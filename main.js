@@ -249,6 +249,21 @@ function refreshUsageData() {
   console.log(`[${CONFIG.appName}] Usage refresh triggered`);
 }
 
+function refreshCodexUsageData() {
+  if (!CONFIG.features.usage) return;
+  const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
+  const scriptPath = path.join(process.env.HOME, 'telegram-claude-bot/abilities/check_codex_usage.py');
+  const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` };
+
+  const proc = spawn(pythonPath, [scriptPath, '--save'], {
+    detached: true,
+    stdio: 'ignore',
+    env,
+  });
+  proc.unref();
+  console.log(`[${CONFIG.appName}] Codex usage refresh triggered`);
+}
+
 app.whenReady().then(async () => {
   // Application menu — needed for Cmd+C/V/X/A to work in Electron
   Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -349,6 +364,7 @@ app.whenReady().then(async () => {
 
     // Auto-refresh usage data on startup
     refreshUsageData();
+    refreshCodexUsageData();
   });
 
   // IPC handlers
@@ -559,6 +575,58 @@ app.whenReady().then(async () => {
       }
     } catch {}
     return panes;
+  });
+
+  // ── Dashboard Data ──────────────────────────────────────────
+  ipcMain.handle('dashboard:pipeline-stats', async () => {
+    return new Promise((resolve) => {
+      const env = {
+        ...process.env,
+        PYTHONPATH: '/Users/bartimaeus/land-bot',
+        DATABASE_URL: 'postgresql://bartimaeus@localhost:5432/altum',
+      };
+      const proc = spawn('/Users/bartimaeus/.venvs/global/bin/python', [
+        '/Users/bartimaeus/land-bot/scripts/pipeline_stats.py',
+      ], { env });
+      let stdout = '';
+      let stderr = '';
+      const timer = setTimeout(() => { proc.kill('SIGKILL'); }, 15000);
+      proc.stdout.on('data', d => { stdout += d; });
+      proc.stderr.on('data', d => { stderr += d; });
+      proc.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) {
+          try { resolve(JSON.parse(stdout.trim())); }
+          catch (e) { resolve({ error: 'Invalid JSON: ' + stdout.slice(0, 100) }); }
+        } else { resolve({ error: (stderr || '').slice(0, 200) || `Stats script exit ${code}` }); }
+      });
+      proc.on('error', (e) => { clearTimeout(timer); resolve({ error: e.message }); });
+    });
+  });
+
+  ipcMain.handle('dashboard:0dte-stats', async () => {
+    return new Promise((resolve) => {
+      const env = {
+        ...process.env,
+        PYTHONPATH: '/Users/bartimaeus/iv-rank-scanner',
+      };
+      const proc = spawn('/Users/bartimaeus/.venvs/global/bin/python', [
+        '/Users/bartimaeus/iv-rank-scanner/scripts/0dte_dashboard_stats.py',
+      ], { env });
+      let stdout = '';
+      let stderr = '';
+      const timer = setTimeout(() => { proc.kill('SIGKILL'); }, 10000);
+      proc.stdout.on('data', d => { stdout += d; });
+      proc.stderr.on('data', d => { stderr += d; });
+      proc.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) {
+          try { resolve(JSON.parse(stdout.trim())); }
+          catch (e) { resolve({ error: 'Invalid JSON: ' + stdout.slice(0, 100) }); }
+        } else { resolve({ error: (stderr || '').slice(0, 200) || `0DTE stats exit ${code}` }); }
+      });
+      proc.on('error', (e) => { clearTimeout(timer); resolve({ error: e.message }); });
+    });
   });
 
   // ── Image Paste ─────────────────────────────────────────────

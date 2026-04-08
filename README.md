@@ -95,20 +95,77 @@ Toggle optional features on or off:
 ```js
 features: {
   mic: true,        // Mic panel + per-slot voice record (requires a mic server)
-  usage: true,      // API usage bar in sidebar (requires usage API endpoint)
+  usage: true,      // Claude + Codex usage bars in sidebar (requires usage API endpoints)
   botsTab: true,    // Bots tab in sidebar (shows separate Sessions/Bots tabs)
   inputBar: true,   // Per-slot input bar for composing while scrolled up
+  dashboards: true, // Dashboards view in sidebar (Chats/Dashboards switcher)
 },
 ```
 
 | Feature | What it does | What it requires |
 |---------|-------------|-----------------|
 | `mic` | Mic control panel in sidebar, voice record buttons on each slot | A mic server at `micServerUrl` with `/status`, `/mode/*`, `/copy/*` endpoints |
-| `usage` | Usage progress bar in sidebar footer, auto-refresh on startup | An `/api/usage` endpoint on the API server |
+| `usage` | Claude Code + Codex usage progress bars in sidebar footer, auto-refresh on startup | `/api/usage` and `/api/codex-usage` endpoints on the API server |
 | `botsTab` | Separate "Sessions" and "Bots" tabs in sidebar | An `/api/bots` endpoint on the API server |
 | `inputBar` | Keyboard icon on each slot header that toggles a text input bar below the terminal | Nothing — works with any terminal session |
+| `dashboards` | Chats/Dashboards view switcher in sidebar, dashboard list panel | Dashboard files in `renderer/dashboards/` + IPC handlers in `main.js` |
 
-Set any feature to `false` to hide it completely. The UI adapts — for example, disabling `botsTab` removes the tab bar entirely since there's only one panel.
+Set any feature to `false` to hide it completely. The UI adapts — for example, disabling `botsTab` removes the tab bar entirely since there's only one panel. Disabling `dashboards` hides the view switcher and shows only the chat list.
+
+### Dashboards
+
+Dashboards are live data views that poll a backend and render stats, charts, and tables. They live in `renderer/dashboards/` as self-registering JS files.
+
+**File structure:**
+
+```
+renderer/dashboards/
+  registry.js      — shared utilities, initializes window.DASHBOARDS = []
+  0dte.js          — 0DTE Trading dashboard (prebuilt, ships with repo)
+  foreclosure.js   — Foreclosure Pipeline (custom, not in repo)
+```
+
+**How it works:**
+- `registry.js` creates an empty `window.DASHBOARDS` array and shared utilities
+- Each dashboard file is an IIFE that pushes its definition to the array
+- Only loaded files register — to exclude a dashboard, don't include its `<script>` tag in `index.html`
+
+**Adding a dashboard:**
+
+1. Create `renderer/dashboards/my-dashboard.js` with a self-registering IIFE:
+
+```js
+(function() {
+  function mount(container) { /* build DOM, return refs */ }
+  function update(refs, data) { /* update DOM from polled data */ }
+  function unmount(refs) { /* cleanup intervals/listeners */ }
+
+  window.DASHBOARDS.push({
+    id: 'my-dashboard',
+    name: 'My Dashboard',
+    description: 'What it shows',
+    color: 'var(--green)',
+    mount, update, unmount,
+    pollFn: () => window.cc.getMyStats(),
+    pollInterval: 10000,
+  });
+})();
+```
+
+2. Add the script to `index.html` (after `registry.js`, before `app.js`):
+```html
+<script src="dashboards/registry.js"></script>
+<script src="dashboards/my-dashboard.js"></script>
+<script src="app.js"></script>
+```
+
+3. Add an IPC handler in `main.js` and a preload bridge in `preload.js` for the data fetch.
+
+**Prebuilt dashboards:**
+- **0DTE Trading** (`0dte.js`) — SPX iron condor pipeline. Shows live market data, P&L, positions, trade history, signal flow. Smart polling: only fetches during market hours, shows countdown timer and "Day Complete" state after close. Requires an IBKR Gateway running on `localhost:7400`.
+
+**Custom dashboards (not in repo):**
+- These are specific to your bot's workload. Add the JS file and include it in your `index.html`. Example: the Foreclosure Pipeline dashboard queries a Postgres database for scraper progress.
 
 ## Running
 

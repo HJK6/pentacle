@@ -98,6 +98,7 @@ module.exports = {
     usage: true,             // Usage bar in sidebar + auto-refresh on startup
     botsTab: true,           // Bots tab in sidebar (shows separate Sessions/Bots tabs)
     inputBar: true,          // Per-slot input bar for composing while scrolled up
+    dashboards: true,        // Dashboards view in sidebar (Chats/Dashboards switcher)
   },
 
   // Mic server URL (only used if features.micServer is true)

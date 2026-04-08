@@ -28,6 +28,16 @@ const state = {
   activityStates: {}, // sessionName:windowIndex -> 'working' | 'waiting' | 'idle'
   sessionSummaries: {}, // sessionName:windowIndex -> one-line summary string
   autoNames: {}, // sessionName -> auto-detected label (e.g. "pentacle refactor")
+  // Dashboard state — all mutable dashboard state lives here
+  currentView: 'chats',            // 'chats' | 'dashboards'
+  selectedDashboard: null,          // dashboard id string
+  dashboardPollToken: 0,            // generation counter
+  dashboardPollTimer: null,         // setInterval id
+  dashboardRefs: null,              // cached DOM refs from mount()
+  dashboardLastData: null,          // last successful poll data
+  dashboardLastUpdated: null,       // Date of last successful poll
+  dashboardState: 'loading',        // 'loading' | 'loaded' | 'stale' | 'error'
+  dashboardError: null,             // error message string
 };
 
 // ── API ────────────────────────────────────────────────────────
@@ -1056,6 +1066,202 @@ document.querySelectorAll('.sidebar-tab').forEach(tab => {
   });
 });
 
+// ── View Switcher (Chats / Dashboards) ───────────────────────
+
+function switchView(view) {
+  if (state.currentView === view) return;
+
+  // Cleanup current dashboard if leaving dashboards view
+  if (state.currentView === 'dashboards') {
+    stopDashboardPolling();
+    unmountCurrentDashboard();
+  }
+
+  state.currentView = view;
+
+  // Toggle DOM visibility
+  document.querySelector('.grid').style.display = view === 'chats' ? '' : 'none';
+  document.getElementById('dashboard-content').style.display = view === 'dashboards' ? '' : 'none';
+  document.querySelector('.sidebar-tabs').style.display = view === 'chats' ? (CONFIG.features.botsTab ? '' : 'none') : 'none';
+  document.getElementById('panel-dashboards').style.display = view === 'dashboards' ? 'flex' : 'none';
+
+  // Update view switcher buttons
+  document.querySelectorAll('.view-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.view === view));
+
+  if (view === 'chats') {
+    // Restore Sessions/Bots panels
+    document.getElementById('panel-sessions').style.display = state.activeTab === 'sessions' ? 'flex' : 'none';
+    document.getElementById('panel-bots').style.display = state.activeTab === 'bots' ? 'flex' : 'none';
+    // Refit all terminals
+    requestAnimationFrame(() => {
+      for (let i = 0; i < 4; i++) {
+        if (state.terminals[i]) {
+          const { term: t, fitAddon: fa } = state.terminals[i];
+          const oldCols = t.cols;
+          const oldRows = t.rows;
+          fa.fit();
+          if (t.cols !== oldCols || t.rows !== oldRows) {
+            window.cc.resizePty(i, t.cols, t.rows);
+          }
+        }
+      }
+    });
+  } else {
+    // Hide chat panels
+    document.getElementById('panel-sessions').style.display = 'none';
+    document.getElementById('panel-bots').style.display = 'none';
+    renderDashboardList();
+    if (!state.selectedDashboard && window.DASHBOARDS.length > 0) {
+      selectDashboard(window.DASHBOARDS[0].id);
+    } else if (state.selectedDashboard) {
+      mountAndPoll(state.selectedDashboard);
+    }
+  }
+}
+
+function selectDashboard(id) {
+  if (state.selectedDashboard === id) return;
+  stopDashboardPolling();
+  unmountCurrentDashboard();
+  state.selectedDashboard = id;
+  state.dashboardLastData = null;
+  state.dashboardState = 'loading';
+  renderDashboardList(); // update active highlight
+  mountAndPoll(id);
+}
+
+function mountAndPoll(id) {
+  const db = window.DASHBOARDS.find(d => d.id === id);
+  if (!db) return;
+  // Reset dashboard state for fresh mount
+  state.dashboardState = 'loading';
+  state.dashboardError = null;
+  state.dashboardLastData = null;
+  state.dashboardLastUpdated = null;
+  const container = document.getElementById('dashboard-content');
+  container.innerHTML = ''; // clear previous
+  state.dashboardRefs = db.mount(container);
+  updateDashboardStatusBadge();
+  startDashboardPolling();
+}
+
+function unmountCurrentDashboard() {
+  if (state.dashboardRefs && state.selectedDashboard) {
+    const db = window.DASHBOARDS.find(d => d.id === state.selectedDashboard);
+    if (db && db.unmount) db.unmount(state.dashboardRefs);
+  }
+  state.dashboardRefs = null;
+}
+
+function renderDashboardList() {
+  const list = document.getElementById('dashboard-list');
+  if (!list) return;
+  list.innerHTML = window.DASHBOARDS.map(d => {
+    const isActive = d.id === state.selectedDashboard;
+    return `<div class="dashboard-item ${isActive ? 'active' : ''}" data-dashboard-id="${d.id}">
+      <div class="dashboard-item-top">
+        <span class="dashboard-dot" style="background:${d.color}"></span>
+        <span class="dashboard-name">${d.name}</span>
+      </div>
+      <div class="dashboard-desc">${d.description}</div>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('.dashboard-item').forEach(el => {
+    el.addEventListener('click', () => selectDashboard(el.dataset.dashboardId));
+  });
+}
+
+// ── Dashboard Polling ─────────────────────────────────────────
+
+function startDashboardPolling() {
+  stopDashboardPolling();
+  const db = window.DASHBOARDS.find(d => d.id === state.selectedDashboard);
+  if (!db || !state.dashboardRefs) return;
+
+  state.dashboardPollToken++;
+  const token = state.dashboardPollToken;
+  let inFlight = false; // closure-scoped per generation
+
+  async function poll() {
+    if (inFlight) return;
+    if (state.dashboardPollToken !== token) return;
+    inFlight = true;
+    try {
+      const data = await db.pollFn();
+      if (state.dashboardPollToken !== token) return; // stale generation
+      if (data && !data.error) {
+        state.dashboardLastData = data;
+        state.dashboardLastUpdated = new Date();
+        state.dashboardState = 'loaded';
+        state.dashboardError = null;
+        db.update(state.dashboardRefs, data);
+        updateDashboardStatusBadge();
+      } else {
+        state.dashboardError = data?.error || 'Unknown error';
+        state.dashboardState = state.dashboardLastData ? 'stale' : 'error';
+        updateDashboardStatusBadge();
+      }
+    } catch (e) {
+      if (state.dashboardPollToken !== token) return;
+      state.dashboardError = e.message;
+      state.dashboardState = state.dashboardLastData ? 'stale' : 'error';
+      updateDashboardStatusBadge();
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  poll();
+  state.dashboardPollTimer = setInterval(poll, db.pollInterval);
+}
+
+function stopDashboardPolling() {
+  if (state.dashboardPollTimer) {
+    clearInterval(state.dashboardPollTimer);
+    state.dashboardPollTimer = null;
+  }
+  state.dashboardPollToken++; // invalidates any in-flight poll for the old generation
+}
+
+function updateDashboardStatusBadge() {
+  if (!state.dashboardRefs) return;
+  const { statusBadge, lastUpdated, retryBtn } = state.dashboardRefs;
+  if (!statusBadge) return;
+
+  if (state.dashboardState === 'loading') {
+    statusBadge.textContent = 'Loading...';
+    statusBadge.className = 'pipeline-status loading';
+    if (retryBtn) retryBtn.style.display = 'none';
+  } else if (state.dashboardState === 'loaded') {
+    statusBadge.textContent = 'Live';
+    statusBadge.className = 'pipeline-status live';
+    if (lastUpdated) lastUpdated.textContent = 'Updated just now';
+    if (retryBtn) retryBtn.style.display = 'none';
+  } else if (state.dashboardState === 'stale') {
+    const ago = state.dashboardLastUpdated
+      ? Math.round((Date.now() - state.dashboardLastUpdated) / 1000)
+      : '?';
+    statusBadge.textContent = 'Stale';
+    statusBadge.className = 'pipeline-status stale';
+    if (lastUpdated) lastUpdated.textContent = `Last updated ${ago}s ago`;
+    if (retryBtn) retryBtn.style.display = 'none';
+  } else {
+    statusBadge.textContent = 'Error';
+    statusBadge.className = 'pipeline-status error';
+    if (lastUpdated) lastUpdated.textContent = state.dashboardError || 'Connection failed';
+    if (retryBtn) retryBtn.style.display = '';
+  }
+}
+
+// Exposed for retry button in dashboard DOM
+window.retryDashboardPoll = function() { startDashboardPolling(); };
+
+document.querySelectorAll('.view-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchView(btn.dataset.view));
+});
+
 // ── Toolbar Buttons ────────────────────────────────────────────
 
 document.getElementById('btn-new').addEventListener('click', showNewSessionModal);
@@ -1253,6 +1459,45 @@ function renderUsage(u) {
       <div class="usage-bar-fill ${usageBarClass(weekPct)}" style="width:${weekPct}%"></div>
     </div>
     <div class="usage-resets">Resets ${esc(u.week_all_resets || '')}</div>
+  `;
+}
+
+// ── Codex Usage Footer ───────────────────────────────────────
+
+async function fetchCodexUsage() {
+  const footer = document.getElementById('codex-usage-footer');
+  const data = await api('GET', '/api/codex-usage');
+  if (data && data.status !== 'no_data' && data.status !== 'error') {
+    footer.style.display = '';
+    renderCodexUsage(data);
+  } else {
+    footer.style.display = 'none';
+  }
+}
+
+function renderCodexUsage(u) {
+  const footer = document.getElementById('codex-usage-footer');
+  const sessionPct = u.session_pct != null ? u.session_pct : 0;
+  const weekPct = u.weekly_pct != null ? u.weekly_pct : 0;
+
+  footer.innerHTML = `
+    <div class="usage-label">
+      <span>Codex 5h</span>
+      <span>${sessionPct}%</span>
+    </div>
+    <div class="usage-bar">
+      <div class="usage-bar-fill ${usageBarClass(sessionPct)}" style="width:${sessionPct}%"></div>
+    </div>
+    <div class="usage-resets">Resets ${esc(u.session_resets || '')}</div>
+
+    <div class="usage-label" style="margin-top:8px">
+      <span>Codex Weekly</span>
+      <span>${weekPct}%</span>
+    </div>
+    <div class="usage-bar">
+      <div class="usage-bar-fill ${usageBarClass(weekPct)}" style="width:${weekPct}%"></div>
+    </div>
+    <div class="usage-resets">Resets ${esc(u.weekly_resets || '')}</div>
   `;
 }
 
@@ -1599,10 +1844,12 @@ document.getElementById('mic-btn-meeting').addEventListener('click', async () =>
     document.querySelectorAll('.cell-voice').forEach(btn => btn.style.display = 'none');
   }
 
-  // Hide usage footer if disabled
+  // Hide usage footers if disabled
   if (!CONFIG.features.usage) {
     const usageFooter = document.getElementById('usage-footer');
     if (usageFooter) usageFooter.style.display = 'none';
+    const codexUsageFooter = document.getElementById('codex-usage-footer');
+    if (codexUsageFooter) codexUsageFooter.style.display = 'none';
   }
 
   // Hide input bar toggle buttons if disabled
@@ -1614,6 +1861,12 @@ document.getElementById('mic-btn-meeting').addEventListener('click', async () =>
   if (!CONFIG.features.botsTab) {
     const tabBar = document.querySelector('.sidebar-tabs');
     if (tabBar) tabBar.style.display = 'none';
+  }
+
+  // Hide dashboards view switcher if disabled — just show chats, no label
+  if (!CONFIG.features.dashboards) {
+    const viewSwitcher = document.querySelector('.view-switcher');
+    if (viewSwitcher) viewSwitcher.style.display = 'none';
   }
 })();
 
@@ -1674,6 +1927,8 @@ setInterval(pollActivity, 3000);
 if (CONFIG.features.usage) {
   fetchUsage();
   setInterval(fetchUsage, 30000);
+  fetchCodexUsage();
+  setInterval(fetchCodexUsage, 30000);
 }
 if (CONFIG.features.mic) {
   fetchMicStatus();

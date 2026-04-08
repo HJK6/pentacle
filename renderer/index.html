@@ -21,6 +21,11 @@
   <div class="main">
     <!-- Sidebar -->
     <div class="sidebar">
+      <div class="view-switcher">
+        <button class="view-btn active" id="view-chats" data-view="chats">Chats</button>
+        <button class="view-btn" id="view-dashboards" data-view="dashboards">Dashboards</button>
+      </div>
+
       <div class="sidebar-tabs">
         <button class="sidebar-tab active" id="tab-sessions" data-tab="sessions">Sessions</button>
         <button class="sidebar-tab" id="tab-bots" data-tab="bots">Bots</button>
@@ -44,6 +49,11 @@
         <div class="bot-list" id="bot-list"></div>
       </div>
 
+      <!-- Dashboard List Panel (hidden by default) -->
+      <div class="sidebar-panel" id="panel-dashboards" style="display:none">
+        <div class="dashboard-list" id="dashboard-list"></div>
+      </div>
+
       <!-- Mic Control Panel -->
       <div class="mic-panel" id="mic-panel">
         <div class="mic-header">
@@ -61,6 +71,7 @@
       </div>
 
       <div class="usage-footer" id="usage-footer"></div>
+      <div class="usage-footer" id="codex-usage-footer"></div>
     </div>
 
     <!-- Terminal Grid -->
@@ -150,6 +161,9 @@
         </div>
       </div>
     </div>
+
+    <!-- Dashboard Content Area (hidden by default) -->
+    <div class="dashboard-content" id="dashboard-content" style="display:none"></div>
   </div>
 
   <!-- Rename modal -->
@@ -178,6 +192,9 @@
     </div>
   </div>
 
+  <script src="dashboards/registry.js"></script>
+  <script src="dashboards/0dte.js"></script>
+  <script src="dashboards/foreclosure.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -42,6 +42,10 @@ window.cc = {
   // Config
   getConfig: () => ipcRenderer.invoke('get-config'),
 
+  // Dashboards
+  getPipelineStats: () => ipcRenderer.invoke('dashboard:pipeline-stats'),
+  get0dteStats: () => ipcRenderer.invoke('dashboard:0dte-stats'),
+
   // Context menu
   showContextMenu: (sessionName, displayName) => {
     ipcRenderer.send('context-menu', sessionName, displayName);
