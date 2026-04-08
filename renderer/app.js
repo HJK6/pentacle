@@ -4,32 +4,11 @@
 const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { Unicode11Addon } = require('@xterm/addon-unicode11'); // REQUIRED: without this, ❯ and other unicode renders as __
+const { WebglAddon } = require('@xterm/addon-webgl'); // GPU-accelerated rendering — fixes partial text paint on screen refresh
+const CONFIG = require('../pentacle.config.js');
 
-const API = 'http://localhost:7777';
-
-const THEME = {
-  background: '#0c1310',
-  foreground: '#b5ccba',
-  cursor: '#3fb950',
-  cursorAccent: '#0c1310',
-  selectionBackground: '#1e4d2b',
-  black: '#0c1310',
-  red: '#f47067',
-  green: '#3fb950',
-  yellow: '#d4a72c',
-  blue: '#58a6ff',
-  magenta: '#a78bfa',
-  cyan: '#2dd4bf',
-  white: '#b5ccba',
-  brightBlack: '#4d6e56',
-  brightRed: '#f47067',
-  brightGreen: '#56d364',
-  brightYellow: '#e0af68',
-  brightBlue: '#79c0ff',
-  brightMagenta: '#b8a0fa',
-  brightCyan: '#56d4c4',
-  brightWhite: '#d6e8da',
-};
+const API = CONFIG.apiServer.url;
+const THEME = CONFIG.terminal;
 
 // ── State ──────────────────────────────────────────────────────
 
@@ -40,10 +19,15 @@ const state = {
   activeTab: 'sessions', // 'sessions' or 'bots'
   slots: [null, null, null, null], // { name, displayName } or { bot, displayName } or null
   terminals: [null, null, null, null], // { term, fitAddon } or null
-  wheelAbort: [null, null, null, null], // AbortController per slot for wheel listener cleanup
+  wheelThrottles: [0, 0, 0, 0], // last scroll timestamp per slot for throttling
   botSlots: [false, false, false, false], // true if slot has a bot detail panel (not a terminal)
+  slotGen: [0, 0, 0, 0], // generation counter per slot — incremented on each attach to detect stale PTY exits
   showTrash: false,
   maximizedSlot: null, // null = grid view, 0-3 = maximized slot
+  // Activity detection
+  activityStates: {}, // sessionName:windowIndex -> 'working' | 'waiting' | 'idle'
+  sessionSummaries: {}, // sessionName:windowIndex -> one-line summary string
+  autoNames: {}, // sessionName -> auto-detected label (e.g. "pentacle refactor")
 };
 
 // ── API ────────────────────────────────────────────────────────
@@ -80,33 +64,173 @@ function getSlotForSession(name) {
   return -1;
 }
 
+// ── Activity Detection & Summaries ────────────────────────────
+
+function getActivityForSession(sessionName) {
+  // Match sessionName to activityStates keys (format: "sessionName:0")
+  for (const [key, val] of Object.entries(state.activityStates)) {
+    if (key.startsWith(sessionName + ':')) return val;
+  }
+  return 'idle';
+}
+
+function extractSummary(paneContent) {
+  if (!paneContent) return '';
+  const lines = paneContent.split('\n').map(l => l.trim()).filter(l => l);
+  // Look for Claude's status line patterns
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 30); i--) {
+    const line = lines[i];
+    // Match tool use lines like "Read file.js", "Edit main.py", "Bash npm test"
+    if (/^(Read|Edit|Write|Bash|Grep|Glob|Agent|TodoWrite)\b/.test(line)) {
+      return line.slice(0, 80);
+    }
+    // Match "Working on..." or task descriptions
+    if (/^(Working|Building|Testing|Fixing|Adding|Updating|Creating|Running|Searching|Installing)\b/i.test(line)) {
+      return line.slice(0, 80);
+    }
+  }
+  // Fallback: last non-empty line that isn't a prompt
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 10); i--) {
+    const line = lines[i];
+    if (line && !line.startsWith('❯') && !line.includes('bypass') && !line.includes('auto-accept') && line.length > 3) {
+      return line.slice(0, 80);
+    }
+  }
+  return '';
+}
+
+function extractAutoName(paneContent) {
+  if (!paneContent) return '';
+  const lines = paneContent.split('\n');
+  // Look for working directory hints (common in Claude Code output)
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 50); i--) {
+    const line = lines[i].trim();
+    // Match paths like "/Users/bartimaeus/pentacle" → extract "pentacle"
+    const pathMatch = line.match(/\/Users\/\w+\/([a-zA-Z0-9_-]+)/);
+    if (pathMatch) {
+      return pathMatch[1];
+    }
+    // Match "cwd: /path/to/dir" patterns
+    const cwdMatch = line.match(/(?:cwd|directory|repo|project)[:\s]+.*?([a-zA-Z0-9_-]+)\s*$/i);
+    if (cwdMatch) {
+      return cwdMatch[1];
+    }
+  }
+  return '';
+}
+
+async function pollActivity() {
+  try {
+    const [actStates, panes] = await Promise.all([
+      window.cc.detectActivity(),
+      window.cc.captureAllPanes(),
+    ]);
+    if (actStates) state.activityStates = actStates;
+    if (panes) {
+      for (const [key, content] of Object.entries(panes)) {
+        state.sessionSummaries[key] = extractSummary(content);
+        // Extract auto-name from pane content
+        const sessionName = key.split(':')[0];
+        if (!state.autoNames[sessionName]) {
+          const name = extractAutoName(content);
+          if (name) state.autoNames[sessionName] = name;
+        }
+      }
+    }
+    // Update activity strips on slot headers
+    updateActivityStrips();
+    // Re-render sidebar with activity data
+    renderSidebar();
+  } catch (e) {
+    // Activity polling is best-effort
+  }
+}
+
+function updateActivityStrips() {
+  for (let i = 0; i < 4; i++) {
+    const strip = document.getElementById(`activity-strip-${i}`);
+    if (!strip) continue;
+    strip.className = 'cell-activity-strip';
+    if (state.slots[i] && !state.botSlots[i]) {
+      const sessionName = state.slots[i].name;
+      const activity = getActivityForSession(sessionName);
+      if (activity === 'working' || activity === 'waiting') {
+        strip.classList.add(activity);
+      }
+      // Update header label with auto-name if session still has its raw name
+      const autoName = state.autoNames[sessionName];
+      if (autoName && state.slots[i].displayName === sessionName) {
+        state.slots[i].displayName = autoName;
+        const label = document.querySelector(`#header-${i} .cell-label`);
+        if (label) label.textContent = autoName;
+      }
+    }
+  }
+}
+
 function renderSidebar() {
   const list = document.getElementById('session-list');
   const stats = document.getElementById('stats');
 
   const active = state.sessions;
-  stats.textContent = `${active.length} sessions | ${active.filter(s => s.attached).length} attached`;
+  const working = active.filter(s => getActivityForSession(s.name) === 'working');
+  const waiting = active.filter(s => getActivityForSession(s.name) === 'waiting');
+  const idle = active.filter(s => getActivityForSession(s.name) === 'idle');
+  stats.textContent = `${active.length} sessions | ${working.length} working | ${waiting.length} waiting`;
 
-  list.innerHTML = active.map(s => {
+  function renderSessionItem(s) {
     const slotIdx = getSlotForSession(s.name);
     const isActive = slotIdx >= 0;
-    const dotClass = s.attached ? 'attached' : s.type;
+    const activity = getActivityForSession(s.name);
+    const dotClass = activity === 'working' ? 'attached' : activity === 'waiting' ? 'chat' : (s.attached ? 'attached' : s.type);
     const hasTitle = s.title && s.title !== s.name;
+    const autoName = state.autoNames[s.name];
+    const displayName = s.display_name || (autoName ? autoName : s.name);
+    // Get summary for this session
+    const summaryKey = Object.keys(state.sessionSummaries).find(k => k.startsWith(s.name + ':'));
+    const summary = summaryKey ? state.sessionSummaries[summaryKey] : '';
+
+    const activityBadge = activity === 'working'
+      ? `<span class="activity-indicator working"><span class="activity-spinner"></span>Working</span>`
+      : activity === 'waiting'
+        ? `<span class="activity-indicator waiting">Waiting</span>`
+        : '';
 
     return `<div class="session-item ${isActive ? 'active' : ''}"
                  data-name="${esc(s.name)}"
-                 data-display="${esc(s.display_name)}">
+                 data-display="${esc(displayName)}">
       <div class="s-top">
         <span class="s-dot ${dotClass}"></span>
-        <span class="s-name">${esc(s.display_name)}</span>
+        <span class="s-name">${esc(displayName)}</span>
+        ${activityBadge}
         ${isActive ? `<span class="s-slot-badge">${slotIdx + 1}</span>` : ''}
-        <button class="s-edit-btn" data-edit-name="${esc(s.name)}" data-edit-display="${esc(s.display_name)}" title="Rename"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5L13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175l-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg></button>
+        <button class="s-edit-btn" data-edit-name="${esc(s.name)}" data-edit-display="${esc(displayName)}" title="Rename"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5L13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175l-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg></button>
         <button class="s-trash-btn" data-trash-name="${esc(s.name)}" title="Move to trash"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg></button>
       </div>
       ${hasTitle ? `<div class="s-meta">${esc(s.name)}</div>` : ''}
-      ${s.preview ? `<div class="s-preview">${esc(s.preview)}</div>` : ''}
+      ${autoName && !hasTitle ? `<div class="s-meta">${esc(s.name)}</div>` : ''}
+      ${summary ? `<div class="s-summary">${esc(summary)}</div>` : (s.preview ? `<div class="s-preview">${esc(s.preview)}</div>` : '')}
     </div>`;
-  }).join('');
+  }
+
+  let html = '';
+  if (working.length > 0) {
+    html += `<div class="sidebar-group-label working">Working (${working.length})</div>`;
+    html += working.map(renderSessionItem).join('');
+  }
+  if (waiting.length > 0) {
+    html += `<div class="sidebar-group-label waiting">Waiting (${waiting.length})</div>`;
+    html += waiting.map(renderSessionItem).join('');
+  }
+  if (idle.length > 0) {
+    html += `<div class="sidebar-group-label idle">Idle (${idle.length})</div>`;
+    html += idle.map(renderSessionItem).join('');
+  }
+  // If no activity data yet, render flat list
+  if (working.length === 0 && waiting.length === 0 && idle.length === 0 && active.length > 0) {
+    html += active.map(renderSessionItem).join('');
+  }
+  list.innerHTML = html;
 
   // Click handlers
   list.querySelectorAll('.session-item').forEach(el => {
@@ -298,6 +422,7 @@ function attachBotToSlot(slot, bot) {
   // Kill existing terminal/bot in this slot
   detachSlot(slot);
 
+  state.slotGen[slot]++;
   const title = bot.title || bot.bot_name || bot.bot_id;
   state.slots[slot] = { bot, displayName: title };
   state.botSlots[slot] = true;
@@ -446,6 +571,8 @@ async function attachSession(slot, sessionName, displayName) {
   // Kill existing terminal in this slot
   detachSlot(slot);
 
+  state.slotGen[slot]++;
+  const gen = state.slotGen[slot]; // capture generation to detect stale async resumes
   state.slots[slot] = { name: sessionName, displayName };
 
   // Update header
@@ -469,67 +596,35 @@ async function attachSession(slot, sessionName, displayName) {
   });
 
   const fitAddon = new FitAddon();
-  const unicode11Addon = new Unicode11Addon(); // REQUIRED: fixes ❯ showing as __
+  const unicode11Addon = new Unicode11Addon();
   term.loadAddon(fitAddon);
   term.loadAddon(unicode11Addon);
-  term.open(container);
-  // Set AFTER open() — xterm.js 5.x resets activeVersion during open()
   term.unicode.activeVersion = '11';
+  term.open(container);
 
-  // Kill viewport scrollability — xterm.js sets overflow-y:scroll inline, which
-  // tells Chromium's compositor this element is scrollable. The compositor then
-  // swallows wheel events at the GPU level before our JS ever sees them.
-  // We must force it hidden on the element itself AND watch for xterm resetting it.
-  const viewport = container.querySelector('.xterm-viewport');
-  const nukeViewportScroll = () => {
-    if (viewport) {
-      viewport.style.overflowY = 'hidden';
-      viewport.style.touchAction = 'none';
-    }
-  };
-  nukeViewportScroll();
-
-  // Watch for xterm.js resetting the inline overflow style (happens on fit/resize)
-  let viewportObserver;
-  if (viewport) {
-    viewportObserver = new MutationObserver(nukeViewportScroll);
-    viewportObserver.observe(viewport, { attributes: true, attributeFilter: ['style'] });
+  // Enable WebGL renderer for GPU-accelerated full-frame draws.
+  // The DOM renderer creates individual spans per cell — browser paint cycles
+  // can leave cells partially rendered until a repaint is forced (e.g. by
+  // selecting text). WebGL does full-frame GPU draws, eliminating this.
+  try {
+    const webglAddon = new WebglAddon();
+    webglAddon.onContextLoss(() => {
+      // Fall back to DOM renderer if GPU context is lost
+      webglAddon.dispose();
+    });
+    term.loadAddon(webglAddon);
+  } catch (e) {
+    console.warn('[App] WebGL renderer unavailable, using DOM fallback:', e.message);
   }
 
-  // Delay fit to ensure DOM is laid out
-  requestAnimationFrame(() => {
-    fitAddon.fit();
-    window.cc.resizePty(slot, term.cols, term.rows);
-  });
-
-  // Abort any previous wheel listener on this slot before adding a new one
-  if (state.wheelAbort[slot]) {
-    state.wheelAbort[slot].abort();
-  }
-  const wheelAC = new AbortController();
-  state.wheelAbort[slot] = wheelAC;
-
-  // Scroll wheel → tmux copy-mode scroll
-  // Attach to BOTH the container (capture phase) and the xterm-viewport element directly.
-  // In Electron 35+/Chromium 136+, the compositor can intercept wheel events on the
-  // viewport element before capture-phase listeners on ancestors fire.
-  let lastScrollTime = 0;
-  const handleWheel = (e) => {
-    e.preventDefault();
-    e.stopImmediatePropagation();
-    const now = Date.now();
-    if (now - lastScrollTime < 50) return;
-    lastScrollTime = now;
-    const lines = Math.max(1, Math.round(Math.abs(e.deltaY) / 25));
-    const direction = e.deltaY < 0 ? 'up' : 'down';
-    window.cc.scrollTmux(slot, direction, lines);
-  };
-  const wheelOpts = { passive: false, capture: true, signal: wheelAC.signal };
-  container.addEventListener('wheel', handleWheel, wheelOpts);
-  // Also attach directly to the xterm-viewport which Chromium treats as the scroll target
-  if (viewport) {
-    viewport.addEventListener('wheel', handleWheel, { passive: false, signal: wheelAC.signal });
-  }
+  // Fit terminal BEFORE spawning PTY so tmux renders at the correct size
+  // from the very first frame. Without this, the PTY spawns at 80x24,
+  // tmux redraws at the wrong size (garbled flash), then fit fires and
+  // tmux redraws again correctly — causing the "unicode flash" on old chats.
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  // Bail if another attachSession took over this slot while we awaited
+  if (state.slotGen[slot] !== gen) { try { term.dispose(); } catch {} return; }
+  fitAddon.fit();
 
   // Keyboard enhancements for terminal input
   term.attachCustomKeyEventHandler((e) => {
@@ -542,6 +637,18 @@ async function attachSession(slot, sessionName, displayName) {
         navigator.clipboard.writeText(sel);
         return false;
       }
+    }
+
+    // Cmd+V → paste from clipboard (Electron's editMenu paste no longer
+    // fires into xterm.js in Chromium 134+; handle explicitly)
+    if (e.metaKey && e.key === 'v') {
+      navigator.clipboard.readText().then(text => {
+        if (text) {
+          window.cc.exitCopyMode(slot);
+          window.cc.writePty(slot, text);
+        }
+      });
+      return false;
     }
 
     // Ctrl+Enter → insert newline in Claude Code (send CSI u via tmux send-keys -H)
@@ -562,6 +669,18 @@ async function attachSession(slot, sessionName, displayName) {
       }
     }
 
+    // Fn+Up / Fn+Down (PageUp/PageDown) → tmux scrollback
+    if (e.key === 'PageUp') {
+      const pid = state.slots[slot]?.paneId;
+      if (pid) window.cc.scrollTmux(pid, 'up', 15);
+      return false;
+    }
+    if (e.key === 'PageDown') {
+      const pid = state.slots[slot]?.paneId;
+      if (pid) window.cc.scrollTmux(pid, 'down', 15);
+      return false;
+    }
+
     return true;
   });
 
@@ -571,17 +690,39 @@ async function attachSession(slot, sessionName, displayName) {
     window.cc.writePty(slot, data);
   });
 
-  state.terminals[slot] = { term, fitAddon, viewportObserver };
+  state.terminals[slot] = { term, fitAddon };
 
-  // Spawn PTY
-  await window.cc.createPty(slot, sessionName);
+  // Spawn PTY at the fitted terminal size (not the default 80x24).
+  // createPty returns the immutable tmux pane ID (e.g. %5) which survives
+  // session renames. All tmux commands (scroll, copy-mode) target this ID.
+  const paneId = await window.cc.createPty(slot, sessionName, term.cols, term.rows);
+  // Bail if another attachSession took over this slot while we awaited
+  if (state.slotGen[slot] !== gen) return;
+  if (!paneId) {
+    console.warn(`[attach] createPty returned null for session=${sessionName}, detaching`);
+    detachSlot(slot);
+    return;
+  }
+  state.slots[slot].paneId = paneId;
 
-  // Observe resize
+  // Observe resize — only send resizePty when cols/rows ACTUALLY change.
+  // Without this guard, attaching a session to one slot triggers ResizeObservers
+  // on ALL slots (DOM layout recalc), causing unnecessary tmux redraws that
+  // flash garbled content on the other terminals.
+  let resizeTimer = null;
   const ro = new ResizeObserver(() => {
-    if (state.terminals[slot]) {
-      state.terminals[slot].fitAddon.fit();
-      window.cc.resizePty(slot, state.terminals[slot].term.cols, state.terminals[slot].term.rows);
-    }
+    if (!state.terminals[slot]) return;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (!state.terminals[slot]) return;
+      const { term: t, fitAddon: fa } = state.terminals[slot];
+      const oldCols = t.cols;
+      const oldRows = t.rows;
+      fa.fit();
+      if (t.cols !== oldCols || t.rows !== oldRows) {
+        window.cc.resizePty(slot, t.cols, t.rows);
+      }
+    }, 50);
   });
   ro.observe(container);
   state.terminals[slot]._ro = ro;
@@ -591,37 +732,59 @@ async function attachSession(slot, sessionName, displayName) {
 
 function detachSlot(slot) {
   const wasBot = state.botSlots[slot];
+  const sessionName = state.slots[slot] && state.slots[slot].name;
 
-  if (state.wheelAbort[slot]) {
-    state.wheelAbort[slot].abort();
-    state.wheelAbort[slot] = null;
-  }
-  if (state.terminals[slot]) {
-    if (state.terminals[slot].viewportObserver) {
-      state.terminals[slot].viewportObserver.disconnect();
-    }
-    if (state.terminals[slot]._ro) {
-      state.terminals[slot]._ro.disconnect();
-    }
-    state.terminals[slot].term.dispose();
-    state.terminals[slot] = null;
-  }
+  // Bump generation FIRST — this invalidates any pending onPtyExit setTimeout
+  // callbacks for the OLD session. Without this, killing the old PTY fires an
+  // async pty:exit event that captures the NEW session's generation (because
+  // attachSession increments slotGen after detachSlot returns), making the
+  // guard in onPtyExit think the NEW session exited and detaching it.
+  state.slotGen[slot]++;
 
-  if (state.slots[slot]) {
-    if (!wasBot) window.cc.killPty(slot);
-    state.slots[slot] = null;
-  }
-  state.botSlots[slot] = false;
-
-  // Reset UI
-  const container = document.getElementById(`term-${slot}`);
-  container.innerHTML = '<div class="cell-empty">Click a session or bot to attach</div>';
+  // Reset UI FIRST — this must always happen regardless of cleanup errors
   const header = document.getElementById(`header-${slot}`);
   const label = header.querySelector('.cell-label');
   label.textContent = `Slot ${slot + 1}`;
   label.classList.remove('has-session');
   label.style.color = '';
   document.getElementById(`cell-${slot}`).classList.remove('occupied');
+
+  // Clear state before async/throwing operations
+  const hadSlot = !!state.slots[slot];
+  state.slots[slot] = null;
+  state.botSlots[slot] = false;
+  if (sessionName) delete state.autoNames[sessionName];
+
+  // Dispose terminal (may throw if WebGL context is lost, etc.)
+  try {
+    if (state.terminals[slot]) {
+      if (state.terminals[slot]._ro) {
+        state.terminals[slot]._ro.disconnect();
+      }
+      state.terminals[slot].term.dispose();
+    }
+  } catch (e) {
+    console.warn('[App] terminal dispose error:', e);
+  }
+  state.terminals[slot] = null;
+
+  // Kill PTY (async IPC, fire-and-forget)
+  if (hadSlot && !wasBot) {
+    window.cc.killPty(slot);
+  }
+
+  // Clear terminal container
+  const container = document.getElementById(`term-${slot}`);
+  container.innerHTML = '<div class="cell-empty">Click a session or bot to attach</div>';
+
+  // Reset input bar
+  inputBarState[slot] = false;
+  const inputBar = document.getElementById(`input-bar-${slot}`);
+  if (inputBar) inputBar.style.display = 'none';
+  const kbBtn = document.querySelector(`.cell-kb-toggle[data-slot="${slot}"]`);
+  if (kbBtn) kbBtn.classList.remove('active');
+  const textarea = document.getElementById(`input-textarea-${slot}`);
+  if (textarea) { textarea.value = ''; textarea.style.height = ''; }
 
   // If this was the maximized slot, go back to grid view
   if (state.maximizedSlot === slot) {
@@ -660,9 +823,14 @@ function maximizeSlot(slot) {
   // Refit the maximized terminal after layout settles
   requestAnimationFrame(() => {
     if (state.terminals[slot]) {
-      state.terminals[slot].fitAddon.fit();
-      window.cc.resizePty(slot, state.terminals[slot].term.cols, state.terminals[slot].term.rows);
-      state.terminals[slot].term.focus();
+      const { term: t, fitAddon: fa } = state.terminals[slot];
+      const oldCols = t.cols;
+      const oldRows = t.rows;
+      fa.fit();
+      if (t.cols !== oldCols || t.rows !== oldRows) {
+        window.cc.resizePty(slot, t.cols, t.rows);
+      }
+      t.focus();
     }
   });
 
@@ -678,12 +846,17 @@ function minimizeAll() {
     document.getElementById(`cell-${i}`).classList.remove('maximized-cell');
   }
 
-  // Refit all terminals
+  // Refit all terminals — only resize PTY when size actually changes
   requestAnimationFrame(() => {
     for (let i = 0; i < 4; i++) {
       if (state.terminals[i]) {
-        state.terminals[i].fitAddon.fit();
-        window.cc.resizePty(i, state.terminals[i].term.cols, state.terminals[i].term.rows);
+        const { term: t, fitAddon: fa } = state.terminals[i];
+        const oldCols = t.cols;
+        const oldRows = t.rows;
+        fa.fit();
+        if (t.cols !== oldCols || t.rows !== oldRows) {
+          window.cc.resizePty(i, t.cols, t.rows);
+        }
       }
     }
   });
@@ -699,13 +872,52 @@ window.cc.onPtyData((slot, data) => {
   }
 });
 
-window.cc.onPtyExit((slot, exitCode) => {
-  // Show reconnect message
+window.cc.onPtyExit(async (slot, exitCode) => {
+  // Capture the slot generation so we can detect if the slot was reused
+  const gen = state.slotGen[slot];
+
+  // If slot was already manually detached (user clicked X), skip entirely
+  if (!state.slots[slot] && !state.terminals[slot]) return;
+
+  const sessionName = state.slots[slot]?.name;
+  console.warn(`[pty:exit] slot=${slot} session=${sessionName} exitCode=${exitCode}`);
+
+  // If the tmux session still exists, auto-reconnect instead of detaching.
+  // This handles cases where the PTY process dies (crash, signal) but the
+  // tmux session and its Claude Code process are still alive.
+  if (sessionName) {
+    try {
+      const sessionAlive = await window.cc.checkSession(sessionName);
+      if (state.slotGen[slot] !== gen) return; // slot was reused during await
+      if (sessionAlive) {
+        console.warn(`[pty:exit] auto-reconnecting slot=${slot} session=${sessionName}`);
+        if (state.terminals[slot]) {
+          state.terminals[slot].term.writeln('\r\n\x1b[90m--- Reconnecting... ---\x1b[0m');
+        }
+        const displayName = state.slots[slot]?.displayName || sessionName;
+        // Small delay to avoid rapid reconnect loops if PTY keeps dying
+        setTimeout(() => {
+          if (state.slotGen[slot] === gen) {
+            attachSession(slot, sessionName, displayName);
+          }
+        }, 500);
+        return;
+      }
+    } catch (e) {
+      console.warn(`[pty:exit] checkSession failed:`, e);
+    }
+    if (state.slotGen[slot] !== gen) return;
+  }
+
+  // Session is truly gone — show message and detach
   if (state.terminals[slot]) {
     state.terminals[slot].term.writeln('\r\n\x1b[90m--- Session ended ---\x1b[0m');
   }
-  // Clean up after a short delay
-  setTimeout(() => detachSlot(slot), 1000);
+  setTimeout(() => {
+    if (state.slotGen[slot] === gen) {
+      detachSlot(slot);
+    }
+  }, 1000);
 });
 
 // ── IPC from Main Process ──────────────────────────────────────
@@ -763,13 +975,24 @@ async function cleanupDead() {
   fetchSessions();
 }
 
-async function newSession() {
+function showNewSessionModal() {
+  document.getElementById('new-session-overlay').style.display = 'flex';
+}
+
+function hideNewSessionModal() {
+  document.getElementById('new-session-overlay').style.display = 'none';
+}
+
+async function newSession(agent) {
+  hideNewSessionModal();
+
   // Find first empty slot, or default to slot 3 (swap out)
   let slot = state.slots.findIndex(s => s === null);
   if (slot === -1) slot = 3;
 
-  // Create a new tmux session running claude
-  const sessionName = await window.cc.newClaude(slot);
+  // Create a new tmux session with a shell, then launch the agent inside it.
+  // The shell survives even if the agent exits immediately (auth, startup error).
+  const sessionName = await window.cc.newSession(agent);
   if (!sessionName) return;
 
   // Attach it to the slot
@@ -835,7 +1058,13 @@ document.querySelectorAll('.sidebar-tab').forEach(tab => {
 
 // ── Toolbar Buttons ────────────────────────────────────────────
 
-document.getElementById('btn-new').addEventListener('click', newSession);
+document.getElementById('btn-new').addEventListener('click', showNewSessionModal);
+document.getElementById('new-session-claude').addEventListener('click', () => newSession('claude'));
+document.getElementById('new-session-codex').addEventListener('click', () => newSession('codex'));
+document.getElementById('new-session-cancel').addEventListener('click', hideNewSessionModal);
+document.getElementById('new-session-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'new-session-overlay') hideNewSessionModal();
+});
 document.getElementById('btn-cleanup').addEventListener('click', cleanupDead);
 document.getElementById('btn-refresh').addEventListener('click', fetchSessions);
 
@@ -887,6 +1116,105 @@ document.querySelectorAll('.cell-header').forEach(header => {
   });
 });
 
+// ── Input Bar ─────────────────────────────────────────────────
+
+const inputBarState = [false, false, false, false]; // visible per slot
+
+function toggleInputBar(slot) {
+  inputBarState[slot] = !inputBarState[slot];
+  const bar = document.getElementById(`input-bar-${slot}`);
+  const btn = document.querySelector(`.cell-kb-toggle[data-slot="${slot}"]`);
+  if (bar) {
+    bar.style.display = inputBarState[slot] ? 'flex' : 'none';
+    if (inputBarState[slot]) {
+      const textarea = document.getElementById(`input-textarea-${slot}`);
+      if (textarea) textarea.focus();
+    }
+  }
+  if (btn) btn.classList.toggle('active', inputBarState[slot]);
+
+  // Refit terminal since available space changed
+  requestAnimationFrame(() => {
+    if (state.terminals[slot]) {
+      const { term: t, fitAddon: fa } = state.terminals[slot];
+      const oldCols = t.cols;
+      const oldRows = t.rows;
+      fa.fit();
+      if (t.cols !== oldCols || t.rows !== oldRows) {
+        window.cc.resizePty(slot, t.cols, t.rows);
+      }
+    }
+  });
+}
+
+function sendInputBar(slot) {
+  const textarea = document.getElementById(`input-textarea-${slot}`);
+  if (!textarea || !state.slots[slot] || state.botSlots[slot]) return;
+  const text = textarea.value;
+  if (!text) return;
+
+  // Exit tmux copy-mode first
+  window.cc.exitCopyMode(slot);
+
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    // Send line text
+    if (lines[i]) window.cc.writePty(slot, lines[i]);
+    if (i < lines.length - 1) {
+      // Internal newline → Ctrl+Enter (CSI u sequence for Claude Code)
+      window.cc.tmuxSend(slot, '-H', '1B', '5B', '31', '33', '3B', '35', '75');
+    }
+  }
+  // Final Enter to submit
+  window.cc.writePty(slot, '\r');
+
+  textarea.value = '';
+  textarea.style.height = '';
+}
+
+// Wire up keyboard toggle buttons
+document.querySelectorAll('.cell-kb-toggle').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const slot = parseInt(btn.dataset.slot);
+    toggleInputBar(slot);
+  });
+});
+
+// Wire up send buttons
+document.querySelectorAll('.cell-input-send').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const slot = parseInt(btn.dataset.slot);
+    sendInputBar(slot);
+  });
+});
+
+// Wire up textareas — Enter to send, Shift+Enter for newline, auto-grow
+for (let i = 0; i < 4; i++) {
+  const textarea = document.getElementById(`input-textarea-${i}`);
+  if (!textarea) continue;
+  const slot = i;
+
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendInputBar(slot);
+    }
+    if (e.key === 'Escape') {
+      toggleInputBar(slot);
+    }
+  });
+
+  textarea.addEventListener('input', () => {
+    // Auto-grow, show scrollbar only when at max height
+    textarea.style.height = '';
+    const h = Math.min(textarea.scrollHeight, 120);
+    textarea.style.height = h + 'px';
+    textarea.style.overflowY = textarea.scrollHeight > 120 ? 'auto' : 'hidden';
+  });
+}
+
 // ── Usage Footer ──────────────────────────────────────────────
 
 async function fetchUsage() {
@@ -928,10 +1256,9 @@ function renderUsage(u) {
   `;
 }
 
-// ── Mic Control ───────────────────────────────────────────────
+// ── Mic API ──────────────────────────────────────────────────
 
-const MIC_API = 'http://127.0.0.1:7780';
-const micState = { mode: 'off', lastTranscriptIdx: 0, meetingWindowOpen: false };
+const MIC_API = CONFIG.micServerUrl || 'http://127.0.0.1:7780';
 
 async function micApi(method, path) {
   try {
@@ -942,80 +1269,212 @@ async function micApi(method, path) {
   }
 }
 
+// ── Voice Record per Slot (uses mic server copy ability) ──────
+
+const voiceState = { activeSlot: null, pollTimer: null, prevCopied: '' };
+
+async function toggleVoiceRecord(slot) {
+  if (!state.terminals[slot]) return;
+
+  const btn = document.querySelector(`.cell-voice[data-slot="${slot}"]`);
+
+  // If already recording this slot, stop capture
+  if (voiceState.activeSlot === slot) {
+    const r = await micApi('POST', '/copy/stop');
+    if (r && r.copied && r.copied.trim() && r.copied !== voiceState.prevCopied) {
+      window.cc.writePty(slot, r.copied.trim());
+    }
+    stopVoicePoll(slot);
+    return;
+  }
+
+  // If recording another slot, stop that first
+  if (voiceState.activeSlot !== null) {
+    await micApi('POST', '/copy/stop');
+    stopVoicePoll(voiceState.activeSlot);
+  }
+
+  // Mic must be in "on" mode — auto-enable if off
+  let status = await micApi('GET', '/status');
+  if (!status) {
+    console.error('Mic server not reachable');
+    return;
+  }
+  if (status.mode === 'off' || status.mode === 'offline') {
+    if (status.mode === 'offline') {
+      await window.cc.startMicServer();
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    await micApi('POST', '/mode/on');
+    // Wait for model loading
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      status = await micApi('GET', '/status');
+      if (status && status.mode === 'on') break;
+    }
+    if (!status || status.mode !== 'on') {
+      console.error('Failed to auto-enable mic');
+      return;
+    }
+    // Update sidebar mic UI
+    setTimeout(fetchMicStatus, 100);
+  }
+
+  // Remember current on_last_copied so we don't paste stale text
+  voiceState.prevCopied = status.on_last_copied || '';
+
+  // Start copy ability via mic server
+  const r = await micApi('POST', '/copy/start');
+  if (!r || !r.ok) {
+    console.error('Failed to start copy:', r);
+    return;
+  }
+
+  voiceState.activeSlot = slot;
+  if (btn) btn.classList.add('recording');
+
+  // Poll mic status — when capture ends (state leaves CAPTURING), paste result
+  voiceState.pollTimer = setInterval(async () => {
+    const s = await micApi('GET', '/status');
+    if (!s) return;
+    if (s.on_listener_state !== 'CAPTURING') {
+      // Capture ended (user said "over" / "end copy")
+      const copied = s.on_last_copied;
+      if (copied && copied.trim() && copied !== voiceState.prevCopied && state.terminals[slot]) {
+        window.cc.writePty(slot, copied.trim());
+      }
+      stopVoicePoll(slot);
+    }
+  }, 500);
+}
+
+function stopVoicePoll(slot) {
+  if (voiceState.pollTimer) {
+    clearInterval(voiceState.pollTimer);
+    voiceState.pollTimer = null;
+  }
+  const btn = document.querySelector(`.cell-voice[data-slot="${slot}"]`);
+  if (btn) btn.classList.remove('recording');
+  voiceState.activeSlot = null;
+}
+
+// Wire up voice buttons
+for (const btn of document.querySelectorAll('.cell-voice')) {
+  btn.addEventListener('click', (e) => {
+    const slot = parseInt(btn.dataset.slot, 10);
+    toggleVoiceRecord(slot);
+  });
+}
+
+// ── Mic Control ───────────────────────────────────────────────
+
+const micState = { mode: 'off', lastTranscriptIdx: 0, meetingWindowOpen: false };
+
 function updateMicUI(data) {
   const dot = document.getElementById('mic-status-dot');
   const info = document.getElementById('mic-info');
   const btn = document.getElementById('mic-btn-toggle');
+  const copyBtn = document.getElementById('mic-btn-copy');
+  const meetingBtn = document.getElementById('mic-btn-meeting');
   const preview = document.getElementById('mic-transcript-preview');
 
   dot.className = 'mic-status-dot';
 
   if (!data) {
     info.textContent = 'Mic server offline';
-    btn.textContent = 'Off';
-    btn.className = 'mic-btn mic-toggle';
+    btn.textContent = 'Start';
+    btn.className = 'mic-btn mic-toggle mic-start';
+    copyBtn.disabled = true;
+    meetingBtn.disabled = true;
+    copyBtn.className = 'mic-btn mic-btn-copy';
+    meetingBtn.className = 'mic-btn mic-btn-meeting';
+    micState.mode = 'offline';
     return;
   }
 
   micState.mode = data.mode;
-  const isOn = data.mode === 'on';
+  const mode = data.mode;
+  const isCopy = mode === 'clipboard';
+  const isMeeting = mode === 'meeting' || data.meeting_active;
+  const isOn = mode === 'on';
+
+  // Toggle button
   btn.textContent = isOn ? 'On' : 'Off';
   btn.className = 'mic-btn mic-toggle' + (isOn ? ' selected-on' : '');
 
-  if (!isOn) {
-    info.textContent = 'Mic off';
+  // Copy button
+  copyBtn.textContent = isCopy ? 'Stop Copy' : 'Copy';
+  copyBtn.className = 'mic-btn mic-btn-copy' + (isCopy ? ' active' : '');
+  copyBtn.disabled = isMeeting;
+
+  // Meeting button
+  meetingBtn.textContent = isMeeting ? 'Stop Meeting' : 'Meeting';
+  meetingBtn.className = 'mic-btn mic-btn-meeting' + (isMeeting ? ' active' : '');
+  meetingBtn.disabled = isCopy;
+
+  if (isCopy) {
+    dot.classList.add('active-clipboard');
+    info.innerHTML = '<span style="color:var(--green)">Clipboard capture active</span>';
     preview.innerHTML = '';
-    return;
-  }
-
-  const listenerState = data.on_listener_state || 'LISTENING';
-
-  if (listenerState === 'AWAKE') {
-    dot.classList.add('active-awake');
-    info.innerHTML = '<span style="color:#00ff66">Listening for command...</span>';
-    if (!data.on_last_copied) preview.innerHTML = '';
-  } else if (listenerState === 'CAPTURING') {
-    dot.classList.add('active-capturing');
-    info.innerHTML = '<span style="color:#00ff66">Copying...</span>';
-    const texts = data.on_captured_texts || [];
-    if (texts.length > 0) {
-      preview.innerHTML = texts.map(t =>
-        `<div class="mic-transcript-line">${esc(t)}</div>`
-      ).join('');
-      preview.scrollTop = preview.scrollHeight;
-    }
-  } else if (listenerState === 'MEETING') {
+  } else if (isMeeting) {
     dot.classList.add('active-meeting');
     const mins = Math.floor(data.duration / 60);
     const secs = Math.floor(data.duration % 60);
     info.innerHTML = `<span style="color:var(--red)">Recording ${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}</span> — ${data.transcript_count} lines`;
-    preview.innerHTML = '';
     // Auto-open meeting window
     if (!micState.meetingWindowOpen) {
       micState.meetingWindowOpen = true;
       window.cc.openMeeting();
     }
-  } else if (listenerState === 'CALIBRATING') {
-    dot.classList.add('active-awake');
-    info.innerHTML = '<span style="color:var(--yellow)">Calibrating...</span>';
+  } else if (!isOn) {
+    info.textContent = 'Mic off';
+    preview.innerHTML = '';
   } else {
-    // LISTENING or AWAKE — not in meeting
-    if (listenerState !== 'AWAKE') {
-      dot.classList.add('active-on');
-    }
-    if (data.on_last_copied) {
-      info.innerHTML = '<span style="color:var(--green)">Copied to clipboard</span>';
-      preview.innerHTML = `<div class="mic-transcript-line" style="color:var(--green)">${esc(data.on_last_copied)}</div>`;
+    // Always-on mode
+    const listenerState = data.on_listener_state || 'LISTENING';
+
+    if (listenerState === 'AWAKE') {
+      dot.classList.add('active-awake');
+      info.innerHTML = '<span style="color:#00ff66">Listening for command...</span>';
+      if (!data.on_last_copied) preview.innerHTML = '';
+    } else if (listenerState === 'CAPTURING') {
+      dot.classList.add('active-capturing');
+      info.innerHTML = '<span style="color:#00ff66">Copying...</span>';
+      const texts = data.on_captured_texts || [];
+      if (texts.length > 0) {
+        preview.innerHTML = texts.map(t =>
+          `<div class="mic-transcript-line">${esc(t)}</div>`
+        ).join('');
+        preview.scrollTop = preview.scrollHeight;
+      }
+    } else if (listenerState === 'MEETING') {
+      dot.classList.add('active-meeting');
+      const mins = Math.floor(data.duration / 60);
+      const secs = Math.floor(data.duration % 60);
+      info.innerHTML = `<span style="color:var(--red)">Recording ${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}</span> — ${data.transcript_count} lines`;
+      if (!micState.meetingWindowOpen) {
+        micState.meetingWindowOpen = true;
+        window.cc.openMeeting();
+      }
+    } else if (listenerState === 'CALIBRATING') {
+      dot.classList.add('active-awake');
+      info.innerHTML = '<span style="color:var(--yellow)">Calibrating...</span>';
     } else {
-      info.textContent = 'Say "Hey Bart" to wake';
-      preview.innerHTML = '';
+      dot.classList.add('active-on');
+      if (data.on_last_copied) {
+        info.innerHTML = '<span style="color:var(--green)">[Copied]</span>';
+        preview.innerHTML = '';
+      } else {
+        info.textContent = `Say "${CONFIG.wakeWord}" to wake`;
+        preview.innerHTML = '';
+      }
     }
   }
 
-  // Close meeting window if we left MEETING state
-  if (listenerState !== 'MEETING' && micState.meetingWindowOpen) {
+  // Close meeting window tracking if we left meeting
+  const inMeeting = isMeeting || (isOn && (data.on_listener_state === 'MEETING'));
+  if (!inMeeting && micState.meetingWindowOpen) {
     micState.meetingWindowOpen = false;
-    // Don't auto-close — let user close it when they're done reading
   }
 }
 
@@ -1056,6 +1515,22 @@ async function fetchMicStatus() {
 }
 
 document.getElementById('mic-btn-toggle').addEventListener('click', async () => {
+  if (micState.mode === 'offline') {
+    // Server is down — start it
+    const btn = document.getElementById('mic-btn-toggle');
+    const info = document.getElementById('mic-info');
+    btn.textContent = 'Starting...';
+    btn.className = 'mic-btn mic-toggle mic-start';
+    info.textContent = 'Starting mic server...';
+    const ok = await window.cc.startMicServer();
+    if (ok) {
+      setTimeout(fetchMicStatus, 500);
+    } else {
+      info.textContent = 'Failed to start mic server';
+      btn.textContent = 'Start';
+    }
+    return;
+  }
   const newMode = micState.mode === 'on' ? 'off' : 'on';
   await micApi('POST', `/mode/${newMode}`);
   micState.lastTranscriptIdx = 0;
@@ -1063,19 +1538,148 @@ document.getElementById('mic-btn-toggle').addEventListener('click', async () => 
   setTimeout(fetchMicStatus, newMode === 'on' ? 1500 : 500);
 });
 
+document.getElementById('mic-btn-copy').addEventListener('click', async () => {
+  if (micState.mode === 'offline') return;
+  const newMode = micState.mode === 'clipboard' ? 'off' : 'clipboard';
+  await micApi('POST', `/mode/${newMode}`);
+  setTimeout(fetchMicStatus, 500);
+});
+
+document.getElementById('mic-btn-meeting').addEventListener('click', async () => {
+  if (micState.mode === 'offline') return;
+  const isMeeting = micState.mode === 'meeting';
+  const newMode = isMeeting ? 'off' : 'meeting';
+  await micApi('POST', `/mode/${newMode}`);
+  micState.lastTranscriptIdx = 0;
+  document.getElementById('mic-transcript-preview').innerHTML = '';
+  setTimeout(fetchMicStatus, isMeeting ? 500 : 2000);
+});
+
 // ── Init ───────────────────────────────────────────────────────
 
-// Set empty state for all cells
+// Apply config — theme, app name, feature flags
+(function applyConfig() {
+  // Set titlebar text and document title
+  const titleEl = document.getElementById('titlebar-text');
+  if (titleEl) titleEl.textContent = CONFIG.appName.toUpperCase();
+  document.title = CONFIG.appName;
+
+  // Apply CSS custom properties from config theme
+  const themeVarMap = { bg: '--bg', bg2: '--bg2', bg3: '--bg3', fg: '--fg', fgDim: '--fg-dim',
+    blue: '--blue', green: '--green', red: '--red', yellow: '--yellow',
+    purple: '--purple', cyan: '--cyan', border: '--border' };
+
+  function applyThemeVars(theme) {
+    if (!theme) return;
+    for (const [key, cssVar] of Object.entries(themeVarMap)) {
+      if (theme[key]) document.documentElement.style.setProperty(cssVar, theme[key]);
+    }
+  }
+
+  // Apply initial theme
+  const isDark = document.documentElement.dataset.theme !== 'light';
+  applyThemeVars(isDark ? CONFIG.dark : CONFIG.light);
+
+  // Wire up theme toggle to also apply config colors
+  const themeToggle = document.getElementById('theme-toggle');
+  if (themeToggle) {
+    themeToggle.addEventListener('click', () => {
+      const html = document.documentElement;
+      const nowDark = html.dataset.theme !== 'light';
+      html.dataset.theme = nowDark ? 'light' : 'dark';
+      themeToggle.innerHTML = nowDark ? '&#9788;' : '&#9790;';
+      applyThemeVars(nowDark ? CONFIG.light : CONFIG.dark);
+    });
+  }
+
+  // Hide mic panel + voice record buttons if disabled
+  if (!CONFIG.features.mic) {
+    const micPanel = document.getElementById('mic-panel');
+    if (micPanel) micPanel.style.display = 'none';
+    document.querySelectorAll('.cell-voice').forEach(btn => btn.style.display = 'none');
+  }
+
+  // Hide usage footer if disabled
+  if (!CONFIG.features.usage) {
+    const usageFooter = document.getElementById('usage-footer');
+    if (usageFooter) usageFooter.style.display = 'none';
+  }
+
+  // Hide input bar toggle buttons if disabled
+  if (!CONFIG.features.inputBar) {
+    document.querySelectorAll('.cell-kb-toggle').forEach(btn => btn.style.display = 'none');
+  }
+
+  // Hide bots tab if disabled — show flat session list without tabs
+  if (!CONFIG.features.botsTab) {
+    const tabBar = document.querySelector('.sidebar-tabs');
+    if (tabBar) tabBar.style.display = 'none';
+  }
+})();
+
+// Set empty state for all cells.
 for (let i = 0; i < 4; i++) {
-  document.getElementById(`term-${i}`).innerHTML =
-    '<div class="cell-empty">Click a session or bot to attach</div>';
+  const container = document.getElementById(`term-${i}`);
+  container.innerHTML = '<div class="cell-empty">Click a session or bot to attach</div>';
 }
 
+// Single document-level capture-phase wheel handler for ALL slots.
+// Previous approach: per-container handlers. These failed silently when xterm's
+// WebGL canvas or viewport absorbed wheel events before the container's capture
+// handler could fire (Chromium compositor-level scroll interception).
+// Document-level capture fires FIRST, before any element-level handler.
+document.addEventListener('wheel', (e) => {
+  // Walk up from event target to find which .cell-terminal slot we're in
+  let el = e.target;
+  let container = null;
+  while (el && el !== document) {
+    if (el.classList && el.classList.contains('cell-terminal')) {
+      container = el;
+      break;
+    }
+    el = el.parentElement;
+  }
+  if (!container) return; // not over a terminal slot
+
+  const slotMatch = container.id.match(/^term-(\d)$/);
+  if (!slotMatch) return;
+  const slot = parseInt(slotMatch[1], 10);
+
+  // Only scroll if slot has an active terminal session (not a bot panel, not empty)
+  if (!state.slots[slot] || state.botSlots[slot] || !state.terminals[slot]) {
+    const now = Date.now();
+    if (now - (state._scrollDebugTs?.[slot] || 0) > 1000) {
+      if (!state._scrollDebugTs) state._scrollDebugTs = [0,0,0,0];
+      state._scrollDebugTs[slot] = now;
+      console.warn(`[scroll:blocked] slot=${slot} slots=${!!state.slots[slot]} botSlots=${state.botSlots[slot]} terminals=${!!state.terminals[slot]}`);
+    }
+    return;
+  }
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  const now = Date.now();
+  if (now - state.wheelThrottles[slot] < 50) return;
+  state.wheelThrottles[slot] = now;
+  const paneId = state.slots[slot].paneId;
+  if (!paneId) return; // PTY not yet created or createPty failed
+  const lines = Math.max(1, Math.round(Math.abs(e.deltaY) / 25));
+  window.cc.scrollTmux(paneId, e.deltaY < 0 ? 'up' : 'down', lines);
+}, { passive: false, capture: true });
+
 fetchSessions();
-fetchUsage();
-fetchMicStatus();
-fetchBots();
+pollActivity();
 setInterval(fetchSessions, 5000);
-setInterval(fetchUsage, 30000);
-setInterval(fetchMicStatus, 1000);
-setInterval(fetchBots, 10000);
+setInterval(pollActivity, 3000);
+
+if (CONFIG.features.usage) {
+  fetchUsage();
+  setInterval(fetchUsage, 30000);
+}
+if (CONFIG.features.mic) {
+  fetchMicStatus();
+  setInterval(fetchMicStatus, 1000);
+}
+if (CONFIG.features.botsTab) {
+  fetchBots();
+  setInterval(fetchBots, 10000);
+}

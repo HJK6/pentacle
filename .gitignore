@@ -4,3 +4,6 @@ out/
 .env
 *.log
 .DS_Store
+.slot-state.json
+.claude/
+*.backup-*
