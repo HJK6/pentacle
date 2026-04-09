@@ -42,11 +42,12 @@ function mount(container) {
   flow.className = 'pipeline-flow';
 
   const stageDefs = [
-    { id: 'scraped', label: 'Scraped' },
+    { id: 'scrape', label: 'Scrape' },
     { id: 'cad', label: 'CAD' },
     { id: 'ps', label: 'PropStream' },
     { id: 'qualify', label: 'Qualify' },
-    { id: 'promoted', label: 'Staging' },
+    { id: 'skipmatrix', label: 'SkipMatrix' },
+    { id: 'prod', label: 'Prod' },
   ];
 
   const stageEls = {};
@@ -107,39 +108,163 @@ function mount(container) {
 
   return {
     batchLabel, statusBadge, lastUpdated, retryBtn, _retryHandler: retryHandler,
-    scrapedStage: stageEls.scraped, cadStage: stageEls.cad, psStage: stageEls.ps,
-    qualifyStage: stageEls.qualify, promotedStage: stageEls.promoted,
+    scrapeStage: stageEls.scrape, cadStage: stageEls.cad, psStage: stageEls.ps,
+    qualifyStage: stageEls.qualify,
+    skipmatrixStage: stageEls.skipmatrix, prodStage: stageEls.prod,
     rejectedHeader, rejectedReasons, qualifiedStates,
   };
 }
 
+// Map state machine stage names → SkipMatrix box sub-state label
+const SM_LABELS = {
+  skipmatrix_csv:           'csv',
+  skipmatrix_submit:        'submit',
+  skipmatrix_confirm:       'confirm',
+  skipmatrix_invoice:       'invoice',
+  skipmatrix_pay:           'pay',
+  skipmatrix_paid_confirm:  'paid',
+  skipmatrix_results:       'results',
+};
+
+const SM_STAGE_IDS = Object.keys(SM_LABELS);
+
+function _stagesByName(stages) {
+  const out = {};
+  (stages || []).forEach(s => { out[s.stage] = s; });
+  return out;
+}
+
+function _isBlocked(state) {
+  return state === 'failed' || state === 'blocked_qa' || state === 'blocked_circuit_breaker';
+}
+
 function update(refs, data) {
-  const { batchLabel, scrapedStage, cadStage, psStage, qualifyStage, promotedStage,
+  const { batchLabel, scrapeStage, cadStage, psStage, qualifyStage,
+          skipmatrixStage, prodStage,
           rejectedHeader, rejectedReasons, qualifiedStates } = refs;
 
-  batchLabel.textContent = data.batch ? `Batch ${data.batch}` : '';
-  scrapedStage.num.textContent = _fmt(data.scraped);
-  scrapedStage.box.classList.remove('active', 'success');
+  // Prefer state-machine batch (orchestrator's view), fall back to leads_dev batch
+  const summary = data.pipeline_summary || {};
+  const smBatch = summary.state_machine_batch || data.batch || '';
+  batchLabel.textContent = smBatch ? `Batch ${smBatch}` : '';
 
+  const smStages = _stagesByName(data.pipeline_stages);
+
+  // ─── Scrape box ───
+  // Show total scraped + ingested counts from the scrape stage's metrics if
+  // present (state machine view). Otherwise fall back to leads_dev counts.
+  const scrapeRow = smStages['scrape'];
+  const scrapeMetrics = (scrapeRow && scrapeRow.metrics) || {};
+  const totalScraped = scrapeMetrics.total_scraped != null
+    ? scrapeMetrics.total_scraped
+    : (data.scraped || 0);
+  const totalIngested = scrapeMetrics.total_ingested != null
+    ? scrapeMetrics.total_ingested
+    : (data.scraped || 0);
+  const totalDuped = scrapeMetrics.total_duped || 0;
+  scrapeStage.num.textContent = _fmt(totalScraped);
+  scrapeStage.sec.textContent = totalDuped > 0
+    ? `${_fmt(totalIngested)} new / ${_fmt(totalDuped)} dupe`
+    : `${_fmt(totalIngested)} ingested`;
+  scrapeStage.box.classList.toggle('active', scrapeRow && scrapeRow.state === 'running');
+  scrapeStage.box.classList.toggle('success', scrapeRow && scrapeRow.state === 'complete');
+  scrapeStage.box.classList.toggle('blocked', scrapeRow && _isBlocked(scrapeRow.state));
+
+  // ─── CAD ───
   const cadP = data.cad_pending || 0, cadC = data.cad_complete || 0;
   cadStage.num.textContent = _fmt(cadP);
   cadStage.sec.textContent = `${_fmt(cadC)} done`;
-  cadStage.box.classList.toggle('active', cadP > 0);
+  const cadRow = smStages['cad'];
+  cadStage.box.classList.toggle('active', cadP > 0 || (cadRow && cadRow.state === 'running'));
+  cadStage.box.classList.toggle('success', cadRow && cadRow.state === 'complete');
+  cadStage.box.classList.toggle('blocked', cadRow && _isBlocked(cadRow.state));
 
+  // ─── PropStream ───
   const psP = data.ps_pending || 0, psC = data.ps_complete || 0;
   psStage.num.textContent = _fmt(psP);
   psStage.sec.textContent = `${_fmt(psC)} done`;
-  psStage.box.classList.toggle('active', psP > 0);
+  const psRow = smStages['propstream'];
+  psStage.box.classList.toggle('active', psP > 0 || (psRow && psRow.state === 'running'));
+  psStage.box.classList.toggle('success', psRow && psRow.state === 'complete');
+  psStage.box.classList.toggle('blocked', psRow && _isBlocked(psRow.state));
 
+  // ─── Qualify ───
   const qP = data.qualify_pending || 0, qual = data.qualified || 0, rej = data.rejected || 0;
   qualifyStage.num.textContent = _fmt(qP);
   qualifyStage.sec.textContent = `${_fmt(qual)} pass / ${_fmt(rej)} fail`;
-  qualifyStage.box.classList.toggle('active', qP > 0);
+  const qRow = smStages['qualify'];
+  qualifyStage.box.classList.toggle('active', qP > 0 || (qRow && qRow.state === 'running'));
+  qualifyStage.box.classList.toggle('success', qRow && qRow.state === 'complete');
+  qualifyStage.box.classList.toggle('blocked', qRow && _isBlocked(qRow.state));
 
-  const prom = data.promoted || 0;
-  promotedStage.num.textContent = _fmt(prom);
-  promotedStage.sec.textContent = prom > 0 ? 'promoted' : '';
-  promotedStage.box.classList.toggle('success', prom > 0);
+  // ─── SkipMatrix (collapsed: 7 sub-stages) ───
+  // Find the first sub-stage that isn't complete, show it as the secondary
+  // label. If all are complete, show "done". If none have started, show "—".
+  let smCurrent = null;
+  let smState = null;
+  let smAllComplete = true;
+  let smAnyStarted = false;
+  for (const id of SM_STAGE_IDS) {
+    const r = smStages[id];
+    if (!r) { smAllComplete = false; continue; }
+    if (r.state !== 'complete') {
+      smAllComplete = false;
+      if (!smCurrent) {
+        smCurrent = id;
+        smState = r.state;
+      }
+    }
+    if (r.state !== 'waiting') smAnyStarted = true;
+  }
+  const smCsvRows = (smStages.skipmatrix_csv && smStages.skipmatrix_csv.metrics && smStages.skipmatrix_csv.metrics.csv_rows) || 0;
+  if (smAllComplete) {
+    skipmatrixStage.num.textContent = _fmt(smCsvRows || qual || 0);
+    skipmatrixStage.sec.textContent = 'submitted';
+    skipmatrixStage.box.classList.add('success');
+    skipmatrixStage.box.classList.remove('active', 'blocked');
+  } else if (smCurrent) {
+    skipmatrixStage.num.textContent = _fmt(smCsvRows || qual || 0);
+    const subLabel = SM_LABELS[smCurrent] || smCurrent;
+    skipmatrixStage.sec.textContent = `${subLabel} (${smState})`;
+    skipmatrixStage.box.classList.toggle('active', smState === 'running' || smState === 'waiting_email');
+    skipmatrixStage.box.classList.toggle('blocked', _isBlocked(smState));
+    skipmatrixStage.box.classList.remove('success');
+  } else {
+    skipmatrixStage.num.textContent = '—';
+    skipmatrixStage.sec.textContent = '';
+    skipmatrixStage.box.classList.remove('active', 'success', 'blocked');
+  }
+
+  // ─── Prod (prod_hydrate_promote) ───
+  const prodRow = smStages['prod_hydrate_promote'];
+  if (prodRow) {
+    const prodMetrics = prodRow.metrics || {};
+    const promotedCount = prodMetrics.created_owners || prodMetrics.promoted || 0;
+    if (prodRow.state === 'complete') {
+      prodStage.num.textContent = _fmt(promotedCount);
+      prodStage.sec.textContent = 'promoted';
+      prodStage.box.classList.add('success');
+      prodStage.box.classList.remove('active', 'blocked');
+    } else if (prodRow.state === 'running') {
+      prodStage.num.textContent = _fmt(promotedCount);
+      prodStage.sec.textContent = 'promoting';
+      prodStage.box.classList.add('active');
+      prodStage.box.classList.remove('success', 'blocked');
+    } else if (_isBlocked(prodRow.state)) {
+      prodStage.num.textContent = '!';
+      prodStage.sec.textContent = prodRow.state;
+      prodStage.box.classList.add('blocked');
+      prodStage.box.classList.remove('active', 'success');
+    } else {
+      prodStage.num.textContent = '—';
+      prodStage.sec.textContent = '';
+      prodStage.box.classList.remove('active', 'success', 'blocked');
+    }
+  } else {
+    prodStage.num.textContent = '—';
+    prodStage.sec.textContent = '';
+    prodStage.box.classList.remove('active', 'success', 'blocked');
+  }
 
   rejectedHeader.textContent = `Rejected — ${_fmt(rej)}`;
 
