@@ -329,9 +329,16 @@ function update(refs, data) {
   batchLabel.textContent = smBatch ? `Batch ${smBatch}` : '';
 
   // Populate / refresh the batch-selector dropdown from data.all_batches.
-  // Re-render options in place so the selection sticks across polls.
+  // Only initialize the selection once (to whichever batch the server
+  // picked by default on first poll). After that, the dropdown is USER
+  // STATE — never let an update() call change it, even when a stale
+  // in-flight poll from before a dropdown click returns with the old
+  // batch's data. Clobbering user picks mid-poll was the "toggles back
+  // to E" bug.
   const allBatches = Array.isArray(data.all_batches) ? data.all_batches : [];
   if (batchSelect) {
+    // Preserve the user's current pick across option re-renders.
+    const savedValue = batchSelect.value;
     const existingKeys = Array.from(batchSelect.options).map(o => o.value);
     const wantKeys = allBatches;
     const same = existingKeys.length === wantKeys.length
@@ -344,13 +351,16 @@ function update(refs, data) {
         opt.textContent = b;
         batchSelect.appendChild(opt);
       });
-    }
-    // Sync current selection with whichever batch the poll actually returned.
-    // If the user hasn't picked anything yet, mark the active server-picked
-    // batch as selected so the dropdown matches reality.
-    if (smBatch && batchSelect.value !== smBatch) {
-      const has = Array.from(batchSelect.options).some(o => o.value === smBatch);
-      if (has) batchSelect.value = smBatch;
+      // Restore user selection if it's still a valid option; otherwise
+      // fall back to the server-picked batch for the initial render.
+      const restore = savedValue && allBatches.includes(savedValue)
+        ? savedValue
+        : (smBatch && allBatches.includes(smBatch) ? smBatch : '');
+      if (restore) batchSelect.value = restore;
+    } else if (!savedValue && smBatch && allBatches.includes(smBatch)) {
+      // First-load initialization: dropdown had no value yet, highlight
+      // whichever batch the server returned.
+      batchSelect.value = smBatch;
     }
   }
 
