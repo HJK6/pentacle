@@ -4,7 +4,19 @@ const pty = require('node-pty');
 const { spawn, execFile, execFileSync, execSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const CONFIG = require('./pentacle.config.js');
+
+// ── DynamoDB client for the 0DTE dashboard ──────────────────────────────────
+// Reads AWS credentials from the standard chain: ~/.aws/credentials, env vars,
+// or instance profile. The dashboard is read-only (Query + Scan), no PutItem.
+const _ddbRaw = new DynamoDBClient({ region: 'us-east-1' });
+const _ddb = DynamoDBDocumentClient.from(_ddbRaw);
+const _DASHBOARD_TABLE = '0dte-snapshots';
+// Cache the trader list for 60s to avoid scanning the table on every poll.
+let _tradersCache = { ts: 0, traders: [] };
+const _TRADERS_CACHE_TTL_MS = 60_000;
 
 // Set app identity so Ghost OS and macOS recognize us properly
 app.setName(CONFIG.appName);
@@ -617,29 +629,73 @@ app.whenReady().then(async () => {
     });
   });
 
-  ipcMain.handle('dashboard:0dte-stats', async () => {
-    return new Promise((resolve) => {
-      const env = {
-        ...process.env,
-        PYTHONPATH: '/Users/bartimaeus/iv-rank-scanner',
-      };
-      const proc = spawn('/Users/bartimaeus/.venvs/global/bin/python', [
-        '/Users/bartimaeus/iv-rank-scanner/scripts/0dte_dashboard_stats.py',
-      ], { env });
-      let stdout = '';
-      let stderr = '';
-      const timer = setTimeout(() => { proc.kill('SIGKILL'); }, 10000);
-      proc.stdout.on('data', d => { stdout += d; });
-      proc.stderr.on('data', d => { stderr += d; });
-      proc.on('close', (code) => {
-        clearTimeout(timer);
-        if (code === 0) {
-          try { resolve(JSON.parse(stdout.trim())); }
-          catch (e) { resolve({ error: 'Invalid JSON: ' + stdout.slice(0, 100) }); }
-        } else { resolve({ error: (stderr || '').slice(0, 200) || `0DTE stats exit ${code}` }); }
-      });
-      proc.on('error', (e) => { clearTimeout(timer); resolve({ error: e.message }); });
-    });
+  // ── 0DTE dashboard: read latest snapshot for one trader from DynamoDB ──
+  // Replaces the legacy Python subprocess that hit the bot's local HTTP API.
+  // The Trader process publishes snapshots to 0dte-snapshots every 5s; this
+  // handler queries the latest one for the requested trader_id. Multi-trader
+  // support is built in via the trader_id partition key.
+  //
+  // Returns { snapshot, age_sec, error } where snapshot is the raw DynamoDB
+  // item (positions_by_account, circuit, today_stats, last_scan, etc.) and
+  // age_sec is how stale the snapshot is. The renderer uses age to color a
+  // freshness indicator. error is set if the query fails.
+  ipcMain.handle('dashboard:0dte-stats', async (_evt, traderId) => {
+    if (!traderId) {
+      return { error: 'no trader_id provided' };
+    }
+    try {
+      const resp = await _ddb.send(new QueryCommand({
+        TableName: _DASHBOARD_TABLE,
+        KeyConditionExpression: 'trader_id = :t',
+        ExpressionAttributeValues: { ':t': traderId },
+        ScanIndexForward: false,
+        Limit: 1,
+      }));
+      const items = resp.Items || [];
+      if (items.length === 0) {
+        return { snapshot: null, age_sec: null, trader_id: traderId };
+      }
+      const snapshot = items[0];
+      const ageSec = Math.max(0, (Date.now() - Number(snapshot.snapshot_ts)) / 1000);
+      return { snapshot, age_sec: ageSec, trader_id: traderId };
+    } catch (e) {
+      return { error: `dynamodb query failed: ${e.message || e}` };
+    }
+  });
+
+  // ── 0DTE dashboard: discover known traders ────────────────────────────
+  // Scans the 0dte-snapshots table with a projection of just trader_id and
+  // dedupes. Cached for 60s to avoid scanning on every poll. Returns the
+  // list sorted alphabetically.
+  //
+  // For a small table (a handful of traders, ~thousands of snapshots) this
+  // is fine — the Scan reads each item but the projection keeps it small.
+  // If the table grows large we'll add a GSI.
+  ipcMain.handle('dashboard:0dte-list-traders', async () => {
+    const now = Date.now();
+    if (now - _tradersCache.ts < _TRADERS_CACHE_TTL_MS && _tradersCache.traders.length > 0) {
+      return { traders: _tradersCache.traders, cached: true };
+    }
+    try {
+      const traders = new Set();
+      let lastKey = undefined;
+      do {
+        const resp = await _ddb.send(new ScanCommand({
+          TableName: _DASHBOARD_TABLE,
+          ProjectionExpression: 'trader_id',
+          ExclusiveStartKey: lastKey,
+        }));
+        for (const it of (resp.Items || [])) {
+          if (it.trader_id) traders.add(it.trader_id);
+        }
+        lastKey = resp.LastEvaluatedKey;
+      } while (lastKey);
+      const list = Array.from(traders).sort();
+      _tradersCache = { ts: now, traders: list };
+      return { traders: list, cached: false };
+    } catch (e) {
+      return { error: `dynamodb scan failed: ${e.message || e}`, traders: _tradersCache.traders };
+    }
   });
 
   // ── Image Paste ─────────────────────────────────────────────

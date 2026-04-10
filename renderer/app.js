@@ -650,8 +650,13 @@ async function attachSession(slot, sessionName, displayName) {
     }
 
     // Cmd+V → paste from clipboard (Electron's editMenu paste no longer
-    // fires into xterm.js in Chromium 134+; handle explicitly)
+    // fires into xterm.js in Chromium 134+; handle explicitly).
+    // preventDefault is REQUIRED — without it Chromium still dispatches a
+    // native `paste` event on xterm's hidden textarea, which xterm.js handles
+    // by writing the clipboard a second time, causing a double paste.
     if (e.metaKey && e.key === 'v') {
+      e.preventDefault();
+      e.stopPropagation();
       navigator.clipboard.readText().then(text => {
         if (text) {
           window.cc.exitCopyMode(slot);
@@ -993,6 +998,28 @@ function hideNewSessionModal() {
   document.getElementById('new-session-overlay').style.display = 'none';
 }
 
+function sendProgrammaticInput(slot, text) {
+  if (!text || !state.slots[slot] || state.botSlots[slot] || !state.terminals[slot]) return;
+
+  window.cc.exitCopyMode(slot);
+
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]) window.cc.writePty(slot, lines[i]);
+    if (i < lines.length - 1) {
+      window.cc.tmuxSend(slot, '-H', '1B', '5B', '31', '33', '3B', '35', '75');
+    }
+  }
+  // Delay the submit \r so it lands as a separate keystroke event, not part of the
+  // text burst. Codex's TUI batches bytes received in a short window into one chunk
+  // and treats \r inside the chunk as a literal paste-newline (insert) instead of
+  // Enter (submit) — without this gap, "hello\r" appears in the input but never
+  // submits. Claude submits on \r regardless of timing, so the delay is harmless
+  // there. 100ms is well above the empirical threshold (~20ms) with margin for slow
+  // systems; barely perceptible to users.
+  setTimeout(() => window.cc.writePty(slot, '\r'), 100);
+}
+
 async function newSession(agent) {
   hideNewSessionModal();
 
@@ -1006,7 +1033,16 @@ async function newSession(agent) {
   if (!sessionName) return;
 
   // Attach it to the slot
-  attachSession(slot, sessionName, sessionName);
+  await attachSession(slot, sessionName, sessionName);
+
+  const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
+  if (agentConfig.startupMessage) {
+    const startupDelayMs = Number(agentConfig.startupDelayMs) || 1500;
+    setTimeout(() => {
+      if (state.slots[slot]?.name !== sessionName) return;
+      sendProgrammaticInput(slot, agentConfig.startupMessage);
+    }, startupDelayMs);
+  }
 
   // Refresh sidebar after a short delay to pick up the new session
   setTimeout(fetchSessions, 2000);
@@ -1183,13 +1219,27 @@ function startDashboardPolling() {
   state.dashboardPollToken++;
   const token = state.dashboardPollToken;
   let inFlight = false; // closure-scoped per generation
+  let currentInterval = db.pollInterval; // may flip to idlePollInterval when idle
+
+  // Re-arm the setInterval with a new period if it changed (e.g. active→idle).
+  // Dashboards that opt in provide `idleFn(data) -> bool` and `idlePollInterval`
+  // in their registration — when idleFn returns true, we poll at the slower
+  // rate until idleFn returns false again.
+  function _retuneInterval(nextInterval) {
+    if (nextInterval === currentInterval) return;
+    currentInterval = nextInterval;
+    if (state.dashboardPollTimer) clearInterval(state.dashboardPollTimer);
+    state.dashboardPollTimer = setInterval(poll, currentInterval);
+  }
 
   async function poll() {
     if (inFlight) return;
     if (state.dashboardPollToken !== token) return;
     inFlight = true;
     try {
-      const data = await db.pollFn();
+      // Pass refs so dashboards that need state (e.g. 0DTE selected trader)
+      // can read it without going through localStorage on every tick.
+      const data = await db.pollFn(state.dashboardRefs);
       if (state.dashboardPollToken !== token) return; // stale generation
       if (data && !data.error) {
         state.dashboardLastData = data;
@@ -1198,6 +1248,14 @@ function startDashboardPolling() {
         state.dashboardError = null;
         db.update(state.dashboardRefs, data);
         updateDashboardStatusBadge();
+
+        // Idle-slowdown: if the dashboard declared itself idle for this data,
+        // bump the interval down to `idlePollInterval`. If it's no longer
+        // idle, snap back to the normal interval.
+        if (typeof db.idleFn === 'function' && db.idlePollInterval) {
+          const isIdle = !!db.idleFn(data);
+          _retuneInterval(isIdle ? db.idlePollInterval : db.pollInterval);
+        }
       } else {
         state.dashboardError = data?.error || 'Unknown error';
         state.dashboardState = state.dashboardLastData ? 'stale' : 'error';
@@ -1214,7 +1272,7 @@ function startDashboardPolling() {
   }
 
   poll();
-  state.dashboardPollTimer = setInterval(poll, db.pollInterval);
+  state.dashboardPollTimer = setInterval(poll, currentInterval);
 }
 
 function stopDashboardPolling() {
@@ -1358,21 +1416,7 @@ function sendInputBar(slot) {
   if (!textarea || !state.slots[slot] || state.botSlots[slot]) return;
   const text = textarea.value;
   if (!text) return;
-
-  // Exit tmux copy-mode first
-  window.cc.exitCopyMode(slot);
-
-  const lines = text.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    // Send line text
-    if (lines[i]) window.cc.writePty(slot, lines[i]);
-    if (i < lines.length - 1) {
-      // Internal newline → Ctrl+Enter (CSI u sequence for Claude Code)
-      window.cc.tmuxSend(slot, '-H', '1B', '5B', '31', '33', '3B', '35', '75');
-    }
-  }
-  // Final Enter to submit
-  window.cc.writePty(slot, '\r');
+  sendProgrammaticInput(slot, text);
 
   textarea.value = '';
   textarea.style.height = '';
@@ -1523,13 +1567,18 @@ async function toggleVoiceRecord(slot) {
 
   const btn = document.querySelector(`.cell-voice[data-slot="${slot}"]`);
 
-  // If already recording this slot, stop capture
+  // If already recording this slot, stop capture.
+  // IMPORTANT: clear activeSlot + stop poller BEFORE awaiting /copy/stop so
+  // any in-flight poll tick bails out (it checks voiceState.activeSlot after
+  // its await resumes). Otherwise the manual-stop response and the poller
+  // both see the new on_last_copied and paste it twice.
   if (voiceState.activeSlot === slot) {
+    stopVoicePoll(slot);
     const r = await micApi('POST', '/copy/stop');
     if (r && r.copied && r.copied.trim() && r.copied !== voiceState.prevCopied) {
+      voiceState.prevCopied = r.copied;
       window.cc.writePty(slot, r.copied.trim());
     }
-    stopVoicePoll(slot);
     return;
   }
 
@@ -1578,14 +1627,18 @@ async function toggleVoiceRecord(slot) {
   voiceState.activeSlot = slot;
   if (btn) btn.classList.add('recording');
 
-  // Poll mic status — when capture ends (state leaves CAPTURING), paste result
+  // Poll mic status — when capture ends (user said "over" / "end copy"),
+  // paste result. If the user clicked the slot button instead, the manual-stop
+  // path above already handled it; this poller bails on the activeSlot check
+  // so we don't double-paste.
   voiceState.pollTimer = setInterval(async () => {
     const s = await micApi('GET', '/status');
+    if (voiceState.activeSlot !== slot) return; // manual stop or another slot took over
     if (!s) return;
     if (s.on_listener_state !== 'CAPTURING') {
-      // Capture ended (user said "over" / "end copy")
       const copied = s.on_last_copied;
       if (copied && copied.trim() && copied !== voiceState.prevCopied && state.terminals[slot]) {
+        voiceState.prevCopied = copied;
         window.cc.writePty(slot, copied.trim());
       }
       stopVoicePoll(slot);

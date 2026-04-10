@@ -1,287 +1,429 @@
 // ══════════════════════════════════════════════════════════════
-// ── 0DTE Trading Dashboard (prebuilt) ────────────────────────
+// ── 0DTE Trading Dashboard ───────────────────────────────────
 // ══════════════════════════════════════════════════════════════
-// Self-registering — pushes to window.DASHBOARDS on load.
-// Ships with Pentacle for all bots running the 0DTE pipeline.
-// Requires: preload bridge `window.cc.get0dteStats()`
-//           IPC handler `dashboard:0dte-stats`
+// Reads snapshots from the 0dte-snapshots DynamoDB table via the
+// dashboard:0dte-stats IPC handler. Multi-trader: a dropdown at the top
+// switches between operators (bart, sai, etc.) sourced from the
+// dashboard:0dte-list-traders handler.
+//
+// Snapshot shape (see ~/iv-rank-scanner/execution/trader/dashboard_publisher.py):
+//   { trader_id, snapshot_ts, bot_version, host, trader_accounts,
+//     circuit: { daily_pnl, entries_blocked, vix_breached, divergence_halt },
+//     today_stats: { entries_attempted, entries_filled, tp_hits, sl_hits, realized_pnl },
+//     last_scan: { decision_dt, scored_count, candidates_count, top_picks: [...] },
+//     positions_by_account: { acct1: [TrackedPosition...] } }
 
 (function() {
 
-// ET market schedule
-const DTE_SCHEDULE = {
-  GATEWAY_START: 9, MARKET_OPEN: 9.5, ENTRY_START: 10,
-  ENTRY_END: 14, FORCED_EXIT: 14.917, MARKET_CLOSE: 15,
-};
+const _LS_KEY = 'pentacle.0dte.selected_trader';
 
-function _dteState() {
-  const now = new Date();
-  const day = now.getDay();
-  const h = now.getHours() + now.getMinutes() / 60;
-  if (day === 0 || day === 6) return 'complete';
-  if (h < DTE_SCHEDULE.GATEWAY_START) return 'pre-market';
-  if (h < DTE_SCHEDULE.MARKET_OPEN) return 'initializing';
-  if (h < DTE_SCHEDULE.ENTRY_START) return 'waiting';
-  if (h < DTE_SCHEDULE.FORCED_EXIT) return 'trading';
-  if (h < DTE_SCHEDULE.MARKET_CLOSE) return 'closing';
-  return 'complete';
+function _fmtAge(sec) {
+  if (sec === null || sec === undefined) return '—';
+  if (sec < 60) return `${sec.toFixed(0)}s`;
+  if (sec < 3600) return `${(sec / 60).toFixed(1)}m`;
+  return `${(sec / 3600).toFixed(1)}h`;
 }
 
-function _nextSessionTime() {
-  const now = new Date();
-  const target = new Date(now);
-  target.setHours(DTE_SCHEDULE.GATEWAY_START, 0, 0, 0);
-  if (now >= target || now.getDay() === 0 || now.getDay() === 6) {
-    target.setDate(target.getDate() + 1);
-    while (target.getDay() === 0 || target.getDay() === 6)
-      target.setDate(target.getDate() + 1);
-  }
-  return target;
+function _ageColor(sec) {
+  if (sec === null || sec === undefined) return 'var(--text-dim)';
+  if (sec < 30) return 'var(--green)';
+  if (sec < 90) return 'var(--yellow)';
+  return 'var(--red)';
 }
 
-function _formatCountdown(ms) {
-  if (ms <= 0) return '0s';
-  const s = Math.floor(ms / 1000);
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60), sec = s % 60;
-  if (d > 0) return `${d}d ${h}h ${m}m`;
-  if (h > 0) return `${h}h ${m}m ${sec}s`;
-  if (m > 0) return `${m}m ${sec}s`;
-  return `${sec}s`;
+function _fmtMoney(v, signed = true) {
+  if (v === null || v === undefined) return '—';
+  const n = Number(v);
+  const sign = signed && n >= 0 ? '+' : '';
+  return `${sign}$${n.toFixed(0)}`;
 }
 
-const STATE_LABELS = {
-  'pre-market': { text: 'Pre-Market', cls: 'stale', desc: 'Next session in' },
-  'initializing': { text: 'Initializing', cls: 'loading', desc: 'Gateway connecting, TWS starting' },
-  'waiting': { text: 'Waiting', cls: 'loading', desc: 'Market open — waiting for entry window' },
-  'trading': { text: 'Trading Live', cls: 'live', desc: 'Actively trading' },
-  'closing': { text: 'Closing', cls: 'stale', desc: 'Forced exit in progress' },
-  'complete': { text: 'Day Complete', cls: 'stale', desc: 'Next session in' },
-};
+function _decimal(v) {
+  // DynamoDB SDK returns Decimal — coerce to number
+  if (v === null || v === undefined) return v;
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') return parseFloat(v);
+  if (typeof v === 'object' && v !== null && 'N' in v) return parseFloat(v.N);
+  return Number(v);
+}
+
+function _statusBadge(status) {
+  if (!status) return { text: '—', cls: 'dim' };
+  if (status === 'Filled') return { text: 'FILL', cls: 'green' };
+  if (status === 'PreSubmitted' || status === 'Submitted') return { text: 'LIVE', cls: 'blue' };
+  if (status === 'Cancelled' || status === 'ApiCancelled') return { text: 'CXLD', cls: 'red' };
+  if (status === 'Inactive') return { text: 'INAC', cls: 'red' };
+  return { text: status.slice(0, 4).toUpperCase(), cls: 'yellow' };
+}
+
+// ── DOM construction ──────────────────────────────────────────────────────
 
 function mount(container) {
   container.innerHTML = '';
+  container.style.cssText = 'padding:24px;color:var(--text);font-family:var(--font-mono);overflow:auto;height:100%;box-sizing:border-box';
 
-  const banner = document.createElement('div');
-  banner.className = 'dte-banner';
-  banner.innerHTML = `
-    <div class="dte-banner-state"></div>
-    <div class="dte-banner-desc"></div>
-    <div class="dte-banner-countdown"></div>
-  `;
-  container.appendChild(banner);
-
+  // Header bar with trader selector
   const header = document.createElement('div');
-  header.className = 'dte-header';
-  header.innerHTML = `
-    <div class="pipeline-title-row">
-      <h2 class="pipeline-title" style="margin:0">0DTE Trading</h2>
-      <span class="dte-date"></span>
-      <span class="pipeline-status live">Gateway</span>
-    </div>
-    <div class="dte-market-bar">
-      <span class="dte-market-item">SPX <strong class="dte-spx">—</strong></span>
-      <span class="dte-market-item">VIX <strong class="dte-vix">—</strong></span>
-      <span class="dte-market-item dte-cycle-item">Cycle <strong class="dte-cycle">—</strong></span>
-    </div>
-  `;
+  header.style.cssText = 'display:flex;align-items:center;gap:24px;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid var(--border)';
   container.appendChild(header);
 
-  const grid = document.createElement('div');
-  grid.className = 'dte-stats-grid';
-  ['account', 'pnl', 'activity', 'positions'].forEach(id => {
-    const label = { account: 'Portfolio', pnl: 'Daily P&L', activity: 'Activity', positions: 'Positions' }[id];
+  const traderSelectWrap = document.createElement('div');
+  traderSelectWrap.style.cssText = 'display:flex;align-items:center;gap:8px';
+  const traderLabel = document.createElement('span');
+  traderLabel.textContent = 'TRADER:';
+  traderLabel.style.cssText = 'color:var(--text-dim);font-size:12px;letter-spacing:1px';
+  const traderSelect = document.createElement('select');
+  traderSelect.style.cssText = 'background:var(--bg-elev);color:var(--text);border:1px solid var(--border);padding:6px 12px;font-family:var(--font-mono);font-size:14px;border-radius:4px';
+  traderSelectWrap.appendChild(traderLabel);
+  traderSelectWrap.appendChild(traderSelect);
+  header.appendChild(traderSelectWrap);
+
+  const meta = document.createElement('div');
+  meta.style.cssText = 'flex:1;display:flex;gap:24px;align-items:center;color:var(--text-dim);font-size:12px';
+  header.appendChild(meta);
+
+  const ageEl = document.createElement('span');
+  ageEl.style.cssText = 'font-weight:bold;font-size:14px';
+  meta.appendChild(ageEl);
+
+  const botEl = document.createElement('span');
+  meta.appendChild(botEl);
+
+  const hostEl = document.createElement('span');
+  meta.appendChild(hostEl);
+
+  // Banners (error / divergence / VIX)
+  const banner = document.createElement('div');
+  banner.style.cssText = 'margin-bottom:16px;display:none;padding:12px 16px;border-radius:6px;font-weight:bold';
+  container.appendChild(banner);
+
+  // Top-level stats grid
+  const statsGrid = document.createElement('div');
+  statsGrid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px';
+  container.appendChild(statsGrid);
+
+  function makeStat(label) {
     const card = document.createElement('div');
-    card.className = 'dte-stat-card';
-    card.dataset.card = id;
-    card.innerHTML = `<div class="dte-card-label">${label}</div><div class="dte-card-value">—</div><div class="dte-card-sub">—</div>`;
-    grid.appendChild(card);
-  });
-  container.appendChild(grid);
+    card.style.cssText = 'background:var(--bg-elev);padding:12px 16px;border-radius:6px;border:1px solid var(--border)';
+    const lbl = document.createElement('div');
+    lbl.textContent = label;
+    lbl.style.cssText = 'color:var(--text-dim);font-size:11px;letter-spacing:1px;margin-bottom:4px';
+    const val = document.createElement('div');
+    val.style.cssText = 'font-size:22px;font-weight:bold';
+    card.appendChild(lbl);
+    card.appendChild(val);
+    statsGrid.appendChild(card);
+    return val;
+  }
 
-  const flow = document.createElement('div');
-  flow.className = 'dte-flow';
-  flow.innerHTML = `
-    <div class="dte-flow-stage"><div class="dte-flow-num dte-signals-num">0</div><div class="dte-flow-label">Signals</div></div>
-    <div class="dte-flow-arrow">→</div>
-    <div class="dte-flow-stage"><div class="dte-flow-num dte-orders-num">0</div><div class="dte-flow-label">Orders</div></div>
-    <div class="dte-flow-arrow">→</div>
-    <div class="dte-flow-stage"><div class="dte-flow-num dte-fills-num" style="color:var(--green)">0</div><div class="dte-flow-label">Filled</div></div>
-    <div class="dte-flow-arrow">→</div>
-    <div class="dte-flow-stage"><div class="dte-flow-num dte-cancelled-num" style="color:var(--fg-dim)">0</div><div class="dte-flow-label">Cancelled</div></div>
-    <div style="margin-left:auto;text-align:right">
-      <div class="dte-fill-rate">—%</div>
-      <div class="dte-flow-label">Fill Rate</div>
-    </div>
-  `;
-  container.appendChild(flow);
+  const dayPnlVal = makeStat('DAY P&L');
+  const realizedVal = makeStat('REALIZED');
+  const filledVal = makeStat('FILLS TODAY');
+  const tpVal = makeStat('TP HITS');
+  const slVal = makeStat('SL HITS');
+  const circuitVal = makeStat('CIRCUIT');
 
-  const tableWrap = document.createElement('div');
-  tableWrap.className = 'dte-table-wrap';
-  tableWrap.innerHTML = `
-    <div class="dte-table-header">Today's Trades</div>
-    <table class="dte-table"><thead><tr><th>IC</th><th>Put Spread</th><th>Call Spread</th><th>Size</th><th>Credit</th><th>Time</th></tr></thead>
-    <tbody class="dte-trades-body"></tbody></table>
-    <div class="dte-empty-msg" style="display:none">No trades today</div>
-  `;
-  container.appendChild(tableWrap);
+  // Last scan section
+  const scanSection = document.createElement('div');
+  scanSection.style.cssText = 'background:var(--bg-elev);padding:12px 16px;border-radius:6px;border:1px solid var(--border);margin-bottom:16px';
+  const scanTitle = document.createElement('div');
+  scanTitle.style.cssText = 'color:var(--text-dim);font-size:11px;letter-spacing:1px;margin-bottom:8px';
+  scanSection.appendChild(scanTitle);
+  const scanList = document.createElement('div');
+  scanList.style.cssText = 'font-size:13px;line-height:1.6';
+  scanSection.appendChild(scanList);
+  container.appendChild(scanSection);
 
-  const posWrap = document.createElement('div');
-  posWrap.className = 'dte-table-wrap';
-  posWrap.innerHTML = `
-    <div class="dte-table-header">Open Positions</div>
-    <table class="dte-table"><thead><tr><th>Symbol</th><th>Pos</th><th>Avg Cost</th><th>Mkt Value</th><th>P&L</th></tr></thead>
-    <tbody class="dte-positions-body"></tbody></table>
-    <div class="dte-positions-empty" style="display:none">No open positions</div>
-  `;
-  container.appendChild(posWrap);
+  // Positions section
+  const posTitle = document.createElement('div');
+  posTitle.textContent = 'OPEN POSITIONS';
+  posTitle.style.cssText = 'color:var(--text-dim);font-size:11px;letter-spacing:1px;margin-bottom:8px;margin-top:8px';
+  container.appendChild(posTitle);
 
-  const countdownTimer = setInterval(() => {
-    const state = _dteState();
-    const info = STATE_LABELS[state];
-    banner.querySelector('.dte-banner-state').textContent = info.text;
-    banner.querySelector('.dte-banner-state').className = 'dte-banner-state dte-state-' + info.cls;
+  const posTableWrap = document.createElement('div');
+  posTableWrap.style.cssText = 'background:var(--bg-elev);border-radius:6px;border:1px solid var(--border);overflow:hidden';
+  container.appendChild(posTableWrap);
 
-    if (state === 'pre-market' || state === 'complete') {
-      banner.querySelector('.dte-banner-countdown').textContent = _formatCountdown(_nextSessionTime() - new Date());
-      banner.querySelector('.dte-banner-desc').textContent = info.desc;
-      banner.style.display = '';
-    } else if (state === 'initializing' || state === 'waiting') {
-      banner.querySelector('.dte-banner-countdown').textContent = '';
-      banner.querySelector('.dte-banner-desc').textContent = info.desc;
-      banner.style.display = '';
-    } else if (state === 'closing') {
-      const close = new Date(); close.setHours(15, 0, 0, 0);
-      banner.querySelector('.dte-banner-countdown').textContent = _formatCountdown(close - new Date());
-      banner.querySelector('.dte-banner-desc').textContent = info.desc;
-      banner.style.display = '';
-    } else {
-      banner.style.display = 'none';
-    }
-  }, 1000);
+  // Footer with publish info
+  const footer = document.createElement('div');
+  footer.style.cssText = 'margin-top:24px;color:var(--text-dim);font-size:11px;text-align:center';
+  container.appendChild(footer);
 
-  return {
-    _countdownTimer: countdownTimer, banner,
-    dateEl: header.querySelector('.dte-date'),
-    statusEl: header.querySelector('.pipeline-status'),
-    spxEl: header.querySelector('.dte-spx'),
-    vixEl: header.querySelector('.dte-vix'),
-    cycleEl: header.querySelector('.dte-cycle'),
-    cardAccount: grid.querySelector('[data-card="account"]'),
-    cardPnl: grid.querySelector('[data-card="pnl"]'),
-    cardActivity: grid.querySelector('[data-card="activity"]'),
-    cardPositions: grid.querySelector('[data-card="positions"]'),
-    signalsNum: flow.querySelector('.dte-signals-num'),
-    ordersNum: flow.querySelector('.dte-orders-num'),
-    fillsNum: flow.querySelector('.dte-fills-num'),
-    cancelledNum: flow.querySelector('.dte-cancelled-num'),
-    fillRate: flow.querySelector('.dte-fill-rate'),
-    tradesBody: tableWrap.querySelector('.dte-trades-body'),
-    tradesEmpty: tableWrap.querySelector('.dte-empty-msg'),
-    posBody: posWrap.querySelector('.dte-positions-body'),
-    posEmpty: posWrap.querySelector('.dte-positions-empty'),
+  const refs = {
+    container, header, traderSelect, ageEl, botEl, hostEl, banner,
+    dayPnlVal, realizedVal, filledVal, tpVal, slVal, circuitVal,
+    scanTitle, scanList, posTableWrap, footer,
+    selectedTrader: localStorage.getItem(_LS_KEY) || 'bart',
+    knownTraders: [],
+    lastSnapshotTs: 0,
   };
+
+  // Initial trader list load + selection
+  refreshTraderList(refs).then(() => {
+    if (refs.knownTraders.length > 0 && !refs.knownTraders.includes(refs.selectedTrader)) {
+      refs.selectedTrader = refs.knownTraders[0];
+      localStorage.setItem(_LS_KEY, refs.selectedTrader);
+    }
+    renderTraderOptions(refs);
+  });
+
+  traderSelect.addEventListener('change', () => {
+    refs.selectedTrader = traderSelect.value;
+    localStorage.setItem(_LS_KEY, refs.selectedTrader);
+    // Force a fresh fetch on switch (don't wait for next poll tick)
+    pollFn(refs).then(d => update(refs, d));
+  });
+
+  return refs;
 }
 
-function update(refs, d) {
-  if (d.error || d._skip) return;
-
-  const state = _dteState();
-  refs.dateEl.textContent = d.date || '';
-  if (state === 'complete' || state === 'pre-market') {
-    refs.statusEl.textContent = 'Market Closed';
-    refs.statusEl.className = 'pipeline-status stale';
-  } else {
-    const gwOk = d.gateway_status === 'ok';
-    refs.statusEl.textContent = gwOk ? 'Gateway Live' : (d.gateway_status || 'Offline');
-    refs.statusEl.className = 'pipeline-status ' + (gwOk ? 'live' : 'error');
+async function refreshTraderList(refs) {
+  try {
+    const resp = await window.cc.list0dteTraders();
+    if (resp && Array.isArray(resp.traders)) {
+      refs.knownTraders = resp.traders;
+    }
+  } catch (e) {
+    // keep stale list
   }
-  refs.spxEl.textContent = d.spx ? `$${Number(d.spx).toLocaleString(undefined, {minimumFractionDigits:2})}` : '—';
-  refs.vixEl.textContent = d.vix ? d.vix.toFixed(1) : (d.vix1d ? d.vix1d.toFixed(1) : '—');
-  refs.cycleEl.textContent = d.data_age_ms ? `${(d.data_age_ms/1000).toFixed(1)}s` : '—';
+}
 
-  const $v = (card, val, sub) => {
-    card.querySelector('.dte-card-value').textContent = val;
-    card.querySelector('.dte-card-sub').textContent = sub;
-  };
+function renderTraderOptions(refs) {
+  refs.traderSelect.innerHTML = '';
+  for (const t of refs.knownTraders) {
+    const opt = document.createElement('option');
+    opt.value = t;
+    opt.textContent = t;
+    if (t === refs.selectedTrader) opt.selected = true;
+    refs.traderSelect.appendChild(opt);
+  }
+  if (refs.knownTraders.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = refs.selectedTrader;
+    opt.textContent = `${refs.selectedTrader} (no traders found)`;
+    refs.traderSelect.appendChild(opt);
+  }
+}
 
-  $v(refs.cardAccount,
-    d.portfolio_value ? `$${Number(d.portfolio_value).toLocaleString(undefined, {maximumFractionDigits:0})}` : '—',
-    d.buying_power ? `BP: $${Number(d.buying_power).toLocaleString(undefined, {maximumFractionDigits:0})}` : '');
+// ── Update from a snapshot response ───────────────────────────────────────
 
-  const pnl = (d.realized_pnl || 0) + (d.unrealized_pnl || 0);
-  const pnlPct = d.portfolio_value > 0 ? (pnl / d.portfolio_value * 100) : 0;
-  refs.cardPnl.querySelector('.dte-card-value').textContent = `$${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}`;
-  refs.cardPnl.querySelector('.dte-card-value').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
-  refs.cardPnl.querySelector('.dte-card-sub').textContent =
-    `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | R: $${(d.realized_pnl||0).toFixed(0)} U: $${(d.unrealized_pnl||0).toFixed(0)}`;
+function update(refs, resp) {
+  if (!resp) return;
+  if (resp._skip) return;
 
-  $v(refs.cardActivity, `${d.orders_filled || 0} filled`,
-    `${d.signals_received || 0} signals | ${d.orders_placed || 0} attempted`);
-  $v(refs.cardPositions, `${d.open_ics || 0} ICs`,
-    `${d.open_legs || 0} legs | Credit: $${(d.total_credit||0).toFixed(0)}`);
-
-  refs.signalsNum.textContent = _fmt(d.signals_received);
-  refs.ordersNum.textContent = _fmt(d.orders_placed);
-  refs.fillsNum.textContent = _fmt(d.orders_filled);
-  refs.cancelledNum.textContent = _fmt(d.orders_cancelled);
-  refs.fillRate.textContent = `${d.fill_rate || 0}%`;
-
-  const entries = d.entries || [];
-  if (entries.length === 0) {
-    refs.tradesBody.innerHTML = '';
-    refs.tradesEmpty.style.display = '';
-  } else {
-    refs.tradesEmpty.style.display = 'none';
-    refs.tradesBody.innerHTML = entries.map(e => `<tr>
-      <td>${e.label}</td><td>${e.put_spread}</td><td>${e.call_spread}</td>
-      <td>${e.size}</td><td>$${e.credit}</td><td>${(e.time || '').slice(11, 19)}</td>
-    </tr>`).join('');
+  // Refresh trader list every ~30 ticks (~2.5 min) so new operators show up
+  refs._refreshCounter = (refs._refreshCounter || 0) + 1;
+  if (refs._refreshCounter >= 30) {
+    refs._refreshCounter = 0;
+    refreshTraderList(refs).then(() => renderTraderOptions(refs));
   }
 
-  const positions = d.positions || [];
-  if (positions.length === 0) {
-    refs.posBody.innerHTML = '';
-    refs.posEmpty.style.display = '';
-  } else {
-    refs.posEmpty.style.display = 'none';
-    refs.posBody.innerHTML = positions.map(p => {
-      const pv = p.unrealizedPnL || 0;
-      return `<tr>
-        <td>${(p.symbol || '').trim()}</td>
-        <td>${p.position > 0 ? '+' : ''}${p.position}</td>
-        <td>$${(p.avgCost || 0).toFixed(2)}</td>
-        <td>$${(p.marketValue || 0).toFixed(2)}</td>
-        <td class="${pv >= 0 ? 'dte-pnl-pos' : 'dte-pnl-neg'}">$${pv >= 0 ? '+' : ''}${pv.toFixed(2)}</td>
-      </tr>`;
-    }).join('');
+  if (resp.error) {
+    refs.banner.textContent = `⚠ ${resp.error}`;
+    refs.banner.style.background = 'var(--red-bg, rgba(255,0,0,0.15))';
+    refs.banner.style.color = 'var(--red, #f55)';
+    refs.banner.style.display = '';
+    refs.ageEl.textContent = '— ERROR —';
+    refs.ageEl.style.color = 'var(--red)';
+    return;
   }
+
+  const snap = resp.snapshot;
+  const ageSec = resp.age_sec;
+  refs.ageEl.textContent = `${_fmtAge(ageSec)} ago`;
+  refs.ageEl.style.color = _ageColor(ageSec);
+
+  if (!snap) {
+    refs.banner.textContent = `No snapshots found for trader_id="${resp.trader_id}". Either the bot is not running or DASHBOARD_ENABLED is false in their .env.trader.`;
+    refs.banner.style.background = 'var(--bg-elev)';
+    refs.banner.style.color = 'var(--text-dim)';
+    refs.banner.style.display = '';
+    refs.botEl.textContent = '';
+    refs.hostEl.textContent = '';
+    refs.dayPnlVal.textContent = '—';
+    refs.realizedVal.textContent = '—';
+    refs.filledVal.textContent = '—';
+    refs.tpVal.textContent = '—';
+    refs.slVal.textContent = '—';
+    refs.circuitVal.textContent = '—';
+    refs.scanList.innerHTML = '';
+    refs.posTableWrap.innerHTML = '';
+    return;
+  }
+
+  refs.banner.style.display = 'none';
+  refs.botEl.textContent = `bot=${snap.bot_version || '?'}`;
+  refs.hostEl.textContent = `host=${snap.host || '?'}`;
+
+  const circuit = snap.circuit || {};
+  const todayStats = snap.today_stats || {};
+  const lastScan = snap.last_scan || null;
+  const positionsByAcct = snap.positions_by_account || {};
+
+  // Stats grid
+  const dayPnl = _decimal(circuit.daily_pnl) || 0;
+  refs.dayPnlVal.textContent = _fmtMoney(dayPnl);
+  refs.dayPnlVal.style.color = dayPnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+  const realized = _decimal(todayStats.realized_pnl) || 0;
+  refs.realizedVal.textContent = _fmtMoney(realized);
+  refs.realizedVal.style.color = realized >= 0 ? 'var(--green)' : 'var(--red)';
+
+  const attempted = _decimal(todayStats.entries_attempted) || 0;
+  const filled = _decimal(todayStats.entries_filled) || 0;
+  refs.filledVal.textContent = `${filled}/${attempted}`;
+  refs.filledVal.style.color = 'var(--text)';
+
+  refs.tpVal.textContent = `${_decimal(todayStats.tp_hits) || 0}`;
+  refs.tpVal.style.color = 'var(--green)';
+  refs.slVal.textContent = `${_decimal(todayStats.sl_hits) || 0}`;
+  refs.slVal.style.color = 'var(--red)';
+
+  if (circuit.entries_blocked) {
+    refs.circuitVal.textContent = 'BLOCKED';
+    refs.circuitVal.style.color = 'var(--red)';
+  } else if (circuit.divergence_halt) {
+    refs.circuitVal.textContent = 'DIVERGENT';
+    refs.circuitVal.style.color = 'var(--red)';
+  } else if (circuit.vix_breached) {
+    refs.circuitVal.textContent = 'VIX HALT';
+    refs.circuitVal.style.color = 'var(--red)';
+  } else {
+    refs.circuitVal.textContent = 'OK';
+    refs.circuitVal.style.color = 'var(--green)';
+  }
+
+  // Banner for halt states
+  if (circuit.divergence_halt || circuit.vix_breached) {
+    const flags = [];
+    if (circuit.divergence_halt) flags.push('DIVERGENCE HALT — entries blocked until operator clears ~/.0dte/control/clear_divergence');
+    if (circuit.vix_breached) flags.push('VIX CIRCUIT BREAKER — VIX ≥ 26 today');
+    refs.banner.textContent = '⚠ ' + flags.join(' · ');
+    refs.banner.style.background = 'rgba(255, 100, 100, 0.15)';
+    refs.banner.style.color = 'var(--red, #f55)';
+    refs.banner.style.display = '';
+  }
+
+  // Last scan section
+  if (lastScan && lastScan.decision_dt) {
+    const decTs = String(lastScan.decision_dt).slice(-8);
+    refs.scanTitle.textContent = `LAST SCAN @ ${decTs} • scored=${_decimal(lastScan.scored_count) || 0} candidates=${_decimal(lastScan.candidates_count) || 0}`;
+    refs.scanList.innerHTML = '';
+    const picks = Array.isArray(lastScan.top_picks) ? lastScan.top_picks : [];
+    for (const pick of picks.slice(0, 5)) {
+      const row = document.createElement('div');
+      const cal = (_decimal(pick.best_tp_cal_prob) || 0) * 100;
+      const ev = _decimal(pick.best_ev) || 0;
+      row.innerHTML = `→ <span style="color:var(--blue)">${pick.strategy || '?'}</span> tp${_decimal(pick.best_tp) || 0} cal=${cal.toFixed(1)}% EV=$${ev.toFixed(2)}`;
+      refs.scanList.appendChild(row);
+    }
+    if (picks.length === 0) {
+      refs.scanList.innerHTML = '<span style="color:var(--text-dim)">no candidates passed cutoffs</span>';
+    }
+  } else {
+    refs.scanTitle.textContent = 'LAST SCAN — none yet';
+    refs.scanList.innerHTML = '';
+  }
+
+  // Positions table per account
+  refs.posTableWrap.innerHTML = '';
+  const acctNames = Object.keys(positionsByAcct);
+  if (acctNames.length === 0) {
+    refs.posTableWrap.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-dim)">no accounts</div>';
+  }
+  for (const acct of acctNames) {
+    const positions = positionsByAcct[acct] || [];
+    const open = positions.filter(p => !p.closed);
+    const closed = positions.filter(p => p.closed);
+    const closedPnl = closed.reduce((s, p) => s + (_decimal(p.close_pnl) || 0), 0);
+
+    const acctHeader = document.createElement('div');
+    acctHeader.style.cssText = 'padding:8px 16px;background:rgba(255,255,255,0.03);border-bottom:1px solid var(--border);display:flex;gap:24px;font-size:12px;color:var(--text-dim)';
+    acctHeader.innerHTML = `
+      <span style="color:var(--text);font-weight:bold">[${acct}]</span>
+      <span>open=${open.length}</span>
+      <span>closed=${closed.length}</span>
+      <span>realized=<span style="color:${closedPnl >= 0 ? 'var(--green)' : 'var(--red)'}">${_fmtMoney(closedPnl)}</span></span>
+    `;
+    refs.posTableWrap.appendChild(acctHeader);
+
+    if (open.length === 0) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'padding:16px;text-align:center;color:var(--text-dim);font-size:12px';
+      empty.textContent = 'no open positions';
+      refs.posTableWrap.appendChild(empty);
+      continue;
+    }
+
+    const table = document.createElement('table');
+    table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px';
+    const thead = document.createElement('thead');
+    thead.innerHTML = `
+      <tr style="color:var(--text-dim);text-align:left">
+        <th style="padding:8px 16px;font-weight:normal">STRATEGY</th>
+        <th style="padding:8px;font-weight:normal">QTY</th>
+        <th style="padding:8px;font-weight:normal">CREDIT</th>
+        <th style="padding:8px;font-weight:normal">STRIKES</th>
+        <th style="padding:8px;font-weight:normal">OCA</th>
+        <th style="padding:8px;font-weight:normal">TP</th>
+        <th style="padding:8px;font-weight:normal">SL</th>
+        <th style="padding:8px 16px;font-weight:normal">ENTRY</th>
+      </tr>
+    `;
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    for (const p of open) {
+      const tr = document.createElement('tr');
+      tr.style.cssText = 'border-top:1px solid var(--border)';
+      const strikes = p.strikes || {};
+      const lp = _decimal(strikes.lp);
+      const sp = _decimal(strikes.sp);
+      const sc = _decimal(strikes.sc);
+      const lc = _decimal(strikes.lc);
+      const credit = _decimal(p.credit) || 0;
+      const oca = String(p.oca_group || '').slice(-12);
+      const tp = _statusBadge(p.tp_status);
+      const sl = _statusBadge(p.sl_status);
+      const entryTime = String(p.entry_time || '').slice(-8);
+      tr.innerHTML = `
+        <td style="padding:8px 16px;color:var(--blue)">${p.strategy || '?'}</td>
+        <td style="padding:8px">${_decimal(p.quantity) || 0}</td>
+        <td style="padding:8px">$${credit.toFixed(2)}</td>
+        <td style="padding:8px;color:var(--text-dim);font-size:11px">${lp}/${sp}P · ${sc}/${lc}C</td>
+        <td style="padding:8px;color:var(--text-dim);font-size:11px">${oca}</td>
+        <td style="padding:8px;color:var(--${tp.cls})">${tp.text}</td>
+        <td style="padding:8px;color:var(--${sl.cls})">${sl.text}</td>
+        <td style="padding:8px 16px;color:var(--text-dim);font-size:11px">${entryTime}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    refs.posTableWrap.appendChild(table);
+  }
+
+  // Footer
+  const accountsStr = Array.isArray(snap.trader_accounts) ? snap.trader_accounts.join(', ') : '?';
+  refs.footer.textContent = `accounts=${accountsStr}  •  table=0dte-snapshots  •  trader_id=${resp.trader_id}  •  refreshes every 5s`;
 }
 
 function unmount(refs) {
-  if (refs && refs._countdownTimer) clearInterval(refs._countdownTimer);
+  // No timers to clean up; the parent app handles polling lifecycle.
 }
 
-let _finalFetched = false;
-function pollFn() {
-  const state = _dteState();
-  if (state === 'pre-market') { _finalFetched = false; return Promise.resolve({ _skip: true }); }
-  if (state === 'complete') {
-    if (!_finalFetched) { _finalFetched = true; return window.cc.get0dteStats(); }
-    return Promise.resolve({ _skip: true });
-  }
-  _finalFetched = false;
-  return window.cc.get0dteStats();
+function pollFn(refs) {
+  // refs may be undefined if called before mount has completed (unlikely but safe)
+  const trader = (refs && refs.selectedTrader) || localStorage.getItem(_LS_KEY) || 'bart';
+  return window.cc.get0dteStats(trader);
 }
 
 // ── Self-register ──
 window.DASHBOARDS.push({
   id: '0dte-trading',
   name: '0DTE Trading',
-  description: 'SPX iron condor pipeline — live P&L, positions, signals',
+  description: 'SPX iron condor pipeline — multi-trader live snapshots',
   color: 'var(--blue)',
   mount, update, unmount, pollFn,
-  pollInterval: 10000,
+  pollInterval: 5000,
 });
 
 })();

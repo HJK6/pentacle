@@ -44,7 +44,10 @@ window.cc = {
 
   // Dashboards
   getPipelineStats: () => ipcRenderer.invoke('dashboard:pipeline-stats'),
-  get0dteStats: () => ipcRenderer.invoke('dashboard:0dte-stats'),
+  // 0DTE: takes a trader_id (e.g. "bart", "sai") so multiple operators
+  // can be viewed independently. Reads from DynamoDB directly.
+  get0dteStats: (traderId) => ipcRenderer.invoke('dashboard:0dte-stats', traderId),
+  list0dteTraders: () => ipcRenderer.invoke('dashboard:0dte-list-traders'),
 
   // Context menu
   showContextMenu: (sessionName, displayName) => {
