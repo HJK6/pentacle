@@ -1571,6 +1571,165 @@ body {
   padding: 12px;
 }
 
+/* Shared section header used by both views */
+.pipeline-section-header {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--fg-dim);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.pipeline-section-header.rejected {
+  color: var(--red);
+}
+
+/* ── Pipeline Tabs (scraping | skiptrace) ──────────── */
+
+.pipeline-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.pipeline-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 16px;
+  color: var(--fg-dim);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.pipeline-tab:hover {
+  color: var(--fg);
+}
+.pipeline-tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--blue);
+}
+
+.pipeline-tab-label {
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.pipeline-tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 700;
+}
+.pipeline-tab-icon.pending  { color: var(--fg-dim); }
+.pipeline-tab-icon.running  { color: var(--blue); }
+.pipeline-tab-icon.waiting  { color: var(--yellow); }
+.pipeline-tab-icon.success  { color: var(--green); }
+.pipeline-tab-icon.error    { color: var(--red); }
+.pipeline-tab-icon.blocked  { color: var(--yellow); }
+
+/* ── Pipeline View Container ──────────────────────── */
+
+.pipeline-view {
+  padding-top: 12px;
+}
+
+/* ── Stage icon (replaces stage-number for the new 2-tab layout) ── */
+
+.stage-icon {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 700;
+  text-align: center;
+}
+.stage-icon.pending { color: var(--fg-dim); }
+.stage-icon.running { color: var(--blue); }
+.stage-icon.waiting { color: var(--yellow); }
+.stage-icon.success { color: var(--green); }
+.stage-icon.error   { color: var(--red); }
+.stage-icon.blocked { color: var(--yellow); }
+
+/* Spin the running icon to convey motion — light touch, 2s per rotation */
+.stage-icon.spin,
+.pipeline-tab-icon.spin {
+  animation: stage-icon-spin 2s linear infinite;
+}
+@keyframes stage-icon-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Per-state borders for the stage box (overrides default gray) */
+.pipeline-flow .pipeline-stage.running {
+  border-color: var(--blue);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--blue) 30%, transparent);
+}
+.pipeline-flow .pipeline-stage.waiting {
+  border-color: var(--yellow);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--yellow) 25%, transparent);
+}
+.pipeline-flow .pipeline-stage.success {
+  border-color: var(--green);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--green) 25%, transparent);
+}
+.pipeline-flow .pipeline-stage.error {
+  border-color: var(--red);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--red) 35%, transparent);
+}
+.pipeline-flow .pipeline-stage.blocked {
+  border-color: var(--yellow);
+}
+.pipeline-flow .pipeline-stage.pending {
+  border-color: var(--border);
+}
+
+/* Wrap the skiptrace flow to 2 rows when the 8 boxes don't fit one line */
+.pipeline-view .pipeline-flow {
+  flex-wrap: wrap;
+  row-gap: 16px;
+}
+
+/* ── Skiptrace summary footer ─────────────────────── */
+
+.pipeline-skiptrace-summary {
+  margin-top: 16px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+}
+.pipeline-skiptrace-summary-line {
+  font-size: 12px;
+  color: var(--fg);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.pipeline-skiptrace-summary-line .sk-key {
+  color: var(--fg-dim);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 10px;
+  margin-right: 4px;
+}
+.pipeline-skiptrace-summary-line .sk-empty {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
 /* ══════════════════════════════════════════════════════════════ */
 /* ── 0DTE Trading Dashboard ──────────────────────────────────  */
 /* ══════════════════════════════════════════════════════════════ */
