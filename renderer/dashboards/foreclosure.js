@@ -332,7 +332,7 @@ function update(refs, data) {
   const rej = data.rejected || 0;
   s.rejectedHeader.textContent = `Rejected — ${_fmt(rej)}`;
   const reasons = Object.entries(data.rejection_reasons || {})
-    .sort((a,b) => b[1]-a[1]).slice(0,8)
+    .sort((a,b) => b[1]-a[1]).slice(0,14)
     .map(([key,value]) => ({ key, value }));
   reconcilePills(s.rejectedReasons, reasons, 'reason', (k,v) => `${k} (${v})`);
 
