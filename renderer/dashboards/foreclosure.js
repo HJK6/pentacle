@@ -101,14 +101,11 @@ function _fmt(n) {
 function mount(container) {
   // Root wrapper. `activeTab` tracks the currently-displayed tab;
   // `userPinned` flips to 'true' when the user clicks a tab so update()
-  // knows to stop auto-switching on poll. `selectedBatch` is the batch
-  // id the batch-selector dropdown is currently pointing at (empty =
-  // use whichever batch pipeline_stats.py picks by default = most recent).
+  // knows to stop auto-switching on poll.
   const root = document.createElement('div');
   root.className = 'foreclosure-dashboard';
   root.dataset.activeTab = 'scraping';
   root.dataset.userPinned = 'false';
-  root.dataset.selectedBatch = '';
 
   // ── Header ──
   const header = document.createElement('div');
@@ -121,22 +118,8 @@ function mount(container) {
   title.textContent = 'Foreclosure Pipeline';
   const batchLabel = document.createElement('span');
   batchLabel.className = 'pipeline-batch-label';
-  // Batch selector dropdown — populated from data.all_batches on first poll
-  // so users can jump between e.g. 2026-04-E (live) and 2026-04-D
-  // (debugging). Switching re-polls immediately with the new batch.
-  const batchSelect = document.createElement('select');
-  batchSelect.className = 'pipeline-batch-select';
-  batchSelect.title = 'Switch dashboard to a different batch';
-  batchSelect.addEventListener('change', () => {
-    root.dataset.selectedBatch = batchSelect.value || '';
-    // Force an immediate re-poll with the new batch.
-    if (typeof window.retryDashboardPoll === 'function') {
-      window.retryDashboardPoll();
-    }
-  });
   titleRow.appendChild(title);
   titleRow.appendChild(batchLabel);
-  titleRow.appendChild(batchSelect);
 
   const metaRow = document.createElement('div');
   metaRow.className = 'pipeline-meta';
@@ -300,7 +283,7 @@ function mount(container) {
   retryBtn.addEventListener('click', retryHandler);
 
   return {
-    root, batchLabel, batchSelect, statusBadge, lastUpdated, retryBtn,
+    root, batchLabel, statusBadge, lastUpdated, retryBtn,
     _retryHandler: retryHandler,
     tabEls, viewEls,
   };
@@ -321,48 +304,12 @@ function _refreshViewVisibility(viewEls, activeId) {
 // ───────────────────────── update ─────────────────────────
 
 function update(refs, data) {
-  const { root, batchLabel, batchSelect, tabEls, viewEls } = refs;
+  const { root, batchLabel, tabEls, viewEls } = refs;
 
   // Prefer state-machine batch (orchestrator's view), fall back to leads_dev
   const summary = data.pipeline_summary || {};
   const smBatch = summary.state_machine_batch || data.batch || '';
   batchLabel.textContent = smBatch ? `Batch ${smBatch}` : '';
-
-  // Populate / refresh the batch-selector dropdown from data.all_batches.
-  // Only initialize the selection once (to whichever batch the server
-  // picked by default on first poll). After that, the dropdown is USER
-  // STATE — never let an update() call change it, even when a stale
-  // in-flight poll from before a dropdown click returns with the old
-  // batch's data. Clobbering user picks mid-poll was the "toggles back
-  // to E" bug.
-  const allBatches = Array.isArray(data.all_batches) ? data.all_batches : [];
-  if (batchSelect) {
-    // Preserve the user's current pick across option re-renders.
-    const savedValue = batchSelect.value;
-    const existingKeys = Array.from(batchSelect.options).map(o => o.value);
-    const wantKeys = allBatches;
-    const same = existingKeys.length === wantKeys.length
-      && existingKeys.every((k, i) => k === wantKeys[i]);
-    if (!same) {
-      batchSelect.innerHTML = '';
-      allBatches.forEach(b => {
-        const opt = document.createElement('option');
-        opt.value = b;
-        opt.textContent = b;
-        batchSelect.appendChild(opt);
-      });
-      // Restore user selection if it's still a valid option; otherwise
-      // fall back to the server-picked batch for the initial render.
-      const restore = savedValue && allBatches.includes(savedValue)
-        ? savedValue
-        : (smBatch && allBatches.includes(smBatch) ? smBatch : '');
-      if (restore) batchSelect.value = restore;
-    } else if (!savedValue && smBatch && allBatches.includes(smBatch)) {
-      // First-load initialization: dropdown had no value yet, highlight
-      // whichever batch the server returned.
-      batchSelect.value = smBatch;
-    }
-  }
 
   const smStages = _stagesByName(data.pipeline_stages);
 
@@ -588,12 +535,7 @@ window.DASHBOARDS.push({
   description: 'Scraping + skiptrace flow with stage status',
   color: 'var(--green)',
   mount, update, unmount,
-  // pollFn receives the dashboard's `refs` so it can read the batch-selector
-  // choice off the root dataset. Empty string = server-default (most recent).
-  pollFn: (refs) => {
-    const batch = refs && refs.root ? (refs.root.dataset.selectedBatch || '') : '';
-    return window.cc.getPipelineStats(batch || undefined);
-  },
+  pollFn: () => window.cc.getPipelineStats(),
   pollInterval: 10000,        // 10s when a stage is active
   idlePollInterval: 60000,    // 60s when everything is complete
   idleFn: _isIdle,

@@ -1462,21 +1462,6 @@ body {
   font-weight: 600;
 }
 
-.pipeline-batch-select {
-  font-size: 12px;
-  font-weight: 600;
-  background: var(--bg2);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px 6px;
-  margin-left: 8px;
-  cursor: pointer;
-}
-.pipeline-batch-select:hover {
-  border-color: var(--blue);
-}
-
 /* ── Pipeline Flow (spec layout) ─────────────── */
 
 /* .pipeline-flow uses flex already via .pipeline-stages — this variant
