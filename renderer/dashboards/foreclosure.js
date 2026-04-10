@@ -99,11 +99,15 @@ function _fmt(n) {
 // ───────────────────────── mount ─────────────────────────
 
 function mount(container) {
-  // Root wrapper — we store the active tab on a dataset attribute so update()
-  // can find it on poll ticks.
+  // Root wrapper. `activeTab` tracks the currently-displayed tab;
+  // `userPinned` flips to 'true' when the user clicks a tab so update()
+  // knows to stop auto-switching on poll. Until the user picks, we auto-
+  // switch the active tab to follow whichever pipeline has an in-progress
+  // stage (so reopening the dashboard always lands on the live work).
   const root = document.createElement('div');
   root.className = 'foreclosure-dashboard';
   root.dataset.activeTab = 'scraping';
+  root.dataset.userPinned = 'false';
 
   // ── Header ──
   const header = document.createElement('div');
@@ -157,6 +161,7 @@ function mount(container) {
     btn.appendChild(txt);
     btn.addEventListener('click', () => {
       root.dataset.activeTab = p.id;
+      root.dataset.userPinned = 'true';  // stop auto-switching once user picks
       _refreshTabActive(tabEls, p.id);
       _refreshViewVisibility(viewEls, p.id);
     });
@@ -292,7 +297,11 @@ function update(refs, data) {
 
   const smStages = _stagesByName(data.pipeline_stages);
 
-  // ── Paint tab rollup icons ──
+  // ── Paint tab rollup icons + figure out which pipeline is "current" ──
+  // Current = first pipeline (in canonical order) that isn't complete. If
+  // every pipeline is complete, the last one wins (so a fully-done batch
+  // defaults to showing the skiptrace view, not scraping).
+  let currentPipelineId = null;
   PIPELINES.forEach(p => {
     const rows = p.stages.map(s => smStages[s.id]);
     const rollupState = _rollup(rows);
@@ -301,7 +310,24 @@ function update(refs, data) {
     tab.icon.textContent = meta.icon;
     tab.icon.className = `pipeline-tab-icon ${meta.cls}${rollupState === 'running' ? ' spin' : ''}`;
     tab.btn.title = `${p.label}: ${meta.label}`;
+    if (currentPipelineId == null && rollupState !== 'complete') {
+      currentPipelineId = p.id;
+    }
   });
+  if (currentPipelineId == null) {
+    currentPipelineId = PIPELINES[PIPELINES.length - 1].id;
+  }
+
+  // ── Auto-switch to the current pipeline unless the user has pinned one ──
+  // Once the user clicks a tab, `userPinned` stays 'true' for the rest of
+  // this mount's lifetime and we respect their choice on every poll. A fresh
+  // mount (e.g. reopening the dashboard) starts with userPinned='false' so
+  // it lands on whichever pipeline has in-progress work.
+  if (root.dataset.userPinned !== 'true' && root.dataset.activeTab !== currentPipelineId) {
+    root.dataset.activeTab = currentPipelineId;
+    _refreshTabActive(tabEls, currentPipelineId);
+    _refreshViewVisibility(viewEls, currentPipelineId);
+  }
 
   // ── Paint stage boxes for both pipelines (even hidden one — it's cheap
   // and means flipping the tab shows current state immediately) ──
