@@ -235,10 +235,27 @@ function mount(container) {
       statesBox.appendChild(statesHeader);
       statesBox.appendChild(qualifiedStates);
 
+      // Auction date bucket pills — shows the distribution of auction
+      // dates for the qualified leads. Backed by pipeline_stats.py's
+      // auction_date_buckets dict.
+      const auctionBox = document.createElement('div');
+      auctionBox.className = 'pipeline-states-section';
+      const auctionHeader = document.createElement('div');
+      auctionHeader.className = 'pipeline-section-header';
+      auctionHeader.textContent = 'Auction Dates';
+      const auctionPills = document.createElement('div');
+      auctionPills.className = 'pipeline-states-pills';
+      auctionBox.appendChild(auctionHeader);
+      auctionBox.appendChild(auctionPills);
+
       view.appendChild(rejectedBox);
       view.appendChild(statesBox);
+      view.appendChild(auctionBox);
 
-      viewEls[p.id] = { view, stageEls, rejectedHeader, rejectedReasons, qualifiedStates };
+      viewEls[p.id] = {
+        view, stageEls, rejectedHeader, rejectedReasons, qualifiedStates,
+        auctionHeader, auctionPills,
+      };
     } else {
       // Skiptrace: summary line with invoice/pay/prod details
       const summaryBox = document.createElement('div');
@@ -367,6 +384,32 @@ function update(refs, data) {
     .map(([key,value]) => ({ key, value }));
   reconcilePills(s.qualifiedStates, states, 'state', (k,v) => `${k}: ${v}`);
 
+  // Auction date buckets — canonical order (past → 6mo+ → unparseable)
+  // with zero-count buckets hidden so the row isn't noisy when the early
+  // pipeline hasn't populated data yet.
+  const auction = data.auction_date_buckets || {};
+  const totalAuction = Object.values(auction).reduce((a,b) => a + (Number(b)||0), 0);
+  s.auctionHeader.textContent = totalAuction > 0
+    ? `Auction Dates — ${_fmt(totalAuction)} in staging`
+    : 'Auction Dates';
+  const bucketLabels = {
+    'past':        'past',
+    'within_2w':   '< 2w',
+    '2_4w':        '2–4w',
+    '4_8w':        '4–8w',
+    '8w_6mo':      '8w–6mo',
+    '6mo+':        '6mo+',
+    'unparseable': 'unparsed',
+  };
+  const bucketOrder = ['past','within_2w','2_4w','4_8w','8w_6mo','6mo+','unparseable'];
+  const auctionPills = bucketOrder
+    .filter(k => (auction[k] || 0) > 0)
+    .map(k => ({ key: k, value: auction[k] }));
+  reconcilePills(
+    s.auctionPills, auctionPills, 'auction',
+    (k, v) => `${bucketLabels[k] || k}: ${v}`,
+  );
+
   // ── Skiptrace view: summary line ──
   const sk = viewEls.skiptrace;
   sk.summaryLine.innerHTML = _skiptraceSummary(smStages);
@@ -396,8 +439,13 @@ function _secondaryText(stageId, row, data) {
       return pending > 0 ? `${_fmt(pending)} pending` : `${_fmt(done)} done`;
     }
     case 'qualify': {
-      const qual = m.qualified != null ? m.qualified : (data.qualified || 0);
-      const rej  = m.rejected  != null ? m.rejected  : (data.rejected  || 0);
+      // Prefer the POST-filter count — what actually made it through all
+      // scraping + CSV-generation filters (i.e. the leads we paid to
+      // skip-trace). Fall back to the raw staging count if we're pre-CSV.
+      const qual = data.qualified_actual_count != null
+        ? data.qualified_actual_count
+        : (m.qualified != null ? m.qualified : (data.qualified || 0));
+      const rej  = m.rejected != null ? m.rejected : (data.rejected || 0);
       return `${_fmt(qual)} pass · ${_fmt(rej)} fail`;
     }
 
