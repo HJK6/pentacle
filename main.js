@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, Menu, nativeImage } = require('electron');
 const path = require('path');
 const pty = require('node-pty');
-const { spawn, execFile, execSync } = require('child_process');
+const { spawn, execFile, execFileSync, execSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const CONFIG = require('./pentacle.config.js');
@@ -204,6 +204,12 @@ function loadSlotState() {
 }
 
 // ── Auto-start Mic Server ─────────────────────────────────────
+//
+// Mic server runs out of /Applications/MicServer.app which has its own TCC
+// microphone permission (com.bartimaeus.mic-server). We MUST launch it via
+// `open -a` rather than spawning python directly — a bare python child has
+// no TCC identity and macOS silently returns zero audio. The .app's Swift
+// launcher inherits TCC, sets MIC_SERVER_START_MODE=on, and execs python.
 async function ensureMicServer() {
   if (!CONFIG.features.mic) return;
   const micUrl = CONFIG.micServerUrl || 'http://127.0.0.1:7780';
@@ -213,16 +219,14 @@ async function ensureMicServer() {
     return;
   } catch {}
 
-  console.log(`[${CONFIG.appName}] Starting mic server...`);
-  const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
-  const serverPath = path.join(process.env.HOME, 'mic-listener/mic_server.py');
-  const server = spawn(pythonPath, [serverPath], {
+  console.log(`[${CONFIG.appName}] Starting mic server via MicServer.app...`);
+  const launcher = spawn('/usr/bin/open', ['-a', '/Applications/MicServer.app'], {
     detached: true,
     stdio: 'ignore',
   });
-  server.unref();
+  launcher.unref();
 
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 500));
     try {
       await fetch(`${micUrl}/status`);
@@ -396,25 +400,34 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('pty:new-session', (_, agent) => {
-    // Create a new tmux session with a shell, then send the agent command.
-    // Starting a shell first means the session survives if the agent exits
-    // immediately (auth check, startup error, etc.) — fixing the "appears
-    // then disappears on first click" bug.
+    // Delegate to the shared `agent-tmux` CLI so Pentacle and Python callers
+    // (run_pipeline.py, orchestrator, stage agents) all go through the same
+    // tmux-spawn primitive. See agent-dashboard/modules/AgentTmux.py for the
+    // real implementation and agent-dashboard/bin/agent-tmux for the CLI.
+    //
+    // Behavior preserved: the CLI uses the same shell-first pattern, so the
+    // tmux session survives even if the agent command crashes on startup.
     const sessionName = `${agent}-${process.pid}-${Date.now()}`;
     try {
       const workDir = CONFIG.workingDirectory.replace(/^~/, process.env.HOME);
-      execSync(`${TMUX} new-session -d -s "${sessionName}" -c "${workDir}"`, { env: PTY_ENV });
       const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
-      let cmd;
+      let command;
       if (agentConfig.binary) {
         const bin = agentConfig.binary.replace(/^~/, process.env.HOME);
-        // Extract flags from command (everything after the first word)
         const flags = agentConfig.command.split(' ').slice(1).join(' ');
-        cmd = `cd ${workDir} && ${bin}${flags ? ' ' + flags : ''}`;
+        command = `${bin}${flags ? ' ' + flags : ''}`;
       } else {
-        cmd = `cd ${workDir} && PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" ${agentConfig.command}`;
+        command = agentConfig.command;
       }
-      execSync(`${TMUX} send-keys -t "${sessionName}" ${JSON.stringify(cmd)} Enter`, { env: PTY_ENV });
+      // Pass everything as explicit args to avoid shell quoting issues.
+      execFileSync(
+        '/Users/bartimaeus/agent-dashboard/bin/agent-tmux',
+        ['create-session',
+         '--name', sessionName,
+         '--workdir', workDir,
+         '--command', command],
+        { env: PTY_ENV, stdio: ['ignore', 'pipe', 'pipe'] }
+      );
     } catch (e) {
       console.error('Failed to create tmux session:', e.message);
       return null;
@@ -463,16 +476,16 @@ app.whenReady().then(async () => {
       return true; // already running
     } catch {}
 
-    const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
-    const serverPath = path.join(process.env.HOME, 'mic-listener/mic_server.py');
-    const server = spawn(pythonPath, [serverPath], {
+    // Launch via MicServer.app — bare python child has no TCC identity and
+    // produces silent zero audio. See ensureMicServer() comment above.
+    const launcher = spawn('/usr/bin/open', ['-a', '/Applications/MicServer.app'], {
       detached: true,
       stdio: 'ignore',
     });
-    server.unref();
+    launcher.unref();
 
-    // Wait up to 5 seconds for it to come up
-    for (let i = 0; i < 10; i++) {
+    // Wait up to 10 seconds for it to come up (Swift launcher + python load)
+    for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 500));
       try {
         await fetch(`${micUrl}/status`);
