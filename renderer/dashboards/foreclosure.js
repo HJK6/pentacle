@@ -520,6 +520,15 @@ function unmount(refs) {
     refs.retryBtn.removeEventListener('click', refs._retryHandler);
 }
 
+// Dashboard is "idle" when every stage in the canonical list is complete.
+// In that state there's nothing to refresh and we drop to the slow poll
+// interval until a new batch starts running a stage again.
+function _isIdle(data) {
+  const stages = data && data.pipeline_stages;
+  if (!stages || !stages.length) return false;
+  return stages.every(s => s.state === 'complete');
+}
+
 // ── Self-register ──
 window.DASHBOARDS.push({
   id: 'foreclosure-pipeline',
@@ -528,7 +537,9 @@ window.DASHBOARDS.push({
   color: 'var(--green)',
   mount, update, unmount,
   pollFn: () => window.cc.getPipelineStats(),
-  pollInterval: 10000,
+  pollInterval: 10000,        // 10s when a stage is active
+  idlePollInterval: 60000,    // 60s when everything is complete
+  idleFn: _isIdle,
 });
 
 })();
