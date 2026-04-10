@@ -603,16 +603,20 @@ app.whenReady().then(async () => {
   });
 
   // ── Dashboard Data ──────────────────────────────────────────
-  ipcMain.handle('dashboard:pipeline-stats', async () => {
+  ipcMain.handle('dashboard:pipeline-stats', async (_evt, batch) => {
     return new Promise((resolve) => {
       const env = {
         ...process.env,
         PYTHONPATH: '/Users/bartimaeus/land-bot',
         DATABASE_URL: 'postgresql://bartimaeus@localhost:5432/altum',
       };
-      const proc = spawn('/Users/bartimaeus/.venvs/global/bin/python', [
-        '/Users/bartimaeus/land-bot/scripts/pipeline_stats.py',
-      ], { env });
+      // Pass --batch through when the dashboard's selector specifies one,
+      // so users can toggle between e.g. batch D and batch E side-by-side.
+      const args = ['/Users/bartimaeus/land-bot/scripts/pipeline_stats.py'];
+      if (batch && typeof batch === 'string') {
+        args.push('--batch', batch);
+      }
+      const proc = spawn('/Users/bartimaeus/.venvs/global/bin/python', args, { env });
       let stdout = '';
       let stderr = '';
       const timer = setTimeout(() => { proc.kill('SIGKILL'); }, 15000);

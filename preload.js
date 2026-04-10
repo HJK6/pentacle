@@ -43,7 +43,9 @@ window.cc = {
   getConfig: () => ipcRenderer.invoke('get-config'),
 
   // Dashboards
-  getPipelineStats: () => ipcRenderer.invoke('dashboard:pipeline-stats'),
+  // getPipelineStats accepts an optional batch id. When omitted, the stats
+  // script picks the most recent batch from pipeline_batches.
+  getPipelineStats: (batch) => ipcRenderer.invoke('dashboard:pipeline-stats', batch),
   // 0DTE: takes a trader_id (e.g. "bart", "sai") so multiple operators
   // can be viewed independently. Reads from DynamoDB directly.
   get0dteStats: (traderId) => ipcRenderer.invoke('dashboard:0dte-stats', traderId),
