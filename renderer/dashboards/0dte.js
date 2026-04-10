@@ -116,7 +116,8 @@ function mount(container) {
     return val;
   }
 
-  const dayPnlVal = makeStat('DAY P&L');
+  const totalPnlVal = makeStat('TOTAL P&L');
+  const unrealizedVal = makeStat('UNREALIZED');
   const realizedVal = makeStat('REALIZED');
   const filledVal = makeStat('FILLS TODAY');
   const tpVal = makeStat('TP HITS');
@@ -151,7 +152,7 @@ function mount(container) {
 
   const refs = {
     container, header, traderSelect, ageEl, botEl, hostEl, banner,
-    dayPnlVal, realizedVal, filledVal, tpVal, slVal, circuitVal,
+    totalPnlVal, unrealizedVal, realizedVal, filledVal, tpVal, slVal, circuitVal,
     scanTitle, scanList, posTableWrap, footer,
     selectedTrader: localStorage.getItem(_LS_KEY) || 'bart',
     knownTraders: [],
@@ -261,11 +262,28 @@ function update(refs, resp) {
   const positionsByAcct = snap.positions_by_account || {};
 
   // Stats grid
-  const dayPnl = _decimal(circuit.daily_pnl) || 0;
-  refs.dayPnlVal.textContent = _fmtMoney(dayPnl);
-  refs.dayPnlVal.style.color = dayPnl >= 0 ? 'var(--green)' : 'var(--red)';
-
   const realized = _decimal(todayStats.realized_pnl) || 0;
+  const unrealizedRaw = todayStats.unrealized_pnl;
+  const unrealized = unrealizedRaw === null || unrealizedRaw === undefined ? null : _decimal(unrealizedRaw);
+  const totalPnlRaw = todayStats.total_pnl;
+  const totalPnl = totalPnlRaw === null || totalPnlRaw === undefined ? null : _decimal(totalPnlRaw);
+
+  if (totalPnl !== null) {
+    refs.totalPnlVal.textContent = _fmtMoney(totalPnl);
+    refs.totalPnlVal.style.color = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  } else {
+    refs.totalPnlVal.textContent = _fmtMoney(realized);
+    refs.totalPnlVal.style.color = realized >= 0 ? 'var(--green)' : 'var(--red)';
+  }
+
+  if (unrealized !== null) {
+    refs.unrealizedVal.textContent = _fmtMoney(unrealized);
+    refs.unrealizedVal.style.color = unrealized >= 0 ? 'var(--green)' : 'var(--red)';
+  } else {
+    refs.unrealizedVal.textContent = '—';
+    refs.unrealizedVal.style.color = 'var(--text-dim)';
+  }
+
   refs.realizedVal.textContent = _fmtMoney(realized);
   refs.realizedVal.style.color = realized >= 0 ? 'var(--green)' : 'var(--red)';
 
@@ -363,6 +381,7 @@ function update(refs, resp) {
         <th style="padding:8px 16px;font-weight:normal">STRATEGY</th>
         <th style="padding:8px;font-weight:normal">QTY</th>
         <th style="padding:8px;font-weight:normal">CREDIT</th>
+        <th style="padding:8px;font-weight:normal">UNREAL</th>
         <th style="padding:8px;font-weight:normal">STRIKES</th>
         <th style="padding:8px;font-weight:normal">OCA</th>
         <th style="padding:8px;font-weight:normal">TP</th>
@@ -385,10 +404,21 @@ function update(refs, resp) {
       const tp = _statusBadge(p.tp_status);
       const sl = _statusBadge(p.sl_status);
       const entryTime = String(p.entry_time || '').slice(-8);
+      const unrealRaw = p.unrealized_pnl;
+      let unrealCell;
+      if (unrealRaw === null || unrealRaw === undefined) {
+        unrealCell = `<td style="padding:8px;color:var(--text-dim)">—</td>`;
+      } else {
+        const unr = _decimal(unrealRaw);
+        const color = unr >= 0 ? 'var(--green)' : 'var(--red)';
+        const sign = unr >= 0 ? '+' : '';
+        unrealCell = `<td style="padding:8px;color:${color};font-weight:bold">${sign}$${unr.toFixed(0)}</td>`;
+      }
       tr.innerHTML = `
         <td style="padding:8px 16px;color:var(--blue)">${p.strategy || '?'}</td>
         <td style="padding:8px">${_decimal(p.quantity) || 0}</td>
         <td style="padding:8px">$${credit.toFixed(2)}</td>
+        ${unrealCell}
         <td style="padding:8px;color:var(--text-dim);font-size:11px">${lp}/${sp}P · ${sc}/${lc}C</td>
         <td style="padding:8px;color:var(--text-dim);font-size:11px">${oca}</td>
         <td style="padding:8px;color:var(--${tp.cls})">${tp.text}</td>
