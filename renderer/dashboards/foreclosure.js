@@ -28,6 +28,7 @@ const PIPELINES = [
       { id: 'cad',        label: 'CAD' },
       { id: 'propstream', label: 'PropStream' },
       { id: 'qualify',    label: 'Qualify' },
+      { id: 'staging',    label: 'Staging' },
     ],
   },
   {
@@ -438,14 +439,31 @@ function _secondaryText(stageId, row, data) {
       return pending > 0 ? `${_fmt(pending)} pending` : `${_fmt(done)} done`;
     }
     case 'qualify': {
-      // Prefer the POST-filter count — what actually made it through all
-      // scraping + CSV-generation filters (i.e. the leads we paid to
-      // skip-trace). Fall back to the raw staging count if we're pre-CSV.
-      const qual = data.qualified_actual_count != null
-        ? data.qualified_actual_count
-        : (m.qualified != null ? m.qualified : (data.qualified || 0));
+      // Pre-staging view of the qualify step: how many rows made it
+      // through the filters (pass), how many were rejected, and how
+      // many of the passing rows ALREADY exist in prod.properties
+      // (preexisting — they'll be dedup'd during the promote/staging
+      // step, so they're not net-new leads but also not failures).
+      // `qualified` here is the raw leads_dev.qualified=TRUE count,
+      // NOT the post-dedup staging count (that's the Staging stage).
+      const qual = data.qualified != null ? data.qualified : (m.qualified || 0);
       const rej  = m.rejected != null ? m.rejected : (data.rejected || 0);
+      const pre  = data.qualified_preexisting_prod || 0;
+      if (pre > 0) return `${_fmt(qual)} pass · ${_fmt(rej)} fail · ${_fmt(pre)} pre`;
       return `${_fmt(qual)} pass · ${_fmt(rej)} fail`;
+    }
+
+    case 'staging': {
+      // Final count of net-new leads that actually landed in Lightsail
+      // properties_staging. This is the "real" yield — everything from
+      // the qualify stage minus rows dedup'd against prod. Source:
+      // pipeline_stats.py -> stats.qualified_actual_count (= len of
+      // properties_staging rows for this batch).
+      const newCount = (m.staged_new != null ? m.staged_new : null);
+      const staged = newCount != null ? newCount : (data.qualified_actual_count || 0);
+      const pre = m.preexisting_prod != null ? m.preexisting_prod : (data.qualified_preexisting_prod || 0);
+      if (pre > 0) return `${_fmt(staged)} new · ${_fmt(pre)} pre`;
+      return `${_fmt(staged)} new`;
     }
 
     case 'skipmatrix_csv': {
