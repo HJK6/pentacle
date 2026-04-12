@@ -97,6 +97,15 @@ function _fmt(n) {
   return Number(n).toLocaleString();
 }
 
+function _elapsed(seconds) {
+  if (seconds == null) return '';
+  seconds = Math.max(0, Math.floor(seconds));
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s > 0 ? `${m}m${s}s` : `${m}m`;
+}
+
 // ───────────────────────── mount ─────────────────────────
 
 function mount(container) {
@@ -424,6 +433,17 @@ function _secondaryText(stageId, row, data) {
 
   switch (stageId) {
     case 'scrape': {
+      const q = data.scraper_queue || {};
+      if (q.total > 0) {
+        if (q.running_job) {
+          return `${q.running_job.state}/${q.running_job.scraper_name} (${_elapsed(q.running_job.elapsed_seconds)})`;
+        }
+        const parts = [`${_fmt(q.completed)}/${_fmt(q.total)} done`];
+        if (q.failed > 0) parts.push(`${_fmt(q.failed)} fail`);
+        if (q.pending > 0) parts.push(`${_fmt(q.pending)} pending`);
+        return parts.join(' · ');
+      }
+      // Fallback for pre-queue batches
       const tot = m.total_scraped != null ? m.total_scraped : (data.scraped || 0);
       const dup = m.total_duped || 0;
       return dup > 0 ? `${_fmt(tot)} · ${_fmt(dup)} dupe` : `${_fmt(tot)} scraped`;
