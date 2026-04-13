@@ -676,21 +676,31 @@ async function attachSession(slot, sessionName, displayName, hostId) {
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true;
 
-    // Cmd+C with selection → copy to clipboard (instead of sending ^C)
+    // Copy: Cmd+C on mac (intercept always — mac users don't rely on Ctrl
+    // here). On Win/Linux, Ctrl+Shift+C always copies; plain Ctrl+C copies
+    // only when there's a selection, otherwise falls through to SIGINT
+    // (standard Windows Terminal / VSCode behavior).
+    const isMac = navigator.platform.toLowerCase().includes('mac');
     if (e.metaKey && e.key === 'c') {
       const sel = term.getSelection();
-      if (sel) {
-        navigator.clipboard.writeText(sel);
-        return false;
+      if (sel) { navigator.clipboard.writeText(sel); return false; }
+    }
+    if (!isMac && e.ctrlKey && !e.metaKey && (e.key === 'c' || e.key === 'C')) {
+      const sel = term.getSelection();
+      if (e.shiftKey) {
+        if (sel) navigator.clipboard.writeText(sel);
+        return false;  // Ctrl+Shift+C always swallowed
       }
+      if (sel) { navigator.clipboard.writeText(sel); return false; }
+      // no selection + no shift → fall through so Ctrl+C becomes SIGINT
     }
 
-    // Cmd+V → paste from clipboard (Electron's editMenu paste no longer
-    // fires into xterm.js in Chromium 134+; handle explicitly).
-    // preventDefault is REQUIRED — without it Chromium still dispatches a
-    // native `paste` event on xterm's hidden textarea, which xterm.js handles
-    // by writing the clipboard a second time, causing a double paste.
-    if (e.metaKey && e.key === 'v') {
+    // Paste: Cmd+V on mac. Ctrl+V / Ctrl+Shift+V on Win/Linux. preventDefault
+    // is REQUIRED — without it Chromium dispatches a native `paste` into
+    // xterm's hidden textarea, causing a double paste.
+    const pasteCombo = (e.metaKey && e.key === 'v') ||
+                       (!isMac && e.ctrlKey && !e.metaKey && (e.key === 'v' || e.key === 'V'));
+    if (pasteCombo) {
       e.preventDefault();
       e.stopPropagation();
       navigator.clipboard.readText().then(text => {

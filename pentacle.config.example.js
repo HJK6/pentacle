@@ -3,20 +3,53 @@
 // All values have sensible defaults — override only what you need.
 
 module.exports = {
-  // ── Mode ──────────────────────────────────────────────────────
-  // `remote` → client mode. SSHs to the given host for attaching sessions and
-  //            tunnels its API server over SSH (apiPort, default 7778).
-  // No `remote` → host mode. Local node-pty, local API server on 7777.
+  // ── Mode (host vs client) ─────────────────────────────────────
+  // Pentacle runs in one of two modes:
   //
-  // `localWsl` (Windows only) → "local" means tmux inside WSL over sshd:2222.
-  //                             Omit on macOS/Linux.
+  // HOST — no `remote` block. Local node-pty, local API server on 7777,
+  //        mic server + usage refresh active (mac-mini today).
   //
-  // Tip: for a roaming laptop, set `remote.host` to a Tailscale IP or MagicDNS
-  // hostname so you hit the host over LAN when home and WireGuard when away.
+  // CLIENT — `remote` block present. SSHs to the given host for attaching
+  //          remote sessions, SSH-tunnels the host's API on `apiPort`
+  //          (default 7778) → localhost, so the sidebar/session list work
+  //          unchanged. Mic + usage poll are disabled on clients.
   //
-  // remote: { host: '100.x.x.x', user: 'bartimaeus', tmux: '/opt/homebrew/bin/tmux',
-  //           apiPort: 7778, port: 22 },
-  // localWsl: { distro: 'Ubuntu', sshPort: 2222, user: 'root', tmux: 'tmux' },
+  // Three config shapes:
+  //
+  //   (A) Mac-mini HOST — leave as-is, no remote/localWsl blocks.
+  //
+  //   (B) Macbook CLIENT — add `remote` pointing at the mac-mini. Use a
+  //       Tailscale IP/MagicDNS for roaming (falls back to LAN when home).
+  //       `local` uses the macbook's own tmux via node-pty.
+  //
+  //         remote: {
+  //           host: '100.x.x.x',       // or 'mac-mini.tail-xxxx.ts.net'
+  //           user: 'bartimaeus',
+  //           tmux: '/opt/homebrew/bin/tmux',
+  //           apiPort: 7778,
+  //           port: 22,
+  //         },
+  //
+  //   (C) Windows CLIENT — `remote` block + `localWsl` block. Local sessions
+  //       run inside WSL over sshd on port 2222. Pentacle auto-detects WSL's
+  //       eth0 IP (localhost forwarding is unreliable) and starts a static
+  //       sshd if one isn't already listening. WSL needs: a non-root user,
+  //       claude + codex + tmux + wslu installed for that user, and their
+  //       Windows-side SSH public key in ~/.ssh/authorized_keys.
+  //
+  //         remote: {
+  //           host: '192.168.4.195',
+  //           user: 'bartimaeus',
+  //           tmux: '/opt/homebrew/bin/tmux',
+  //           apiPort: 7778,
+  //         },
+  //         localWsl: {
+  //           distro: 'Ubuntu',
+  //           sshPort: 2222,
+  //           user: 'vamsh',             // non-root so --dangerously-skip-permissions works
+  //           tmux: 'tmux',
+  //           // host: '172.23.x.x',     // optional; auto-detected if omitted
+  //         },
 
   // ── App Identity ──────────────────────────────────────────────
   appName: 'Pentacle',             // Window title, titlebar text, process name

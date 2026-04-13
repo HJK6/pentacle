@@ -473,10 +473,16 @@ app.whenReady().then(async () => {
       await host.tmux(['new-session', '-d', '-s', sessionName, 'bash', '-l']);
       // Give bash a beat to become prompt-ready
       await new Promise(r => setTimeout(r, 200));
+      // Inside WSL, claude/codex call xdg-open for OAuth and WSL has no
+      // display. `wslview` (from the `wslu` apt package) correctly hands URLs
+      // to the Windows default browser. `explorer.exe <url>` would
+      // misinterpret URL-like strings as paths and open My Documents.
+      const isWsl = IS_WIN && host === hostLocal;
+      const envPrelude = isWsl ? 'export BROWSER=wslview; ' : '';
       const cdLine = workDir ? `cd ${JSON.stringify(workDir)} 2>/dev/null; clear; ` : '';
       // Plain name here — tmux's `=exact` prefix applies to session targets
       // (has-session, display-message) but not pane targets (send-keys).
-      await host.tmux(['send-keys', '-t', sessionName, `${cdLine}${command}`, 'Enter']);
+      await host.tmux(['send-keys', '-t', sessionName, `${envPrelude}${cdLine}${command}`, 'Enter']);
     }
 
     try {
