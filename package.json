@@ -5,13 +5,17 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "postinstall": "electron-rebuild",
+    "postinstall": "node -e \"if(process.platform==='darwin'){require('child_process').execSync('npx electron-rebuild',{stdio:'inherit'})}\"",
     "build": "electron-builder --mac"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-unicode11": "^0.9.0",
+    "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^5.5.0",
+    "ssh2": "^1.17.0"
+  },
+  "optionalDependencies": {
     "node-pty": "^1.0.0"
   },
   "devDependencies": {

@@ -54,6 +54,7 @@
       </div>
 
       <div class="usage-footer" id="usage-footer"></div>
+      <div class="usage-footer" id="codex-usage-footer" style="display:none"></div>
     </div>
 
     <!-- Terminal Grid -->
@@ -109,6 +110,26 @@
         </div>
         <div class="cell-terminal" id="term-3"></div>
 
+      </div>
+    </div>
+  </div>
+
+  <!-- New Session modal -->
+  <div class="modal-overlay" id="new-session-overlay" style="display:none">
+    <div class="modal">
+      <h3>New Session</h3>
+      <div id="new-session-location" style="display:none;margin-bottom:12px">
+        <div style="display:flex;gap:6px">
+          <button class="sb-btn new-loc-btn active" data-loc="local" style="flex:1;padding:6px;font-size:11px">This PC</button>
+          <button class="sb-btn new-loc-btn" data-loc="remote" style="flex:1;padding:6px;font-size:11px">Mac Mini</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px">
+        <button class="sb-btn sb-btn-green" id="new-session-claude" style="flex:1;padding:12px;font-size:14px">Claude</button>
+        <button class="sb-btn sb-btn-codex" id="new-session-codex" style="flex:1;padding:12px;font-size:14px">Codex</button>
+      </div>
+      <div style="margin-top:12px;text-align:center">
+        <button class="sb-btn" id="new-session-cancel" style="padding:6px 16px">Cancel</button>
       </div>
     </div>
   </div>

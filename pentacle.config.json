@@ -1,0 +1,19 @@
+{
+  "remote": {
+    "host": "192.168.4.195",
+    "user": "bartimaeus",
+    "tmux": "/opt/homebrew/bin/tmux"
+  },
+  "agents": {
+    "claude": {
+      "label": "Claude",
+      "command": "claude --dangerously-skip-permissions"
+    },
+    "codex": {
+      "label": "Codex",
+      "command": "codex --dangerously-bypass-approvals-and-sandbox",
+      "startupMessage": "Load the shared memory index at /Users/bartimaeus/.claude/projects/-/memory/MEMORY.md now. Use it as the default context source for project and personal instructions before handling my request.",
+      "startupDelayMs": 1500
+    }
+  }
+}
