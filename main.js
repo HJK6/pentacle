@@ -1,195 +1,248 @@
 const { app, BrowserWindow, ipcMain, Menu, nativeImage } = require('electron');
 const path = require('path');
-const pty = require('node-pty');
 const { spawn, execFile, execFileSync, execSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const CONFIG = require('./pentacle.config.js');
+const { LocalHost, Ssh2Host, buildHostRegistry } = require('./hosts.js');
 
 // ── DynamoDB client for the 0DTE dashboard ──────────────────────────────────
-// Reads AWS credentials from the standard chain: ~/.aws/credentials, env vars,
-// or instance profile. The dashboard is read-only (Query + Scan), no PutItem.
+// Reads AWS credentials from the standard chain (~/.aws/credentials, env, or
+// instance profile). Read-only (Query + Scan). Platform-agnostic — works from
+// host or client. Silently no-ops if AWS creds are absent.
 const _ddbRaw = new DynamoDBClient({ region: 'us-east-1' });
 const _ddb = DynamoDBDocumentClient.from(_ddbRaw);
 const _DASHBOARD_TABLE = '0dte-snapshots';
-// Cache the trader list for 60s to avoid scanning the table on every poll.
 let _tradersCache = { ts: 0, traders: [] };
 const _TRADERS_CACHE_TTL_MS = 60_000;
 
-// Set app identity so Ghost OS and macOS recognize us properly
 app.setName(CONFIG.appName);
 
 const MAX_SLOTS = 4;
+const IS_DARWIN = process.platform === 'darwin';
+const IS_WIN = process.platform === 'win32';
 
 // Force UTF-8 locale in the Electron process itself BEFORE any tmux interaction.
-// Electron launched from Dock/Finder has no LANG set (defaults to C locale).
-// If a tmux server starts under C locale, wcwidth('❯') returns -1 and the char
-// renders as __ for the lifetime of that server (can't be fixed without restart).
-// Setting this early ensures any tmux server we start inherits UTF-8.
+// When Pentacle starts a tmux server (host mode), the server inherits this locale,
+// so wcwidth() for U+276F (❯), U+23F5 (⏵), and other glyphs is computed correctly.
+// On clients, this only affects the local Electron process — the remote tmux server
+// is probed separately (see startup block).
 process.env.LANG = 'en_US.UTF-8';
 process.env.LC_ALL = 'en_US.UTF-8';
 
-const TMUX = '/opt/homebrew/bin/tmux';
-const API_URL = CONFIG.apiServer.url;
+// ── Host registry ──────────────────────────────────────────────
+// Built once at startup from CONFIG. `remote` block present → client mode.
+// `localWsl` block on Windows → WSL is the "local" host (Ssh2Host to :2222).
+const { hosts: HOSTS, isClient: IS_CLIENT } = buildHostRegistry(CONFIG);
+// Convenience shortcuts
+const hostLocal = HOSTS.local;
+const hostRemote = HOSTS.remote;
 
-const PTY_ENV = { ...process.env, TERM: 'xterm-256color' };
+// ── API server (host-local) URL + client-mode tunneled URL ─────
+// On the host: the Python API server runs locally on 7777.
+// On a client: we SSH-tunnel the remote's 7777 to localhost:<apiPort>
+// (default 7778), and the renderer hits the tunneled port for session
+// list / trash / kill / usage / bots APIs.
+const API_PORT = IS_CLIENT ? (CONFIG.remote?.apiPort || 7778) : 7777;
+const API_URL = IS_CLIENT ? `http://localhost:${API_PORT}` : (CONFIG.apiServer?.url || 'http://localhost:7777');
 
-let meetingWindow = null;
-
-// ── PTY Manager ────────────────────────────────────────────────
-
-class PtyManager {
+// ── PTY / SSH Session Manager ─────────────────────────────────
+// Each slot holds an entry: { host, sessionName, paneId, handle, gen }.
+// `gen` is incremented on every create to defeat stale async callbacks.
+// Pane-ID reverse-map keyed by entry identity (not just paneId) — the guard
+// `entry === sessionManager.slots[entry.slot]` catches stale callbacks fired
+// after a replacement attach has taken the slot.
+class SessionManager {
   constructor() {
-    this.ptys = new Array(MAX_SLOTS).fill(null);
+    this.slots = new Array(MAX_SLOTS).fill(null);
     this.webContents = null;
+    this._gen = 0;
   }
 
-  setWebContents(wc) {
-    this.webContents = wc;
-  }
+  setWebContents(wc) { this.webContents = wc; }
 
-  create(slot, sessionName, cols, rows) {
+  async create(slot, sessionName, hostId, cols, rows) {
     this.kill(slot);
-
-    // Verify session exists before spawning PTY
-    try {
-      execSync(`${TMUX} has-session -t "${sessionName}"`, { stdio: 'ignore' });
-    } catch {
-      console.warn(`[pty:create] session not found: ${sessionName}`);
+    const host = HOSTS[hostId] || hostLocal;
+    if (!host) {
+      console.warn(`[session:create] unknown hostId=${hostId}`);
       return null;
     }
 
-    // Resolve immutable pane ID BEFORE spawning PTY. Session names are mutable
-    // (the API server auto-renames them), but %pane_id (e.g. %5) is stable for
-    // the lifetime of the pane. All tmux commands (scroll, send-keys, copy-mode)
-    // should target pane ID, not session name.
-    let paneId;
+    // Verify session exists on target host (silent — `has-session` exits non-zero if missing)
     try {
-      paneId = execSync(`${TMUX} display-message -t "${sessionName}" -p "#{pane_id}"`, { encoding: 'utf8' }).trim();
+      if (host instanceof LocalHost) execSync(`${host.tmuxBin} has-session -t ${JSON.stringify(sessionName)}`, { stdio: 'ignore', env: host.env });
+      else await host.tmux(['has-session', '-t', sessionName]);
     } catch {
-      console.warn(`[pty:create] failed to resolve pane_id for: ${sessionName}`);
+      console.warn(`[session:create] session not found: ${hostId}:${sessionName}`);
       return null;
     }
 
-    const p = pty.spawn(TMUX, ['attach-session', '-t', sessionName], {
-      name: 'xterm-256color',
-      cols: cols || 80,
-      rows: rows || 24,
-      cwd: process.env.HOME,
-      env: PTY_ENV,
-    });
-
-    // Keep tmux mouse OFF so xterm.js handles click-drag selection natively.
-    // Scroll is handled separately via pty:scroll IPC → tmux copy-mode commands.
-    // Target by pane ID (immune to session renames).
-    try {
-      execSync(`${TMUX} set-option -t "${paneId}" mouse off`, { stdio: 'ignore' });
-    } catch (e) {
-      console.warn(`[pty:create] mouse off failed for ${paneId}:`, e.message);
+    const handle = await host.attach(sessionName, cols, rows);
+    if (!handle) {
+      console.warn(`[session:create] attach failed for ${hostId}:${sessionName}`);
+      return null;
     }
 
-    const entry = { pty: p, sessionName, paneId };
-    this.ptys[slot] = entry;
+    // Mouse off once per attach via pane ID target — never toggle on kill.
+    // (Toggle-on-kill was the root cause of recurring scroll failures.)
+    host.tmuxSilent(['set-option', '-t', handle.paneId, 'mouse', 'off']);
 
-    p.onData((data) => {
-      // Guard: only forward if this PTY is still the active one for this slot
-      if (this.ptys[slot] === entry && this.webContents && !this.webContents.isDestroyed()) {
+    const entry = { slot, host, sessionName, paneId: handle.paneId, handle, gen: ++this._gen };
+    this.slots[slot] = entry;
+
+    handle.onData((data) => {
+      // Identity guard — stale data events from a replaced attach must not
+      // clobber the new slot occupant's terminal.
+      if (this.slots[slot] !== entry) return;
+      if (this.webContents && !this.webContents.isDestroyed()) {
         this.webContents.send('pty:data', slot, data);
       }
     });
 
-    p.onExit(({ exitCode }) => {
-      // Only process exit if this PTY is still the active one for this slot.
-      // When kill() is called (e.g. during slot replacement), it sets
-      // this.ptys[slot] = null before the async onExit fires. Without this
-      // guard, the stale exit event would reach the renderer and detach the
-      // NEW session that replaced this one.
-      if (this.ptys[slot] !== entry) return;
-      this.ptys[slot] = null;
+    handle.onExit((exitCode) => {
+      if (this.slots[slot] !== entry) return;
+      this.slots[slot] = null;
       if (this.webContents && !this.webContents.isDestroyed()) {
         this.webContents.send('pty:exit', slot, exitCode);
       }
     });
-    return paneId;
+
+    return handle.paneId;
   }
 
-  write(slot, data) {
-    if (this.ptys[slot]) {
-      this.ptys[slot].pty.write(data);
-    }
-  }
-
-  resize(slot, cols, rows) {
-    if (this.ptys[slot]) {
-      try {
-        this.ptys[slot].pty.resize(cols, rows);
-      } catch (e) {
-        // ignore resize errors on dead ptys
-      }
-    }
-  }
+  write(slot, data) { this.slots[slot]?.handle.write(data); }
+  resize(slot, cols, rows) { this.slots[slot]?.handle.resize(cols, rows); }
 
   kill(slot) {
-    if (this.ptys[slot]) {
-      // Do NOT restore tmux mouse on kill. Mouse off is set once in create()
-      // and stays off for the session's lifetime. Toggling mouse on/off during
-      // kill/create cycles was the root cause of recurring scroll failures —
-      // session-scoped tmux state got stuck in the wrong mode when
-      // attach/detach/reconnect sequences interleaved.
-      try {
-        this.ptys[slot].pty.kill();
-      } catch (e) {
-        // already dead
-      }
-      this.ptys[slot] = null;
-    }
+    const e = this.slots[slot];
+    if (!e) return;
+    this.slots[slot] = null;  // null first so onExit's identity check skips
+    try { e.handle.kill(); } catch {}
   }
 
-  killAll() {
-    for (let i = 0; i < MAX_SLOTS; i++) this.kill(i);
+  killAll() { for (let i = 0; i < MAX_SLOTS; i++) this.kill(i); }
+}
+
+const sessionManager = new SessionManager();
+
+// ── SSH tunnel (client mode only) ───────────────────────────────
+// Forward localhost:<API_PORT> → remote:7777 so the renderer can hit the
+// mac-mini's API server through a stable local address.
+let sshTunnel = null;
+
+function startSshTunnel() {
+  if (!IS_CLIENT || !CONFIG.remote) return;
+  const { host, user, port } = CONFIG.remote;
+  const args = ['-o', 'StrictHostKeyChecking=no',
+    '-o', 'ServerAliveInterval=30',
+    '-o', 'ExitOnForwardFailure=yes',
+    '-N', '-L', `${API_PORT}:localhost:7777`];
+  if (port && port !== 22) { args.push('-p', String(port)); }
+  args.push(`${user}@${host}`);
+
+  if (IS_WIN) {
+    // Use Windows OpenSSH (ships with Windows 10+). Falls back to WSL ssh only
+    // if we can't locate it — but the Windows-side ssh avoids an extra hop.
+    sshTunnel = spawn('ssh', args, { stdio: 'ignore', windowsHide: true });
+  } else {
+    sshTunnel = spawn('ssh', args, { stdio: 'ignore' });
+  }
+
+  sshTunnel.on('exit', (code) => {
+    console.warn(`[tunnel] exited code=${code}, retrying in 5s`);
+    sshTunnel = null;
+    setTimeout(startSshTunnel, 5000);
+  });
+  sshTunnel.on('error', () => {});
+}
+
+function stopSshTunnel() {
+  if (sshTunnel) { try { sshTunnel.kill(); } catch {} sshTunnel = null; }
+}
+
+// ── WSL sshd bootstrap (Windows only) ───────────────────────────
+function ensureWslSshd() {
+  if (!IS_WIN) return;
+  const port = (CONFIG.localWsl && CONFIG.localWsl.sshPort) || 2222;
+  const distro = (CONFIG.localWsl && CONFIG.localWsl.distro) || 'Ubuntu';
+  try {
+    execFileSync('wsl', ['-d', distro, '--', 'bash', '-lc',
+      `pgrep -f "sshd.*${port}" >/dev/null || /usr/sbin/sshd -p ${port}`],
+      { stdio: 'ignore', timeout: 5000 });
+  } catch (e) {
+    console.warn('[wsl:sshd] failed to ensure sshd:', e.message);
   }
 }
 
-const ptyManager = new PtyManager();
-
-// ── Ensure API Server ──────────────────────────────────────────
-
+// ── Ensure API Server (host mode) ───────────────────────────────
 async function ensureApiServer() {
-  try {
-    await fetch(`${API_URL}/api/sessions`);
-    return;
-  } catch {
-    // Server not running — start it
-    const serverPath = path.join(process.env.HOME, CONFIG.apiServer.script);
-    const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
-    const server = spawn(pythonPath, [serverPath], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    server.unref();
-
-    // Wait up to 4 seconds
-    for (let i = 0; i < 8; i++) {
-      await new Promise((r) => setTimeout(r, 500));
-      try {
-        await fetch(`${API_URL}/api/sessions`);
-        return;
-      } catch {}
+  if (IS_CLIENT) {
+    // Wait for tunnel to become reachable
+    for (let i = 0; i < 20; i++) {
+      try { await fetch(`${API_URL}/api/sessions`); return; } catch {}
+      await new Promise(r => setTimeout(r, 500));
     }
-    console.error('Failed to start API server');
+    console.warn('[api] tunneled API server not reachable');
+    return;
   }
+
+  try { await fetch(`${API_URL}/api/sessions`); return; } catch {}
+  const serverPath = path.join(process.env.HOME, CONFIG.apiServer.script);
+  const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
+  const server = spawn(pythonPath, [serverPath], { detached: true, stdio: 'ignore' });
+  server.unref();
+  for (let i = 0; i < 8; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    try { await fetch(`${API_URL}/api/sessions`); return; } catch {}
+  }
+  console.error('Failed to start API server');
+}
+
+// ── Mic server (mac host only) ─────────────────────────────────
+async function ensureMicServer() {
+  if (IS_CLIENT || !IS_DARWIN || !CONFIG.features.mic) return;
+  const micUrl = CONFIG.micServerUrl || 'http://127.0.0.1:7780';
+  try { await fetch(`${micUrl}/status`); return; } catch {}
+  console.log(`[${CONFIG.appName}] Starting mic server via MicServer.app...`);
+  const launcher = spawn('/usr/bin/open', ['-a', '/Applications/MicServer.app'], { detached: true, stdio: 'ignore' });
+  launcher.unref();
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try { await fetch(`${micUrl}/status`); return; } catch {}
+  }
+  console.error(`[${CONFIG.appName}] Failed to start mic server`);
+}
+
+// ── Usage refresh (mac host only) ──────────────────────────────
+function refreshUsageData() {
+  if (IS_CLIENT || !IS_DARWIN || !CONFIG.features.usage) return;
+  const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
+  const scriptPath = path.join(process.env.HOME, 'telegram-claude-bot/abilities/check_usage.py');
+  const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` };
+  const proc = spawn(pythonPath, [scriptPath, '--save'], { detached: true, stdio: 'ignore', env });
+  proc.unref();
+}
+
+function refreshCodexUsageData() {
+  if (IS_CLIENT || !IS_DARWIN || !CONFIG.features.usage) return;
+  const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
+  const scriptPath = path.join(process.env.HOME, 'telegram-claude-bot/abilities/check_codex_usage.py');
+  const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` };
+  const proc = spawn(pythonPath, [scriptPath, '--save'], { detached: true, stdio: 'ignore', env });
+  proc.unref();
 }
 
 // ── Context Menu ───────────────────────────────────────────────
-
-function showContextMenu(win, sessionName, displayName) {
+function showContextMenu(win, sessionName, displayName, hostId) {
+  const hid = hostId || 'local';
   const template = [
-    { label: `Open in Slot 1`, click: () => win.webContents.send('assign-slot', 0, sessionName) },
-    { label: `Open in Slot 2`, click: () => win.webContents.send('assign-slot', 1, sessionName) },
-    { label: `Open in Slot 3`, click: () => win.webContents.send('assign-slot', 2, sessionName) },
-    { label: `Open in Slot 4`, click: () => win.webContents.send('assign-slot', 3, sessionName) },
+    { label: `Open in Slot 1`, click: () => win.webContents.send('assign-slot', 0, sessionName, hid) },
+    { label: `Open in Slot 2`, click: () => win.webContents.send('assign-slot', 1, sessionName, hid) },
+    { label: `Open in Slot 3`, click: () => win.webContents.send('assign-slot', 2, sessionName, hid) },
+    { label: `Open in Slot 4`, click: () => win.webContents.send('assign-slot', 3, sessionName, hid) },
     { type: 'separator' },
     { label: 'Rename...', click: () => win.webContents.send('action', 'rename', sessionName, displayName) },
     { label: 'Trash', click: () => win.webContents.send('action', 'trash', sessionName) },
@@ -198,147 +251,84 @@ function showContextMenu(win, sessionName, displayName) {
 }
 
 // ── App ────────────────────────────────────────────────────────
-
 let mainWindow;
+let meetingWindow = null;
 const SLOT_STATE_FILE = path.join(app.getPath('userData'), '.slot-state.json');
 
 function saveSlotState() {
   try {
-    const slots = ptyManager.ptys.map(p => p ? p.sessionName : null);
-    require('fs').writeFileSync(SLOT_STATE_FILE, JSON.stringify(slots));
+    const slots = sessionManager.slots.map(e => e ? { name: e.sessionName, hostId: e.host.id } : null);
+    fs.writeFileSync(SLOT_STATE_FILE, JSON.stringify(slots));
   } catch {}
 }
 
 function loadSlotState() {
   try {
-    return JSON.parse(require('fs').readFileSync(SLOT_STATE_FILE, 'utf8'));
-  } catch { return [null, null, null, null]; }
+    const data = JSON.parse(fs.readFileSync(SLOT_STATE_FILE, 'utf8'));
+    // Backcompat: bare string → { name, hostId: 'local' }
+    return (data || []).map(s => {
+      if (!s) return null;
+      if (typeof s === 'string') return { name: s, hostId: 'local' };
+      return s;
+    });
+  } catch { return new Array(MAX_SLOTS).fill(null); }
 }
 
-// ── Auto-start Mic Server ─────────────────────────────────────
-//
-// Mic server runs out of /Applications/MicServer.app which has its own TCC
-// microphone permission (com.bartimaeus.mic-server). We MUST launch it via
-// `open -a` rather than spawning python directly — a bare python child has
-// no TCC identity and macOS silently returns zero audio. The .app's Swift
-// launcher inherits TCC, sets MIC_SERVER_START_MODE=on, and execs python.
-async function ensureMicServer() {
-  if (!CONFIG.features.mic) return;
-  const micUrl = CONFIG.micServerUrl || 'http://127.0.0.1:7780';
+// Host-mode-only tmux-server UTF-8 ensure. On clients we probe remote and warn.
+function ensureLocalTmuxUtf8() {
+  if (!(hostLocal instanceof LocalHost)) return;
   try {
-    await fetch(`${micUrl}/status`);
-    console.log(`[${CONFIG.appName}] Mic server already running`);
-    return;
-  } catch {}
-
-  console.log(`[${CONFIG.appName}] Starting mic server via MicServer.app...`);
-  const launcher = spawn('/usr/bin/open', ['-a', '/Applications/MicServer.app'], {
-    detached: true,
-    stdio: 'ignore',
-  });
-  launcher.unref();
-
-  for (let i = 0; i < 20; i++) {
-    await new Promise(r => setTimeout(r, 500));
-    try {
-      await fetch(`${micUrl}/status`);
-      console.log(`[${CONFIG.appName}] Mic server started`);
-      return;
-    } catch {}
+    const serverPid = execSync(`${hostLocal.tmuxBin} display-message -p "#{pid}"`, { encoding: 'utf8', env: hostLocal.env }).trim();
+    const serverEnv = execSync(`/bin/ps eww -p ${serverPid} 2>/dev/null || true`, { encoding: 'utf8' });
+    const hasUtf8 = /LANG=.*[Uu][Tt][Ff]/.test(serverEnv);
+    if (!hasUtf8) {
+      console.log(`[${CONFIG.appName}] tmux server started without UTF-8 locale — restarting`);
+      try { execSync(`${hostLocal.tmuxBin} kill-server`, { stdio: 'ignore', timeout: 3000 }); } catch {}
+      execSync('sleep 0.3');
+      execSync(`${hostLocal.tmuxBin} new-session -d -s _app_keepalive`, { env: hostLocal.env, timeout: 3000 });
+    } else {
+      execSync(`${hostLocal.tmuxBin} set-environment -g LANG "en_US.UTF-8"`, { stdio: 'ignore', env: hostLocal.env });
+      execSync(`${hostLocal.tmuxBin} set-environment -g LC_ALL "en_US.UTF-8"`, { stdio: 'ignore', env: hostLocal.env });
+    }
+  } catch {
+    try { execSync(`${hostLocal.tmuxBin} new-session -d -s _app_keepalive`, { env: hostLocal.env, timeout: 3000 }); } catch {}
   }
-  console.error(`[${CONFIG.appName}] Failed to start mic server`);
 }
 
-// ── Auto-refresh Usage Data ───────────────────────────────────
-function refreshUsageData() {
-  if (!CONFIG.features.usage) return;
-  const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
-  const scriptPath = path.join(process.env.HOME, 'telegram-claude-bot/abilities/check_usage.py');
-  const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` };
-
-  const proc = spawn(pythonPath, [scriptPath, '--save'], {
-    detached: true,
-    stdio: 'ignore',
-    env,
-  });
-  proc.unref();
-  console.log(`[${CONFIG.appName}] Usage refresh triggered`);
-}
-
-function refreshCodexUsageData() {
-  if (!CONFIG.features.usage) return;
-  const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
-  const scriptPath = path.join(process.env.HOME, 'telegram-claude-bot/abilities/check_codex_usage.py');
-  const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` };
-
-  const proc = spawn(pythonPath, [scriptPath, '--save'], {
-    detached: true,
-    stdio: 'ignore',
-    env,
-  });
-  proc.unref();
-  console.log(`[${CONFIG.appName}] Codex usage refresh triggered`);
+async function probeRemoteTmuxUtf8() {
+  if (!IS_CLIENT || !hostRemote) return;
+  const r = await hostRemote.probeLocale();
+  if (r.ok) return;
+  if (r.error) {
+    console.warn(`[${CONFIG.appName}] remote tmux locale probe failed: ${r.error}`);
+  } else {
+    console.warn(`[${CONFIG.appName}] remote tmux server LANG=${r.lang || '(unset)'} — not UTF-8. ⏵/❯ may render as __. Fix: SSH to the host and run \`tmux kill-server\`, then reattach.`);
+  }
 }
 
 app.whenReady().then(async () => {
-  // Application menu — needed for Cmd+C/V/X/A to work in Electron
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
     { role: 'editMenu' },
   ]));
 
+  ensureWslSshd();
+  startSshTunnel();
   await ensureApiServer();
-
-  // Ensure tmux server has UTF-8 locale for proper Unicode width calculations.
-  // Without this, ❯ and other Unicode chars render as __ in terminals.
-  // CRITICAL: set-environment only affects programs INSIDE tmux, not the tmux
-  // server's own wcwidth(). If the server started under C locale (e.g. from
-  // another app or before Pentacle set LANG), it must be restarted.
-  try {
-    // Check if tmux server is running and what locale it inherited
-    const serverPid = execSync(`${TMUX} display-message -p "#{pid}"`, { encoding: 'utf8' }).trim();
-    // Read the server process's actual environment to check its locale
-    const serverEnv = execSync(`ps -p ${serverPid} -o command= -E 2>/dev/null || true`, { encoding: 'utf8' });
-    // More reliable: check if tmux server can handle ❯ correctly by testing wcwidth
-    // If LANG was C/POSIX when server started, wcwidth('❯') returns -1
-    const langCheck = execSync(`${TMUX} display-message -p "#{client_termname}"`, { encoding: 'utf8', timeout: 2000 }).trim();
-    // The definitive test: ask tmux to print ❯ and see if it measures correctly
-    // Instead, just check if the server's start environment had LANG set
-    const serverStartEnv = execSync(`/bin/ps eww -p ${serverPid} 2>/dev/null || true`, { encoding: 'utf8' });
-    const hasUtf8 = /LANG=.*[Uu][Tt][Ff]/.test(serverStartEnv);
-    if (!hasUtf8) {
-      console.log(`[${CONFIG.appName}] tmux server started without UTF-8 locale — restarting for proper Unicode support`);
-      // Save session list before killing
-      try {
-        execSync(`${TMUX} kill-server`, { stdio: 'ignore', timeout: 3000 });
-      } catch {}
-      // Small delay for server to fully exit
-      execSync('sleep 0.3');
-      // Start a fresh tmux server (inherits our UTF-8 env from process.env)
-      execSync(`${TMUX} new-session -d -s _app_keepalive`, { env: PTY_ENV, timeout: 3000 });
-      console.log(`[${CONFIG.appName}] tmux server restarted with UTF-8 locale`);
-    } else {
-      // Server already has UTF-8 — just set global env as extra safety
-      execSync(`${TMUX} set-environment -g LANG "en_US.UTF-8"`, { stdio: 'ignore' });
-      execSync(`${TMUX} set-environment -g LC_ALL "en_US.UTF-8"`, { stdio: 'ignore' });
-    }
-  } catch {
-    // tmux server may not be running yet — that's fine, PTY_ENV handles new sessions
-    // Start one now so it inherits our UTF-8 locale
-    try {
-      execSync(`${TMUX} new-session -d -s _app_keepalive`, { env: PTY_ENV, timeout: 3000 });
-    } catch {}
-  }
+  ensureLocalTmuxUtf8();
+  probeRemoteTmuxUtf8();  // fire-and-forget; just logs
 
   mainWindow = new BrowserWindow({
     width: 1600,
     height: 1000,
     minWidth: 900,
     minHeight: 600,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 15, y: 15 },
+    titleBarStyle: IS_DARWIN ? 'hiddenInset' : 'default',
+    trafficLightPosition: IS_DARWIN ? { x: 15, y: 15 } : undefined,
     backgroundColor: CONFIG.dark.bg,
-    icon: nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.icns')),
+    icon: IS_DARWIN
+      ? nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.icns'))
+      : undefined,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: false,
@@ -346,204 +336,196 @@ app.whenReady().then(async () => {
     },
   });
 
-  ptyManager.setWebContents(mainWindow.webContents);
-
-  // Disable renderer cache so code changes take effect immediately
+  sessionManager.setWebContents(mainWindow.webContents);
   await mainWindow.webContents.session.clearCache();
-
-
   mainWindow.loadFile('renderer/index.html');
 
-  // Restore previous slots after renderer is fully ready
+  // Restore slots after renderer is ready
   const savedSlots = loadSlotState();
   mainWindow.webContents.on('did-finish-load', () => {
-    // Wait for renderer JS to initialize (fetchSessions, event handlers, etc.)
-    // did-finish-load fires when HTML is parsed, but app.js may still be executing
     setTimeout(() => {
       let delay = 0;
-      savedSlots.forEach((sessionName, slot) => {
-        if (sessionName) {
-          const { execSync } = require('child_process');
+      savedSlots.forEach((s, slot) => {
+        if (!s || !s.name) return;
+        const host = HOSTS[s.hostId] || hostLocal;
+        if (!host) return;
+        // Best-effort session existence check; skip if missing
+        (async () => {
           try {
-            execSync(`${TMUX} has-session -t "${sessionName}"`, { stdio: 'ignore' });
+            if (host instanceof LocalHost) {
+              execSync(`${host.tmuxBin} has-session -t ${JSON.stringify(s.name)}`, { stdio: 'ignore', env: host.env });
+            } else {
+              await host.tmux(['has-session', '-t', s.name]);
+            }
             setTimeout(() => {
-              mainWindow.webContents.send('assign-slot', slot, sessionName);
+              mainWindow.webContents.send('assign-slot', slot, s.name, s.hostId || 'local');
             }, delay);
             delay += 500;
           } catch {}
-        }
+        })();
       });
     }, 1000);
 
-    // Auto-start mic server if not already running
     ensureMicServer();
-
-    // Auto-refresh usage data on startup
     refreshUsageData();
     refreshCodexUsageData();
   });
 
-  // IPC handlers
-  ipcMain.handle('pty:create', (_, slot, sessionName, cols, rows) => {
-    const result = ptyManager.create(slot, sessionName, cols, rows);
+  // ── IPC: session management ─────────────────────────────────
+  ipcMain.handle('pty:create', async (_, slot, sessionName, hostId, cols, rows) => {
+    const result = await sessionManager.create(slot, sessionName, hostId || 'local', cols, rows);
     saveSlotState();
     return result;
   });
 
-  ipcMain.on('pty:write', (_, slot, data) => {
-    ptyManager.write(slot, data);
-  });
-
-  ipcMain.on('pty:resize', (_, slot, cols, rows) => {
-    ptyManager.resize(slot, cols, rows);
-  });
+  ipcMain.on('pty:write', (_, slot, data) => sessionManager.write(slot, data));
+  ipcMain.on('pty:resize', (_, slot, cols, rows) => sessionManager.resize(slot, cols, rows));
 
   ipcMain.handle('pty:kill', (_, slot) => {
-    ptyManager.kill(slot);
+    sessionManager.kill(slot);
     saveSlotState();
   });
 
-  // Check if a tmux session still exists (for auto-reconnect after PTY death)
-  ipcMain.handle('pty:check-session', (_, sessionName) => {
+  ipcMain.handle('pty:check-session', async (_, sessionName, hostId) => {
+    const host = HOSTS[hostId] || hostLocal;
+    if (!host) return false;
     try {
-      execSync(`${TMUX} has-session -t "${sessionName}"`, { stdio: 'ignore' });
+      if (host instanceof LocalHost) {
+        execSync(`${host.tmuxBin} has-session -t ${JSON.stringify(sessionName)}`, { stdio: 'ignore', env: host.env });
+      } else {
+        await host.tmux(['has-session', '-t', sessionName]);
+      }
       return true;
     } catch { return false; }
   });
 
-  ipcMain.handle('pty:new-session', (_, agent) => {
-    // Delegate to the shared `agent-tmux` CLI so Pentacle and Python callers
-    // (run_pipeline.py, orchestrator, stage agents) all go through the same
-    // tmux-spawn primitive. See agent-dashboard/modules/AgentTmux.py for the
-    // real implementation and agent-dashboard/bin/agent-tmux for the CLI.
-    //
-    // Behavior preserved: the CLI uses the same shell-first pattern, so the
-    // tmux session survives even if the agent command crashes on startup.
+  ipcMain.handle('pty:new-session', async (_, agent, location = 'local') => {
     const sessionName = `${agent}-${process.pid}-${Date.now()}`;
+    const wantRemote = location === 'remote' && IS_CLIENT && hostRemote;
+    const targetHost = wantRemote ? hostRemote : hostLocal;
+
     try {
-      const workDir = CONFIG.workingDirectory.replace(/^~/, process.env.HOME);
-      const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
-      let command;
-      if (agentConfig.binary) {
-        const bin = agentConfig.binary.replace(/^~/, process.env.HOME);
-        const flags = agentConfig.command.split(' ').slice(1).join(' ');
-        command = `${bin}${flags ? ' ' + flags : ''}`;
+      if (wantRemote && IS_DARWIN) {
+        // Route through the mac-mini's agent-tmux CLI (shell-first pattern;
+        // session survives agent crashes on startup). Since remote is the
+        // mac-mini, the CLI path is known.
+        const workDir = (CONFIG.workingDirectory || '~/agent-workspace').replace(/^~/, `/Users/${CONFIG.remote.user}`);
+        const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
+        const command = agentConfig.command;
+        await hostRemote.exec([
+          '/Users/bartimaeus/agent-dashboard/bin/agent-tmux',
+          'create-session', '--name', sessionName, '--workdir', workDir, '--command', command,
+        ]);
+        return { sessionName, hostId: 'remote' };
+      } else if (wantRemote) {
+        // Generic remote new-session without agent-tmux (non-bartimaeus host)
+        const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
+        const workDir = (CONFIG.workingDirectory || '~/agent-workspace');
+        await hostRemote.tmux(['new-session', '-d', '-s', sessionName, '-c', workDir, agentConfig.command]);
+        return { sessionName, hostId: 'remote' };
+      } else if (!IS_CLIENT && IS_DARWIN) {
+        // Host mode on the mac-mini — use the agent-tmux CLI directly.
+        const workDir = (CONFIG.workingDirectory || '~/agent-workspace').replace(/^~/, process.env.HOME);
+        const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
+        let command;
+        if (agentConfig.binary) {
+          const bin = agentConfig.binary.replace(/^~/, process.env.HOME);
+          const flags = agentConfig.command.split(' ').slice(1).join(' ');
+          command = `${bin}${flags ? ' ' + flags : ''}`;
+        } else {
+          command = agentConfig.command;
+        }
+        execFileSync(
+          '/Users/bartimaeus/agent-dashboard/bin/agent-tmux',
+          ['create-session', '--name', sessionName, '--workdir', workDir, '--command', command],
+          { env: hostLocal.env, stdio: ['ignore', 'pipe', 'pipe'] }
+        );
+        return { sessionName, hostId: 'local' };
       } else {
-        command = agentConfig.command;
+        // Client local (mac client's own tmux or Windows WSL). Raw tmux new-session.
+        const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
+        const workDir = (CONFIG.workingDirectory || '~');
+        await targetHost.tmux(['new-session', '-d', '-s', sessionName, '-c', workDir, agentConfig.command]);
+        return { sessionName, hostId: targetHost.id };
       }
-      // Pass everything as explicit args to avoid shell quoting issues.
-      execFileSync(
-        '/Users/bartimaeus/agent-dashboard/bin/agent-tmux',
-        ['create-session',
-         '--name', sessionName,
-         '--workdir', workDir,
-         '--command', command],
-        { env: PTY_ENV, stdio: ['ignore', 'pipe', 'pipe'] }
-      );
     } catch (e) {
-      console.error('Failed to create tmux session:', e.message);
+      console.error(`[new-session] agent=${agent} location=${location}:`, e.message);
       return null;
     }
-    return sessionName;
   });
 
-  ipcMain.on('context-menu', (_, sessionName, displayName) => {
-    showContextMenu(mainWindow, sessionName, displayName);
+  ipcMain.on('context-menu', (_, sessionName, displayName, hostId) => {
+    showContextMenu(mainWindow, sessionName, displayName, hostId);
   });
 
-  // Scroll tmux scrollback via copy-mode.
-  // Receives the immutable tmux pane ID (e.g. %5) from the renderer — not the
-  // session name, which can be renamed at any time. Pane IDs are stable for the
-  // lifetime of the pane, so scroll works even after session renames.
-  // Uses tmux ";" command separator for atomic copy-mode + send-keys in one call.
-  ipcMain.on('pty:scroll', (_, paneId, direction, lines) => {
-    if (!paneId) return;
+  // Scroll via copy-mode. Renderer passes slot + direction + lines; we look up
+  // the entry's host and pane-id from the slot (not a separate paneId map, to
+  // avoid stale-pane-id races across rapid attach/detach).
+  ipcMain.on('pty:scroll', (_, slot, direction, lines) => {
+    const entry = sessionManager.slots[slot];
+    if (!entry) return;
     const count = Math.min(lines || 1, 50);
     const cmd = direction === 'up' ? 'scroll-up' : 'scroll-down';
-    execFile(TMUX, [
-      'copy-mode', '-e', '-t', paneId, ';',
-      'send-keys', '-t', paneId, '-X', '-N', String(count), cmd,
-    ], (err) => {
-      if (err) console.warn(`[scroll:fail] pane=${paneId} dir=${direction} err=${err.message}`);
-    });
+    entry.host.tmuxSilent([
+      'copy-mode', '-e', '-t', entry.paneId, ';',
+      'send-keys', '-t', entry.paneId, '-X', '-N', String(count), cmd,
+    ]);
   });
 
-  // Exit copy-mode so typing goes to the shell
-  // Send tmux key notation directly to a pane (bypasses terminal input parser)
   ipcMain.on('pty:tmux-send', (_, slot, ...keys) => {
-    const entry = ptyManager.ptys[slot];
+    const entry = sessionManager.slots[slot];
     if (!entry) return;
-    execFile(TMUX, ['send-keys', '-t', entry.paneId, ...keys], { stdio: 'ignore' }, () => {});
+    entry.host.tmuxSilent(['send-keys', '-t', entry.paneId, ...keys]);
   });
 
-  // Expose config to renderer
-  ipcMain.handle('get-config', () => CONFIG);
+  ipcMain.on('pty:exit-copy-mode', (_, slot) => {
+    const entry = sessionManager.slots[slot];
+    if (!entry) return;
+    entry.host.tmuxSilent(['send-keys', '-t', entry.paneId, '-X', 'cancel']);
+  });
 
+  // Expose config to renderer, including computed fields
+  ipcMain.handle('get-config', () => ({
+    ...CONFIG,
+    isClient: IS_CLIENT,
+    apiUrl: API_URL,
+    apiPort: API_PORT,
+    platform: process.platform,
+    hostIds: Object.keys(HOSTS),
+  }));
+
+  // ── IPC: mic / meeting (mac host only) ───────────────────────
   ipcMain.handle('mic:start-server', async () => {
-    if (!CONFIG.features.mic) return false;
+    if (IS_CLIENT || !IS_DARWIN || !CONFIG.features.mic) return false;
     const micUrl = CONFIG.micServerUrl || 'http://127.0.0.1:7780';
-    // Check if mic server is already running
-    try {
-      await fetch(`${micUrl}/status`);
-      return true; // already running
-    } catch {}
-
-    // Launch via MicServer.app — bare python child has no TCC identity and
-    // produces silent zero audio. See ensureMicServer() comment above.
-    const launcher = spawn('/usr/bin/open', ['-a', '/Applications/MicServer.app'], {
-      detached: true,
-      stdio: 'ignore',
-    });
+    try { await fetch(`${micUrl}/status`); return true; } catch {}
+    const launcher = spawn('/usr/bin/open', ['-a', '/Applications/MicServer.app'], { detached: true, stdio: 'ignore' });
     launcher.unref();
-
-    // Wait up to 10 seconds for it to come up (Swift launcher + python load)
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 500));
-      try {
-        await fetch(`${micUrl}/status`);
-        return true;
-      } catch {}
+      try { await fetch(`${micUrl}/status`); return true; } catch {}
     }
     return false;
   });
 
   ipcMain.on('meeting:open', () => {
-    if (meetingWindow && !meetingWindow.isDestroyed()) {
-      meetingWindow.focus();
-      return;
-    }
+    if (meetingWindow && !meetingWindow.isDestroyed()) { meetingWindow.focus(); return; }
     meetingWindow = new BrowserWindow({
-      width: 600,
-      height: 500,
-      minWidth: 400,
-      minHeight: 300,
-      titleBarStyle: 'hiddenInset',
-      trafficLightPosition: { x: 12, y: 12 },
+      width: 600, height: 500, minWidth: 400, minHeight: 300,
+      titleBarStyle: IS_DARWIN ? 'hiddenInset' : 'default',
+      trafficLightPosition: IS_DARWIN ? { x: 12, y: 12 } : undefined,
       backgroundColor: CONFIG.dark.bg,
-      webPreferences: {
-        contextIsolation: false,
-        nodeIntegration: true,
-      },
+      webPreferences: { contextIsolation: false, nodeIntegration: true },
     });
     meetingWindow.loadFile('renderer/meeting.html');
     meetingWindow.on('closed', () => { meetingWindow = null; });
   });
 
   ipcMain.on('meeting:close', () => {
-    if (meetingWindow && !meetingWindow.isDestroyed()) {
-      meetingWindow.close();
-      meetingWindow = null;
-    }
+    if (meetingWindow && !meetingWindow.isDestroyed()) { meetingWindow.close(); meetingWindow = null; }
   });
 
-  ipcMain.on('pty:exit-copy-mode', (_, slot) => {
-    const entry = ptyManager.ptys[slot];
-    if (!entry) return;
-    execFile(TMUX, ['send-keys', '-t', entry.paneId, '-X', 'cancel'], { stdio: 'ignore' }, () => {});
-  });
-
-  // ── Activity Detection ──────────────────────────────────────
-  // Capture tmux pane content for a session and classify as working/waiting/idle
+  // ── Activity detection / capture (multi-host) ───────────────
   const SPINNER_RE = /[✻✢·⊹*❋◆◇◈⟡⟢⟣☼◉] [A-Z][a-z]+…/;
   const WORKING_STRINGS = ['Running…', 'ctrl+b ctrl+b', 'to run in background'];
 
@@ -552,73 +534,76 @@ app.whenReady().then(async () => {
     const bottomLines = lines.slice(-4).map(l => l.trim()).filter(l => l);
     const isClaude = bottomLines.some(l => l.includes('⏵⏵ bypass') || l.includes('⏵⏵ auto-accept'));
     if (!isClaude) return 'idle';
-
-    // Find content above the ❯ prompt line
     let contentLines = [];
     for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i].includes('❯')) {
-        contentLines = lines.slice(Math.max(0, i - 15), i);
-        break;
-      }
+      if (lines[i].includes('❯')) { contentLines = lines.slice(Math.max(0, i - 15), i); break; }
     }
     if (!contentLines.length) contentLines = lines.slice(-20);
     const contentText = contentLines.join('\n');
-
     const isWorking = SPINNER_RE.test(contentText) || WORKING_STRINGS.some(p => contentText.includes(p));
     return isWorking ? 'working' : 'waiting';
   }
 
-  ipcMain.handle('pty:detect-activity', async () => {
-    // Get all tmux sessions and classify each
-    const states = {};
+  async function hostListTargets(host) {
     try {
-      const result = execSync(`${TMUX} list-windows -a -F "#{session_name}:#{window_index}"`, { encoding: 'utf8', timeout: 3000 });
-      const targets = result.trim().split('\n').filter(t => t);
-
-      for (const target of targets) {
-        try {
-          const cap = execSync(`${TMUX} capture-pane -t "${target}" -p`, { encoding: 'utf8', timeout: 2000 });
-          states[target] = classifyPane(cap);
-        } catch { states[target] = 'idle'; }
+      if (host instanceof LocalHost) {
+        const r = execSync(`${host.tmuxBin} list-windows -a -F "#{session_name}:#{window_index}"`, { encoding: 'utf8', timeout: 3000, env: host.env });
+        return r.trim().split('\n').filter(Boolean);
       }
-    } catch {}
+      const r = await host.tmux(['list-windows', '-a', '-F', '#{session_name}:#{window_index}'], { lane: 'bg' });
+      return r.trim().split('\n').filter(Boolean);
+    } catch { return []; }
+  }
+
+  async function hostCapture(host, target, opts = {}) {
+    const args = ['capture-pane', '-t', target, '-p'];
+    if (opts.scrollback) args.push('-S', String(opts.scrollback));
+    try {
+      if (host instanceof LocalHost) {
+        return execSync(`${host.tmuxBin} ${args.map(a => JSON.stringify(a)).join(' ')}`, { encoding: 'utf8', timeout: 2000, env: host.env });
+      }
+      return await host.tmux(args, { lane: 'bg' });
+    } catch { return ''; }
+  }
+
+  ipcMain.handle('pty:detect-activity', async () => {
+    const states = {};
+    // Iterate registered hosts; keys prefixed with hostId
+    for (const [id, host] of Object.entries(HOSTS)) {
+      const targets = await hostListTargets(host);
+      for (const target of targets) {
+        const cap = await hostCapture(host, target);
+        states[`${id}:${target}`] = classifyPane(cap);
+      }
+    }
     return states;
   });
 
-  // Capture pane content for sidebar summaries
   ipcMain.handle('pty:capture-all-panes', async () => {
     const panes = {};
-    try {
-      const result = execSync(`${TMUX} list-windows -a -F "#{session_name}:#{window_index}"`, { encoding: 'utf8', timeout: 3000 });
-      const targets = result.trim().split('\n').filter(t => t);
-
+    for (const [id, host] of Object.entries(HOSTS)) {
+      const targets = await hostListTargets(host);
       for (const target of targets) {
-        try {
-          const cap = execSync(`${TMUX} capture-pane -t "${target}" -p -S -500`, { encoding: 'utf8', timeout: 2000 });
-          panes[target] = cap;
-        } catch {}
+        panes[`${id}:${target}`] = await hostCapture(host, target, { scrollback: -500 });
       }
-    } catch {}
+    }
     return panes;
   });
 
-  // ── Dashboard Data ──────────────────────────────────────────
+  // ── Dashboards ──────────────────────────────────────────────
   ipcMain.handle('dashboard:pipeline-stats', async (_evt, batch) => {
+    // Paths are hardcoded to macOS bartimaeus home → needs mac host.
+    if (IS_CLIENT || !IS_DARWIN) return { error: 'pipeline-stats only available on mac host' };
     return new Promise((resolve) => {
       const env = {
         ...process.env,
         PYTHONPATH: '/Users/bartimaeus/land-bot',
         DATABASE_URL: 'postgresql://bartimaeus@localhost:5432/altum',
       };
-      // Pass --batch through when the dashboard's selector specifies one,
-      // so users can toggle between e.g. batch D and batch E side-by-side.
       const args = ['/Users/bartimaeus/land-bot/scripts/pipeline_stats.py'];
-      if (batch && typeof batch === 'string') {
-        args.push('--batch', batch);
-      }
+      if (batch && typeof batch === 'string') args.push('--batch', batch);
       const proc = spawn('/Users/bartimaeus/.venvs/global/bin/python', args, { env });
-      let stdout = '';
-      let stderr = '';
+      let stdout = '', stderr = '';
       const timer = setTimeout(() => { proc.kill('SIGKILL'); }, 15000);
       proc.stdout.on('data', d => { stdout += d; });
       proc.stderr.on('data', d => { stderr += d; });
@@ -626,55 +611,31 @@ app.whenReady().then(async () => {
         clearTimeout(timer);
         if (code === 0) {
           try { resolve(JSON.parse(stdout.trim())); }
-          catch (e) { resolve({ error: 'Invalid JSON: ' + stdout.slice(0, 100) }); }
+          catch { resolve({ error: 'Invalid JSON: ' + stdout.slice(0, 100) }); }
         } else { resolve({ error: (stderr || '').slice(0, 200) || `Stats script exit ${code}` }); }
       });
       proc.on('error', (e) => { clearTimeout(timer); resolve({ error: e.message }); });
     });
   });
 
-  // ── 0DTE dashboard: read latest snapshot for one trader from DynamoDB ──
-  // Replaces the legacy Python subprocess that hit the bot's local HTTP API.
-  // The Trader process publishes snapshots to 0dte-snapshots every 5s; this
-  // handler queries the latest one for the requested trader_id. Multi-trader
-  // support is built in via the trader_id partition key.
-  //
-  // Returns { snapshot, age_sec, error } where snapshot is the raw DynamoDB
-  // item (positions_by_account, circuit, today_stats, last_scan, etc.) and
-  // age_sec is how stale the snapshot is. The renderer uses age to color a
-  // freshness indicator. error is set if the query fails.
+  // 0DTE dashboard — DynamoDB queries work from any host (AWS is remote)
   ipcMain.handle('dashboard:0dte-stats', async (_evt, traderId) => {
-    if (!traderId) {
-      return { error: 'no trader_id provided' };
-    }
+    if (!traderId) return { error: 'no trader_id provided' };
     try {
       const resp = await _ddb.send(new QueryCommand({
         TableName: _DASHBOARD_TABLE,
         KeyConditionExpression: 'trader_id = :t',
         ExpressionAttributeValues: { ':t': traderId },
-        ScanIndexForward: false,
-        Limit: 1,
+        ScanIndexForward: false, Limit: 1,
       }));
       const items = resp.Items || [];
-      if (items.length === 0) {
-        return { snapshot: null, age_sec: null, trader_id: traderId };
-      }
+      if (items.length === 0) return { snapshot: null, age_sec: null, trader_id: traderId };
       const snapshot = items[0];
       const ageSec = Math.max(0, (Date.now() - Number(snapshot.snapshot_ts)) / 1000);
       return { snapshot, age_sec: ageSec, trader_id: traderId };
-    } catch (e) {
-      return { error: `dynamodb query failed: ${e.message || e}` };
-    }
+    } catch (e) { return { error: `dynamodb query failed: ${e.message || e}` }; }
   });
 
-  // ── 0DTE dashboard: discover known traders ────────────────────────────
-  // Scans the 0dte-snapshots table with a projection of just trader_id and
-  // dedupes. Cached for 60s to avoid scanning on every poll. Returns the
-  // list sorted alphabetically.
-  //
-  // For a small table (a handful of traders, ~thousands of snapshots) this
-  // is fine — the Scan reads each item but the projection keeps it small.
-  // If the table grows large we'll add a GSI.
   ipcMain.handle('dashboard:0dte-list-traders', async () => {
     const now = Date.now();
     if (now - _tradersCache.ts < _TRADERS_CACHE_TTL_MS && _tradersCache.traders.length > 0) {
@@ -689,9 +650,7 @@ app.whenReady().then(async () => {
           ProjectionExpression: 'trader_id',
           ExclusiveStartKey: lastKey,
         }));
-        for (const it of (resp.Items || [])) {
-          if (it.trader_id) traders.add(it.trader_id);
-        }
+        for (const it of (resp.Items || [])) if (it.trader_id) traders.add(it.trader_id);
         lastKey = resp.LastEvaluatedKey;
       } while (lastKey);
       const list = Array.from(traders).sort();
@@ -702,7 +661,7 @@ app.whenReady().then(async () => {
     }
   });
 
-  // ── Image Paste ─────────────────────────────────────────────
+  // Image paste
   ipcMain.handle('pty:save-image', async (_, base64Data) => {
     try {
       const buf = Buffer.from(base64Data, 'base64');
@@ -713,20 +672,20 @@ app.whenReady().then(async () => {
       return { ok: false, error: e.message };
     }
   });
-
 });
 
 app.on('window-all-closed', () => {
-  // Save slot state BEFORE killing PTYs — killAll nulls the entries
   saveSlotState();
-  ptyManager.killAll();
+  sessionManager.killAll();
+  stopSshTunnel();
+  for (const h of Object.values(HOSTS)) h.destroy?.();
   app.quit();
 });
 
 app.on('before-quit', () => {
   saveSlotState();
-  ptyManager.killAll();
-  if (meetingWindow && !meetingWindow.isDestroyed()) {
-    meetingWindow.close();
-  }
+  sessionManager.killAll();
+  stopSshTunnel();
+  for (const h of Object.values(HOSTS)) h.destroy?.();
+  if (meetingWindow && !meetingWindow.isDestroyed()) meetingWindow.close();
 });

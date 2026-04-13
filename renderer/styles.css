@@ -962,6 +962,9 @@ body {
   justify-content: flex-end;
 }
 
+#new-session-location { display: flex; }
+#new-session-location .sb-btn.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+
 .modal-subtitle {
   font-size: 12px;
   color: var(--fg-dim);

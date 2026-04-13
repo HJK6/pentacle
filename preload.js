@@ -4,18 +4,22 @@
 const { ipcRenderer } = require('electron');
 
 window.cc = {
-  // PTY operations
-  createPty: (slot, sessionName, cols, rows) => ipcRenderer.invoke('pty:create', slot, sessionName, cols, rows),
+  // PTY operations — hostId threads through so each slot knows which tmux
+  // server its session lives on. Defaults to 'local' for backcompat.
+  createPty: (slot, sessionName, hostId, cols, rows) => ipcRenderer.invoke('pty:create', slot, sessionName, hostId || 'local', cols, rows),
   writePty: (slot, data) => ipcRenderer.send('pty:write', slot, data),
   tmuxSend: (slot, ...keys) => ipcRenderer.send('pty:tmux-send', slot, ...keys),
   resizePty: (slot, cols, rows) => ipcRenderer.send('pty:resize', slot, cols, rows),
-  scrollTmux: (paneId, direction, lines) => ipcRenderer.send('pty:scroll', paneId, direction, lines || 1),
+  // Scroll now takes slot (the main process looks up host+paneId from the slot).
+  // This keeps pane-id routing race-safe — a stale paneId can't land on a
+  // replacement attach because we check slot identity on every callback.
+  scrollTmux: (slot, direction, lines) => ipcRenderer.send('pty:scroll', slot, direction, lines || 1),
   exitCopyMode: (slot) => ipcRenderer.send('pty:exit-copy-mode', slot),
   killPty: (slot) => ipcRenderer.invoke('pty:kill', slot),
-  newSession: (agent) => ipcRenderer.invoke('pty:new-session', agent),
-  checkSession: (sessionName) => ipcRenderer.invoke('pty:check-session', sessionName),
+  newSession: (agent, location) => ipcRenderer.invoke('pty:new-session', agent, location || 'local'),
+  checkSession: (sessionName, hostId) => ipcRenderer.invoke('pty:check-session', sessionName, hostId || 'local'),
 
-  // PTY events (remove old listeners first to prevent duplicates on reload)
+  // PTY events
   onPtyData: (callback) => {
     ipcRenderer.removeAllListeners('pty:data');
     ipcRenderer.on('pty:data', (_, slot, data) => callback(slot, data));
@@ -32,34 +36,32 @@ window.cc = {
   openMeeting: () => ipcRenderer.send('meeting:open'),
   closeMeeting: () => ipcRenderer.send('meeting:close'),
 
-  // Activity detection + summaries
+  // Activity detection + summaries. Keys are prefixed with `hostId:` in client
+  // mode (e.g. `remote:session:0`, `local:session:0`). Host-mode hosts can
+  // still strip the prefix — renderer code should treat `hostId:` as opaque.
   detectActivity: () => ipcRenderer.invoke('pty:detect-activity'),
   captureAllPanes: () => ipcRenderer.invoke('pty:capture-all-panes'),
 
   // Image paste
   saveImage: (base64Data) => ipcRenderer.invoke('pty:save-image', base64Data),
 
-  // Config
+  // Config. Returned object includes isClient, apiUrl, apiPort, platform, hostIds.
   getConfig: () => ipcRenderer.invoke('get-config'),
 
   // Dashboards
-  // getPipelineStats accepts an optional batch id. When omitted, the stats
-  // script picks the most recent batch from pipeline_batches.
   getPipelineStats: (batch) => ipcRenderer.invoke('dashboard:pipeline-stats', batch),
-  // 0DTE: takes a trader_id (e.g. "bart", "sai") so multiple operators
-  // can be viewed independently. Reads from DynamoDB directly.
   get0dteStats: (traderId) => ipcRenderer.invoke('dashboard:0dte-stats', traderId),
   list0dteTraders: () => ipcRenderer.invoke('dashboard:0dte-list-traders'),
 
   // Context menu
-  showContextMenu: (sessionName, displayName) => {
-    ipcRenderer.send('context-menu', sessionName, displayName);
+  showContextMenu: (sessionName, displayName, hostId) => {
+    ipcRenderer.send('context-menu', sessionName, displayName, hostId || 'local');
   },
 
-  // Actions from main process (remove old listeners first to prevent duplicates on reload)
+  // Actions from main process. `assign-slot` now carries hostId.
   onAssignSlot: (callback) => {
     ipcRenderer.removeAllListeners('assign-slot');
-    ipcRenderer.on('assign-slot', (_, slot, sessionName) => callback(slot, sessionName));
+    ipcRenderer.on('assign-slot', (_, slot, sessionName, hostId) => callback(slot, sessionName, hostId || 'local'));
   },
   onAction: (callback) => {
     ipcRenderer.removeAllListeners('action');

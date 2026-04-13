@@ -7,3 +7,4 @@ out/
 .slot-state.json
 .claude/
 *.backup-*
+pentacle.config.js

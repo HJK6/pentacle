@@ -7,8 +7,24 @@ const { Unicode11Addon } = require('@xterm/addon-unicode11'); // REQUIRED: witho
 const { WebglAddon } = require('@xterm/addon-webgl'); // GPU-accelerated rendering — fixes partial text paint on screen refresh
 const CONFIG = require('../pentacle.config.js');
 
-const API = CONFIG.apiServer.url;
+// API URL is mutable — on client machines it's rewritten to the SSH-tunneled
+// port after getConfig() resolves. On the host it's the same local URL.
+let API = CONFIG.apiServer.url;
+let IS_CLIENT = false;
 const THEME = CONFIG.terminal;
+
+// Bootstrap async config from main so we can reroute the API URL before the
+// first fetch fires. All top-level code runs under DOMContentLoaded, but
+// network-touching code is kicked off from event handlers / timers — those
+// fire after this promise resolves.
+const CFG_READY = (async () => {
+  try {
+    const cfg = await window.cc.getConfig();
+    if (cfg && cfg.apiUrl) API = cfg.apiUrl;
+    IS_CLIENT = !!(cfg && cfg.isClient);
+    return cfg;
+  } catch { return null; }
+})();
 
 // ── State ──────────────────────────────────────────────────────
 
@@ -135,9 +151,23 @@ async function pollActivity() {
       window.cc.detectActivity(),
       window.cc.captureAllPanes(),
     ]);
-    if (actStates) state.activityStates = actStates;
+    // Main now returns keys as `hostId:sessionName:windowIdx`. Strip the host
+    // prefix so the existing `sessionName:windowIdx`-keyed code keeps working.
+    // (Collisions across hosts with identical session names are tolerated —
+    // the user runs distinct workloads per host.)
+    const stripHost = (obj) => {
+      if (!obj) return obj;
+      const out = {};
+      for (const [k, v] of Object.entries(obj)) {
+        const i = k.indexOf(':');
+        out[i >= 0 ? k.slice(i + 1) : k] = v;
+      }
+      return out;
+    };
+    if (actStates) state.activityStates = stripHost(actStates);
     if (panes) {
-      for (const [key, content] of Object.entries(panes)) {
+      const strippedPanes = stripHost(panes);
+      for (const [key, content] of Object.entries(strippedPanes)) {
         state.sessionSummaries[key] = extractSummary(content);
         // Extract auto-name from pane content
         const sessionName = key.split(':')[0];
@@ -247,11 +277,13 @@ function renderSidebar() {
     el.addEventListener('click', () => {
       const name = el.dataset.name;
       const display = el.dataset.display;
-      assignToSlot(name, display);
+      // In client mode, all API-sourced sessions live on the remote host.
+      // In host mode, they live on the local host.
+      assignToSlot(name, display, IS_CLIENT ? 'remote' : 'local');
     });
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      window.cc.showContextMenu(el.dataset.name, el.dataset.display);
+      window.cc.showContextMenu(el.dataset.name, el.dataset.display, IS_CLIENT ? 'remote' : 'local');
     });
   });
 
@@ -547,7 +579,7 @@ function renderBotDetail(bot) {
 
 // ── Slot Assignment ────────────────────────────────────────────
 
-function assignToSlot(sessionName, displayName) {
+function assignToSlot(sessionName, displayName, hostId) {
   // Already in a slot? Focus it (and maximize if in maximized mode)
   const existing = getSlotForSession(sessionName);
   if (existing >= 0) {
@@ -562,7 +594,7 @@ function assignToSlot(sessionName, displayName) {
   if (state.maximizedSlot !== null) {
     // In maximized mode — replace the currently maximized slot
     const slot = state.maximizedSlot;
-    attachSession(slot, sessionName, displayName);
+    attachSession(slot, sessionName, displayName, hostId);
     maximizeSlot(slot);
     return;
   }
@@ -574,16 +606,17 @@ function assignToSlot(sessionName, displayName) {
     slot = 3;
   }
 
-  attachSession(slot, sessionName, displayName);
+  attachSession(slot, sessionName, displayName, hostId);
 }
 
-async function attachSession(slot, sessionName, displayName) {
+async function attachSession(slot, sessionName, displayName, hostId) {
+  hostId = hostId || 'local';
   // Kill existing terminal in this slot
   detachSlot(slot);
 
   state.slotGen[slot]++;
   const gen = state.slotGen[slot]; // capture generation to detect stale async resumes
-  state.slots[slot] = { name: sessionName, displayName };
+  state.slots[slot] = { name: sessionName, displayName, hostId };
 
   // Update header
   const header = document.getElementById(`header-${slot}`);
@@ -686,13 +719,11 @@ async function attachSession(slot, sessionName, displayName) {
 
     // Fn+Up / Fn+Down (PageUp/PageDown) → tmux scrollback
     if (e.key === 'PageUp') {
-      const pid = state.slots[slot]?.paneId;
-      if (pid) window.cc.scrollTmux(pid, 'up', 15);
+      if (state.slots[slot]?.paneId) window.cc.scrollTmux(slot, 'up', 15);
       return false;
     }
     if (e.key === 'PageDown') {
-      const pid = state.slots[slot]?.paneId;
-      if (pid) window.cc.scrollTmux(pid, 'down', 15);
+      if (state.slots[slot]?.paneId) window.cc.scrollTmux(slot, 'down', 15);
       return false;
     }
 
@@ -710,7 +741,7 @@ async function attachSession(slot, sessionName, displayName) {
   // Spawn PTY at the fitted terminal size (not the default 80x24).
   // createPty returns the immutable tmux pane ID (e.g. %5) which survives
   // session renames. All tmux commands (scroll, copy-mode) target this ID.
-  const paneId = await window.cc.createPty(slot, sessionName, term.cols, term.rows);
+  const paneId = await window.cc.createPty(slot, sessionName, hostId, term.cols, term.rows);
   // Bail if another attachSession took over this slot while we awaited
   if (state.slotGen[slot] !== gen) return;
   if (!paneId) {
@@ -900,9 +931,10 @@ window.cc.onPtyExit(async (slot, exitCode) => {
   // If the tmux session still exists, auto-reconnect instead of detaching.
   // This handles cases where the PTY process dies (crash, signal) but the
   // tmux session and its Claude Code process are still alive.
+  const hostId = state.slots[slot]?.hostId || 'local';
   if (sessionName) {
     try {
-      const sessionAlive = await window.cc.checkSession(sessionName);
+      const sessionAlive = await window.cc.checkSession(sessionName, hostId);
       if (state.slotGen[slot] !== gen) return; // slot was reused during await
       if (sessionAlive) {
         console.warn(`[pty:exit] auto-reconnecting slot=${slot} session=${sessionName}`);
@@ -913,7 +945,7 @@ window.cc.onPtyExit(async (slot, exitCode) => {
         // Small delay to avoid rapid reconnect loops if PTY keeps dying
         setTimeout(() => {
           if (state.slotGen[slot] === gen) {
-            attachSession(slot, sessionName, displayName);
+            attachSession(slot, sessionName, displayName, hostId);
           }
         }, 500);
         return;
@@ -937,10 +969,10 @@ window.cc.onPtyExit(async (slot, exitCode) => {
 
 // ── IPC from Main Process ──────────────────────────────────────
 
-window.cc.onAssignSlot((slot, sessionName) => {
+window.cc.onAssignSlot((slot, sessionName, hostId) => {
   const session = state.sessions.find(s => s.name === sessionName);
   const displayName = session ? session.display_name : sessionName;
-  attachSession(slot, sessionName, displayName);
+  attachSession(slot, sessionName, displayName, hostId || 'local');
 });
 
 window.cc.onAction((action, sessionName, extra) => {
@@ -990,7 +1022,20 @@ async function cleanupDead() {
   fetchSessions();
 }
 
+let newSessionLocation = 'local';
+
 function showNewSessionModal() {
+  // Only show the local/remote toggle when Pentacle is running as a client
+  // (CONFIG has a `remote` block). Host-mode machines hide it entirely.
+  const toggle = document.getElementById('new-session-location');
+  if (toggle) toggle.style.display = IS_CLIENT ? '' : 'none';
+  if (IS_CLIENT) {
+    // Default to remote when client — that's usually what you want
+    newSessionLocation = newSessionLocation || 'remote';
+    document.querySelectorAll('#new-session-location [data-loc]').forEach(b => {
+      b.classList.toggle('active', b.dataset.loc === newSessionLocation);
+    });
+  }
   document.getElementById('new-session-overlay').style.display = 'flex';
 }
 
@@ -1021,6 +1066,7 @@ function sendProgrammaticInput(slot, text) {
 }
 
 async function newSession(agent) {
+  const location = newSessionLocation || 'local';
   hideNewSessionModal();
 
   // Find first empty slot, or default to slot 3 (swap out)
@@ -1029,11 +1075,14 @@ async function newSession(agent) {
 
   // Create a new tmux session with a shell, then launch the agent inside it.
   // The shell survives even if the agent exits immediately (auth, startup error).
-  const sessionName = await window.cc.newSession(agent);
-  if (!sessionName) return;
+  // newSession now returns { sessionName, hostId } or null.
+  const result = await window.cc.newSession(agent, location);
+  if (!result) return;
+  const sessionName = result.sessionName || result; // tolerate legacy string return
+  const hostId = result.hostId || (location === 'remote' ? 'remote' : 'local');
 
   // Attach it to the slot
-  await attachSession(slot, sessionName, sessionName);
+  await attachSession(slot, sessionName, sessionName, hostId);
 
   const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
   if (agentConfig.startupMessage) {
@@ -1326,6 +1375,15 @@ document.getElementById('btn-new').addEventListener('click', showNewSessionModal
 document.getElementById('new-session-claude').addEventListener('click', () => newSession('claude'));
 document.getElementById('new-session-codex').addEventListener('click', () => newSession('codex'));
 document.getElementById('new-session-cancel').addEventListener('click', hideNewSessionModal);
+// Local/remote toggle — only rendered when IS_CLIENT
+document.querySelectorAll('#new-session-location [data-loc]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    newSessionLocation = btn.dataset.loc;
+    document.querySelectorAll('#new-session-location [data-loc]').forEach(b => {
+      b.classList.toggle('active', b === btn);
+    });
+  });
+});
 document.getElementById('new-session-overlay').addEventListener('click', (e) => {
   if (e.target.id === 'new-session-overlay') hideNewSessionModal();
 });
@@ -1966,28 +2024,38 @@ document.addEventListener('wheel', (e) => {
   const now = Date.now();
   if (now - state.wheelThrottles[slot] < 50) return;
   state.wheelThrottles[slot] = now;
-  const paneId = state.slots[slot].paneId;
-  if (!paneId) return; // PTY not yet created or createPty failed
+  if (!state.slots[slot].paneId) return; // PTY not yet created or createPty failed
   const lines = Math.max(1, Math.round(Math.abs(e.deltaY) / 25));
-  window.cc.scrollTmux(paneId, e.deltaY < 0 ? 'up' : 'down', lines);
+  window.cc.scrollTmux(slot, e.deltaY < 0 ? 'up' : 'down', lines);
 }, { passive: false, capture: true });
 
-fetchSessions();
-pollActivity();
-setInterval(fetchSessions, 5000);
-setInterval(pollActivity, 3000);
+// Wait for main-process config (isClient, tunneled apiUrl) before kicking off
+// any network activity — the first fetchSessions() otherwise targets the
+// pre-bootstrap hardcoded URL and fails on clients.
+CFG_READY.then((cfg) => {
+  fetchSessions();
+  pollActivity();
+  setInterval(fetchSessions, 5000);
+  setInterval(pollActivity, 3000);
 
-if (CONFIG.features.usage) {
-  fetchUsage();
-  setInterval(fetchUsage, 30000);
-  fetchCodexUsage();
-  setInterval(fetchCodexUsage, 30000);
-}
-if (CONFIG.features.mic) {
-  fetchMicStatus();
-  setInterval(fetchMicStatus, 1000);
-}
-if (CONFIG.features.botsTab) {
-  fetchBots();
-  setInterval(fetchBots, 10000);
-}
+  if (CONFIG.features.usage) {
+    fetchUsage();
+    setInterval(fetchUsage, 30000);
+    fetchCodexUsage();
+    setInterval(fetchCodexUsage, 30000);
+  }
+  // Mic panel is mac-host only — uses MicServer.app, TCC permissions, etc.
+  // Clients and non-mac machines hide it entirely and skip the status poll.
+  const isMacHost = cfg && cfg.platform === 'darwin' && !cfg.isClient;
+  if (CONFIG.features.mic && isMacHost) {
+    fetchMicStatus();
+    setInterval(fetchMicStatus, 1000);
+  } else {
+    const panel = document.getElementById('mic-panel');
+    if (panel) panel.style.display = 'none';
+  }
+  if (CONFIG.features.botsTab) {
+    fetchBots();
+    setInterval(fetchBots, 10000);
+  }
+});

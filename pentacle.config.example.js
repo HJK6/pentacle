@@ -3,6 +3,21 @@
 // All values have sensible defaults — override only what you need.
 
 module.exports = {
+  // ── Mode ──────────────────────────────────────────────────────
+  // `remote` → client mode. SSHs to the given host for attaching sessions and
+  //            tunnels its API server over SSH (apiPort, default 7778).
+  // No `remote` → host mode. Local node-pty, local API server on 7777.
+  //
+  // `localWsl` (Windows only) → "local" means tmux inside WSL over sshd:2222.
+  //                             Omit on macOS/Linux.
+  //
+  // Tip: for a roaming laptop, set `remote.host` to a Tailscale IP or MagicDNS
+  // hostname so you hit the host over LAN when home and WireGuard when away.
+  //
+  // remote: { host: '100.x.x.x', user: 'bartimaeus', tmux: '/opt/homebrew/bin/tmux',
+  //           apiPort: 7778, port: 22 },
+  // localWsl: { distro: 'Ubuntu', sshPort: 2222, user: 'root', tmux: 'tmux' },
+
   // ── App Identity ──────────────────────────────────────────────
   appName: 'Pentacle',             // Window title, titlebar text, process name
   appId: 'com.pentacle.app',       // macOS bundle identifier
