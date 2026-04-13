@@ -71,10 +71,12 @@ class SessionManager {
       return null;
     }
 
-    // Verify session exists on target host (silent — `has-session` exits non-zero if missing)
+    // Verify session exists on target host (silent — `has-session` exits non-zero if missing).
+    // Use `=<name>` exact-match so no prefix/glob accident — a session named `foo` never
+    // accidentally matches `foo-1776054321` if only the latter exists.
     try {
-      if (host instanceof LocalHost) execSync(`${host.tmuxBin} has-session -t ${JSON.stringify(sessionName)}`, { stdio: 'ignore', env: host.env });
-      else await host.tmux(['has-session', '-t', sessionName]);
+      if (host instanceof LocalHost) execSync(`${host.tmuxBin} has-session -t ${JSON.stringify('=' + sessionName)}`, { stdio: 'ignore', env: host.env });
+      else await host.tmux(['has-session', '-t', '=' + sessionName]);
     } catch {
       console.warn(`[session:create] session not found: ${hostId}:${sessionName}`);
       return null;
@@ -168,10 +170,25 @@ function ensureWslSshd() {
   if (!IS_WIN) return;
   const port = (CONFIG.localWsl && CONFIG.localWsl.sshPort) || 2222;
   const distro = (CONFIG.localWsl && CONFIG.localWsl.distro) || 'Ubuntu';
+  // Two-step: (1) probe whether *something* is accepting TCP on the port;
+  // (2) if yes, try an SSH handshake (banner read) to confirm it's sshd.
+  // Only launch /usr/sbin/sshd if the port is truly free. We never kill the
+  // existing listener — on WSL with systemd, the listener can be owned by
+  // pid=1 (socket-activated sshd) and killing it would destroy the VM.
+  const script = `
+    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":${port}\\b"; then
+      # Port is bound; check it speaks SSH. Banner starts with "SSH-".
+      BANNER=$(timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${port}; head -c 4 <&3 2>/dev/null; exec 3<&-' 2>/dev/null)
+      if [ "$BANNER" = "SSH-" ]; then exit 0; fi
+      # Something else is on the port — don't clobber. Log and bail.
+      echo "[wsl:sshd] port ${port} held by non-SSH process; skipping" >&2
+      exit 0
+    fi
+    /usr/sbin/sshd -p ${port}
+  `.trim();
   try {
-    execFileSync('wsl', ['-d', distro, '--', 'bash', '-lc',
-      `pgrep -f "sshd.*${port}" >/dev/null || /usr/sbin/sshd -p ${port}`],
-      { stdio: 'ignore', timeout: 5000 });
+    execFileSync('wsl', ['-d', distro, '--', 'bash', '-lc', script],
+      { stdio: 'ignore', timeout: 8000 });
   } catch (e) {
     console.warn('[wsl:sshd] failed to ensure sshd:', e.message);
   }
@@ -373,9 +390,9 @@ app.whenReady().then(async () => {
         (async () => {
           try {
             if (host instanceof LocalHost) {
-              execSync(`${host.tmuxBin} has-session -t ${JSON.stringify(s.name)}`, { stdio: 'ignore', env: host.env });
+              execSync(`${host.tmuxBin} has-session -t ${JSON.stringify('=' + s.name)}`, { stdio: 'ignore', env: host.env });
             } else {
-              await host.tmux(['has-session', '-t', s.name]);
+              await host.tmux(['has-session', '-t', '=' + s.name]);
             }
             setTimeout(() => {
               mainWindow.webContents.send('assign-slot', slot, s.name, s.hostId || 'local');
@@ -411,9 +428,9 @@ app.whenReady().then(async () => {
     if (!host) return false;
     try {
       if (host instanceof LocalHost) {
-        execSync(`${host.tmuxBin} has-session -t ${JSON.stringify(sessionName)}`, { stdio: 'ignore', env: host.env });
+        execSync(`${host.tmuxBin} has-session -t ${JSON.stringify('=' + sessionName)}`, { stdio: 'ignore', env: host.env });
       } else {
-        await host.tmux(['has-session', '-t', sessionName]);
+        await host.tmux(['has-session', '-t', '=' + sessionName]);
       }
       return true;
     } catch { return false; }
@@ -423,30 +440,49 @@ app.whenReady().then(async () => {
     const sessionName = `${agent}-${process.pid}-${Date.now()}`;
     const wantRemote = location === 'remote' && IS_CLIENT && hostRemote;
     const targetHost = wantRemote ? hostRemote : hostLocal;
+    const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
+    // Optional per-location override. Useful for WSL-as-root where
+    // `claude --dangerously-skip-permissions` is refused — user can set
+    // `agents.claude.commandLocal = 'claude'` to sidestep the flag.
+    const locationCommand = (location === 'local' && agentConfig.commandLocal) || agentConfig.command;
+
+    // Shell-first fallback creator. Creates an interactive bash session with
+    // no command, then send-keys the agent command. Session survives the
+    // agent exiting (shell stays alive). Used whenever agent-tmux CLI isn't
+    // available on the target host.
+    async function shellFirstCreate(host, workDir, command) {
+      // Use bash as the session's anchor process. -d detaches immediately.
+      // Note: we don't pass -c <workDir> here — some tmux builds error if the
+      // path doesn't exist or contains a `~`. Instead we cd + exec in send-keys.
+      await host.tmux(['new-session', '-d', '-s', sessionName, 'bash', '-l']);
+      // Give bash a beat to become prompt-ready
+      await new Promise(r => setTimeout(r, 200));
+      const cdLine = workDir ? `cd ${JSON.stringify(workDir)} 2>/dev/null; clear; ` : '';
+      // Plain name here — tmux's `=exact` prefix applies to session targets
+      // (has-session, display-message) but not pane targets (send-keys).
+      await host.tmux(['send-keys', '-t', sessionName, `${cdLine}${command}`, 'Enter']);
+    }
 
     try {
-      if (wantRemote && IS_DARWIN) {
-        // Route through the mac-mini's agent-tmux CLI (shell-first pattern;
-        // session survives agent crashes on startup). Since remote is the
-        // mac-mini, the CLI path is known.
-        const workDir = (CONFIG.workingDirectory || '~/agent-workspace').replace(/^~/, `/Users/${CONFIG.remote.user}`);
-        const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
+      if (wantRemote) {
+        const remoteHome = `/Users/${CONFIG.remote.user}`;
+        const workDir = (CONFIG.workingDirectory || '~/agent-workspace').replace(/^~/, remoteHome);
         const command = agentConfig.command;
-        await hostRemote.exec([
-          '/Users/bartimaeus/agent-dashboard/bin/agent-tmux',
-          'create-session', '--name', sessionName, '--workdir', workDir, '--command', command,
-        ]);
-        return { sessionName, hostId: 'remote' };
-      } else if (wantRemote) {
-        // Generic remote new-session without agent-tmux (non-bartimaeus host)
-        const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
-        const workDir = (CONFIG.workingDirectory || '~/agent-workspace');
-        await hostRemote.tmux(['new-session', '-d', '-s', sessionName, '-c', workDir, agentConfig.command]);
+        // Prefer the mac-mini's agent-tmux CLI (shell-first pattern, orchestrator
+        // hooks). Fall back to inline shell-first on any failure.
+        try {
+          await hostRemote.exec([
+            '/Users/bartimaeus/agent-dashboard/bin/agent-tmux',
+            'create-session', '--name', sessionName, '--workdir', workDir, '--command', command,
+          ]);
+        } catch (e) {
+          console.warn(`[new-session] agent-tmux failed (${e.message}); falling back to shell-first`);
+          await shellFirstCreate(hostRemote, workDir, command);
+        }
         return { sessionName, hostId: 'remote' };
       } else if (!IS_CLIENT && IS_DARWIN) {
-        // Host mode on the mac-mini — use the agent-tmux CLI directly.
+        // Host mode on the mac-mini — call agent-tmux CLI locally.
         const workDir = (CONFIG.workingDirectory || '~/agent-workspace').replace(/^~/, process.env.HOME);
-        const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
         let command;
         if (agentConfig.binary) {
           const bin = agentConfig.binary.replace(/^~/, process.env.HOME);
@@ -455,21 +491,26 @@ app.whenReady().then(async () => {
         } else {
           command = agentConfig.command;
         }
-        execFileSync(
-          '/Users/bartimaeus/agent-dashboard/bin/agent-tmux',
-          ['create-session', '--name', sessionName, '--workdir', workDir, '--command', command],
-          { env: hostLocal.env, stdio: ['ignore', 'pipe', 'pipe'] }
-        );
+        try {
+          execFileSync(
+            '/Users/bartimaeus/agent-dashboard/bin/agent-tmux',
+            ['create-session', '--name', sessionName, '--workdir', workDir, '--command', command],
+            { env: hostLocal.env, stdio: ['ignore', 'pipe', 'pipe'] }
+          );
+        } catch (e) {
+          console.warn(`[new-session] agent-tmux local failed (${e.message}); falling back to shell-first`);
+          await shellFirstCreate(hostLocal, workDir, command);
+        }
         return { sessionName, hostId: 'local' };
       } else {
-        // Client local (mac client's own tmux or Windows WSL). Raw tmux new-session.
-        const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
-        const workDir = (CONFIG.workingDirectory || '~');
-        await targetHost.tmux(['new-session', '-d', '-s', sessionName, '-c', workDir, agentConfig.command]);
+        // Client local (macbook's own tmux or Windows WSL). Shell-first —
+        // no agent-tmux CLI available here.
+        const workDir = (CONFIG.workingDirectory || '~').replace(/^~/, process.env.HOME || '~');
+        await shellFirstCreate(targetHost, workDir, locationCommand);
         return { sessionName, hostId: targetHost.id };
       }
     } catch (e) {
-      console.error(`[new-session] agent=${agent} location=${location}:`, e.message);
+      console.error(`[new-session] agent=${agent} location=${location}:`, e.message || e, e.stack || '');
       return null;
     }
   });

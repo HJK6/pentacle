@@ -22,6 +22,9 @@ const CFG_READY = (async () => {
     const cfg = await window.cc.getConfig();
     if (cfg && cfg.apiUrl) API = cfg.apiUrl;
     IS_CLIENT = !!(cfg && cfg.isClient);
+    // Clients default to creating remote sessions (the mac-mini). Users can
+    // still toggle to local for WSL/macbook-local sessions.
+    if (IS_CLIENT) newSessionLocation = 'remote';
     return cfg;
   } catch { return null; }
 })();
@@ -1022,16 +1025,16 @@ async function cleanupDead() {
   fetchSessions();
 }
 
+// Default depends on mode: clients prefer 'remote' (the mac-mini); hosts use 'local'.
+// CFG_READY flips this to 'remote' once we know IS_CLIENT.
 let newSessionLocation = 'local';
 
 function showNewSessionModal() {
   // Only show the local/remote toggle when Pentacle is running as a client
   // (CONFIG has a `remote` block). Host-mode machines hide it entirely.
   const toggle = document.getElementById('new-session-location');
-  if (toggle) toggle.style.display = IS_CLIENT ? '' : 'none';
+  if (toggle) toggle.style.display = IS_CLIENT ? 'flex' : 'none';
   if (IS_CLIENT) {
-    // Default to remote when client — that's usually what you want
-    newSessionLocation = newSessionLocation || 'remote';
     document.querySelectorAll('#new-session-location [data-loc]').forEach(b => {
       b.classList.toggle('active', b.dataset.loc === newSessionLocation);
     });

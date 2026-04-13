@@ -68,6 +68,8 @@ class LocalHost {
   async attach(sessionName, cols, rows) {
     let paneId;
     try {
+      // display-message takes target-pane, not target-session — `=exact` prefix
+      // silently yields empty output there, so use bare session name.
       paneId = execSync(`${this.tmuxBin} display-message -t ${JSON.stringify(sessionName)} -p "#{pane_id}"`, {
         encoding: 'utf8', env: this.env, timeout: 3000,
       }).trim();
@@ -202,6 +204,8 @@ class Ssh2Host {
 
   async attach(sessionName, cols, rows) {
     let paneId;
+    // display-message takes target-pane — bare session name resolves to its
+    // active pane. `=exact` works on target-session only (has-session, etc).
     try { paneId = (await this.tmux(['display-message', '-t', sessionName, '-p', '#{pane_id}'])).trim(); }
     catch { return null; }
 
