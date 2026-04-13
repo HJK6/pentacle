@@ -32,6 +32,25 @@ const IS_WIN = process.platform === 'win32';
 process.env.LANG = 'en_US.UTF-8';
 process.env.LC_ALL = 'en_US.UTF-8';
 
+// ── WSL IP auto-detect (Windows, first boot only) ──────────────
+// WSL2 is supposed to forward `localhost:<port>` to the VM, but on many
+// machines that silently breaks after a network change. Falling back to
+// WSL's actual eth0 IP avoids the issue entirely. We only probe if the
+// user hasn't pinned `localWsl.host` explicitly.
+if (IS_WIN && CONFIG.localWsl && !CONFIG.localWsl.host) {
+  try {
+    // `hostname -I` returns the primary eth0 IPv4 as the first word — simpler
+    // than awk-parsing `ip -o addr show` and immune to shell-escape gotchas.
+    const raw = execFileSync('wsl', ['-d', CONFIG.localWsl.distro || 'Ubuntu', '--', 'hostname', '-I'],
+      { encoding: 'utf8', timeout: 3000 });
+    const ip = (raw || '').split(/\s+/).find(w => /^\d+\.\d+\.\d+\.\d+$/.test(w));
+    if (ip) {
+      CONFIG.localWsl.host = ip;
+      console.log(`[wsl] auto-detected IP: ${ip}`);
+    }
+  } catch {}
+}
+
 // ── Host registry ──────────────────────────────────────────────
 // Built once at startup from CONFIG. `remote` block present → client mode.
 // `localWsl` block on Windows → WSL is the "local" host (Ssh2Host to :2222).
@@ -170,21 +189,18 @@ function ensureWslSshd() {
   if (!IS_WIN) return;
   const port = (CONFIG.localWsl && CONFIG.localWsl.sshPort) || 2222;
   const distro = (CONFIG.localWsl && CONFIG.localWsl.distro) || 'Ubuntu';
-  // Two-step: (1) probe whether *something* is accepting TCP on the port;
-  // (2) if yes, try an SSH handshake (banner read) to confirm it's sshd.
-  // Only launch /usr/sbin/sshd if the port is truly free. We never kill the
-  // existing listener — on WSL with systemd, the listener can be owned by
-  // pid=1 (socket-activated sshd) and killing it would destroy the VM.
+  // Launch a standalone sshd bound to :port. If one is already listening, kill
+  // it first to guarantee it's a fresh static daemon (not systemd's socket-
+  // activated one, which drops idle → causes ECONNREFUSED on reconnect after
+  // tmux commands complete). We only kill PIDs owned by `sshd` — systemd's
+  // listener (pid=1) is always skipped.
   const script = `
-    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":${port}\\b"; then
-      # Port is bound; check it speaks SSH. Banner starts with "SSH-".
-      BANNER=$(timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${port}; head -c 4 <&3 2>/dev/null; exec 3<&-' 2>/dev/null)
-      if [ "$BANNER" = "SSH-" ]; then exit 0; fi
-      # Something else is on the port — don't clobber. Log and bail.
-      echo "[wsl:sshd] port ${port} held by non-SSH process; skipping" >&2
-      exit 0
-    fi
-    /usr/sbin/sshd -p ${port}
+    systemctl disable --now ssh.socket ssh.service 2>/dev/null || true
+    pkill -x sshd 2>/dev/null || true
+    sleep 0.4
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":${port}\\b" && exit 0
+    mkdir -p /run/sshd
+    /usr/sbin/sshd -p ${port} -f /etc/ssh/sshd_config 2>&1 | tee /tmp/pentacle-sshd.log || true
   `.trim();
   try {
     execFileSync('wsl', ['-d', distro, '--', 'bash', '-lc', script],

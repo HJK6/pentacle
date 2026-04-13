@@ -38,7 +38,7 @@ class LocalHost {
 
   tmuxSync(args, opts = {}) {
     // args: array of argv. Use execFileSync via execSync string for consistency.
-    const cmd = [this.tmuxBin, ...args.map(a => /^[A-Za-z0-9._%:@/+=,-]+$/.test(String(a)) ? a : JSON.stringify(a))].join(' ');
+    const cmd = [this.tmuxBin, ...args.map(a => /^[A-Za-z0-9._%:@/+,-]+$/.test(String(a)) ? a : JSON.stringify(a))].join(' ');
     return execSync(cmd, { encoding: 'utf8', timeout: 3000, env: this.env, ...opts });
   }
 
@@ -152,7 +152,7 @@ class Ssh2Host {
   _buildCmd(args) {
     const quoted = args.map((a) => {
       const s = String(a);
-      if (/^[A-Za-z0-9._%:@/+=,-]+$/.test(s)) return s;
+      if (/^[A-Za-z0-9._%:@/+,-]+$/.test(s)) return s;
       return "'" + s.replace(/'/g, "'\\''") + "'";
     }).join(' ');
     return this._envPrefix + this.tmuxBin + ' ' + quoted;
@@ -185,7 +185,7 @@ class Ssh2Host {
   // Non-tmux remote exec (agent-tmux CLI, locale probes, etc.)
   async exec(cmdLine, { lane = 'ctrl' } = {}) {
     const line = Array.isArray(cmdLine)
-      ? cmdLine.map(a => /^[A-Za-z0-9._%:@/+=,-]+$/.test(String(a)) ? a : "'" + String(a).replace(/'/g, "'\\''") + "'").join(' ')
+      ? cmdLine.map(a => /^[A-Za-z0-9._%:@/+,-]+$/.test(String(a)) ? a : "'" + String(a).replace(/'/g, "'\\''") + "'").join(' ')
       : cmdLine;
     const conn = await this._lane(lane);
     return new Promise((resolve, reject) => {
@@ -289,7 +289,9 @@ function buildHostRegistry(CONFIG, { platform } = { platform: process.platform }
     const wsl = (CONFIG && CONFIG.localWsl) || {};
     hosts.local = new Ssh2Host({
       id: 'local',
-      host: 'localhost',
+      // Prefer explicit host from config, else auto-detected eth0 IP (set in
+      // main.js before we're called), else fall back to localhost.
+      host: wsl.host || 'localhost',
       port: wsl.sshPort || 2222,
       user: wsl.user || 'root',
       tmuxBin: wsl.tmux || 'tmux',
