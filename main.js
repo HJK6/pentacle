@@ -306,6 +306,25 @@ async function probeRemoteTmuxUtf8() {
   }
 }
 
+// Ensure `window-size latest` on every tmux server we talk to. Without this,
+// tmux sizes each window to the SMALLEST attached client — so when a Windows
+// or macbook client attaches to a small slot, the mac-mini's own Pentacle
+// view shrinks to match. `latest` makes each window track the most-recently-
+// active client instead, so whoever is typing gets their correct size and
+// the idle client sees a slight reflow until the active one steps away.
+function ensureWindowSizeLatest() {
+  for (const host of Object.values(HOSTS)) {
+    try {
+      if (host instanceof LocalHost) {
+        // Sync for host mode — cheap, one call at startup.
+        execFile(host.tmuxBin, ['set-option', '-g', 'window-size', 'latest'], { env: host.env }, () => {});
+      } else {
+        host.tmuxSilent(['set-option', '-g', 'window-size', 'latest']);
+      }
+    } catch {}
+  }
+}
+
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
@@ -317,6 +336,7 @@ app.whenReady().then(async () => {
   await ensureApiServer();
   ensureLocalTmuxUtf8();
   probeRemoteTmuxUtf8();  // fire-and-forget; just logs
+  ensureWindowSizeLatest();  // stop multi-client size collapse
 
   mainWindow = new BrowserWindow({
     width: 1600,
