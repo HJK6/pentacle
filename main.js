@@ -840,6 +840,29 @@ app.whenReady().then(async () => {
     return panes;
   });
 
+  // Kill a tmux session on a specific host. Used by the trash flow so that
+  // trashing actually removes the session from tmux (not just flips a
+  // DynamoDB flag) — otherwise the session lives on forever, slot-state
+  // rehydration finds it on the next launch, and it keeps reappearing on
+  // every machine that has it pinned to a slot.
+  ipcMain.handle('tmux:kill-session', async (_, hostId, sessionName) => {
+    const host = HOSTS[hostId] || hostLocal;
+    if (!host || !sessionName) return false;
+    try {
+      if (host instanceof LocalHost) {
+        execSync(`${host.tmuxBin} kill-session -t ${JSON.stringify('=' + sessionName)}`,
+          { stdio: 'ignore', timeout: 3000, env: host.env });
+      } else {
+        await host.tmux(['kill-session', '-t', '=' + sessionName]);
+      }
+      return true;
+    } catch {
+      // Session already gone, or tmux server down — either way the desired
+      // end-state is reached.
+      return false;
+    }
+  });
+
   // Enumerate tmux sessions on every registered host. The Python API only
   // serves one host (remote in client mode, local in host mode), so sessions
   // on the "other" host (e.g. WSL local when Pentacle runs as a Windows

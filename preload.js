@@ -46,6 +46,11 @@ window.cc = {
   // don't run the Python API (e.g. WSL local in client mode).
   listSessionsByHost: () => ipcRenderer.invoke('tmux:list-sessions-by-host'),
 
+  // Kill a tmux session directly on a specific host (bypasses the Python API).
+  // Used by the trash flow so trashing on any machine actually removes the
+  // session from tmux, not just from DynamoDB.
+  killTmuxSession: (hostId, sessionName) => ipcRenderer.invoke('tmux:kill-session', hostId, sessionName),
+
   // Image paste
   saveImage: (base64Data) => ipcRenderer.invoke('pty:save-image', base64Data),
 

@@ -1089,13 +1089,33 @@ window.cc.onAction((action, sessionName, extra) => {
 // ── Actions ────────────────────────────────────────────────────
 
 async function trashSession(name) {
-  await api('POST', '/api/trash', { session: name });
-  // Detach if in a slot
+  const apiHostId = IS_CLIENT ? 'remote' : 'local';
+  const hostId = state.sessionHosts[name] || apiHostId;
+
+  // Detach from any local slot first so the UI doesn't flash "Session ended"
+  // when the tmux kill below closes the SSH stream.
   for (let i = 0; i < 4; i++) {
     if (state.slots[i] && state.slots[i].name === name) {
       detachSlot(i);
     }
   }
+
+  // DynamoDB-backed trash record (keeps history, surfaces the entry in the
+  // Trash drawer). Only the API host has an AgentTracker entry for this
+  // session, so skip this call when the session lives on a non-API host.
+  if (hostId === apiHostId) {
+    try { await api('POST', '/api/trash', { session: name }); } catch {}
+  }
+
+  // Actually kill the tmux session. The Python API's trash handler only
+  // updates DynamoDB and leaves tmux alone, which is how sessions kept
+  // reappearing after being "trashed". Killing it here makes the trash
+  // action propagate across machines: any Pentacle elsewhere attached to
+  // this session sees its SSH stream close and clears its slot naturally,
+  // and slot-state rehydration on next launch skips it because has-session
+  // fails.
+  try { await window.cc.killTmuxSession(hostId, name); } catch {}
+
   fetchSessions();
 }
 
