@@ -787,7 +787,12 @@ const MAC_MINI_HOST_PREFIX = 'Bartimaeuss-Mac-mini';
 const _host = (window.HOST && window.HOST.hostname) || '';
 const _isClient = !!(window.HOST && window.HOST.isClient);
 
-if (!_isClient && _host.startsWith(MAC_MINI_HOST_PREFIX)) {
+// Bartimaeus-only: this is Bart's foreclosure pipeline — do not show on
+// Amaterasu, Abra, or any client-mode host. Gate is both isClient + host prefix
+// so a stale pentacle.config.js without `remote` still can't accidentally flip
+// it on from another machine.
+const _showForeclosure = !_isClient && _host.startsWith(MAC_MINI_HOST_PREFIX);
+if (_showForeclosure) {
   window.DASHBOARDS.push({
     id: 'foreclosure-pipeline',
     name: 'Foreclosure Pipeline',

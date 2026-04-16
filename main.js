@@ -5,6 +5,8 @@ const fs = require('fs');
 const os = require('os');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
+const { S3Client, ListObjectsV2Command, GetObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
+const { SQSClient, GetQueueAttributesCommand } = require('@aws-sdk/client-sqs');
 const CONFIG = require('./pentacle.config.js');
 const { LocalHost, Ssh2Host, buildHostRegistry } = require('./hosts.js');
 
@@ -17,6 +19,14 @@ const _ddb = DynamoDBDocumentClient.from(_ddbRaw);
 const _DASHBOARD_TABLE = '0dte-snapshots';
 let _tradersCache = { ts: 0, traders: [] };
 const _TRADERS_CACHE_TTL_MS = 60_000;
+
+// ── S3 + SQS clients for the Amaterasu OCR dashboard ─────────────────────────
+// Platform-agnostic — reads AWS creds from the standard chain. Works on Bart,
+// Amaterasu (Windows), Abra (mac) without any hardcoded Python paths.
+const _s3 = new S3Client({ region: 'us-east-1' });
+const _sqs = new SQSClient({ region: 'us-east-1' });
+const _AMATERASU_BUCKET = 'amaterasu-botcomm-data';
+const _AMATERASU_QUEUE = 'https://sqs.us-east-1.amazonaws.com/841672795586/amaterasu-inbox';
 
 app.setName(CONFIG.appName);
 
@@ -960,6 +970,137 @@ app.whenReady().then(async () => {
       return { traders: list, cached: false };
     } catch (e) {
       return { error: `dynamodb scan failed: ${e.message || e}`, traders: _tradersCache.traders };
+    }
+  });
+
+  ipcMain.handle('dashboard:amaterasu-ocr-stats', async () => {
+    // Platform-agnostic: uses AWS SDK directly. Runs on Bart, Amaterasu,
+    // or any client with AWS creds. Paginates the batches/ prefix, summarizes
+    // per-batch progress, and returns a JSON shape consumed by
+    // renderer/dashboards/amaterasu.js.
+    try {
+      // SQS depth
+      const qa = await _sqs.send(new GetQueueAttributesCommand({
+        QueueUrl: _AMATERASU_QUEUE,
+        AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'],
+      }));
+      const sqsStats = {
+        visible: Number(qa.Attributes?.ApproximateNumberOfMessages || 0),
+        in_flight: Number(qa.Attributes?.ApproximateNumberOfMessagesNotVisible || 0),
+      };
+
+      // List all batch keys (paginated)
+      const batchMap = new Map();
+      let continuationToken;
+      do {
+        const lr = await _s3.send(new ListObjectsV2Command({
+          Bucket: _AMATERASU_BUCKET,
+          Prefix: 'batches/',
+          ContinuationToken: continuationToken,
+        }));
+        for (const obj of (lr.Contents || [])) {
+          const parts = obj.Key.split('/');
+          if (parts.length < 3) continue;
+          const [, friend, batchId] = parts;
+          const k = `${friend}/${batchId}`;
+          if (!batchMap.has(k)) batchMap.set(k, { friend_id: friend, batch_id: batchId, objs: [] });
+          batchMap.get(k).objs.push(obj);
+        }
+        continuationToken = lr.IsTruncated ? lr.NextContinuationToken : undefined;
+      } while (continuationToken);
+
+      const readJson = async (key) => {
+        try {
+          const o = await _s3.send(new GetObjectCommand({ Bucket: _AMATERASU_BUCKET, Key: key }));
+          const chunks = [];
+          for await (const c of o.Body) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
+          return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch { return null; }
+      };
+
+      const active = [];
+      const completed = [];
+      const now = Date.now();
+      const cutoff24h = now - 24 * 3600 * 1000;
+      let completed24h = 0;
+      let docs24h = 0;
+
+      for (const b of batchMap.values()) {
+        let hasRequest = false, hasResponse = false, requestTs = null, responseTs = null;
+        const docOutputs = [];
+        for (const o of b.objs) {
+          if (o.Key.endsWith('/response.json')) { hasResponse = true; responseTs = o.LastModified; }
+          else if (o.Key.endsWith('/request.json')) { hasRequest = true; requestTs = o.LastModified; }
+          else if (o.Key.includes('/docs/') && o.Key.endsWith('/output.json')) docOutputs.push(o);
+        }
+        docOutputs.sort((a, x) => a.LastModified - x.LastModified);
+        const summary = {
+          friend_id: b.friend_id, batch_id: b.batch_id,
+          has_request: hasRequest, has_response: hasResponse,
+          docs_done: docOutputs.length,
+          started_at: requestTs?.toISOString() || null,
+          first_doc_at: docOutputs[0]?.LastModified?.toISOString() || null,
+          last_doc_at: docOutputs.at(-1)?.LastModified?.toISOString() || null,
+          completed_at: responseTs?.toISOString() || null,
+        };
+        if (hasResponse) {
+          completed.push(summary);
+          if (responseTs && responseTs.getTime() >= cutoff24h) {
+            completed24h += 1;
+            docs24h += summary.docs_done;
+          }
+        } else {
+          active.push(summary);
+        }
+      }
+
+      // Enrich active batches with docs_total (from request.json) + error count.
+      for (const b of active) {
+        const req = await readJson(`batches/${b.friend_id}/${b.batch_id}/request.json`);
+        b.docs_total = Array.isArray(req?.docs) ? req.docs.length : null;
+        // Error count: scan per-doc output.json statuses (small JSON files).
+        let errCount = 0;
+        const batchKey = `${b.friend_id}/${b.batch_id}`;
+        const entry = batchMap.get(batchKey);
+        if (entry) {
+          for (const o of entry.objs) {
+            if (o.Key.includes('/docs/') && o.Key.endsWith('/output.json')) {
+              const d = await readJson(o.Key);
+              if (d && d.status === 'error') errCount += 1;
+            }
+          }
+        }
+        b.docs_error = errCount;
+      }
+
+      // Enrich completed batches with response.json stats.
+      for (const b of completed) {
+        const resp = await readJson(`batches/${b.friend_id}/${b.batch_id}/response.json`);
+        if (resp) {
+          b.count = resp.count || 0;
+          b.status = resp.status || '';
+          b.model = resp.model || '';
+          b.error_count = (resp.results || []).filter(r => r?.status === 'error').length;
+          if (b.completed_at) {
+            const end = new Date(b.completed_at).getTime();
+            const start = new Date(b.first_doc_at || b.started_at).getTime();
+            if (!isNaN(end) && !isNaN(start)) b.elapsed_sec = Math.floor((end - start) / 1000);
+          }
+        } else { b.count = b.docs_done; b.status = 'unknown'; }
+      }
+
+      active.sort((a, x) => String(x.first_doc_at || x.started_at || '').localeCompare(String(a.first_doc_at || a.started_at || '')));
+      completed.sort((a, x) => String(x.completed_at || '').localeCompare(String(a.completed_at || '')));
+
+      return {
+        sqs: sqsStats,
+        active_batches: active.slice(0, 20),
+        recent_completed: completed.slice(0, 20),
+        totals: { active_count: active.length, completed_24h: completed24h, docs_processed_24h: docs24h },
+        generated_at: new Date().toISOString(),
+      };
+    } catch (e) {
+      return { error: `amaterasu-ocr-stats failed: ${e.message || e}` };
     }
   });
 

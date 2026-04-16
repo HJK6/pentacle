@@ -78,6 +78,7 @@ window.cc = {
   getPipelineStats: (batch) => ipcRenderer.invoke('dashboard:pipeline-stats', batch),
   get0dteStats: (traderId) => ipcRenderer.invoke('dashboard:0dte-stats', traderId),
   list0dteTraders: () => ipcRenderer.invoke('dashboard:0dte-list-traders'),
+  getAmaterasuOcrStats: () => ipcRenderer.invoke('dashboard:amaterasu-ocr-stats'),
 
   // Context menu
   showContextMenu: (sessionName, displayName, hostId) => {
