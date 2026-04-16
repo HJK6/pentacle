@@ -42,6 +42,10 @@ window.cc = {
   detectActivity: () => ipcRenderer.invoke('pty:detect-activity'),
   captureAllPanes: () => ipcRenderer.invoke('pty:capture-all-panes'),
 
+  // Per-host tmux session list — used to surface sessions from hosts that
+  // don't run the Python API (e.g. WSL local in client mode).
+  listSessionsByHost: () => ipcRenderer.invoke('tmux:list-sessions-by-host'),
+
   // Image paste
   saveImage: (base64Data) => ipcRenderer.invoke('pty:save-image', base64Data),
 

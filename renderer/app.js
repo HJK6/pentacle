@@ -77,12 +77,44 @@ async function api(method, path, body) {
 // ── Session Fetching ───────────────────────────────────────────
 
 async function fetchSessions() {
-  const data = await api('GET', '/api/sessions');
-  if (data) {
-    state.sessions = data.active || [];
-    state.trashed = data.trashed || [];
-    renderSidebar();
+  // The Python API only covers one host (remote in client mode, local in host
+  // mode). On clients the other host (WSL local) is enumerated via tmux so
+  // its sessions show up alongside the remote ones.
+  const apiHostId = IS_CLIENT ? 'remote' : 'local';
+  const [data, byHost] = await Promise.all([
+    api('GET', '/api/sessions'),
+    window.cc.listSessionsByHost ? window.cc.listSessionsByHost().catch(() => ({})) : Promise.resolve({}),
+  ]);
+
+  const apiActive = (data && data.active) || [];
+  const seen = new Set();
+  for (const s of apiActive) {
+    s.hostId = apiHostId;
+    state.sessionHosts[s.name] = apiHostId;
+    seen.add(s.name);
   }
+
+  const extras = [];
+  for (const [hostId, sessions] of Object.entries(byHost || {})) {
+    if (hostId === apiHostId) continue;
+    for (const s of sessions) {
+      if (seen.has(s.name)) continue; // API metadata wins on collision
+      state.sessionHosts[s.name] = hostId;
+      extras.push({
+        name: s.name,
+        display_name: s.name,
+        title: '',
+        preview: '',
+        attached: !!s.attached,
+        type: 'claude',
+        hostId,
+      });
+    }
+  }
+
+  state.sessions = [...apiActive, ...extras];
+  state.trashed = (data && data.trashed) || [];
+  renderSidebar();
 }
 
 // ── Sidebar Rendering ──────────────────────────────────────────
@@ -109,6 +141,12 @@ function getSourceForSession(sessionName) {
   if (!hostId) return null;
   const names = CONFIG.hostNames || {};
   return names[hostId] || hostId;
+}
+
+function getSourceColorForSession(sessionName) {
+  const hostId = state.sessionHosts[sessionName];
+  const colors = CONFIG.hostColors || {};
+  return colors[hostId] || 'green';
 }
 
 function extractSummary(paneContent) {
@@ -230,7 +268,7 @@ function updateActivityStrips() {
           const source = getSourceForSession(sessionName);
           if (source) {
             const tag = document.createElement('span');
-            tag.className = 'cell-source-tag';
+            tag.className = `cell-source-tag color-${getSourceColorForSession(sessionName)}`;
             tag.textContent = source;
             const label = header.querySelector('.cell-label');
             if (label) label.after(tag);
@@ -269,7 +307,8 @@ function renderSidebar() {
         ? `<span class="activity-indicator waiting" title="Waiting"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5a.5.5 0 0 0-1 0V8a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 7.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg></span>`
         : '';
     const source = CONFIG.features.sourceTags ? getSourceForSession(s.name) : null;
-    const sourceTag = source ? `<span class="s-source-tag">${esc(source)}</span>` : '';
+    const sourceColor = source ? getSourceColorForSession(s.name) : 'green';
+    const sourceTag = source ? `<span class="s-source-tag color-${sourceColor}">${esc(source)}</span>` : '';
 
     return `<div class="session-item ${isActive ? 'active' : ''}"
                  data-name="${esc(s.name)}"
@@ -309,17 +348,22 @@ function renderSidebar() {
   list.innerHTML = html;
 
   // Click handlers
+  const defaultHostId = IS_CLIENT ? 'remote' : 'local';
   list.querySelectorAll('.session-item').forEach(el => {
     el.addEventListener('click', () => {
       const name = el.dataset.name;
       const display = el.dataset.display;
-      // In client mode, all API-sourced sessions live on the remote host.
-      // In host mode, they live on the local host.
-      assignToSlot(name, display, IS_CLIENT ? 'remote' : 'local');
+      // Use the session's tracked host (set by fetchSessions / activity poll)
+      // so sessions from non-API hosts (e.g. WSL local in client mode) attach
+      // to the correct tmux server.
+      const hostId = state.sessionHosts[name] || defaultHostId;
+      assignToSlot(name, display, hostId);
     });
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      window.cc.showContextMenu(el.dataset.name, el.dataset.display, IS_CLIENT ? 'remote' : 'local');
+      const name = el.dataset.name;
+      const hostId = state.sessionHosts[name] || defaultHostId;
+      window.cc.showContextMenu(name, el.dataset.display, hostId);
     });
   });
 
@@ -667,7 +711,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
     const source = getSourceForSession(sessionName);
     if (source) {
       const tag = document.createElement('span');
-      tag.className = 'cell-source-tag';
+      tag.className = `cell-source-tag color-${getSourceColorForSession(sessionName)}`;
       tag.textContent = source;
       label.after(tag);
     }

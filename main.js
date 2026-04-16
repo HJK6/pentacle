@@ -840,6 +840,34 @@ app.whenReady().then(async () => {
     return panes;
   });
 
+  // Enumerate tmux sessions on every registered host. The Python API only
+  // serves one host (remote in client mode, local in host mode), so sessions
+  // on the "other" host (e.g. WSL local when Pentacle runs as a Windows
+  // client) are invisible to the sidebar unless we list them here directly.
+  ipcMain.handle('tmux:list-sessions-by-host', async () => {
+    const fmt = '#{session_name}|#{session_attached}|#{session_created}';
+    const out = {};
+    for (const [id, host] of Object.entries(HOSTS)) {
+      try {
+        let raw;
+        if (host instanceof LocalHost) {
+          raw = execSync(`${host.tmuxBin} list-sessions -F ${JSON.stringify(fmt)}`,
+            { encoding: 'utf8', timeout: 3000, env: host.env });
+        } else {
+          raw = await host.tmux(['list-sessions', '-F', fmt], { lane: 'bg' });
+        }
+        out[id] = raw.trim().split('\n').filter(Boolean).map((line) => {
+          const [name, attached, created] = line.split('|');
+          return { name, attached: attached === '1', created: Number(created) || 0 };
+        });
+      } catch {
+        // `tmux list-sessions` exits non-zero when no server is running — treat as empty.
+        out[id] = [];
+      }
+    }
+    return out;
+  });
+
   // ── Dashboards ──────────────────────────────────────────────
   ipcMain.handle('dashboard:pipeline-stats', async (_evt, batch) => {
     // Paths are hardcoded to macOS bartimaeus home → needs mac host.

@@ -1036,6 +1036,33 @@ body {
 .sidebar-group-label.waiting { color: var(--yellow); }
 .sidebar-group-label.idle { color: var(--fg-dim); }
 
+/* ── Source Tags ──────────────────────────────── */
+
+.s-source-tag,
+.cell-source-tag {
+  display: inline-block;
+  font-size: 8px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--green);
+  background: rgba(86,211,100,0.12);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.cell-source-tag {
+  font-size: 9px;
+  margin-left: 6px;
+}
+.s-source-tag.color-red,    .cell-source-tag.color-red    { color: var(--red);    background: rgba(244,112,103,0.12); }
+.s-source-tag.color-purple, .cell-source-tag.color-purple { color: var(--purple); background: rgba(167,139,250,0.12); }
+.s-source-tag.color-yellow, .cell-source-tag.color-yellow { color: var(--yellow); background: rgba(212,167,44,0.12); }
+.s-source-tag.color-green,  .cell-source-tag.color-green  { color: var(--green);  background: rgba(86,211,100,0.12); }
+.s-source-tag.color-blue,   .cell-source-tag.color-blue   { color: var(--blue);   background: rgba(63,185,80,0.12); }
+.s-source-tag.color-orange, .cell-source-tag.color-orange { color: #f0883e;       background: rgba(240,136,62,0.12); }
+
 /* ── Session Summary in Sidebar ───────────────── */
 
 .session-item .s-summary {

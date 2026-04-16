@@ -159,6 +159,13 @@ module.exports = {
   //   remote: 'RemoteHost',
   // },
 
+  // Source tag colors per host ID. Valid: red, purple, yellow, green, blue, orange.
+  // Unknown hosts fall back to green.
+  // hostColors: {
+  //   local: 'red',
+  //   remote: 'purple',
+  // },
+
   // Mic server URL (only used if features.mic is true)
   micServerUrl: 'http://127.0.0.1:7780',
 
