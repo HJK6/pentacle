@@ -609,6 +609,13 @@ app.whenReady().then(async () => {
       // Plain name here — tmux's `=exact` prefix applies to session targets
       // (has-session, display-message) but not pane targets (send-keys).
       await host.tmux(['send-keys', '-t', sessionName, `${envPrelude}${cdLine}${command}`, 'Enter']);
+      // Claude/Codex show startup trust prompts (external imports, directory trust)
+      // that block the session. Auto-accept by sending Enter after the agent has
+      // time to render the prompt. Harmless if already dismissed — Enter on the
+      // ❯ input line is a no-op.
+      setTimeout(async () => {
+        try { await host.tmux(['send-keys', '-t', sessionName, '', 'Enter']); } catch {}
+      }, 3000);
     }
 
     try {
