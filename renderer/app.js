@@ -47,6 +47,7 @@ const state = {
   activityStates: {}, // sessionName:windowIndex -> 'working' | 'waiting' | 'idle'
   sessionSummaries: {}, // sessionName:windowIndex -> one-line summary string
   autoNames: {}, // sessionName -> auto-detected label (e.g. "pentacle refactor")
+  sessionHosts: {}, // sessionName -> hostId (e.g. 'local', 'remote')
   // Dashboard state — all mutable dashboard state lives here
   currentView: 'chats',            // 'chats' | 'dashboards'
   selectedDashboard: null,          // dashboard id string
@@ -101,6 +102,13 @@ function getActivityForSession(sessionName) {
     if (key.startsWith(sessionName + ':')) return val;
   }
   return 'idle';
+}
+
+function getSourceForSession(sessionName) {
+  const hostId = state.sessionHosts[sessionName];
+  if (!hostId) return null;
+  const names = CONFIG.hostNames || {};
+  return names[hostId] || hostId;
 }
 
 function extractSummary(paneContent) {
@@ -163,7 +171,15 @@ async function pollActivity() {
       const out = {};
       for (const [k, v] of Object.entries(obj)) {
         const i = k.indexOf(':');
-        out[i >= 0 ? k.slice(i + 1) : k] = v;
+        if (i >= 0) {
+          const hostId = k.slice(0, i);
+          const rest = k.slice(i + 1);
+          const sessionName = rest.split(':')[0];
+          state.sessionHosts[sessionName] = hostId;
+          out[rest] = v;
+        } else {
+          out[k] = v;
+        }
       }
       return out;
     };
@@ -207,6 +223,20 @@ function updateActivityStrips() {
         const label = document.querySelector(`#header-${i} .cell-label`);
         if (label) label.textContent = autoName;
       }
+      // Refresh source tag on slot header (may appear after activity poll)
+      if (CONFIG.features.sourceTags) {
+        const header = document.getElementById(`header-${i}`);
+        if (header && !header.querySelector('.cell-source-tag')) {
+          const source = getSourceForSession(sessionName);
+          if (source) {
+            const tag = document.createElement('span');
+            tag.className = 'cell-source-tag';
+            tag.textContent = source;
+            const label = header.querySelector('.cell-label');
+            if (label) label.after(tag);
+          }
+        }
+      }
     }
   }
 }
@@ -234,10 +264,12 @@ function renderSidebar() {
     const summary = summaryKey ? state.sessionSummaries[summaryKey] : '';
 
     const activityBadge = activity === 'working'
-      ? `<span class="activity-indicator working"><span class="activity-spinner"></span>Working</span>`
+      ? `<span class="activity-indicator working" title="Working"><span class="activity-spinner"></span></span>`
       : activity === 'waiting'
-        ? `<span class="activity-indicator waiting">Waiting</span>`
+        ? `<span class="activity-indicator waiting" title="Waiting"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5a.5.5 0 0 0-1 0V8a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 7.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg></span>`
         : '';
+    const source = CONFIG.features.sourceTags ? getSourceForSession(s.name) : null;
+    const sourceTag = source ? `<span class="s-source-tag">${esc(source)}</span>` : '';
 
     return `<div class="session-item ${isActive ? 'active' : ''}"
                  data-name="${esc(s.name)}"
@@ -246,6 +278,7 @@ function renderSidebar() {
         <span class="s-dot ${dotClass}"></span>
         <span class="s-name">${esc(displayName)}</span>
         ${activityBadge}
+        ${sourceTag}
         ${isActive ? `<span class="s-slot-badge">${slotIdx + 1}</span>` : ''}
         <button class="s-edit-btn" data-edit-name="${esc(s.name)}" data-edit-display="${esc(displayName)}" title="Rename"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5L13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175l-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg></button>
         <button class="s-trash-btn" data-trash-name="${esc(s.name)}" title="Move to trash"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg></button>
@@ -628,6 +661,18 @@ async function attachSession(slot, sessionName, displayName, hostId) {
   label.classList.add('has-session');
   document.getElementById(`cell-${slot}`).classList.add('occupied');
 
+  // Source tag on slot header
+  header.querySelector('.cell-source-tag')?.remove();
+  if (CONFIG.features.sourceTags) {
+    const source = getSourceForSession(sessionName);
+    if (source) {
+      const tag = document.createElement('span');
+      tag.className = 'cell-source-tag';
+      tag.textContent = source;
+      label.after(tag);
+    }
+  }
+
   // Create terminal
   const container = document.getElementById(`term-${slot}`);
   container.innerHTML = '';
@@ -806,6 +851,7 @@ function detachSlot(slot) {
   label.textContent = `Slot ${slot + 1}`;
   label.classList.remove('has-session');
   label.style.color = '';
+  header.querySelector('.cell-source-tag')?.remove();
   document.getElementById(`cell-${slot}`).classList.remove('occupied');
 
   // Clear state before async/throwing operations
@@ -1093,6 +1139,7 @@ async function newSession(agent) {
   if (!result) return;
   const sessionName = result.sessionName || result; // tolerate legacy string return
   const hostId = result.hostId || (location === 'remote' ? 'remote' : 'local');
+  state.sessionHosts[sessionName] = hostId;
 
   // Attach it to the slot
   await attachSession(slot, sessionName, sessionName, hostId);
@@ -2057,10 +2104,9 @@ CFG_READY.then((cfg) => {
     fetchCodexUsage();
     setInterval(fetchCodexUsage, 30000);
   }
-  // Mic panel is mac-host only — uses MicServer.app, TCC permissions, etc.
-  // Clients and non-mac machines hide it entirely and skip the status poll.
-  const isMacHost = cfg && cfg.platform === 'darwin' && !cfg.isClient;
-  if (CONFIG.features.mic && isMacHost) {
+  // Mic panel — enabled on any platform when features.mic is true.
+  // The mic server is cross-platform (MicServer.app on macOS, Python direct on Windows/Linux).
+  if (CONFIG.features.mic) {
     fetchMicStatus();
     setInterval(fetchMicStatus, 1000);
   } else {

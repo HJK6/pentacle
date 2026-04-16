@@ -149,11 +149,23 @@ module.exports = {
     botsTab: true,           // Bots tab in sidebar (shows separate Sessions/Bots tabs)
     inputBar: true,          // Per-slot input bar for composing while scrolled up
     dashboards: true,        // Dashboards view in sidebar (Chats/Dashboards switcher)
+    sourceTags: false,       // Show source host tag (e.g. "Amaterasu") on sessions
   },
 
-  // Mic server URL (only used if features.micServer is true)
+  // Display names for host IDs — shown as source tags when features.sourceTags is true.
+  // Keys match HOSTS registry IDs (e.g. 'local', 'remote'). Add more as needed.
+  // hostNames: {
+  //   local: 'MyMachine',
+  //   remote: 'RemoteHost',
+  // },
+
+  // Mic server URL (only used if features.mic is true)
   micServerUrl: 'http://127.0.0.1:7780',
 
-  // Wake word shown in mic UI (only used if features.micServer is true)
+  // Python binary for mic server (non-macOS). Defaults to 'python' on Windows, 'python3' elsewhere.
+  // macOS uses /Applications/MicServer.app when present (TCC requirement), falls back to this.
+  // micServerPython: 'python',
+
+  // Wake word shown in mic UI (only used if features.mic is true)
   wakeWord: 'Hey Bart',
 };

@@ -1,0 +1,7 @@
+sounddevice
+soundfile
+numpy
+scipy
+faster-whisper
+silero-vad
+torch

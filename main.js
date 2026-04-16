@@ -234,19 +234,41 @@ async function ensureApiServer() {
   console.error('Failed to start API server');
 }
 
-// ── Mic server (mac host only) ─────────────────────────────────
+// ── Mic server (cross-platform) ────────────────────────────────
 async function ensureMicServer() {
-  if (IS_CLIENT || !IS_DARWIN || !CONFIG.features.mic) return;
+  if (!CONFIG.features.mic) return;
   const micUrl = CONFIG.micServerUrl || 'http://127.0.0.1:7780';
   try { await fetch(`${micUrl}/status`); return; } catch {}
-  console.log(`[${CONFIG.appName}] Starting mic server via MicServer.app...`);
-  const launcher = spawn('/usr/bin/open', ['-a', '/Applications/MicServer.app'], { detached: true, stdio: 'ignore' });
-  launcher.unref();
+
+  if (IS_DARWIN) {
+    // macOS: use MicServer.app for TCC permissions if available
+    const appPath = '/Applications/MicServer.app';
+    if (require('fs').existsSync(appPath)) {
+      console.log(`[${CONFIG.appName}] Starting mic server via MicServer.app...`);
+      const launcher = spawn('/usr/bin/open', ['-a', appPath], { detached: true, stdio: 'ignore' });
+      launcher.unref();
+    } else {
+      _spawnMicServerPython();
+    }
+  } else {
+    // Windows / Linux: spawn Python mic server directly (no TCC needed)
+    _spawnMicServerPython();
+  }
+
   for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 500));
     try { await fetch(`${micUrl}/status`); return; } catch {}
   }
   console.error(`[${CONFIG.appName}] Failed to start mic server`);
+}
+
+function _spawnMicServerPython() {
+  const micScript = path.join(__dirname, 'mic-server', 'mic_server.py');
+  const pythonCmd = CONFIG.micServerPython || (IS_WIN ? 'python' : 'python3');
+  const env = { ...process.env, MIC_SERVER_START_MODE: 'on' };
+  console.log(`[${CONFIG.appName}] Starting mic server: ${pythonCmd} ${micScript}`);
+  const proc = spawn(pythonCmd, ['-u', micScript], { detached: true, stdio: 'ignore', env });
+  proc.unref();
 }
 
 // ── Usage refresh (mac host only) ──────────────────────────────
@@ -710,13 +732,19 @@ app.whenReady().then(async () => {
     hostIds: Object.keys(HOSTS),
   }));
 
-  // ── IPC: mic / meeting (mac host only) ───────────────────────
+  // ── IPC: mic / meeting (cross-platform) ──────────────────────
   ipcMain.handle('mic:start-server', async () => {
-    if (IS_CLIENT || !IS_DARWIN || !CONFIG.features.mic) return false;
+    if (!CONFIG.features.mic) return false;
     const micUrl = CONFIG.micServerUrl || 'http://127.0.0.1:7780';
     try { await fetch(`${micUrl}/status`); return true; } catch {}
-    const launcher = spawn('/usr/bin/open', ['-a', '/Applications/MicServer.app'], { detached: true, stdio: 'ignore' });
-    launcher.unref();
+
+    if (IS_DARWIN && require('fs').existsSync('/Applications/MicServer.app')) {
+      const launcher = spawn('/usr/bin/open', ['-a', '/Applications/MicServer.app'], { detached: true, stdio: 'ignore' });
+      launcher.unref();
+    } else {
+      _spawnMicServerPython();
+    }
+
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 500));
       try { await fetch(`${micUrl}/status`); return true; } catch {}
