@@ -782,21 +782,27 @@ function _isIdle(data) {
   return stages.every(s => s.state === 'complete');
 }
 
-// ── Self-register ──
-window.DASHBOARDS.push({
-  id: 'foreclosure-pipeline',
-  name: 'Foreclosure Pipeline',
-  description: 'Scraping + skiptrace flow with stage status',
-  color: 'var(--green)',
-  mount, update, unmount,
-  pollFn: () => {
-    const root = document.querySelector('.foreclosure-dashboard');
-    const pinned = root && root.dataset.selectedBatch;
-    return window.cc.getPipelineStats(pinned || undefined);
-  },
-  pollInterval: 10000,        // 10s when a stage is active
-  idlePollInterval: 60000,    // 60s when everything is complete
-  idleFn: _isIdle,
-});
+// ── Self-register (mac-mini host only, synchronous) ──
+const MAC_MINI_HOST_PREFIX = 'Bartimaeuss-Mac-mini';
+const _host = (window.HOST && window.HOST.hostname) || '';
+const _isClient = !!(window.HOST && window.HOST.isClient);
+
+if (!_isClient && _host.startsWith(MAC_MINI_HOST_PREFIX)) {
+  window.DASHBOARDS.push({
+    id: 'foreclosure-pipeline',
+    name: 'Foreclosure Pipeline',
+    description: 'Scraping + skiptrace flow with stage status',
+    color: 'var(--green)',
+    mount, update, unmount,
+    pollFn: () => {
+      const root = document.querySelector('.foreclosure-dashboard');
+      const pinned = root && root.dataset.selectedBatch;
+      return window.cc.getPipelineStats(pinned || undefined);
+    },
+    pollInterval: 10000,        // 10s when a stage is active
+    idlePollInterval: 60000,    // 60s when everything is complete
+    idleFn: _isIdle,
+  });
+}
 
 })();

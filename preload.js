@@ -2,6 +2,23 @@
 // on window.cc for the renderer to use.
 
 const { ipcRenderer } = require('electron');
+const os = require('os');
+const path = require('path');
+
+// Synchronous host metadata — available at script-eval time so dashboards
+// can self-register without waiting on an async getConfig() round-trip.
+// `isClient` matches the logic in main.js: CONFIG.remote present → CLIENT.
+let _isClient = false;
+try {
+  const _cfg = require(path.join(__dirname, 'pentacle.config.js'));
+  _isClient = !!_cfg.remote;
+} catch { /* keep default false */ }
+
+window.HOST = {
+  hostname: os.hostname(),
+  platform: process.platform,
+  isClient: _isClient,
+};
 
 window.cc = {
   // PTY operations — hostId threads through so each slot knows which tmux

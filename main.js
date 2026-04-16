@@ -736,6 +736,7 @@ app.whenReady().then(async () => {
     apiPort: API_PORT,
     platform: process.platform,
     hostIds: Object.keys(HOSTS),
+    hostname: os.hostname(),
   }));
 
   // ── IPC: mic / meeting (cross-platform) ──────────────────────
