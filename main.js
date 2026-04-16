@@ -263,7 +263,13 @@ async function ensureMicServer() {
 }
 
 function _spawnMicServerPython() {
-  const micScript = path.join(__dirname, 'mic-server', 'mic_server.py');
+  // When packaged, mic-server is unpacked from app.asar (see package.json asarUnpack).
+  // Python can't execute scripts from inside the asar archive, so redirect to the
+  // unpacked copy. When running from source (npm start), __dirname has no 'app.asar'
+  // segment and the replace is a no-op.
+  const micScript = path
+    .join(__dirname, 'mic-server', 'mic_server.py')
+    .replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
   const pythonCmd = CONFIG.micServerPython || (IS_WIN ? 'python' : 'python3');
   const env = { ...process.env, MIC_SERVER_START_MODE: 'on' };
   console.log(`[${CONFIG.appName}] Starting mic server: ${pythonCmd} ${micScript}`);

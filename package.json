@@ -37,6 +37,9 @@
     "files": [
       "**/*",
       "!scripts"
+    ],
+    "asarUnpack": [
+      "mic-server/**"
     ]
   }
 }
