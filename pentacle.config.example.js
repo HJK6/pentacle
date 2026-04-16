@@ -77,6 +77,8 @@ module.exports = {
     },
     codex: {
       label: 'Codex',
+      // Pentacle checks once per day whether this CLI is outdated and, if so,
+      // runs `npm install -g @openai/codex` on the target host before launch.
       command: 'codex',
     },
   },

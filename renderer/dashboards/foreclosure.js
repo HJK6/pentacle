@@ -47,6 +47,23 @@ const PIPELINES = [
   },
 ];
 
+// Stages that emit a drill-down breakdown from pipeline_stats.py. Only
+// these are clickable. Skiptrace stages and prod_hydrate_promote don't
+// ship per-state data today (could add later).
+const _STAGES_WITH_BREAKDOWN = ['scrape', 'cad', 'propstream', 'qualify', 'staging'];
+
+// Column definitions per stage — drives both the header and the per-row
+// cell extraction for the drill-down table.
+const _BREAKDOWN_COLUMNS = {
+  // scrape is rendered specially (state group + nested source rows); this
+  // definition is just a stub for the header — actual rendering done inline.
+  scrape:     [{k:'state',label:'State / source'}, {k:'count',label:'Count',num:true}],
+  cad:        [{k:'state',label:'State'}, {k:'done',label:'Done',num:true}, {k:'miss',label:'Miss',num:true}, {k:'pending',label:'Pending',num:true}, {k:'skipped',label:'Skipped',num:true}],
+  propstream: [{k:'state',label:'State'}, {k:'done',label:'Done',num:true}, {k:'pending',label:'Pending',num:true}, {k:'skipped',label:'Skipped',num:true}],
+  qualify:    [{k:'state',label:'State'}, {k:'qualified',label:'Qual.',num:true}, {k:'rejected',label:'Rej.',num:true}, {k:'top_reason',label:'Top reason'}],
+  staging:    [{k:'state',label:'State'}, {k:'new',label:'New',num:true}, {k:'preexisting',label:'Pre',num:true}],
+};
+
 // State → { icon, cls, label } for the status badge on each stage box.
 // Falls back to "pending" for unknown states.
 const STATE_MAP = {
@@ -128,8 +145,28 @@ function mount(container) {
   title.textContent = 'Foreclosure Pipeline';
   const batchLabel = document.createElement('span');
   batchLabel.className = 'pipeline-batch-label';
+  // Batch selector — populated from data.all_batches on first poll.
+  const batchSelect = document.createElement('select');
+  batchSelect.className = 'pipeline-batch-select';
+  batchSelect.style.display = 'none';
+  batchSelect.addEventListener('change', () => {
+    const picked = batchSelect.value || '';
+    root.dataset.selectedBatch = picked;
+    // Show a visible "loading" state so the user sees something is happening
+    // even if the backend takes a moment.
+    if (statusBadge) {
+      statusBadge.textContent = 'Switching batch...';
+      statusBadge.className = 'pipeline-status loading';
+    }
+    if (typeof window.retryDashboardPoll === 'function') {
+      window.retryDashboardPoll();
+    } else {
+      console.warn('[foreclosure-dashboard] window.retryDashboardPoll missing');
+    }
+  });
   titleRow.appendChild(title);
   titleRow.appendChild(batchLabel);
+  titleRow.appendChild(batchSelect);
 
   const metaRow = document.createElement('div');
   metaRow.className = 'pipeline-meta';
@@ -144,6 +181,7 @@ function mount(container) {
   retryBtn.style.display = 'none';
   retryBtn.style.fontSize = '10px';
   retryBtn.style.padding = '4px 10px';
+
   metaRow.appendChild(statusBadge);
   metaRow.appendChild(lastUpdated);
   metaRow.appendChild(retryBtn);
@@ -207,6 +245,18 @@ function mount(container) {
       box.appendChild(iconEl);
       box.appendChild(lbl);
       box.appendChild(sec);
+
+      // Only stages with breakdown data are clickable.
+      if (_STAGES_WITH_BREAKDOWN.includes(def.id)) {
+        box.classList.add('clickable');
+        box.addEventListener('click', () => {
+          const latest = root._latestData;
+          if (!latest) return;
+          const stageRow = (latest.pipeline_stages || []).find(x => x.stage === def.id);
+          _openStageModal(def.id, def.label, stageRow ? (stageRow.metrics || {}) : {});
+        });
+      }
+
       flow.appendChild(box);
 
       stageEls[def.id] = { box, iconEl, sec };
@@ -279,10 +329,14 @@ function mount(container) {
     root.appendChild(view);
   });
 
-  // Reorder: header, tabs, views
-  container.appendChild(header);
-  container.appendChild(tabs);
-  PIPELINES.forEach(p => container.appendChild(viewEls[p.id].view));
+  // Reorder: header, tabs, views — appended to root (not container directly)
+  // so `.foreclosure-dashboard` wrapper is actually in the DOM. Without this
+  // root is detached and pollFn's document.querySelector('.foreclosure-dashboard')
+  // returns null → dataset.selectedBatch unreadable → batch switcher no-ops.
+  root.appendChild(header);
+  root.appendChild(tabs);
+  PIPELINES.forEach(p => root.appendChild(viewEls[p.id].view));
+  container.appendChild(root);
 
   _refreshTabActive(tabEls, 'scraping');
   _refreshViewVisibility(viewEls, 'scraping');
@@ -293,7 +347,7 @@ function mount(container) {
   retryBtn.addEventListener('click', retryHandler);
 
   return {
-    root, batchLabel, statusBadge, lastUpdated, retryBtn,
+    root, batchLabel, batchSelect, statusBadge, lastUpdated, retryBtn,
     _retryHandler: retryHandler,
     tabEls, viewEls,
   };
@@ -314,12 +368,31 @@ function _refreshViewVisibility(viewEls, activeId) {
 // ───────────────────────── update ─────────────────────────
 
 function update(refs, data) {
-  const { root, batchLabel, tabEls, viewEls } = refs;
+  const { root, batchLabel, batchSelect, tabEls, viewEls } = refs;
 
   // Prefer state-machine batch (orchestrator's view), fall back to leads_dev
   const summary = data.pipeline_summary || {};
   const smBatch = summary.state_machine_batch || data.batch || '';
   batchLabel.textContent = smBatch ? `Batch ${smBatch}` : '';
+
+  // ── Batch selector options ──
+  if (batchSelect && Array.isArray(data.all_batches)) {
+    const current = root.dataset.selectedBatch || '';
+    const want = ['', ...data.all_batches];
+    const have = Array.from(batchSelect.options).map(o => o.value);
+    const same = want.length === have.length && want.every((v, i) => v === have[i]);
+    if (!same) {
+      batchSelect.innerHTML = '';
+      want.forEach(b => {
+        const opt = document.createElement('option');
+        opt.value = b;
+        opt.textContent = b || 'Current';
+        batchSelect.appendChild(opt);
+      });
+    }
+    batchSelect.value = current;
+    batchSelect.style.display = data.all_batches.length > 1 ? '' : 'none';
+  }
 
   const smStages = _stagesByName(data.pipeline_stages);
 
@@ -378,6 +451,10 @@ function update(refs, data) {
       el.sec.textContent = _secondaryText(def.id, row, data);
     });
   });
+
+  // Cache the most recent payload so a stage-box click can open the modal
+  // with current data without requiring a fresh poll.
+  root._latestData = data;
 
   // ── Scraping view: rejected pills + qualified by state ──
   const s = viewEls.scraping;
@@ -552,6 +629,145 @@ function _skiptraceSummary(smStages) {
   return parts.join(' · ');
 }
 
+// ───────── Drill-down modal ─────────
+
+function _closeStageModal() {
+  const m = document.querySelector('.pipeline-stage-modal');
+  if (m) m.remove();
+  document.removeEventListener('keydown', _modalKeydownHandler);
+}
+
+function _modalKeydownHandler(e) {
+  if (e.key === 'Escape') _closeStageModal();
+}
+
+function _openStageModal(stageId, stageLabel, metrics) {
+  _closeStageModal();  // single-modal
+
+  const overlay = document.createElement('div');
+  overlay.className = 'pipeline-stage-modal';
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) _closeStageModal();
+  });
+
+  const panel = document.createElement('div');
+  panel.className = 'pipeline-stage-modal-panel';
+
+  const header = document.createElement('div');
+  header.className = 'pipeline-stage-modal-header';
+  const title = document.createElement('h3');
+  title.textContent = `${stageLabel || stageId} — by state`;
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'pipeline-stage-modal-close';
+  closeBtn.textContent = '×';
+  closeBtn.title = 'Close (Esc)';
+  closeBtn.addEventListener('click', _closeStageModal);
+  header.appendChild(title);
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'pipeline-stage-modal-body';
+  const rows = Array.isArray(metrics.breakdown) ? metrics.breakdown : [];
+  const cols = _BREAKDOWN_COLUMNS[stageId] || [];
+
+  if (!rows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'pipeline-stage-modal-empty';
+    empty.textContent = 'No data yet for this stage.';
+    body.appendChild(empty);
+  } else if (stageId === 'scrape') {
+    // Grouped render: state parent row + nested per-source detail rows.
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    ['State / source', 'Count'].forEach((t, i) => {
+      const th = document.createElement('th');
+      th.textContent = t;
+      if (i === 1) th.className = 'num';
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    rows.forEach(g => {
+      const stateRow = document.createElement('tr');
+      stateRow.className = 'pipeline-modal-state-row';
+      const stateCell = document.createElement('td');
+      stateCell.textContent = g.state;
+      stateCell.className = 'pipeline-modal-state-label';
+      const totalCell = document.createElement('td');
+      totalCell.className = 'num pipeline-modal-state-total';
+      totalCell.textContent = _fmt(g.total);
+      stateRow.appendChild(stateCell);
+      stateRow.appendChild(totalCell);
+      tbody.appendChild(stateRow);
+      (g.sources || []).forEach(src => {
+        const tr = document.createElement('tr');
+        tr.className = 'pipeline-modal-source-row';
+        const st = document.createElement('td');
+        st.textContent = src.source;
+        st.className = 'pipeline-modal-source-label';
+        const ct = document.createElement('td');
+        ct.className = 'num';
+        ct.textContent = _fmt(src.count);
+        tr.appendChild(st);
+        tr.appendChild(ct);
+        tbody.appendChild(tr);
+      });
+    });
+    table.appendChild(tbody);
+    body.appendChild(table);
+  } else {
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    cols.forEach(c => {
+      const th = document.createElement('th');
+      th.textContent = c.label;
+      if (c.num) th.className = 'num';
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    rows.forEach(r => {
+      const tr = document.createElement('tr');
+      cols.forEach(c => {
+        const td = document.createElement('td');
+        let v = r[c.k];
+        if (c.num) td.className = 'num';
+        if (v == null || v === '') v = '—';
+        else if (c.num) v = _fmt(v);
+        td.textContent = v;
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+
+      // Extra detail row for qualify: every rejection reason per state
+      if (stageId === 'qualify' && Array.isArray(r.reasons) && r.reasons.length) {
+        const detail = document.createElement('tr');
+        detail.className = 'pipeline-stage-modal-detail';
+        const cell = document.createElement('td');
+        cell.colSpan = cols.length;
+        const pills = r.reasons
+          .map(x => `<span class="pipeline-reason-pill">${x.reason} (${_fmt(x.count)})</span>`)
+          .join(' ');
+        cell.innerHTML = `<span class="pipeline-reason-label">All reasons:</span> ${pills}`;
+        detail.appendChild(cell);
+        tbody.appendChild(detail);
+      }
+    });
+    table.appendChild(tbody);
+    body.appendChild(table);
+  }
+
+  panel.appendChild(body);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  document.addEventListener('keydown', _modalKeydownHandler);
+}
+
 function unmount(refs) {
   if (refs && refs.retryBtn && refs._retryHandler)
     refs.retryBtn.removeEventListener('click', refs._retryHandler);
@@ -573,7 +789,11 @@ window.DASHBOARDS.push({
   description: 'Scraping + skiptrace flow with stage status',
   color: 'var(--green)',
   mount, update, unmount,
-  pollFn: () => window.cc.getPipelineStats(),
+  pollFn: () => {
+    const root = document.querySelector('.foreclosure-dashboard');
+    const pinned = root && root.dataset.selectedBatch;
+    return window.cc.getPipelineStats(pinned || undefined);
+  },
   pollInterval: 10000,        // 10s when a stage is active
   idlePollInterval: 60000,    // 60s when everything is complete
   idleFn: _isIdle,

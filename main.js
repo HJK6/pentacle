@@ -287,6 +287,8 @@ function showContextMenu(win, sessionName, displayName, hostId) {
 let mainWindow;
 let meetingWindow = null;
 const SLOT_STATE_FILE = path.join(app.getPath('userData'), '.slot-state.json');
+const CODEX_UPDATE_STATE_FILE = path.join(app.getPath('userData'), '.codex-update-state.json');
+const CODEX_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function saveSlotState() {
   try {
@@ -305,6 +307,124 @@ function loadSlotState() {
       return s;
     });
   } catch { return new Array(MAX_SLOTS).fill(null); }
+}
+
+function loadCodexUpdateState() {
+  try {
+    return JSON.parse(fs.readFileSync(CODEX_UPDATE_STATE_FILE, 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCodexUpdateState(state) {
+  try {
+    fs.writeFileSync(CODEX_UPDATE_STATE_FILE, JSON.stringify(state, null, 2));
+  } catch {}
+}
+
+function parseKeyValueLines(text) {
+  const out = {};
+  for (const line of String(text || '').split('\n')) {
+    const i = line.indexOf('=');
+    if (i <= 0) continue;
+    out[line.slice(0, i)] = line.slice(i + 1);
+  }
+  return out;
+}
+
+function getCodexCommandForLocation(agentConfig, location) {
+  return (location === 'local' && agentConfig.commandLocal) || agentConfig.command || 'codex';
+}
+
+async function ensureCodexUpdatedForHost(host, hostId, command) {
+  const state = loadCodexUpdateState();
+  const hostState = state[hostId] || {};
+  const now = Date.now();
+  if (hostState.lastCheckedAt && now - Number(hostState.lastCheckedAt) < CODEX_UPDATE_INTERVAL_MS) {
+    return hostState;
+  }
+
+  const commandName = String(command || 'codex').trim().split(/\s+/)[0] || 'codex';
+  const shell = process.platform === 'win32' ? 'bash' : 'zsh';
+  const script = `
+set -u
+export PATH="/opt/homebrew/bin:$PATH"
+command_name=${JSON.stringify(commandName)}
+current_raw="$($command_name -V 2>/dev/null || true)"
+current="$(printf '%s' "$current_raw" | awk '{print $NF}' | tr -d '\\r')"
+latest="$(npm view @openai/codex version 2>/dev/null | tr -d '[:space:]')"
+updated=0
+install_status=skipped
+if [ -n "$latest" ] && [ "$current" != "$latest" ]; then
+  if npm install -g @openai/codex >/tmp/pentacle-codex-update.log 2>&1; then
+    updated=1
+    install_status=ok
+  else
+    install_status=failed
+  fi
+fi
+final_raw="$($command_name -V 2>/dev/null || true)"
+final="$(printf '%s' "$final_raw" | awk '{print $NF}' | tr -d '\\r')"
+printf 'command=%s\\n' "$command_name"
+printf 'current=%s\\n' "$current"
+printf 'latest=%s\\n' "$latest"
+printf 'final=%s\\n' "$final"
+printf 'updated=%s\\n' "$updated"
+printf 'install_status=%s\\n' "$install_status"
+`.trim();
+
+  try {
+    const raw = await host.exec([`/bin/${shell}`, '-lc', script]);
+    const result = {
+      ...hostState,
+      ...parseKeyValueLines(raw),
+      lastCheckedAt: now,
+      hostId,
+    };
+    state[hostId] = result;
+    saveCodexUpdateState(state);
+    const changed = result.updated === '1';
+    const from = result.current || '(unknown)';
+    const to = result.final || result.latest || '(unknown)';
+    console.log(`[codex:update] host=${hostId} status=${result.install_status || 'unknown'} updated=${changed} ${from} -> ${to}`);
+    return result;
+  } catch (e) {
+    const result = {
+      ...hostState,
+      hostId,
+      lastCheckedAt: now,
+      error: e.message || String(e),
+    };
+    state[hostId] = result;
+    saveCodexUpdateState(state);
+    console.warn(`[codex:update] host=${hostId} failed: ${result.error}`);
+    return result;
+  }
+}
+
+function maybeRefreshCodexUsageAfterUpdate(result) {
+  if (!result || result.updated !== '1') return;
+  refreshCodexUsageData();
+}
+
+function startBackgroundCodexUpdateChecks() {
+  const agentConfig = CONFIG.agents?.codex;
+  if (!agentConfig) return;
+  const jobs = [];
+  if (hostLocal) {
+    jobs.push(
+      ensureCodexUpdatedForHost(hostLocal, hostLocal.id || 'local', getCodexCommandForLocation(agentConfig, 'local'))
+        .then(maybeRefreshCodexUsageAfterUpdate)
+    );
+  }
+  if (hostRemote) {
+    jobs.push(
+      ensureCodexUpdatedForHost(hostRemote, hostRemote.id || 'remote', agentConfig.command)
+        .then(maybeRefreshCodexUsageAfterUpdate)
+    );
+  }
+  Promise.allSettled(jobs).catch(() => {});
 }
 
 // Host-mode-only tmux-server UTF-8 ensure. On clients we probe remote and warn.
@@ -422,6 +542,7 @@ app.whenReady().then(async () => {
     ensureMicServer();
     refreshUsageData();
     refreshCodexUsageData();
+    startBackgroundCodexUpdateChecks();
   });
 
   // ── IPC: session management ─────────────────────────────────
@@ -461,6 +582,11 @@ app.whenReady().then(async () => {
     // `claude --dangerously-skip-permissions` is refused — user can set
     // `agents.claude.commandLocal = 'claude'` to sidestep the flag.
     const locationCommand = (location === 'local' && agentConfig.commandLocal) || agentConfig.command;
+
+    if (agent === 'codex' && targetHost) {
+      const updateResult = await ensureCodexUpdatedForHost(targetHost, targetHost.id || (wantRemote ? 'remote' : 'local'), locationCommand);
+      maybeRefreshCodexUsageAfterUpdate(updateResult);
+    }
 
     // Shell-first fallback creator. Creates an interactive bash session with
     // no command, then send-keys the agent command. Session survives the

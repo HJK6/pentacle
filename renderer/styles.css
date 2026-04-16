@@ -962,7 +962,6 @@ body {
   justify-content: flex-end;
 }
 
-#new-session-location { display: flex; }
 #new-session-location .sb-btn.active { background: var(--blue); color: #fff; border-color: var(--blue); }
 
 .modal-subtitle {
@@ -1463,6 +1462,150 @@ body {
   font-size: 12px;
   color: var(--fg-dim);
   font-weight: 600;
+}
+
+.pipeline-batch-select {
+  margin-left: 8px;
+  font-size: 11px;
+  padding: 2px 4px;
+  background: var(--bg-2, #2a2a2a);
+  color: var(--fg, #eee);
+  border: 1px solid var(--border, #444);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.pipeline-batch-select:hover { border-color: var(--accent, #6cf); }
+
+.pipeline-stage.clickable { cursor: pointer; }
+.pipeline-stage.clickable:hover { background: rgba(255,255,255,0.04); }
+
+.pipeline-stage-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: pipelineModalFade 0.12s ease-out;
+}
+@keyframes pipelineModalFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.pipeline-stage-modal-panel {
+  background: var(--bg-1, #1a1a1a);
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  width: min(720px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+.pipeline-stage-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border, #333);
+}
+.pipeline-stage-modal-header h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg, #eee);
+  text-transform: capitalize;
+}
+.pipeline-stage-modal-close {
+  background: none;
+  border: none;
+  color: var(--fg-dim, #888);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 6px;
+}
+.pipeline-stage-modal-close:hover { color: var(--fg, #eee); }
+.pipeline-stage-modal-body {
+  padding: 12px 16px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.pipeline-stage-modal-empty {
+  color: var(--fg-dim, #888);
+  font-style: italic;
+  padding: 20px 0;
+  text-align: center;
+}
+.pipeline-stage-modal-body table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.pipeline-stage-modal-body th,
+.pipeline-stage-modal-body td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border, #2a2a2a);
+}
+.pipeline-stage-modal-body th {
+  color: var(--fg-dim, #888);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.pipeline-stage-modal-body td.num,
+.pipeline-stage-modal-body th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.pipeline-stage-modal-body tbody tr:hover {
+  background: rgba(255,255,255,0.03);
+}
+.pipeline-stage-modal-detail {
+  background: rgba(255,255,255,0.02);
+}
+.pipeline-stage-modal-detail td {
+  padding: 8px 10px 10px 20px !important;
+  font-size: 11px;
+  border-bottom: 2px solid var(--border, #333) !important;
+}
+.pipeline-reason-label {
+  color: var(--fg-dim, #888);
+  margin-right: 6px;
+}
+.pipeline-reason-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  margin: 2px 3px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border, #333);
+  border-radius: 10px;
+  font-size: 10px;
+  color: var(--fg, #ccc);
+  white-space: nowrap;
+}
+
+/* Scrape grouped state/source rows */
+.pipeline-modal-state-row td {
+  background: rgba(255,255,255,0.04);
+  font-weight: 600;
+  border-top: 1px solid var(--border, #333);
+}
+.pipeline-modal-state-label {
+  color: var(--fg, #eee);
+}
+.pipeline-modal-state-total {
+  color: var(--fg, #eee);
+}
+.pipeline-modal-source-row td {
+  color: var(--fg-dim, #aaa);
+}
+.pipeline-modal-source-label {
+  padding-left: 24px !important;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
 }
 
 /* ── Pipeline Flow (spec layout) ─────────────── */

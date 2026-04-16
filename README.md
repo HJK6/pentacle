@@ -12,6 +12,7 @@ Pentacle gives you a 4-slot grid of terminal panes, each connected to a tmux ses
 - **Session management** — create, rename, trash, and restore tmux sessions from the sidebar
 - **Activity detection** — sessions are classified as working/waiting/idle with visual indicators
 - **Auto-reconnect** — if a PTY dies but the tmux session is alive, it reconnects automatically
+- **Daily Codex auto-update** — local and remote Codex hosts are checked at most once per day; Pentacle auto-installs a newer `@openai/codex` before launching a Codex session
 - **Input bar** — per-slot text input for composing messages while scrolled up reading output
 - **Theme toggle** — dark and light themes, fully configurable via config file
 - **Image paste** — paste images from clipboard into agent sessions
@@ -77,6 +78,8 @@ agents: {
   },
 },
 ```
+
+Pentacle caches the last Codex update check per host in its app data and only re-checks once every 24 hours. When a newer CLI is available, it runs `npm install -g @openai/codex` before opening the Codex session.
 
 ### Themes
 
