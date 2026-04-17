@@ -10,7 +10,7 @@ echo "Killing $APP_NAME..."
 killall "$APP_NAME" 2>/dev/null && sleep 1 || echo "Not running"
 
 echo "Building..."
-npm run build
+npm run build:mac
 
 echo "Launching..."
 open "/Applications/$APP_NAME.app"

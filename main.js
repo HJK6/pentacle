@@ -7,7 +7,48 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { S3Client, ListObjectsV2Command, GetObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const { SQSClient, GetQueueAttributesCommand } = require('@aws-sdk/client-sqs');
-const CONFIG = require('./pentacle.config.js');
+
+// ── Config bootstrap ────────────────────────────────────────────────────────
+// Auto-copy example → config on first run (dev mode only).
+// Never overwrites an existing config.
+{
+  const cfgPath = path.join(__dirname, 'pentacle.config.js');
+  const examplePath = path.join(__dirname, 'pentacle.config.example.js');
+  if (!fs.existsSync(cfgPath) && fs.existsSync(examplePath)) {
+    try { fs.copyFileSync(examplePath, cfgPath); } catch (_e) { /* fall through to error window */ }
+  }
+}
+
+let CONFIG;
+let _configLoadError = null;
+try {
+  CONFIG = require('./pentacle.config.js');
+} catch (e) {
+  _configLoadError = e;
+}
+
+if (_configLoadError) {
+  // Config missing or invalid — show a minimal error window.
+  // Register the handler before any CONFIG-dependent code can run.
+  app.whenReady().then(() => {
+    const w = new BrowserWindow({ width: 700, height: 320, webPreferences: { contextIsolation: true } });
+    const msg = String(_configLoadError.message || _configLoadError).slice(0, 300).replace(/</g, '&lt;');
+    w.loadURL(
+      'data:text/html,' + encodeURIComponent(
+        '<body style="font-family:sans-serif;padding:32px;background:#0c1310;color:#b5ccba">' +
+        '<h2>Could not load pentacle.config.js</h2>' +
+        '<p>Copy <code>pentacle.config.example.js</code> to <code>pentacle.config.js</code> and relaunch.</p>' +
+        `<pre style="font-size:12px;color:#f47067">${msg}</pre></body>`
+      )
+    );
+    w.on('closed', () => app.quit());
+  });
+  app.on('window-all-closed', () => app.quit());
+  // Use a fake minimal CONFIG so the rest of the module doesn't crash on property access.
+  // app.whenReady() will show the error window; the normal app window is never created.
+  CONFIG = { appName: 'Pentacle', apiServer: {}, features: {}, dark: { bg: '#0c1310' }, agents: {} };
+}
+
 const { LocalHost, Ssh2Host, buildHostRegistry } = require('./hosts.js');
 
 // ── DynamoDB client for the 0DTE dashboard ──────────────────────────────────
@@ -220,6 +261,34 @@ function ensureWslSshd() {
   }
 }
 
+// ── Python binary resolution ────────────────────────────────────
+function resolvePython() {
+  // 1. CONFIG.apiServer.python if set and file exists (Vamshi's venv path).
+  const cfgPy = CONFIG.apiServer && CONFIG.apiServer.python;
+  if (cfgPy) {
+    const abs = path.isAbsolute(cfgPy) ? cfgPy : path.join(os.homedir(), cfgPy);
+    if (fs.existsSync(abs)) return abs;
+  }
+  // 2. Auto-detect: python3 on POSIX, python on Windows.
+  const candidate = IS_WIN ? 'python' : 'python3';
+  try {
+    execFileSync(candidate, ['--version'], { stdio: 'ignore', timeout: 3000 });
+    return candidate;
+  } catch {}
+  // 3. Give up — caller will skip server launch and log an error.
+  return null;
+}
+
+// ── Script path resolution ──────────────────────────────────────
+function resolveServerScript() {
+  const script = (CONFIG.apiServer && CONFIG.apiServer.script) || 'server/server.py';
+  if (path.isAbsolute(script)) return script;
+  // Try repo-relative first (vendored server), then $HOME-relative (Vamshi's server).
+  const repoRel = path.join(__dirname, script);
+  if (fs.existsSync(repoRel)) return repoRel;
+  return path.join(os.homedir(), script);
+}
+
 // ── Ensure API Server (host mode) ───────────────────────────────
 async function ensureApiServer() {
   if (IS_CLIENT) {
@@ -233,15 +302,29 @@ async function ensureApiServer() {
   }
 
   try { await fetch(`${API_URL}/api/sessions`); return; } catch {}
-  const serverPath = path.join(process.env.HOME, CONFIG.apiServer.script);
-  const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
-  const server = spawn(pythonPath, [serverPath], { detached: true, stdio: 'ignore' });
+
+  const pythonBin = resolvePython();
+  if (!pythonBin) {
+    console.error('[api] python3/python not found on PATH — cannot start API server; sidebar will be empty');
+    return;
+  }
+  // When packaged, server script is unpacked from app.asar (see package.json asarUnpack).
+  const serverPath = resolveServerScript()
+    .replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
+  if (!fs.existsSync(serverPath)) {
+    console.error(`[api] server script not found: ${serverPath}`);
+    return;
+  }
+  console.log(`[api] starting: ${pythonBin} ${serverPath}`);
+  const spawnOpts = { detached: true, stdio: 'ignore' };
+  if (IS_WIN) spawnOpts.windowsHide = true;
+  const server = spawn(pythonBin, ['-u', serverPath], spawnOpts);
   server.unref();
   for (let i = 0; i < 8; i++) {
     await new Promise((r) => setTimeout(r, 500));
     try { await fetch(`${API_URL}/api/sessions`); return; } catch {}
   }
-  console.error('Failed to start API server');
+  console.error('[api] server did not become reachable in time');
 }
 
 // ── Mic server (cross-platform) ────────────────────────────────
@@ -287,11 +370,17 @@ function _spawnMicServerPython() {
   proc.unref();
 }
 
-// ── Usage refresh (mac host only) ──────────────────────────────
+// ── Usage refresh (mac host only, Bartimaeus-specific) ──────────
+// Requires CONFIG.apiServer.python (explicit venv path), features.usage: true,
+// and the check_usage.py scripts from telegram-claude-bot. Fresh users have
+// features.usage: false by default, so these functions are never called.
 function refreshUsageData() {
   if (IS_CLIENT || !IS_DARWIN || !CONFIG.features.usage) return;
-  const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
-  const scriptPath = path.join(process.env.HOME, 'telegram-claude-bot/abilities/check_usage.py');
+  const cfgPy = CONFIG.apiServer && CONFIG.apiServer.python;
+  if (!cfgPy) return;
+  const pythonPath = path.join(os.homedir(), cfgPy);
+  if (!fs.existsSync(pythonPath)) return;
+  const scriptPath = path.join(os.homedir(), 'telegram-claude-bot/abilities/check_usage.py');
   const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` };
   const proc = spawn(pythonPath, [scriptPath, '--save'], { detached: true, stdio: 'ignore', env });
   proc.unref();
@@ -299,8 +388,11 @@ function refreshUsageData() {
 
 function refreshCodexUsageData() {
   if (IS_CLIENT || !IS_DARWIN || !CONFIG.features.usage) return;
-  const pythonPath = path.join(process.env.HOME, CONFIG.apiServer.python);
-  const scriptPath = path.join(process.env.HOME, 'telegram-claude-bot/abilities/check_codex_usage.py');
+  const cfgPy = CONFIG.apiServer && CONFIG.apiServer.python;
+  if (!cfgPy) return;
+  const pythonPath = path.join(os.homedir(), cfgPy);
+  if (!fs.existsSync(pythonPath)) return;
+  const scriptPath = path.join(os.homedir(), 'telegram-claude-bot/abilities/check_codex_usage.py');
   const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` };
   const proc = spawn(pythonPath, [scriptPath, '--save'], { detached: true, stdio: 'ignore', env });
   proc.unref();
@@ -517,6 +609,9 @@ function ensureWindowSizeLatest() {
 }
 
 app.whenReady().then(async () => {
+  // Error window was already registered above — skip normal startup.
+  if (_configLoadError) return;
+
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
     { role: 'editMenu' },
@@ -698,7 +793,9 @@ app.whenReady().then(async () => {
       } else {
         // Client local (macbook's own tmux or Windows WSL). Shell-first —
         // no agent-tmux CLI available here.
-        const workDir = (CONFIG.workingDirectory || '~').replace(/^~/, process.env.HOME || '~');
+        const workDir = (CONFIG.workingDirectory || '~/agent-workspace').replace(/^~/, process.env.HOME || '~');
+        // Create the working directory if it doesn't exist yet (fresh install).
+        try { fs.mkdirSync(workDir, { recursive: true }); } catch {}
         await shellFirstCreate(targetHost, workDir, locationCommand);
         return { sessionName, hostId: targetHost.id };
       }
@@ -978,6 +1075,10 @@ app.whenReady().then(async () => {
     // or any client with AWS creds. Paginates the batches/ prefix, summarizes
     // per-batch progress, and returns a JSON shape consumed by
     // renderer/dashboards/amaterasu.js.
+    const _debugLog = (msg) => {
+      try { require('fs').appendFileSync('C:\\Users\\vamsh\\pentacle_ocr_debug.log', `[${new Date().toISOString()}] ${msg}\n`); } catch {}
+    };
+    _debugLog('handler invoked');
     try {
       // SQS depth
       const qa = await _sqs.send(new GetQueueAttributesCommand({
@@ -1054,27 +1155,22 @@ app.whenReady().then(async () => {
         }
       }
 
-      // Enrich active batches with docs_total (from request.json) + error count.
-      for (const b of active) {
+      // Enrich active batches with docs_total (from request.json). Skip the
+      // per-doc error scan for large batches — 800+ sequential GetObject calls
+      // hang the handler. Error counts for active batches show as null; the
+      // response.json (written at the end) is where we source authoritative
+      // error counts for completed batches.
+      _debugLog(`enriching ${active.length} active batches`);
+      await Promise.all(active.map(async (b) => {
         const req = await readJson(`batches/${b.friend_id}/${b.batch_id}/request.json`);
         b.docs_total = Array.isArray(req?.docs) ? req.docs.length : null;
-        // Error count: scan per-doc output.json statuses (small JSON files).
-        let errCount = 0;
-        const batchKey = `${b.friend_id}/${b.batch_id}`;
-        const entry = batchMap.get(batchKey);
-        if (entry) {
-          for (const o of entry.objs) {
-            if (o.Key.includes('/docs/') && o.Key.endsWith('/output.json')) {
-              const d = await readJson(o.Key);
-              if (d && d.status === 'error') errCount += 1;
-            }
-          }
-        }
-        b.docs_error = errCount;
-      }
+        b.docs_error = null; // computed only for completed batches
+      }));
+      _debugLog('active batches enriched');
 
       // Enrich completed batches with response.json stats.
-      for (const b of completed) {
+      _debugLog(`enriching ${completed.length} completed batches`);
+      await Promise.all(completed.map(async (b) => {
         const resp = await readJson(`batches/${b.friend_id}/${b.batch_id}/response.json`);
         if (resp) {
           b.count = resp.count || 0;
@@ -1087,19 +1183,23 @@ app.whenReady().then(async () => {
             if (!isNaN(end) && !isNaN(start)) b.elapsed_sec = Math.floor((end - start) / 1000);
           }
         } else { b.count = b.docs_done; b.status = 'unknown'; }
-      }
+      }));
+      _debugLog('completed batches enriched');
 
       active.sort((a, x) => String(x.first_doc_at || x.started_at || '').localeCompare(String(a.first_doc_at || a.started_at || '')));
       completed.sort((a, x) => String(x.completed_at || '').localeCompare(String(a.completed_at || '')));
 
-      return {
+      const result = {
         sqs: sqsStats,
         active_batches: active.slice(0, 20),
         recent_completed: completed.slice(0, 20),
         totals: { active_count: active.length, completed_24h: completed24h, docs_processed_24h: docs24h },
         generated_at: new Date().toISOString(),
       };
+      _debugLog(`handler success: active=${active.length} completed=${completed.length} sqs=${JSON.stringify(sqsStats)}`);
+      return result;
     } catch (e) {
+      _debugLog(`handler ERROR: ${e.name}: ${e.message}\n${(e.stack||'').slice(0,600)}`);
       return { error: `amaterasu-ocr-stats failed: ${e.message || e}` };
     }
   });

@@ -20,16 +20,14 @@ Pentacle gives you a 4-slot grid of terminal panes, each connected to a tmux ses
 
 ## Prerequisites
 
-- **macOS** (arm64 or x64)
+- **macOS / Linux / Windows + WSL** — supported for `npm start` (dev mode)
 - **Node.js** 18+
-- **tmux** installed (`brew install tmux`)
-- **A tmux session manager API** — Pentacle connects to an HTTP API (default `localhost:7777`) that lists and manages tmux sessions. You'll need a server that exposes:
-  - `GET /api/sessions` — returns `{ active: [...], trashed: [...] }`
-  - `POST /api/rename` — `{ session, new_name }`
-  - `POST /api/trash` — `{ session }`
-  - `POST /api/restore` — `{ agent_id }`
-  - `POST /api/kill` — `{ session, agent_id }`
-  - `POST /api/cleanup` — kills dead sessions
+- **tmux** (`brew install tmux` / `sudo apt install tmux`)
+- **Python 3.9+** (for the API server — `brew install python` / `sudo apt install python3`)
+
+Ships with a reference API server at `server/server.py` (stdlib only, no pip deps). Pentacle starts it automatically. See `server/README.md` for standalone testing.
+
+For the full setup playbook — HOST vs CLIENT mode, WSL setup, troubleshooting — see **[CLAUDE.md](CLAUDE.md)**.
 
 ## Setup
 
@@ -37,7 +35,11 @@ Pentacle gives you a 4-slot grid of terminal panes, each connected to a tmux ses
 git clone https://github.com/HJK6/pentacle.git
 cd pentacle
 npm install
+npm start     # auto-copies pentacle.config.example.js → pentacle.config.js on first run
 ```
+
+> **Supported distribution for v1:** `npm start` (dev mode) on macOS / Linux / Windows+WSL.
+> Packaged builds are best-effort and currently only polished on macOS.
 
 ## Configuration
 
@@ -56,8 +58,10 @@ appId: 'com.pentacle.app',     // macOS bundle identifier
 workingDirectory: '~/agent-workspace',  // Where new sessions start
 apiServer: {
   url: 'http://localhost:7777',         // Session manager API
-  script: '.tmux/cmdcenter/server.py',  // API server script (relative to $HOME)
-  python: '.venvs/global/bin/python',   // Python binary for launching servers
+  script: 'server/server.py',           // Vendored server (repo-relative).
+                                        // Resolved repo-first, $HOME second.
+  // python: '.venvs/global/bin/python',  // Optional: pin a specific interpreter.
+                                          // Omit to auto-detect python3/python on PATH.
 },
 ```
 
@@ -70,7 +74,8 @@ agents: {
   claude: {
     label: 'Claude',
     command: 'claude --dangerously-skip-permissions',
-    binary: '~/.local/bin/claude',
+    // binary: '~/.local/bin/claude',  // Optional: pin a specific path.
+                                        // Omit to resolve from PATH.
   },
   codex: {
     label: 'Codex',
@@ -93,15 +98,16 @@ terminal: { background: '#0c1310', foreground: '#b5ccba', cursor: '#3fb950', /* 
 
 ### Feature Flags
 
-Toggle optional features on or off:
+Optional features default to `false` in the example config — they require extra infrastructure. Turn them on only after confirming the required backend is running.
 
 ```js
 features: {
-  mic: true,        // Mic panel + per-slot voice record (requires a mic server)
-  usage: true,      // Claude + Codex usage bars in sidebar (requires usage API endpoints)
-  botsTab: true,    // Bots tab in sidebar (shows separate Sessions/Bots tabs)
-  inputBar: true,   // Per-slot input bar for composing while scrolled up
-  dashboards: true, // Dashboards view in sidebar (Chats/Dashboards switcher)
+  mic: false,        // Mic panel + voice record (requires a mic server)
+  usage: false,      // Usage bars (requires /api/usage + /api/codex-usage endpoints)
+  botsTab: false,    // Bots tab (requires /api/bots endpoint)
+  inputBar: true,    // Per-slot input bar — works with any terminal, no extra deps
+  dashboards: false, // Dashboards view (requires your own dashboard files; bundled
+                     // 0DTE/Amaterasu dashboards query private AWS resources)
 },
 ```
 
@@ -173,14 +179,14 @@ renderer/dashboards/
 ## Running
 
 ```bash
-# Development
+# Development (all platforms)
 npm start
 
-# Build + install to /Applications
-npm run build
+# macOS: build + install to /Applications
+npm run build:mac
 
-# Or use the deploy script (kills running app, rebuilds, relaunches)
-./deploy.sh
+# Or use the deploy script (macOS: kills running app, rebuilds, relaunches)
+./deploy-mac.sh
 ```
 
 ## How It Works

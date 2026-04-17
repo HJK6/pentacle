@@ -59,21 +59,22 @@ module.exports = {
   // Where new agent sessions start (~ is expanded automatically)
   workingDirectory: '~/agent-workspace',
 
-  // API server that manages tmux sessions
+  // API server that manages tmux sessions.
+  // `script` is resolved relative to the repo root first, then $HOME.
+  // The vendored server (server/server.py) is the default for fresh installs.
+  // `python` is optional — omit it and main.js auto-detects python3/python on PATH.
   apiServer: {
     url: 'http://localhost:7777',
-    // Path to the server script (relative to $HOME)
-    script: '.tmux/cmdcenter/server.py',
-    python: '.venvs/global/bin/python',
+    script: 'server/server.py',
+    // python: '.venvs/global/bin/python',  // uncomment to use a specific venv
   },
 
   // Agent commands — what "New Session" launches
   agents: {
     claude: {
       label: 'Claude',
+      // Resolved from PATH. Set `binary` only if you need a specific path.
       command: 'claude --dangerously-skip-permissions',
-      // Explicit binary path (optional, overrides command)
-      binary: '~/.local/bin/claude',
     },
     codex: {
       label: 'Codex',
@@ -142,13 +143,14 @@ module.exports = {
   },
 
   // ── Optional Features ─────────────────────────────────────────
-  // Set to false to disable features that require extra infrastructure
+  // Features that require extra infrastructure default to false for fresh installs.
+  // Set to true only after confirming the required backend is running.
   features: {
-    mic: true,               // Mic panel, voice record buttons, mic server auto-start
-    usage: true,             // Usage bar in sidebar + auto-refresh on startup
-    botsTab: true,           // Bots tab in sidebar (shows separate Sessions/Bots tabs)
-    inputBar: true,          // Per-slot input bar for composing while scrolled up
-    dashboards: true,        // Dashboards view in sidebar (Chats/Dashboards switcher)
+    mic: false,              // Mic panel + voice record (requires mic server + TCC on macOS)
+    usage: false,            // Usage bars in sidebar (requires /api/usage + /api/codex-usage endpoints)
+    botsTab: false,          // Bots tab in sidebar (requires /api/bots endpoint)
+    inputBar: true,          // Per-slot input bar — works with any terminal, no extra deps
+    dashboards: false,       // Dashboards view (requires custom dashboard files + AWS for bundled ones)
     sourceTags: false,       // Show source host tag (e.g. "Amaterasu") on sessions
   },
 

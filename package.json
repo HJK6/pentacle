@@ -5,9 +5,12 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "postinstall": "node -e \"if (process.platform==='darwin') { try { require('child_process').execSync('electron-rebuild', {stdio:'inherit'}); } catch (e) { process.exit(1); } }\"",
-    "build": "electron-builder --mac && rm -rf /Applications/Pentacle.app && cp -R dist/mac-arm64/Pentacle.app /Applications/Pentacle.app",
-    "deploy": "./deploy.sh"
+    "postinstall": "node scripts/postinstall.js",
+    "build": "electron-builder",
+    "build:mac": "node scripts/build-mac.js",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux",
+    "deploy": "./deploy-mac.sh"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1028.0",
@@ -36,12 +39,20 @@
       "target": "dir",
       "hardenedRuntime": false
     },
+    "linux": {
+      "target": "dir",
+      "category": "Development"
+    },
+    "win": {
+      "target": "dir"
+    },
     "files": [
       "**/*",
       "!scripts"
     ],
     "asarUnpack": [
-      "mic-server/**"
+      "mic-server/**",
+      "server/**"
     ]
   }
 }
