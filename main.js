@@ -976,7 +976,7 @@ app.whenReady().then(async () => {
   // on the "other" host (e.g. WSL local when Pentacle runs as a Windows
   // client) are invisible to the sidebar unless we list them here directly.
   ipcMain.handle('tmux:list-sessions-by-host', async () => {
-    const fmt = '#{session_name}|#{session_attached}|#{session_created}';
+    const fmt = '#{session_name}|#{session_attached}|#{session_created}|#{window_name}';
     const out = {};
     for (const [id, host] of Object.entries(HOSTS)) {
       try {
@@ -988,8 +988,10 @@ app.whenReady().then(async () => {
           raw = await host.tmux(['list-sessions', '-F', fmt], { lane: 'bg' });
         }
         out[id] = raw.trim().split('\n').filter(Boolean).map((line) => {
-          const [name, attached, created] = line.split('|');
-          return { name, attached: attached === '1', created: Number(created) || 0 };
+          const parts = line.split('|');
+          const [name, attached, created] = parts;
+          const windowName = parts.slice(3).join('|'); // window name may contain |
+          return { name, attached: attached === '1', created: Number(created) || 0, windowName };
         });
       } catch {
         // `tmux list-sessions` exits non-zero when no server is running — treat as empty.
@@ -1000,31 +1002,92 @@ app.whenReady().then(async () => {
   });
 
   // ── Dashboards ──────────────────────────────────────────────
-  ipcMain.handle('dashboard:pipeline-stats', async (_evt, batch) => {
-    // Paths are hardcoded to macOS bartimaeus home → needs mac host.
-    if (IS_CLIENT || !IS_DARWIN) return { error: 'pipeline-stats only available on mac host' };
+  // Pipeline stats come from a JSON cache on Bart's SSD, refreshed every 10s
+  // by scripts/dashboard_cache_updater.py while scrapers are running. Host
+  // mode reads the file directly; client mode `ssh cat`s it through the
+  // same connection used for the API tunnel. When the caller asks for an
+  // explicit batch that differs from the cache, we fall through to a fresh
+  // pipeline_stats.py run (local on host, remote via ssh on client).
+  const STATS_CACHE_PATH = '/Volumes/T7/land-bot/dashboard-cache/foreclosure_pipeline.json';
+  const STATS_PY = '/Users/bartimaeus/.venvs/global/bin/python';
+  const STATS_SCRIPT = '/Users/bartimaeus/land-bot/scripts/pipeline_stats.py';
+
+  function _sshBase() {
+    const r = CONFIG.remote || {};
+    const args = ['-o', 'BatchMode=yes',
+      '-o', 'StrictHostKeyChecking=no',
+      '-o', 'ConnectTimeout=5'];
+    if (r.port && r.port !== 22) args.push('-p', String(r.port));
+    args.push(`${r.user}@${r.host}`);
+    return args;
+  }
+
+  function _runCapture(cmd, args, timeoutMs) {
     return new Promise((resolve) => {
-      const env = {
-        ...process.env,
-        PYTHONPATH: '/Users/bartimaeus/land-bot',
-        DATABASE_URL: 'postgresql://bartimaeus@localhost:5432/altum',
-      };
-      const args = ['/Users/bartimaeus/land-bot/scripts/pipeline_stats.py'];
-      if (batch && typeof batch === 'string') args.push('--batch', batch);
-      const proc = spawn('/Users/bartimaeus/.venvs/global/bin/python', args, { env });
+      const proc = spawn(cmd, args, IS_WIN ? { windowsHide: true } : {});
       let stdout = '', stderr = '';
-      const timer = setTimeout(() => { proc.kill('SIGKILL'); }, 15000);
+      const timer = setTimeout(() => { proc.kill('SIGKILL'); }, timeoutMs);
       proc.stdout.on('data', d => { stdout += d; });
       proc.stderr.on('data', d => { stderr += d; });
       proc.on('close', (code) => {
         clearTimeout(timer);
-        if (code === 0) {
-          try { resolve(JSON.parse(stdout.trim())); }
-          catch { resolve({ error: 'Invalid JSON: ' + stdout.slice(0, 100) }); }
-        } else { resolve({ error: (stderr || '').slice(0, 200) || `Stats script exit ${code}` }); }
+        resolve({ code, stdout, stderr });
       });
-      proc.on('error', (e) => { clearTimeout(timer); resolve({ error: e.message }); });
+      proc.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, stdout: '', stderr: e.message }); });
     });
+  }
+
+  async function _readStatsCache() {
+    const res = IS_CLIENT && CONFIG.remote
+      ? await _runCapture('ssh', [..._sshBase(), 'cat', STATS_CACHE_PATH], 8000)
+      : await _runCapture(IS_WIN ? 'type' : 'cat', [STATS_CACHE_PATH], 5000);
+    if (res.code !== 0) return { error: (res.stderr || '').slice(0, 200) || `cache read exit ${res.code}` };
+    try { return JSON.parse(res.stdout); }
+    catch { return { error: 'Invalid JSON in cache' }; }
+  }
+
+  async function _runStatsFresh(batch) {
+    // Spawn pipeline_stats.py either locally (host) or through ssh (client).
+    const pyArgs = [STATS_SCRIPT];
+    if (batch && typeof batch === 'string') pyArgs.push('--batch', batch);
+    let cmd, args;
+    if (IS_CLIENT && CONFIG.remote) {
+      cmd = 'ssh';
+      args = [..._sshBase(),
+        `PYTHONPATH=/Users/bartimaeus/land-bot DATABASE_URL=postgresql://bartimaeus@localhost:5432/altum ${STATS_PY} ${pyArgs.map(a => `'${a.replace(/'/g, `'\\''`)}'`).join(' ')}`];
+    } else if (IS_DARWIN) {
+      cmd = STATS_PY;
+      args = pyArgs;
+    } else {
+      return { error: 'pipeline-stats not available on this host' };
+    }
+    const env = !IS_CLIENT && IS_DARWIN ? {
+      ...process.env,
+      PYTHONPATH: '/Users/bartimaeus/land-bot',
+      DATABASE_URL: 'postgresql://bartimaeus@localhost:5432/altum',
+    } : undefined;
+    const res = env
+      ? await new Promise((resolve) => {
+          const proc = spawn(cmd, args, { env });
+          let stdout = '', stderr = '';
+          const timer = setTimeout(() => { proc.kill('SIGKILL'); }, 20000);
+          proc.stdout.on('data', d => { stdout += d; });
+          proc.stderr.on('data', d => { stderr += d; });
+          proc.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+          proc.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, stdout: '', stderr: e.message }); });
+        })
+      : await _runCapture(cmd, args, 20000);
+    if (res.code !== 0) return { error: (res.stderr || '').slice(0, 200) || `Stats script exit ${res.code}` };
+    try { return JSON.parse(res.stdout.trim()); }
+    catch { return { error: 'Invalid JSON: ' + res.stdout.slice(0, 100) }; }
+  }
+
+  ipcMain.handle('dashboard:pipeline-stats', async (_evt, batch) => {
+    const cached = await _readStatsCache();
+    const wantBatch = (batch && typeof batch === 'string') ? batch : null;
+    if (!cached.error && (!wantBatch || cached.batch === wantBatch)) return cached;
+    // Cache missing or batch mismatch: run fresh.
+    return await _runStatsFresh(wantBatch);
   });
 
   // 0DTE dashboard — DynamoDB queries work from any host (AWS is remote)

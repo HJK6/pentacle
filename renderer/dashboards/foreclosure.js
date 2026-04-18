@@ -782,16 +782,16 @@ function _isIdle(data) {
   return stages.every(s => s.state === 'complete');
 }
 
-// ── Self-register (mac-mini host only, synchronous) ──
+// ── Self-register ──
+// Show when we have direct access to the cache (Bart host) OR when we're a
+// client pointing at Bart (reads the SSD cache over ssh via main.js IPC).
+// Any other standalone host (no remote config, not Bart) has nothing to read.
 const MAC_MINI_HOST_PREFIX = 'Bartimaeuss-Mac-mini';
 const _host = (window.HOST && window.HOST.hostname) || '';
 const _isClient = !!(window.HOST && window.HOST.isClient);
-
-// Bartimaeus-only: this is Bart's foreclosure pipeline — do not show on
-// Amaterasu, Abra, or any client-mode host. Gate is both isClient + host prefix
-// so a stale pentacle.config.js without `remote` still can't accidentally flip
-// it on from another machine.
-const _showForeclosure = !_isClient && _host.startsWith(MAC_MINI_HOST_PREFIX);
+const _hasRemote = !!(window.HOST && window.HOST.hasRemote);
+const _showForeclosure = (!_isClient && _host.startsWith(MAC_MINI_HOST_PREFIX))
+  || (_isClient && _hasRemote);
 if (_showForeclosure) {
   window.DASHBOARDS.push({
     id: 'foreclosure-pipeline',

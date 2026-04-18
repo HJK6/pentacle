@@ -9,15 +9,18 @@ const path = require('path');
 // can self-register without waiting on an async getConfig() round-trip.
 // `isClient` matches the logic in main.js: CONFIG.remote present → CLIENT.
 let _isClient = false;
+let _hasRemote = false;
 try {
   const _cfg = require(path.join(__dirname, 'pentacle.config.js'));
   _isClient = !!_cfg.remote;
+  _hasRemote = !!_cfg.remote;
 } catch { /* keep default false */ }
 
 window.HOST = {
   hostname: os.hostname(),
   platform: process.platform,
   isClient: _isClient,
+  hasRemote: _hasRemote,
 };
 
 window.cc = {

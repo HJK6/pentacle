@@ -1867,6 +1867,23 @@ body {
   border-color: var(--border);
 }
 
+/* ── Skiptrace gate indicator ───────────────────── */
+/* Applied to the skipmatrix_csv stage box when pipeline_summary.skiptrace_gate
+   === 'closed'. Dims the box + shows a lock glyph next to the label so it's
+   clear the pipeline is parked (waiting for the user to release the gate),
+   not failed. */
+.pipeline-flow .pipeline-stage.stage-gated {
+  opacity: 0.7;
+}
+.stage-gate-icon {
+  margin-right: 4px;
+  font-size: 12px;
+  cursor: help;
+}
+.batch-label-gated {
+  color: var(--yellow);
+}
+
 /* Wrap the skiptrace flow to 2 rows when the 8 boxes don't fit one line */
 .pipeline-view .pipeline-flow {
   flex-wrap: wrap;
