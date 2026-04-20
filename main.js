@@ -8,6 +8,49 @@ const { DynamoDBDocumentClient, QueryCommand, ScanCommand } = require('@aws-sdk/
 const { S3Client, ListObjectsV2Command, GetObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const { SQSClient, GetQueueAttributesCommand } = require('@aws-sdk/client-sqs');
 
+// ── File logging ────────────────────────────────────────────────────────────
+// Mirror console.{log,info,warn,error} and uncaught exceptions to a log file
+// under the platform userData dir, so post-mortem debugging works on any
+// machine. Rotates at 5 MB (keeps one .1 backup). Best-effort — any failure
+// inside this block is swallowed so logging never breaks app startup.
+//
+// Log locations:
+//   Windows  %APPDATA%\Pentacle\logs\pentacle.log
+//   macOS    ~/Library/Application Support/Pentacle/logs/pentacle.log
+//   Linux    ~/.config/Pentacle/logs/pentacle.log
+{
+  try {
+    const logDir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, 'pentacle.log');
+    const MAX_BYTES = 5 * 1024 * 1024;
+    try {
+      const st = fs.statSync(logPath);
+      if (st.size > MAX_BYTES) fs.renameSync(logPath, logPath + '.1');
+    } catch {}
+    const stream = fs.createWriteStream(logPath, { flags: 'a' });
+    stream.write(`\n[${new Date().toISOString()}] --- Pentacle start ${process.platform} node=${process.versions.node} electron=${process.versions.electron} pid=${process.pid} ---\n`);
+    const fmt = (args) => args.map((a) => {
+      if (typeof a === 'string') return a;
+      if (a && a.stack) return a.stack;
+      try { return JSON.stringify(a); } catch { return String(a); }
+    }).join(' ');
+    for (const level of ['log', 'info', 'warn', 'error']) {
+      const orig = console[level].bind(console);
+      console[level] = (...args) => {
+        try { stream.write(`[${new Date().toISOString()}] [${level}] ${fmt(args)}\n`); } catch {}
+        orig(...args);
+      };
+    }
+    process.on('uncaughtException', (e) => {
+      try { stream.write(`[${new Date().toISOString()}] [uncaught] ${e && e.stack || e}\n`); } catch {}
+    });
+    process.on('unhandledRejection', (e) => {
+      try { stream.write(`[${new Date().toISOString()}] [unhandledRejection] ${e && e.stack || e}\n`); } catch {}
+    });
+  } catch { /* logging is best-effort */ }
+}
+
 // ── Config bootstrap ────────────────────────────────────────────────────────
 // Auto-copy example → config on first run (dev mode only).
 // Never overwrites an existing config.
