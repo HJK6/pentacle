@@ -105,12 +105,17 @@ let _tradersCache = { ts: 0, traders: [] };
 const _TRADERS_CACHE_TTL_MS = 60_000;
 
 // ── S3 + SQS clients for the Amaterasu OCR dashboard ─────────────────────────
-// Platform-agnostic — reads AWS creds from the standard chain. Works on Bart,
-// Amaterasu (Windows), Abra (mac) without any hardcoded Python paths.
+// Kept for back-compat; dashboard data now flows through the Dashboard Hub
+// (see hubClient + IPC handlers below).
 const _s3 = new S3Client({ region: 'us-east-1' });
 const _sqs = new SQSClient({ region: 'us-east-1' });
 const _AMATERASU_BUCKET = 'amaterasu-botcomm-data';
 const _AMATERASU_QUEUE = 'https://sqs.us-east-1.amazonaws.com/841672795586/amaterasu-inbox';
+
+// ── Dashboard Hub client ─────────────────────────────────────────────────────
+// Single long-lived WS connection per Pentacle instance. Handles reconnect +
+// disk cache. Exposes .get(id) → envelope.
+const hubClient = require('./main/dashboard_hub_client');
 
 app.setName(CONFIG.appName);
 
@@ -1044,270 +1049,64 @@ app.whenReady().then(async () => {
     return out;
   });
 
-  // ── Dashboards ──────────────────────────────────────────────
-  // Pipeline stats come from a JSON cache on Bart's SSD, refreshed every 10s
-  // by scripts/dashboard_cache_updater.py while scrapers are running. Host
-  // mode reads the file directly; client mode `ssh cat`s it through the
-  // same connection used for the API tunnel. When the caller asks for an
-  // explicit batch that differs from the cache, we fall through to a fresh
-  // pipeline_stats.py run (local on host, remote via ssh on client).
-  const STATS_CACHE_PATH = '/Volumes/T7/land-bot/dashboard-cache/foreclosure_pipeline.json';
-  const STATS_PY = '/Users/bartimaeus/.venvs/global/bin/python';
-  const STATS_SCRIPT = '/Users/bartimaeus/land-bot/scripts/pipeline_stats.py';
-
-  function _sshBase() {
-    const r = CONFIG.remote || {};
-    const args = ['-o', 'BatchMode=yes',
-      '-o', 'StrictHostKeyChecking=no',
-      '-o', 'ConnectTimeout=5'];
-    if (r.port && r.port !== 22) args.push('-p', String(r.port));
-    args.push(`${r.user}@${r.host}`);
-    return args;
+  // ── Dashboards — Dashboard Hub (see dashboard-hub spec §5.2) ────────────────
+  // Hub client is initialised once per Pentacle instance, maintains a WS
+  // connection to Bart, and caches envelopes in memory + on disk. IPC handlers
+  // below are thin shims that extract the right envelope and add staleness
+  // metadata (_transport_stale / _data_stale / _age_sec / _updated_at).
+  if (CONFIG.dashboardHub) {
+    hubClient.init(CONFIG, app);
   }
 
-  function _runCapture(cmd, args, timeoutMs) {
-    return new Promise((resolve) => {
-      const proc = spawn(cmd, args, IS_WIN ? { windowsHide: true } : {});
-      let stdout = '', stderr = '';
-      const timer = setTimeout(() => { proc.kill('SIGKILL'); }, timeoutMs);
-      proc.stdout.on('data', d => { stdout += d; });
-      proc.stderr.on('data', d => { stderr += d; });
-      proc.on('close', (code) => {
-        clearTimeout(timer);
-        resolve({ code, stdout, stderr });
-      });
-      proc.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, stdout: '', stderr: e.message }); });
-    });
-  }
-
-  async function _readStatsCache() {
-    const res = IS_CLIENT && CONFIG.remote
-      ? await _runCapture('ssh', [..._sshBase(), 'cat', STATS_CACHE_PATH], 8000)
-      : await _runCapture(IS_WIN ? 'type' : 'cat', [STATS_CACHE_PATH], 5000);
-    if (res.code !== 0) return { error: (res.stderr || '').slice(0, 200) || `cache read exit ${res.code}` };
-    try { return JSON.parse(res.stdout); }
-    catch { return { error: 'Invalid JSON in cache' }; }
-  }
-
-  async function _runStatsFresh(batch) {
-    // Spawn pipeline_stats.py either locally (host) or through ssh (client).
-    const pyArgs = [STATS_SCRIPT];
-    if (batch && typeof batch === 'string') pyArgs.push('--batch', batch);
-    let cmd, args;
-    if (IS_CLIENT && CONFIG.remote) {
-      cmd = 'ssh';
-      args = [..._sshBase(),
-        `PYTHONPATH=/Users/bartimaeus/land-bot DATABASE_URL=postgresql://bartimaeus@localhost:5432/altum ${STATS_PY} ${pyArgs.map(a => `'${a.replace(/'/g, `'\\''`)}'`).join(' ')}`];
-    } else if (IS_DARWIN) {
-      cmd = STATS_PY;
-      args = pyArgs;
-    } else {
-      return { error: 'pipeline-stats not available on this host' };
-    }
-    const env = !IS_CLIENT && IS_DARWIN ? {
-      ...process.env,
-      PYTHONPATH: '/Users/bartimaeus/land-bot',
-      DATABASE_URL: 'postgresql://bartimaeus@localhost:5432/altum',
-    } : undefined;
-    const res = env
-      ? await new Promise((resolve) => {
-          const proc = spawn(cmd, args, { env });
-          let stdout = '', stderr = '';
-          const timer = setTimeout(() => { proc.kill('SIGKILL'); }, 20000);
-          proc.stdout.on('data', d => { stdout += d; });
-          proc.stderr.on('data', d => { stderr += d; });
-          proc.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
-          proc.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, stdout: '', stderr: e.message }); });
-        })
-      : await _runCapture(cmd, args, 20000);
-    if (res.code !== 0) return { error: (res.stderr || '').slice(0, 200) || `Stats script exit ${res.code}` };
-    try { return JSON.parse(res.stdout.trim()); }
-    catch { return { error: 'Invalid JSON: ' + res.stdout.slice(0, 100) }; }
-  }
-
-  ipcMain.handle('dashboard:pipeline-stats', async (_evt, batch) => {
-    const cached = await _readStatsCache();
-    const wantBatch = (batch && typeof batch === 'string') ? batch : null;
-    if (!cached.error && (!wantBatch || cached.batch === wantBatch)) return cached;
-    // Cache missing or batch mismatch: run fresh.
-    return await _runStatsFresh(wantBatch);
-  });
-
-  // 0DTE dashboard — DynamoDB queries work from any host (AWS is remote)
-  ipcMain.handle('dashboard:0dte-stats', async (_evt, traderId) => {
-    if (!traderId) return { error: 'no trader_id provided' };
-    try {
-      const resp = await _ddb.send(new QueryCommand({
-        TableName: _DASHBOARD_TABLE,
-        KeyConditionExpression: 'trader_id = :t',
-        ExpressionAttributeValues: { ':t': traderId },
-        ScanIndexForward: false, Limit: 1,
-      }));
-      const items = resp.Items || [];
-      if (items.length === 0) return { snapshot: null, age_sec: null, trader_id: traderId };
-      const snapshot = items[0];
-      const ageSec = Math.max(0, (Date.now() - Number(snapshot.snapshot_ts)) / 1000);
-      return { snapshot, age_sec: ageSec, trader_id: traderId };
-    } catch (e) { return { error: `dynamodb query failed: ${e.message || e}` }; }
-  });
-
-  ipcMain.handle('dashboard:0dte-list-traders', async () => {
-    const now = Date.now();
-    if (now - _tradersCache.ts < _TRADERS_CACHE_TTL_MS && _tradersCache.traders.length > 0) {
-      return { traders: _tradersCache.traders, cached: true };
-    }
-    try {
-      const traders = new Set();
-      let lastKey = undefined;
-      do {
-        const resp = await _ddb.send(new ScanCommand({
-          TableName: _DASHBOARD_TABLE,
-          ProjectionExpression: 'trader_id',
-          ExclusiveStartKey: lastKey,
-        }));
-        for (const it of (resp.Items || [])) if (it.trader_id) traders.add(it.trader_id);
-        lastKey = resp.LastEvaluatedKey;
-      } while (lastKey);
-      const list = Array.from(traders).sort();
-      _tradersCache = { ts: now, traders: list };
-      return { traders: list, cached: false };
-    } catch (e) {
-      return { error: `dynamodb scan failed: ${e.message || e}`, traders: _tradersCache.traders };
-    }
-  });
-
-  ipcMain.handle('dashboard:amaterasu-ocr-stats', async () => {
-    // Platform-agnostic: uses AWS SDK directly. Runs on Bart, Amaterasu,
-    // or any client with AWS creds. Paginates the batches/ prefix, summarizes
-    // per-batch progress, and returns a JSON shape consumed by
-    // renderer/dashboards/amaterasu.js.
-    const _debugLog = (msg) => {
-      try { require('fs').appendFileSync('C:\\Users\\vamsh\\pentacle_ocr_debug.log', `[${new Date().toISOString()}] ${msg}\n`); } catch {}
+  function _hubEnvelope(dashboardId) {
+    const env = hubClient.get(dashboardId);
+    if (!env) return { error: 'no data yet from hub', _transport_stale: !hubClient.connected };
+    const ageSec = (Date.now() - new Date(env.server_received_at).getTime()) / 1000;
+    const ttl = env.freshness_ttl_sec != null ? env.freshness_ttl_sec : 300;
+    return {
+      ...env.data,
+      _updated_at: env.updated_at,
+      _server_received_at: env.server_received_at,
+      _age_sec: ageSec,
+      _transport_stale: !hubClient.connected,
+      _data_stale: ageSec > ttl,
     };
-    _debugLog('handler invoked');
-    try {
-      // SQS depth
-      const qa = await _sqs.send(new GetQueueAttributesCommand({
-        QueueUrl: _AMATERASU_QUEUE,
-        AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'],
-      }));
-      const sqsStats = {
-        visible: Number(qa.Attributes?.ApproximateNumberOfMessages || 0),
-        in_flight: Number(qa.Attributes?.ApproximateNumberOfMessagesNotVisible || 0),
-      };
+  }
 
-      // List all batch keys (paginated)
-      const batchMap = new Map();
-      let continuationToken;
-      do {
-        const lr = await _s3.send(new ListObjectsV2Command({
-          Bucket: _AMATERASU_BUCKET,
-          Prefix: 'batches/',
-          ContinuationToken: continuationToken,
-        }));
-        for (const obj of (lr.Contents || [])) {
-          const parts = obj.Key.split('/');
-          if (parts.length < 3) continue;
-          const [, friend, batchId] = parts;
-          const k = `${friend}/${batchId}`;
-          if (!batchMap.has(k)) batchMap.set(k, { friend_id: friend, batch_id: batchId, objs: [] });
-          batchMap.get(k).objs.push(obj);
-        }
-        continuationToken = lr.IsTruncated ? lr.NextContinuationToken : undefined;
-      } while (continuationToken);
+  ipcMain.handle('dashboard:pipeline-stats', (_evt, _batch) => {
+    // v1: ignores batch arg — always returns hub's current snapshot.
+    return _hubEnvelope('bart.foreclosure');
+  });
 
-      const readJson = async (key) => {
-        try {
-          const o = await _s3.send(new GetObjectCommand({ Bucket: _AMATERASU_BUCKET, Key: key }));
-          const chunks = [];
-          for await (const c of o.Body) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
-          return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        } catch { return null; }
-      };
+  ipcMain.handle('dashboard:0dte-stats', (_evt, traderId) => {
+    const env = hubClient.get('bart.0dte');
+    if (!env) return { error: 'no data yet from hub', _transport_stale: !hubClient.connected };
+    const ageSec = (Date.now() - new Date(env.server_received_at).getTime()) / 1000;
+    const ttl = env.freshness_ttl_sec != null ? env.freshness_ttl_sec : 300;
+    const base = {
+      _updated_at: env.updated_at,
+      _server_received_at: env.server_received_at,
+      _age_sec: ageSec,
+      _transport_stale: !hubClient.connected,
+      _data_stale: ageSec > ttl,
+    };
+    if (!traderId) return { error: 'no trader_id provided', ...base };
+    const snapshots = env.data?.snapshots || {};
+    const snapshot = snapshots[traderId] || null;
+    const snapshotTs = snapshot?.snapshot_ts ? Number(snapshot.snapshot_ts) : null;
+    const snapshotAge = snapshotTs ? Math.max(0, (Date.now() - snapshotTs) / 1000) : null;
+    return { snapshot, age_sec: snapshotAge, trader_id: traderId, ...base };
+  });
 
-      const active = [];
-      const completed = [];
-      const now = Date.now();
-      const cutoff24h = now - 24 * 3600 * 1000;
-      let completed24h = 0;
-      let docs24h = 0;
+  ipcMain.handle('dashboard:0dte-list-traders', () => {
+    const env = hubClient.get('bart.0dte');
+    if (!env) return { traders: [], error: 'no data yet from hub', _transport_stale: !hubClient.connected };
+    const traders = env.data?.traders || [];
+    return { traders, cached: false };
+  });
 
-      for (const b of batchMap.values()) {
-        let hasRequest = false, hasResponse = false, requestTs = null, responseTs = null;
-        const docOutputs = [];
-        for (const o of b.objs) {
-          if (o.Key.endsWith('/response.json')) { hasResponse = true; responseTs = o.LastModified; }
-          else if (o.Key.endsWith('/request.json')) { hasRequest = true; requestTs = o.LastModified; }
-          else if (o.Key.includes('/docs/') && o.Key.endsWith('/output.json')) docOutputs.push(o);
-        }
-        docOutputs.sort((a, x) => a.LastModified - x.LastModified);
-        const summary = {
-          friend_id: b.friend_id, batch_id: b.batch_id,
-          has_request: hasRequest, has_response: hasResponse,
-          docs_done: docOutputs.length,
-          started_at: requestTs?.toISOString() || null,
-          first_doc_at: docOutputs[0]?.LastModified?.toISOString() || null,
-          last_doc_at: docOutputs.at(-1)?.LastModified?.toISOString() || null,
-          completed_at: responseTs?.toISOString() || null,
-        };
-        if (hasResponse) {
-          completed.push(summary);
-          if (responseTs && responseTs.getTime() >= cutoff24h) {
-            completed24h += 1;
-            docs24h += summary.docs_done;
-          }
-        } else {
-          active.push(summary);
-        }
-      }
-
-      // Enrich active batches with docs_total (from request.json). Skip the
-      // per-doc error scan for large batches — 800+ sequential GetObject calls
-      // hang the handler. Error counts for active batches show as null; the
-      // response.json (written at the end) is where we source authoritative
-      // error counts for completed batches.
-      _debugLog(`enriching ${active.length} active batches`);
-      await Promise.all(active.map(async (b) => {
-        const req = await readJson(`batches/${b.friend_id}/${b.batch_id}/request.json`);
-        b.docs_total = Array.isArray(req?.docs) ? req.docs.length : null;
-        b.docs_error = null; // computed only for completed batches
-      }));
-      _debugLog('active batches enriched');
-
-      // Enrich completed batches with response.json stats.
-      _debugLog(`enriching ${completed.length} completed batches`);
-      await Promise.all(completed.map(async (b) => {
-        const resp = await readJson(`batches/${b.friend_id}/${b.batch_id}/response.json`);
-        if (resp) {
-          b.count = resp.count || 0;
-          b.status = resp.status || '';
-          b.model = resp.model || '';
-          b.error_count = (resp.results || []).filter(r => r?.status === 'error').length;
-          if (b.completed_at) {
-            const end = new Date(b.completed_at).getTime();
-            const start = new Date(b.first_doc_at || b.started_at).getTime();
-            if (!isNaN(end) && !isNaN(start)) b.elapsed_sec = Math.floor((end - start) / 1000);
-          }
-        } else { b.count = b.docs_done; b.status = 'unknown'; }
-      }));
-      _debugLog('completed batches enriched');
-
-      active.sort((a, x) => String(x.first_doc_at || x.started_at || '').localeCompare(String(a.first_doc_at || a.started_at || '')));
-      completed.sort((a, x) => String(x.completed_at || '').localeCompare(String(a.completed_at || '')));
-
-      const result = {
-        sqs: sqsStats,
-        active_batches: active.slice(0, 20),
-        recent_completed: completed.slice(0, 20),
-        totals: { active_count: active.length, completed_24h: completed24h, docs_processed_24h: docs24h },
-        generated_at: new Date().toISOString(),
-      };
-      _debugLog(`handler success: active=${active.length} completed=${completed.length} sqs=${JSON.stringify(sqsStats)}`);
-      return result;
-    } catch (e) {
-      _debugLog(`handler ERROR: ${e.name}: ${e.message}\n${(e.stack||'').slice(0,600)}`);
-      return { error: `amaterasu-ocr-stats failed: ${e.message || e}` };
-    }
+  ipcMain.handle('dashboard:amaterasu-ocr-stats', () => {
+    return _hubEnvelope('amaterasu.ocr');
   });
 
   // Image paste
