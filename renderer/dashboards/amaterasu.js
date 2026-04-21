@@ -94,14 +94,21 @@ function update(refs, data) {
   if (!refs || !data) return;
   const { subtitle, metrics, activeBody, doneBody } = refs;
 
-  if (data.error) {
+  if (data.error && !data._transport_stale) {
     subtitle.textContent = `error: ${data.error}`;
     subtitle.style.color = '#d66';
     return;
   }
 
-  subtitle.textContent = `updated ${_agoSec(data.generated_at) || 0}s ago`;
-  subtitle.style.color = '#888';
+  // Prefer dashboard-hub staleness badge when the IPC payload carries the
+  // new fields (post-hub migration). Fall back to the legacy subtitle when
+  // data came from the old path.
+  if (typeof renderStalenessBadge === 'function' && (data._updated_at || data._transport_stale !== undefined)) {
+    renderStalenessBadge(subtitle, data);
+  } else {
+    subtitle.textContent = `updated ${_agoSec(data.generated_at) || 0}s ago`;
+    subtitle.style.color = '#888';
+  }
 
   // Metrics row
   const sqs = data.sqs || {};
