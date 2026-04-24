@@ -318,6 +318,24 @@ function buildHostRegistry(CONFIG, { platform } = { platform: process.platform }
     });
   }
 
+  // Peers — additional SSH hosts for multi-machine chat visibility without
+  // flipping into CLIENT mode. Each peer's tmux sessions show up in the sidebar
+  // alongside local ones; attach works via SSH like `remote` does.
+  const peers = Array.isArray(CONFIG && CONFIG.peers) ? CONFIG.peers : [];
+  for (const p of peers) {
+    if (!p || !p.id || !p.host || !p.user) continue;
+    if (hosts[p.id]) continue; // don't clobber local/remote
+    hosts[p.id] = new Ssh2Host({
+      id: p.id,
+      host: p.host,
+      port: p.port || 22,
+      user: p.user,
+      tmuxBin: p.tmux || 'tmux',
+      privateKey,
+      isRemote: true,
+    });
+  }
+
   return { hosts, defaultId: hasRemote ? 'remote' : 'local', isClient: hasRemote };
 }
 

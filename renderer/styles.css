@@ -176,6 +176,40 @@ body {
   flex-shrink: 0;
 }
 
+/* ── Source Filter Bar ────────────────────────── */
+
+.source-filter-bar {
+  display: flex;
+  gap: 4px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.source-filter-btn {
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition: all 0.12s;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.source-filter-btn:hover { border-color: var(--fg-dim); color: var(--fg); }
+.source-filter-btn.active { background: var(--bg3); color: var(--fg); border-color: var(--fg-dim); }
+.source-filter-btn.color-red.active    { color: var(--red);    border-color: var(--red);    background: rgba(244,112,103,0.12); }
+.source-filter-btn.color-purple.active { color: var(--purple); border-color: var(--purple); background: rgba(167,139,250,0.12); }
+.source-filter-btn.color-yellow.active { color: var(--yellow); border-color: var(--yellow); background: rgba(212,167,44,0.12); }
+.source-filter-btn.color-green.active  { color: var(--green);  border-color: var(--green);  background: rgba(86,211,100,0.12); }
+.source-filter-btn.color-blue.active   { color: var(--blue);   border-color: var(--blue);   background: rgba(63,185,80,0.12); }
+.source-filter-btn.color-orange.active { color: #f0883e;       border-color: #f0883e;       background: rgba(240,136,62,0.12); }
+
 .session-list {
   flex: 1;
   overflow-y: auto;
