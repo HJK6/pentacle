@@ -38,7 +38,42 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": "dir",
-      "hardenedRuntime": false
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "Pentacle spawns Claude Code and Codex agents that use AppleScript to access Contacts, Messages, Calendar, Notes, and Mail.",
+        "NSContactsUsageDescription": "Agents running inside Pentacle read and search your macOS Contacts.",
+        "NSCalendarsUsageDescription": "Agents running inside Pentacle read and create Calendar events.",
+        "NSCalendarsFullAccessUsageDescription": "Agents running inside Pentacle read and create Calendar events.",
+        "NSRemindersUsageDescription": "Agents running inside Pentacle may read and create Reminders.",
+        "NSRemindersFullAccessUsageDescription": "Agents running inside Pentacle may read and create Reminders.",
+        "NSCameraUsageDescription": "Agents running inside Pentacle capture webcam snapshots and video.",
+        "NSMicrophoneUsageDescription": "Agents running inside Pentacle record and transcribe audio.",
+        "NSPhotoLibraryUsageDescription": "Agents running inside Pentacle read and analyze photos from the library.",
+        "NSPhotoLibraryAddUsageDescription": "Agents running inside Pentacle save generated images to the photo library.",
+        "NSSpeechRecognitionUsageDescription": "Agents running inside Pentacle transcribe speech locally and via Apple Speech.",
+        "NSLocationWhenInUseUsageDescription": "Agents running inside Pentacle use location for weather, maps, and context.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Agents running inside Pentacle use location for background tasks.",
+        "NSBluetoothAlwaysUsageDescription": "Agents running inside Pentacle discover and connect to nearby Bluetooth devices.",
+        "NSBluetoothPeripheralUsageDescription": "Agents running inside Pentacle discover and connect to nearby Bluetooth devices.",
+        "NSMotionUsageDescription": "Agents running inside Pentacle read motion sensors.",
+        "NSAppleMusicUsageDescription": "Agents running inside Pentacle read the Apple Music library.",
+        "NSHomeKitUsageDescription": "Agents running inside Pentacle control HomeKit accessories.",
+        "NSFaceIDUsageDescription": "Agents running inside Pentacle authenticate with Face ID / Touch ID.",
+        "NSDesktopFolderUsageDescription": "Agents running inside Pentacle read and write files in Desktop.",
+        "NSDocumentsFolderUsageDescription": "Agents running inside Pentacle read and write files in Documents.",
+        "NSDownloadsFolderUsageDescription": "Agents running inside Pentacle read and write files in Downloads.",
+        "NSNetworkVolumesUsageDescription": "Agents running inside Pentacle access files on network volumes.",
+        "NSRemovableVolumesUsageDescription": "Agents running inside Pentacle access files on removable volumes.",
+        "NSFileProviderDomainUsageDescription": "Agents running inside Pentacle access cloud-synced files.",
+        "NSFileProviderPresenceUsageDescription": "Agents running inside Pentacle read cloud-sync presence info.",
+        "NSSystemAdministrationUsageDescription": "Agents running inside Pentacle may perform admin tasks.",
+        "NSUserTrackingUsageDescription": "Agents running inside Pentacle do not use cross-app tracking.",
+        "NSLocalNetworkUsageDescription": "Agents running inside Pentacle discover and communicate with devices on the local network.",
+        "NSFocusStatusUsageDescription": "Agents running inside Pentacle read Focus status.",
+        "NSNearbyInteractionUsageDescription": "Agents running inside Pentacle use Nearby Interaction."
+      }
     },
     "linux": {
       "target": "dir",
@@ -49,7 +84,8 @@
     },
     "files": [
       "**/*",
-      "!scripts"
+      "!scripts",
+      "!build"
     ],
     "asarUnpack": [
       "mic-server/**",
