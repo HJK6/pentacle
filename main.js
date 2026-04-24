@@ -800,11 +800,13 @@ app.whenReady().then(async () => {
 
   ensureWslSshd();
   startSshTunnel();
-  await ensureApiServer();
   ensureLocalTmuxUtf8();
   probeRemoteTmuxUtf8();  // fire-and-forget; just logs
   ensureWindowSizeLatest();  // stop multi-client size collapse
   await createMainWindow();
+  ensureApiServer().catch((e) => {
+    console.warn(`[api] startup check failed: ${e.message || e}`);
+  });
 
   // ── IPC: session management ─────────────────────────────────
   ipcMain.handle('pty:create', async (_, slot, sessionName, hostId, cols, rows) => {
