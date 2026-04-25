@@ -1,0 +1,174 @@
+{
+  "render_event_cases": [
+    {
+      "name": "command-output-stays-readable",
+      "expected_output": "Show only the top command line in the transcript. Hide the noisy process-list output underneath.",
+      "event": {
+        "kind": "ASSIST",
+        "text": "Ran ps ax | rg \"/Users/bartimaeus/pentacle/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \\\\.|chat_streamd.py --port 7791\"\n└ 13767   ??  SN     0:06.07 /Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python -u chat_streamd.py --port 7791 --bind 0.0.0.0\n  --host bart --host abra --host amaterasu"
+      },
+      "expect_contains": [
+        "Ran ps ax | rg"
+      ],
+      "expect_not_contains": [
+        "slot-chat-change-pill",
+        "0:06.07"
+      ]
+    },
+    {
+      "name": "code-edit-collapses-to-first-line",
+      "expected_output": "Show a compact change pill with the edited file path only. Hide the patch hunk details.",
+      "event": {
+        "kind": "ASSIST",
+        "text": "Edited ~/pentacle/renderer/app.js\n@@\n- old\n+ new"
+      },
+      "expect_contains": [
+        "slot-chat-change-pill",
+        "Edited ~/pentacle/renderer/app.js"
+      ],
+      "expect_not_contains": [
+        "@@",
+        "- old",
+        "+ new"
+      ]
+    },
+    {
+      "name": "normal-assistant-text-stays-text",
+      "expected_output": "Render the assistant sentence as normal transcript text, not as a pill or button-style chip.",
+      "event": {
+        "kind": "ASSIST",
+        "text": "I’m checking the workspace for anything related to foreclosure scrapers so I can answer from the actual code, not guesswork."
+      },
+      "expect_contains": [
+        "I’m checking the workspace"
+      ],
+      "expect_not_contains": [
+        "slot-chat-change-pill"
+      ]
+    }
+  ],
+  "body_cases": [
+    {
+      "name": "working-status-line-hidden-from-transcript",
+      "expected_output": "Hide the raw Working(...) status line from the transcript body. The working state should live in the badge/timer area instead.",
+      "text": "• Working (2m 08s • esc to interrupt) · 3 background terminals running · /ps to view · /stop to close",
+      "expect_contains": [],
+      "expect_not_contains": [
+        "Working (2m 08s",
+        "slot-chat-line"
+      ]
+    },
+    {
+      "name": "pending-block-keeps-user-facing-label",
+      "expected_output": "Render a readable queued label plus the pending message body.",
+      "text": "Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n↳ fix the timer",
+      "expect_contains": [
+        "Queued for next tool call",
+        "fix the timer"
+      ],
+      "expect_not_contains": []
+    },
+    {
+      "name": "explored-block-stays-readable",
+      "expected_output": "Keep the Explored label plus the indented file detail block. Do not collapse it into a generic change pill.",
+      "text": "Explored\n└ Read app.js\n  Search effectiveDraft|shouldMirrorRemoteDraft|is-remote-draft|draftPreviewEl|remoteDraft in app.js",
+      "expect_contains": [
+        "Explored",
+        "Read app.js",
+        "Search effectiveDraft"
+      ],
+      "expect_not_contains": [
+        "slot-chat-change-pill"
+      ]
+    }
+  ],
+  "summary_cases": [
+    {
+      "name": "working-summary-hidden-in-sidebar",
+      "expected_output": "Sidebar detail should be blank for the raw Working(...) line.",
+      "input": "Working (38s • esc to interrupt) · 3 background terminals running · /ps to view · /stop to close",
+      "expected": ""
+    },
+    {
+      "name": "command-summary-allowed-in-sidebar",
+      "expected_output": "Sidebar detail can keep the top command line when it is useful context.",
+      "input": "Ran ps ax | rg \"chat_streamd.py --port 7791|Electron \\\\.\"",
+      "expected": "Ran ps ax | rg \"chat_streamd.py --port 7791|Electron \\\\.\""
+    }
+  ],
+  "composer_cases": [
+    {
+      "name": "remote-terminal-draft-mirrors-into-composer",
+      "expected_output": "Composer should mirror the remote in-progress draft when the user has not started a local edit yet.",
+      "local_draft": "",
+      "remote_draft": "I’m checking the renderer path against the websocket state now.",
+      "local_draft_touched": false,
+      "expected": "I’m checking the renderer path against the websocket state now."
+    },
+    {
+      "name": "local-composer-text-wins",
+      "remote_draft": "I’m checking the renderer path against the websocket state now.",
+      "local_draft_touched": true,
+      "expected_output": "Composer should show the local draft exactly.",
+      "local_draft": "reply here",
+      "expected": "reply here"
+    },
+    {
+      "name": "cleared-local-composer-stays-empty-until-remote-clears",
+      "remote_draft": "I’m checking the renderer path against the websocket state now.",
+      "local_draft_touched": true,
+      "expected_output": "Once the user clears the chat bar locally, it should stay empty instead of snapping the remote draft back in.",
+      "local_draft": "",
+      "expected": ""
+    }
+  ],
+  "working_time_cases": [
+    {
+      "name": "extracts-working-time-from-bulleted-line",
+      "expected_output": "Extract just the elapsed time token for the badge timer.",
+      "input": "• Working (38s • esc to interrupt) · 3 background terminals running · /ps to view · /stop to close",
+      "expected": "38s"
+    }
+  ],
+  "status_cases": [
+    {
+      "name": "working-with-timer-and-pending",
+      "expected_output": "Show only the working badge with timer once execution starts, even if a stale pending flag is still present.",
+      "activity": "working",
+      "workingLabel": "2m 08s",
+      "pending": true
+    },
+    {
+      "name": "waiting-without-timer",
+      "expected_output": "Show only the waiting badge with no timer text.",
+      "activity": "waiting",
+      "workingLabel": "",
+      "pending": false
+    },
+    {
+      "name": "idle-ready",
+      "expected_output": "Show only the idle badge.",
+      "activity": "idle",
+      "workingLabel": "",
+      "pending": false
+    }
+  ],
+  "draft_preview_cases": [
+    {
+      "name": "queued-draft-preview",
+      "expected_output": "Show queued draft preview with the pending label and the draft body.",
+      "remoteDraft": "fix the timer and keep the working chip visible",
+      "remotePending": true,
+      "activity": "waiting",
+      "timestampLabel": "2:45 AM"
+    },
+    {
+      "name": "working-draft-preview",
+      "expected_output": "Show draft-in-progress preview while the session is working.",
+      "remoteDraft": "I’m checking the renderer path against the websocket state now.",
+      "remotePending": false,
+      "activity": "working",
+      "timestampLabel": "2:46 AM"
+    }
+  ]
+}

@@ -198,6 +198,46 @@ npm run build:mac
 5. Activity detection polls tmux pane content to classify sessions as working/waiting/idle
 6. The input bar sends text directly to the PTY, supporting multiline input with Ctrl+Enter
 
+## Structured Chat Streaming
+
+Pentacle also has a websocket-backed structured chat mode layered on top of the tmux sessions.
+
+- Daemon: `~/agent-workspace/multi-machine-chat/chat_streamd.py`
+- Current hosts: Bart, Abra, Amaterasu
+- Current providers: Claude and Codex
+- Desktop renderer: slot-level `Chat` / `Terminal` toggle
+
+This is the intended foundation for non-desktop clients too. See [docs/mobile_handoff.md](docs/mobile_handoff.md) for the current handoff for building a mobile app on top of the same session and streaming layer.
+
+## Chat UI Mockups
+
+The structured chat UI has a fixture-driven mockup generator so you can review proposed transcript behavior visually before or alongside live testing.
+
+Generate the mockup page with:
+
+```bash
+cd /Users/bartimaeus/pentacle
+npm run mockups:chat-ui
+```
+
+Output:
+
+- `test/artifacts/chat_ui_mockups.html`
+
+The page is generated from:
+
+- production renderer helpers: `renderer/chat_ui_state.js`
+- renderer fixtures: `test/fixtures/slot_chat_state_subjects.json`
+
+Each card shows:
+
+- case label
+- source input/state
+- expected visible output
+- production-rendered preview
+
+This is intended to be the fast review surface for transcript/UI changes before live QA.
+
 ## License
 
 MIT

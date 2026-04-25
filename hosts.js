@@ -118,14 +118,39 @@ class Ssh2Host {
 
   _openLaneClient() {
     const conn = this._Client();
-    return new Promise((resolve, reject) => {
-      conn.once('ready', () => resolve(conn));
-      conn.once('error', reject);
+    // Persistent 'error' listener: ssh2 can emit multiple 'error' events for a
+    // single failure (e.g. banner timeout → 'error' + socket 'error' + proto
+    // errors on close). A `once` listener catches the first, and the rest hit
+    // Node's EventEmitter with no handler → uncaught exception → Electron
+    // main-process crash. Keep the listener permanent and swallow late errors.
+    const onError = (err) => {
+      if (settled) {
+        if (process.env.PENTACLE_DEBUG) {
+          console.warn(`[${this.id}] ssh2 late error:`, err && err.message);
+        }
+        return;
+      }
+      settled = true;
+      reject(err);
+    };
+    let settled = false;
+    let resolve, reject;
+    const p = new Promise((res, rej) => { resolve = res; reject = rej; });
+    conn.on('error', onError);
+    conn.once('ready', () => {
+      if (settled) return;
+      settled = true;
+      resolve(conn);
+    });
+    try {
       conn.connect({
         host: this.host, port: this.port, username: this.user,
         privateKey: this.privateKey, readyTimeout: 10000, keepaliveInterval: 30000,
       });
-    });
+    } catch (err) {
+      onError(err);
+    }
+    return p;
   }
 
   async _lane(name) {
@@ -313,6 +338,24 @@ function buildHostRegistry(CONFIG, { platform } = { platform: process.platform }
       port: CONFIG.remote.port || 22,
       user: CONFIG.remote.user,
       tmuxBin: CONFIG.remote.tmux || '/opt/homebrew/bin/tmux',
+      privateKey,
+      isRemote: true,
+    });
+  }
+
+  // Peers — additional SSH hosts for multi-machine chat visibility without
+  // flipping into CLIENT mode. Each peer's tmux sessions show up in the sidebar
+  // alongside local ones; attach works via SSH like `remote` does.
+  const peers = Array.isArray(CONFIG && CONFIG.peers) ? CONFIG.peers : [];
+  for (const p of peers) {
+    if (!p || !p.id || !p.host || !p.user) continue;
+    if (hosts[p.id]) continue; // don't clobber local/remote
+    hosts[p.id] = new Ssh2Host({
+      id: p.id,
+      host: p.host,
+      port: p.port || 22,
+      user: p.user,
+      tmuxBin: p.tmux || 'tmux',
       privateKey,
       isRemote: true,
     });

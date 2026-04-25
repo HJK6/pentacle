@@ -5,6 +5,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "test:chat-ui": "node --test test/chat_ui_state.test.js",
+    "mockups:chat-ui": "node test/generate_chat_ui_mockups.js",
     "postinstall": "node scripts/postinstall.js",
     "build": "electron-builder",
     "build:mac": "node scripts/build-mac.js",

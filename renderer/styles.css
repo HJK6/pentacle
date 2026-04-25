@@ -665,6 +665,427 @@ body {
   height: 100%;
 }
 
+.slot-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.slot-chat-layer {
+  color: #dfeae3;
+}
+
+.slot-chat-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  padding: 8px 10px 8px;
+  gap: 8px;
+  background:
+    linear-gradient(180deg, rgba(14, 19, 16, 0.98), rgba(10, 14, 12, 0.99));
+}
+
+.slot-chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 6px;
+}
+
+.slot-chat-scroll::-webkit-scrollbar {
+  width: 7px;
+}
+
+.slot-chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.slot-chat-scroll::-webkit-scrollbar-thumb {
+  background: rgba(94, 118, 104, 0.55);
+  border-radius: 999px;
+}
+
+.slot-chat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.slot-chat-timestamp {
+  align-self: center;
+  margin: 8px 0 2px;
+  padding: 0 6px;
+  font-size: 9px;
+  letter-spacing: 0.45px;
+  color: rgba(144, 161, 152, 0.5);
+  text-transform: uppercase;
+}
+
+.slot-chat-filterbar {
+  display: flex;
+  gap: 6px;
+  padding-bottom: 2px;
+}
+
+.slot-chat-filter {
+  border: 1px solid rgba(56, 77, 67, 0.9);
+  background: rgba(15, 21, 18, 0.95);
+  color: rgba(132, 152, 141, 0.88);
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.45px;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.slot-chat-filter.active {
+  color: #e8fbef;
+  border-color: rgba(45, 212, 191, 0.7);
+  background: rgba(20, 53, 43, 0.95);
+}
+
+.slot-chat-message {
+  width: 100%;
+  align-self: stretch;
+  border: none;
+  background: transparent;
+  border-radius: 0;
+  padding: 2px 0 4px;
+  box-shadow: none;
+}
+
+.slot-chat-message.is-user {
+  align-self: flex-end;
+  max-width: 78%;
+  background: rgba(18, 23, 21, 0.96);
+  border-color: rgba(196, 150, 28, 0.75);
+  border: 1px solid rgba(196, 150, 28, 0.75);
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px rgba(196, 150, 28, 0.16);
+  padding: 6px 8px 7px;
+  margin: 10px 0 12px;
+}
+
+.slot-chat-message-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.slot-chat-message-role {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: rgba(145, 162, 153, 0.62);
+  min-height: 12px;
+}
+
+.slot-chat-message-time {
+  font-size: 9px;
+  color: rgba(205, 219, 210, 0.42);
+}
+
+.slot-chat-message-body {
+  font-size: 11px;
+  line-height: 1.48;
+  color: #eef5f0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.slot-chat-line {
+  margin: 0;
+}
+
+.slot-chat-spacer {
+  height: 4px;
+}
+
+.slot-chat-annotation {
+  display: inline-flex;
+  align-items: center;
+  margin: 3px 0;
+  font-size: 10px;
+  letter-spacing: 0.35px;
+  color: rgba(154, 177, 165, 0.72);
+}
+
+.slot-chat-annotation.is-label {
+  color: #84d8b5;
+  font-style: italic;
+}
+
+.slot-chat-annotation.is-timing {
+  color: rgba(208, 218, 212, 0.56);
+  font-style: italic;
+}
+
+.slot-chat-annotation.is-pending {
+  color: #ffe39b;
+  font-style: italic;
+}
+
+.slot-chat-loglist {
+  margin: 2px 0 6px 0;
+  padding-left: 10px;
+  border-left: 1px solid rgba(58, 80, 68, 0.6);
+}
+
+.slot-chat-pending-body {
+  margin: 2px 0 8px 10px;
+  padding-left: 10px;
+  border-left: 2px solid rgba(212, 167, 44, 0.5);
+  color: #f7edd1;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.slot-chat-logitem {
+  color: rgba(223, 236, 229, 0.84);
+  font-size: 10px;
+  line-height: 1.45;
+  margin: 1px 0;
+}
+
+.slot-chat-change-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(88, 125, 107, 0.72);
+  background: linear-gradient(180deg, rgba(19, 29, 24, 0.98), rgba(13, 20, 17, 0.98));
+  color: #dbece3;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.22px;
+  text-transform: uppercase;
+}
+
+.slot-chat-empty {
+  border: 1px dashed rgba(86, 110, 97, 0.45);
+  border-radius: 14px;
+  padding: 16px 18px;
+  color: #83968b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.slot-chat-compose {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex-shrink: 0;
+  border-top: 1px solid rgba(40, 53, 47, 0.9);
+  padding-top: 7px;
+}
+
+.slot-chat-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  min-height: 28px;
+  padding-top: 8px;
+}
+
+.slot-chat-status-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.slot-chat-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 22px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(72, 86, 80, 0.95);
+  background: rgba(13, 19, 16, 0.98);
+  font-size: 10px;
+}
+
+.slot-chat-status-badge.is-working {
+  border-color: rgba(96, 208, 255, 0.75);
+  background: linear-gradient(180deg, rgba(13, 39, 53, 0.98), rgba(9, 26, 37, 0.98));
+}
+
+.slot-chat-status-badge.is-waiting {
+  border-color: rgba(255, 181, 71, 0.75);
+  background: linear-gradient(180deg, rgba(55, 34, 10, 0.98), rgba(36, 22, 8, 0.98));
+}
+
+.slot-chat-status-badge.is-idle {
+  border-color: rgba(124, 140, 132, 0.55);
+  background: rgba(24, 29, 27, 0.94);
+}
+
+.slot-chat-status-badge.is-pending {
+  border-color: rgba(255, 210, 92, 0.8);
+  background: linear-gradient(180deg, rgba(64, 43, 10, 0.98), rgba(42, 28, 8, 0.98));
+}
+
+.slot-chat-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(150, 165, 157, 0.6);
+  flex: 0 0 auto;
+}
+
+.slot-chat-status-badge.is-working .slot-chat-status-dot {
+  background: #61d1ff;
+  box-shadow: 0 0 0 5px rgba(97, 209, 255, 0.18);
+  animation: slot-chat-pulse 1.2s ease-in-out infinite;
+}
+
+.slot-chat-status-badge.is-waiting .slot-chat-status-dot {
+  background: #ffb547;
+  box-shadow: 0 0 0 4px rgba(255, 181, 71, 0.16);
+}
+
+.slot-chat-status-badge.is-idle .slot-chat-status-dot {
+  background: rgba(153, 169, 161, 0.55);
+}
+
+.slot-chat-status-badge.is-pending .slot-chat-status-dot {
+  background: #ffd25c;
+  box-shadow: 0 0 0 4px rgba(255, 210, 92, 0.16);
+}
+
+.slot-chat-status-timer {
+  color: #eefaff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+@keyframes slot-chat-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.85; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+
+.slot-chat-draft-preview {
+  display: none;
+  border: 1px solid rgba(45, 212, 191, 0.22);
+  background: rgba(11, 21, 18, 0.92);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.slot-chat-draft-preview-host .slot-chat-draft-preview {
+  display: block;
+}
+
+.slot-chat-draft-preview.is-pending {
+  border-color: rgba(212, 167, 44, 0.8);
+  background:
+    linear-gradient(90deg, rgba(212, 167, 44, 0.14), rgba(212, 167, 44, 0.04) 30%, rgba(11, 21, 18, 0.94) 30%),
+    rgba(11, 21, 18, 0.94);
+  box-shadow: inset 0 0 0 1px rgba(212, 167, 44, 0.10);
+}
+
+.slot-chat-draft-preview.is-working {
+  box-shadow: inset 0 0 0 1px rgba(86, 211, 100, 0.08);
+}
+
+.slot-chat-draft-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.slot-chat-draft-preview-label,
+.slot-chat-draft-preview-time {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.55px;
+  color: rgba(152, 171, 161, 0.72);
+}
+
+.slot-chat-draft-preview.is-pending .slot-chat-draft-preview-label {
+  color: #ffe39b;
+}
+
+.slot-chat-draft-preview-body {
+  font-size: 11px;
+  line-height: 1.45;
+  color: #f0f5f2;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.slot-chat-compose-input {
+  flex: 1;
+  min-height: 34px;
+  max-height: 120px;
+  resize: none;
+  border: 1px solid rgba(62, 88, 75, 0.9);
+  background: rgba(12, 18, 15, 0.96);
+  color: #edf4ef;
+  border-radius: 10px;
+  padding: 8px 10px;
+  outline: none;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.slot-chat-compose-input.is-remote-draft {
+  border-color: rgba(212, 167, 44, 0.5);
+  background: rgba(22, 20, 12, 0.96);
+}
+
+.slot-chat-compose-input.is-remote-pending {
+  border-color: rgba(212, 167, 44, 0.8);
+  box-shadow: 0 0 0 1px rgba(212, 167, 44, 0.16), inset 0 0 18px rgba(212, 167, 44, 0.05);
+}
+
+.slot-chat-compose-input:focus {
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.15);
+}
+
+.slot-chat-compose-input::placeholder {
+  color: rgba(137, 157, 145, 0.75);
+}
+
+.slot-chat-compose-send {
+  height: 34px;
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
+  border: 1px solid rgba(45, 212, 191, 0.45);
+  background: linear-gradient(180deg, rgba(27, 64, 52, 0.98), rgba(22, 44, 36, 0.98));
+  color: #dff9eb;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+
+.slot-chat-compose-send:hover {
+  border-color: var(--cyan);
+  color: white;
+}
+
 /* Kill xterm.js's built-in scroll viewport — we use tmux scrollback instead.
    Without this, Chromium's compositor-thread scrolling intercepts wheel events
    at the GPU level BEFORE JavaScript listeners fire, making our capture-phase

@@ -82,6 +82,7 @@ window.cc = {
   get0dteStats: (traderId) => ipcRenderer.invoke('dashboard:0dte-stats', traderId),
   list0dteTraders: () => ipcRenderer.invoke('dashboard:0dte-list-traders'),
   getAmaterasuOcrStats: () => ipcRenderer.invoke('dashboard:amaterasu-ocr-stats'),
+  getChatStreamState: () => ipcRenderer.invoke('chat-stream:get-state'),
 
   // Context menu
   showContextMenu: (sessionName, displayName, hostId) => {
@@ -96,5 +97,9 @@ window.cc = {
   onAction: (callback) => {
     ipcRenderer.removeAllListeners('action');
     ipcRenderer.on('action', (_, action, sessionName, extra) => callback(action, sessionName, extra));
+  },
+  onChatStreamEvent: (callback) => {
+    ipcRenderer.removeAllListeners('chat-stream:event');
+    ipcRenderer.on('chat-stream:event', (_, payload) => callback(payload));
   },
 };

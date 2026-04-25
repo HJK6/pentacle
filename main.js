@@ -94,6 +94,19 @@ if (_configLoadError) {
 
 const { LocalHost, Ssh2Host, buildHostRegistry } = require('./hosts.js');
 
+// Last-resort guard: a peer SSH client that emits 'error' with no listener
+// (ssh2 is prone to this on banner-timeout / unreachable hosts) would otherwise
+// tear down the main process. Log and keep running — the individual lane has
+// already been invalidated in hosts.js.
+process.on('uncaughtException', (err) => {
+  const msg = (err && err.message) || String(err);
+  console.error('[uncaughtException]', msg, err && err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+  const msg = (reason && reason.message) || String(reason);
+  console.error('[unhandledRejection]', msg);
+});
+
 // ── DynamoDB client for the 0DTE dashboard ──────────────────────────────────
 // Reads AWS credentials from the standard chain (~/.aws/credentials, env, or
 // instance profile). Read-only (Query + Scan). Platform-agnostic — works from
@@ -116,6 +129,7 @@ const _AMATERASU_QUEUE = 'https://sqs.us-east-1.amazonaws.com/841672795586/amate
 // Single long-lived WS connection per Pentacle instance. Handles reconnect +
 // disk cache. Exposes .get(id) → envelope.
 const hubClient = require('./main/dashboard_hub_client');
+const chatStreamClient = require('./main/chat_stream_client');
 
 app.setName(CONFIG.appName);
 
@@ -403,6 +417,27 @@ async function ensureMicServer() {
   console.error(`[${CONFIG.appName}] Failed to start mic server`);
 }
 
+async function ensureChatStreamServer() {
+  const cfg = CONFIG.chatStream || {};
+  if (cfg.autoStart === false) return;
+  const pythonBin = resolvePython();
+  if (!pythonBin) {
+    console.error('[chat-stream] python not found — cannot start websocket daemon');
+    return;
+  }
+  const script = cfg.script || path.join(os.homedir(), 'agent-workspace', 'multi-machine-chat', 'chat_streamd.py');
+  if (!fs.existsSync(script)) {
+    console.warn(`[chat-stream] daemon script not found: ${script}`);
+    return;
+  }
+  const port = String(cfg.port || 7791);
+  const hosts = Array.isArray(cfg.hosts) && cfg.hosts.length ? cfg.hosts : ['bart', 'abra', 'amaterasu'];
+  const args = ['-u', script, '--port', port];
+  for (const host of hosts) args.push('--host', String(host));
+  const proc = spawn(pythonBin, args, { detached: true, stdio: 'ignore' });
+  proc.unref();
+}
+
 function _spawnMicServerPython() {
   // When packaged, mic-server is unpacked from app.asar (see package.json asarUnpack).
   // Python can't execute scripts from inside the asar archive, so redirect to the
@@ -668,6 +703,7 @@ app.whenReady().then(async () => {
   ensureWslSshd();
   startSshTunnel();
   await ensureApiServer();
+  await ensureChatStreamServer();
   ensureLocalTmuxUtf8();
   probeRemoteTmuxUtf8();  // fire-and-forget; just logs
   ensureWindowSizeLatest();  // stop multi-client size collapse
@@ -693,6 +729,11 @@ app.whenReady().then(async () => {
   sessionManager.setWebContents(mainWindow.webContents);
   await mainWindow.webContents.session.clearCache();
   mainWindow.loadFile('renderer/index.html');
+  chatStreamClient.init(CONFIG, (payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('chat-stream:event', payload);
+    }
+  });
 
   // Restore slots after renderer is ready
   const savedSlots = loadSlotState();
@@ -934,12 +975,33 @@ app.whenReady().then(async () => {
   // ── Activity detection / capture (multi-host) ───────────────
   const SPINNER_RE = /[✻✢·⊹*❋◆◇◈⟡⟢⟣☼◉] [A-Z][a-z]+…/;
   const WORKING_STRINGS = ['Running…', 'ctrl+b ctrl+b', 'to run in background'];
+  const CODEX_WORKING_RE = /^Working \(\d+[smh]/;
 
   function classifyPane(content) {
     const lines = content.split('\n');
     const bottomLines = lines.slice(-4).map(l => l.trim()).filter(l => l);
     const isClaude = bottomLines.some(l => l.includes('⏵⏵ bypass') || l.includes('⏵⏵ auto-accept'));
-    if (!isClaude) return 'idle';
+    const isCodex = content.includes('OpenAI Codex') || bottomLines.some(l => /^gpt-[\d.]+/.test(l) || /tab to queue message/i.test(l));
+    if (!isClaude && !isCodex) return 'idle';
+    if (isCodex) {
+      const recent = lines.slice(-250).map(l => l.trim()).filter(Boolean);
+      const lastIndex = (pred) => {
+        for (let i = recent.length - 1; i >= 0; i--) {
+          if (pred(recent[i])) return i;
+        }
+        return -1;
+      };
+      const workingIdx = lastIndex(l => CODEX_WORKING_RE.test(l) || (l.toLowerCase().includes('working') && l.toLowerCase().includes('esc to interrupt')));
+      const pendingIdx = lastIndex(l => l.startsWith('Messages to be submitted after next tool call'));
+      const promptIdx = lastIndex(l => /^›\s+/.test(l));
+      const outputIdx = lastIndex(l => /^•\s+/.test(l));
+      const footerIdx = lastIndex(l => /tab to queue message/i.test(l) || /^gpt-[\d.]+/.test(l));
+
+      const latestPromptLike = Math.max(pendingIdx, promptIdx, outputIdx, footerIdx);
+      if (workingIdx >= 0 && workingIdx > latestPromptLike) return 'working';
+      if (latestPromptLike >= 0) return 'waiting';
+      return 'idle';
+    }
     let contentLines = [];
     for (let i = lines.length - 1; i >= 0; i--) {
       if (lines[i].includes('❯')) { contentLines = lines.slice(Math.max(0, i - 15), i); break; }
@@ -1108,6 +1170,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('dashboard:amaterasu-ocr-stats', () => {
     return _hubEnvelope('amaterasu.ocr');
   });
+  ipcMain.handle('chat-stream:get-state', () => chatStreamClient.snapshot());
 
   // Image paste
   ipcMain.handle('pty:save-image', async (_, base64Data) => {
@@ -1126,6 +1189,7 @@ app.on('window-all-closed', () => {
   saveSlotState();
   sessionManager.killAll();
   stopSshTunnel();
+  chatStreamClient.destroy();
   for (const h of Object.values(HOSTS)) h.destroy?.();
   app.quit();
 });
@@ -1134,6 +1198,7 @@ app.on('before-quit', () => {
   saveSlotState();
   sessionManager.killAll();
   stopSshTunnel();
+  chatStreamClient.destroy();
   for (const h of Object.values(HOSTS)) h.destroy?.();
   if (meetingWindow && !meetingWindow.isDestroyed()) meetingWindow.close();
 });

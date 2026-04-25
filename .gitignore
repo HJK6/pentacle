@@ -8,3 +8,5 @@ out/
 .claude/
 *.backup-*
 pentacle.config.js
+
+test/artifacts/
