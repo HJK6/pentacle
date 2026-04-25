@@ -127,9 +127,20 @@ const _AMATERASU_QUEUE = 'https://sqs.us-east-1.amazonaws.com/841672795586/amate
 
 // ── Dashboard Hub client ─────────────────────────────────────────────────────
 // Single long-lived WS connection per Pentacle instance. Handles reconnect +
-// disk cache. Exposes .get(id) → envelope.
-const hubClient = require('./main/dashboard_hub_client');
-const chatStreamClient = require('./main/chat_stream_client');
+// disk cache. Exposes .get(id) → envelope. Keep startup resilient if an older
+// checkout/build is missing this optional module.
+let hubClient;
+try {
+  hubClient = require("./main/dashboard_hub_client");
+} catch (e) {
+  console.warn("[DashboardHub] disabled: " + e.message);
+  hubClient = {
+    connected: false,
+    init() {},
+    get() { return null; },
+  };
+}
+const chatStreamClient = require("./main/chat_stream_client");
 
 app.setName(CONFIG.appName);
 
@@ -453,32 +464,59 @@ function _spawnMicServerPython() {
   proc.unref();
 }
 
-// ── Usage refresh (mac host only, Bartimaeus-specific) ──────────
-// Requires CONFIG.apiServer.python (explicit venv path), features.usage: true,
-// and the check_usage.py scripts from telegram-claude-bot. Fresh users have
-// features.usage: false by default, so these functions are never called.
-function refreshUsageData() {
-  if (IS_CLIENT || !IS_DARWIN || !CONFIG.features.usage) return;
+// ── Usage refresh ───────────────────────────────────────────────
+// The usage footer reads from the host serving the Python API: local on the
+// mac-mini host, or remote when Pentacle is in client mode. Refresh the cache
+// on that host so the renderer can always fetch current limits.
+function usageRefreshHost() {
+  if (!CONFIG.features.usage) return null;
+  if (IS_CLIENT) return hostRemote || null;
+  if (IS_DARWIN) return hostLocal || null;
+  return null;
+}
+
+function homeDirForHost(host) {
+  if (host === hostRemote && CONFIG.remote?.user) return `/Users/${CONFIG.remote.user}`;
+  if (host === hostLocal && IS_WIN && CONFIG.localWsl?.user) return `/home/${CONFIG.localWsl.user}`;
+  return os.homedir();
+}
+
+async function refreshUsageScript(scriptName) {
+  const host = usageRefreshHost();
+  if (!host) return;
   const cfgPy = CONFIG.apiServer && CONFIG.apiServer.python;
   if (!cfgPy) return;
-  const pythonPath = path.join(os.homedir(), cfgPy);
-  if (!fs.existsSync(pythonPath)) return;
-  const scriptPath = path.join(os.homedir(), 'telegram-claude-bot/abilities/check_usage.py');
-  const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` };
-  const proc = spawn(pythonPath, [scriptPath, '--save'], { detached: true, stdio: 'ignore', env });
-  proc.unref();
+  const home = homeDirForHost(host);
+  const pythonPath = path.isAbsolute(cfgPy)
+    ? cfgPy
+    : path.posix.join(home, String(cfgPy).replace(/\\/g, '/'));
+  const scriptPath = path.posix.join(home, 'telegram-claude-bot/abilities', scriptName);
+
+  if (host instanceof LocalHost) {
+    if (!fs.existsSync(pythonPath) || !fs.existsSync(scriptPath)) return;
+    const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` };
+    const proc = spawn(pythonPath, [scriptPath, '--save'], { detached: true, stdio: 'ignore', env });
+    proc.unref();
+    return;
+  }
+
+  const shellScript = `
+export PATH="/opt/homebrew/bin:$PATH"
+[ -x ${JSON.stringify(pythonPath)} ] || exit 0
+[ -f ${JSON.stringify(scriptPath)} ] || exit 0
+nohup ${JSON.stringify(pythonPath)} ${JSON.stringify(scriptPath)} --save >/dev/null 2>&1 &
+`.trim();
+  try {
+    await host.exec(['/bin/bash', '-lc', shellScript], { lane: 'bg' });
+  } catch {}
+}
+
+function refreshUsageData() {
+  void refreshUsageScript('check_usage.py');
 }
 
 function refreshCodexUsageData() {
-  if (IS_CLIENT || !IS_DARWIN || !CONFIG.features.usage) return;
-  const cfgPy = CONFIG.apiServer && CONFIG.apiServer.python;
-  if (!cfgPy) return;
-  const pythonPath = path.join(os.homedir(), cfgPy);
-  if (!fs.existsSync(pythonPath)) return;
-  const scriptPath = path.join(os.homedir(), 'telegram-claude-bot/abilities/check_codex_usage.py');
-  const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` };
-  const proc = spawn(pythonPath, [scriptPath, '--save'], { detached: true, stdio: 'ignore', env });
-  proc.unref();
+  void refreshUsageScript('check_codex_usage.py');
 }
 
 // ── Context Menu ───────────────────────────────────────────────
@@ -502,6 +540,75 @@ let meetingWindow = null;
 const SLOT_STATE_FILE = path.join(app.getPath('userData'), '.slot-state.json');
 const CODEX_UPDATE_STATE_FILE = path.join(app.getPath('userData'), '.codex-update-state.json');
 const CODEX_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+async function createMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return mainWindow;
+  }
+
+  mainWindow = new BrowserWindow({
+    width: 1600,
+    height: 1000,
+    minWidth: 900,
+    minHeight: 600,
+    titleBarStyle: IS_DARWIN ? 'hiddenInset' : 'default',
+    trafficLightPosition: IS_DARWIN ? { x: 15, y: 15 } : undefined,
+    backgroundColor: CONFIG.dark.bg,
+    icon: IS_DARWIN
+      ? nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.icns'))
+      : undefined,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: false,
+      nodeIntegration: true,
+    },
+  });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+
+  sessionManager.setWebContents(mainWindow.webContents);
+  await mainWindow.webContents.session.clearCache();
+  mainWindow.loadFile('renderer/index.html');
+
+  const savedSlots = loadSlotState();
+  mainWindow.webContents.on('did-finish-load', () => {
+    setTimeout(() => {
+      let delay = 0;
+      savedSlots.forEach((s, slot) => {
+        if (!s || !s.name) return;
+        const host = HOSTS[s.hostId] || hostLocal;
+        if (!host) return;
+        (async () => {
+          try {
+            if (host instanceof LocalHost) {
+              execSync(`${host.tmuxBin} has-session -t ${JSON.stringify('=' + s.name)}`, { stdio: 'ignore', env: host.env });
+            } else {
+              await host.tmux(['has-session', '-t', '=' + s.name]);
+            }
+            setTimeout(() => {
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('assign-slot', slot, s.name, s.hostId || 'local');
+              }
+            }, delay);
+            delay += 500;
+          } catch {}
+        })();
+      });
+    }, 1000);
+
+    ensureMicServer();
+    refreshUsageData();
+    refreshCodexUsageData();
+    startBackgroundCodexUpdateChecks();
+  });
+
+  return mainWindow;
+}
 
 function saveSlotState() {
   try {
@@ -548,6 +655,32 @@ function parseKeyValueLines(text) {
 
 function getCodexCommandForLocation(agentConfig, location) {
   return (location === 'local' && agentConfig.commandLocal) || agentConfig.command || 'codex';
+}
+
+function homeDirForTargetHost(location, targetHost) {
+  if (targetHost?.id === 'remote' && CONFIG.remote?.user) {
+    return `/Users/${CONFIG.remote.user}`;
+  }
+
+  if (process.platform === 'win32' && targetHost?.id === 'local') {
+    const wslUser = CONFIG.localWsl?.user || 'root';
+    return wslUser === 'root' ? '/root' : `/home/${wslUser}`;
+  }
+
+  const peer = Array.isArray(CONFIG.peers) ? CONFIG.peers.find((p) => p && p.id === targetHost?.id) : null;
+  if (peer?.user) {
+    const isLikelyMac = String(peer.tmux || '').includes('/opt/homebrew/') || String(peer.host || '').includes('.local');
+    return isLikelyMac ? `/Users/${peer.user}` : `/home/${peer.user}`;
+  }
+
+  return process.env.HOME || '~';
+}
+
+function resolveAgentWorkDir(location, targetHost) {
+  const configured = CONFIG.workingDirectory || '~/agent-workspace';
+  if (!String(configured).startsWith('~')) return configured;
+
+  return configured.replace(/^~/, homeDirForTargetHost(location, targetHost));
 }
 
 async function ensureCodexUpdatedForHost(host, hostId, command) {
@@ -702,69 +835,20 @@ app.whenReady().then(async () => {
 
   ensureWslSshd();
   startSshTunnel();
-  await ensureApiServer();
-  await ensureChatStreamServer();
   ensureLocalTmuxUtf8();
   probeRemoteTmuxUtf8();  // fire-and-forget; just logs
   ensureWindowSizeLatest();  // stop multi-client size collapse
-
-  mainWindow = new BrowserWindow({
-    width: 1600,
-    height: 1000,
-    minWidth: 900,
-    minHeight: 600,
-    titleBarStyle: IS_DARWIN ? 'hiddenInset' : 'default',
-    trafficLightPosition: IS_DARWIN ? { x: 15, y: 15 } : undefined,
-    backgroundColor: CONFIG.dark.bg,
-    icon: IS_DARWIN
-      ? nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.icns'))
-      : undefined,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: false,
-      nodeIntegration: true,
-    },
-  });
-
-  sessionManager.setWebContents(mainWindow.webContents);
-  await mainWindow.webContents.session.clearCache();
-  mainWindow.loadFile('renderer/index.html');
+  await createMainWindow();
   chatStreamClient.init(CONFIG, (payload) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('chat-stream:event', payload);
+      mainWindow.webContents.send("chat-stream:event", payload);
     }
   });
-
-  // Restore slots after renderer is ready
-  const savedSlots = loadSlotState();
-  mainWindow.webContents.on('did-finish-load', () => {
-    setTimeout(() => {
-      let delay = 0;
-      savedSlots.forEach((s, slot) => {
-        if (!s || !s.name) return;
-        const host = HOSTS[s.hostId] || hostLocal;
-        if (!host) return;
-        // Best-effort session existence check; skip if missing
-        (async () => {
-          try {
-            if (host instanceof LocalHost) {
-              execSync(`${host.tmuxBin} has-session -t ${JSON.stringify('=' + s.name)}`, { stdio: 'ignore', env: host.env });
-            } else {
-              await host.tmux(['has-session', '-t', '=' + s.name]);
-            }
-            setTimeout(() => {
-              mainWindow.webContents.send('assign-slot', slot, s.name, s.hostId || 'local');
-            }, delay);
-            delay += 500;
-          } catch {}
-        })();
-      });
-    }, 1000);
-
-    ensureMicServer();
-    refreshUsageData();
-    refreshCodexUsageData();
-    startBackgroundCodexUpdateChecks();
+  ensureApiServer().catch((e) => {
+    console.warn("[api] startup check failed: " + (e.message || e));
+  });
+  ensureChatStreamServer().catch((e) => {
+    console.warn("[chat-stream] startup check failed: " + (e.message || e));
   });
 
   // ── IPC: session management ─────────────────────────────────
@@ -797,16 +881,20 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('pty:new-session', async (_, agent, location = 'local') => {
     const sessionName = `${agent}-${process.pid}-${Date.now()}`;
-    const wantRemote = location === 'remote' && IS_CLIENT && hostRemote;
-    const targetHost = wantRemote ? hostRemote : hostLocal;
+    const targetHost = HOSTS[location] || hostLocal;
+    if (!targetHost) {
+      console.warn(`[new-session] unknown host: ${location}`);
+      return null;
+    }
+    const isRemoteHost = targetHost.id !== 'local';
     const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
     // Optional per-location override. Useful for WSL-as-root where
     // `claude --dangerously-skip-permissions` is refused — user can set
     // `agents.claude.commandLocal = 'claude'` to sidestep the flag.
-    const locationCommand = (location === 'local' && agentConfig.commandLocal) || agentConfig.command;
+    const locationCommand = getCodexCommandForLocation(agentConfig, location);
 
     if (agent === 'codex' && targetHost) {
-      const updateResult = await ensureCodexUpdatedForHost(targetHost, targetHost.id || (wantRemote ? 'remote' : 'local'), locationCommand);
+      const updateResult = await ensureCodexUpdatedForHost(targetHost, targetHost.id || location, locationCommand);
       maybeRefreshCodexUsageAfterUpdate(updateResult);
     }
 
@@ -814,7 +902,7 @@ app.whenReady().then(async () => {
     // no command, then send-keys the agent command. Session survives the
     // agent exiting (shell stays alive). Used whenever agent-tmux CLI isn't
     // available on the target host.
-    async function shellFirstCreate(host, workDir, command) {
+    async function shellFirstCreate(host, workDir, command, { autoAcceptStartup = true } = {}) {
       // Use bash as the session's anchor process. -d detaches immediately.
       // Note: we don't pass -c <workDir> here — some tmux builds error if the
       // path doesn't exist or contains a `~`. Instead we cd + exec in send-keys.
@@ -826,24 +914,31 @@ app.whenReady().then(async () => {
       // to the Windows default browser. `explorer.exe <url>` would
       // misinterpret URL-like strings as paths and open My Documents.
       const isWsl = IS_WIN && host === hostLocal;
-      const envPrelude = isWsl ? 'export BROWSER=wslview; ' : '';
+      const envPreludeParts = [
+        // Remote macOS shells launched via tmux can miss Homebrew and user-local
+        // bins under non-interactive bash login shells. Normalize PATH first so
+        // agent commands like `codex` and `claude` resolve consistently.
+        'export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"',
+      ];
+      if (isWsl) envPreludeParts.push('export BROWSER=wslview');
+      const envPrelude = `${envPreludeParts.join('; ')}; `;
       const cdLine = workDir ? `cd ${JSON.stringify(workDir)} 2>/dev/null; clear; ` : '';
       // Plain name here — tmux's `=exact` prefix applies to session targets
       // (has-session, display-message) but not pane targets (send-keys).
       await host.tmux(['send-keys', '-t', sessionName, `${envPrelude}${cdLine}${command}`, 'Enter']);
-      // Claude/Codex show startup trust prompts (external imports, directory trust)
-      // that block the session. Auto-accept by sending Enter after the agent has
-      // time to render the prompt. Harmless if already dismissed — Enter on the
-      // ❯ input line is a no-op.
-      setTimeout(async () => {
-        try { await host.tmux(['send-keys', '-t', sessionName, '', 'Enter']); } catch {}
-      }, 3000);
+      // Some agents can show startup trust prompts that block the session.
+      // Keep the delayed Enter opt-in so Codex sessions do not accidentally
+      // submit half-written input once the session is live.
+      if (autoAcceptStartup) {
+        setTimeout(async () => {
+          try { await host.tmux(['send-keys', '-t', sessionName, '', 'Enter']); } catch {}
+        }, 3000);
+      }
     }
 
     try {
-      if (wantRemote) {
-        const remoteHome = `/Users/${CONFIG.remote.user}`;
-        const workDir = (CONFIG.workingDirectory || '~/agent-workspace').replace(/^~/, remoteHome);
+      if (targetHost.id === 'remote' && IS_CLIENT && hostRemote) {
+        const workDir = resolveAgentWorkDir(location, targetHost);
         const command = agentConfig.command;
         // Prefer the mac-mini's agent-tmux CLI (shell-first pattern, orchestrator
         // hooks). Fall back to inline shell-first on any failure.
@@ -854,12 +949,12 @@ app.whenReady().then(async () => {
           ]);
         } catch (e) {
           console.warn(`[new-session] agent-tmux failed (${e.message}); falling back to shell-first`);
-          await shellFirstCreate(hostRemote, workDir, command);
+          await shellFirstCreate(hostRemote, workDir, command, { autoAcceptStartup: agent !== 'codex' });
         }
-        return { sessionName, hostId: 'remote' };
-      } else if (!IS_CLIENT && IS_DARWIN) {
+        return { sessionName, hostId: targetHost.id };
+      } else if (targetHost.id === 'local' && !IS_CLIENT && IS_DARWIN) {
         // Host mode on the mac-mini — call agent-tmux CLI locally.
-        const workDir = (CONFIG.workingDirectory || '~/agent-workspace').replace(/^~/, process.env.HOME);
+        const workDir = resolveAgentWorkDir(location, targetHost);
         let command;
         if (agentConfig.binary) {
           const bin = agentConfig.binary.replace(/^~/, process.env.HOME);
@@ -876,16 +971,19 @@ app.whenReady().then(async () => {
           );
         } catch (e) {
           console.warn(`[new-session] agent-tmux local failed (${e.message}); falling back to shell-first`);
-          await shellFirstCreate(hostLocal, workDir, command);
+          await shellFirstCreate(hostLocal, workDir, command, { autoAcceptStartup: agent !== 'codex' });
         }
-        return { sessionName, hostId: 'local' };
+        return { sessionName, hostId: targetHost.id };
       } else {
-        // Client local (macbook's own tmux or Windows WSL). Shell-first —
-        // no agent-tmux CLI available here.
-        const workDir = (CONFIG.workingDirectory || '~/agent-workspace').replace(/^~/, process.env.HOME || '~');
+        // General shell-first path for local clients and SSH peers.
+        const workDir = resolveAgentWorkDir(location, targetHost);
         // Create the working directory if it doesn't exist yet (fresh install).
-        try { fs.mkdirSync(workDir, { recursive: true }); } catch {}
-        await shellFirstCreate(targetHost, workDir, locationCommand);
+        if (isRemoteHost) {
+          try { await targetHost.exec(['/bin/bash', '-lc', `mkdir -p ${JSON.stringify(workDir)}`]); } catch {}
+        } else {
+          try { fs.mkdirSync(workDir, { recursive: true }); } catch {}
+        }
+        await shellFirstCreate(targetHost, workDir, locationCommand, { autoAcceptStartup: agent !== 'codex' });
         return { sessionName, hostId: targetHost.id };
       }
     } catch (e) {
@@ -1183,6 +1281,11 @@ app.whenReady().then(async () => {
       return { ok: false, error: e.message };
     }
   });
+});
+
+app.on('activate', () => {
+  if (_configLoadError) return;
+  void createMainWindow();
 });
 
 app.on('window-all-closed', () => {

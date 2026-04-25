@@ -13,6 +13,7 @@ const CONFIG = require('../pentacle.config.js');
 // port after getConfig() resolves. On the host it's the same local URL.
 let API = CONFIG.apiServer.url;
 let IS_CLIENT = false;
+let HOST_IDS = ['local'];
 const THEME = CONFIG.terminal;
 
 // Bootstrap async config from main so we can reroute the API URL before the
@@ -24,9 +25,10 @@ const CFG_READY = (async () => {
     const cfg = await window.cc.getConfig();
     if (cfg && cfg.apiUrl) API = cfg.apiUrl;
     IS_CLIENT = !!(cfg && cfg.isClient);
+    HOST_IDS = Array.isArray(cfg && cfg.hostIds) && cfg.hostIds.length ? cfg.hostIds : ['local'];
     // Clients default to creating remote sessions (the mac-mini). Users can
     // still toggle to local for WSL/macbook-local sessions.
-    if (IS_CLIENT) newSessionLocation = 'remote';
+    if (HOST_IDS.includes('remote')) newSessionLocation = 'remote';
     return cfg;
   } catch { return null; }
 })();
@@ -57,6 +59,7 @@ const state = {
   sessionWorkingLabels: {}, // sessionName:windowIndex -> parsed Working (...) timer label
   autoNames: {}, // sessionName -> auto-detected label (e.g. "pentacle refactor")
   sessionHosts: {}, // sessionName -> hostId (e.g. 'local', 'remote')
+  sourceFilter: null, // null = all, or hostId string to filter by
   // Dashboard state — all mutable dashboard state lives here
   currentView: 'chats',            // 'chats' | 'dashboards'
   selectedDashboard: null,          // dashboard id string
@@ -623,9 +626,12 @@ async function fetchSessions() {
     for (const s of sessions) {
       if (seen.has(s.name)) continue; // API metadata wins on collision
       state.sessionHosts[s.name] = hostId;
+      // Use tmux window name as display name if it's meaningful (not just "bash"/"claude"/version)
+      const wn = s.windowName || '';
+      const isGenericWindow = !wn || wn === 'bash' || wn === 'zsh' || wn === 'claude' || /^\d+[\d.]*$/.test(wn);
       extras.push({
         name: s.name,
-        display_name: s.name,
+        display_name: isGenericWindow ? s.name : wn,
         title: '',
         preview: '',
         attached: !!s.attached,
@@ -733,11 +739,11 @@ async function pollActivity() {
       for (const [key, content] of Object.entries(strippedPanes)) {
         state.sessionSummaries[key] = extractSummary(content);
         state.sessionWorkingLabels[key] = extractWorkingTime(content);
-        // Extract auto-name from pane content
+        // Extract auto-name from pane content (re-extract each poll — title may improve)
         const sessionName = key.split(':')[0];
-        if (!state.autoNames[sessionName]) {
-          const name = extractAutoName(content);
-          if (name) state.autoNames[sessionName] = name;
+        const name = extractAutoName(content);
+        if (name && name !== state.autoNames[sessionName]) {
+          state.autoNames[sessionName] = name;
         }
       }
     }
@@ -766,9 +772,9 @@ function updateActivityStrips() {
       if (activity === 'working' || activity === 'waiting') {
         strip.classList.add(activity);
       }
-      // Update header label with auto-name if session still has its raw name
+      // Update header label with auto-name if it changed
       const autoName = state.autoNames[sessionName];
-      if (autoName && state.slots[i].displayName === sessionName) {
+      if (autoName && state.slots[i].displayName !== autoName) {
         state.slots[i].displayName = autoName;
         const label = document.querySelector(`#header-${i} .cell-label`);
         if (label) label.textContent = autoName;
@@ -791,15 +797,50 @@ function updateActivityStrips() {
   }
 }
 
+function renderSourceFilterBar() {
+  const bar = document.getElementById('source-filter-bar');
+  if (!bar || !CONFIG.features.sourceTags) { if (bar) bar.style.display = 'none'; return; }
+
+  // Collect unique hostIds that have at least one session
+  const hostIds = [...new Set(Object.values(state.sessionHosts))];
+  if (hostIds.length < 2) { bar.style.display = 'none'; return; }
+
+  bar.style.display = 'flex';
+  const names = CONFIG.hostNames || {};
+  const colors = CONFIG.hostColors || {};
+
+  let html = `<button class="source-filter-btn${state.sourceFilter === null ? ' active' : ''}" data-host="all">All</button>`;
+  for (const id of hostIds) {
+    const name = names[id] || id;
+    const color = colors[id] || 'green';
+    const isActive = state.sourceFilter === id;
+    html += `<button class="source-filter-btn color-${color}${isActive ? ' active' : ''}" data-host="${esc(id)}">${esc(name)}</button>`;
+  }
+  bar.innerHTML = html;
+
+  bar.querySelectorAll('.source-filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.sourceFilter = btn.dataset.host === 'all' ? null : btn.dataset.host;
+      renderSidebar();
+    });
+  });
+}
+
 function renderSidebar() {
   const list = document.getElementById('session-list');
   const stats = document.getElementById('stats');
 
-  const active = state.sessions;
+  // Apply source filter
+  const all = state.sessions;
+  const active = state.sourceFilter
+    ? all.filter(s => state.sessionHosts[s.name] === state.sourceFilter)
+    : all;
   const working = active.filter(s => getActivityForSession(s.name) === 'working');
   const waiting = active.filter(s => getActivityForSession(s.name) === 'waiting');
   const idle = active.filter(s => getActivityForSession(s.name) === 'idle');
   stats.textContent = `${active.length} sessions | ${working.length} working | ${waiting.length} waiting`;
+
+  renderSourceFilterBar();
 
   function renderSessionItem(s) {
     const slotIdx = getSlotForSession(s.name);
@@ -1691,16 +1732,43 @@ async function cleanupDead() {
 // CFG_READY flips this to 'remote' once we know IS_CLIENT.
 let newSessionLocation = 'local';
 
-function showNewSessionModal() {
-  // Only show the local/remote toggle when Pentacle is running as a client
-  // (CONFIG has a `remote` block). Host-mode machines hide it entirely.
+function getNewSessionHostOptions() {
+  const names = CONFIG.hostNames || {};
+  const hostIds = Array.isArray(HOST_IDS) && HOST_IDS.length ? HOST_IDS : ['local'];
+  return hostIds.map((id) => ({ id, label: names[id] || id }));
+}
+
+function renderNewSessionLocationOptions() {
   const toggle = document.getElementById('new-session-location');
-  if (toggle) toggle.style.display = IS_CLIENT ? 'flex' : 'none';
-  if (IS_CLIENT) {
-    document.querySelectorAll('#new-session-location [data-loc]').forEach(b => {
-      b.classList.toggle('active', b.dataset.loc === newSessionLocation);
-    });
+  if (!toggle) return;
+
+  const options = getNewSessionHostOptions();
+  if (options.length <= 1) {
+    toggle.style.display = 'none';
+    toggle.innerHTML = '';
+    newSessionLocation = options[0]?.id || 'local';
+    return;
   }
+
+  if (!options.some((opt) => opt.id === newSessionLocation)) {
+    newSessionLocation = options[0].id;
+  }
+
+  toggle.style.display = 'flex';
+  toggle.innerHTML = options.map((opt) => (
+    `<button class="sb-btn${opt.id === newSessionLocation ? ' active' : ''}" data-loc="${esc(opt.id)}" style="flex:1">${esc(opt.label)}</button>`
+  )).join('');
+
+  toggle.querySelectorAll('[data-loc]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      newSessionLocation = btn.dataset.loc;
+      renderNewSessionLocationOptions();
+    });
+  });
+}
+
+function showNewSessionModal() {
+  renderNewSessionLocationOptions();
   document.getElementById('new-session-overlay').style.display = 'flex';
 }
 
@@ -1744,7 +1812,7 @@ async function newSession(agent) {
   const result = await window.cc.newSession(agent, location);
   if (!result) return;
   const sessionName = result.sessionName || result; // tolerate legacy string return
-  const hostId = result.hostId || (location === 'remote' ? 'remote' : 'local');
+  const hostId = result.hostId || location;
   state.sessionHosts[sessionName] = hostId;
 
   // Attach it to the slot
@@ -2041,15 +2109,6 @@ document.getElementById('btn-new').addEventListener('click', showNewSessionModal
 document.getElementById('new-session-claude').addEventListener('click', () => newSession('claude'));
 document.getElementById('new-session-codex').addEventListener('click', () => newSession('codex'));
 document.getElementById('new-session-cancel').addEventListener('click', hideNewSessionModal);
-// Local/remote toggle — only rendered when IS_CLIENT
-document.querySelectorAll('#new-session-location [data-loc]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    newSessionLocation = btn.dataset.loc;
-    document.querySelectorAll('#new-session-location [data-loc]').forEach(b => {
-      b.classList.toggle('active', b === btn);
-    });
-  });
-});
 document.getElementById('new-session-overlay').addEventListener('click', (e) => {
   if (e.target.id === 'new-session-overlay') hideNewSessionModal();
 });

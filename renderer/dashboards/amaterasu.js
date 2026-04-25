@@ -32,10 +32,11 @@ function _agoSec(iso) {
 function _fmtDuration(sec) {
   if (sec === null || sec === undefined) return '–';
   if (sec < 60) return `${sec}s`;
-  if (sec < 3600) return `${Math.floor(sec/60)}m ${sec%60}s`;
+  const s = sec % 60;
+  if (sec < 3600) return `${Math.floor(sec/60)}m ${s}s`;
   const h = Math.floor(sec/3600);
   const m = Math.floor((sec%3600)/60);
-  return `${h}h ${m}m`;
+  return `${h}h ${m}m ${s}s`;
 }
 
 function mount(container) {
@@ -136,13 +137,16 @@ function update(refs, data) {
     table.innerHTML = `
       <thead>
         <tr style="border-bottom:1px solid #333;text-align:left;color:#888;">
-          <th style="padding:6px 8px;font-weight:500;">Friend</th>
+          <th style="padding:6px 8px;font-weight:500;">Requestor</th>
+          <th style="padding:6px 8px;font-weight:500;">Source</th>
+          <th style="padding:6px 8px;font-weight:500;">Category</th>
           <th style="padding:6px 8px;font-weight:500;">Batch ID</th>
           <th style="padding:6px 8px;font-weight:500;">Progress</th>
           <th style="padding:6px 8px;font-weight:500;text-align:right;">Done</th>
           <th style="padding:6px 8px;font-weight:500;text-align:right;">Errors</th>
           <th style="padding:6px 8px;font-weight:500;text-align:right;">Elapsed</th>
           <th style="padding:6px 8px;font-weight:500;text-align:right;">Rate</th>
+          <th style="padding:6px 8px;font-weight:500;text-align:right;">ETA</th>
         </tr>
       </thead>
       <tbody></tbody>`;
@@ -152,26 +156,53 @@ function update(refs, data) {
       tr.style.cssText = 'border-bottom:1px solid #222;';
       const total = b.docs_total;
       const done = b.docs_done || 0;
-      const err = b.docs_error || 0;
+      const err = b.docs_error;
       const pct = total ? (done / total) * 100 : 0;
-      const elapsed = _agoSec(b.started_at);
-      const rate = (elapsed && done) ? (done / (elapsed / 60)).toFixed(1) : '–';
+      // Use the EARLIEST of started_at vs first_doc_at for elapsed. On resume
+      // (SQS redeliver), request.json gets overwritten so started_at resets to
+      // restart time. first_doc_at preserves the original OCR start.
+      const startCandidates = [b.started_at, b.first_doc_at].filter(Boolean);
+      const batchStart = startCandidates.length
+        ? startCandidates.reduce((a, x) => new Date(a) < new Date(x) ? a : x)
+        : null;
+      const rateAnchor = b.first_doc_at || batchStart;
+      const elapsed = _agoSec(rateAnchor);
+      const elapsedFromStart = _agoSec(batchStart);
+      const ratePerSec = (elapsed && done) ? done / elapsed : null;
+      const rate = ratePerSec ? (ratePerSec * 60).toFixed(1) : '–';
+      // ETA: remaining docs / current rate, rendered as absolute clock time.
+      let etaCell = '<span style="color:#666;">–</span>';
+      if (ratePerSec && total && done < total) {
+        const remaining = total - done;
+        const etaSec = Math.ceil(remaining / ratePerSec);
+        const etaAt = new Date(Date.now() + etaSec * 1000);
+        const clock = etaAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        etaCell = `<span style="color:#aaa;font-variant-numeric:tabular-nums;" title="in ${_fmtDuration(etaSec)}">${clock}</span>`;
+      } else if (total && done >= total) {
+        etaCell = '<span style="color:#0a0;">finalizing</span>';
+      }
       const progressBar = total
         ? `<div style="display:flex;align-items:center;gap:6px;">
              <div style="flex:1;height:6px;background:#222;border-radius:3px;overflow:hidden;">
-               <div style="width:${pct.toFixed(1)}%;height:100%;background:${err > 0 ? '#c80' : '#090'};"></div>
+               <div style="width:${pct.toFixed(1)}%;height:100%;background:${(err || 0) > 0 ? '#c80' : '#090'};"></div>
              </div>
              <span style="color:#aaa;font-variant-numeric:tabular-nums;min-width:44px;">${pct.toFixed(0)}%</span>
            </div>`
         : '<span style="color:#666;">unknown total</span>';
+      const errCell = (err === null || err === undefined)
+        ? '<span style="color:#555;">–</span>'
+        : `<span style="color:${err > 0 ? '#e66' : '#666'};">${_fmt(err)}</span>`;
       tr.innerHTML = `
         <td style="padding:8px;color:#ccc;">${b.friend_id || ''}</td>
+        <td style="padding:8px;color:#888;font-size:11px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${b.source || ''}">${b.source || '<span style="color:#555;">–</span>'}</td>
+        <td style="padding:8px;color:#888;font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${b.category || ''}">${b.category || '<span style="color:#555;">–</span>'}</td>
         <td style="padding:8px;color:#888;font-family:monospace;font-size:11px;" title="${b.batch_id}">${_shortBatch(b.batch_id)}</td>
         <td style="padding:8px;min-width:180px;">${progressBar}</td>
         <td style="padding:8px;text-align:right;color:#ddd;font-variant-numeric:tabular-nums;">${_fmt(done)}${total ? ` / ${_fmt(total)}` : ''}</td>
-        <td style="padding:8px;text-align:right;color:${err > 0 ? '#e66' : '#666'};font-variant-numeric:tabular-nums;">${_fmt(err)}</td>
-        <td style="padding:8px;text-align:right;color:#aaa;font-variant-numeric:tabular-nums;">${_fmtDuration(elapsed)}</td>
-        <td style="padding:8px;text-align:right;color:#aaa;font-variant-numeric:tabular-nums;">${rate}/min</td>`;
+        <td style="padding:8px;text-align:right;font-variant-numeric:tabular-nums;">${errCell}</td>
+        <td style="padding:8px;text-align:right;color:#aaa;font-variant-numeric:tabular-nums;">${_fmtDuration(elapsedFromStart)}</td>
+        <td style="padding:8px;text-align:right;color:#aaa;font-variant-numeric:tabular-nums;">${rate}/min</td>
+        <td style="padding:8px;text-align:right;">${etaCell}</td>`;
       tbody.appendChild(tr);
     }
     activeBody.appendChild(table);
@@ -188,7 +219,9 @@ function update(refs, data) {
     table.innerHTML = `
       <thead>
         <tr style="border-bottom:1px solid #333;text-align:left;color:#888;">
-          <th style="padding:6px 8px;font-weight:500;">Friend</th>
+          <th style="padding:6px 8px;font-weight:500;">Requestor</th>
+          <th style="padding:6px 8px;font-weight:500;">Source</th>
+          <th style="padding:6px 8px;font-weight:500;">Category</th>
           <th style="padding:6px 8px;font-weight:500;">Batch ID</th>
           <th style="padding:6px 8px;font-weight:500;">Status</th>
           <th style="padding:6px 8px;font-weight:500;text-align:right;">Docs</th>
@@ -207,6 +240,8 @@ function update(refs, data) {
         : b.status === 'error' ? '#e66' : '#888';
       tr.innerHTML = `
         <td style="padding:8px;color:#ccc;">${b.friend_id || ''}</td>
+        <td style="padding:8px;color:#888;font-size:11px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${b.source || ''}">${b.source || '<span style="color:#555;">–</span>'}</td>
+        <td style="padding:8px;color:#888;font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${b.category || ''}">${b.category || '<span style="color:#555;">–</span>'}</td>
         <td style="padding:8px;color:#888;font-family:monospace;font-size:11px;" title="${b.batch_id}">${_shortBatch(b.batch_id)}</td>
         <td style="padding:8px;color:${statusColor};">${b.status || '–'}</td>
         <td style="padding:8px;text-align:right;color:#ddd;font-variant-numeric:tabular-nums;">${_fmt(b.count)}</td>
