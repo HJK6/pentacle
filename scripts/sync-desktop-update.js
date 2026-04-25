@@ -188,8 +188,22 @@ function restartForMachine(machine, dryRun, skipRestart, restartCommand) {
   }
 
   if (process.platform === 'darwin') {
-    must(run(npmCommand(), ['run', 'deploy']));
-    return 'mac app rebuilt and relaunched';
+    const deploy = run(npmCommand(), ['run', 'deploy']);
+    if (deploy.ok) return 'mac app rebuilt and relaunched';
+
+    const appName = 'Pentacle';
+    run('killall', [appName]);
+    const child = spawn(npmCommand(), ['start'], {
+      cwd: ROOT,
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        PATH: `${path.dirname(process.execPath || '')}${path.delimiter}/opt/homebrew/bin${path.delimiter}/usr/local/bin${path.delimiter}${process.env.PATH || ''}`,
+      },
+    });
+    child.unref();
+    return `mac packaged deploy failed; source app relaunched: ${(deploy.stderr || deploy.stdout || '').trim().split('\n').slice(-1)[0] || 'deploy failed'}`;
   }
 
   try {
