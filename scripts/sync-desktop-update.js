@@ -35,12 +35,25 @@ function detectMachine() {
 }
 
 function run(cmd, args, opts = {}) {
+  const pathEntries = [
+    path.dirname(process.execPath || ''),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+  ].filter(Boolean);
   const res = spawnSync(cmd, args, {
     cwd: opts.cwd || ROOT,
     shell: !!opts.shell,
     text: true,
     encoding: 'utf8',
-    env: { ...process.env, ...(opts.env || {}) },
+    env: {
+      ...process.env,
+      PATH: `${pathEntries.join(path.delimiter)}${path.delimiter}${process.env.PATH || ''}`,
+      ...(opts.env || {}),
+    },
     maxBuffer: 20 * 1024 * 1024,
   });
   return {
