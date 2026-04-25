@@ -52,6 +52,22 @@ function run(cmd, args, opts = {}) {
   };
 }
 
+function npmCommand() {
+  if (process.env.PENTACLE_NPM_PATH) return process.env.PENTACLE_NPM_PATH;
+  const nodeDir = path.dirname(process.execPath || '');
+  for (const candidate of [
+    path.join(nodeDir, process.platform === 'win32' ? 'npm.cmd' : 'npm'),
+    '/opt/homebrew/bin/npm',
+    '/usr/local/bin/npm',
+    '/usr/bin/npm',
+    '/mnt/c/nvm4w/nodejs/npm.cmd',
+    '/mnt/c/Program Files/nodejs/npm.cmd',
+  ]) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return 'npm';
+}
+
 function must(res) {
   if (!res.ok) {
     const err = new Error(`${res.command} failed`);
@@ -125,15 +141,15 @@ function installIfNeeded(before, after, dryRun) {
     changedBetween(before, after, 'package-lock.json');
   if (!needsInstall) return 'dependencies unchanged';
   if (dryRun) return 'would install dependencies';
-  must(run('npm', ['install']));
+  must(run(npmCommand(), ['install']));
   return 'dependencies installed';
 }
 
 function verify(dryRun) {
   if (dryRun) return 'would run syntax checks and chat UI tests';
-  must(run('node', ['--check', 'main.js']));
-  must(run('node', ['--check', 'renderer/app.js']));
-  const test = run('npm', ['run', 'test:chat-ui']);
+  must(run(process.execPath, ['--check', 'main.js']));
+  must(run(process.execPath, ['--check', 'renderer/app.js']));
+  const test = run(npmCommand(), ['run', 'test:chat-ui']);
   if (!test.ok && !/Missing script/.test(test.stderr + test.stdout)) must(test);
   return 'verified';
 }
@@ -159,7 +175,7 @@ function restartForMachine(machine, dryRun, skipRestart, restartCommand) {
   }
 
   if (process.platform === 'darwin') {
-    must(run('npm', ['run', 'deploy']));
+    must(run(npmCommand(), ['run', 'deploy']));
     return 'mac app rebuilt and relaunched';
   }
 
