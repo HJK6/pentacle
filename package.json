@@ -7,6 +7,8 @@
     "start": "electron .",
     "test:chat-ui": "node --test test/chat_ui_state.test.js",
     "mockups:chat-ui": "node test/generate_chat_ui_mockups.js",
+    "sync:desktop": "node scripts/sync-desktop-update.js",
+    "sync:desktop:dry-run": "node scripts/sync-desktop-update.js --dry-run",
     "postinstall": "node scripts/postinstall.js",
     "build": "electron-builder",
     "build:mac": "node scripts/build-mac.js",
