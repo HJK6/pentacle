@@ -114,6 +114,19 @@ function _fmt(n) {
   return Number(n).toLocaleString();
 }
 
+function _prodPromoteSummary(metrics) {
+  const m = metrics || {};
+  const promoted = m.created_owners || m.promoted || 0;
+  const inProd = m.prod_total_count || m.promoted_total_count || 0;
+  const excluded = m.stale_window_excluded || 0;
+  if (inProd > 0) {
+    if (promoted > 0) return `${_fmt(inProd)} in prod · ${_fmt(promoted)} new`;
+    if (excluded > 0) return `${_fmt(inProd)} in prod · ${_fmt(excluded)} excluded`;
+    return `${_fmt(inProd)} in prod`;
+  }
+  return `${_fmt(promoted)} promoted`;
+}
+
 function _elapsed(seconds) {
   if (seconds == null) return '';
   seconds = Math.max(0, Math.floor(seconds));
@@ -596,8 +609,7 @@ function _secondaryText(stageId, row, data) {
       return '';
     }
     case 'prod_hydrate_promote': {
-      const promoted = m.created_owners || m.promoted || 0;
-      if (st === 'complete') return `${_fmt(promoted)} promoted`;
+      if (st === 'complete') return _prodPromoteSummary(m);
       if (st === 'running')  return 'promoting…';
       return '';
     }
@@ -622,8 +634,9 @@ function _skiptraceSummary(smStages) {
   const hits = results && results.metrics && results.metrics.hit_count;
   if (hits != null) parts.push(`<span class="sk-key">Hits</span> ${_fmt(hits)}`);
 
-  const promoted = prod && prod.metrics && (prod.metrics.created_owners || prod.metrics.promoted);
-  if (promoted != null) parts.push(`<span class="sk-key">Promoted</span> ${_fmt(promoted)}`);
+  if (prod && prod.metrics) {
+    parts.push(`<span class="sk-key">Prod</span> ${_prodPromoteSummary(prod.metrics)}`);
+  }
 
   if (!parts.length) return '<span class="sk-empty">Waiting for skiptrace to start…</span>';
   return parts.join(' · ');

@@ -5,6 +5,8 @@ const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { Unicode11Addon } = require('@xterm/addon-unicode11'); // REQUIRED: without this, ❯ and other unicode renders as __
 const { WebglAddon } = require('@xterm/addon-webgl'); // GPU-accelerated rendering — fixes partial text paint on screen refresh
+const { clipboard: electronClipboard } = require('electron'); // reliable synchronous read; navigator.clipboard needs focus
+const chatUi = require('./chat_ui_state');
 const CONFIG = require('../pentacle.config.js');
 
 // API URL is mutable — on client machines it's rewritten to the SSH-tunneled
@@ -40,6 +42,12 @@ const state = {
   activeTab: 'sessions', // 'sessions' or 'bots'
   slots: [null, null, null, null], // { name, displayName } or { bot, displayName } or null
   terminals: [null, null, null, null], // { term, fitAddon } or null
+  slotViewModes: ['terminal', 'terminal', 'terminal', 'terminal'], // 'chat' | 'terminal'
+  slotBuffers: ['', '', '', ''], // rolling PTY text buffer per slot
+  slotChatRefs: [null, null, null, null], // { shell, terminalMount, chatMount, scrollEl, listEl, inputEl, sendEl, hintEl } per slot
+  slotDrafts: ['', '', '', ''], // chat composer draft per slot
+  slotDraftTouched: [false, false, false, false], // whether the user has taken ownership of the chat bar text
+  slotChatRenderTimers: [null, null, null, null],
   wheelThrottles: [0, 0, 0, 0], // last scroll timestamp per slot for throttling
   botSlots: [false, false, false, false], // true if slot has a bot detail panel (not a terminal)
   slotGen: [0, 0, 0, 0], // generation counter per slot — incremented on each attach to detect stale PTY exits
@@ -48,6 +56,7 @@ const state = {
   // Activity detection
   activityStates: {}, // sessionName:windowIndex -> 'working' | 'waiting' | 'idle'
   sessionSummaries: {}, // sessionName:windowIndex -> one-line summary string
+  sessionWorkingLabels: {}, // sessionName:windowIndex -> parsed Working (...) timer label
   autoNames: {}, // sessionName -> auto-detected label (e.g. "pentacle refactor")
   sessionHosts: {}, // sessionName -> hostId (e.g. 'local', 'remote')
   sourceFilter: null, // null = all, or hostId string to filter by
@@ -61,7 +70,521 @@ const state = {
   dashboardLastUpdated: null,       // Date of last successful poll
   dashboardState: 'loading',        // 'loading' | 'loaded' | 'stale' | 'error'
   dashboardError: null,             // error message string
+  chatStream: {
+    connected: false,
+    events: [],
+    drafts: {},
+    sessions: [],
+  },
 };
+
+const SLOT_BUFFER_LIMIT = 120000;
+const CHAT_STREAM_LIMIT = CONFIG.chatStream?.recentLimit || 5000;
+
+function stripAnsi(text) {
+  return String(text || '').replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
+}
+
+function normalizeTranscript(text) {
+  return stripAnsi(text)
+    .replace(/\r/g, '')
+    .replace(/[^\S\n]+$/gm, '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/^\s+$/gm, '')
+    .trim();
+}
+
+function providerForSession(sessionName) {
+  const explicit = state.sessions.find(s => s.name === sessionName)?.type;
+  if (explicit === 'codex' || explicit === 'claude') return explicit;
+  if (/codex/i.test(sessionName || '')) return 'codex';
+  return 'claude';
+}
+
+function streamHostForHostId(hostId) {
+  return hostId === 'local' ? 'bart' : (hostId || 'bart');
+}
+
+function applyChatStreamState(data) {
+  if (!data) return;
+  state.chatStream.connected = !!data.connected;
+  if (Array.isArray(data.events)) {
+    state.chatStream.events = data.events.slice(-CHAT_STREAM_LIMIT);
+  }
+  state.chatStream.drafts = data.drafts || {};
+  state.chatStream.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+  for (let slot = 0; slot < 4; slot++) {
+    if (state.slots[slot] && !state.botSlots[slot] && state.slotViewModes[slot] === 'chat') {
+      scheduleSlotChatRender(slot);
+    }
+  }
+}
+
+function applyChatStreamPayload(payload) {
+  if (!payload) return;
+  if (payload.type === 'snapshot') {
+    applyChatStreamState({
+      connected: state.chatStream.connected,
+      events: payload.events || [],
+      drafts: payload.drafts || {},
+      sessions: payload.sessions || [],
+    });
+    return;
+  }
+  if (payload.connected === true || payload.connected === false) {
+    applyChatStreamState(payload);
+    return;
+  }
+  if (payload.type === 'session.inventory' && Array.isArray(payload.sessions)) {
+    state.chatStream.sessions = payload.sessions;
+    for (let slot = 0; slot < 4; slot++) {
+      if (state.slots[slot] && !state.botSlots[slot] && state.slotViewModes[slot] === 'chat') {
+        scheduleSlotChatRender(slot);
+      }
+    }
+    return;
+  }
+  if (payload.kind === 'DRAFT') {
+    if (payload.stream_id) state.chatStream.drafts[payload.stream_id] = payload;
+    for (let slot = 0; slot < 4; slot++) {
+      const session = state.slots[slot];
+      if (!session || state.botSlots[slot] || state.slotViewModes[slot] !== 'chat') continue;
+      const host = streamHostForHostId(session.hostId);
+      if (payload.host === host && payload.session_name === session.name) {
+        scheduleSlotChatRender(slot);
+      }
+    }
+    return;
+  }
+  state.chatStream.events = [...state.chatStream.events, payload].slice(-CHAT_STREAM_LIMIT);
+  for (let slot = 0; slot < 4; slot++) {
+    const session = state.slots[slot];
+    if (!session || state.botSlots[slot] || state.slotViewModes[slot] !== 'chat') continue;
+    const host = streamHostForHostId(session.hostId);
+    if (payload.host === host && payload.session_name === session.name) {
+      scheduleSlotChatRender(slot);
+    }
+  }
+}
+
+function chatEventsForSession(session) {
+  if (!session) return [];
+  const host = streamHostForHostId(session.hostId);
+  return state.chatStream.events.filter((event) => event.host === host && event.session_name === session.name);
+}
+
+function hasRecentWorkingEvent(session) {
+  if (!session) return false;
+  const now = Date.now();
+  return chatEventsForSession(session).some((event) => {
+    if (!/^Working \(\d+[smh]/.test(String(event?.text || ''))) return false;
+    const ts = event?.timestamp ? new Date(event.timestamp).getTime() : 0;
+    return ts && (now - ts) < 20 * 1000;
+  });
+}
+
+function extractWorkingTime(text) {
+  return chatUi.extractWorkingTime(text);
+}
+
+function recentWorkingLabel(session) {
+  if (!session) return '';
+  const now = Date.now();
+  let latest = null;
+  for (const event of chatEventsForSession(session)) {
+    const text = String(event?.text || '');
+    const parsed = extractWorkingTime(text);
+    if (!parsed) continue;
+    const ts = event?.timestamp ? new Date(event.timestamp).getTime() : 0;
+    if (!ts || (now - ts) >= 20 * 1000) continue;
+    latest = parsed;
+  }
+  return latest || '';
+}
+
+function paneWorkingLabel(sessionName) {
+  if (!sessionName) return '';
+  for (const [key, label] of Object.entries(state.sessionWorkingLabels)) {
+    if (!key.startsWith(`${sessionName}:`)) continue;
+    if (label) return label;
+  }
+  return '';
+}
+
+function chatDraftForSession(session) {
+  if (!session) return '';
+  const host = streamHostForHostId(session.hostId);
+  return state.chatStream.drafts?.[`${host}:${session.name}`]?.text || '';
+}
+
+function chatDraftStateForSession(session) {
+  if (!session) return null;
+  const host = streamHostForHostId(session.hostId);
+  return state.chatStream.drafts?.[`${host}:${session.name}`] || null;
+}
+
+function chatSessionStateForSession(session) {
+  if (!session) return null;
+  const host = streamHostForHostId(session.hostId);
+  return state.chatStream.sessions.find((item) => item?.host === host && item?.session_name === session.name) || null;
+}
+
+function isCodeLikeEvent(event) {
+  return chatUi.isCodeLikeEvent(event);
+}
+
+function isCodexHelperPromptText(text) {
+  const normalized = normalizeTranscript(text).toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized === 'run /review on my current changes.' ||
+    normalized === 'run /review on my current changes' ||
+    normalized === 'summarize recent commits' ||
+    (/^(summarize|explore|inspect|review|find|run)\b.+/.test(normalized) && normalized.split(/\s+/).length <= 8)
+  );
+}
+
+function isSystemHelperPrompt(event) {
+  if (!event) return false;
+  if (String(event.provider || '').toLowerCase() !== 'codex') return false;
+  if (String(event.kind || '').toUpperCase() !== 'USER') return false;
+  const text = normalizeTranscript(event.text).toLowerCase();
+  if (!text) return false;
+  return isCodexHelperPromptText(text);
+}
+
+function renderEventContent(event, isUser) {
+  return chatUi.renderEventContent(event, isUser);
+}
+
+function displayChatEvents(session) {
+  return chatEventsForSession(session).filter((event) => event.kind !== 'DRAFT' && !isSystemHelperPrompt(event));
+}
+
+function formatEventTime(timestamp) {
+  if (!timestamp) return '';
+  try {
+    return new Date(timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
+function renderChatBody(text, isUser) {
+  return chatUi.renderChatBody(text, isUser);
+}
+
+function parseChatEventsFromBuffer(rawText, provider) {
+  const text = normalizeTranscript(rawText);
+  if (!text) return [];
+  const lines = text.split('\n');
+  const events = [];
+  let current = null;
+
+  const flush = () => {
+    if (!current) return;
+    current.text = current.text.trim();
+    if (current.text) events.push(current);
+    current = null;
+  };
+
+  for (const originalLine of lines) {
+    const line = originalLine.trimRight();
+    if (!line) continue;
+
+    if (/^❯\s+/.test(line) || /^›\s+/.test(line)) {
+      flush();
+      current = { kind: 'USER', text: line.replace(/^([❯›])\s+/, '') };
+      if (isSystemHelperPrompt({ kind: 'USER', provider, text: current.text })) {
+        current = null;
+      }
+      continue;
+    }
+
+    if (/^⎿\s+/.test(line) || /^•\s+/.test(line)) {
+      flush();
+      current = { kind: 'ASSIST', text: line.replace(/^([⎿•])\s+/, '') };
+      continue;
+    }
+
+    if (/^API Error:/.test(line)) {
+      flush();
+      current = { kind: 'ASSIST', text: line };
+      continue;
+    }
+
+    if (/^(Read|Edit|Write|Bash|Grep|Glob|Agent|TodoWrite)\b/.test(line)) {
+      flush();
+      current = { kind: 'TOOL', text: line };
+      continue;
+    }
+
+    if (/^Tip: /.test(line) || /^gpt-[\d.]+/.test(line) || /^permissions: /.test(line) || /^model: /.test(line) || /^directory: /.test(line)) {
+      continue;
+    }
+
+    if (/^Do you trust the contents of this directory\?/.test(line) || /^Press enter to continue/.test(line)) {
+      flush();
+      current = { kind: 'SYSTEM', text: line };
+      continue;
+    }
+
+    if (current) {
+      current.text += `\n${line.trim()}`;
+    }
+  }
+
+  flush();
+  return events.slice(-80).map((event, idx) => ({ ...event, provider, id: `${provider}-${idx}` }));
+}
+
+function ensureSlotChatSurface(slot) {
+  const container = document.getElementById(`term-${slot}`);
+  if (!container) return null;
+  if (state.slotChatRefs[slot]) return state.slotChatRefs[slot];
+
+  container.innerHTML = '';
+  container.style.position = 'relative';
+
+  const shell = document.createElement('div');
+  shell.className = 'slot-shell';
+  shell.style.cssText = 'position:relative;width:100%;height:100%;';
+
+  const terminalMount = document.createElement('div');
+  terminalMount.className = 'slot-terminal-layer';
+  terminalMount.style.cssText = 'position:absolute;inset:0;';
+
+  const chatMount = document.createElement('div');
+  chatMount.className = 'slot-chat-layer';
+  chatMount.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;background:radial-gradient(circle at top,#16211c 0%,#0d1310 68%);overflow:hidden;';
+
+  const chatShell = document.createElement('div');
+  chatShell.className = 'slot-chat-shell';
+
+  const scrollEl = document.createElement('div');
+  scrollEl.className = 'slot-chat-scroll';
+
+  const listEl = document.createElement('div');
+  listEl.className = 'slot-chat-list';
+  scrollEl.appendChild(listEl);
+
+  const draftPreviewEl = document.createElement('div');
+  draftPreviewEl.className = 'slot-chat-draft-preview-host';
+
+  const composeEl = document.createElement('div');
+  composeEl.className = 'slot-chat-compose';
+
+  const statusEl = document.createElement('div');
+  statusEl.className = 'slot-chat-status';
+
+  const inputEl = document.createElement('textarea');
+  inputEl.className = 'slot-chat-compose-input';
+  inputEl.rows = 1;
+  inputEl.placeholder = '';
+  inputEl.dataset.slot = String(slot);
+
+  const sendEl = document.createElement('button');
+  sendEl.className = 'slot-chat-compose-send';
+  sendEl.dataset.slot = String(slot);
+  sendEl.title = 'Send';
+  sendEl.innerHTML = '<span aria-hidden="true">↑</span>';
+
+  composeEl.appendChild(inputEl);
+  composeEl.appendChild(sendEl);
+  chatShell.appendChild(scrollEl);
+  chatShell.appendChild(statusEl);
+  chatShell.appendChild(draftPreviewEl);
+  chatShell.appendChild(composeEl);
+  chatMount.appendChild(chatShell);
+
+  const autoSize = () => {
+    inputEl.style.height = '';
+    const h = Math.min(inputEl.scrollHeight, 120);
+    inputEl.style.height = `${h}px`;
+    inputEl.style.overflowY = inputEl.scrollHeight > 120 ? 'auto' : 'hidden';
+  };
+  inputEl.addEventListener('input', () => {
+    state.slotDrafts[slot] = inputEl.value;
+    state.slotDraftTouched[slot] = true;
+    autoSize();
+  });
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChatComposer(slot);
+    }
+  });
+  sendEl.addEventListener('click', () => sendChatComposer(slot));
+  autoSize();
+
+  shell.appendChild(terminalMount);
+  shell.appendChild(chatMount);
+  container.appendChild(shell);
+
+  state.slotChatRefs[slot] = { shell, terminalMount, chatMount, scrollEl, listEl, statusEl, draftPreviewEl, inputEl, sendEl };
+  return state.slotChatRefs[slot];
+}
+
+function renderSlotChat(slot) {
+  const refs = state.slotChatRefs[slot];
+  const session = state.slots[slot];
+  if (!refs || !session || state.botSlots[slot]) return;
+
+  const events = displayChatEvents(session);
+  const remoteDraftState = chatDraftStateForSession(session);
+  const remoteSessionState = chatSessionStateForSession(session);
+  const remoteDraft = isCodexHelperPromptText(remoteDraftState?.text || '') ? '' : (remoteDraftState?.text || '');
+  const remotePending = !!remoteDraftState?.raw?.pending;
+  const remoteWorking = !!remoteDraftState?.raw?.working;
+  const remoteWorkingLabel = String(remoteDraftState?.raw?.working_label || '');
+  if (!remoteDraft && !state.slotDrafts[slot]) {
+    state.slotDraftTouched[slot] = false;
+  }
+  const snapshotWorking = !!remoteSessionState?.working;
+  const activity = (remoteWorking || snapshotWorking || hasRecentWorkingEvent(session)) ? 'working' : getActivityForSession(session.name);
+  const workingLabel = remoteWorkingLabel || recentWorkingLabel(session) || paneWorkingLabel(session.name) || chatUi.extractWorkingTime(remoteSessionState?.last_text || '');
+  const chatMode = state.slotViewModes[slot] === 'chat';
+  refs.terminalMount.style.display = chatMode ? 'none' : '';
+  refs.chatMount.style.display = chatMode ? 'flex' : 'none';
+  if (!chatMode) return;
+
+  const shouldStick = !refs.scrollEl || (refs.scrollEl.scrollHeight - refs.scrollEl.scrollTop - refs.scrollEl.clientHeight) < 32;
+
+  const items = events.length
+    ? events.map((event, idx) => {
+        const isUser = event.kind === 'USER';
+        const isTool = event.kind === 'TOOL' || event.kind === 'TOOL-OUT';
+        const isSystem = event.kind === 'SYSTEM';
+        const isThink = event.kind === 'THINK';
+        const marker = isTool ? 'tool' : isSystem ? 'system' : isThink ? 'thinking' : '';
+        const timestamp = formatEventTime(event.timestamp);
+        const previousTimestamp = idx > 0 ? formatEventTime(events[idx - 1].timestamp) : '';
+        const showTimestamp = idx === 0 || timestamp !== previousTimestamp;
+        return `
+          ${showTimestamp ? `<div class="slot-chat-timestamp">${esc(timestamp)}</div>` : ''}
+          <article class="slot-chat-message ${isUser ? 'is-user' : ''} ${isTool ? 'is-tool' : ''} ${isSystem ? 'is-system' : ''} ${isThink ? 'is-think' : ''}">
+            ${marker ? `<div class="slot-chat-message-meta"><span class="slot-chat-message-role">${esc(marker)}</span></div>` : ''}
+            <div class="slot-chat-message-body">${renderEventContent(event, isUser)}</div>
+          </article>`;
+      }).join('')
+    : `<div class="slot-chat-empty">${state.chatStream.connected ? 'No recent chat activity.' : 'Chat stream offline.'}</div>`;
+
+  refs.listEl.innerHTML = items;
+
+  if (refs.statusEl) {
+    refs.statusEl.className = `slot-chat-status is-${activity}`;
+    refs.statusEl.innerHTML = chatUi.renderStatusBadges({
+      activity,
+      workingLabel,
+      pending: remotePending,
+    });
+  }
+
+  if (refs.draftPreviewEl) {
+    refs.draftPreviewEl.innerHTML = '';
+    refs.draftPreviewEl.style.display = 'none';
+  }
+
+  const composerValue = chatUi.deriveComposerInputValue(
+    state.slotDrafts[slot],
+    remoteDraft,
+    state.slotDraftTouched[slot],
+  );
+  if (refs.inputEl && refs.inputEl !== document.activeElement && refs.inputEl.value !== composerValue) {
+    refs.inputEl.value = composerValue;
+    refs.inputEl.style.height = '';
+    const h = Math.min(refs.inputEl.scrollHeight, 120);
+    refs.inputEl.style.height = `${h}px`;
+    refs.inputEl.style.overflowY = refs.inputEl.scrollHeight > 120 ? 'auto' : 'hidden';
+  }
+  refs.inputEl?.classList.toggle('is-remote-draft', !!remoteDraft && !state.slotDraftTouched[slot]);
+  refs.inputEl?.classList.toggle('is-remote-pending', !!remotePending && !state.slotDraftTouched[slot]);
+  refs.inputEl?.setAttribute('placeholder', composerValue ? '' : 'Type a message');
+
+  if (refs.scrollEl && shouldStick) {
+    requestAnimationFrame(() => {
+      refs.scrollEl.scrollTop = refs.scrollEl.scrollHeight;
+    });
+  }
+}
+
+function sendChatComposer(slot) {
+  const refs = state.slotChatRefs[slot];
+  const inputEl = refs?.inputEl;
+  const text = (inputEl ? inputEl.value : state.slotDrafts[slot]).trim();
+  if (!text || !state.slots[slot] || state.botSlots[slot]) return;
+  sendProgrammaticInput(slot, text);
+  state.slotDrafts[slot] = '';
+  state.slotDraftTouched[slot] = true;
+  if (inputEl) {
+    inputEl.value = '';
+    inputEl.style.height = '';
+  }
+  requestAnimationFrame(() => renderSlotChat(slot));
+}
+
+function scheduleSlotChatRender(slot) {
+  if (state.slotChatRenderTimers[slot]) return;
+  state.slotChatRenderTimers[slot] = setTimeout(() => {
+    state.slotChatRenderTimers[slot] = null;
+    renderSlotChat(slot);
+  }, 120);
+}
+
+function updateSlotViewMode(slot, mode) {
+  state.slotViewModes[slot] = mode;
+  const header = document.getElementById(`header-${slot}`);
+  if (header) {
+    header.querySelectorAll('.cell-view-toggle').forEach((btn) => {
+      const active = btn.dataset.mode === mode;
+      btn.classList.toggle('active', active);
+      btn.style.opacity = active ? '1' : '0.65';
+      btn.style.borderColor = active ? '#2dd4bf' : '#284137';
+      btn.style.color = active ? '#dff8ea' : '#86a595';
+      btn.style.background = active ? '#173126' : '#101815';
+    });
+  }
+  renderSlotChat(slot);
+}
+
+function ensureSlotModeToggle(slot) {
+  const header = document.getElementById(`header-${slot}`);
+  if (!header || header.querySelector('.cell-view-toggle-group')) return;
+  const actions = header.querySelector('.cell-actions');
+  if (!actions) return;
+  const group = document.createElement('div');
+  group.className = 'cell-view-toggle-group';
+  group.style.cssText = 'display:flex;gap:4px;margin-right:4px;';
+  group.innerHTML = `
+    <button class="cell-view-toggle" data-slot="${slot}" data-mode="chat" title="Chat view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Chat</button>
+    <button class="cell-view-toggle" data-slot="${slot}" data-mode="terminal" title="Terminal view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Terminal</button>`;
+  actions.prepend(group);
+  group.querySelectorAll('.cell-view-toggle').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      updateSlotViewMode(slot, btn.dataset.mode);
+      if (btn.dataset.mode === 'terminal') focusTerminal(slot);
+    });
+  });
+  updateSlotViewMode(slot, state.slotViewModes[slot]);
+}
+
+function updateSlotProviderTag(slot) {
+  const header = document.getElementById(`header-${slot}`);
+  const session = state.slots[slot];
+  if (!header) return;
+  header.querySelector('.cell-provider-tag')?.remove();
+  if (!session || state.botSlots[slot]) return;
+  const provider = providerForSession(session.name);
+  const tag = document.createElement('span');
+  tag.className = 'cell-provider-tag';
+  tag.style.cssText = 'font-size:10px;line-height:1;padding:4px 6px;border-radius:999px;border:1px solid #284137;background:#101815;color:#8ee4bf;text-transform:uppercase;letter-spacing:0.5px;';
+  tag.textContent = provider;
+  const sourceTag = header.querySelector('.cell-source-tag');
+  const label = header.querySelector('.cell-label');
+  if (sourceTag) sourceTag.after(tag);
+  else if (label) label.after(tag);
+}
 
 // ── API ────────────────────────────────────────────────────────
 
@@ -109,7 +632,7 @@ async function fetchSessions() {
         title: '',
         preview: '',
         attached: !!s.attached,
-        type: 'claude',
+        type: /codex/i.test(s.name) ? 'codex' : 'claude',
         hostId,
       });
     }
@@ -155,29 +678,12 @@ function getSourceColorForSession(sessionName, hostId) {
   return colors[hostId] || 'green';
 }
 
+function isSummaryNoiseLine(line) {
+  return chatUi.isSummaryNoiseLine(line);
+}
+
 function extractSummary(paneContent) {
-  if (!paneContent) return '';
-  const lines = paneContent.split('\n').map(l => l.trim()).filter(l => l);
-  // Look for Claude's status line patterns
-  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 30); i--) {
-    const line = lines[i];
-    // Match tool use lines like "Read file.js", "Edit main.py", "Bash npm test"
-    if (/^(Read|Edit|Write|Bash|Grep|Glob|Agent|TodoWrite)\b/.test(line)) {
-      return line.slice(0, 80);
-    }
-    // Match "Working on..." or task descriptions
-    if (/^(Working|Building|Testing|Fixing|Adding|Updating|Creating|Running|Searching|Installing)\b/i.test(line)) {
-      return line.slice(0, 80);
-    }
-  }
-  // Fallback: last non-empty line that isn't a prompt
-  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 10); i--) {
-    const line = lines[i];
-    if (line && !line.startsWith('❯') && !line.includes('bypass') && !line.includes('auto-accept') && line.length > 3) {
-      return line.slice(0, 80);
-    }
-  }
-  return '';
+  return chatUi.extractSummary(paneContent);
 }
 
 function extractAutoName(paneContent) {
@@ -254,6 +760,7 @@ async function pollActivity() {
         const key = i >= 0 ? rawKey.slice(i + 1) : rawKey;
         const sessionName = key.split(':')[0];
         state.sessionSummaries[key] = extractSummary(content);
+        state.sessionWorkingLabels[key] = extractWorkingTime(content);
         // Extract auto-name from pane content (re-extract each poll — title may improve)
         const name = extractAutoName(content);
         if (name && name !== state.autoNames[sessionName]) {
@@ -273,6 +780,11 @@ async function pollActivity() {
     }
     // Update activity strips on slot headers
     updateActivityStrips();
+    for (let slot = 0; slot < 4; slot++) {
+      if (state.slots[slot] && !state.botSlots[slot] && state.slotViewModes[slot] === 'chat') {
+        scheduleSlotChatRender(slot);
+      }
+    }
     // Re-render sidebar with activity data
     renderSidebar();
   } catch (e) {
@@ -373,7 +885,8 @@ function renderSidebar() {
     const displayName = s.display_name || (autoName ? autoName : s.name);
     // Get summary for this session
     const summaryKey = Object.keys(state.sessionSummaries).find(k => k.startsWith(s.name + ':'));
-    const summary = summaryKey ? state.sessionSummaries[summaryKey] : '';
+    const summary = chatUi.sanitizeSidebarDetail(summaryKey ? state.sessionSummaries[summaryKey] : '');
+    const preview = chatUi.sanitizeSidebarDetail(s.preview);
 
     const activityBadge = activity === 'working'
       ? `<span class="activity-indicator working" title="Working"><span class="activity-spinner"></span></span>`
@@ -399,7 +912,7 @@ function renderSidebar() {
       </div>
       ${hasTitle ? `<div class="s-meta">${esc(s.name)}</div>` : ''}
       ${autoName && !hasTitle ? `<div class="s-meta">${esc(s.name)}</div>` : ''}
-      ${summary ? `<div class="s-summary">${esc(summary)}</div>` : (s.preview ? `<div class="s-preview">${esc(s.preview)}</div>` : '')}
+      ${summary ? `<div class="s-summary">${esc(summary)}</div>` : (preview ? `<div class="s-preview">${esc(preview)}</div>` : '')}
     </div>`;
   }
 
@@ -626,6 +1139,7 @@ function attachBotToSlot(slot, bot) {
 
   // Update header
   const header = document.getElementById(`header-${slot}`);
+  ensureSlotModeToggle(slot);
   const label = header.querySelector('.cell-label');
   label.textContent = title;
   label.classList.add('has-session');
@@ -635,6 +1149,7 @@ function attachBotToSlot(slot, bot) {
   // Render bot detail into the terminal area
   const container = document.getElementById(`term-${slot}`);
   container.innerHTML = renderBotDetail(bot);
+  state.slotViewModes[slot] = 'terminal';
 
   // Wire up refresh for this bot panel
   const refreshBtn = container.querySelector('.bot-detail-refresh');
@@ -776,6 +1291,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
 
   // Update header
   const header = document.getElementById(`header-${slot}`);
+  ensureSlotModeToggle(slot);
   const label = header.querySelector('.cell-label');
   label.textContent = displayName;
   label.classList.add('has-session');
@@ -792,10 +1308,17 @@ async function attachSession(slot, sessionName, displayName, hostId) {
       label.after(tag);
     }
   }
+  updateSlotProviderTag(slot);
 
   // Create terminal
-  const container = document.getElementById(`term-${slot}`);
-  container.innerHTML = '';
+  const refs = ensureSlotChatSurface(slot);
+  const container = refs.terminalMount;
+  if (refs.listEl) refs.listEl.innerHTML = '';
+  if (refs.inputEl) refs.inputEl.value = '';
+  state.slotBuffers[slot] = '';
+  state.slotDrafts[slot] = '';
+  state.slotDraftTouched[slot] = false;
+  state.slotViewModes[slot] = 'terminal';
 
   const term = new Terminal({
     theme: THEME,
@@ -863,17 +1386,23 @@ async function attachSession(slot, sessionName, displayName, hostId) {
     // Paste: Cmd+V on mac. Ctrl+V / Ctrl+Shift+V on Win/Linux. preventDefault
     // is REQUIRED — without it Chromium dispatches a native `paste` into
     // xterm's hidden textarea, causing a double paste.
+    // Use Electron's clipboard API: navigator.clipboard.readText() silently
+    // rejects when the document isn't focused (xterm's WebGL canvas swallows
+    // document focus on click), so paste into the terminal stopped working.
     const pasteCombo = (e.metaKey && e.key === 'v') ||
                        (!isMac && e.ctrlKey && !e.metaKey && (e.key === 'v' || e.key === 'V'));
     if (pasteCombo) {
       e.preventDefault();
       e.stopPropagation();
-      navigator.clipboard.readText().then(text => {
+      try {
+        const text = electronClipboard.readText();
         if (text) {
           window.cc.exitCopyMode(slot);
           window.cc.writePty(slot, text);
         }
-      });
+      } catch (err) {
+        console.warn('[paste] electron clipboard read failed:', err);
+      }
       return false;
     }
 
@@ -952,6 +1481,8 @@ async function attachSession(slot, sessionName, displayName, hostId) {
   state.terminals[slot]._ro = ro;
 
   renderSidebar();
+  renderSlotChat(slot);
+  updateSlotViewMode(slot, state.slotViewModes[slot]);
 }
 
 function detachSlot(slot) {
@@ -972,12 +1503,18 @@ function detachSlot(slot) {
   label.classList.remove('has-session');
   label.style.color = '';
   header.querySelector('.cell-source-tag')?.remove();
+  header.querySelector('.cell-provider-tag')?.remove();
   document.getElementById(`cell-${slot}`).classList.remove('occupied');
 
   // Clear state before async/throwing operations
   const hadSlot = !!state.slots[slot];
   state.slots[slot] = null;
   state.botSlots[slot] = false;
+  state.slotBuffers[slot] = '';
+  state.slotDrafts[slot] = '';
+  state.slotDraftTouched[slot] = false;
+  state.slotViewModes[slot] = 'terminal';
+  state.slotChatRefs[slot] = null;
   if (sessionName) delete state.autoNames[sessionName];
 
   // Dispose terminal (may throw if WebGL context is lost, etc.)
@@ -1092,9 +1629,14 @@ function minimizeAll() {
 // ── PTY Events ─────────────────────────────────────────────────
 
 window.cc.onPtyData((slot, data) => {
+  state.slotBuffers[slot] = (state.slotBuffers[slot] + stripAnsi(data)).slice(-SLOT_BUFFER_LIMIT);
   if (state.terminals[slot]) {
     state.terminals[slot].term.write(data);
   }
+});
+
+window.cc.onChatStreamEvent((payload) => {
+  applyChatStreamPayload(payload);
 });
 
 window.cc.onPtyExit(async (slot, exitCode) => {
@@ -2240,6 +2782,7 @@ document.addEventListener('wheel', (e) => {
     }
     return;
   }
+  if (state.slotViewModes[slot] === 'chat') return;
   e.preventDefault();
   e.stopImmediatePropagation();
   const now = Date.now();
@@ -2256,6 +2799,7 @@ document.addEventListener('wheel', (e) => {
 CFG_READY.then((cfg) => {
   fetchSessions();
   pollActivity();
+  window.cc.getChatStreamState().then(applyChatStreamState).catch(() => {});
   setInterval(fetchSessions, 5000);
   setInterval(pollActivity, 3000);
 

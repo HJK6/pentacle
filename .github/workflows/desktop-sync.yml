@@ -1,0 +1,107 @@
+name: Pentacle Desktop Sync Notifications
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  notify-triforce:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      MEMORY_SYNC_ROLE_ARN: arn:aws:iam::841672795586:role/GitHubActionsBartimaeusMemorySync
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.MEMORY_SYNC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Send desktop sync notifications
+        shell: bash
+        env:
+          HEAD_AUTHOR_EMAIL: ${{ github.event.head_commit.author.email }}
+          HEAD_AUTHOR_NAME: ${{ github.event.head_commit.author.name }}
+          HEAD_COMMITTER_EMAIL: ${{ github.event.head_commit.committer.email }}
+          HEAD_COMMITTER_NAME: ${{ github.event.head_commit.committer.name }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+          PUSH_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          detect_machine() {
+            local text
+            text="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+              "${HEAD_MESSAGE}" \
+              "${HEAD_AUTHOR_EMAIL}" \
+              "${HEAD_AUTHOR_NAME}" \
+              "${HEAD_COMMITTER_EMAIL}" \
+              "${HEAD_COMMITTER_NAME}" \
+              "${PUSH_ACTOR}" | tr '[:upper:]' '[:lower:]')"
+
+            if [[ "${text}" =~ \[machine:([a-z0-9_-]+)\] ]]; then
+              printf '%s\n' "${BASH_REMATCH[1]}"
+              return
+            fi
+
+            case "${text}" in
+              *amaterasu*|*vamsh@amaterasu.local*|*vamsh@amaterasu.localdomain*)
+                printf 'amaterasu\n'
+                ;;
+              *merlin*|*vgujju*|*vamsh@merlin.local*)
+                printf 'merlin\n'
+                ;;
+              *bartimaeus*|*bartimaeuss-mac-mini*|*bartimaeus@*)
+                printf 'bartimaeus\n'
+                ;;
+              *)
+                printf 'unknown\n'
+                ;;
+            esac
+          }
+
+          sender_machine="$(detect_machine)"
+          echo "sender_machine=${sender_machine}"
+
+          for target in bartimaeus amaterasu merlin; do
+            if [[ "${target}" == "${sender_machine}" ]]; then
+              echo "skip ${target}; sender owns this update"
+              continue
+            fi
+
+            queue_url="$(aws sqs get-queue-url \
+              --queue-name "TriforceMemorySync-${target}" \
+              --query 'QueueUrl' \
+              --output text)"
+
+            body="$(jq -n \
+              --arg source "pentacle_desktop_sync" \
+              --arg repo "pentacle" \
+              --arg branch "${GITHUB_REF_NAME}" \
+              --arg commit "${GITHUB_SHA}" \
+              --arg sender "${sender_machine}" \
+              --arg target "${target}" \
+              --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --arg summary "GitHub push ${GITHUB_SHA} to ${GITHUB_REPOSITORY}" \
+              '{
+                source: $source,
+                repo: $repo,
+                branch: $branch,
+                commit: $commit,
+                sender_machine: $sender,
+                target_machine: $target,
+                timestamp: $timestamp,
+                summary: $summary
+              }')"
+
+            aws sqs send-message \
+              --queue-url "${queue_url}" \
+              --message-body "${body}" >/dev/null
+
+            echo "sent ${target} ${GITHUB_SHA}"
+          done

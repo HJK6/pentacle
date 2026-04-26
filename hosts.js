@@ -118,14 +118,39 @@ class Ssh2Host {
 
   _openLaneClient() {
     const conn = this._Client();
-    return new Promise((resolve, reject) => {
-      conn.once('ready', () => resolve(conn));
-      conn.once('error', reject);
+    // Persistent 'error' listener: ssh2 can emit multiple 'error' events for a
+    // single failure (e.g. banner timeout → 'error' + socket 'error' + proto
+    // errors on close). A `once` listener catches the first, and the rest hit
+    // Node's EventEmitter with no handler → uncaught exception → Electron
+    // main-process crash. Keep the listener permanent and swallow late errors.
+    const onError = (err) => {
+      if (settled) {
+        if (process.env.PENTACLE_DEBUG) {
+          console.warn(`[${this.id}] ssh2 late error:`, err && err.message);
+        }
+        return;
+      }
+      settled = true;
+      reject(err);
+    };
+    let settled = false;
+    let resolve, reject;
+    const p = new Promise((res, rej) => { resolve = res; reject = rej; });
+    conn.on('error', onError);
+    conn.once('ready', () => {
+      if (settled) return;
+      settled = true;
+      resolve(conn);
+    });
+    try {
       conn.connect({
         host: this.host, port: this.port, username: this.user,
         privateKey: this.privateKey, readyTimeout: 10000, keepaliveInterval: 30000,
       });
-    });
+    } catch (err) {
+      onError(err);
+    }
+    return p;
   }
 
   async _lane(name) {

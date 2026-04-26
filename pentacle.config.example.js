@@ -50,6 +50,21 @@ module.exports = {
   //           tmux: 'tmux',
   //           // host: '172.23.x.x',     // optional; auto-detected if omitted
   //         },
+  //
+  //   (D) HOST + peers — additive. A HOST can also surface tmux sessions from
+  //       other SSH-reachable machines in its sidebar without flipping into
+  //       CLIENT mode. Useful when you want one sidebar that shows chats from
+  //       this machine AND other peers you own.
+  //
+  //         peers: [
+  //           {
+  //             id: 'amaterasu',         // shows up as host id; used by hostNames/hostColors
+  //             host: '100.104.128.92',  // Tailscale IP or LAN IP
+  //             user: 'vamsh',
+  //             port: 22,
+  //             tmux: '/usr/bin/tmux',
+  //           },
+  //         ],
 
   // ── App Identity ──────────────────────────────────────────────
   appName: 'Pentacle',             // Window title, titlebar text, process name
