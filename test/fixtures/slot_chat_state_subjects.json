@@ -5,7 +5,7 @@
       "expected_output": "Show only the top command line in the transcript. Hide the noisy process-list output underneath.",
       "event": {
         "kind": "ASSIST",
-        "text": "Ran ps ax | rg \"/Users/bartimaeus/pentacle/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \\\\.|chat_streamd.py --port 7791\"\n└ 13767   ??  SN     0:06.07 /Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python -u chat_streamd.py --port 7791 --bind 0.0.0.0\n  --host bart --host abra --host amaterasu"
+        "text": "Ran ps ax | rg \"/Users/bartimaeus/pentacle/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \\\\.|chat_streamd.py --port 7791\"\n└ 13767   ??  SN     0:06.07 /Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python -u chat_streamd.py --port 7791 --bind 0.0.0.0\n  --host bart --host merlin --host amaterasu"
       },
       "expect_contains": [
         "Ran ps ax | rg"

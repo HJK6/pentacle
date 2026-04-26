@@ -26,7 +26,7 @@ Pentacle currently has two relevant layers:
    - Source repo: `~/agent-workspace/multi-machine-chat`
    - Daemon: `chat_streamd.py`
    - Transport: websocket on `ws://127.0.0.1:7791`
-   - Source of truth: live tmux sessions on Bart, Abra, and Amaterasu
+   - Source of truth: live tmux sessions on Bart, Merlin, and Amaterasu
 
 The mobile app should consume the websocket-backed structured stream, not scrape PTY output directly.
 
@@ -60,7 +60,7 @@ Those fields are the intended foundation for mobile UI state like:
 
 Current target machines:
 - `bart`
-- `abra`
+- `merlin`
 - `amaterasu`
 
 Current requirement:
@@ -136,7 +136,7 @@ If a mobile-specific backend is introduced, it should wrap the current daemon an
 
 As of 2026-04-24:
 - desktop Pentacle has a websocket-backed chat mode
-- Bart, Abra, and Amaterasu are wired into the daemon
+- Bart, Merlin, and Amaterasu are wired into the daemon
 - Claude and Codex both stream through the same normalized UI path
 - footer/status noise like `gpt-5.4 default ...` was explicitly filtered from chat transcript parsing
 - draft state is separated from committed transcript events

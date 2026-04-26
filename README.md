@@ -203,7 +203,7 @@ npm run build:mac
 Pentacle also has a websocket-backed structured chat mode layered on top of the tmux sessions.
 
 - Daemon: `~/agent-workspace/multi-machine-chat/chat_streamd.py`
-- Current hosts: Bart, Abra, Amaterasu
+- Current hosts: Bart, Merlin, Amaterasu
 - Current providers: Claude and Codex
 - Desktop renderer: slot-level `Chat` / `Terminal` toggle
 

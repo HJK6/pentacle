@@ -19,7 +19,7 @@ function _kindColor(kind) {
 
 function _hostColor(host) {
   if (host === 'bart') return '#a78bfa';
-  if (host === 'abra') return '#d4a72c';
+  if (host === 'merlin') return '#d4a72c';
   if (host === 'amaterasu') return '#f47067';
   return '#2dd4bf';
 }
@@ -91,7 +91,7 @@ function mount(container) {
   header.innerHTML = `
     <div>
       <h2 style="margin:0 0 4px 0;font-size:20px;font-weight:700;color:#f2fbf5;">Agent Stream</h2>
-      <div style="font-size:13px;color:#8aa097;">Merged Claude and Codex transcript stream across Bart and Abra.</div>
+      <div style="font-size:13px;color:#8aa097;">Merged Claude and Codex transcript stream across Bart and Merlin.</div>
     </div>
     <div data-role="status" style="font-size:12px;color:#8aa097;padding-top:4px;"></div>`;
   root.appendChild(header);
@@ -185,7 +185,7 @@ function unmount(_refs) {}
 window.DASHBOARDS.push({
   id: 'chat-stream',
   name: 'Agent Stream',
-  description: 'Merged Claude and Codex event stream from Bart and Abra',
+  description: 'Merged Claude and Codex event stream from Bart and Merlin',
   color: 'var(--cyan, #2dd4bf)',
   mount,
   update,

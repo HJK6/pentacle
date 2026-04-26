@@ -16,7 +16,7 @@ The message body is:
   "repo": "pentacle",
   "branch": "main",
   "commit": "<git sha>",
-  "sender_machine": "abra",
+  "sender_machine": "merlin",
   "target_machine": "bartimaeus",
   "timestamp": "2026-04-25T00:00:00Z",
   "summary": "GitHub push <sha> to HJK6/pentacle"
@@ -28,7 +28,7 @@ The message body is:
 Dry-run a message:
 
 ```bash
-npm run sync:desktop:dry-run -- --commit "$(git rev-parse HEAD)" --target bartimaeus --sender abra
+npm run sync:desktop:dry-run -- --commit "$(git rev-parse HEAD)" --target bartimaeus --sender merlin
 ```
 
 Apply a message from JSON:
@@ -41,6 +41,6 @@ The sync command writes local status under `.pentacle-sync/`. Dirty worktrees or
 
 ## Restart Rules
 
-- Abra and Bartimaeus default to `npm run deploy`, which rebuilds and relaunches `/Applications/Pentacle.app`.
+- Merlin and Bartimaeus default to `npm run deploy`, which rebuilds and relaunches `/Applications/Pentacle.app`.
 - Amaterasu defaults to relaunching the Windows Electron dev app from `C:\Users\vamsh\repos\pentacle` with `C:\nvm4w\nodejs\npm.cmd start`.
 - Any machine can override restart behavior with `PENTACLE_SYNC_RESTART_COMMAND`.

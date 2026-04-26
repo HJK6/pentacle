@@ -442,7 +442,7 @@ async function ensureChatStreamServer() {
     return;
   }
   const port = String(cfg.port || 7791);
-  const hosts = Array.isArray(cfg.hosts) && cfg.hosts.length ? cfg.hosts : ['bart', 'abra', 'amaterasu'];
+  const hosts = Array.isArray(cfg.hosts) && cfg.hosts.length ? cfg.hosts : ['bart', 'merlin', 'amaterasu'];
   const args = ['-u', script, '--port', port];
   for (const host of hosts) args.push('--host', String(host));
   const proc = spawn(pythonBin, args, { detached: true, stdio: 'ignore' });

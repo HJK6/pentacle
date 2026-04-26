@@ -53,8 +53,8 @@ jobs:
               *amaterasu*|*vamsh@amaterasu.local*|*vamsh@amaterasu.localdomain*)
                 printf 'amaterasu\n'
                 ;;
-              *abra*|*vgujju*|*vamsh@abra.local*)
-                printf 'abra\n'
+              *merlin*|*vgujju*|*vamsh@merlin.local*)
+                printf 'merlin\n'
                 ;;
               *bartimaeus*|*bartimaeuss-mac-mini*|*bartimaeus@*)
                 printf 'bartimaeus\n'
@@ -68,7 +68,7 @@ jobs:
           sender_machine="$(detect_machine)"
           echo "sender_machine=${sender_machine}"
 
-          for target in bartimaeus amaterasu abra; do
+          for target in bartimaeus amaterasu merlin; do
             if [[ "${target}" == "${sender_machine}" ]]; then
               echo "skip ${target}; sender owns this update"
               continue

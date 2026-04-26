@@ -25,10 +25,10 @@ function detectMachine() {
   if (process.env.TRIFORCE_MACHINE) return process.env.TRIFORCE_MACHINE.toLowerCase();
   const host = os.hostname().toLowerCase();
   if (host.includes('amaterasu')) return 'amaterasu';
-  if (host.includes('abra') || host.includes('macbook')) return 'abra';
+  if (host.includes('merlin') || host.includes('macbook')) return 'merlin';
   if (host.includes('bartimaeus') || host.includes('mac-mini')) return 'bartimaeus';
   const home = os.homedir();
-  if (home === '/Users/vgujju') return 'abra';
+  if (home === '/Users/vgujju') return 'merlin';
   if (home === '/Users/bartimaeus') return 'bartimaeus';
   if (home === '/home/vamsh' || home === '/mnt/c/Users/vamsh') return 'amaterasu';
   return host.replace(/[^a-z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'unknown';
