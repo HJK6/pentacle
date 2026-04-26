@@ -42,7 +42,7 @@ const state = {
   activeTab: 'sessions', // 'sessions' or 'bots'
   slots: [null, null, null, null], // { name, displayName } or { bot, displayName } or null
   terminals: [null, null, null, null], // { term, fitAddon } or null
-  slotViewModes: ['chat', 'chat', 'chat', 'chat'], // 'chat' | 'terminal'
+  slotViewModes: ['terminal', 'terminal', 'terminal', 'terminal'], // 'chat' | 'terminal'
   slotBuffers: ['', '', '', ''], // rolling PTY text buffer per slot
   slotChatRefs: [null, null, null, null], // { shell, terminalMount, chatMount, scrollEl, listEl, inputEl, sendEl, hintEl } per slot
   slotDrafts: ['', '', '', ''], // chat composer draft per slot
@@ -1283,7 +1283,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
   state.slotBuffers[slot] = '';
   state.slotDrafts[slot] = '';
   state.slotDraftTouched[slot] = false;
-  state.slotViewModes[slot] = 'chat';
+  state.slotViewModes[slot] = 'terminal';
 
   const term = new Terminal({
     theme: THEME,
@@ -1478,7 +1478,7 @@ function detachSlot(slot) {
   state.slotBuffers[slot] = '';
   state.slotDrafts[slot] = '';
   state.slotDraftTouched[slot] = false;
-  state.slotViewModes[slot] = 'chat';
+  state.slotViewModes[slot] = 'terminal';
   state.slotChatRefs[slot] = null;
   if (sessionName) delete state.autoNames[sessionName];
 
