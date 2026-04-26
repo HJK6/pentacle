@@ -90,18 +90,15 @@ async function fetchSessions() {
   ]);
 
   const apiActive = (data && data.active) || [];
-  const seen = new Set();
   for (const s of apiActive) {
     s.hostId = apiHostId;
     state.sessionHosts[s.name] = apiHostId;
-    seen.add(s.name);
   }
 
   const extras = [];
   for (const [hostId, sessions] of Object.entries(byHost || {})) {
     if (hostId === apiHostId) continue;
     for (const s of sessions) {
-      if (seen.has(s.name)) continue; // API metadata wins on collision
       state.sessionHosts[s.name] = hostId;
       // Use tmux window name as display name if it's meaningful (not just "bash"/"claude"/version)
       const wn = s.windowName || '';
@@ -120,14 +117,17 @@ async function fetchSessions() {
 
   state.sessions = [...apiActive, ...extras];
   state.trashed = (data && data.trashed) || [];
+  syncSlotDisplayNames();
   renderSidebar();
 }
 
 // ── Sidebar Rendering ──────────────────────────────────────────
 
-function getSlotForSession(name) {
+function getSlotForSession(name, hostId) {
   for (let i = 0; i < 4; i++) {
-    if (state.slots[i] && state.slots[i].name === name) return i;
+    if (!state.slots[i] || state.slots[i].name !== name) continue;
+    if (hostId && state.slots[i].hostId !== hostId) continue;
+    return i;
   }
   return -1;
 }
@@ -142,15 +142,15 @@ function getActivityForSession(sessionName) {
   return 'idle';
 }
 
-function getSourceForSession(sessionName) {
-  const hostId = state.sessionHosts[sessionName];
+function getSourceForSession(sessionName, hostId) {
+  hostId = hostId || state.sessionHosts[sessionName];
   if (!hostId) return null;
   const names = CONFIG.hostNames || {};
   return names[hostId] || hostId;
 }
 
-function getSourceColorForSession(sessionName) {
-  const hostId = state.sessionHosts[sessionName];
+function getSourceColorForSession(sessionName, hostId) {
+  hostId = hostId || state.sessionHosts[sessionName];
   const colors = CONFIG.hostColors || {};
   return colors[hostId] || 'green';
 }
@@ -200,6 +200,24 @@ function extractAutoName(paneContent) {
   return '';
 }
 
+function findSession(sessionName, hostId) {
+  return state.sessions.find(s => s.name === sessionName && (s.hostId || state.sessionHosts[s.name]) === hostId)
+    || state.sessions.find(s => s.name === sessionName);
+}
+
+function syncSlotDisplayNames() {
+  for (let i = 0; i < 4; i++) {
+    const slot = state.slots[i];
+    if (!slot || state.botSlots[i]) continue;
+    const session = findSession(slot.name, slot.hostId || state.sessionHosts[slot.name]);
+    const displayName = session?.display_name || slot.displayName || slot.name;
+    if (slot.displayName === displayName) continue;
+    slot.displayName = displayName;
+    const label = document.querySelector(`#header-${i} .cell-label`);
+    if (label) label.textContent = displayName;
+  }
+}
+
 async function pollActivity() {
   try {
     const [actStates, panes] = await Promise.all([
@@ -230,13 +248,26 @@ async function pollActivity() {
     if (actStates) state.activityStates = stripHost(actStates);
     if (panes) {
       const strippedPanes = stripHost(panes);
-      for (const [key, content] of Object.entries(strippedPanes)) {
+      for (const [rawKey, content] of Object.entries(panes)) {
+        const i = rawKey.indexOf(':');
+        const hostId = i >= 0 ? rawKey.slice(0, i) : (IS_CLIENT ? 'remote' : 'local');
+        const key = i >= 0 ? rawKey.slice(i + 1) : rawKey;
+        const sessionName = key.split(':')[0];
         state.sessionSummaries[key] = extractSummary(content);
         // Extract auto-name from pane content (re-extract each poll — title may improve)
-        const sessionName = key.split(':')[0];
         const name = extractAutoName(content);
         if (name && name !== state.autoNames[sessionName]) {
           state.autoNames[sessionName] = name;
+        }
+        const session = findSession(sessionName, hostId);
+        const currentTitle = session?.display_name || session?.title || '';
+        if (window.cc.maybeTitleSession) {
+          window.cc.maybeTitleSession({
+            hostId,
+            sessionName,
+            currentTitle,
+            transcript: content,
+          }).catch(() => {});
         }
       }
     }
@@ -256,6 +287,7 @@ function updateActivityStrips() {
     strip.className = 'cell-activity-strip';
     if (state.slots[i] && !state.botSlots[i]) {
       const sessionName = state.slots[i].name;
+      const hostId = state.slots[i].hostId || state.sessionHosts[sessionName];
       const activity = getActivityForSession(sessionName);
       if (activity === 'working' || activity === 'waiting') {
         strip.classList.add(activity);
@@ -271,10 +303,10 @@ function updateActivityStrips() {
       if (CONFIG.features.sourceTags) {
         const header = document.getElementById(`header-${i}`);
         if (header && !header.querySelector('.cell-source-tag')) {
-          const source = getSourceForSession(sessionName);
+          const source = getSourceForSession(sessionName, hostId);
           if (source) {
             const tag = document.createElement('span');
-            tag.className = `cell-source-tag color-${getSourceColorForSession(sessionName)}`;
+            tag.className = `cell-source-tag color-${getSourceColorForSession(sessionName, hostId)}`;
             tag.textContent = source;
             const label = header.querySelector('.cell-label');
             if (label) label.after(tag);
@@ -290,7 +322,7 @@ function renderSourceFilterBar() {
   if (!bar || !CONFIG.features.sourceTags) { if (bar) bar.style.display = 'none'; return; }
 
   // Collect unique hostIds that have at least one session
-  const hostIds = [...new Set(Object.values(state.sessionHosts))];
+  const hostIds = [...new Set(state.sessions.map(s => s.hostId || state.sessionHosts[s.name]).filter(Boolean))];
   if (hostIds.length < 2) { bar.style.display = 'none'; return; }
 
   bar.style.display = 'flex';
@@ -321,7 +353,7 @@ function renderSidebar() {
   // Apply source filter
   const all = state.sessions;
   const active = state.sourceFilter
-    ? all.filter(s => state.sessionHosts[s.name] === state.sourceFilter)
+    ? all.filter(s => (s.hostId || state.sessionHosts[s.name]) === state.sourceFilter)
     : all;
   const working = active.filter(s => getActivityForSession(s.name) === 'working');
   const waiting = active.filter(s => getActivityForSession(s.name) === 'waiting');
@@ -331,7 +363,8 @@ function renderSidebar() {
   renderSourceFilterBar();
 
   function renderSessionItem(s) {
-    const slotIdx = getSlotForSession(s.name);
+    const hostId = s.hostId || state.sessionHosts[s.name] || (IS_CLIENT ? 'remote' : 'local');
+    const slotIdx = getSlotForSession(s.name, hostId);
     const isActive = slotIdx >= 0;
     const activity = getActivityForSession(s.name);
     const dotClass = activity === 'working' ? 'attached' : activity === 'waiting' ? 'chat' : (s.attached ? 'attached' : s.type);
@@ -347,12 +380,13 @@ function renderSidebar() {
       : activity === 'waiting'
         ? `<span class="activity-indicator waiting" title="Waiting"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5a.5.5 0 0 0-1 0V8a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 7.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg></span>`
         : '';
-    const source = CONFIG.features.sourceTags ? getSourceForSession(s.name) : null;
-    const sourceColor = source ? getSourceColorForSession(s.name) : 'green';
+    const source = CONFIG.features.sourceTags ? getSourceForSession(s.name, hostId) : null;
+    const sourceColor = source ? getSourceColorForSession(s.name, hostId) : 'green';
     const sourceTag = source ? `<span class="s-source-tag color-${sourceColor}">${esc(source)}</span>` : '';
 
     return `<div class="session-item ${isActive ? 'active' : ''}"
                  data-name="${esc(s.name)}"
+                 data-host="${esc(hostId)}"
                  data-display="${esc(displayName)}">
       <div class="s-top">
         <span class="s-dot ${dotClass}"></span>
@@ -360,8 +394,8 @@ function renderSidebar() {
         ${activityBadge}
         ${sourceTag}
         ${isActive ? `<span class="s-slot-badge">${slotIdx + 1}</span>` : ''}
-        <button class="s-edit-btn" data-edit-name="${esc(s.name)}" data-edit-display="${esc(displayName)}" title="Rename"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5L13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175l-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg></button>
-        <button class="s-trash-btn" data-trash-name="${esc(s.name)}" title="Move to trash"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg></button>
+        <button class="s-edit-btn" data-edit-name="${esc(s.name)}" data-edit-display="${esc(displayName)}" data-edit-host="${esc(hostId)}" title="Rename"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5L13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175l-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg></button>
+        <button class="s-trash-btn" data-trash-name="${esc(s.name)}" data-trash-host="${esc(hostId)}" title="Move to trash"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg></button>
       </div>
       ${hasTitle ? `<div class="s-meta">${esc(s.name)}</div>` : ''}
       ${autoName && !hasTitle ? `<div class="s-meta">${esc(s.name)}</div>` : ''}
@@ -394,16 +428,16 @@ function renderSidebar() {
     el.addEventListener('click', () => {
       const name = el.dataset.name;
       const display = el.dataset.display;
+      const hostId = el.dataset.host || defaultHostId;
       // Use the session's tracked host (set by fetchSessions / activity poll)
       // so sessions from non-API hosts (e.g. WSL local in client mode) attach
       // to the correct tmux server.
-      const hostId = state.sessionHosts[name] || defaultHostId;
       assignToSlot(name, display, hostId);
     });
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       const name = el.dataset.name;
-      const hostId = state.sessionHosts[name] || defaultHostId;
+      const hostId = el.dataset.host || defaultHostId;
       window.cc.showContextMenu(name, el.dataset.display, hostId);
     });
   });
@@ -412,7 +446,7 @@ function renderSidebar() {
   list.querySelectorAll('.s-edit-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      showRenameModal(btn.dataset.editName, btn.dataset.editDisplay);
+      showRenameModal(btn.dataset.editName, btn.dataset.editDisplay, btn.dataset.editHost);
     });
   });
 
@@ -420,7 +454,7 @@ function renderSidebar() {
   list.querySelectorAll('.s-trash-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      trashSession(btn.dataset.trashName);
+      trashSession(btn.dataset.trashName, btn.dataset.trashHost);
     });
   });
 
@@ -702,7 +736,7 @@ function renderBotDetail(bot) {
 
 function assignToSlot(sessionName, displayName, hostId) {
   // Already in a slot? Focus it (and maximize if in maximized mode)
-  const existing = getSlotForSession(sessionName);
+  const existing = getSlotForSession(sessionName, hostId);
   if (existing >= 0) {
     if (state.maximizedSlot !== null && state.maximizedSlot !== existing) {
       // In maximized mode, switch the maximized view to this slot
@@ -738,6 +772,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
   state.slotGen[slot]++;
   const gen = state.slotGen[slot]; // capture generation to detect stale async resumes
   state.slots[slot] = { name: sessionName, displayName, hostId };
+  state.sessionHosts[sessionName] = hostId;
 
   // Update header
   const header = document.getElementById(`header-${slot}`);
@@ -749,10 +784,10 @@ async function attachSession(slot, sessionName, displayName, hostId) {
   // Source tag on slot header
   header.querySelector('.cell-source-tag')?.remove();
   if (CONFIG.features.sourceTags) {
-    const source = getSourceForSession(sessionName);
+    const source = getSourceForSession(sessionName, hostId);
     if (source) {
       const tag = document.createElement('span');
-      tag.className = `cell-source-tag color-${getSourceColorForSession(sessionName)}`;
+      tag.className = `cell-source-tag color-${getSourceColorForSession(sessionName, hostId)}`;
       tag.textContent = source;
       label.after(tag);
     }
@@ -1114,29 +1149,32 @@ window.cc.onPtyExit(async (slot, exitCode) => {
 // ── IPC from Main Process ──────────────────────────────────────
 
 window.cc.onAssignSlot((slot, sessionName, hostId) => {
-  const session = state.sessions.find(s => s.name === sessionName);
+  hostId = hostId || 'local';
+  const session = state.sessions.find(s => s.name === sessionName && (s.hostId || state.sessionHosts[s.name]) === hostId)
+    || state.sessions.find(s => s.name === sessionName);
   const displayName = session ? session.display_name : sessionName;
-  attachSession(slot, sessionName, displayName, hostId || 'local');
+  attachSession(slot, sessionName, displayName, hostId);
 });
 
 window.cc.onAction((action, sessionName, extra) => {
   if (action === 'rename') {
-    showRenameModal(sessionName, extra);
+    if (extra && typeof extra === 'object') showRenameModal(sessionName, extra.displayName, extra.hostId);
+    else showRenameModal(sessionName, extra);
   } else if (action === 'trash') {
-    trashSession(sessionName);
+    trashSession(sessionName, extra);
   }
 });
 
 // ── Actions ────────────────────────────────────────────────────
 
-async function trashSession(name) {
+async function trashSession(name, hostId) {
   const apiHostId = IS_CLIENT ? 'remote' : 'local';
-  const hostId = state.sessionHosts[name] || apiHostId;
+  hostId = hostId || state.sessionHosts[name] || apiHostId;
 
   // Detach from any local slot first so the UI doesn't flash "Session ended"
   // when the tmux kill below closes the SSH stream.
   for (let i = 0; i < 4; i++) {
-    if (state.slots[i] && state.slots[i].name === name) {
+    if (state.slots[i] && state.slots[i].name === name && (state.slots[i].hostId || apiHostId) === hostId) {
       detachSlot(i);
     }
   }
@@ -1293,8 +1331,8 @@ async function newSession(agent) {
 
 let renameTarget = null;
 
-function showRenameModal(sessionName, currentTitle) {
-  renameTarget = sessionName;
+function showRenameModal(sessionName, currentTitle, hostId) {
+  renameTarget = { sessionName, hostId: hostId || state.sessionHosts[sessionName] || (IS_CLIENT ? 'remote' : 'local') };
   document.getElementById('modal-title').textContent = `Rename: ${sessionName}`;
   document.getElementById('modal-input').value = currentTitle || sessionName;
   document.getElementById('modal-overlay').style.display = 'flex';
@@ -1315,7 +1353,7 @@ document.getElementById('modal-overlay').addEventListener('click', (e) => {
 document.getElementById('modal-confirm').addEventListener('click', async () => {
   const newName = document.getElementById('modal-input').value.trim();
   if (newName && renameTarget) {
-    await api('POST', '/api/rename', { session: renameTarget, new_name: newName });
+    await window.cc.setWindowTitle(renameTarget.hostId, renameTarget.sessionName, newName, 'manual');
     hideRenameModal();
     fetchSessions();
   }
@@ -1598,7 +1636,7 @@ document.querySelectorAll('.cell-trash').forEach(btn => {
     e.stopPropagation();
     const slot = parseInt(btn.dataset.slot);
     if (state.slots[slot] && !state.botSlots[slot]) {
-      trashSession(state.slots[slot].name);
+      trashSession(state.slots[slot].name, state.slots[slot].hostId);
     }
   });
 });

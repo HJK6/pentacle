@@ -58,7 +58,7 @@ class LocalHost {
   exec(argv) {
     return new Promise((resolve, reject) => {
       const [bin, ...args] = argv;
-      execFile(bin, args, { encoding: 'utf8', env: this.env, timeout: 15000 }, (err, stdout, stderr) => {
+      execFile(bin, args, { encoding: 'utf8', env: this.env, timeout: 60000 }, (err, stdout, stderr) => {
         if (err) return reject(new Error(stderr || err.message));
         resolve(stdout);
       });

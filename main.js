@@ -493,8 +493,8 @@ function showContextMenu(win, sessionName, displayName, hostId) {
     { label: `Open in Slot 3`, click: () => win.webContents.send('assign-slot', 2, sessionName, hid) },
     { label: `Open in Slot 4`, click: () => win.webContents.send('assign-slot', 3, sessionName, hid) },
     { type: 'separator' },
-    { label: 'Rename...', click: () => win.webContents.send('action', 'rename', sessionName, displayName) },
-    { label: 'Trash', click: () => win.webContents.send('action', 'trash', sessionName) },
+    { label: 'Rename...', click: () => win.webContents.send('action', 'rename', sessionName, { displayName, hostId: hid }) },
+    { label: 'Trash', click: () => win.webContents.send('action', 'trash', sessionName, hid) },
   ];
   Menu.buildFromTemplate(template).popup({ window: win });
 }
@@ -505,6 +505,7 @@ let meetingWindow = null;
 const SLOT_STATE_FILE = path.join(app.getPath('userData'), '.slot-state.json');
 const CODEX_UPDATE_STATE_FILE = path.join(app.getPath('userData'), '.codex-update-state.json');
 const CODEX_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const TITLE_STATE_FILE = path.join(app.getPath('userData'), '.title-state.json');
 
 async function createMainWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -618,6 +619,20 @@ function parseKeyValueLines(text) {
   return out;
 }
 
+function loadTitleState() {
+  try {
+    return JSON.parse(fs.readFileSync(TITLE_STATE_FILE, 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveTitleState(state) {
+  try {
+    fs.writeFileSync(TITLE_STATE_FILE, JSON.stringify(state, null, 2));
+  } catch {}
+}
+
 function getCodexCommandForLocation(agentConfig, location) {
   return (location === 'local' && agentConfig.commandLocal) || agentConfig.command || 'codex';
 }
@@ -646,6 +661,171 @@ function resolveAgentWorkDir(location, targetHost) {
   if (!String(configured).startsWith('~')) return configured;
 
   return configured.replace(/^~/, homeDirForTargetHost(location, targetHost));
+}
+
+function slugPart(value, fallback = 'chat', maxLen = 36) {
+  const raw = String(value || fallback).trim().toLowerCase();
+  const slug = raw
+    .replace(/['"]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, maxLen)
+    .replace(/-+$/g, '');
+  return slug || fallback;
+}
+
+async function tmuxSessionExists(host, sessionName) {
+  try {
+    if (host instanceof LocalHost) {
+      execSync(`${host.tmuxBin} has-session -t ${JSON.stringify('=' + sessionName)}`, { stdio: 'ignore', env: host.env });
+    } else {
+      await host.tmux(['has-session', '-t', '=' + sessionName]);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function makeSessionName(agent, targetHost) {
+  const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+  const agentSlug = slugPart(agent, 'chat', 16);
+  const base = `${agentSlug}-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
+  for (let i = 0; i < 100; i++) {
+    const suffix = i === 0 ? '' : `-${String(i + 1).padStart(2, '0')}`;
+    const candidate = `${base}${suffix}`;
+    if (!(await tmuxSessionExists(targetHost, candidate))) return candidate;
+  }
+  return `${base}-${Date.now().toString(36).slice(-4)}`;
+}
+
+function titleKey(hostId, sessionName) {
+  return `${hostId || 'local'}:${sessionName}`;
+}
+
+function isGenericTitle(title, sessionName) {
+  const t = String(title || '').trim();
+  if (!t) return true;
+  if (t === sessionName) return true;
+  return /^(node|bash|zsh|sh|claude|codex|new chat|untitled chat)$/i.test(t);
+}
+
+function titleCase(words) {
+  return words
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 7)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ');
+}
+
+function cleanTitleCandidate(raw) {
+  let title = String(raw || '').trim();
+  try {
+    const parsed = JSON.parse(title);
+    if (parsed && parsed.title) title = String(parsed.title);
+  } catch {}
+  title = title
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/[.,:;!?()[\]{}]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!title || title.includes('-')) return '';
+  if (/\b(codex|claude|amaterasu|bartimaeus|abra)\b/i.test(title)) return '';
+  const words = title.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 7) return '';
+  if (/\d{6,}/.test(title)) return '';
+  return titleCase(title);
+}
+
+function meaningfulUserMessages(transcript) {
+  const messages = [];
+  for (const line of String(transcript || '').split('\n')) {
+    const m = line.match(/^\s*›\s+(.+?)\s*$/);
+    if (!m) continue;
+    const text = m[1].trim();
+    if (!text || /^(continue|ok|okay|yes|no|try again|go on)$/i.test(text)) continue;
+    messages.push(text);
+  }
+  return messages;
+}
+
+function heuristicTitleFromTranscript(transcript) {
+  const first = meaningfulUserMessages(transcript)[0] || '';
+  if (first.replace(/\s+/g, '').length < 20) return '';
+  const cleaned = first
+    .replace(/\b(can you|could you|please|i need|i want|lets|let's|we need to|how do we)\b/ig, ' ')
+    .replace(/[^A-Za-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleanTitleCandidate(titleCase(cleaned.split(/\s+/).slice(0, 6).join(' ')));
+}
+
+function titleStats(transcript) {
+  const users = meaningfulUserMessages(transcript);
+  const meaningfulChars = String(transcript || '').replace(/\s+/g, '').length;
+  const assistantResponseExists = /(^|\n)\s*[•\-]\s+\S/.test(String(transcript || ''));
+  return { users, meaningfulChars, assistantResponseExists };
+}
+
+async function renameTmuxWindow(host, sessionName, title) {
+  if (!host || !sessionName || !title) return false;
+  try {
+    if (host instanceof LocalHost) {
+      execFileSync(host.tmuxBin, ['rename-window', '-t', `${sessionName}:0`, title], { env: host.env, timeout: 3000 });
+    } else {
+      await host.tmux(['rename-window', '-t', `${sessionName}:0`, title]);
+    }
+    return true;
+  } catch (e) {
+    console.warn(`[title] rename-window failed for ${sessionName}: ${e.message || e}`);
+    return false;
+  }
+}
+
+async function generateTitleWithCodex(host, transcript) {
+  const prompt = [
+    'You are titling an agent chat from a noisy terminal transcript.',
+    'First identify the main durable user goal of the chat, not the latest command, tool log, status update, or validation output.',
+    'Ignore shell commands, tool output, test output, file diffs, progress updates, and repeated assistant summaries.',
+    'Prefer the user request that caused the substantive work in this chat.',
+    '',
+    'Return only a JSON object with this shape:',
+    '{"title":"2 to 7 Title Case words no punctuation no dashes","goal":"one sentence explaining the main user goal"}',
+    '',
+    'Transcript:',
+    String(transcript || '').split('\n').slice(-420).join('\n'),
+  ].join('\n');
+
+  const script = `
+set -e
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+tmp="$(mktemp)"
+prompt="$(mktemp)"
+cat > "$prompt" <<'PENTACLE_TITLE_PROMPT'
+${prompt.replace(/PENTACLE_TITLE_PROMPT/g, 'PENTACLE_TITLE_PROMPT_TEXT')}
+PENTACLE_TITLE_PROMPT
+codex exec --ephemeral --skip-git-repo-check -s read-only -C "$HOME" --output-last-message "$tmp" - < "$prompt" >/dev/null
+cat "$tmp"
+rm -f "$tmp" "$prompt"
+`.trim();
+
+  return host.exec(['/bin/bash', '-lc', script], { lane: 'bg' });
+}
+
+const titleJobs = new Set();
+
+async function initializeSessionTitle(host, hostId, sessionName) {
+  await renameTmuxWindow(host, sessionName, 'New Chat');
+  const state = loadTitleState();
+  state[titleKey(hostId || host.id || 'local', sessionName)] = {
+    title: 'New Chat',
+    source: 'placeholder',
+    locked: false,
+    llmAttempts: 0,
+    lastTitleAt: Date.now(),
+  };
+  saveTitleState(state);
 }
 
 async function ensureCodexUpdatedForHost(host, hostId, command) {
@@ -837,12 +1017,12 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('pty:new-session', async (_, agent, location = 'local') => {
-    const sessionName = `${agent}-${process.pid}-${Date.now()}`;
     const targetHost = HOSTS[location] || hostLocal;
     if (!targetHost) {
       console.warn(`[new-session] unknown host: ${location}`);
       return null;
     }
+    const sessionName = await makeSessionName(agent, targetHost);
     const isRemoteHost = targetHost.id !== 'local';
     const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
     // Optional per-location override. Useful for WSL-as-root where
@@ -908,6 +1088,7 @@ app.whenReady().then(async () => {
           console.warn(`[new-session] agent-tmux failed (${e.message}); falling back to shell-first`);
           await shellFirstCreate(hostRemote, workDir, command, { autoAcceptStartup: agent !== 'codex' });
         }
+        await initializeSessionTitle(targetHost, targetHost.id, sessionName);
         return { sessionName, hostId: targetHost.id };
       } else if (targetHost.id === 'local' && !IS_CLIENT && IS_DARWIN) {
         // Host mode on the mac-mini — call agent-tmux CLI locally.
@@ -930,6 +1111,7 @@ app.whenReady().then(async () => {
           console.warn(`[new-session] agent-tmux local failed (${e.message}); falling back to shell-first`);
           await shellFirstCreate(hostLocal, workDir, command, { autoAcceptStartup: agent !== 'codex' });
         }
+        await initializeSessionTitle(targetHost, targetHost.id, sessionName);
         return { sessionName, hostId: targetHost.id };
       } else {
         // General shell-first path for local clients and SSH peers.
@@ -941,6 +1123,7 @@ app.whenReady().then(async () => {
           try { fs.mkdirSync(workDir, { recursive: true }); } catch {}
         }
         await shellFirstCreate(targetHost, workDir, locationCommand, { autoAcceptStartup: agent !== 'codex' });
+        await initializeSessionTitle(targetHost, targetHost.id, sessionName);
         return { sessionName, hostId: targetHost.id };
       }
     } catch (e) {
@@ -1090,6 +1273,96 @@ app.whenReady().then(async () => {
       }
     }
     return panes;
+  });
+
+  ipcMain.handle('tmux:set-window-title', async (_, hostId, sessionName, title, source = 'manual') => {
+    const host = HOSTS[hostId] || hostLocal;
+    const clean = cleanTitleCandidate(title);
+    if (!host || !sessionName || !clean) return { ok: false };
+    const ok = await renameTmuxWindow(host, sessionName, clean);
+    if (ok) {
+      const state = loadTitleState();
+      const key = titleKey(hostId || host.id || 'local', sessionName);
+      state[key] = {
+        ...(state[key] || {}),
+        title: clean,
+        source,
+        locked: source === 'manual' || !!state[key]?.locked,
+        lastTitleAt: Date.now(),
+      };
+      saveTitleState(state);
+    }
+    return { ok, title: clean };
+  });
+
+  ipcMain.handle('tmux:maybe-title-session', async (_, payload = {}) => {
+    const hostId = payload.hostId || 'local';
+    const sessionName = payload.sessionName;
+    const transcript = String(payload.transcript || '');
+    const currentTitle = payload.currentTitle || '';
+    const host = HOSTS[hostId] || hostLocal;
+    if (!host || !sessionName || transcript.length < 80) return { ok: false, skipped: 'insufficient' };
+
+    const state = loadTitleState();
+    const key = titleKey(hostId, sessionName);
+    const existing = state[key] || {};
+    if (existing.locked || existing.source === 'manual') return { ok: false, skipped: 'manual' };
+    if (titleJobs.has(key)) return { ok: false, skipped: 'running' };
+
+    const stats = titleStats(transcript);
+    if (!stats.users.length) return { ok: false, skipped: 'no-user-message' };
+
+    const now = Date.now();
+    if (existing.lastCheckedAt && now - existing.lastCheckedAt < 60_000) {
+      return { ok: false, skipped: 'throttled' };
+    }
+    existing.lastCheckedAt = now;
+    state[key] = existing;
+    saveTitleState(state);
+
+    if (!existing.source && isGenericTitle(currentTitle, sessionName)) {
+      const heuristic = heuristicTitleFromTranscript(transcript);
+      if (heuristic) {
+        await renameTmuxWindow(host, sessionName, heuristic);
+        existing.title = heuristic;
+        existing.source = 'heuristic';
+        existing.lastTitleAt = Date.now();
+        state[key] = existing;
+        saveTitleState(state);
+      }
+    }
+
+    const firstLong = (stats.users[0] || '').length >= 80 && stats.assistantResponseExists;
+    const enoughTurns = stats.users.length >= 2 && stats.assistantResponseExists;
+    const refinement = existing.source === 'llm' && (stats.users.length >= 4 || stats.meaningfulChars >= 1500);
+    if (!firstLong && !enoughTurns && !refinement) {
+      return { ok: true, title: existing.title || '', source: existing.source || 'none' };
+    }
+    if ((existing.llmAttempts || 0) >= 2) return { ok: false, skipped: 'max-attempts' };
+
+    titleJobs.add(key);
+    try {
+      const raw = await generateTitleWithCodex(host, transcript);
+      const clean = cleanTitleCandidate(raw);
+      if (!clean) return { ok: false, skipped: 'invalid-title', raw: String(raw || '').slice(0, 200) };
+      await renameTmuxWindow(host, sessionName, clean);
+      const latest = loadTitleState();
+      latest[key] = {
+        ...(latest[key] || {}),
+        title: clean,
+        source: 'llm',
+        locked: false,
+        llmAttempts: (existing.llmAttempts || 0) + 1,
+        lastTitleAt: Date.now(),
+      };
+      saveTitleState(latest);
+      return { ok: true, title: clean, source: 'llm' };
+    } catch (e) {
+      console.warn(`[title] Codex title failed for ${hostId}:${sessionName}: ${e.message || e}`);
+      return { ok: false, error: e.message || String(e) };
+    } finally {
+      titleJobs.delete(key);
+    }
   });
 
   // Kill a tmux session on a specific host. Used by the trash flow so that

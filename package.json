@@ -5,6 +5,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "start:win:hidden": "wscript.exe scripts\\start-windows-hidden.vbs",
+    "restart:win:hidden": "wscript.exe scripts\\restart-windows-hidden.vbs",
     "postinstall": "node scripts/postinstall.js",
     "build": "electron-builder",
     "build:mac": "node scripts/build-mac.js",
