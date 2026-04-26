@@ -18,8 +18,8 @@ function _kindColor(kind) {
 }
 
 function _hostColor(host) {
-  if (host === 'bart') return '#a78bfa';
-  if (host === 'merlin') return '#d4a72c';
+  if (host === 'bart') return '#166534';
+  if (host === 'merlin') return '#1d4ed8';
   if (host === 'amaterasu') return '#f47067';
   return '#2dd4bf';
 }

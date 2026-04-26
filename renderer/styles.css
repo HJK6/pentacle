@@ -209,6 +209,8 @@ body {
 .source-filter-btn.color-green.active  { color: var(--green);  border-color: var(--green);  background: rgba(86,211,100,0.12); }
 .source-filter-btn.color-blue.active   { color: var(--blue);   border-color: var(--blue);   background: rgba(63,185,80,0.12); }
 .source-filter-btn.color-orange.active { color: #f0883e;       border-color: #f0883e;       background: rgba(240,136,62,0.12); }
+.source-filter-btn.color-royal-blue.active { color: #1d4ed8; border-color: #1d4ed8; background: rgba(29,78,216,0.14); }
+.source-filter-btn.color-forest-green.active { color: #166534; border-color: #166534; background: rgba(22,101,52,0.14); }
 
 .session-list {
   flex: 1;
@@ -1517,6 +1519,8 @@ body {
 .s-source-tag.color-green,  .cell-source-tag.color-green  { color: var(--green);  background: rgba(86,211,100,0.12); }
 .s-source-tag.color-blue,   .cell-source-tag.color-blue   { color: var(--blue);   background: rgba(63,185,80,0.12); }
 .s-source-tag.color-orange, .cell-source-tag.color-orange { color: #f0883e;       background: rgba(240,136,62,0.12); }
+.s-source-tag.color-royal-blue, .cell-source-tag.color-royal-blue { color: #1d4ed8; background: rgba(29,78,216,0.14); }
+.s-source-tag.color-forest-green, .cell-source-tag.color-forest-green { color: #166534; background: rgba(22,101,52,0.14); }
 
 /* ── Session Summary in Sidebar ───────────────── */
 
