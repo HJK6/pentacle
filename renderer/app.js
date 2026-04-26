@@ -1932,7 +1932,8 @@ function switchView(view) {
     document.getElementById('panel-bots').style.display = 'none';
     renderDashboardList();
     if (!state.selectedDashboard && window.DASHBOARDS.length > 0) {
-      selectDashboard(window.DASHBOARDS[0].id);
+      const preferred = window.DASHBOARDS.find(d => d.id === 'foreclosure-pipeline');
+      selectDashboard((preferred || window.DASHBOARDS[0]).id);
     } else if (state.selectedDashboard) {
       mountAndPoll(state.selectedDashboard);
     }

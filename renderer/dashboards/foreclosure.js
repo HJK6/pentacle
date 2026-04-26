@@ -796,14 +796,15 @@ function _isIdle(data) {
 }
 
 // ── Self-register ──
-// Show when we have direct access to the cache (Bart host) OR when we're a
-// client pointing at Bart (reads the SSD cache over ssh via main.js IPC).
-// Any other standalone host (no remote config, not Bart) has nothing to read.
+// Show when we have a Dashboard Hub configured. Older configs also surface it
+// on Bart host mode or remote-client mode for compatibility.
 const MAC_MINI_HOST_PREFIX = 'Bartimaeuss-Mac-mini';
 const _host = (window.HOST && window.HOST.hostname) || '';
 const _isClient = !!(window.HOST && window.HOST.isClient);
 const _hasRemote = !!(window.HOST && window.HOST.hasRemote);
-const _showForeclosure = (!_isClient && _host.startsWith(MAC_MINI_HOST_PREFIX))
+const _hasDashboardHub = !!(window.HOST && window.HOST.hasDashboardHub);
+const _showForeclosure = _hasDashboardHub
+  || (!_isClient && _host.startsWith(MAC_MINI_HOST_PREFIX))
   || (_isClient && _hasRemote);
 if (_showForeclosure) {
   window.DASHBOARDS.push({

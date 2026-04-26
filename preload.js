@@ -10,10 +10,12 @@ const path = require('path');
 // `isClient` matches the logic in main.js: CONFIG.remote present → CLIENT.
 let _isClient = false;
 let _hasRemote = false;
+let _hasDashboardHub = false;
 try {
   const _cfg = require(path.join(__dirname, 'pentacle.config.js'));
   _isClient = !!_cfg.remote;
   _hasRemote = !!_cfg.remote;
+  _hasDashboardHub = !!(_cfg.dashboardHub && _cfg.dashboardHub.url);
 } catch { /* keep default false */ }
 
 window.HOST = {
@@ -21,6 +23,7 @@ window.HOST = {
   platform: process.platform,
   isClient: _isClient,
   hasRemote: _hasRemote,
+  hasDashboardHub: _hasDashboardHub,
 };
 
 window.cc = {
