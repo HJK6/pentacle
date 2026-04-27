@@ -624,8 +624,7 @@ function updateSlotProviderTag(slot) {
   const provider = providerForSession(session.name);
   const tag = document.createElement('span');
   tag.className = 'cell-provider-tag';
-  tag.style.cssText = 'font-size:10px;line-height:1;padding:4px 6px;border-radius:999px;border:1px solid #284137;background:#101815;color:#8ee4bf;text-transform:uppercase;letter-spacing:0.5px;';
-  tag.textContent = provider;
+  tag.textContent = providerLabelForHero(provider);
   const sourceTag = header.querySelector('.cell-source-tag');
   const label = header.querySelector('.cell-label');
   if (sourceTag) sourceTag.after(tag);
@@ -845,7 +844,7 @@ function updateActivityStrips() {
           if (source) {
             const tag = document.createElement('span');
             tag.className = `cell-source-tag color-${getSourceColorForSession(sessionName, hostId)}`;
-            tag.textContent = getSourceInitial(source);
+            tag.textContent = source;
             tag.title = source;
             const label = header.querySelector('.cell-label');
             if (label) label.after(tag);
@@ -1339,7 +1338,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
     if (source) {
       const tag = document.createElement('span');
       tag.className = `cell-source-tag color-${getSourceColorForSession(sessionName, hostId)}`;
-      tag.textContent = getSourceInitial(source);
+      tag.textContent = source;
       tag.title = source;
       label.after(tag);
     }
@@ -1807,7 +1806,11 @@ let newSessionLocation = 'local';
 
 function getNewSessionHostOptions() {
   const hostIds = Array.isArray(HOST_IDS) && HOST_IDS.length ? HOST_IDS : ['local'];
-  return hostIds.map((id) => ({ id, label: getSourceForSession('', id) || id }));
+  return hostIds.map((id) => ({
+    id,
+    label: getSourceForSession('', id) || id,
+    color: getSourceColorForSession('', id),
+  }));
 }
 
 function renderNewSessionLocationOptions() {
@@ -1815,10 +1818,8 @@ function renderNewSessionLocationOptions() {
   if (!toggle) return;
 
   const options = getNewSessionHostOptions();
-  if (options.length <= 1) {
-    toggle.style.display = 'none';
-    toggle.innerHTML = '';
-    newSessionLocation = options[0]?.id || 'local';
+  if (options.length === 0) {
+    toggle.innerHTML = '<div class="new-session-empty">No machines configured.</div>';
     return;
   }
 
@@ -1826,15 +1827,18 @@ function renderNewSessionLocationOptions() {
     newSessionLocation = options[0].id;
   }
 
-  toggle.style.display = 'flex';
   toggle.innerHTML = options.map((opt) => (
-    `<button class="sb-btn${opt.id === newSessionLocation ? ' active' : ''}" data-loc="${esc(opt.id)}" style="flex:1">${esc(opt.label)}</button>`
+    `<button class="new-session-machine color-${esc(opt.color)}" data-loc="${esc(opt.id)}" title="Start Codex on ${esc(opt.label)}">
+      <span class="new-session-machine-mark">${esc(getSourceInitial(opt.label))}</span>
+      <span class="new-session-machine-label">${esc(opt.label)}</span>
+      <span class="new-session-machine-agent">Codex</span>
+    </button>`
   )).join('');
 
   toggle.querySelectorAll('[data-loc]').forEach((btn) => {
     btn.addEventListener('click', () => {
       newSessionLocation = btn.dataset.loc;
-      renderNewSessionLocationOptions();
+      newSession('codex', newSessionLocation);
     });
   });
 }
@@ -1870,8 +1874,8 @@ function sendProgrammaticInput(slot, text) {
   setTimeout(() => window.cc.writePty(slot, '\r'), 100);
 }
 
-async function newSession(agent) {
-  const location = newSessionLocation || 'local';
+async function newSession(agent = 'codex', locationOverride = null) {
+  const location = locationOverride || newSessionLocation || 'local';
   hideNewSessionModal();
 
   // Find first empty slot, or default to slot 3 (swap out)
@@ -1890,7 +1894,7 @@ async function newSession(agent) {
   // Attach it to the slot
   await attachSession(slot, sessionName, sessionName, hostId);
 
-  const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
+  const agentConfig = CONFIG.agents[agent] || CONFIG.agents.codex || {};
   if (agentConfig.startupMessage) {
     const startupDelayMs = Number(agentConfig.startupDelayMs) || 1500;
     setTimeout(() => {
@@ -2179,8 +2183,6 @@ document.querySelectorAll('.view-btn').forEach(btn => {
 // ── Toolbar Buttons ────────────────────────────────────────────
 
 document.getElementById('btn-new').addEventListener('click', showNewSessionModal);
-document.getElementById('new-session-claude').addEventListener('click', () => newSession('claude'));
-document.getElementById('new-session-codex').addEventListener('click', () => newSession('codex'));
 document.getElementById('new-session-cancel').addEventListener('click', hideNewSessionModal);
 document.getElementById('new-session-overlay').addEventListener('click', (e) => {
   if (e.target.id === 'new-session-overlay') hideNewSessionModal();
@@ -2328,10 +2330,8 @@ for (let i = 0; i < 4; i++) {
 // ── Usage Footer ──────────────────────────────────────────────
 
 async function fetchUsage() {
-  const data = await api('GET', '/api/usage');
-  if (data && data.status !== 'no_data' && data.status !== 'error') {
-    renderUsage(data);
-  }
+  const footer = document.getElementById('usage-footer');
+  if (footer) footer.style.display = 'none';
 }
 
 function usageBarClass(pct) {
@@ -2366,42 +2366,58 @@ function renderUsage(u) {
   `;
 }
 
-// ── Codex Usage Footer ───────────────────────────────────────
+// ── Machine Stats Footer ─────────────────────────────────────
 
-async function fetchCodexUsage() {
+async function fetchMachineStats() {
   const footer = document.getElementById('codex-usage-footer');
-  const data = await api('GET', '/api/codex-usage');
-  if (data && data.status !== 'no_data' && data.status !== 'error') {
+  if (!footer || !window.cc.getMachineStats) return;
+  const data = await window.cc.getMachineStats();
+  if (data && Array.isArray(data.machines)) {
     footer.style.display = '';
-    renderCodexUsage(data);
+    renderMachineStats(data.machines);
   } else {
     footer.style.display = 'none';
   }
 }
 
-function renderCodexUsage(u) {
+function fmtStatPct(value) {
+  return Number.isFinite(Number(value)) ? `${Math.round(Number(value))}%` : '--';
+}
+
+function fmtStatGb(value) {
+  return Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)} GB` : '--';
+}
+
+function compactUptime(text) {
+  const value = String(text || '').trim();
+  const match = value.match(/\bup\s+(.+?),\s+\d+\s+users?/i) || value.match(/\bup\s+(.+?),\s+load/i);
+  return match ? match[1].trim() : (value || '--');
+}
+
+function renderMachineStats(machines) {
   const footer = document.getElementById('codex-usage-footer');
-  const sessionPct = u.session_pct != null ? u.session_pct : 0;
-  const weekPct = u.weekly_pct != null ? u.weekly_pct : 0;
-
   footer.innerHTML = `
-    <div class="usage-label">
-      <span>Codex 5h</span>
-      <span>${sessionPct}%</span>
-    </div>
-    <div class="usage-bar">
-      <div class="usage-bar-fill ${usageBarClass(sessionPct)}" style="width:${sessionPct}%"></div>
-    </div>
-    <div class="usage-resets">Resets ${esc(u.session_resets || '')}</div>
-
-    <div class="usage-label" style="margin-top:8px">
-      <span>Codex Weekly</span>
-      <span>${weekPct}%</span>
-    </div>
-    <div class="usage-bar">
-      <div class="usage-bar-fill ${usageBarClass(weekPct)}" style="width:${weekPct}%"></div>
-    </div>
-    <div class="usage-resets">Resets ${esc(u.weekly_resets || '')}</div>
+    <div class="machine-stats-title">Machine Stats</div>
+    ${machines.map((m) => {
+      const color = getSourceColorForSession('', m.id);
+      const memPct = Number(m.memPct);
+      const diskPct = Number(m.diskPct);
+      return `<div class="machine-stat-card color-${esc(color)}">
+        <div class="machine-stat-head">
+          <span class="machine-stat-mark">${esc(getSourceInitial(m.label || m.id))}</span>
+          <span class="machine-stat-name">${esc(m.label || m.id)}</span>
+          <span class="machine-stat-state ${m.ok ? 'ok' : 'error'}">${m.ok ? 'Live' : 'Offline'}</span>
+        </div>
+        ${m.ok ? `
+          <div class="machine-stat-row"><span>RAM</span><b>${fmtStatPct(memPct)}</b></div>
+          <div class="usage-bar"><div class="usage-bar-fill ${usageBarClass(memPct || 0)}" style="width:${Number.isFinite(memPct) ? memPct : 0}%"></div></div>
+          <div class="machine-stat-row"><span>Disk Free</span><b>${fmtStatGb(m.diskFreeGb)}</b></div>
+          <div class="machine-stat-row"><span>Load</span><b>${esc(String(m.load || '--').split(',').slice(0, 3).join(', '))}</b></div>
+          <div class="machine-stat-row"><span>Up</span><b>${esc(compactUptime(m.uptime))}</b></div>
+          ${Number.isFinite(diskPct) ? `<div class="machine-stat-note">Disk used ${Math.round(diskPct)}%</div>` : ''}
+        ` : `<div class="machine-stat-note">${esc(m.error || 'No status available')}</div>`}
+      </div>`;
+    }).join('')}
   `;
 }
 
@@ -2845,8 +2861,8 @@ CFG_READY.then((cfg) => {
   if (CONFIG.features.usage) {
     fetchUsage();
     setInterval(fetchUsage, 30000);
-    fetchCodexUsage();
-    setInterval(fetchCodexUsage, 30000);
+    fetchMachineStats();
+    setInterval(fetchMachineStats, 30000);
   }
   // Mic panel — enabled on any platform when features.mic is true.
   // The mic server is cross-platform (MicServer.app on macOS, Python direct on Windows/Linux).

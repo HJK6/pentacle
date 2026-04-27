@@ -35,11 +35,6 @@ module.exports = {
   },
 
   agents: {
-    claude: {
-      label: 'Claude',
-      command: 'claude --dangerously-skip-permissions',
-      binary: '~/.local/bin/claude',
-    },
     codex: {
       label: 'Codex',
       command: '/opt/homebrew/bin/codex --dangerously-bypass-approvals-and-sandbox',
@@ -134,6 +129,17 @@ module.exports = {
     local: 'royal-blue',
     remote: 'forest-green',
     amaterasu: 'red',
+  },
+
+  machineStats: {
+    hostIds: ['local', 'remote', 'amaterasu'],
+    // Per-host overrides can provide `{ shell, command, format }`.
+    // `format: "kv"` expects key=value lines; `format: "json"` expects JSON.
+    hosts: {
+      local: {},
+      remote: {},
+      amaterasu: {},
+    },
   },
 
   micServerUrl: 'http://127.0.0.1:7780',

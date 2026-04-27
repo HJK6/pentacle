@@ -4,6 +4,7 @@
 const { ipcRenderer } = require('electron');
 const os = require('os');
 const path = require('path');
+const { loadConfig } = require('./config-loader');
 
 // Synchronous host metadata — available at script-eval time so dashboards
 // can self-register without waiting on an async getConfig() round-trip.
@@ -12,7 +13,7 @@ let _isClient = false;
 let _hasRemote = false;
 let _hasDashboardHub = false;
 try {
-  const _cfg = require(path.join(__dirname, 'pentacle.config.js'));
+  const _cfg = loadConfig(__dirname).config;
   _isClient = !!_cfg.remote;
   _hasRemote = !!_cfg.remote;
   _hasDashboardHub = !!(_cfg.dashboardHub && _cfg.dashboardHub.url);
@@ -88,6 +89,7 @@ window.cc = {
   list0dteTraders: () => ipcRenderer.invoke('dashboard:0dte-list-traders'),
   getAmaterasuOcrStats: () => ipcRenderer.invoke('dashboard:amaterasu-ocr-stats'),
   getChatStreamState: () => ipcRenderer.invoke('chat-stream:get-state'),
+  getMachineStats: () => ipcRenderer.invoke('machine-stats:get'),
   listUiReviewArtifacts: () => ipcRenderer.invoke('ui-review:list-artifacts'),
 
   // Context menu

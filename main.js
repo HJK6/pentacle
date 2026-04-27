@@ -7,6 +7,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { S3Client, ListObjectsV2Command, GetObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const { SQSClient, GetQueueAttributesCommand } = require('@aws-sdk/client-sqs');
+const { loadConfig } = require('./config-loader');
 
 // ── File logging ────────────────────────────────────────────────────────────
 // Mirror console.{log,info,warn,error} and uncaught exceptions to a log file
@@ -51,21 +52,10 @@ const { SQSClient, GetQueueAttributesCommand } = require('@aws-sdk/client-sqs');
   } catch { /* logging is best-effort */ }
 }
 
-// ── Config bootstrap ────────────────────────────────────────────────────────
-// Auto-copy example → config on first run (dev mode only).
-// Never overwrites an existing config.
-{
-  const cfgPath = path.join(__dirname, 'pentacle.config.js');
-  const examplePath = path.join(__dirname, 'pentacle.config.example.js');
-  if (!fs.existsSync(cfgPath) && fs.existsSync(examplePath)) {
-    try { fs.copyFileSync(examplePath, cfgPath); } catch (_e) { /* fall through to error window */ }
-  }
-}
-
 let CONFIG;
 let _configLoadError = null;
 try {
-  CONFIG = require('./pentacle.config.js');
+  CONFIG = loadConfig(__dirname).config;
 } catch (e) {
   _configLoadError = e;
 }
@@ -79,8 +69,8 @@ if (_configLoadError) {
     w.loadURL(
       'data:text/html,' + encodeURIComponent(
         '<body style="font-family:sans-serif;padding:32px;background:#0c1310;color:#b5ccba">' +
-        '<h2>Could not load pentacle.config.js</h2>' +
-        '<p>Copy <code>pentacle.config.example.js</code> to <code>pentacle.config.js</code> and relaunch.</p>' +
+        '<h2>Could not load Pentacle config</h2>' +
+        '<p>Set <code>PENTACLE_CONFIG</code>, add <code>configs/&lt;machine&gt;.js</code>, or provide <code>pentacle.config.js</code>.</p>' +
         `<pre style="font-size:12px;color:#f47067">${msg}</pre></body>`
       )
     );
@@ -588,7 +578,7 @@ nohup ${JSON.stringify(pythonPath)} ${JSON.stringify(scriptPath)} --save >/dev/n
 }
 
 function refreshUsageData() {
-  void refreshUsageScript('check_usage.py');
+  // Claude limits are not shown in the Codex-only UI.
 }
 
 function refreshCodexUsageData() {
@@ -679,7 +669,6 @@ async function createMainWindow() {
     }, 1000);
 
     ensureMicServer();
-    refreshUsageData();
     refreshCodexUsageData();
     startBackgroundCodexUpdateChecks();
   });
@@ -746,6 +735,94 @@ function saveTitleState(state) {
 
 function getCodexCommandForLocation(agentConfig, location) {
   return (location === 'local' && agentConfig.commandLocal) || agentConfig.command || 'codex';
+}
+
+function defaultMachineStatsScript() {
+  return String.raw`
+set +e
+platform="$(uname -s 2>/dev/null || echo unknown)"
+host="$(hostname 2>/dev/null || echo unknown)"
+uptime_text="$(uptime 2>/dev/null | sed -E 's/^[[:space:]]+//')"
+load_text="$(printf '%s\n' "$uptime_text" | sed -E 's/.*load averages?: //; s/.*load average: //')"
+disk_line="$(df -Pk / 2>/dev/null | awk 'NR==2{gsub("%","",$5); printf "%s|%.1f", $5, $4/1048576}')"
+disk_pct="\${disk_line%%|*}"
+disk_free_gb="\${disk_line#*|}"
+mem_pct=""
+mem_used_gb=""
+mem_total_gb=""
+if [ "$platform" = "Darwin" ]; then
+  page_size="$(sysctl -n hw.pagesize 2>/dev/null || echo 4096)"
+  mem_total="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
+  vm="$(vm_stat 2>/dev/null)"
+  free_pages="$(printf '%s\n' "$vm" | awk '/Pages free/{gsub("\\.","",$3); print $3}')"
+  inactive_pages="$(printf '%s\n' "$vm" | awk '/Pages inactive/{gsub("\\.","",$3); print $3}')"
+  speculative_pages="$(printf '%s\n' "$vm" | awk '/Pages speculative/{gsub("\\.","",$3); print $3}')"
+  free_pages="\${free_pages:-0}"
+  inactive_pages="\${inactive_pages:-0}"
+  speculative_pages="\${speculative_pages:-0}"
+  mem_calc="$(awk -v total="$mem_total" -v ps="$page_size" -v free="$free_pages" -v inactive="$inactive_pages" -v spec="$speculative_pages" 'BEGIN{avail=(free+inactive+spec)*ps; used=total-avail; if (used<0) used=0; if (total>0) printf "%.0f|%.1f|%.1f", used*100/total, used/1073741824, total/1073741824}')"
+  mem_pct="\${mem_calc%%|*}"
+  rest="\${mem_calc#*|}"
+  mem_used_gb="\${rest%%|*}"
+  mem_total_gb="\${rest#*|}"
+elif [ -r /proc/meminfo ]; then
+  mem_calc="$(awk '/MemTotal/{total=$2} /MemAvailable/{avail=$2} END{used=total-avail; if(total>0) printf "%.0f|%.1f|%.1f", used*100/total, used/1048576, total/1048576}' /proc/meminfo)"
+  mem_pct="\${mem_calc%%|*}"
+  rest="\${mem_calc#*|}"
+  mem_used_gb="\${rest%%|*}"
+  mem_total_gb="\${rest#*|}"
+fi
+printf 'host=%s\nplatform=%s\nuptime=%s\nload=%s\ndisk_pct=%s\ndisk_free_gb=%s\nmem_pct=%s\nmem_used_gb=%s\nmem_total_gb=%s\n' "$host" "$platform" "$uptime_text" "$load_text" "$disk_pct" "$disk_free_gb" "$mem_pct" "$mem_used_gb" "$mem_total_gb"
+`;
+}
+
+function machineStatsConfigForHost(hostId) {
+  const cfg = CONFIG.machineStats || {};
+  return {
+    ...(cfg.defaults || {}),
+    ...((cfg.hosts && cfg.hosts[hostId]) || {}),
+  };
+}
+
+function parseMachineStats(raw, format = 'kv') {
+  if (format === 'json') return JSON.parse(raw);
+  const data = parseKeyValueLines(raw);
+  return {
+    host: data.host || '',
+    platform: data.platform || '',
+    uptime: data.uptime || '',
+    load: data.load || '',
+    diskPct: data.disk_pct === '' ? null : Number(data.disk_pct),
+    diskFreeGb: data.disk_free_gb === '' ? null : Number(data.disk_free_gb),
+    memPct: data.mem_pct === '' ? null : Number(data.mem_pct),
+    memUsedGb: data.mem_used_gb === '' ? null : Number(data.mem_used_gb),
+    memTotalGb: data.mem_total_gb === '' ? null : Number(data.mem_total_gb),
+  };
+}
+
+async function collectMachineStats(hostId, host) {
+  const cfg = machineStatsConfigForHost(hostId);
+  const command = cfg.command || defaultMachineStatsScript();
+  const shell = cfg.shell || '/bin/bash';
+  const label = (CONFIG.hostNames && CONFIG.hostNames[hostId]) || hostId;
+  try {
+    const raw = await host.exec([shell, '-lc', command]);
+    return {
+      id: hostId,
+      label,
+      ok: true,
+      updatedAt: new Date().toISOString(),
+      ...parseMachineStats(raw, cfg.format || 'kv'),
+    };
+  } catch (e) {
+    return {
+      id: hostId,
+      label,
+      ok: false,
+      updatedAt: new Date().toISOString(),
+      error: e.message || String(e),
+    };
+  }
 }
 
 function homeDirForTargetHost(location, targetHost) {
@@ -1146,7 +1223,7 @@ app.whenReady().then(async () => {
     }
     const sessionName = await makeSessionName(agent, targetHost);
     const isRemoteHost = targetHost.id !== 'local';
-    const agentConfig = CONFIG.agents[agent] || CONFIG.agents.claude;
+    const agentConfig = CONFIG.agents[agent] || CONFIG.agents.codex || { command: 'codex' };
     // Optional per-location override. Useful for WSL-as-root where
     // `claude --dangerously-skip-permissions` is refused — user can set
     // `agents.claude.commandLocal = 'claude'` to sidestep the flag.
@@ -1648,6 +1725,14 @@ app.whenReady().then(async () => {
     return _hubEnvelope('amaterasu.ocr');
   });
   ipcMain.handle('chat-stream:get-state', () => chatStreamClient.snapshot());
+
+  ipcMain.handle('machine-stats:get', async () => {
+    const cfg = CONFIG.machineStats || {};
+    const configuredIds = Array.isArray(cfg.hostIds) ? cfg.hostIds : Object.keys(HOSTS);
+    const hostIds = configuredIds.filter((id) => HOSTS[id]);
+    const machines = await Promise.all(hostIds.map((id) => collectMachineStats(id, HOSTS[id])));
+    return { machines };
+  });
   ipcMain.handle('ui-review:list-artifacts', () => _uiReviewArtifacts());
 
   // Image paste

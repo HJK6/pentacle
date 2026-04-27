@@ -182,19 +182,12 @@
     </div>
   </div>
 
-  <!-- New Session modal — agent selector -->
+  <!-- New Session modal — machine selector -->
   <div class="modal-overlay" id="new-session-overlay" style="display:none">
     <div class="modal">
       <h3>New Session</h3>
-      <!-- Location toggle — shown only in client mode (main.js: IS_CLIENT=true) -->
-      <div id="new-session-location" style="display:none;gap:8px;margin-top:8px">
-        <button class="sb-btn" data-loc="local" style="flex:1">Local</button>
-        <button class="sb-btn" data-loc="remote" style="flex:1">Remote</button>
-      </div>
-      <div style="display:flex;gap:12px;margin-top:8px">
-        <button class="sb-btn sb-btn-green" id="new-session-claude" style="flex:1;padding:12px;font-size:14px">Claude</button>
-        <button class="sb-btn sb-btn-blue" id="new-session-codex" style="flex:1;padding:12px;font-size:14px">Codex</button>
-      </div>
+      <div class="modal-subtitle">Start Codex on a machine.</div>
+      <div id="new-session-location" class="new-session-machines"></div>
       <div class="modal-actions" style="margin-top:12px">
         <button class="sb-btn" id="new-session-cancel">Cancel</button>
       </div>

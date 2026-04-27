@@ -200,6 +200,25 @@ module.exports = {
   //   remote: 'purple',
   // },
 
+  // Machine stats in the sidebar. By default Pentacle runs a lightweight
+  // built-in macOS/Linux shell probe on each configured host. Override a host
+  // when a machine needs a custom collector.
+  // machineStats: {
+  //   hostIds: ['local', 'remote', 'amaterasu'],
+  //   defaults: {
+  //     shell: '/bin/bash',
+  //     format: 'kv', // `kv` key=value lines, or `json`
+  //   },
+  //   hosts: {
+  //     local: {},
+  //     remote: {},
+  //     amaterasu: {
+  //       // command: 'python3 ~/agent-workspace/pentacle_stats.py',
+  //       // format: 'json',
+  //     },
+  //   },
+  // },
+
   // Mic server URL (only used if features.mic is true)
   micServerUrl: 'http://127.0.0.1:7780',
 

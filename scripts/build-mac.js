@@ -13,10 +13,9 @@ if (process.platform !== 'darwin') {
 }
 
 const root = path.join(__dirname, '..');
-const cfgPath = path.join(root, 'pentacle.config.js');
 let appName = 'Pentacle';
 try {
-  appName = require(cfgPath).appName || 'Pentacle';
+  appName = require(path.join(root, 'config-loader')).loadConfig(root).config.appName || 'Pentacle';
 } catch {}
 
 console.log(`Building ${appName}...`);
