@@ -115,6 +115,13 @@ function providerForSession(sessionName) {
   return 'claude';
 }
 
+function providerLabelForHero(provider) {
+  const normalized = String(provider || '').trim().toLowerCase();
+  if (normalized === 'codex') return 'Codex';
+  if (normalized === 'claude') return 'Claude';
+  return provider ? String(provider).trim() : 'Agent';
+}
+
 function streamHostForHostId(hostId) {
   const names = CONFIG.hostNames || {};
   const label = String(names[hostId] || hostId || '').toLowerCase();
@@ -501,7 +508,10 @@ function renderSlotChat(slot) {
     ? `
       <div class="slot-chat-session-hero" style="--machine:${esc(chrome.accent)};--machine-surface:${esc(chrome.surface)};--machine-border:${esc(chrome.border)};">
         <div class="slot-chat-session-band"></div>
-        <div class="slot-chat-session-kicker">${esc(chrome.title)} · ${esc(detail.providerLabel || providerForSession(session.name).toUpperCase())}</div>
+        <div class="slot-chat-session-kicker">
+          <span class="slot-chat-session-machine">${esc(chrome.title)}</span>
+          <span class="slot-chat-session-provider">${esc(providerLabelForHero(detail.providerLabel || providerForSession(session.name)))}</span>
+        </div>
         <div class="slot-chat-session-title">${esc(detail.title || session.displayName || session.name)}</div>
       </div>
       ${chatUi.renderTranscriptTimeline(detail, chrome) || `<div class="slot-chat-empty">${state.chatStream.connected ? 'No recent chat activity.' : 'Chat stream offline.'}</div>`}`
