@@ -148,6 +148,60 @@ const MAX_SLOTS = 4;
 const IS_DARWIN = process.platform === 'darwin';
 const IS_WIN = process.platform === 'win32';
 
+function psSingleQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function windowsIsElevated() {
+  if (!IS_WIN) return false;
+  try {
+    const script = [
+      '$identity = [Security.Principal.WindowsIdentity]::GetCurrent()',
+      '$principal = [Security.Principal.WindowsPrincipal]::new($identity)',
+      '$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)',
+    ].join('; ');
+    const out = execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { encoding: 'utf8', timeout: 3000, windowsHide: true }
+    );
+    return String(out).trim().toLowerCase() === 'true';
+  } catch (e) {
+    console.warn('[admin] could not determine Windows elevation:', e.message || e);
+    return false;
+  }
+}
+
+function relaunchWindowsElevated() {
+  const exe = process.execPath;
+  const cwd = __dirname;
+  const script = [
+    `Start-Process -FilePath ${psSingleQuote(exe)}`,
+    `-ArgumentList ${psSingleQuote('.')}`,
+    `-WorkingDirectory ${psSingleQuote(cwd)}`,
+    '-Verb RunAs',
+  ].join(' ');
+  execFileSync(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+    { stdio: 'ignore', timeout: 8000, windowsHide: true }
+  );
+}
+
+if (IS_WIN && CONFIG.windows?.requireAdmin !== false && !process.env.PENTACLE_NO_ADMIN_RELAUNCH) {
+  if (!windowsIsElevated()) {
+    try {
+      console.log('[admin] relaunching Pentacle elevated');
+      relaunchWindowsElevated();
+      app.exit(0);
+    } catch (e) {
+      console.warn('[admin] elevated relaunch failed:', e.message || e);
+    }
+  } else {
+    console.log('[admin] Pentacle is running elevated');
+  }
+}
+
 // Force UTF-8 locale in the Electron process itself BEFORE any tmux interaction.
 // When Pentacle starts a tmux server (host mode), the server inherits this locale,
 // so wcwidth() for U+276F (❯), U+23F5 (⏵), and other glyphs is computed correctly.
@@ -430,23 +484,44 @@ async function ensureMicServer() {
 
 async function ensureChatStreamServer() {
   const cfg = CONFIG.chatStream || {};
-  if (cfg.autoStart === false) return;
-  const pythonBin = resolvePython();
-  if (!pythonBin) {
-    console.error('[chat-stream] python not found — cannot start websocket daemon');
-    return;
-  }
-  const script = cfg.script || path.join(os.homedir(), 'agent-workspace', 'multi-machine-chat', 'chat_streamd.py');
-  if (!fs.existsSync(script)) {
-    console.warn(`[chat-stream] daemon script not found: ${script}`);
-    return;
-  }
+  if (cfg.autoStart === false) return Boolean(cfg.url);
   const port = String(cfg.port || 7791);
   const hosts = Array.isArray(cfg.hosts) && cfg.hosts.length ? cfg.hosts : ['bart', 'merlin', 'amaterasu'];
-  const args = ['-u', script, '--port', port];
+
+  let command;
+  let args;
+  let spawnOpts = { detached: true, stdio: 'ignore' };
+  if (IS_WIN && CONFIG.localWsl) {
+    const distro = CONFIG.localWsl.distro || 'Ubuntu';
+    const user = CONFIG.localWsl.user || 'vamsh';
+    const script = cfg.script || `/home/${user}/agent-workspace/multi-machine-chat/chat_streamd.py`;
+    try {
+      execFileSync('wsl', ['-d', distro, '--', 'test', '-f', script], { stdio: 'ignore', timeout: 3000 });
+    } catch {
+      console.warn(`[chat-stream] daemon script not found in WSL ${distro}: ${script}`);
+      return false;
+    }
+    command = 'wsl';
+    args = ['-d', distro, '--', 'python3', '-u', script, '--port', port];
+    spawnOpts.windowsHide = true;
+  } else {
+    const pythonBin = resolvePython();
+    if (!pythonBin) {
+      console.error('[chat-stream] python not found — cannot start websocket daemon');
+      return false;
+    }
+    const script = cfg.script || path.join(os.homedir(), 'agent-workspace', 'multi-machine-chat', 'chat_streamd.py');
+    if (!fs.existsSync(script)) {
+      console.warn(`[chat-stream] daemon script not found: ${script}`);
+      return false;
+    }
+    command = pythonBin;
+    args = ['-u', script, '--port', port];
+  }
   for (const host of hosts) args.push('--host', String(host));
-  const proc = spawn(pythonBin, args, { detached: true, stdio: 'ignore' });
+  const proc = spawn(command, args, spawnOpts);
   proc.unref();
+  return true;
 }
 
 function _spawnMicServerPython() {
@@ -875,7 +950,7 @@ async function ensureCodexUpdatedForHost(host, hostId, command) {
   const shell = process.platform === 'win32' ? 'bash' : 'zsh';
   const script = `
 set -u
-export PATH="/opt/homebrew/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 command_name=${JSON.stringify(commandName)}
 current_raw="$($command_name -V 2>/dev/null || true)"
 current="$(printf '%s' "$current_raw" | awk '{print $NF}' | tr -d '\\r')"
@@ -1019,17 +1094,20 @@ app.whenReady().then(async () => {
   probeRemoteTmuxUtf8();  // fire-and-forget; just logs
   ensureWindowSizeLatest();  // stop multi-client size collapse
   await createMainWindow();
-  chatStreamClient.init(CONFIG, (payload) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("chat-stream:event", payload);
-    }
-  });
   ensureApiServer().catch((e) => {
     console.warn("[api] startup check failed: " + (e.message || e));
   });
-  ensureChatStreamServer().catch((e) => {
+  const chatStreamReady = await ensureChatStreamServer().catch((e) => {
     console.warn("[chat-stream] startup check failed: " + (e.message || e));
+    return false;
   });
+  if (chatStreamReady) {
+    chatStreamClient.init(CONFIG, (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("chat-stream:event", payload);
+      }
+    });
+  }
 
   // ── IPC: session management ─────────────────────────────────
   ipcMain.handle('pty:create', async (_, slot, sessionName, hostId, cols, rows) => {
@@ -1098,7 +1176,7 @@ app.whenReady().then(async () => {
         // Remote macOS shells launched via tmux can miss Homebrew and user-local
         // bins under non-interactive bash login shells. Normalize PATH first so
         // agent commands like `codex` and `claude` resolve consistently.
-        'export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"',
+        'export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"',
       ];
       if (isWsl) envPreludeParts.push('export BROWSER=wslview');
       const envPrelude = `${envPreludeParts.join('; ')}; `;

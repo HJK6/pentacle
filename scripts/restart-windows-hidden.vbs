@@ -1,7 +1,7 @@
 Option Explicit
 
-Dim shell, repo, ps
-Set shell = CreateObject("WScript.Shell")
+Dim shell, repo, ps, args
+Set shell = CreateObject("Shell.Application")
 
 repo = "C:\Users\vamsh\repos\pentacle"
 ps = "$repo = 'C:\Users\vamsh\repos\pentacle'; " & _
@@ -13,4 +13,5 @@ ps = "$repo = 'C:\Users\vamsh\repos\pentacle'; " & _
   "Start-Sleep -Milliseconds 500; " & _
   "Start-Process -FilePath (Join-Path $repo 'node_modules\electron\dist\electron.exe') -ArgumentList '.' -WorkingDirectory $repo"
 
-shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command " & Chr(34) & ps & Chr(34), 0, False
+args = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command " & Chr(34) & ps & Chr(34)
+shell.ShellExecute "powershell.exe", args, "", "runas", 0

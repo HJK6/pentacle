@@ -33,6 +33,20 @@ const CFG_READY = (async () => {
   } catch { return null; }
 })();
 
+const CANONICAL_SOURCE_NAMES = {
+  bart: 'Bartimaeus',
+  bartimaeus: 'Bartimaeus',
+  remote: 'Bartimaeus',
+  amaterasu: 'Amaterasu',
+  merlin: 'Merlin',
+};
+
+const CANONICAL_SOURCE_COLORS = {
+  bartimaeus: 'deep-raspberry',
+  amaterasu: 'red',
+  merlin: 'royal-blue',
+};
+
 // ── State ──────────────────────────────────────────────────────
 
 const state = {
@@ -669,11 +683,19 @@ function getSourceForSession(sessionName, hostId) {
   hostId = hostId || state.sessionHosts[sessionName];
   if (!hostId) return null;
   const names = CONFIG.hostNames || {};
-  return names[hostId] || hostId;
+  const configured = names[hostId];
+  if (configured) return configured;
+  return CANONICAL_SOURCE_NAMES[String(hostId).toLowerCase()] || hostId;
 }
 
 function getSourceColorForSession(sessionName, hostId) {
   hostId = hostId || state.sessionHosts[sessionName];
+  const sourceName = getSourceForSession(sessionName, hostId);
+  const canonicalColor = CANONICAL_SOURCE_COLORS[String(sourceName || '').toLowerCase()];
+  if (canonicalColor) return canonicalColor;
+  const aliasedName = CANONICAL_SOURCE_NAMES[String(hostId || '').toLowerCase()];
+  const aliasedColor = CANONICAL_SOURCE_COLORS[String(aliasedName || '').toLowerCase()];
+  if (aliasedColor) return aliasedColor;
   const colors = CONFIG.hostColors || {};
   return colors[hostId] || 'green';
 }
@@ -838,13 +860,10 @@ function renderSourceFilterBar() {
   if (hostIds.length < 2) { bar.style.display = 'none'; return; }
 
   bar.style.display = 'flex';
-  const names = CONFIG.hostNames || {};
-  const colors = CONFIG.hostColors || {};
-
   let html = `<button class="source-filter-btn${state.sourceFilter === null ? ' active' : ''}" data-host="all">All</button>`;
   for (const id of hostIds) {
-    const name = names[id] || id;
-    const color = colors[id] || 'green';
+    const name = getSourceForSession('', id) || id;
+    const color = getSourceColorForSession('', id);
     const isActive = state.sourceFilter === id;
     html += `<button class="source-filter-btn color-${color}${isActive ? ' active' : ''}" data-host="${esc(id)}">${esc(name)}</button>`;
   }
@@ -1771,9 +1790,8 @@ async function cleanupDead() {
 let newSessionLocation = 'local';
 
 function getNewSessionHostOptions() {
-  const names = CONFIG.hostNames || {};
   const hostIds = Array.isArray(HOST_IDS) && HOST_IDS.length ? HOST_IDS : ['local'];
-  return hostIds.map((id) => ({ id, label: names[id] || id }));
+  return hostIds.map((id) => ({ id, label: getSourceForSession('', id) || id }));
 }
 
 function renderNewSessionLocationOptions() {
