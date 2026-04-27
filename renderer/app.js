@@ -102,7 +102,20 @@ function providerForSession(sessionName) {
 }
 
 function streamHostForHostId(hostId) {
-  return hostId === 'local' ? 'bart' : (hostId || 'bart');
+  const names = CONFIG.hostNames || {};
+  const label = String(names[hostId] || hostId || '').toLowerCase();
+  if (label.includes('bart')) return 'bart';
+  if (label.includes('merlin') || label.includes('abra')) return 'merlin';
+  if (label.includes('amaterasu')) return 'amaterasu';
+  if (hostId === 'remote') return 'bart';
+  if (hostId === 'amaterasu') return 'amaterasu';
+  if (hostId === 'local') {
+    const hostname = String(window.HOST?.hostname || '').toLowerCase();
+    if (hostname.includes('merlin')) return 'merlin';
+    if (hostname.includes('amaterasu')) return 'amaterasu';
+    return 'bart';
+  }
+  return hostId || 'bart';
 }
 
 function applyChatStreamState(data) {
@@ -213,14 +226,18 @@ function paneWorkingLabel(sessionName) {
 
 function chatDraftForSession(session) {
   if (!session) return '';
-  const host = streamHostForHostId(session.hostId);
-  return state.chatStream.drafts?.[`${host}:${session.name}`]?.text || '';
+  return chatDraftStateForSession(session)?.text || '';
 }
 
 function chatDraftStateForSession(session) {
   if (!session) return null;
   const host = streamHostForHostId(session.hostId);
-  return state.chatStream.drafts?.[`${host}:${session.name}`] || null;
+  const streamSession = chatSessionStateForSession(session);
+  return (
+    state.chatStream.drafts?.[streamSession?.stream_id] ||
+    state.chatStream.drafts?.[`${host}:${session.name}`] ||
+    null
+  );
 }
 
 function chatSessionStateForSession(session) {
@@ -430,7 +447,14 @@ function renderSlotChat(slot) {
   const session = state.slots[slot];
   if (!refs || !session || state.botSlots[slot]) return;
 
-  const events = displayChatEvents(session);
+  const streamHost = streamHostForHostId(session.hostId);
+  const detail = chatUi.selectSessionDetailForDesktopSession(
+    state.chatStream,
+    session,
+    streamHost,
+    { visibleCount: 120, includeDraft: false },
+  );
+  const chrome = chatUi.hostChrome(detail?.host || streamHost);
   const remoteDraftState = chatDraftStateForSession(session);
   const remoteSessionState = chatSessionStateForSession(session);
   const remoteDraft = isCodexHelperPromptText(remoteDraftState?.text || '') ? '' : (remoteDraftState?.text || '');
@@ -450,26 +474,20 @@ function renderSlotChat(slot) {
 
   const shouldStick = !refs.scrollEl || (refs.scrollEl.scrollHeight - refs.scrollEl.scrollTop - refs.scrollEl.clientHeight) < 32;
 
-  const items = events.length
-    ? events.map((event, idx) => {
-        const isUser = event.kind === 'USER';
-        const isTool = event.kind === 'TOOL' || event.kind === 'TOOL-OUT';
-        const isSystem = event.kind === 'SYSTEM';
-        const isThink = event.kind === 'THINK';
-        const marker = isTool ? 'tool' : isSystem ? 'system' : isThink ? 'thinking' : '';
-        const timestamp = formatEventTime(event.timestamp);
-        const previousTimestamp = idx > 0 ? formatEventTime(events[idx - 1].timestamp) : '';
-        const showTimestamp = idx === 0 || timestamp !== previousTimestamp;
-        return `
-          ${showTimestamp ? `<div class="slot-chat-timestamp">${esc(timestamp)}</div>` : ''}
-          <article class="slot-chat-message ${isUser ? 'is-user' : ''} ${isTool ? 'is-tool' : ''} ${isSystem ? 'is-system' : ''} ${isThink ? 'is-think' : ''}">
-            ${marker ? `<div class="slot-chat-message-meta"><span class="slot-chat-message-role">${esc(marker)}</span></div>` : ''}
-            <div class="slot-chat-message-body">${renderEventContent(event, isUser)}</div>
-          </article>`;
-      }).join('')
-    : `<div class="slot-chat-empty">${state.chatStream.connected ? 'No recent chat activity.' : 'Chat stream offline.'}</div>`;
+  refs.chatMount.style.setProperty('--machine', chrome.accent);
+  refs.chatMount.style.setProperty('--machine-header', chrome.header);
+  refs.chatMount.style.setProperty('--machine-surface', chrome.surface);
+  refs.chatMount.style.setProperty('--machine-border', chrome.border);
 
-  refs.listEl.innerHTML = items;
+  refs.listEl.innerHTML = detail
+    ? `
+      <div class="slot-chat-session-hero" style="--machine:${esc(chrome.accent)};--machine-surface:${esc(chrome.surface)};--machine-border:${esc(chrome.border)};">
+        <div class="slot-chat-session-band"></div>
+        <div class="slot-chat-session-kicker">${esc(chrome.title)} · ${esc(detail.providerLabel || providerForSession(session.name).toUpperCase())}</div>
+        <div class="slot-chat-session-title">${esc(detail.title || session.displayName || session.name)}</div>
+      </div>
+      ${chatUi.renderTranscriptTimeline(detail, chrome) || `<div class="slot-chat-empty">${state.chatStream.connected ? 'No recent chat activity.' : 'Chat stream offline.'}</div>`}`
+    : `<div class="slot-chat-empty">${state.chatStream.connected ? 'Waiting for websocket session detail.' : 'Chat stream offline.'}</div>`;
 
   if (refs.statusEl) {
     refs.statusEl.className = `slot-chat-status is-${activity}`;

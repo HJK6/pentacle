@@ -88,6 +88,63 @@ for (const subject of fixtures.draft_preview_cases || []) {
   });
 }
 
+test('selectSessionDetailForDesktopSession renders mobile-style websocket transcript', () => {
+  const state = {
+    connected: true,
+    drafts: {},
+    sessions: [{
+      stream_id: 'merlin:codex-1',
+      host: 'merlin',
+      provider: 'codex',
+      session_name: 'codex-1',
+      title: 'Desktop chat rebuild',
+      last_event_at: '2026-04-27T10:01:00Z',
+      last_text: 'Ran npm run test:chat-ui\n└ all good',
+      last_kind: 'ASSIST',
+      online: true,
+      working: false,
+    }],
+    events: [
+      {
+        daemon_seq: 1,
+        stream_id: 'merlin:codex-1',
+        host: 'merlin',
+        provider: 'codex',
+        session_name: 'codex-1',
+        timestamp: '2026-04-27T10:00:00Z',
+        kind: 'USER',
+        text: 'Make desktop match mobile',
+      },
+      {
+        daemon_seq: 2,
+        stream_id: 'merlin:codex-1',
+        host: 'merlin',
+        provider: 'codex',
+        session_name: 'codex-1',
+        timestamp: '2026-04-27T10:01:00Z',
+        kind: 'ASSIST',
+        text: 'Ran npm run test:chat-ui\n└ all good',
+      },
+    ],
+  };
+
+  const detail = chatUi.selectSessionDetailForDesktopSession(
+    state,
+    { name: 'codex-1' },
+    'merlin',
+    { includeDraft: false },
+  );
+  assert.equal(detail.title, 'Desktop chat rebuild');
+  assert.equal(detail.transcriptItems.length, 2);
+  assert.equal(detail.transcriptItems[1].displayRule, 'activity:command');
+
+  const html = chatUi.renderTranscriptTimeline(detail, chatUi.hostChrome(detail.host));
+  assert.match(html, /slot-chat-user-bubble/);
+  assert.match(html, /slot-chat-activity/);
+  assert.match(html, /#4da3ff/);
+  assert.match(html, /Ran npm run test:chat-ui/);
+});
+
 function escapeRegExp(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

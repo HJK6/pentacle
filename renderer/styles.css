@@ -716,10 +716,10 @@ body {
   flex-direction: column;
   min-height: 0;
   height: 100%;
-  padding: 8px 10px 8px;
+  padding: 10px 12px 10px;
   gap: 8px;
   background:
-    linear-gradient(180deg, rgba(14, 19, 16, 0.98), rgba(10, 14, 12, 0.99));
+    linear-gradient(180deg, rgba(7, 17, 13, 0.99), rgba(7, 17, 13, 0.99));
 }
 
 .slot-chat-scroll {
@@ -746,17 +746,192 @@ body {
 .slot-chat-list {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 7px;
 }
 
 .slot-chat-timestamp {
   align-self: center;
-  margin: 8px 0 2px;
+  margin: 7px 0 1px;
   padding: 0 6px;
   font-size: 9px;
   letter-spacing: 0.45px;
   color: rgba(144, 161, 152, 0.5);
   text-transform: uppercase;
+}
+
+.slot-chat-session-hero {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--machine-border, #356150);
+  border-radius: 10px;
+  background: var(--machine-surface, #101a16);
+  padding: 14px 26px 12px;
+  text-align: center;
+}
+
+.slot-chat-session-band {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 4px;
+  background: var(--machine, #7ef0ba);
+}
+
+.slot-chat-session-kicker {
+  color: var(--machine, #7ef0ba);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 10px;
+  line-height: 1.3;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 900;
+}
+
+.slot-chat-session-title {
+  color: #eef8f2;
+  font-size: 20px;
+  line-height: 1.18;
+  font-weight: 800;
+  margin-top: 5px;
+}
+
+.slot-chat-row {
+  align-self: stretch;
+  width: 100%;
+}
+
+.slot-chat-row.is-user {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.slot-chat-user-bubble {
+  max-width: 88%;
+  padding: 8px 11px;
+  background: #18372b;
+  border: 1px solid #356652;
+  border-radius: 14px;
+  color: #eef8f2;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.slot-chat-assistant-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 2px;
+  color: #eef8f2;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 12px;
+  line-height: 1.46;
+}
+
+.slot-chat-activity {
+  max-width: 94%;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--machine-border, #356150);
+  border-radius: 10px;
+  background: var(--machine-surface, #101a16);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+.slot-chat-activity-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--machine, #7ef0ba);
+  margin-top: 5px;
+}
+
+.slot-chat-activity-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.slot-chat-activity b {
+  display: block;
+  color: var(--machine, #7ef0ba);
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 800;
+}
+
+.slot-chat-activity p {
+  margin: 2px 0 0;
+  color: #8ea89d;
+  font-size: 11px;
+  line-height: 1.42;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.slot-chat-command-card,
+.slot-chat-file-card {
+  border: 1px solid var(--machine-border, #356150);
+  border-radius: 10px;
+  background: var(--machine-surface, #101a16);
+  padding: 7px 9px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+.slot-chat-command-card b,
+.slot-chat-file-card b {
+  display: block;
+  color: var(--machine, #7ef0ba);
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 800;
+}
+
+.slot-chat-command-card pre,
+.slot-chat-file-card p {
+  margin: 4px 0 0;
+  color: #8ea89d;
+  font: 11px/1.42 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.slot-chat-terminal-divider {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  color: #597065;
+  font: 10px/1.3 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+.slot-chat-terminal-divider span {
+  flex: 1;
+  height: 1px;
+  background: #356150;
+}
+
+.slot-chat-terminal-divider b {
+  font-weight: 600;
+}
+
+.slot-chat-compacted {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 92%;
+  border: 1px solid #6e5730;
+  background: #241b10;
+  color: #e8c37b;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font: 11px/1.35 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-weight: 700;
 }
 
 .slot-chat-filterbar {
@@ -929,7 +1104,7 @@ body {
   justify-content: flex-start;
   gap: 8px;
   min-height: 28px;
-  padding-top: 8px;
+  padding: 4px 0 0;
 }
 
 .slot-chat-status-left {
@@ -946,14 +1121,14 @@ body {
   min-height: 22px;
   padding: 3px 9px;
   border-radius: 999px;
-  border: 1px solid rgba(72, 86, 80, 0.95);
-  background: rgba(13, 19, 16, 0.98);
+  border: 1px solid var(--machine-border, rgba(72, 86, 80, 0.95));
+  background: var(--machine-surface, rgba(13, 19, 16, 0.98));
   font-size: 10px;
 }
 
 .slot-chat-status-badge.is-working {
-  border-color: rgba(96, 208, 255, 0.75);
-  background: linear-gradient(180deg, rgba(13, 39, 53, 0.98), rgba(9, 26, 37, 0.98));
+  border-color: var(--machine-border, rgba(96, 208, 255, 0.75));
+  background: var(--machine-surface, rgba(9, 26, 37, 0.98));
 }
 
 .slot-chat-status-badge.is-waiting {
@@ -980,8 +1155,8 @@ body {
 }
 
 .slot-chat-status-badge.is-working .slot-chat-status-dot {
-  background: #61d1ff;
-  box-shadow: 0 0 0 5px rgba(97, 209, 255, 0.18);
+  background: var(--machine, #61d1ff);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--machine, #61d1ff) 18%, transparent);
   animation: slot-chat-pulse 1.2s ease-in-out infinite;
 }
 
@@ -1000,7 +1175,7 @@ body {
 }
 
 .slot-chat-status-timer {
-  color: #eefaff;
+  color: #eef8f2;
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.2px;
@@ -1090,8 +1265,8 @@ body {
 }
 
 .slot-chat-compose-input:focus {
-  border-color: var(--cyan);
-  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.15);
+  border-color: var(--machine, var(--cyan));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--machine, #2dd4bf) 22%, transparent);
 }
 
 .slot-chat-compose-input::placeholder {
@@ -1103,8 +1278,8 @@ body {
   width: 34px;
   min-width: 34px;
   padding: 0;
-  border: 1px solid rgba(45, 212, 191, 0.45);
-  background: linear-gradient(180deg, rgba(27, 64, 52, 0.98), rgba(22, 44, 36, 0.98));
+  border: 1px solid var(--machine-border, rgba(45, 212, 191, 0.45));
+  background: var(--machine-surface, rgba(22, 44, 36, 0.98));
   color: #dff9eb;
   border-radius: 10px;
   font-family: inherit;
@@ -1118,7 +1293,7 @@ body {
 
 
 .slot-chat-compose-send:hover {
-  border-color: var(--cyan);
+  border-color: var(--machine, var(--cyan));
   color: white;
 }
 
