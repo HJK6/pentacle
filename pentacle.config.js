@@ -109,6 +109,12 @@ module.exports = {
     sourceTags: true,
   },
 
+  uiReview: {
+    repoRoots: ['~/repos'],
+    artifactDirs: ['~/agent-workspace/ui-review'],
+    localFallback: true,
+  },
+
   // Source tag display — shared convention across the fleet:
   // Bartimaeus=forest green, Amaterasu=red, Merlin=royal blue. On each machine its OWN
   // sessions live under `local` but render with the machine's real name.

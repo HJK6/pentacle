@@ -169,6 +169,20 @@ module.exports = {
     sourceTags: false,       // Show source host tag (e.g. "Amaterasu") on sessions
   },
 
+  // ── UI Review Dashboard ───────────────────────────────────────
+  // The UI Review dashboard indexes static HTML review artifacts from repos.
+  // Defaults:
+  //   repoRoots: ['~/repos']
+  //   artifactDirs: ['~/agent-workspace/ui-review']
+  // For each repo root, Pentacle scans:
+  //   <repo>/test/artifacts/*.html
+  //   <repo>/.ui-review/*.html
+  // uiReview: {
+  //   repoRoots: ['~/repos'],
+  //   artifactDirs: ['~/agent-workspace/ui-review'],
+  //   localFallback: false, // packaged apps normally use Dashboard Hub data/cache
+  // },
+
   // Display names for host IDs — shown as source tags when features.sourceTags is true.
   // Keys match HOSTS registry IDs (e.g. 'local', 'remote'). Add more as needed.
   // hostNames: {

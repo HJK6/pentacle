@@ -141,6 +141,7 @@ try {
   };
 }
 const chatStreamClient = require("./main/chat_stream_client");
+const uiReviewArtifacts = require("./main/ui_review_artifacts");
 
 app.setName(CONFIG.appName);
 
@@ -1233,6 +1234,33 @@ app.whenReady().then(async () => {
     };
   }
 
+  function _uiReviewArtifacts() {
+    const hubIndex = uiReviewArtifacts.normalizeHubIndex(
+      hubClient.get(uiReviewArtifacts.UI_REVIEW_DASHBOARD_ID),
+      hubClient.connected,
+    );
+    if (hubIndex) return hubIndex;
+
+    const allowLocalFallback = !app.isPackaged || !!(CONFIG.uiReview && CONFIG.uiReview.localFallback);
+    if (allowLocalFallback) {
+      return {
+        ...uiReviewArtifacts.listLocalArtifacts(CONFIG.uiReview || {}, os.hostname()),
+        warning: 'Dashboard Hub UI Review index is unavailable; showing local development fallback.',
+        _transport_stale: !hubClient.connected,
+      };
+    }
+
+    return {
+      schema: 'pentacle.uiReviewIndex.v1',
+      generatedAt: new Date().toISOString(),
+      machine: os.hostname(),
+      source: 'hub-missing',
+      artifacts: [],
+      error: 'No UI Review data from Dashboard Hub.',
+      _transport_stale: !hubClient.connected,
+    };
+  }
+
   ipcMain.handle('dashboard:pipeline-stats', (_evt, _batch) => {
     // v1: ignores batch arg — always returns hub's current snapshot.
     return _hubEnvelope('bart.foreclosure');
@@ -1269,6 +1297,7 @@ app.whenReady().then(async () => {
     return _hubEnvelope('amaterasu.ocr');
   });
   ipcMain.handle('chat-stream:get-state', () => chatStreamClient.snapshot());
+  ipcMain.handle('ui-review:list-artifacts', () => _uiReviewArtifacts());
 
   // Image paste
   ipcMain.handle('pty:save-image', async (_, base64Data) => {

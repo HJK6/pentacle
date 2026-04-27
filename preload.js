@@ -86,6 +86,7 @@ window.cc = {
   list0dteTraders: () => ipcRenderer.invoke('dashboard:0dte-list-traders'),
   getAmaterasuOcrStats: () => ipcRenderer.invoke('dashboard:amaterasu-ocr-stats'),
   getChatStreamState: () => ipcRenderer.invoke('chat-stream:get-state'),
+  listUiReviewArtifacts: () => ipcRenderer.invoke('ui-review:list-artifacts'),
 
   // Context menu
   showContextMenu: (sessionName, displayName, hostId) => {
