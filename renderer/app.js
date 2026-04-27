@@ -71,9 +71,9 @@ const state = {
   activityStates: {}, // sessionName:windowIndex -> 'working' | 'waiting' | 'idle'
   sessionSummaries: {}, // sessionName:windowIndex -> one-line summary string
   sessionWorkingLabels: {}, // sessionName:windowIndex -> parsed Working (...) timer label
-  autoNames: {}, // sessionName -> auto-detected label (e.g. "pentacle refactor")
   sessionHosts: {}, // sessionName -> hostId (e.g. 'local', 'remote')
   sourceFilter: null, // null = all, or hostId string to filter by
+  sessionSearch: '',
   // Dashboard state — all mutable dashboard state lives here
   currentView: 'chats',            // 'chats' | 'dashboards'
   selectedDashboard: null,          // dashboard id string
@@ -700,32 +700,16 @@ function getSourceColorForSession(sessionName, hostId) {
   return colors[hostId] || 'green';
 }
 
+function getSourceInitial(source) {
+  return String(source || '').trim().charAt(0).toUpperCase();
+}
+
 function isSummaryNoiseLine(line) {
   return chatUi.isSummaryNoiseLine(line);
 }
 
 function extractSummary(paneContent) {
   return chatUi.extractSummary(paneContent);
-}
-
-function extractAutoName(paneContent) {
-  if (!paneContent) return '';
-  const lines = paneContent.split('\n');
-  // Look for working directory hints (common in Claude Code output)
-  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 50); i--) {
-    const line = lines[i].trim();
-    // Match paths like "/Users/bartimaeus/pentacle" → extract "pentacle"
-    const pathMatch = line.match(/\/Users\/\w+\/([a-zA-Z0-9_-]+)/);
-    if (pathMatch) {
-      return pathMatch[1];
-    }
-    // Match "cwd: /path/to/dir" patterns
-    const cwdMatch = line.match(/(?:cwd|directory|repo|project)[:\s]+.*?([a-zA-Z0-9_-]+)\s*$/i);
-    if (cwdMatch) {
-      return cwdMatch[1];
-    }
-  }
-  return '';
 }
 
 function findSession(sessionName, hostId) {
@@ -783,11 +767,6 @@ async function pollActivity() {
         const sessionName = key.split(':')[0];
         state.sessionSummaries[key] = extractSummary(content);
         state.sessionWorkingLabels[key] = extractWorkingTime(content);
-        // Extract auto-name from pane content (re-extract each poll — title may improve)
-        const name = extractAutoName(content);
-        if (name && name !== state.autoNames[sessionName]) {
-          state.autoNames[sessionName] = name;
-        }
         const session = findSession(sessionName, hostId);
         const currentTitle = session?.display_name || session?.title || '';
         if (window.cc.maybeTitleSession) {
@@ -826,13 +805,6 @@ function updateActivityStrips() {
       if (activity === 'working' || activity === 'waiting') {
         strip.classList.add(activity);
       }
-      // Update header label with auto-name if it changed
-      const autoName = state.autoNames[sessionName];
-      if (autoName && state.slots[i].displayName !== autoName) {
-        state.slots[i].displayName = autoName;
-        const label = document.querySelector(`#header-${i} .cell-label`);
-        if (label) label.textContent = autoName;
-      }
       // Refresh source tag on slot header (may appear after activity poll)
       if (CONFIG.features.sourceTags) {
         const header = document.getElementById(`header-${i}`);
@@ -841,7 +813,8 @@ function updateActivityStrips() {
           if (source) {
             const tag = document.createElement('span');
             tag.className = `cell-source-tag color-${getSourceColorForSession(sessionName, hostId)}`;
-            tag.textContent = source;
+            tag.textContent = getSourceInitial(source);
+            tag.title = source;
             const label = header.querySelector('.cell-label');
             if (label) label.after(tag);
           }
@@ -865,7 +838,7 @@ function renderSourceFilterBar() {
     const name = getSourceForSession('', id) || id;
     const color = getSourceColorForSession('', id);
     const isActive = state.sourceFilter === id;
-    html += `<button class="source-filter-btn color-${color}${isActive ? ' active' : ''}" data-host="${esc(id)}">${esc(name)}</button>`;
+    html += `<button class="source-filter-btn color-${color}${isActive ? ' active' : ''}" data-host="${esc(id)}" title="${esc(name)}">${esc(getSourceInitial(name))}</button>`;
   }
   bar.innerHTML = html;
 
@@ -881,15 +854,29 @@ function renderSidebar() {
   const list = document.getElementById('session-list');
   const stats = document.getElementById('stats');
 
-  // Apply source filter
+  // Apply source/title filters
   const all = state.sessions;
-  const active = state.sourceFilter
+  const sourceFiltered = state.sourceFilter
     ? all.filter(s => (s.hostId || state.sessionHosts[s.name]) === state.sourceFilter)
     : all;
+  const search = state.sessionSearch.trim().toLowerCase();
+  const active = search
+    ? sourceFiltered.filter((s) => {
+      const haystack = [
+        s.display_name,
+        s.title,
+        s.name,
+        getSourceForSession(s.name, s.hostId || state.sessionHosts[s.name]),
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(search);
+    })
+    : sourceFiltered;
   const working = active.filter(s => getActivityForSession(s.name) === 'working');
   const waiting = active.filter(s => getActivityForSession(s.name) === 'waiting');
   const idle = active.filter(s => getActivityForSession(s.name) === 'idle');
-  stats.textContent = `${active.length} sessions | ${working.length} working | ${waiting.length} waiting`;
+  stats.textContent = search
+    ? `${active.length} of ${sourceFiltered.length} sessions`
+    : `${active.length} sessions | ${working.length} working | ${waiting.length} waiting`;
 
   renderSourceFilterBar();
 
@@ -900,8 +887,7 @@ function renderSidebar() {
     const activity = getActivityForSession(s.name);
     const dotClass = activity === 'working' ? 'attached' : activity === 'waiting' ? 'chat' : (s.attached ? 'attached' : s.type);
     const hasTitle = s.title && s.title !== s.name;
-    const autoName = state.autoNames[s.name];
-    const displayName = s.display_name || (autoName ? autoName : s.name);
+    const displayName = s.display_name || s.name;
     // Get summary for this session
     const summaryKey = Object.keys(state.sessionSummaries).find(k => k.startsWith(s.name + ':'));
     const summary = chatUi.sanitizeSidebarDetail(summaryKey ? state.sessionSummaries[summaryKey] : '');
@@ -914,7 +900,7 @@ function renderSidebar() {
         : '';
     const source = CONFIG.features.sourceTags ? getSourceForSession(s.name, hostId) : null;
     const sourceColor = source ? getSourceColorForSession(s.name, hostId) : 'green';
-    const sourceTag = source ? `<span class="s-source-tag color-${sourceColor}">${esc(source)}</span>` : '';
+    const sourceTag = source ? `<span class="s-source-tag color-${sourceColor}" title="${esc(source)}">${esc(getSourceInitial(source))}</span>` : '';
 
     return `<div class="session-item ${isActive ? 'active' : ''}"
                  data-name="${esc(s.name)}"
@@ -925,12 +911,10 @@ function renderSidebar() {
         <span class="s-name">${esc(displayName)}</span>
         ${activityBadge}
         ${sourceTag}
-        ${isActive ? `<span class="s-slot-badge">${slotIdx + 1}</span>` : ''}
         <button class="s-edit-btn" data-edit-name="${esc(s.name)}" data-edit-display="${esc(displayName)}" data-edit-host="${esc(hostId)}" title="Rename"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5L13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175l-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg></button>
         <button class="s-trash-btn" data-trash-name="${esc(s.name)}" data-trash-host="${esc(hostId)}" title="Move to trash"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg></button>
       </div>
       ${hasTitle ? `<div class="s-meta">${esc(s.name)}</div>` : ''}
-      ${autoName && !hasTitle ? `<div class="s-meta">${esc(s.name)}</div>` : ''}
       ${summary ? `<div class="s-summary">${esc(summary)}</div>` : (preview ? `<div class="s-preview">${esc(preview)}</div>` : '')}
     </div>`;
   }
@@ -1323,7 +1307,8 @@ async function attachSession(slot, sessionName, displayName, hostId) {
     if (source) {
       const tag = document.createElement('span');
       tag.className = `cell-source-tag color-${getSourceColorForSession(sessionName, hostId)}`;
-      tag.textContent = source;
+      tag.textContent = getSourceInitial(source);
+      tag.title = source;
       label.after(tag);
     }
   }
@@ -1534,7 +1519,6 @@ function detachSlot(slot) {
   state.slotDraftTouched[slot] = false;
   state.slotViewModes[slot] = 'terminal';
   state.slotChatRefs[slot] = null;
-  if (sessionName) delete state.autoNames[sessionName];
 
   // Dispose terminal (may throw if WebGL context is lost, etc.)
   try {
@@ -2170,6 +2154,10 @@ document.getElementById('new-session-overlay').addEventListener('click', (e) => 
 });
 document.getElementById('btn-cleanup').addEventListener('click', cleanupDead);
 document.getElementById('btn-refresh').addEventListener('click', fetchSessions);
+document.getElementById('session-search')?.addEventListener('input', (e) => {
+  state.sessionSearch = e.target.value || '';
+  renderSidebar();
+});
 
 // ── Slot Header Buttons ───────────────────────────────────────
 
