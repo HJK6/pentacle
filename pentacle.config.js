@@ -115,6 +115,12 @@ module.exports = {
     localFallback: true,
   },
 
+  chatStream: {
+    url: 'ws://100.80.28.24:7791',
+    autoStart: false,
+    recentLimit: 5000,
+  },
+
   // Source tag display — shared convention across the fleet:
   // Bartimaeus=forest green, Amaterasu=red, Merlin=royal blue. On each machine its OWN
   // sessions live under `local` but render with the machine's real name.
