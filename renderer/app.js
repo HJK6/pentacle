@@ -183,6 +183,10 @@ function applyChatStreamPayload(payload) {
 function chatEventsForSession(session) {
   if (!session) return [];
   const host = streamHostForHostId(session.hostId);
+  const streamSession = chatUi.findStreamSessionForDesktopSession(state.chatStream, session, host);
+  if (streamSession?.stream_id) {
+    return state.chatStream.events.filter((event) => event.stream_id === streamSession.stream_id);
+  }
   return state.chatStream.events.filter((event) => event.host === host && event.session_name === session.name);
 }
 
@@ -243,7 +247,7 @@ function chatDraftStateForSession(session) {
 function chatSessionStateForSession(session) {
   if (!session) return null;
   const host = streamHostForHostId(session.hostId);
-  return state.chatStream.sessions.find((item) => item?.host === host && item?.session_name === session.name) || null;
+  return chatUi.findStreamSessionForDesktopSession(state.chatStream, session, host);
 }
 
 function isCodeLikeEvent(event) {

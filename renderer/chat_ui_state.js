@@ -519,11 +519,43 @@ function selectSessionDetail(streamState = {}, streamId, options = {}) {
   };
 }
 
+function compactIdentifier(value) {
+  return normalizedEventText(value).toLowerCase();
+}
+
+function desktopSessionMatchesStreamSession(streamSession = {}, desktopSession = {}, streamHost = '') {
+  const hostMatches = !streamHost || streamSession.host === streamHost;
+  const desktopIds = [
+    desktopSession.streamId,
+    desktopSession.name,
+    desktopSession.displayName,
+    desktopSession.display_name,
+    desktopSession.title,
+  ].map(compactIdentifier).filter(Boolean);
+  const streamIds = [
+    streamSession.stream_id,
+    streamSession.session_name,
+    streamSession.display_name,
+    streamSession.title,
+  ].map(compactIdentifier).filter(Boolean);
+  const idMatches = desktopIds.some((candidate) => streamIds.includes(candidate));
+  return { hostMatches, idMatches };
+}
+
+function findStreamSessionForDesktopSession(streamState = {}, desktopSession = {}, streamHost = '') {
+  const sessions = streamState.sessions || [];
+  return (
+    sessions.find((item) => {
+      const match = desktopSessionMatchesStreamSession(item, desktopSession, streamHost);
+      return match.hostMatches && match.idMatches;
+    }) ||
+    sessions.find((item) => desktopSessionMatchesStreamSession(item, desktopSession, streamHost).idMatches) ||
+    null
+  );
+}
+
 function selectSessionDetailForDesktopSession(streamState = {}, desktopSession = {}, streamHost, options = {}) {
-  const session = (streamState.sessions || []).find((item) => (
-    item.stream_id === desktopSession.streamId ||
-    (item.host === streamHost && item.session_name === desktopSession.name)
-  ));
+  const session = findStreamSessionForDesktopSession(streamState, desktopSession, streamHost);
   if (session) return selectSessionDetail(streamState, session.stream_id, options);
   return null;
 }
@@ -635,6 +667,7 @@ module.exports = {
   escapeHtml,
   extractSummary,
   extractWorkingTime,
+  findStreamSessionForDesktopSession,
   hostChrome,
   hostTitle,
   interpretPentacleEvent,

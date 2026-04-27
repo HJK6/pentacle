@@ -145,6 +145,46 @@ test('selectSessionDetailForDesktopSession renders mobile-style websocket transc
   assert.match(html, /Ran npm run test:chat-ui/);
 });
 
+test('selectSessionDetailForDesktopSession matches human desktop titles to websocket sessions', () => {
+  const state = {
+    connected: true,
+    drafts: {},
+    sessions: [{
+      stream_id: 'bart:codex-20260426104452-annz',
+      host: 'bart',
+      provider: 'codex',
+      session_name: 'codex-20260426104452-annz',
+      display_name: 'Pentacle Chat Data Source',
+      last_event_at: '2026-04-27T10:02:00Z',
+      last_text: 'Ready',
+      last_kind: 'ASSIST',
+      online: true,
+      working: false,
+    }],
+    events: [{
+      daemon_seq: 10,
+      stream_id: 'bart:codex-20260426104452-annz',
+      host: 'bart',
+      provider: 'codex',
+      session_name: 'codex-20260426104452-annz',
+      timestamp: '2026-04-27T10:02:00Z',
+      kind: 'ASSIST',
+      text: 'Ready',
+    }],
+  };
+
+  const detail = chatUi.selectSessionDetailForDesktopSession(
+    state,
+    { name: 'Pentacle Chat Data Source', displayName: 'Pentacle Chat Data Source' },
+    'bart',
+    { includeDraft: false },
+  );
+
+  assert.ok(detail);
+  assert.equal(detail.streamId, 'bart:codex-20260426104452-annz');
+  assert.equal(detail.title, 'Pentacle Chat Data Source');
+});
+
 function escapeRegExp(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
