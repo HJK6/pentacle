@@ -176,6 +176,33 @@ body {
   flex-shrink: 0;
 }
 
+.sidebar-search {
+  padding: 7px 12px 0;
+  flex-shrink: 0;
+}
+
+.sidebar-search input {
+  width: 100%;
+  height: 28px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  padding: 0 9px;
+}
+
+.sidebar-search input:focus {
+  border-color: var(--fg-dim);
+}
+
+.sidebar-search input::placeholder {
+  color: var(--fg-dim);
+}
+
 /* ── Source Filter Bar ────────────────────────── */
 
 .source-filter-bar {
@@ -211,6 +238,7 @@ body {
 .source-filter-btn.color-orange.active { color: #f0883e;       border-color: #f0883e;       background: rgba(240,136,62,0.12); }
 .source-filter-btn.color-royal-blue.active { color: #1d4ed8; border-color: #1d4ed8; background: rgba(29,78,216,0.14); }
 .source-filter-btn.color-forest-green.active { color: #166534; border-color: #166534; background: rgba(22,101,52,0.14); }
+.source-filter-btn.color-deep-raspberry.active { color: #b83280; border-color: #b83280; background: rgba(184,50,128,0.16); }
 
 .session-list {
   flex: 1;
@@ -266,16 +294,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
-}
-
-.session-item .s-slot-badge {
-  font-size: 9px;
-  background: var(--blue);
-  color: var(--bg);
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-weight: 700;
-  flex-shrink: 0;
 }
 
 .session-item .s-edit-btn,
@@ -1672,20 +1690,26 @@ body {
 
 .s-source-tag,
 .cell-source-tag {
-  display: inline-block;
-  font-size: 8px;
-  font-weight: 600;
-  padding: 1px 5px;
-  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 0;
+  border-radius: 50%;
   color: var(--green);
   background: rgba(86,211,100,0.12);
   text-transform: uppercase;
-  letter-spacing: 0.3px;
   flex-shrink: 0;
   white-space: nowrap;
 }
 .cell-source-tag {
   font-size: 9px;
+  width: 18px;
+  height: 18px;
   margin-left: 6px;
 }
 .s-source-tag.color-red,    .cell-source-tag.color-red    { color: var(--red);    background: rgba(244,112,103,0.12); }
@@ -1696,6 +1720,7 @@ body {
 .s-source-tag.color-orange, .cell-source-tag.color-orange { color: #f0883e;       background: rgba(240,136,62,0.12); }
 .s-source-tag.color-royal-blue, .cell-source-tag.color-royal-blue { color: #1d4ed8; background: rgba(29,78,216,0.14); }
 .s-source-tag.color-forest-green, .cell-source-tag.color-forest-green { color: #166534; background: rgba(22,101,52,0.14); }
+.s-source-tag.color-deep-raspberry, .cell-source-tag.color-deep-raspberry { color: #b83280; background: rgba(184,50,128,0.16); }
 
 /* ── Session Summary in Sidebar ───────────────── */
 

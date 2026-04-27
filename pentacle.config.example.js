@@ -95,7 +95,8 @@ module.exports = {
       label: 'Codex',
       // Pentacle checks once per day whether this CLI is outdated and, if so,
       // runs `npm install -g @openai/codex` on the target host before launch.
-      command: 'codex',
+      command: '/opt/homebrew/bin/codex',
+      commandLocal: 'codex',
     },
   },
 
@@ -184,13 +185,15 @@ module.exports = {
   // },
 
   // Display names for host IDs — shown as source tags when features.sourceTags is true.
+  // Bartimaeus, Amaterasu, and Merlin have canonical names/colors in renderer/app.js.
   // Keys match HOSTS registry IDs (e.g. 'local', 'remote'). Add more as needed.
   // hostNames: {
   //   local: 'MyMachine',
   //   remote: 'RemoteHost',
   // },
 
-  // Source tag colors per host ID. Valid: red, purple, yellow, green, blue, orange.
+  // Source tag colors per host ID. Valid: red, purple, yellow, green, blue, orange, royal-blue, forest-green, deep-raspberry.
+  // Canonical Triforce machine colors win over these local overrides.
   // Unknown hosts fall back to green.
   // hostColors: {
   //   local: 'red',

@@ -73,6 +73,8 @@ window.cc = {
   // Used by the trash flow so trashing on any machine actually removes the
   // session from tmux, not just from DynamoDB.
   killTmuxSession: (hostId, sessionName) => ipcRenderer.invoke('tmux:kill-session', hostId, sessionName),
+  setWindowTitle: (hostId, sessionName, title, source) => ipcRenderer.invoke('tmux:set-window-title', hostId, sessionName, title, source || 'manual'),
+  maybeTitleSession: (payload) => ipcRenderer.invoke('tmux:maybe-title-session', payload || {}),
 
   // Image paste
   saveImage: (base64Data) => ipcRenderer.invoke('pty:save-image', base64Data),
