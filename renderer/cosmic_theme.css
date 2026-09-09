@@ -1,0 +1,190 @@
+/*
+ * Cosmic / Arcane theme token layer for the Pentacle desktop (Electron) renderer.
+ *
+ * public token layer (cosmic-parity): ports public companion's `public theme tokens` design
+ * tokens + vendored fonts into the renderer as a SCOPED CSS layer.
+ *
+ * CRITICAL — scope discipline:
+ *   This file does NOT touch the app-wide `--bg/--bg2/--bg3/--fg/--green/--border/...`
+ *   tokens defined in `renderer/styles.css` :root — those style the non-chat
+ *   screens (dashboards, specs, schedule) and must keep working unchanged. All
+ *   cosmic tokens are NEW, namespaced `--cosmic-*` variables, declared on a
+ *   `.cosmic` scope class so public component layer can opt the chat surface in without
+ *   leaking globally.
+ *
+ * Loading the fonts: the `@font-face` blocks below register the 9 faces, but a
+ * browser only fetches a face when (a) this stylesheet is referenced AND (b) a
+ * glyph in that family is rendered. This file is intentionally NOT linked from
+ * `renderer/index.html` (public token layer is new-files-only; zero index.html edits).
+ * The public integration (D) MUST add — exactly once, in the <head> of
+ * `renderer/index.html`, after `styles.css`:
+ *
+ *     <link rel="stylesheet" href="cosmic_theme.css">
+ *
+ * The @font-face `src` paths are relative to THIS file's location
+ * (renderer/cosmic_theme.css), so `assets/fonts/*.ttf` resolves to
+ * renderer/assets/fonts/*.ttf.
+ *
+ * Source of truth (mirror exactly): companion client/public theme tokens.
+ */
+
+/* ── Fonts ─────────────────────────────────────────────────────────
+ * Family names match the public companion face identifiers from `Fonts` in
+ * public theme tokens (e.g. 'Rajdhani_600SemiBold') so the JS token map in
+ * cosmic_tokens.ts and these CSS faces use the same strings.
+ */
+
+/* Rajdhani — UI / display */
+@font-face {
+  font-family: 'Rajdhani_500Medium';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('assets/fonts/Rajdhani_500Medium.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Rajdhani_600SemiBold';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('assets/fonts/Rajdhani_600SemiBold.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Rajdhani_700Bold';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('assets/fonts/Rajdhani_700Bold.ttf') format('truetype');
+}
+
+/* JetBrains Mono — meta / code / user bubbles */
+@font-face {
+  font-family: 'JetBrainsMono_400Regular';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('assets/fonts/JetBrainsMono_400Regular.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'JetBrainsMono_500Medium';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('assets/fonts/JetBrainsMono_500Medium.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'JetBrainsMono_700Bold';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('assets/fonts/JetBrainsMono_700Bold.ttf') format('truetype');
+}
+
+/* Cinzel — mythical accents */
+@font-face {
+  font-family: 'Cinzel_500Medium';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('assets/fonts/Cinzel_500Medium.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Cinzel_600SemiBold';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('assets/fonts/Cinzel_600SemiBold.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Cinzel_700Bold';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('assets/fonts/Cinzel_700Bold.ttf') format('truetype');
+}
+
+/* ── Scoped cosmic token layer ─────────────────────────────────────
+ * All variables live on the `.cosmic` scope. Apply `class="cosmic"` to the
+ * chat-surface root (public component layer) to expose them to that subtree only.
+ */
+.cosmic {
+  /* Palette — mirrors Tokens.palette in public theme tokens */
+  --cosmic-ink: #080b0a;
+  --cosmic-panel: #0d1411;
+  --cosmic-text: #e6fff2;
+  --cosmic-dim: #9dc4b3;
+  --cosmic-muted: #7fa896;
+  --cosmic-line: rgba(120, 255, 160, 0.16);
+  --cosmic-green: #3dff66;
+  --cosmic-amber: #ffb53d;
+  --cosmic-red: #ff2e3e;
+  --cosmic-star: #bdffe0;
+  --cosmic-codepanel: #04100a;
+  --cosmic-backdrop: rgba(3, 7, 5, 0.8);
+
+  /* Machine accents — MACHINES[name].accent */
+  --cosmic-machine-hosta: #3dff66;
+  --cosmic-machine-hostb: #ff2e3e;
+  --cosmic-machine-hostc: #29d4ff;
+  --cosmic-machine-hostd: #b14dff;
+
+  /* Status — STATUS map */
+  --cosmic-status-working: #3dff66;
+  --cosmic-status-idle: #7fa896;
+
+  /* Severity — SEV map */
+  --cosmic-sev-info: #3dff66;
+  --cosmic-sev-warning: #ffb53d;
+  --cosmic-sev-critical: #ff2e3e;
+
+  /* Type scale — TypeScale (px) */
+  --cosmic-type-title: 19px;
+  --cosmic-type-section-title: 16px;
+  --cosmic-type-body: 14.5px;
+  --cosmic-type-compact-body: 13.5px;
+  --cosmic-type-compose: 13.5px;
+  --cosmic-type-preview: 12.5px;
+  --cosmic-type-meta: 10.5px;
+  --cosmic-type-label: 10px;
+  --cosmic-type-tiny: 9px;
+
+  /* Spacing — Spacing (px) */
+  --cosmic-screen-pad: 16px;
+  --cosmic-top-inset: 52px;
+  --cosmic-card-gap: 12px;
+  --cosmic-card-pad-x: 14px;
+  --cosmic-card-pad-y: 13px;
+  --cosmic-bevel-card: 12px;
+  --cosmic-bevel-bubble: 10px;
+
+  /* Font-family stacks — Fonts in public theme tokens */
+  --cosmic-font-display: 'Rajdhani_600SemiBold', 'Rajdhani_500Medium', 'Rajdhani', sans-serif;
+  --cosmic-font-display-medium: 'Rajdhani_500Medium', 'Rajdhani', sans-serif;
+  --cosmic-font-display-bold: 'Rajdhani_700Bold', 'Rajdhani', sans-serif;
+  --cosmic-font-mono: 'JetBrainsMono_400Regular', 'JetBrains Mono', 'SF Mono', monospace;
+  --cosmic-font-mono-medium: 'JetBrainsMono_500Medium', 'JetBrains Mono', 'SF Mono', monospace;
+  --cosmic-font-mono-bold: 'JetBrainsMono_700Bold', 'JetBrains Mono', 'SF Mono', monospace;
+  --cosmic-font-myth: 'Cinzel_600SemiBold', 'Cinzel_500Medium', 'Cinzel', serif;
+  --cosmic-font-myth-medium: 'Cinzel_500Medium', 'Cinzel', serif;
+  --cosmic-font-myth-bold: 'Cinzel_700Bold', 'Cinzel', serif;
+}
+
+/* ── Font-family helper classes ────────────────────────────────────
+ * Scoped under `.cosmic` so they only apply inside the opted-in chat surface
+ * and never leak to the rest of the app.
+ *   .cosmic-display → Rajdhani (UI/display)
+ *   .cosmic-mono    → JetBrains Mono (meta/code/user bubbles)
+ *   .cosmic-myth    → Cinzel (mythical accents)
+ */
+.cosmic .cosmic-display,
+.cosmic.cosmic-display {
+  font-family: var(--cosmic-font-display);
+}
+.cosmic .cosmic-mono,
+.cosmic.cosmic-mono {
+  font-family: var(--cosmic-font-mono);
+}
+.cosmic .cosmic-myth,
+.cosmic.cosmic-myth {
+  font-family: var(--cosmic-font-myth);
+}

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for the chat_streamd v2 per-host ingest satellite (hostb/macOS).
+
+  Install (per README.md in this dir): substitute the <...> placeholders, then
+    cp com.pentacle.satellite.plist ~/Library/LaunchAgents/
+    launchctl unload  ~/Library/LaunchAgents/com.pentacle.satellite.plist 2>/dev/null || true
+    launchctl load -w ~/Library/LaunchAgents/com.pentacle.satellite.plist
+
+  The shared push secret is NOT committed: the bash wrapper sources it from
+  ~/.config/pentacle/satellite.env (see README). WorkingDirectory is a DEDICATED
+  checkout (auto-update git-checkouts there); it must not be a dev worktree.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pentacle.satellite</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>set -a; . "$HOME/.config/pentacle/satellite.env"; exec python3 __CHECKOUT__/services/chat-stream-v2/satellite.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__CHECKOUT__/services/chat-stream-v2</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- PATH MUST include the tmux dir. `bash -lc` runs path_helper, which drops
+         Homebrew's /opt/homebrew/bin unless it is pinned here (path_helper keeps
+         pre-existing entries) — without it `tmux` is unresolvable and discovery
+         silently ingests nothing (the hostb outage). Apple Silicon: /opt/homebrew;
+         Intel: /usr/local. Reconciled with hostb's live plist so redeploy is a no-op. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PENTACLE_SATELLITE_HOST</key>
+    <string>hostb</string>
+    <key>PENTACLE_SATELLITE_CHECKOUT</key>
+    <string>__CHECKOUT__</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/pentacle-satellite.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/pentacle-satellite.err</string>
+</dict>
+</plist>

@@ -1,0 +1,417 @@
+/*
+ * Cosmic / Arcane chat-surface styling (public cosmic chat surface).
+ *
+ * STYLING ONLY — zero behavior change. Every rule is scoped under `.cosmic`,
+ * which app.js puts ONLY on the per-slot chat container (`.slot-chat-layer`).
+ * Non-chat screens (dashboards / specs / schedule) never receive `.cosmic`, so
+ * they keep the existing app-wide `--bg/--fg/...` look untouched.
+ *
+ * All colors / fonts / spacing come from the `--cosmic-*` token layer declared
+ * in renderer/cosmic_theme.css (public token layer), which mirrors companion client
+ * constants/Colors.ts. This file maps the desktop `.slot-chat-*` DOM produced by
+ * app.js renderSlotChat() + shared_transcript_view.ts onto those tokens.
+ *
+ * Flat reskin — no shadows / no glows (matches companion client). Bevels (the cut
+ * top-right + bottom-left corners) are done with `clip-path` to mirror companion client's
+ * Bevel component without an extra SVG node per row.
+ */
+
+/* ── Surface shell ─────────────────────────────────────────────────── */
+
+/* The cosmic background lives here (app.js no longer sets it inline) so the
+   decorative starfield can show through behind the transcript. */
+.slot-chat-layer.cosmic {
+  background: radial-gradient(circle at 50% -8%, var(--cosmic-panel) 0%, var(--cosmic-ink) 72%);
+}
+
+.cosmic .slot-chat-shell {
+  background: transparent;
+  /* Sit above the absolutely-positioned starfield sibling. */
+  position: relative;
+  z-index: 1;
+}
+
+/* Deterministic 44-dot starfield (cosmic_components.starfield) mounted once,
+   behind the transcript. Decorative + pointer-events:none (set inline by the
+   factory); we only place it on the z-axis and dial the intensity down. */
+.cosmic .slot-chat-starfield {
+  z-index: 0;
+  opacity: 0.5;
+}
+
+.cosmic .slot-chat-scroll::-webkit-scrollbar-thumb {
+  background: var(--cosmic-line);
+}
+
+.cosmic .slot-chat-list ::selection {
+  color: var(--cosmic-ink);
+  background: var(--cosmic-green);
+}
+
+.cosmic .slot-chat-timestamp {
+  color: var(--cosmic-muted);
+  font-family: var(--cosmic-font-mono);
+}
+
+/* ── Header / session hero ─────────────────────────────────────────── */
+
+.cosmic .slot-chat-session-hero {
+  border: 1px solid var(--cosmic-line);
+  background: var(--cosmic-panel);
+  border-radius: 0;
+  /* Card bevel: cut top-right + bottom-left corners. */
+  clip-path: polygon(
+    0 0,
+    calc(100% - var(--cosmic-bevel-card)) 0,
+    100% var(--cosmic-bevel-card),
+    100% 100%,
+    var(--cosmic-bevel-card) 100%,
+    0 calc(100% - var(--cosmic-bevel-card))
+  );
+}
+
+/* When the cosmic header ornaments render (active machine is a known known
+   machine), lay the ring sigil beside the text instead of the centered plain
+   hero. */
+.cosmic .slot-chat-session-hero.is-cosmic {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  padding: 12px 22px 12px 16px;
+}
+
+.cosmic .slot-chat-session-sigil {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cosmic .slot-chat-session-head {
+  min-width: 0;
+  flex: 1;
+}
+
+.cosmic .slot-chat-session-band {
+  background: var(--machine, var(--cosmic-green));
+}
+
+.cosmic .slot-chat-session-kicker {
+  color: var(--cosmic-dim);
+  letter-spacing: 0.6px;
+  font-weight: 700;
+  gap: 8px;
+}
+
+.cosmic .slot-chat-session-machine {
+  color: var(--cosmic-text);
+  letter-spacing: 1.2px;
+  font-size: var(--cosmic-type-meta);
+}
+
+.cosmic .slot-chat-session-epithet {
+  color: var(--cosmic-muted);
+  font-size: var(--cosmic-type-meta);
+  text-transform: none;
+  font-weight: 500;
+  letter-spacing: 0.4px;
+}
+
+.cosmic .slot-chat-session-provider {
+  color: var(--cosmic-dim);
+  opacity: 0.9;
+}
+
+.cosmic .slot-chat-session-title {
+  color: var(--cosmic-text);
+  font-size: var(--cosmic-type-title);
+  letter-spacing: 0.3px;
+}
+
+.cosmic .slot-chat-session-tags {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  margin-top: 7px;
+}
+
+/* ── Bubbles ───────────────────────────────────────────────────────── */
+
+[data-density="compact"] .cosmic {
+  --cosmic-type-body: 11.5px;
+  --cosmic-type-compact-body: 11.5px;
+  --cosmic-type-compose: 12px;
+}
+
+/* User bubble — JetBrains Mono (companion client rule: user bubbles + meta in mono),
+   beveled panel in the cosmic palette. */
+.cosmic .slot-chat-user-bubble {
+  font-family: var(--cosmic-font-mono);
+  font-size: var(--cosmic-type-compact-body);
+  background: var(--cosmic-panel);
+  color: var(--cosmic-text);
+  border: 1px solid var(--cosmic-line);
+  border-radius: 0;
+  clip-path: polygon(
+    0 0,
+    calc(100% - var(--cosmic-bevel-bubble)) 0,
+    100% var(--cosmic-bevel-bubble),
+    100% 100%,
+    var(--cosmic-bevel-bubble) 100%,
+    0 calc(100% - var(--cosmic-bevel-bubble))
+  );
+}
+
+/* Assistant prose — Rajdhani display family; code/inline-code stay mono below. */
+.cosmic .slot-chat-assistant-card {
+  font-family: var(--cosmic-font-display);
+  font-size: var(--cosmic-type-body);
+  color: var(--cosmic-text);
+}
+
+.cosmic .slot-chat-assistant-card strong {
+  color: var(--cosmic-text);
+}
+
+.cosmic .slot-chat-assistant-card em {
+  color: var(--cosmic-dim);
+}
+
+/* Edit / command file cards inside an assistant turn. */
+.cosmic .slot-chat-file-card,
+.cosmic .slot-chat-command-card {
+  background: var(--cosmic-codepanel);
+  border: 1px solid var(--cosmic-line);
+  color: var(--cosmic-text);
+}
+
+.cosmic .slot-chat-command-card pre {
+  font-family: var(--cosmic-font-mono);
+  color: var(--cosmic-dim);
+}
+
+/* ── Activity rows ─────────────────────────────────────────────────── */
+
+.cosmic .slot-chat-activity {
+  background: var(--cosmic-panel);
+  border: 1px solid var(--cosmic-line);
+  font-family: var(--cosmic-font-mono);
+}
+
+.cosmic .slot-chat-activity-dot {
+  background: var(--machine, var(--cosmic-green));
+}
+
+.cosmic .slot-chat-activity b {
+  color: var(--machine, var(--cosmic-green));
+  font-family: var(--cosmic-font-display);
+}
+
+.cosmic .slot-chat-activity p {
+  color: var(--cosmic-muted);
+}
+
+/* ── Markdown + code panels (--cosmic-codepanel) ───────────────────── */
+
+.cosmic .slot-chat-md-heading {
+  font-family: var(--cosmic-font-display);
+  color: var(--cosmic-text);
+}
+
+.cosmic .slot-chat-md-link {
+  color: var(--cosmic-green);
+}
+
+.cosmic .slot-chat-md-icode {
+  background: var(--cosmic-codepanel);
+  color: var(--cosmic-green);
+  font-family: var(--cosmic-font-mono);
+  border: 1px solid var(--cosmic-line);
+}
+
+.cosmic .slot-chat-md-code {
+  background: var(--cosmic-codepanel);
+  border: 1px solid var(--cosmic-line);
+  font-family: var(--cosmic-font-mono);
+}
+
+.cosmic .slot-chat-md-code code {
+  font-family: var(--cosmic-font-mono);
+  color: var(--cosmic-text);
+}
+
+.cosmic .slot-chat-md-table {
+  font-family: var(--cosmic-font-mono);
+  color: var(--cosmic-text);
+}
+
+.cosmic .slot-chat-md-table th {
+  color: var(--cosmic-dim);
+  border-color: var(--cosmic-line);
+}
+
+.cosmic .slot-chat-md-table td {
+  border-color: var(--cosmic-line);
+}
+
+.cosmic .slot-chat-md-hr {
+  border-color: var(--cosmic-line);
+}
+
+/* ── Status badges ─────────────────────────────────────────────────── */
+
+.cosmic .slot-chat-status-badge {
+  color: var(--cosmic-dim);
+  font-family: var(--cosmic-font-mono);
+}
+
+.cosmic .slot-chat-status-badge.is-working {
+  color: var(--cosmic-status-working);
+}
+
+.cosmic .slot-chat-status-badge.is-working .slot-chat-status-dot {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--cosmic-status-working) 30%, transparent);
+  border-top-color: var(--cosmic-status-working);
+  box-shadow: none;
+}
+
+.cosmic .slot-chat-status-badge.is-pending {
+  color: var(--cosmic-amber);
+}
+
+.cosmic .slot-chat-status-timer {
+  color: var(--cosmic-status-working);
+  font-family: var(--cosmic-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.cosmic .slot-chat-cancel-btn {
+  border: 1px solid var(--cosmic-line);
+  color: var(--cosmic-dim);
+  background: transparent;
+  font-family: var(--cosmic-font-mono);
+}
+
+/* ── Question dock (single, multi, and multiSelect — all share classes) ── */
+
+.cosmic .slot-chat-question {
+  border-top: 1px solid var(--cosmic-line);
+}
+
+.cosmic .slot-chat-question-prompt {
+  color: var(--cosmic-text);
+  font-family: var(--cosmic-font-display);
+}
+
+.cosmic .slot-chat-question-card {
+  background: var(--cosmic-panel);
+  border: 1px solid var(--cosmic-line);
+}
+
+.cosmic .slot-chat-question-option {
+  background: var(--cosmic-panel);
+  border: 1px solid var(--cosmic-line);
+  color: var(--cosmic-text);
+  font-family: var(--cosmic-font-mono);
+}
+
+.cosmic .slot-chat-question-option:hover:not(:disabled) {
+  border-color: var(--cosmic-green);
+}
+
+.cosmic .slot-chat-question-option.is-selected {
+  border-color: var(--cosmic-green);
+  background: rgba(61, 255, 102, 0.1);
+}
+
+.cosmic .slot-chat-question-option.is-meta {
+  color: var(--cosmic-dim);
+}
+
+.cosmic .slot-chat-question-option-desc {
+  color: var(--cosmic-muted);
+}
+
+.cosmic .slot-chat-question-freetext {
+  background: var(--cosmic-codepanel);
+  border: 1px solid var(--cosmic-line);
+  color: var(--cosmic-text);
+  font-family: var(--cosmic-font-mono);
+}
+
+.cosmic .slot-chat-question-freetext:focus {
+  border-color: var(--cosmic-green);
+  outline: none;
+}
+
+.cosmic .slot-chat-question-retry,
+.cosmic .slot-chat-question-submit {
+  background: var(--cosmic-green);
+  color: var(--cosmic-ink);
+  border: none;
+  font-family: var(--cosmic-font-mono);
+  letter-spacing: 0.6px;
+}
+
+.cosmic .slot-chat-question-warning {
+  color: var(--cosmic-amber);
+  font-family: var(--cosmic-font-mono);
+}
+
+.cosmic .slot-chat-question-loading {
+  color: var(--cosmic-muted);
+  font-family: var(--cosmic-font-mono);
+}
+
+/* ── Composer ──────────────────────────────────────────────────────── */
+
+.cosmic .slot-chat-compose-input {
+  background: var(--cosmic-codepanel);
+  border: 1px solid var(--cosmic-line);
+  color: var(--cosmic-text);
+  font-family: var(--cosmic-font-mono);
+  font-size: var(--cosmic-type-compose);
+}
+
+.cosmic .slot-chat-compose-input:focus {
+  border-color: var(--cosmic-green);
+}
+
+.cosmic .slot-chat-compose-input::placeholder {
+  color: var(--cosmic-muted);
+}
+
+.cosmic .slot-chat-compose-send {
+  background: var(--cosmic-green);
+  color: var(--cosmic-ink);
+  border-color: var(--cosmic-green);
+}
+
+.cosmic .slot-chat-compose-send:hover {
+  filter: brightness(1.08);
+}
+
+.cosmic .slot-chat-compose-send:disabled {
+  background: var(--cosmic-line);
+  color: var(--cosmic-muted);
+}
+
+/* ── Misc ──────────────────────────────────────────────────────────── */
+
+.cosmic .slot-chat-empty {
+  color: var(--cosmic-muted);
+  font-family: var(--cosmic-font-display);
+}
+
+.cosmic .slot-chat-error {
+  color: var(--cosmic-red);
+  font-family: var(--cosmic-font-mono);
+}
+
+.cosmic .slot-chat-send-status {
+  color: var(--cosmic-muted);
+  font-family: var(--cosmic-font-mono);
+}

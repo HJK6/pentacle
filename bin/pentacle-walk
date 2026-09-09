@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Public desktop end-to-end walk harness entrypoint.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec node "$ROOT/test/e2e/cli.js" "$@"
+

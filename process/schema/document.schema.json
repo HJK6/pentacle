@@ -1,0 +1,432 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schema/document.schema.json",
+  "title": "Shared Memory Document Metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "ability",
+        "project",
+        "reference",
+        "config",
+        "personal",
+        "decision",
+        "note",
+        "archive",
+        "spec",
+        "agent-rules",
+        "collection",
+        "meta",
+        "work",
+        "contact",
+        "epic"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "stable",
+        "provisional",
+        "historical",
+        "deprecated",
+        "pending",
+        "backlog",
+        "analysis",
+        "ready_for_dev",
+        "in_progress",
+        "needs_qa",
+        "blocked",
+        "completed"
+      ]
+    },
+    "epic": {
+      "type": "string",
+      "pattern": "^epic_[a-z0-9_]+$"
+    },
+    "canonical": {
+      "type": "boolean"
+    },
+    "created_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "updated_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "completed_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "deprecated_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "unblocks_on": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "source_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "related": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9_]+$"
+      }
+    },
+    "priority": {
+      "type": "string",
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "role": {
+      "type": "string",
+      "minLength": 1
+    },
+    "aliases": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "repos": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "role",
+          "description"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "non_repo_paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "role",
+          "description"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "specs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "description"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "logs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "description"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "machine": {
+      "type": "string"
+    },
+    "owner": {
+      "type": "string"
+    },
+    "supersedes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9_]+$"
+      }
+    },
+    "superseded_by": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9_]+$"
+      }
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["human", "bot"]
+    },
+    "relationship": {
+      "type": "string",
+      "minLength": 1
+    },
+    "channels": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "string", "minLength": 1 },
+          {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "minItems": 1
+          }
+        ]
+      }
+    },
+    "operates_bots": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9_]+$"
+      }
+    },
+    "operated_by": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9_]+$"
+      }
+    },
+    "document_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9_]+$"
+      }
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "worktree": {
+      "type": "string",
+      "minLength": 1
+    },
+    "merge_commit": {
+      "type": "string",
+      "minLength": 1
+    },
+    "shipping_commit": {
+      "type": "string",
+      "minLength": 1
+    },
+    "qa_hardening_commit": {
+      "type": "string",
+      "minLength": 1
+    },
+    "docs_commit": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pr_url": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resolution": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resolution_note": {
+      "type": "string",
+      "minLength": 1
+    },
+    "soak_tracked_by": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+$"
+    },
+    "spec_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+$"
+    },
+    "work_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+$"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": { "type": { "const": "ability" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related"]
+    },
+    {
+      "properties": { "type": { "const": "project" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related", "repos", "non_repo_paths", "specs", "logs"]
+    },
+    {
+      "properties": { "type": { "const": "reference" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related"]
+    },
+    {
+      "properties": { "type": { "const": "config" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related"]
+    },
+    {
+      "properties": { "type": { "const": "personal" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related"]
+    },
+    {
+      "properties": { "type": { "const": "decision" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related"]
+    },
+    {
+      "properties": { "type": { "const": "note" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related"]
+    },
+    {
+      "properties": { "type": { "const": "archive" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related"]
+    },
+    {
+      "properties": { "type": { "const": "spec" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related", "machine", "owner"]
+    },
+    {
+      "properties": { "type": { "const": "agent-rules" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related", "role"]
+    },
+    {
+      "properties": { "type": { "const": "collection" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related"]
+    },
+    {
+      "properties": { "type": { "const": "meta" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related"]
+    },
+    {
+      "properties": { "type": { "const": "work" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related", "machine", "owner"]
+    },
+    {
+      "properties": { "type": { "const": "contact" } },
+      "required": ["type", "id", "title", "status", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related", "kind"]
+    },
+    {
+      "properties": {
+        "type": { "const": "epic" },
+        "status": false
+      },
+      "required": ["type", "id", "title", "canonical", "created_at", "updated_at", "source_path", "tags", "summary", "related"]
+    }
+  ],
+  "allOf": [
+    {
+      "if": { "required": ["role"] },
+      "then": { "required": ["type"], "properties": { "type": { "const": "agent-rules" } } }
+    },
+    {
+      "if": {
+        "anyOf": [
+          { "required": ["kind"] },
+          { "required": ["relationship"] },
+          { "required": ["channels"] },
+          { "required": ["operates_bots"] },
+          { "required": ["operated_by"] }
+        ]
+      },
+      "then": {
+        "anyOf": [
+          { "properties": { "type": { "const": "contact" } }, "required": ["type"] },
+          { "properties": { "id": { "pattern": "^reference_machine_[a-z0-9_]+$" } }, "required": ["id"] }
+        ]
+      }
+    },
+    {
+      "if": { "required": ["document_ids"] },
+      "then": { "properties": { "type": { "const": "collection" } }, "required": ["type"] }
+    },
+    {
+      "if": { "required": ["epic"] },
+      "then": {
+        "required": ["type"],
+        "properties": {
+          "type": { "enum": ["spec", "work"] }
+        }
+      }
+    }
+  ]
+}

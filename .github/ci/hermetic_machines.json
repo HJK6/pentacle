@@ -1,0 +1,80 @@
+{
+  "machines": [
+    {
+      "name": "local",
+      "label": "Hosted hermetic local fixture",
+      "ssh_target": null,
+      "claude_bin": "/usr/bin/false",
+      "codex_bin": "/usr/bin/false",
+      "tmux_bin": "tmux",
+      "projects_root": "/tmp/example-projects",
+      "codex_history_path": "/tmp/example-history.jsonl",
+      "codex_state_db_path": "/tmp/example-state.sqlite",
+      "cwd": "/tmp/example-project",
+      "codex_cwd": "/tmp/example-project",
+      "prompt": "Reply with exactly: local online",
+      "agent_orch_bin_dir": "/usr/bin"
+    },
+    {
+      "name": "hosta",
+      "label": "Hosted hermetic hosta fixture",
+      "ssh_target": null,
+      "claude_bin": "/usr/bin/false",
+      "codex_bin": "/usr/bin/false",
+      "tmux_bin": "tmux",
+      "projects_root": "/tmp/example-projects",
+      "codex_history_path": "/tmp/example-hosta-history.jsonl",
+      "codex_state_db_path": "/tmp/example-hosta-state.sqlite",
+      "cwd": "/tmp/example-project",
+      "codex_cwd": "/tmp/example-project",
+      "prompt": "Reply with exactly: hosta online",
+      "agent_orch_bin_dir": "/usr/bin"
+    },
+    {
+      "name": "hostb",
+      "label": "Hosted hermetic hostb fixture",
+      "ssh_target": null,
+      "claude_bin": "/usr/bin/false",
+      "codex_bin": "/usr/bin/false",
+      "tmux_bin": "tmux",
+      "projects_root": "/tmp/example-projects",
+      "codex_history_path": "/tmp/example-hostb-history.jsonl",
+      "codex_state_db_path": "/tmp/example-hostb-state.sqlite",
+      "cwd": "/tmp/example-project",
+      "codex_cwd": "/tmp/example-project",
+      "prompt": "Reply with exactly: hostb online",
+      "agent_orch_bin_dir": "/usr/bin"
+    },
+    {
+      "name": "hostc",
+      "label": "Hosted hermetic hostc fixture",
+      "ssh_target": null,
+      "claude_bin": "/usr/bin/false",
+      "codex_bin": "/usr/bin/false",
+      "tmux_bin": "tmux",
+      "projects_root": "/tmp/example-projects",
+      "codex_history_path": "/tmp/example-hostc-history.jsonl",
+      "codex_state_db_path": "/tmp/example-hostc-state.sqlite",
+      "cwd": "/tmp/example-project",
+      "codex_cwd": "/tmp/example-project",
+      "prompt": "Reply with exactly: hostc online",
+      "agent_orch_bin_dir": "/usr/bin"
+    },
+    {
+      "name": "hostd",
+      "label": "Hosted hermetic hostd fixture",
+      "ssh_target": null,
+      "claude_bin": "/usr/bin/false",
+      "codex_bin": "/usr/bin/false",
+      "tmux_bin": "tmux",
+      "projects_root": "/tmp/example-projects",
+      "codex_history_path": "/tmp/example-hostd-history.jsonl",
+      "codex_state_db_path": "/tmp/example-hostd-state.sqlite",
+      "cwd": "/tmp/example-project",
+      "codex_cwd": "/tmp/example-project",
+      "prompt": "Reply with exactly: hostd online",
+      "agent_orch_bin_dir": "/usr/bin"
+    }
+  ]
+}
+

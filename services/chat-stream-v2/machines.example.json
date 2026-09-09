@@ -1,0 +1,19 @@
+{
+  "machines": [
+    {
+      "name": "local",
+      "label": "Local example",
+      "ssh_target": null,
+      "claude_bin": "claude",
+      "codex_bin": "codex",
+      "tmux_bin": "tmux",
+      "projects_root": "~/.config/example/projects",
+      "codex_history_path": "~/.config/example/history.jsonl",
+      "codex_state_db_path": "~/.cache/example/state.sqlite",
+      "cwd": "~/workspace",
+      "codex_cwd": "~/workspace",
+      "prompt": "Reply with exactly: local example ready",
+      "show_gpu": false
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+Current session
+███████▌                   15% used
+Resets 05:00 (UTC)
+
+Current week (all models)
+██████████                 40% used
+Resets Jan 08 at 19:00 (UTC)
+
+Current week (Example model)
+████                       10% used
+Resets Jan 08 at 19:00 (UTC)
+
+Extra usage not enabled

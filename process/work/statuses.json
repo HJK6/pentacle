@@ -1,0 +1,77 @@
+{
+  "version": 2,
+  "statuses": [
+    {
+      "name": "backlog",
+      "order": 1,
+      "display_label": "Backlog",
+      "color": "#8aa097",
+      "is_terminal": false,
+      "default_visible": true,
+      "description": "Created; still needs requirements from the user."
+    },
+    {
+      "name": "analysis",
+      "order": 2,
+      "display_label": "Analysis",
+      "color": "#a890ff",
+      "is_terminal": false,
+      "default_visible": true,
+      "description": "Spec QA and pre-development investigation. After backlog, before ready_for_dev."
+    },
+    {
+      "name": "ready_for_dev",
+      "order": 3,
+      "display_label": "Ready for Dev",
+      "color": "#a8b8ff",
+      "is_terminal": false,
+      "default_visible": true,
+      "description": "Spec is QA'd and implementable; awaiting a dev to pick it up."
+    },
+    {
+      "name": "in_progress",
+      "order": 4,
+      "display_label": "In Progress",
+      "color": "#56d364",
+      "is_terminal": false,
+      "default_visible": true,
+      "description": "Being actively worked on. Code dev, code QA, and the documentation phase all live here."
+    },
+    {
+      "name": "needs_qa",
+      "order": 5,
+      "display_label": "Needs QA",
+      "color": "#f5b78a",
+      "is_terminal": false,
+      "default_visible": true,
+      "description": "The exception, not the norm — most stories skip this; automated QA is the default/preferred validation. Entered only after dev AND automated QA are complete (unit/integration tests + code QA green) — NOT while any automated QA is still outstanding (that stays in_progress). Reached when the sole remaining acceptance is a genuine human-only gate (real device, real-money/external side effect, real-world event, or subjective visual judgment): manual QA to verify that remaining functionality. Items fully covered by green automation close directly to completed instead of parking here for a redundant manual eyeball."
+    },
+    {
+      "name": "blocked",
+      "order": 6,
+      "display_label": "Blocked",
+      "color": "#d4a300",
+      "is_terminal": false,
+      "default_visible": true,
+      "description": "Externally stuck; not progressing. Mutually exclusive with in_progress."
+    },
+    {
+      "name": "completed",
+      "order": 7,
+      "display_label": "Completed",
+      "color": "#2dd4bf",
+      "is_terminal": true,
+      "default_visible": false,
+      "description": "Shipped and accepted."
+    },
+    {
+      "name": "deprecated",
+      "order": 8,
+      "display_label": "Deprecated",
+      "color": "#7a7a7a",
+      "is_terminal": true,
+      "default_visible": false,
+      "description": "Dropped before shipping (not pursued, superseded by another approach, no longer relevant)."
+    }
+  ]
+}

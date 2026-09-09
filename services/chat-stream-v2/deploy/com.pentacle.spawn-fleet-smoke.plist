@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pentacle.spawn-fleet-smoke</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd __PENTACLE_RELEASE_CHECKOUT__ &amp;&amp; __PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/.venv/bin/python __PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/tools/spawn_fleet_smoke.py</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>StandardOutPath</key>
+  <string>__PENTACLE_USER_HOME__/.pentacle/spawn-fleet-smoke.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PENTACLE_USER_HOME__/.pentacle/spawn-fleet-smoke.err</string>
+</dict>
+</plist>

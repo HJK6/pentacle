@@ -1,0 +1,14 @@
+{
+  "base_sha": "0000000000000000000000000000000000000000",
+  "captured_with": "synthetic event-push fixture",
+  "rejection_stage": "identity_unverified",
+  "response": {
+    "error": "identity_unverified",
+    "request_id": "request-example",
+    "type": "event.push.error"
+  },
+  "response_has_version": false,
+  "source_sha": "0000000000000000000000000000000000000000",
+  "schema": "event_push_rejection.v1",
+  "target_sha": "0000000000000000000000000000000000000000"
+}

@@ -1,0 +1,12 @@
+Current week (all models)
+40% used
+Resets Jan 01 at 00:00 (UTC)
+Current week (Future model)
+91% used
+Resets Jan 03 at 00:00 (UTC)
+Current session
+88% used
+Resets 04:00 (UTC)
+Current week (Example Model)
+10% used
+Resets Jan 01 at 00:00 (UTC)

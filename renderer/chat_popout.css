@@ -1,0 +1,24 @@
+body.chat-popout .sidebar,
+body.chat-popout #dashboard-content,
+body.chat-popout #cell-1,
+body.chat-popout #cell-2,
+body.chat-popout #cell-3 {
+  display: none !important;
+}
+
+body.chat-popout .grid {
+  display: block;
+  height: 100vh;
+}
+
+body.chat-popout #cell-0 {
+  display: flex !important;
+  width: 100%;
+  height: 100%;
+}
+
+body.chat-popout .cell-view-toggle-group,
+body.chat-popout .cell-maximize,
+body.chat-popout .cell-close {
+  display: none !important;
+}

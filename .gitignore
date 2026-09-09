@@ -1,0 +1,25 @@
+node_modules/
+dist/
+out/
+/renderer/dist/chat_core.bundle.js
+/.ui-review/desktop-chat/
+.env
+*.log
+.DS_Store
+.slot-state.json
+.claude/
+*.backup-*
+pentacle.config.js
+configs/*.local.js
+services/chat-stream-v2/machines.local.json
+/.pentacle-sync/
+.pentacle-deploy/
+worktrees/
+
+test/artifacts/
+.venv/
+__pycache__/
+
+# In-memory-session-store daemons (--session-store :memory:) write a literal
+# ":memory:.rehydrate-seq/" dir in cwd; never commit these test artifacts.
+:memory:*

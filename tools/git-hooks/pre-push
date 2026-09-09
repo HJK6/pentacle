@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Opt-in pre-push gate: run the local v2 merge gate for gate-relevant push ranges
+# so CI is confirmation, not first execution. Enable with `make hooks`.
+# Rule: docs/config/development_process.md § "Local predeploy gates are authoritative"
+# Run the local gate before pushing changes.
+#
+# git invokes this as: pre-push <remote-name> <remote-url>
+# stdin lines: <local_ref> <local_oid> <remote_ref> <remote_oid>
+set -euo pipefail
+
+REMOTE="${1:-}"
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+GIT_DIR="$(git rev-parse --git-dir)"
+HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || echo '')"
+EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+VENV="services/chat-stream-v2/.venv"
+BOOTSTRAP="python3 -m venv $VENV && $VENV/bin/pip install -r services/chat-stream-v2/requirements.txt"
+
+is_zero() { case "$1" in *[!0]*) return 1;; *) return 0;; esac; }
+
+# --- read all stdin tuples ---
+local_refs=(); local_oids=(); remote_oids=()
+while read -r lref loid rref roid; do
+  [ -z "${loid:-}" ] && continue
+  local_refs+=("$lref"); local_oids+=("$loid"); remote_oids+=("$roid")
+done
+
+# --- bypass: PENTACLE_SKIP_PREPUSH="<non-empty reason>" ---
+reason="$(printf '%s' "${PENTACLE_SKIP_PREPUSH:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+if [ -n "$reason" ]; then
+  for i in "${!local_oids[@]}"; do
+    is_zero "${local_oids[$i]}" && continue
+    printf '%s|%s|%s|%s|%s\n' "$(date -Iseconds)" "$REMOTE" "${local_refs[$i]}" "${local_oids[$i]}" "$reason" \
+      >> "$GIT_DIR/prepush-bypass.log"
+  done
+  echo "pre-push: BYPASSED (PENTACLE_SKIP_PREPUSH) — reason logged to $GIT_DIR/prepush-bypass.log" >&2
+  exit 0
+fi
+
+# --- collect changed paths across non-deletion tuples ---
+paths=""
+force_relevant=0
+nonzero_local_oids=()
+for i in "${!local_oids[@]}"; do
+  loid="${local_oids[$i]}"; roid="${remote_oids[$i]}"
+  is_zero "$loid" && continue          # deletion tuple: ignore
+  nonzero_local_oids+=("$loid")
+  if ! is_zero "$roid" && git cat-file -e "$roid" 2>/dev/null; then
+    range_paths="$(git diff --name-only -z --diff-filter=ACMRD --no-renames "$roid" "$loid" | tr '\0' '\n')"
+  elif base="$(git merge-base origin/main "$loid" 2>/dev/null)" && [ -n "$base" ]; then
+    range_paths="$(git diff --name-only -z --diff-filter=ACMRD --no-renames "$base" "$loid" | tr '\0' '\n')"
+  else
+    # unknown base: treat as gate-relevant; enumerate the full tree for agent-orch detection
+    force_relevant=1
+    range_paths="$(git ls-tree -r -z --name-only "$loid" | tr '\0' '\n')"
+  fi
+  paths="$paths$range_paths"$'\n'
+done
+
+# nothing to push (all deletions / empty) -> allow
+if [ "${#nonzero_local_oids[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+relevant=0
+agent_orch=0
+while IFS= read -r p; do
+  [ -z "$p" ] && continue
+  b="${p##*/}"
+  case "$p" in
+    services/chat-stream-v2/*|services/agent-orch/*|services/_shared/*|tools/*|.github/*) relevant=1;;
+  esac
+  case "$p" in services/agent-orch/*) agent_orch=1;; esac
+  case "$b" in .gitignore|Makefile|conftest.py|requirements*|pyproject*) relevant=1;;
+  esac
+done <<< "$paths"
+[ "$force_relevant" -eq 1 ] && relevant=1
+
+if [ "$relevant" -eq 0 ]; then
+  echo "pre-push: no gate-relevant paths in range — skipping local gate." >&2
+  exit 0
+fi
+
+# --- gate-relevant: candidate must be HEAD and the tree clean ---
+for loid in "${nonzero_local_oids[@]}"; do
+  if [ "$loid" != "$HEAD_SHA" ]; then
+    echo "pre-push: REFUSED — pushing $loid but HEAD is $HEAD_SHA." >&2
+    echo "  The local gate runs against the checked-out HEAD; push the current HEAD (one push per gated candidate)." >&2
+    exit 1
+  fi
+done
+if [ -n "$(git status --porcelain)" ]; then
+  echo "pre-push: REFUSED — working tree is dirty; gate would not match the pushed commit." >&2
+  echo "  Commit or stash your changes so the tree is clean, then push." >&2
+  exit 1
+fi
+
+# --- venv required ---
+if [ ! -x "$VENV/bin/python" ]; then
+  echo "pre-push: REFUSED — v2 gate venv missing ($VENV)." >&2
+  echo "  Bootstrap it: $BOOTSTRAP" >&2
+  exit 1
+fi
+PY="$VENV/bin/python"
+
+echo "pre-push: running local v2 merge gate (run_gate.py merge)..." >&2
+"$PY" services/chat-stream-v2/tools/run_gate.py merge
+
+if [ "$agent_orch" -eq 1 ]; then
+  echo "pre-push: agent-orch paths changed — running services/agent-orch/tests..." >&2
+  "$PY" -m pytest services/agent-orch/tests -q
+fi
+
+echo "pre-push: local gate PASSED — proceeding with push." >&2
+exit 0

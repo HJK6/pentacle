@@ -1,0 +1,3 @@
+#!/bin/zsh
+: "${PENTACLE_USAGE_CLAUDE_BIN:?usage collector requires its Claude shim}"
+exec "$PENTACLE_USAGE_CLAUDE_BIN" "$@"

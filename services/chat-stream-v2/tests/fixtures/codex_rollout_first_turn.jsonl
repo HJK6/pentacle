@@ -1,0 +1,12 @@
+{"timestamp":"2025-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"session-public-1","session_id":"session-public-1","cwd":"/workspace/example","cli_version":"0.0.0","originator":"example-client"},"ordinal":0}
+{"timestamp":"2025-01-01T00:00:00.100Z","type":"response_item","payload":{"type":"message","id":"message-developer","role":"developer","content":[{"type":"input_text","text":"<skills_instructions>Example setup</skills_instructions>"}]},"ordinal":1}
+{"timestamp":"2025-01-01T00:00:00.200Z","type":"response_item","payload":{"type":"message","id":"message-environment","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/workspace/example</cwd>\n</environment_context>"}]},"ordinal":2}
+{"timestamp":"2025-01-01T00:00:01.000Z","type":"event_msg","payload":{"type":"task_started"},"ordinal":3}
+{"timestamp":"2025-01-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","id":"message-user-1","role":"user","content":[{"type":"input_text","text":"Inspect the example input."}]},"ordinal":4}
+{"timestamp":"2025-01-01T00:00:03.000Z","type":"response_item","payload":{"type":"reasoning","id":"reasoning-1","summary":[{"type":"summary_text","text":"Planning the example read."}]},"ordinal":5}
+{"timestamp":"2025-01-01T00:00:04.000Z","type":"response_item","payload":{"type":"function_call","id":"call-1","call_id":"call-1","name":"shell","arguments":"{\"command\":\"inspect example input\"}"},"ordinal":6}
+{"timestamp":"2025-01-01T00:00:05.000Z","type":"response_item","payload":{"type":"function_call_output","id":"call-output-1","call_id":"call-1","output":"Synthetic file body"},"ordinal":7}
+{"timestamp":"2025-01-01T00:00:06.000Z","type":"response_item","payload":{"type":"message","id":"message-assistant-1","role":"assistant","content":[{"type":"output_text","text":"The example input is ready."}]},"ordinal":8}
+{"timestamp":"2025-01-01T00:00:07.000Z","type":"response_item","payload":{"type":"message","id":"message-user-2","role":"user","content":[{"type":"input_text","text":"Inspect the next example too."}]},"ordinal":9}
+{"timestamp":"2025-01-01T00:00:08.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total":123}},"ordinal":10}
+{"timestamp":"2025-01-01T00:00:09.000Z","type":"response_item","payload":{"type":"message","id":"message-tell-1","role":"user","content":[{"type":"input_text","text":"A synthetic coordination instruction."}]},"ordinal":11}

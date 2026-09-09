@@ -1,0 +1,2 @@
+{"timestamp":"2025-01-02T00:00:00.000Z","type":"session_meta","payload":{"id":"session-public-2","session_id":"session-public-2","cwd":"/workspace/example/other"},"ordinal":0}
+{"timestamp":"2025-01-02T00:00:01.000Z","type":"response_item","payload":{"type":"message","id":"message-other-1","role":"user","content":[{"type":"input_text","text":"A message from another synthetic session."}]},"ordinal":1}

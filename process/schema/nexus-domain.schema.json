@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/pentacle/schema/nexus-domain.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "title", "charter", "parent_id", "audience", "bindings", "spawn_profile", "aliases"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "title": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S"},
+    "charter": {"type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S"},
+    "parent_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"}
+      ]
+    },
+    "audience": {"enum": ["pull", "scoped", "global"]},
+    "bindings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope_type", "scope_key"],
+        "properties": {
+          "scope_type": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$"},
+          "scope_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$"}
+        }
+      }
+    },
+    "spawn_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "visibility", "provider"],
+      "properties": {
+        "role": {"const": "nexus"},
+        "visibility": {"const": "visible"},
+        "provider": {"enum": ["codex", "claude"]},
+        "host": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "model": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "effort": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "initial_prompt": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S"}
+      }
+    },
+    "aliases": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"}
+    },
+    "expires_at": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+        }
+      ]
+    }
+  }
+}

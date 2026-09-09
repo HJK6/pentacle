@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+find_real_tmux() {
+  if [[ -n "${PENTACLE_REAL_TMUX:-}" ]]; then
+    printf '%s\n' "$PENTACLE_REAL_TMUX"
+    return 0
+  fi
+
+  local self_dir self
+  self_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+  self="$self_dir/$(basename -- "$0")"
+  for candidate in /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux /bin/tmux; do
+    if [[ -x "$candidate" && "$candidate" != "$self" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+real_tmux="$(find_real_tmux)" || {
+  printf 'pentacle tmux guard: real tmux not found\n' >&2
+  exit 127
+}
+
+has_explicit_socket=0
+is_kill_server=0
+skip_next=0
+for arg in "$@"; do
+  if [[ "$skip_next" == 1 ]]; then
+    skip_next=0
+    continue
+  fi
+  case "$arg" in
+    -S|-L)
+      has_explicit_socket=1
+      skip_next=1
+      ;;
+    -S*|-L*)
+      has_explicit_socket=1
+      ;;
+    kill-server)
+      is_kill_server=1
+      ;;
+  esac
+done
+
+if [[ -n "${TMUX:-}" && "$is_kill_server" == 1 && "$has_explicit_socket" == 0 ]]; then
+  printf 'pentacle tmux guard: refusing tmux kill-server inside $TMUX without explicit -S or -L\n' >&2
+  exit 64
+fi
+
+exec "$real_tmux" "$@"

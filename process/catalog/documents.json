@@ -1,0 +1,150 @@
+[
+  {
+    "id": "agent_rules_documentation_baseline",
+    "path": "agents/documentation_baseline.md",
+    "title": "Documentation baseline",
+    "type": "agent-rules",
+    "canonical": true,
+    "updated_at": "2026-09-09",
+    "source_path": "agents/documentation_baseline.md",
+    "tags": [
+      "pentacle",
+      "process"
+    ],
+    "summary": "Documentation baseline.",
+    "related": [],
+    "status": "stable",
+    "role": "documentation"
+  },
+  {
+    "id": "agent_rules_lead_baseline",
+    "path": "agents/lead_baseline.md",
+    "title": "Lead baseline",
+    "type": "agent-rules",
+    "canonical": true,
+    "updated_at": "2026-09-09",
+    "source_path": "agents/lead_baseline.md",
+    "tags": [
+      "pentacle",
+      "process"
+    ],
+    "summary": "Lead baseline.",
+    "related": [],
+    "status": "stable",
+    "role": "lead"
+  },
+  {
+    "id": "agent_rules_nexus_baseline",
+    "path": "agents/nexus_baseline.md",
+    "title": "Coordinator baseline",
+    "type": "agent-rules",
+    "canonical": true,
+    "updated_at": "2026-09-09",
+    "source_path": "agents/nexus_baseline.md",
+    "tags": [
+      "pentacle",
+      "process"
+    ],
+    "summary": "Coordinator baseline.",
+    "related": [],
+    "status": "stable",
+    "role": "nexus"
+  },
+  {
+    "id": "agent_rules_qa_baseline",
+    "path": "agents/qa_baseline.md",
+    "title": "QA baseline",
+    "type": "agent-rules",
+    "canonical": true,
+    "updated_at": "2026-09-09",
+    "source_path": "agents/qa_baseline.md",
+    "tags": [
+      "pentacle",
+      "process"
+    ],
+    "summary": "QA baseline.",
+    "related": [],
+    "status": "stable",
+    "role": "qa"
+  },
+  {
+    "id": "config_agent_orchestration",
+    "path": "docs/config/agent_orchestration.md",
+    "title": "Agent orchestration",
+    "type": "config",
+    "canonical": true,
+    "updated_at": "2026-09-09",
+    "source_path": "docs/config/agent_orchestration.md",
+    "tags": [
+      "pentacle",
+      "process"
+    ],
+    "summary": "Agent orchestration.",
+    "related": [],
+    "status": "stable"
+  },
+  {
+    "id": "config_development_process",
+    "path": "docs/config/development_process.md",
+    "title": "Development process",
+    "type": "config",
+    "canonical": true,
+    "updated_at": "2026-09-09",
+    "source_path": "docs/config/development_process.md",
+    "tags": [
+      "pentacle",
+      "process"
+    ],
+    "summary": "Development process.",
+    "related": [],
+    "status": "stable"
+  },
+  {
+    "id": "config_private_configuration",
+    "path": "docs/config/private_configuration.md",
+    "title": "Private configuration",
+    "type": "config",
+    "canonical": true,
+    "updated_at": "2026-09-09",
+    "source_path": "docs/config/private_configuration.md",
+    "tags": [
+      "pentacle",
+      "process"
+    ],
+    "summary": "Private configuration.",
+    "related": [],
+    "status": "stable"
+  },
+  {
+    "id": "config_qa_guidelines",
+    "path": "docs/config/qa_guidelines.md",
+    "title": "QA guidelines",
+    "type": "config",
+    "canonical": true,
+    "updated_at": "2026-09-09",
+    "source_path": "docs/config/qa_guidelines.md",
+    "tags": [
+      "pentacle",
+      "process"
+    ],
+    "summary": "QA guidelines.",
+    "related": [],
+    "status": "stable"
+  },
+  {
+    "id": "meta_readme",
+    "path": "README.md",
+    "title": "Set up the full process",
+    "type": "meta",
+    "canonical": true,
+    "updated_at": "2026-09-09",
+    "source_path": "README.md",
+    "tags": [
+      "pentacle",
+      "process"
+    ],
+    "summary": "Set up the full process.",
+    "related": [],
+    "status": "stable"
+  }
+]

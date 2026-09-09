@@ -1,0 +1,813 @@
+{
+  "schema": "daemon_updates_v1",
+  "status": "locked_planning_contract_not_runtime_evidence",
+  "source": {
+    "pentacle": "93cb745e57808452dace8b2a18e2d7a542c19441",
+    "mobile": "4cb5c70bb1a96d6a7d173a88d8d6feb87ce8e07d",
+    "mobile_core": "d50cc7de1830fa5f96c7852aa104f05891ccae26",
+    "pentacle_core": "90736f11b95ed64ab313f970f3b41441984a6871"
+  },
+  "contract": {
+    "agent_required": [
+      "stream_id",
+      "session_generation",
+      "display_name",
+      "role",
+      "objective",
+      "state",
+      "model",
+      "since"
+    ],
+    "agent_nullable": [
+      "role",
+      "objective",
+      "model",
+      "since"
+    ],
+    "agent_state": [
+      "working",
+      "idle",
+      "blocked",
+      "done"
+    ],
+    "timestamp": "RFC3339 UTC; since is state-transition time or null",
+    "childless": "omit agents",
+    "order": "created_at,stream_id",
+    "thread_limit": {
+      "default": 25,
+      "min": 1,
+      "max": 50,
+      "max_response_utf8_bytes": 65536,
+      "max_text_utf8_bytes": 8192
+    },
+    "cursor": "base64url JSON v1, no padding; binds pair/generations and exclusive before_seq; decode then reauthorize, never treat cursor as auth",
+    "thread_row_fields": [
+      "row_id",
+      "ref_id",
+      "ts",
+      "direction",
+      "kind",
+      "text",
+      "truncated"
+    ],
+    "direction": [
+      "parent_to_child",
+      "child_to_parent"
+    ],
+    "kinds": [
+      "brief",
+      "tell",
+      "report"
+    ],
+    "page_order": "Newest page first; rows within each page ascending committed sequence; next_cursor loads older entries",
+    "question_caps": {
+      "title": 90,
+      "paragraph": 300,
+      "total": 1200,
+      "lines_per_block": 3,
+      "option_label": 40,
+      "note": 100,
+      "max_options": 5
+    },
+    "answer": "prompt.answer {request_id,question_id,selections?,text?}; same serializer on both surfaces",
+    "spawn_fixture_precondition": "Seed the existing spawn catalog with fixture-catalog-v1 and the named valid model/effort; desktop_manual is the existing mobile wire profile identifier, not a client implementation scope."
+  },
+  "inventory_cases": [
+    {
+      "label": "nexus_no_card",
+      "frame": {
+        "type": "session.inventory",
+        "sessions": [
+          {
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
+            "provider": "codex",
+            "role": "nexus",
+            "visibility": "default",
+            "parent_stream_id": null,
+            "working": false,
+            "online": true,
+            "session_generation": "11111111111111111111111111111111",
+            "agents": [
+              {
+                "stream_id": "host_b:v2-fixture-child",
+                "display_name": "Fixture child",
+                "role": "lead",
+                "objective": "Check the fixture journey",
+                "state": "working",
+                "model": "gpt-6-astra",
+                "since": "2026-09-08T00:00:00Z",
+                "session_generation": "22222222222222222222222222222222"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_mobile": {
+        "status_reachable": true,
+        "sub_agents": [
+          "host_b:v2-fixture-child"
+        ],
+        "history_action": true
+      }
+    },
+    {
+      "label": "summary_snapshot",
+      "frame": {
+        "type": "snapshot",
+        "sessions": [
+          {
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
+            "provider": "codex",
+            "role": "nexus",
+            "visibility": "default",
+            "parent_stream_id": null,
+            "working": false,
+            "online": true,
+            "session_generation": "11111111111111111111111111111111",
+            "agents": [
+              {
+                "stream_id": "host_b:v2-fixture-child",
+                "display_name": "Fixture child",
+                "role": "lead",
+                "objective": "Check the fixture journey",
+                "state": "working",
+                "model": "gpt-6-astra",
+                "since": "2026-09-08T00:00:00Z",
+                "session_generation": "22222222222222222222222222222222"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_mobile": {
+        "sub_agents": [
+          "host_b:v2-fixture-child"
+        ]
+      }
+    },
+    {
+      "label": "non_nexus_parent",
+      "frame": {
+        "type": "session.inventory",
+        "sessions": [
+          {
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
+            "provider": "codex",
+            "role": "lead",
+            "visibility": "default",
+            "parent_stream_id": null,
+            "working": false,
+            "online": true,
+            "session_generation": "11111111111111111111111111111111",
+            "agents": [
+              {
+                "stream_id": "host_b:v2-fixture-child",
+                "display_name": "Fixture child",
+                "role": "lead",
+                "objective": "Check the fixture journey",
+                "state": "working",
+                "model": "gpt-6-astra",
+                "since": "2026-09-08T00:00:00Z",
+                "session_generation": "22222222222222222222222222222222"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_mobile": {
+        "sub_agents": [],
+        "history_action": false
+      }
+    },
+    {
+      "label": "childless",
+      "frame": {
+        "type": "session.inventory",
+        "sessions": [
+          {
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
+            "provider": "codex",
+            "role": "nexus",
+            "visibility": "default",
+            "parent_stream_id": null,
+            "working": false,
+            "online": true,
+            "session_generation": "11111111111111111111111111111111"
+          }
+        ]
+      },
+      "expected_mobile": {
+        "status_reachable": true,
+        "sub_agents": []
+      }
+    },
+    {
+      "label": "legacy_nullable",
+      "frame": {
+        "type": "session.inventory",
+        "sessions": [
+          {
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
+            "provider": "codex",
+            "role": "nexus",
+            "visibility": "default",
+            "parent_stream_id": null,
+            "working": false,
+            "online": true,
+            "session_generation": "11111111111111111111111111111111",
+            "agents": [
+              {
+                "stream_id": "host_b:v2-fixture-child",
+                "display_name": "Fixture child",
+                "role": null,
+                "objective": null,
+                "state": "idle",
+                "model": null,
+                "since": null,
+                "session_generation": "22222222222222222222222222222222"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_mobile": {
+        "sub_agents": [
+          "host_b:v2-fixture-child"
+        ]
+      }
+    },
+    {
+      "label": "generation_replacement",
+      "frame": {
+        "type": "session.inventory",
+        "sessions": [
+          {
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
+            "provider": "codex",
+            "role": "nexus",
+            "visibility": "default",
+            "parent_stream_id": null,
+            "working": false,
+            "online": true,
+            "session_generation": "11111111111111111111111111111111",
+            "agents": [
+              {
+                "stream_id": "host_b:v2-fixture-child",
+                "display_name": "Fixture child",
+                "role": "lead",
+                "objective": "Check the fixture journey",
+                "state": "idle",
+                "model": "gpt-6-astra",
+                "since": "2026-09-08T00:00:00Z",
+                "session_generation": "44444444444444444444444444444444"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_mobile": {
+        "history_invalidated": true,
+        "sub_agents": [
+          "host_b:v2-fixture-child"
+        ]
+      }
+    },
+    {
+      "label": "unicode_objective",
+      "frame": {
+        "type": "session.inventory",
+        "sessions": [
+          {
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
+            "provider": "codex",
+            "role": "nexus",
+            "visibility": "default",
+            "parent_stream_id": null,
+            "working": false,
+            "online": true,
+            "session_generation": "11111111111111111111111111111111",
+            "agents": [
+              {
+                "stream_id": "host_b:v2-fixture-child",
+                "display_name": "Fixture child",
+                "role": "lead",
+                "objective": "Vérifier 東京 🌈",
+                "state": "working",
+                "model": "gpt-6-astra",
+                "since": "2026-09-08T00:00:00Z",
+                "session_generation": "22222222222222222222222222222222"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_mobile": {
+        "status_reachable": true,
+        "sub_agents": [
+          "host_b:v2-fixture-child"
+        ],
+        "history_action": true
+      }
+    }
+  ],
+  "thread_cases": [
+    {
+      "label": "operator_first_page",
+      "auth": {
+        "operator_authenticated": true
+      },
+      "request": {
+        "type": "thread.read",
+        "request_id": "thread-fixture-1",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
+        "limit": 2
+      },
+      "response": {
+        "type": "thread.read.ok",
+        "request_id": "thread-fixture-1",
+        "ok": true,
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
+        "rows": [
+          {
+            "row_id": "tell:tell-fixture-2",
+            "ref_id": "tell-fixture-2",
+            "ts": "2026-09-08T00:00:00Z",
+            "direction": "parent_to_child",
+            "kind": "tell",
+            "text": "Check the second path.",
+            "truncated": false
+          },
+          {
+            "row_id": "report:report-fixture-1",
+            "ref_id": "report-fixture-1",
+            "ts": "2026-09-08T00:00:00Z",
+            "direction": "child_to_parent",
+            "kind": "report",
+            "text": "Done: both fixture paths passed.",
+            "truncated": false
+          }
+        ],
+        "next_cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RhOnYyLWZpeHR1cmUtY2hpbGQiLCJjaGlsZF9nZW5lcmF0aW9uIjoiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJwYXJlbnQiOiJob3N0YTp2Mi1maXh0dXJlLW5leHVzIiwicGFyZW50X2dlbmVyYXRpb24iOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsInYiOjF9",
+        "parent_generation": "11111111111111111111111111111111",
+        "child_generation": "22222222222222222222222222222222"
+      },
+      "given": {
+        "open_parent_generation": "11111111111111111111111111111111",
+        "open_child_generation": "22222222222222222222222222222222",
+        "child_parent_stream_id": "host_b:v2-fixture-nexus",
+        "committed_sequences": [
+          1,
+          2,
+          3,
+          4
+        ]
+      }
+    },
+    {
+      "label": "operator_older_page",
+      "auth": {
+        "operator_authenticated": true
+      },
+      "request": {
+        "type": "thread.read",
+        "request_id": "thread-fixture-2",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
+        "limit": 2,
+        "cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RhOnYyLWZpeHR1cmUtY2hpbGQiLCJjaGlsZF9nZW5lcmF0aW9uIjoiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJwYXJlbnQiOiJob3N0YTp2Mi1maXh0dXJlLW5leHVzIiwicGFyZW50X2dlbmVyYXRpb24iOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsInYiOjF9"
+      },
+      "response": {
+        "type": "thread.read.ok",
+        "request_id": "thread-fixture-2",
+        "ok": true,
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
+        "rows": [
+          {
+            "row_id": "brief:spawn-fixture-1",
+            "ref_id": "spawn-fixture-1",
+            "ts": "2026-09-08T00:00:00Z",
+            "direction": "parent_to_child",
+            "kind": "brief",
+            "text": "Check the fixture journey and report the result.",
+            "truncated": false
+          },
+          {
+            "row_id": "tell:tell-fixture-1",
+            "ref_id": "tell-fixture-1",
+            "ts": "2026-09-08T00:00:00Z",
+            "direction": "child_to_parent",
+            "kind": "tell",
+            "text": "The first check passed.",
+            "truncated": false
+          }
+        ],
+        "next_cursor": null,
+        "parent_generation": "11111111111111111111111111111111",
+        "child_generation": "22222222222222222222222222222222"
+      }
+    },
+    {
+      "label": "agent_parent",
+      "auth": {
+        "token_verified": true,
+        "stream_id": "host_b:v2-fixture-nexus",
+        "session_generation": "11111111111111111111111111111111"
+      },
+      "request": {
+        "type": "thread.read",
+        "request_id": "thread-fixture-1",
+        "child_stream_id": "host_b:v2-fixture-child",
+        "limit": 2
+      },
+      "response": {
+        "type": "thread.read.ok",
+        "request_id": "thread-fixture-1",
+        "ok": true,
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
+        "rows": [
+          {
+            "row_id": "tell:tell-fixture-2",
+            "ref_id": "tell-fixture-2",
+            "ts": "2026-09-08T00:00:00Z",
+            "direction": "parent_to_child",
+            "kind": "tell",
+            "text": "Check the second path.",
+            "truncated": false
+          },
+          {
+            "row_id": "report:report-fixture-1",
+            "ref_id": "report-fixture-1",
+            "ts": "2026-09-08T00:00:00Z",
+            "direction": "child_to_parent",
+            "kind": "report",
+            "text": "Done: both fixture paths passed.",
+            "truncated": false
+          }
+        ],
+        "next_cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RhOnYyLWZpeHR1cmUtY2hpbGQiLCJjaGlsZF9nZW5lcmF0aW9uIjoiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJwYXJlbnQiOiJob3N0YTp2Mi1maXh0dXJlLW5leHVzIiwicGFyZW50X2dlbmVyYXRpb24iOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsInYiOjF9",
+        "parent_generation": "11111111111111111111111111111111",
+        "child_generation": "22222222222222222222222222222222"
+      }
+    }
+  ],
+  "error_cases": [
+    {
+      "label": "unauthenticated",
+      "auth": {},
+      "request": {
+        "type": "thread.read",
+        "request_id": "thread-fixture-1",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
+        "limit": 2
+      },
+      "response": {
+        "type": "thread.error",
+        "request_id": "thread-fixture-1",
+        "ok": false,
+        "error_code": "unauthorized",
+        "message": "unauthorized"
+      }
+    },
+    {
+      "label": "operator_parent_missing",
+      "auth": {
+        "operator_authenticated": true
+      },
+      "request": {
+        "type": "thread.read",
+        "request_id": "thread-fixture-1",
+        "parent_stream_id": null,
+        "child_stream_id": "host_b:v2-fixture-child",
+        "limit": 2
+      },
+      "response": {
+        "type": "thread.error",
+        "request_id": "thread-fixture-1",
+        "ok": false,
+        "error_code": "parent_required",
+        "message": "parent required"
+      }
+    },
+    {
+      "label": "agent_forged_parent",
+      "auth": {
+        "token_verified": true,
+        "stream_id": "host_b:v2-other"
+      },
+      "request": {
+        "type": "thread.read",
+        "request_id": "thread-fixture-1",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
+        "limit": 2
+      },
+      "response": {
+        "type": "thread.error",
+        "request_id": "thread-fixture-1",
+        "ok": false,
+        "error_code": "not_direct_child",
+        "message": "not direct child"
+      }
+    },
+    {
+      "label": "grandchild",
+      "auth": {
+        "operator_authenticated": true
+      },
+      "request": {
+        "type": "thread.read",
+        "request_id": "thread-fixture-1",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-grandchild",
+        "limit": 2
+      },
+      "response": {
+        "type": "thread.error",
+        "request_id": "thread-fixture-1",
+        "ok": false,
+        "error_code": "not_direct_child",
+        "message": "not direct child"
+      },
+      "given": {
+        "target_parent_stream_id": "host_b:v2-fixture-child"
+      }
+    },
+    {
+      "label": "pair_closed",
+      "auth": {
+        "operator_authenticated": true
+      },
+      "request": {
+        "type": "thread.read",
+        "request_id": "thread-fixture-1",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
+        "limit": 2
+      },
+      "response": {
+        "type": "thread.error",
+        "request_id": "thread-fixture-1",
+        "ok": false,
+        "error_code": "pair_closed",
+        "message": "pair closed"
+      },
+      "given": {
+        "child_status": "closed"
+      }
+    },
+    {
+      "label": "cursor_cross_pair",
+      "auth": {
+        "operator_authenticated": true
+      },
+      "request": {
+        "type": "thread.read",
+        "request_id": "thread-fixture-1",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
+        "limit": 2,
+        "cursor": "cross-pair-fixture"
+      },
+      "response": {
+        "type": "thread.error",
+        "request_id": "thread-fixture-1",
+        "ok": false,
+        "error_code": "cursor_invalid",
+        "message": "cursor invalid"
+      }
+    },
+    {
+      "label": "limit_over",
+      "auth": {
+        "operator_authenticated": true
+      },
+      "request": {
+        "type": "thread.read",
+        "request_id": "thread-fixture-1",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
+        "limit": 51
+      },
+      "response": {
+        "type": "thread.error",
+        "request_id": "thread-fixture-1",
+        "ok": false,
+        "error_code": "limit_invalid",
+        "message": "limit invalid"
+      }
+    }
+  ],
+  "question_cases": [
+    {
+      "label": "action_question",
+      "envelope": {
+        "schema_version": 1,
+        "question_id": "question-fixture-1",
+        "producer_stream_id": "host_b:v2-fixture-nexus",
+        "producer_session_generation": "11111111111111111111111111111111",
+        "dedup_key": "agent-question:host_b:v2-fixture-nexus:question-fixture-1",
+        "title": "Please unlock the fixture phone",
+        "body": "I need the phone unlocked to install the build.\n\nDone resumes installation. Not yet leaves it pending while I run independent checks.",
+        "context": null,
+        "response_mode": "single_choice",
+        "options": [
+          {
+            "label": "Done",
+            "value": "done",
+            "description": "Resume the install"
+          },
+          {
+            "label": "Not yet",
+            "value": "not_yet",
+            "description": "Keep the install pending"
+          }
+        ],
+        "allow_custom": true
+      }
+    },
+    {
+      "label": "free_text",
+      "envelope": {
+        "schema_version": 1,
+        "question_id": "question-fixture-free",
+        "producer_stream_id": "host_b:v2-fixture-nexus",
+        "producer_session_generation": "11111111111111111111111111111111",
+        "dedup_key": "agent-question:host_b:v2-fixture-nexus:question-fixture-1",
+        "title": "What destination should I use?",
+        "body": "I need the destination before I can choose the route.",
+        "context": null,
+        "response_mode": "free_text",
+        "options": [],
+        "allow_custom": true
+      }
+    },
+    {
+      "label": "multi_choice",
+      "envelope": {
+        "schema_version": 1,
+        "question_id": "question-fixture-multi",
+        "producer_stream_id": "host_b:v2-fixture-nexus",
+        "producer_session_generation": "11111111111111111111111111111111",
+        "dedup_key": "agent-question:host_b:v2-fixture-nexus:question-fixture-1",
+        "title": "Which checks should run?",
+        "body": "The next run depends on your selection.\n\nFirst check validates the roster. Second check validates history.",
+        "context": null,
+        "response_mode": "multi_choice",
+        "options": [
+          {
+            "label": "First check",
+            "value": "first"
+          },
+          {
+            "label": "Second check",
+            "value": "second"
+          }
+        ],
+        "allow_custom": true
+      }
+    }
+  ],
+  "answer_cases": [
+    {
+      "label": "text_only",
+      "request": {
+        "type": "prompt.answer",
+        "request_id": "answer-fixture-1",
+        "question_id": "question-fixture-1",
+        "text": "It is unlocked now."
+      },
+      "expected_store": {
+        "custom_text": "It is unlocked now.",
+        "selections": []
+      }
+    },
+    {
+      "label": "selection_plus_text",
+      "request": {
+        "type": "prompt.answer",
+        "request_id": "answer-fixture-2",
+        "question_id": "question-fixture-1",
+        "selections": [
+          "not_yet"
+        ],
+        "text": "I can unlock it after lunch."
+      },
+      "expected_store": {
+        "custom_text": "I can unlock it after lunch.",
+        "selections": [
+          "not_yet"
+        ]
+      }
+    },
+    {
+      "label": "selection_only",
+      "request": {
+        "type": "prompt.answer",
+        "request_id": "answer-fixture-3",
+        "question_id": "question-fixture-1",
+        "selections": [
+          "done"
+        ]
+      },
+      "expected_store": {
+        "selections": [
+          "done"
+        ]
+      }
+    },
+    {
+      "label": "pure_free_text",
+      "request": {
+        "type": "prompt.answer",
+        "request_id": "answer-fixture-4",
+        "question_id": "question-fixture-free",
+        "text": "Chicago"
+      },
+      "expected_store": {
+        "text": "Chicago"
+      }
+    }
+  ],
+  "spawn_cases": [
+    {
+      "label": "missing_objective",
+      "request": {
+        "type": "spawn",
+        "schema": "SpawnRequestV2",
+        "host": "host_b",
+        "provider": "codex",
+        "model": "gpt-6-astra",
+        "effort": "high",
+        "spawn_profile": "desktop_manual",
+        "catalog_version": "fixture-catalog-v1",
+        "resolution_source": "explicit_override",
+        "idempotency_key": "33333333-3333-4333-8333-000000000001"
+      },
+      "expected_error": "objective_required"
+    },
+    {
+      "label": "objective_supplied",
+      "request": {
+        "type": "spawn",
+        "schema": "SpawnRequestV2",
+        "host": "host_b",
+        "provider": "codex",
+        "model": "gpt-6-astra",
+        "effort": "high",
+        "spawn_profile": "desktop_manual",
+        "catalog_version": "fixture-catalog-v1",
+        "resolution_source": "explicit_override",
+        "idempotency_key": "33333333-3333-4333-8333-000000000002",
+        "objective": "Check the fixture journey"
+      },
+      "expected_objective": "Check the fixture journey"
+    },
+    {
+      "label": "no_watch",
+      "request": {
+        "type": "spawn",
+        "schema": "SpawnRequestV2",
+        "host": "host_b",
+        "provider": "codex",
+        "model": "gpt-6-astra",
+        "effort": "high",
+        "spawn_profile": "desktop_manual",
+        "catalog_version": "fixture-catalog-v1",
+        "resolution_source": "explicit_override",
+        "idempotency_key": "33333333-3333-4333-8333-000000000003",
+        "objective": "Check without default watch",
+        "no_watch": true
+      },
+      "expected_default_watch": false
+    }
+  ],
+  "navigation": {
+    "header_back": "chats_list",
+    "history_x": "nexus_status",
+    "status_x": "session_chat",
+    "content_back": "nexus_status",
+    "entry_points": [
+      "nexus_status_child",
+      "nexus_chat_child_row"
+    ]
+  }
+}

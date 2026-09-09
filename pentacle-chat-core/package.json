@@ -1,0 +1,27 @@
+{
+  "name": "pentacle-chat-core",
+  "version": "0.1.0",
+  "description": "Shared Pentacle chat state and rendering core.",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HJK6/pentacle-chat-core.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HJK6/pentacle-chat-core/issues"
+  },
+  "homepage": "https://github.com/HJK6/pentacle-chat-core#readme",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "test": "node --import tsx --test tests/*.test.ts && npm run typecheck:test",
+    "typecheck": "tsc --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "tsx": "^4.20.6",
+    "typescript": "~5.9.2"
+  }
+}

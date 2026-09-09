@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Orphan reaper, every six hours. The installer binds checkout and user-home
+  placeholders and keeps a rollback copy. Install in dry-run mode to inspect
+  proposed actions before enabling action mode.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.pentacle.orphan-reaper</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/.venv/bin/python</string>
+    <string>__PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/tools/orphan_reaper.py</string>
+    <string>--act</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:__PENTACLE_USER_HOME__/.local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><false/>
+  <key>StartInterval</key><integer>21600</integer>
+  <key>StandardOutPath</key><string>__PENTACLE_USER_HOME__/.pentacle/orphan-reaper.log</string>
+  <key>StandardErrorPath</key><string>__PENTACLE_USER_HOME__/.pentacle/orphan-reaper.err</string>
+</dict>
+</plist>

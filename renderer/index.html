@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Terminal Dashboard</title>
+  <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css">
+  <!-- Shared dashboard design tokens from the publicdashdefs submodule. -->
+  <link rel="stylesheet" href="dashboards/vendor/publicdashdefs/dist/tokens.css">
+  <link rel="stylesheet" href="styles.css">
+  <!-- Cosmic / arcane theme (workstream B token+font layer, scoped to `.cosmic`)
+       MUST come after styles.css so its `--cosmic-*` vars + @font-face faces are
+       available to the chat surface; it does NOT touch the app-wide --bg/--fg
+       tokens, so non-chat screens are unaffected. -->
+  <link rel="stylesheet" href="cosmic_theme.css">
+  <!-- Cosmic chat-surface styling (workstream D). Every rule is scoped under
+       `.cosmic`, so it only applies inside the opted-in chat surface. -->
+  <link rel="stylesheet" href="cosmic_chat_surface.css">
+</head>
+<body>
+  <!-- Titlebar (draggable) -->
+  <div class="titlebar">
+    <div class="titlebar-left">
+      <span class="titlebar-text" id="titlebar-text">PENTACLE</span>
+      <div class="titlebar-machines" id="titlebar-machines" aria-label="Machines"></div>
+    </div>
+    <div class="titlebar-right">
+      <button class="settings-btn" id="settings-btn" title="Settings" aria-label="Settings">&#9881;</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <!-- Sidebar -->
+    <div class="sidebar">
+      <div class="view-switcher">
+        <button class="view-btn active" id="view-chats" data-view="chats">Agents</button>
+        <button class="view-btn" id="view-dashboards" data-view="dashboards">Dashboards</button>
+      </div>
+      <div id="chat-stream-degraded-banner" class="chat-stream-degraded-banner" role="status" aria-live="polite" hidden></div>
+
+      <!-- Sessions Panel -->
+      <div class="sidebar-panel" id="panel-sessions">
+        <div class="sidebar-search-row">
+        <div class="sidebar-search">
+          <svg class="sidebar-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
+          <input id="session-search" type="search" placeholder="Search chats" autocomplete="off">
+        </div>
+          <button class="sb-btn sb-btn-new" id="btn-new" title="New Chat" aria-label="New Chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14 M5 12h14"></path></svg></button>
+        </div>
+        <div class="sidebar-stats" id="stats"></div>
+        <div class="source-filter-bar" id="source-filter-bar" style="display:none"></div>
+        <div class="session-list" id="session-list"></div>
+      </div>
+
+      <!-- Dashboard List Panel (hidden by default) -->
+      <div class="sidebar-panel" id="panel-dashboards" style="display:none">
+        <div class="dashboard-list" id="dashboard-list"></div>
+      </div>
+
+      <!-- Mic Control Panel -->
+      <div class="sidebar-collapsible-section" id="mic-section">
+        <button class="sidebar-section-header" id="mic-section-toggle" type="button" data-sidebar-section-toggle="mic" aria-controls="mic-section-body" aria-expanded="true">
+          <span class="sidebar-section-caret" data-sidebar-section-caret="mic">&#9660;</span>
+          <span class="mic-icon" id="mic-icon">&#127908;</span>
+          <span class="sidebar-section-title">MIC</span>
+          <span class="mic-status-dot" id="mic-status-dot"></span>
+        </button>
+        <div class="sidebar-section-body" id="mic-section-body">
+          <div class="mic-panel" id="mic-panel">
+            <div class="mic-modes">
+              <button class="mic-btn mic-toggle" id="mic-btn-toggle" title="Toggle mic on/off">Off</button>
+              <button class="mic-btn mic-btn-copy" id="mic-btn-copy" title="Start/stop clipboard capture">Copy</button>
+              <button class="mic-btn mic-btn-meeting" id="mic-btn-meeting" title="Start/stop meeting recording">Meeting</button>
+            </div>
+            <div class="mic-info" id="mic-info"></div>
+            <div class="mic-transcript-preview" id="mic-transcript-preview"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-collapsible-section" id="usage-section" style="display:none">
+        <button class="sidebar-section-header" id="usage-section-toggle" type="button" data-sidebar-section-toggle="usage" aria-controls="usage-section-body" aria-expanded="true">
+          <span class="sidebar-section-caret" data-sidebar-section-caret="usage">&#9660;</span>
+          <span class="sidebar-section-title">Limits</span>
+        </button>
+        <div class="sidebar-section-body" id="usage-section-body">
+          <div class="usage-footer" id="limits-footer"></div>
+        </div>
+      </div>
+      <div class="sidebar-collapsible-section" id="machine-stats-section" style="display:none">
+        <div class="sidebar-section-header" id="machine-stats-section-toggle" role="button" tabindex="0" data-sidebar-section-toggle="machineStats" aria-controls="machine-stats-section-body" aria-expanded="true">
+          <span class="sidebar-section-caret" data-sidebar-section-caret="machineStats">&#9660;</span>
+          <span class="sidebar-section-title">Machine Stats</span>
+        </div>
+        <div class="sidebar-section-body" id="machine-stats-section-body">
+          <div class="usage-footer" id="machine-stats-footer"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Terminal Grid -->
+    <div class="grid">
+      <div class="grid-cell" id="cell-0">
+        <div class="cell-header" id="header-0">
+          <span class="cell-label">Slot 1</span>
+          <div class="cell-actions">
+            <button class="cell-status" data-slot="0" title="Session status" aria-pressed="false" style="display:none" disabled><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 1.5A1.5 1.5 0 0 1 5.5 0h3.6a1.5 1.5 0 0 1 1.06.44l2.4 2.41A1.5 1.5 0 0 1 13 3.9V14.5A1.5 1.5 0 0 1 11.5 16h-6A1.5 1.5 0 0 1 4 14.5v-13z"/><path fill="#fff" d="M6 6.5A.5.5 0 0 1 6.5 6h4a.5.5 0 0 1 0 1h-4A.5.5 0 0 1 6 6.5zm0 2.3a.5.5 0 0 1 .5-.5h4a.5.5 0 0 1 0 1h-4a.5.5 0 0 1-.5-.5zm.5 1.8a.5.5 0 0 0 0 1h2a.5.5 0 0 0 0-1h-2z"/></svg><span class="cell-status-dot" aria-hidden="true"></span></button>
+            <button class="cell-voice" data-slot="0" title="Voice record"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11a3 3 0 0 0 3-3V4a3 3 0 1 0-6 0v4a3 3 0 0 0 3 3z"/><path d="M13 8a1 1 0 0 0-2 0 3 3 0 0 1-6 0 1 1 0 0 0-2 0 5 5 0 0 0 4 4.9V14H5.5a.5.5 0 0 0 0 1h5a.5.5 0 0 0 0-1H9v-1.1A5 5 0 0 0 13 8z"/></svg></button>
+            <button class="cell-edit" data-slot="0" title="Rename"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5L13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175l-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg></button>
+            <button class="cell-trash" data-slot="0" title="Delete session"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg></button>
+            <button class="cell-maximize" data-slot="0" title="Maximize"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1a.5.5 0 0 0-.5.5v4a.5.5 0 0 1-1 0v-4A1.5 1.5 0 0 1 1.5 0h4a.5.5 0 0 1 0 1h-4zM10 .5a.5.5 0 0 1 .5-.5h4A1.5 1.5 0 0 1 16 1.5v4a.5.5 0 0 1-1 0v-4a.5.5 0 0 0-.5-.5h-4a.5.5 0 0 1-.5-.5zM.5 10a.5.5 0 0 1 .5.5v4a.5.5 0 0 0 .5.5h4a.5.5 0 0 1 0 1h-4A1.5 1.5 0 0 1 0 14.5v-4a.5.5 0 0 1 .5-.5zm15 0a.5.5 0 0 1 .5.5v4a1.5 1.5 0 0 1-1.5 1.5h-4a.5.5 0 0 1 0-1h4a.5.5 0 0 0 .5-.5v-4a.5.5 0 0 1 .5-.5z"/></svg></button>
+            <button class="cell-close" data-slot="0" title="Detach">&times;</button>
+          </div>
+        </div>
+        <div class="cell-activity-strip" id="activity-strip-0"></div>
+        <div class="cell-terminal" id="term-0"></div>
+      </div>
+      <div class="grid-cell" id="cell-1">
+        <div class="cell-header" id="header-1">
+          <span class="cell-label">Slot 2</span>
+          <div class="cell-actions">
+            <button class="cell-status" data-slot="1" title="Session status" aria-pressed="false" style="display:none" disabled><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 1.5A1.5 1.5 0 0 1 5.5 0h3.6a1.5 1.5 0 0 1 1.06.44l2.4 2.41A1.5 1.5 0 0 1 13 3.9V14.5A1.5 1.5 0 0 1 11.5 16h-6A1.5 1.5 0 0 1 4 14.5v-13z"/><path fill="#fff" d="M6 6.5A.5.5 0 0 1 6.5 6h4a.5.5 0 0 1 0 1h-4A.5.5 0 0 1 6 6.5zm0 2.3a.5.5 0 0 1 .5-.5h4a.5.5 0 0 1 0 1h-4a.5.5 0 0 1-.5-.5zm.5 1.8a.5.5 0 0 0 0 1h2a.5.5 0 0 0 0-1h-2z"/></svg><span class="cell-status-dot" aria-hidden="true"></span></button>
+            <button class="cell-voice" data-slot="1" title="Voice record"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11a3 3 0 0 0 3-3V4a3 3 0 1 0-6 0v4a3 3 0 0 0 3 3z"/><path d="M13 8a1 1 0 0 0-2 0 3 3 0 0 1-6 0 1 1 0 0 0-2 0 5 5 0 0 0 4 4.9V14H5.5a.5.5 0 0 0 0 1h5a.5.5 0 0 0 0-1H9v-1.1A5 5 0 0 0 13 8z"/></svg></button>
+            <button class="cell-edit" data-slot="1" title="Rename"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5L13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175l-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg></button>
+            <button class="cell-trash" data-slot="1" title="Delete session"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg></button>
+            <button class="cell-maximize" data-slot="1" title="Maximize"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1a.5.5 0 0 0-.5.5v4a.5.5 0 0 1-1 0v-4A1.5 1.5 0 0 1 1.5 0h4a.5.5 0 0 1 0 1h-4zM10 .5a.5.5 0 0 1 .5-.5h4A1.5 1.5 0 0 1 16 1.5v4a.5.5 0 0 1-1 0v-4a.5.5 0 0 0-.5-.5h-4a.5.5 0 0 1-.5-.5zM.5 10a.5.5 0 0 1 .5.5v4a.5.5 0 0 0 .5.5h4a.5.5 0 0 1 0 1h-4A1.5 1.5 0 0 1 0 14.5v-4a.5.5 0 0 1 .5-.5zm15 0a.5.5 0 0 1 .5.5v4a1.5 1.5 0 0 1-1.5 1.5h-4a.5.5 0 0 1 0-1h4a.5.5 0 0 0 .5-.5v-4a.5.5 0 0 1 .5-.5z"/></svg></button>
+            <button class="cell-close" data-slot="1" title="Detach">&times;</button>
+          </div>
+        </div>
+        <div class="cell-activity-strip" id="activity-strip-1"></div>
+        <div class="cell-terminal" id="term-1"></div>
+      </div>
+      <div class="grid-cell" id="cell-2">
+        <div class="cell-header" id="header-2">
+          <span class="cell-label">Slot 3</span>
+          <div class="cell-actions">
+            <button class="cell-status" data-slot="2" title="Session status" aria-pressed="false" style="display:none" disabled><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 1.5A1.5 1.5 0 0 1 5.5 0h3.6a1.5 1.5 0 0 1 1.06.44l2.4 2.41A1.5 1.5 0 0 1 13 3.9V14.5A1.5 1.5 0 0 1 11.5 16h-6A1.5 1.5 0 0 1 4 14.5v-13z"/><path fill="#fff" d="M6 6.5A.5.5 0 0 1 6.5 6h4a.5.5 0 0 1 0 1h-4A.5.5 0 0 1 6 6.5zm0 2.3a.5.5 0 0 1 .5-.5h4a.5.5 0 0 1 0 1h-4a.5.5 0 0 1-.5-.5zm.5 1.8a.5.5 0 0 0 0 1h2a.5.5 0 0 0 0-1h-2z"/></svg><span class="cell-status-dot" aria-hidden="true"></span></button>
+            <button class="cell-voice" data-slot="2" title="Voice record"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11a3 3 0 0 0 3-3V4a3 3 0 1 0-6 0v4a3 3 0 0 0 3 3z"/><path d="M13 8a1 1 0 0 0-2 0 3 3 0 0 1-6 0 1 1 0 0 0-2 0 5 5 0 0 0 4 4.9V14H5.5a.5.5 0 0 0 0 1h5a.5.5 0 0 0 0-1H9v-1.1A5 5 0 0 0 13 8z"/></svg></button>
+            <button class="cell-edit" data-slot="2" title="Rename"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5L13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175l-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg></button>
+            <button class="cell-trash" data-slot="2" title="Delete session"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg></button>
+            <button class="cell-maximize" data-slot="2" title="Maximize"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1a.5.5 0 0 0-.5.5v4a.5.5 0 0 1-1 0v-4A1.5 1.5 0 0 1 1.5 0h4a.5.5 0 0 1 0 1h-4zM10 .5a.5.5 0 0 1 .5-.5h4A1.5 1.5 0 0 1 16 1.5v4a.5.5 0 0 1-1 0v-4a.5.5 0 0 0-.5-.5h-4a.5.5 0 0 1-.5-.5zM.5 10a.5.5 0 0 1 .5.5v4a.5.5 0 0 0 .5.5h4a.5.5 0 0 1 0 1h-4A1.5 1.5 0 0 1 0 14.5v-4a.5.5 0 0 1 .5-.5zm15 0a.5.5 0 0 1 .5.5v4a1.5 1.5 0 0 1-1.5 1.5h-4a.5.5 0 0 1 0-1h4a.5.5 0 0 0 .5-.5v-4a.5.5 0 0 1 .5-.5z"/></svg></button>
+            <button class="cell-close" data-slot="2" title="Detach">&times;</button>
+          </div>
+        </div>
+        <div class="cell-activity-strip" id="activity-strip-2"></div>
+        <div class="cell-terminal" id="term-2"></div>
+      </div>
+      <div class="grid-cell" id="cell-3">
+        <div class="cell-header" id="header-3">
+          <span class="cell-label">Slot 4</span>
+          <div class="cell-actions">
+            <button class="cell-status" data-slot="3" title="Session status" aria-pressed="false" style="display:none" disabled><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 1.5A1.5 1.5 0 0 1 5.5 0h3.6a1.5 1.5 0 0 1 1.06.44l2.4 2.41A1.5 1.5 0 0 1 13 3.9V14.5A1.5 1.5 0 0 1 11.5 16h-6A1.5 1.5 0 0 1 4 14.5v-13z"/><path fill="#fff" d="M6 6.5A.5.5 0 0 1 6.5 6h4a.5.5 0 0 1 0 1h-4A.5.5 0 0 1 6 6.5zm0 2.3a.5.5 0 0 1 .5-.5h4a.5.5 0 0 1 0 1h-4a.5.5 0 0 1-.5-.5zm.5 1.8a.5.5 0 0 0 0 1h2a.5.5 0 0 0 0-1h-2z"/></svg><span class="cell-status-dot" aria-hidden="true"></span></button>
+            <button class="cell-voice" data-slot="3" title="Voice record"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11a3 3 0 0 0 3-3V4a3 3 0 1 0-6 0v4a3 3 0 0 0 3 3z"/><path d="M13 8a1 1 0 0 0-2 0 3 3 0 0 1-6 0 1 1 0 0 0-2 0 5 5 0 0 0 4 4.9V14H5.5a.5.5 0 0 0 0 1h5a.5.5 0 0 0 0-1H9v-1.1A5 5 0 0 0 13 8z"/></svg></button>
+            <button class="cell-edit" data-slot="3" title="Rename"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5L13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175l-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg></button>
+            <button class="cell-trash" data-slot="3" title="Delete session"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg></button>
+            <button class="cell-maximize" data-slot="3" title="Maximize"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1a.5.5 0 0 0-.5.5v4a.5.5 0 0 1-1 0v-4A1.5 1.5 0 0 1 1.5 0h4a.5.5 0 0 1 0 1h-4zM10 .5a.5.5 0 0 1 .5-.5h4A1.5 1.5 0 0 1 16 1.5v4a.5.5 0 0 1-1 0v-4a.5.5 0 0 0-.5-.5h-4a.5.5 0 0 1-.5-.5zM.5 10a.5.5 0 0 1 .5.5v4a.5.5 0 0 0 .5.5h4a.5.5 0 0 1 0 1h-4A1.5 1.5 0 0 1 0 14.5v-4a.5.5 0 0 1 .5-.5zm15 0a.5.5 0 0 1 .5.5v4a1.5 1.5 0 0 1-1.5 1.5h-4a.5.5 0 0 1 0-1h4a.5.5 0 0 0 .5-.5v-4a.5.5 0 0 1 .5-.5z"/></svg></button>
+            <button class="cell-close" data-slot="3" title="Detach">&times;</button>
+          </div>
+        </div>
+        <div class="cell-activity-strip" id="activity-strip-3"></div>
+        <div class="cell-terminal" id="term-3"></div>
+      </div>
+    </div>
+
+    <!-- Dashboard Content Area (hidden by default) -->
+    <div class="dashboard-content" id="dashboard-content" style="display:none"></div>
+  </div>
+
+  <!-- Rename modal -->
+  <div class="modal-overlay" id="modal-overlay" style="display:none">
+    <div class="modal">
+      <h3 id="modal-title">Rename Session</h3>
+      <input id="modal-input" type="text" placeholder="New name...">
+      <div class="modal-actions">
+        <button class="sb-btn" id="modal-cancel">Cancel</button>
+        <button class="sb-btn sb-btn-blue" id="modal-confirm">Rename</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Session modal — machine selector and chat spawn profile -->
+  <div class="modal-overlay" id="new-session-overlay" style="display:none">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="new-session-title" aria-describedby="new-session-subtitle new-session-status">
+      <h3 id="new-session-title" tabindex="-1">New Session</h3>
+      <div class="modal-subtitle" id="new-session-subtitle">Select a machine.</div>
+      <div id="new-session-location" class="new-session-options"></div>
+      <div id="new-session-status" class="new-session-status" role="status" aria-live="polite"></div>
+      <div class="modal-actions" style="margin-top:12px">
+        <button class="sb-btn" id="new-session-back" style="display:none">Back</button>
+        <button class="sb-btn" id="new-session-spawn" style="display:none">Spawn</button>
+        <button class="sb-btn" id="new-session-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings modal — toggles Pentacle feature flags. Populated by app.js. -->
+  <div class="modal-overlay" id="settings-overlay" style="display:none">
+    <div class="modal settings-modal" id="settings-modal">
+      <h3>Settings</h3>
+      <div class="settings-subtitle">Turn Pentacle features on or off.</div>
+      <div class="settings-list" id="settings-list"></div>
+      <div class="settings-footer">
+        <span class="settings-reload-note">Some changes need a reload to take effect.</span>
+        <div class="modal-actions">
+          <button class="sb-btn sb-btn-blue" id="settings-reload" style="display:none">Reload now</button>
+          <button class="sb-btn" id="settings-close">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- In-DOM confirm dialog (UMD global window.confirmDialog). MUST load before
+       any board that gates destructive actions (pi-control) so they never fall
+       back to native window.confirm() and re-trap the Space key on Windows. -->
+  <script src="confirm_dialog.js"></script>
+
+  <!-- Shared dashboard definition layer (classic UMD global; MUST load before
+       registry.js + boards so window.PublicDashDashboards exists at registration). -->
+  <script src="dashboards/vendor/publicdashdefs/dist/publicdashdefs.js"></script>
+  <script src="dashboards/registry.js"></script>
+  <script src="dashboards/0dte.js"></script>
+  <script src="dashboards/foreclosure.js"></script>
+  <script src="dashboards/business.js"></script>
+  <script src="dashboards/pentacle-mobile-testing.js"></script>
+  <script src="dashboards/scraper-bot.js"></script>
+  <script src="dashboards/hostb.js"></script>
+  <script src="dashboards/chat-stream.js"></script>
+  <script src="dashboards/ui-review.js"></script>
+  <script src="dashboards/pi-control.js"></script>
+  <script src="dashboards/specs.js"></script>
+  <script src="dashboards/demo.js"></script>
+  <script src="dashboards/notifications.js"></script>
+
+  <!-- In-DOM toast notifications (replaces native window.alert; see renderer/toast.js) -->
+  <div id="toast-container" aria-live="polite"></div>
+
+  <!-- Shared pentacle-chat-core API bundle (esbuild). Must load BEFORE app.js so
+       later phases can read window.PentacleChatCore. Built via `npm run build:renderer`. -->
+  <script src="dist/chat_core.bundle.js"></script>
+  <!-- Cosmic theme JS handles (workstream B tokens + D components). Loaded BEFORE
+       app.js so window.PentacleCosmicTokens / window.PentacleCosmic are available
+       when renderSlotChat builds the themed chat header. Built via
+       `npm run build:cosmic-tokens` + `build:cosmic-components` (run by prestart).
+       Mirrors how dist/chat_core.bundle.js is loaded. -->
+  <script src="dist/cosmic_tokens.bundle.js"></script>
+  <script src="dist/cosmic_components.bundle.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

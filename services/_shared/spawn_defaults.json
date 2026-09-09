@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "max_concurrent_boots": 3,
+  "spawn_queue_timeout_seconds": 180,
+  "providers": {
+    "claude": {
+      "model": "claude-opus-4-8",
+      "effort": "high"
+    },
+    "codex": {
+      "model": "gpt-5.6-sol",
+      "effort": "high"
+    }
+  },
+  "host_overrides": {
+    "hostb": {
+      "max_concurrent_boots": 2
+    },
+    "hosta": {
+      "max_concurrent_boots": 8
+    }
+  },
+  "profiles": {
+    "agent_orch": {
+      "handoff": {
+        "inheritance": "source_effective",
+        "missing_effective": "reject",
+        "tuple_change": "warn_and_proceed",
+        "confirmation_flag": "--confirm-model-change",
+        "confirmation_flag_effect": "suppress_warning"
+      }
+    }
+  }
+}
