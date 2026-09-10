@@ -39,6 +39,11 @@ class _Rows:
         return dict(row)
 
 
+class LocalSocket:
+    """Explicit local bootstrap transport for projection-only tests."""
+    remote_address = ("127.0.0.1", 8765)
+
+
 def _attach(server: Server, websocket: object) -> asyncio.Queue:
     queue: asyncio.Queue = asyncio.Queue()
     server._clients.add(websocket)
@@ -76,7 +81,7 @@ def _rows() -> list[dict]:
 def test_projection_filters_hidden_workers_but_keeps_the_opted_in_positive_control() -> None:
     async def run() -> None:
         server = Server(sessions=_Rows(_rows()))
-        prehello_client, default_client, opted_in_client = object(), object(), object()
+        prehello_client, default_client, opted_in_client = LocalSocket(), LocalSocket(), LocalSocket()
         prehello_queue = _attach(server, prehello_client)
         default_queue = _attach(server, default_client)
         opted_in_queue = _attach(server, opted_in_client)
@@ -119,7 +124,7 @@ def test_projection_filters_hidden_workers_but_keeps_the_opted_in_positive_contr
 def test_subscribe_rpc_mode_suppresses_the_unsolicited_snapshot_and_excludes_pushes() -> None:
     async def run() -> None:
         server = Server(sessions=_Rows(_rows()))
-        client = object()
+        client = LocalSocket()
         queue = _attach(server, client)
         replies = await server._dispatch(
             json.dumps({
@@ -144,7 +149,7 @@ def test_subscribe_rpc_mode_suppresses_the_unsolicited_snapshot_and_excludes_pus
 
         # The two snapshot controls remain independently effective: a client
         # cannot accidentally receive a bootstrap snapshot by changing only one.
-        snapshot_false_client = object()
+        snapshot_false_client = LocalSocket()
         _attach(server, snapshot_false_client)
         snapshot_false = await server._dispatch(
             json.dumps({"type": "hello", "subscribe": {"snapshot": False}}),
@@ -153,7 +158,7 @@ def test_subscribe_rpc_mode_suppresses_the_unsolicited_snapshot_and_excludes_pus
         assert snapshot_false[0]["type"] == "ready"
         assert snapshot_false[0]["snapshot"] is False
 
-        rpc_client = object()
+        rpc_client = LocalSocket()
         _attach(server, rpc_client)
         rpc_only = await server._dispatch(
             json.dumps({"type": "hello", "subscribe": {"mode": "rpc"}}),
@@ -165,7 +170,7 @@ def test_subscribe_rpc_mode_suppresses_the_unsolicited_snapshot_and_excludes_pus
         # `events_mode` changes the snapshot itself, not merely an internal map
         # or an echo in the ready reply. The full payload contains persistence
         # fields; summary mode keeps only the client-facing session projection.
-        full_client, summary_client = object(), object()
+        full_client, summary_client = LocalSocket(), LocalSocket()
         _attach(server, full_client)
         _attach(server, summary_client)
         full = await server._dispatch(
@@ -190,7 +195,7 @@ def test_subscribe_rpc_mode_suppresses_the_unsolicited_snapshot_and_excludes_pus
 def test_broadcast_serializes_once_per_projection_group() -> None:
     async def run() -> None:
         server = Server(sessions=_Rows(_rows()))
-        default_a, default_b, opted_in = object(), object(), object()
+        default_a, default_b, opted_in = LocalSocket(), LocalSocket(), LocalSocket()
         for websocket in (default_a, default_b, opted_in):
             _attach(server, websocket)
 
@@ -336,7 +341,7 @@ def test_prehello_list_sessions_defaults_to_restrictive_projection() -> None:
     async def scenario() -> None:
         rows = [row for row in _rows() if row["stream_id"] != "host:other"]
         server = Server(sessions=_Rows(rows))
-        websocket = object()
+        websocket = LocalSocket()
         _attach(server, websocket)
 
         prehello_frames = await server._dispatch(
@@ -372,7 +377,7 @@ def test_context_only_update_flushes_to_an_already_connected_client() -> None:
         store.start()
         sessions = Sessions(store, local_host="host")
         server = Server(store=store, sessions=sessions)
-        client = object()
+        client = LocalSocket()
         queue = _attach(server, client)
 
         observer = RoutingIntegrity(store, sessions, broadcast=server.broadcast)

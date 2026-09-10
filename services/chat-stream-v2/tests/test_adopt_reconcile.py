@@ -107,11 +107,15 @@ async def _adopt(name: str, tmux: AdoptTmux) -> tuple[dict | None, dict]:
         spawnctl._tmux_nonce = _pane_nonce  # type: ignore[method-assign]
         # The crash-safe intent a spawn writes before `tmux new-session`.
         assert await store.reserve_stream_id(
-            HOST, name, ttl_s=0.01, request_id="r1", nonce="TEST"
+            HOST, name, ttl_s=30, request_id="r1", nonce="TEST"
         )
-        await store.record_spawn_intent(HOST, name, {"open_fields": {"objective": "Exercise interrupted spawn adoption", }, "brief": BRIEF})
+        assert await store.record_spawn_intent(HOST, name, {"open_fields": {"objective": "Exercise interrupted spawn adoption", }, "brief": BRIEF})
         await store.mark_tmux_created(HOST, name)
-        await asyncio.sleep(0.03)  # a DELAYED restart: the TTL lapsed while down
+        # Model the delayed restart deterministically, after intent persistence.
+        def expire(conn):
+            conn.execute("UPDATE v2_stream_reservations SET expires_at=0 WHERE host=? AND session_name=?", (HOST, name))
+            conn.commit()
+        await store.submit(expire)
         result = await spawnctl.reconcile_spawn_intents()
         reply = await spawnctl.await_spawn({"stream_id": f"{HOST}:{name}"})
         return await store.get_spawn_outcome(HOST, name), {"reconcile": result, "await": reply}

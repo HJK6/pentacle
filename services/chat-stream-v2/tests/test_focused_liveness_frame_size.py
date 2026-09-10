@@ -25,6 +25,11 @@ from notify import (
 from server import Server
 
 
+class LocalSocket:
+    """Explicit local bootstrap transport for projection-only tests."""
+    remote_address = ("127.0.0.1", 8765)
+
+
 def test_complete_roster_frame_budget_0_12_100_500():
     import json
     from agents_roster import project
@@ -56,7 +61,7 @@ def test_unicode_inventory_and_snapshot_encoding_preserves_dedupe_and_other_fram
 
     async def run():
         daemon = Server()
-        ws = object()
+        ws = LocalSocket()
         daemon._clients.add(ws)
         daemon._client_include_subagents[ws] = True
         seen = []
@@ -109,8 +114,8 @@ def test_summary_snapshot_notifications_uses_the_small_cap(tmp_path: Path) -> No
 
 def test_broadcast_session_inventory_is_summary_reduced_for_summary_clients() -> None:
     daemon = Server()
-    ws_summary = object()
-    ws_full = object()
+    ws_summary = LocalSocket()
+    ws_full = LocalSocket()
     for ws, mode in ((ws_summary, "summary"), (ws_full, "full")):
         daemon._clients.add(ws)
         daemon._client_events_mode[ws] = mode
@@ -143,8 +148,8 @@ def test_broadcast_projects_summary_and_full_clients_in_separate_groups() -> Non
     # a mixed group projected once from clients[0] and gave one client the wrong
     # frame.)
     daemon = Server()
-    ws_summary = object()
-    ws_full = object()
+    ws_summary = LocalSocket()
+    ws_full = LocalSocket()
     for ws, mode in ((ws_summary, "summary"), (ws_full, "full")):
         daemon._clients.add(ws)
         daemon._client_events_mode[ws] = mode

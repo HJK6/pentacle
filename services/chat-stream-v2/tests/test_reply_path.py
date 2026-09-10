@@ -11,7 +11,7 @@ from server import CLIENT_SEND_QUEUE_MAX, Server, _EncodedFrame
 
 
 class Socket:
-    def __init__(self, *, peer: tuple[str, int] = ("10.0.0.0", 8765)) -> None:
+    def __init__(self, *, peer: tuple[str, int] = ("127.0.0.1", 8765)) -> None:
         self.remote_address = peer
         self.sent: list[dict] = []
         self.close_calls = 0
@@ -56,7 +56,7 @@ def test_reply_bypasses_saturated_event_queue() -> None:
 def test_event_overflow_never_counts_replies(caplog) -> None:
     async def run() -> None:
         daemon = Server()
-        ws = Socket(peer=("10.0.0.0", 9911))
+        ws = Socket(peer=("127.0.0.1", 9911))
         queue = _attached(daemon, ws)
         daemon._client_identities[ws] = "example-service"
         dropped: list[Socket] = []
@@ -79,7 +79,7 @@ def test_event_overflow_never_counts_replies(caplog) -> None:
     caplog.set_level("WARNING", logger=server.log.name)
     asyncio.run(run())
     assert "client=example-service" in caplog.text
-    assert "peer=('10.0.0.0', 9911)" in caplog.text
+    assert "peer=('127.0.0.1', 9911)" in caplog.text
 
 
 def test_streamed_reply_chunks_stay_contiguous_under_broadcast() -> None:

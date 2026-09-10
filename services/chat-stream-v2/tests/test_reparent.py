@@ -12,6 +12,10 @@ from sessions import Sessions  # noqa: E402
 from store import STREAM_TOKEN_HASH_VERSION, Store  # noqa: E402
 
 
+class LocalSocket:
+    remote_address = ("127.0.0.1", 8765)
+
+
 def test_reparent_dispatch_moves_cross_host_worker() -> None:
     async def run() -> None:
         store = Store(":memory:")
@@ -85,7 +89,7 @@ def test_reparent_rejects_pretoken_caller_and_audits_refusal() -> None:
                 "stream_id": "loopbox:child",
                 "new_parent_stream_id": "testhost:successor",
                 "from_stream_id": "testhost:old",
-            }), websocket=object()))[0]
+            }), websocket=LocalSocket()))[0]
 
             assert reply["error_code"] == "stream_ownership_unverified"
             row = await store.fetch_session("loopbox", "child")

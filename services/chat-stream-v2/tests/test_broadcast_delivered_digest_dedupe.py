@@ -30,7 +30,7 @@ class SendSpy:
     convergence tests.
     """
 
-    remote_address = ("10.0.0.0", 5555)
+    remote_address = ("127.0.0.1", 5555)
 
     def __init__(self) -> None:
         self.sent: list[str] = []

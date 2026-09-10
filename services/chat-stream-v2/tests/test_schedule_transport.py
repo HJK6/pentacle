@@ -95,13 +95,14 @@ def test_hello_schedule_snapshot_is_default_deny(connection_kind: str) -> None:
         elif connection_kind == "peer":
             server._connection_trust[websocket] = _trust("public-client")
 
-        snapshot = (await server._on_hello({
+        replies = await server._on_hello({
             "type": "hello",
             "client": "public-client" if connection_kind != "authless" else "",
             "_client_websocket": websocket,
-        }))[1]
+        })
 
-        assert "schedules" not in snapshot
+        assert replies == [{"type": "hello.error", "error_code": "authentication_required"}]
+        assert all("schedules" not in frame for frame in replies)
         assert inventory.calls == 0
 
     asyncio.run(go())
