@@ -10,6 +10,11 @@ Provider protocol identifiers (`claude`, `fable`, `codex`), model IDs, RPC names
 
 ## Validation
 
+Desktop structured Chat is experimental and disabled in the shipped example.
+Terminal sessions are the default. The structured-view smoke explicitly opts
+in to `features.chatUi`; its passing result does not make that view the default
+or establish production readiness for every structured-chat interaction.
+
 `npm test` exercises the real main IPC shape, renderer bundle/store/view, send receipt settlement, shared telemetry, and the existing renderer/main regression suites. `tools/public_desktop_smoke.py` adds a real Electron window, the real daemon accept loop and spawn/send handlers, an isolated tmux server, and a native provider fixture that writes USER and ASSIST JSONL. It verifies actual assistant DOM content and then stops its daemon to verify disconnected sends fail. Cleanup kills only its named tmux server and daemon process group and removes generated credentials; evidence remains in a temporary artifact directory.
 
 `services/chat-stream-v2/tests/smoke/test_public_socket.py` supplies the daemon runner's public socket smoke tier. Default service tests use synthetic fixtures and exclude the long soak mark. Real-provider opt-ins need installed, authenticated CLIs; passing the deterministic fixture does not claim those providers were contacted.

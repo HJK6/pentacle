@@ -1,6 +1,24 @@
 # Pentacle
 
-Pentacle is a desktop workspace for coding agents, structured chat, work specifications and review evidence. The desktop connects to the included Python daemon; the daemon launches your configured agent CLIs in tmux and streams their transcripts. [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile) connects to the same daemon.
+Pentacle is a desktop terminal workspace for coding agents, work specifications and review evidence. This repository includes the desktop app and the Python daemon that runs your agent sessions. [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile) connects to that same daemon from your phone.
+
+Desktop **Chat view is experimental and disabled by default**. Use terminal view for normal work. Mobile is a separate client and is unaffected by this desktop setting.
+
+## Recommended setup: let an agent do it
+
+Start a coding agent such as Fable or Astra on the computer where your agents will run. Give it the path to [SETUP.md](SETUP.md), or this README, and ask:
+
+> Set up Pentacle by following `/path/to/pentacle/SETUP.md`. Inspect this machine, install the dependencies, configure the daemon and desktop, and verify a real agent session. Keep desktop Chat view disabled. Complete everything you can and tell me only about any login or device action I must do myself.
+
+The guide gives the agent the setup order, configuration files and success checks. Have your provider account ready; the agent can do the setup but cannot complete your interactive login for you. For a phone, continue with the [mobile setup guide](https://github.com/HJK6/pentacle-mobile/blob/main/docs/FRIEND_SETUP.md).
+
+## Which repositories do I need?
+
+| Repository | What it provides | Do I need to clone it? |
+| --- | --- | --- |
+| [pentacle](https://github.com/HJK6/pentacle) | Desktop app and daemon | Yes, on the computer running your agents. The daemon can run without the desktop. |
+| [pentacle-mobile](https://github.com/HJK6/pentacle-mobile) | Mobile app | Only if you want to build the phone app. |
+| [pentacle-chat-core](https://github.com/HJK6/pentacle-chat-core) | Shared chat model and rendering library | No. Both clients already vendor a copy in `pentacle-chat-core/`; normal dependency installation uses it automatically. Clone upstream only to work on the library itself. |
 
 ## Local setup
 
@@ -40,7 +58,9 @@ An absent provider resolves to an empty binary and cannot be launched; use the p
 PENTACLE_CONFIG="$HOME/.config/pentacle/pentacle.config.js" npm start
 ```
 
-Use **New Chat**, select `local`, then the provider/model. New sessions open as terminals; switch the slot to **Chat** for the structured transcript. A disconnected daemon produces an error and creates no synthetic session. Keep the daemon running while using desktop or mobile.
+Use **New Chat**, select `local`, then the provider/model. Sessions open in terminal view. A disconnected daemon produces an error and creates no synthetic session. Keep the daemon running while using desktop or mobile.
+
+To try the unfinished structured view, enable **Chat UI (experimental)** in Settings and reload, or set `features.chatUi: true` in your private config. Fresh installs default to `false`; an existing saved opt-in is preserved. Keep it off for normal use.
 
 The private config selects `chatStream.url`, `chatStream.tokenPath`, host labels, terminal transports and optional features. The token must be a regular mode-0600 file inside a mode-0700 directory, using a path without symbolic-link ancestors. Do not commit credentials or runtime databases. See [daemon setup and remote clients](services/chat-stream-v2/README.md) and [public support boundaries](docs/public_release.md).
 

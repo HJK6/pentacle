@@ -99,7 +99,7 @@ const DESIGN_THEME_VARS = {
 // deep slot state at startup, so changing them only takes full effect after a
 // reload.
 const SETTINGS_FLAGS = [
-  { key: 'chatUi',     label: 'Chat UI',             desc: 'Structured chat view and chat controls inside each slot.',      live: false },
+  { key: 'chatUi',     label: 'Chat UI (experimental)', desc: 'Opt-in structured chat view. Not production-ready; terminals are the default.', live: false },
   { key: 'dashboards', label: 'Dashboards / Widgets', desc: 'The Dashboards view and its widget panels.',                    live: true  },
   { key: 'mic',        label: 'Microphone',          desc: 'Mic panel and per-slot voice record. Requires the mic server.', live: false },
   { key: 'usage',      label: 'Usage bars',          desc: 'Provider usage meters in the sidebar. Requires chat_streamd.',  live: false },

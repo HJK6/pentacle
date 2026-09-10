@@ -54,7 +54,7 @@ module.exports = {
     "brightWhite": "#d6e8da"
   },
   "features": {
-    "chatUi": true,
+    "chatUi": false,
     "inputBar": true,
     "usage": false,
     "dashboards": false,

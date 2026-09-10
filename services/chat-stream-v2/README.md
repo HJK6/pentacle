@@ -16,7 +16,32 @@ Without peer configuration, the daemon runs locally. To keep specs and QA record
 
 `tools/operator_auth_cli.py issue --client-kind pentacle` issues a desktop credential; `--client-kind pentacle-mobile` issues a separate mobile credential. The JSON output's `code` field is secret. Store desktop credentials in a mode-0600 file under a mode-0700 directory and point `chatStream.tokenPath` at its canonical path. Do not place a v2 credential inline in the desktop config. The CLI's `list`, `revoke` and `rotate` commands manage credentials in the daemon's registry.
 
-For mobile, make the daemon reachable through your private LAN/VPN or a tunnel and configure the app's WebSocket endpoint and mobile credential. Loopback is the default. Use the [transport admission policy](../../docs/REMOTE_AUTH.md) when exposing a listener beyond loopback. An SSH tunnel can retain a loopback daemon listener; forwarded connections inherit the tunnel endpoint's trust boundary. Keep tunnel access restricted to the operator.
+For the mobile app, create a **single-use enrollment link** on the daemon host,
+as the same OS user running the daemon. This is separate from the raw credential
+envelope returned by `operator_auth_cli.py issue`; that envelope cannot be used
+as an eight-character enrollment code.
+
+```sh
+python services/chat-stream-v2/tools/mobile_enrollment_cli.py \
+  --ws-url ws://127.0.0.1:7791 --label simulator
+```
+
+The JSON contains a secret `url` that expires after ten minutes and can be used
+once. Open it in the installed mobile app. The app exchanges the code with this
+daemon and stores the resulting credential in SecureStore. Create the link only
+after the app is built and the daemon is reachable. The issuer writes the
+existing private `~/.config/pentacle-mobile/enrollment-codes.json` registry with
+owner-only permissions; no daemon restart is needed. `--ttl-seconds` accepts
+1–3600 seconds. Do not commit or publish the link.
+
+For a physical phone, replace loopback with the daemon host's reachable LAN/VPN
+endpoint and bind the listener to the appropriate interface. Keep access on a
+private network or authenticated tunnel; use WSS if traffic crosses an untrusted
+network. See [network access](../../docs/REMOTE_AUTH.md) and the complete
+[mobile setup guide](https://github.com/HJK6/pentacle-mobile/blob/main/docs/FRIEND_SETUP.md).
+An SSH tunnel can retain a loopback daemon listener; forwarded connections
+inherit the tunnel endpoint's trust boundary. Restrict tunnel access to the
+operator.
 
 ## Tests and supported integrations
 
