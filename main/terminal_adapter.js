@@ -5,7 +5,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const run = promisify(execFile);
 
-function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = run } = {}) {
+function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = run, platform = process.platform } = {}) {
   const slots = new Map();
   const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
   function target(host, args) {
@@ -14,7 +14,7 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
     if (host === 'local' || host === local) return { file: tmux, args };
     const remote = config.hosts?.[host] || (host === 'remote' ? config.remote : null);
     if (!remote?.host) throw new Error(`No terminal transport configured for ${host}`);
-    return { file: 'ssh', args: ['-tt', '-p', String(remote.port || 22), '--',
+    return { file: platform === 'win32' ? 'ssh.exe' : 'ssh', args: ['-tt', '-p', String(remote.port || 22), '--',
       `${remote.user ? remote.user + '@' : ''}${remote.host}`, [remote.tmux || 'tmux', ...args].map(quote).join(' ')] };
   }
   function key(event, slot) { return `${event.sender.id}:${slot}`; }

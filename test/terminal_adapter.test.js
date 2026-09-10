@@ -22,3 +22,20 @@ test('terminal attachment targets a real pane and fences stale output after repl
   assert.deepEqual(calls[1].args, ['attach-session', '-t', '=second']);
   cleanup(); assert.equal(processes[1].killed, true);
 });
+
+
+test('Windows remote terminal uses an executable filename that ConPTY can resolve', async () => {
+  const handlers = new Map(), calls = [];
+  const sender = new EventEmitter(); sender.id = 9; sender.isDestroyed = () => false; sender.send = () => {};
+  const native = { spawn(file) {
+    if (!file.endsWith('.exe')) throw new Error('File not found: ');
+    calls.push(file);
+    return { onData() {}, onExit() {}, kill() {} };
+  } };
+  const cleanup = registerTerminalIpc({ handle: (name, fn) => handlers.set(name, fn), on() {} },
+    { hosts: { workstation: { host: 'workstation.example', user: 'operator' } } }, {},
+    { platform: 'win32', pty: native, execute: async (file) => { calls.push(file); return { stdout: '%42\n' }; } });
+  assert.equal(await handlers.get('pty:create')({ sender }, 0, 'session', 'workstation'), '%42');
+  assert.deepEqual(calls, ['ssh.exe', 'ssh.exe']);
+  cleanup();
+});
