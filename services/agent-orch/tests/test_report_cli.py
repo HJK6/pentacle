@@ -898,20 +898,17 @@ def test_report_terminal_invalid_result_file_fails_before_transport(tmp_path, mo
     assert "next_action" in capsys.readouterr().err
 
 
-def test_report_without_msg_id_defaults_to_zero_for_proactive_report(monkeypatch, capsys, tmp_path):
-    calls = {}
+def test_report_without_msg_id_requires_terminate_or_explicit_zero(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda: pytest.fail("missing msg_id reached config/network setup"),
+    )
 
-    async def fake_report_once(config, request, timeout):
-        calls["request"] = request
-        return {"type": "report.ok", "request_id": "report-1", "report_id": "report-1", "ledger_row_id": 9, "ingested": False}
-
-    monkeypatch.setattr(cli, "load_config", lambda: Config("ws://test", "tok", "hostb", tmp_path))
-    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _config: "hostb:codex-x")
-    monkeypatch.setattr(cli, "report_once", fake_report_once)
-
-    assert cli.report(_args(msg_id=None, terminate=False)) == 0
-    assert calls["request"]["msg_id"] == 0
-    assert json.loads(capsys.readouterr().out)["type"] == "report.ok"
+    assert cli.report(_args(msg_id=None, terminate=False)) == 2
+    error = capsys.readouterr().err
+    assert "--msg-id is required unless --terminate is used" in error
+    assert "--msg-id 0" in error
 
 
 def test_report_timeout_verifies_stream_mode_report_durability(monkeypatch, capsys, tmp_path):
