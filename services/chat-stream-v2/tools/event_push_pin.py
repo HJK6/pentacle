@@ -43,6 +43,32 @@ def _require_gate_passed_sha(candidate: str) -> None:
         raise RuntimeError(result.stderr.strip() or "candidate has no verified v2-gate tag")
 
 
+def _smoke_quota_note(smoke: subprocess.CompletedProcess[str]) -> list[dict]:
+    """Accept a real PASS or a quota-only UNTESTED result; reject other outcomes."""
+    try:
+        payload = json.loads(smoke.stdout)
+    except (TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict):
+        failures = payload.get("failures")
+        untested = payload.get("untested")
+        passed = (
+            smoke.returncode == 0 and payload.get("status") == "PASS"
+            and payload.get("ok") is True and failures == [] and untested == []
+        )
+        quota_only = (
+            smoke.returncode == 2 and payload.get("status") == "UNTESTED"
+            and payload.get("ok") is False and failures == []
+            and isinstance(untested, list) and bool(untested)
+            and all(isinstance(row, dict) and row.get("class") == "untested"
+                    and row.get("reason") == "quota_exhausted" for row in untested)
+        )
+        if passed or quota_only:
+            return untested if quota_only else []
+    detail = smoke.stderr.strip() or smoke.stdout.strip() or "missing smoke result"
+    raise RuntimeError(f"post-deploy spawn smoke failed: {detail}")
+
+
 async def _run(db: str, *, stage: str | None, rollback: bool) -> dict[str, object]:
     if not rollback and not SATELLITE_HOSTS:
         raise ValueError("no satellite hosts configured; refusing to change the target pin")
@@ -99,18 +125,9 @@ async def _run(db: str, *, stage: str | None, rollback: bool) -> dict[str, objec
             capture_output=True,
             check=False,
         )
-        if smoke.returncode:
-            raise RuntimeError(smoke.stderr.strip() or smoke.stdout.strip() or "post-deploy spawn smoke failed")
-        # A codex account over its usage limit is environmental: the smoke exits
-        # 0 for it, so it never blocks this pin, but the pin record still names
-        # the exhausted host(s) as the one operator-actionable line (restore
-        # quota). Parse best-effort; a parse failure yields no note.
-        try:
-            quota = json.loads(smoke.stdout or "{}").get("quota_exhausted") or []
-        except (ValueError, AttributeError):
-            quota = []
+        quota = _smoke_quota_note(smoke)
         if quota:
-            print(f"pin OK; fleet smoke non-code note: codex quota exhausted {json.dumps(quota, sort_keys=True)}", file=sys.stderr)
+            print(f"pin OK; fleet smoke non-code note: codex quota exhausted {json.dumps(quota, sort_keys=True)}; restore quota or wait for reset", file=sys.stderr)
         return {
             "action": "stage",
             "previous": previous,

@@ -48,7 +48,7 @@ def test_stage_requires_gate_tag_before_the_store_write(tmp_path: Path, monkeypa
     monkeypatch.setattr(
         event_push_pin.subprocess,
         "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, "", ""),
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, json.dumps({"ok": True, "status": "PASS", "failures": [], "untested": []}), ""),
     )
     db = tmp_path / "sessions.db"
     _seed_runtime(db)

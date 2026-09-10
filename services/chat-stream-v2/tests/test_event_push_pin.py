@@ -89,46 +89,51 @@ def test_rollback_refuses_without_a_captured_previous_pin() -> None:
     asyncio.run(go())
 
 
-def test_stage_treats_quota_exhausted_smoke_as_non_blocking(
-    tmp_path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC3 (pin): a post-deploy fleet smoke that exits 0 with only
-    `quota_exhausted` cells does NOT fail the pin (does not block, does not count
-    as a daemon failure); the exhausted host surfaces on the returned record."""
-    import subprocess as _subprocess
+@pytest.mark.parametrize("rows, accepted", [
+    ([{"host": "workstation", "class": "untested", "reason": "quota_exhausted", "reset_at": "2030-01-01T12:00:00Z"}], True),
+    ([], True),
+    ([{"host": "workstation", "class": "critical", "reason": "spawn_failed"}], False),
+    ([{"host": "workstation", "class": "untested", "reason": "host_offline"}], False),
+    ([{"host": "workstation", "class": "untested", "reason": "quota_exhausted"},
+      {"host": "workstation", "class": "critical", "reason": "spawn_failed"}], False),
+])
+def test_stage_consumes_actual_smoke_exit_and_json_contract(tmp_path, monkeypatch, capsys, rows, accepted):
+    """Use actual smoke.main output; only its provider-spawning matrix is isolated."""
+    import contextlib
+    import io
+    import subprocess
+    from tools import spawn_fleet_smoke
 
     monkeypatch.setattr(event_push_pin, "SATELLITE_HOSTS", ("workstation",))
+    monkeypatch.setattr(spawn_fleet_smoke, "run_matrix", lambda *a, **k: rows)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = spawn_fleet_smoke.main([])
+    smoke = subprocess.CompletedProcess([], code, output.getvalue(), "")
+    monkeypatch.setattr(event_push_pin.subprocess, "run", lambda *a, **k: smoke)
 
-    async def go() -> None:
+    async def go():
         db = str(tmp_path / "sessions.db")
         store = Store(db)
         store.start()
         try:
-            for host in event_push_pin.SATELLITE_HOSTS:
-                await store.put(
-                    f"event_push.runtime.{host}",
-                    json.dumps({
-                        "sha": TARGET, "pid": 4321,
-                        "observed_at": "2026-09-05T00:00:00Z",
-                        "observed_at_epoch": 9_999_999_999,
-                    }),
-                )
+            await store.put("event_push.runtime.workstation", json.dumps({
+                "sha": TARGET, "pid": 4321, "observed_at": "2030-01-01T00:00:00Z",
+                "observed_at_epoch": 9_999_999_999,
+            }))
         finally:
             store.stop()
-
-        quota_stdout = json.dumps({
-            "ok": True, "failures": [],
-            "quota_exhausted": [{"host": "hostb", "reset_at": "Jan 1st, 2030 12:00 PM"}],
-        })
-        monkeypatch.setattr(
-            event_push_pin.subprocess, "run",
-            lambda *_a, **_k: _subprocess.CompletedProcess([], 0, quota_stdout, ""),
-        )
+        if not accepted:
+            with pytest.raises(RuntimeError):
+                await event_push_pin._run(db, stage=TARGET, rollback=False)
+            return
         result = await event_push_pin._run(db, stage=TARGET, rollback=False)
-        assert result["action"] == "stage"
-        assert result["quota_exhausted"] == [{"host": "hostb", "reset_at": "Jan 1st, 2030 12:00 PM"}]
+        assert result["action"] == "stage" and result["readback"] == TARGET
+        assert result["quota_exhausted"] == rows
 
     asyncio.run(go())
+    if accepted and rows:
+        assert "quota exhausted" in capsys.readouterr().err
 
 
 def test_stage_fails_closed_with_last_stale_runtime_state(
@@ -162,3 +167,16 @@ def test_stage_fails_closed_with_last_stale_runtime_state(
         assert '"process_state": "connected"' in message
 
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("returncode, output", [
+    (0, ""), (2, "not-json"), (0, "[]"),
+    (2, '{"ok":false,"status":"UNTESTED","failures":[],"untested":[]}'),
+    (0, '{"ok":true,"status":"PASS","failures":[{"reason":"spawn_failed"}],"untested":[]}'),
+    (2, '{"ok":false,"status":"UNTESTED","failures":[],"untested":[null]}'),
+    (1, '{"ok":true,"status":"PASS","failures":[],"untested":[]}'),
+])
+def test_smoke_malformed_or_contradictory_results_fail_closed(returncode, output):
+    import subprocess
+    with pytest.raises(RuntimeError, match="post-deploy spawn smoke failed"):
+        event_push_pin._smoke_quota_note(subprocess.CompletedProcess([], returncode, output, ""))

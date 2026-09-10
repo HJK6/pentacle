@@ -119,9 +119,17 @@ JSON output as the durable readback:
   --db /path/to/sessions.db --stage <exact-40-character-deployed-sha>
 ```
 
-The command records the preceding pin before changing the target, writes the
-new value, and reads it back. It is not a deployer: it does not fetch, check
-out, restart, or contact satellites.
+The command verifies the candidate gate tag, records the preceding pin, writes
+the new target, and waits for fresh satellite SHA readbacks in the Store. It
+then runs the configured live spawn smoke matrix. A quota-only `UNTESTED`
+result is non-blocking and returns the affected hosts and reset information
+under `quota_exhausted`, with an actionable stderr note. Other untested cells,
+actual failures, and malformed results fail the command.
+
+A smoke failure happens after the pin was written: inspect the returned error
+and durable pin before choosing an authorized rollback; do not blindly repeat
+the stage action. The pin tool itself does not fetch, check out, or restart
+satellites; satellites with auto-update enabled react to the staged target.
 
 ## Rollback
 
