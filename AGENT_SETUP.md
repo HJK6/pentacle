@@ -54,6 +54,14 @@ not tasks the agent should pretend it completed.
    signing or device action remains, name that exact step and resume after it;
    do not claim the setup is complete.
 
+## Configure metrics, memory sync and operator questions
+
+Follow [the agent metrics and memory guide](docs/AGENT_METRICS_AND_MEMORY.md) to
+set up Claude account limits, local/remote machine stats, Syncthing shared
+memory, and questions through Updates. The daemon already disables Claude's
+native `AskUserQuestion` tool. Include these requested features in the handover
+and verify them using the guide's acceptance checks.
+
 ## If a step fails
 
 Use the error to narrow the next action: a refused socket needs a running,
