@@ -35,6 +35,7 @@ const telemetry = [];
 const chatStreamClient = require('./main/chat_stream_client');
 const { registerAssetIpcHandlers } = require('./main/asset_ipc_bridge');
 const { registerScheduleIpcHandlers } = require('./main/schedule_ipc_bridge');
+const { probeMicServer } = require('./main/mic-url');
 const { registerNotificationIpcHandlers } = require('./main/notification_ipc_bridge');
 const { createAssetPopoutManager } = require('./main/asset_popout_windows');
 const assetPopouts = createAssetPopoutManager({ BrowserWindow, appRoot: __dirname, getMainWindow: () => [...windows][0] });
@@ -126,7 +127,8 @@ function registerIpc() {
   ipcMain.handle('specs:drive', (_event, id, options, caller) => command(() => chatStreamClient.specsDrive(id, options, caller)));
   ipcMain.handle('specs:capabilities', () => command(() => chatStreamClient.specsCapabilities()));
 
-  ipcMain.handle('mic:start-server', () => resultError('optional local microphone adapter is disabled'));
+  // Microphone service ownership stays external to the public desktop.
+  ipcMain.handle('mic:start-server', () => probeMicServer(CONFIG));
   ipcMain.on('meeting:open', () => {});
   ipcMain.on('meeting:close', () => {});
 

@@ -102,3 +102,13 @@ test('test_should_spawn_local_mic_server_truth_table', () => {
   }
 });
 
+
+ test('external mic service probe returns a boolean and honors stream-host routing', async () => {
+  const { probeMicServer } = require('../main/mic-url');
+  const config = { features: { mic: true }, mic: { useStreamHost: true }, chatStream: { url: 'ws://peer.example:7791' } };
+  let requested;
+  assert.equal(await probeMicServer(config, async (url) => { requested = url; return { ok: true }; }), true);
+  assert.equal(requested, 'http://peer.example:7780/status');
+  assert.equal(await probeMicServer(config, async () => { throw Error('offline'); }), false);
+  assert.equal(await probeMicServer({ features: { mic: false } }, async () => { throw Error('must not request'); }), false);
+});

@@ -331,12 +331,19 @@ const CFG_READY = (async () => {
   _perfRecord('renderer:cfg-ready-start');
   try {
     const cfg = await window.cc.getConfig();
-    if (cfg) Object.assign(CONFIG, cfg);
+    if (cfg) {
+      Object.assign(CONFIG, cfg);
+      const overrides = loadSettingsOverrides();
+      for (const { key } of SETTINGS_FLAGS) {
+        if (typeof overrides[key] === 'boolean') CONFIG.features[key] = overrides[key];
+      }
+    }
     IS_CLIENT = !!(cfg && cfg.isClient);
     HOST_IDS = Array.isArray(cfg && cfg.hostIds) && cfg.hostIds.length ? cfg.hostIds : ['local'];
     // Clients default to creating remote sessions (the mac-mini). Users can
     // still toggle to local for WSL/macbook-local sessions.
     if (HOST_IDS.includes('remote')) newSessionLocation = 'remote';
+    renderTitlebarMachines();
     _perfRecord('renderer:cfg-ready-end');
     return cfg;
   } catch { _perfRecord('renderer:cfg-ready-error'); return null; }
@@ -905,6 +912,8 @@ if (typeof window !== 'undefined' && window.PentacleHarness && window.PentacleHa
 }
 
 function streamHostForHostId(hostId) {
+  const configured = CONFIG.chatStream?.hostMap?.[hostId];
+  if (configured) return configured;
   const names = CONFIG.hostNames || {};
   const label = String(names[hostId] || hostId || '').toLowerCase();
   if (label.includes('hosta')) return 'hosta';
@@ -6927,6 +6936,9 @@ CFG_READY.then((cfg) => {
   // and renders nested tmux sessions until the next inventory event.
   window.cc.getChatStreamState().then((snapshot) => {
     applyChatStreamState(snapshot);
+    if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'limits')) {
+      renderLimits(snapshot.limits, snapshot.limits_health ?? null);
+    }
     warmSpawnCatalog();
     window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...(snapshot || {}) });
     bindChatPopout();

@@ -15,7 +15,7 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
     const remote = config.hosts?.[host] || (host === 'remote' ? config.remote : null);
     if (!remote?.host) throw new Error(`No terminal transport configured for ${host}`);
     return { file: platform === 'win32' ? 'ssh.exe' : 'ssh', args: ['-tt', '-p', String(remote.port || 22), '--',
-      `${remote.user ? remote.user + '@' : ''}${remote.host}`, [remote.tmux || 'tmux', ...args].map(quote).join(' ')] };
+      `${remote.user ? remote.user + '@' : ''}${remote.host}`, 'LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 ' + [remote.tmux || 'tmux', ...args].map(quote).join(' ')] };
   }
   function key(event, slot) { return `${event.sender.id}:${slot}`; }
   function close(event, slot) { const id = key(event, slot); const record = slots.get(id); slots.delete(id); record?.process?.kill(); }
@@ -29,10 +29,10 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
     if (slots.get(key(event, slot)) !== record) throw new Error('Terminal attachment was superseded');
     const paneId = stdout.trim();
     if (!/^%\d+$/.test(paneId)) throw new Error('The requested tmux pane is unavailable');
-    const command = target(host, ['attach-session', '-t', `=${sessionName}`]);
+    const command = target(host, ['-u', 'attach-session', '-t', `=${sessionName}`]);
     const native = pty || require('node-pty');
     const proc = native.spawn(command.file, command.args, { name: 'xterm-256color', cols: Math.max(1, cols), rows: Math.max(1, rows),
-      cwd: os.homedir(), env: { ...process.env, TERM: 'xterm-256color' } });
+      cwd: os.homedir(), env: { ...process.env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8', TERM: 'xterm-256color' } });
     record.process = proc;
     record.paneId = paneId;
     proc.onData((data) => { if (slots.get(key(event, slot)) === record && !event.sender.isDestroyed()) event.sender.send('pty:data', slot, data); });

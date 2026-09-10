@@ -27,7 +27,16 @@ function shouldSpawnLocalMicServer(CONFIG) {
   return !!(CONFIG && CONFIG.features && CONFIG.features.mic && !(CONFIG.mic && CONFIG.mic.useStreamHost) && !(CONFIG.mic && CONFIG.mic.autoSpawn === false));
 }
 
+async function probeMicServer(config, fetchStatus = fetch) {
+  if (!config?.features?.mic) return false;
+  try {
+    const response = await fetchStatus(`${resolveMicUrl(config)}/status`, { signal: AbortSignal.timeout(2000) });
+    return response.ok;
+  } catch { return false; }
+}
+
 module.exports = {
+  probeMicServer,
   resolveMicUrl,
   shouldSpawnLocalMicServer,
 };

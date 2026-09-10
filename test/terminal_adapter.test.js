@@ -19,7 +19,7 @@ test('terminal attachment targets a real pane and fences stale output after repl
   processes[1].data('second output');
   assert.deepEqual(output, [['pty:data', 0, 'first output'], ['pty:data', 0, 'second output']]);
   assert.equal(processes[0].killed, true);
-  assert.deepEqual(calls[1].args, ['attach-session', '-t', '=second']);
+  assert.deepEqual(calls[1].args, ['-u', 'attach-session', '-t', '=second']);
   cleanup(); assert.equal(processes[1].killed, true);
 });
 
@@ -37,5 +37,18 @@ test('Windows remote terminal uses an executable filename that ConPTY can resolv
     { platform: 'win32', pty: native, execute: async (file) => { calls.push(file); return { stdout: '%42\n' }; } });
   assert.equal(await handlers.get('pty:create')({ sender }, 0, 'session', 'workstation'), '%42');
   assert.deepEqual(calls, ['ssh.exe', 'ssh.exe']);
+  cleanup();
+});
+
+ test('SSH attachment forces UTF-8 even when the server does not accept locale forwarding', async () => {
+  const handlers = new Map(); let spawned;
+  const sender = new EventEmitter(); sender.id = 11; sender.isDestroyed = () => false;
+  const cleanup = registerTerminalIpc({ handle: (n, fn) => handlers.set(n, fn), on() {} },
+    { hosts: { peer: { host: 'peer.example' } } }, {},
+    { execute: async () => ({ stdout: '%3' }), pty: { spawn(file, args, options) { spawned = { args, options }; return { onData() {}, onExit() {}, kill() {} }; } } });
+  await handlers.get('pty:create')({ sender }, 0, 'utf8-fixture', 'peer');
+  assert.match(spawned.args.at(-1), /LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8/);
+  assert.match(spawned.args.at(-1), /'-u' 'attach-session'/);
+  assert.equal(spawned.options.env.LANG, 'en_US.UTF-8');
   cleanup();
 });
