@@ -93,6 +93,8 @@ def test_unsupported_log_rate_limit_can_expire(monkeypatch: pytest.MonkeyPatch, 
 def test_handler_unsupported_errors_are_recorded_once() -> None:
     async def go() -> None:
         server = Server()
+        class LocalPeer:
+            remote_address = ("127.0.0.1", 54321)
 
         async def reply_error(_msg: dict) -> dict:
             return {"type": "future.error", "error_code": "unsupported_in_v2"}
@@ -102,7 +104,7 @@ def test_handler_unsupported_errors_are_recorded_once() -> None:
 
         server.handlers["future.reply"] = reply_error
         server.handlers["future.raise"] = raise_error
-        websocket = object()
+        websocket = LocalPeer()
         await server._dispatch(json.dumps({"type": "hello", "client": "public-client"}), websocket=websocket)
 
         reply = await server._dispatch(json.dumps({"type": "future.reply", "request_id": "r1"}), websocket=websocket)

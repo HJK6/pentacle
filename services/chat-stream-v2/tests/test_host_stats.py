@@ -53,6 +53,7 @@ def test_host_stats_frame_is_empty_before_the_first_sample() -> None:
 def test_hello_hosts_stats_replay_cannot_follow_a_newer_broadcast() -> None:
     async def run() -> None:
         class Websocket:
+            remote_address = ("127.0.0.1", 54321)
             def __init__(self) -> None:
                 self.sent: list[dict] = []
                 self.new_sample_sent = asyncio.Event()

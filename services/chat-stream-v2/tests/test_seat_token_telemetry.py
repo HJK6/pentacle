@@ -11,6 +11,10 @@ import stat
 import subprocess
 import pytest
 
+
+class _LocalPeer:
+    remote_address = ("127.0.0.1", 54321)
+
 import launch  # noqa: E402
 from seat_token_telemetry import SeatTokenTelemetry  # noqa: E402
 from server import Server  # noqa: E402
@@ -368,7 +372,7 @@ def test_token_verification_reason_codes_and_no_placeholder_telemetry(
                 ]
                 replies = []
                 for message, reason in cases:
-                    replies.append((await server._dispatch(json.dumps(message), websocket=object()))[0])
+                    replies.append((await server._dispatch(json.dumps(message), websocket=_LocalPeer()))[0])
                     if reason == "verified":
                         assert replies[-1]["type"] == "unpark.ok"
                     else:
@@ -384,7 +388,7 @@ def test_token_verification_reason_codes_and_no_placeholder_telemetry(
                 broken_reply = (
                     await broken._dispatch(
                         json.dumps({"type": "seat-token-probe", "stream_token": token}),
-                        websocket=object(),
+                        websocket=_LocalPeer(),
                     )
                 )[0]
                 assert broken_reply["token_reason_code"] == "internal-error"

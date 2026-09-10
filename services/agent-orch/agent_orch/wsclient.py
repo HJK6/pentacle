@@ -484,15 +484,19 @@ class WebsocketClient:
             "host": self.config.host_id,
             "agent_orch_capabilities": _agent_orch_capabilities_payload(),
         }
-        leader_stream_id = os.environ.get("AGENT_ORCH_INTERNAL_LEADER_STREAM_ID")
-        if leader_stream_id:
+        leader_stream_id = _resolved_rpc_from_stream_id()
+        stream_token = _stream_token_from_env()
+        if leader_stream_id and stream_token:
             hello["from_stream_id"] = leader_stream_id
+            hello["stream_token"] = stream_token
         if self.config.token:
             hello["token"] = self.config.token
         return hello
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         message_type = message.get("type")
+        if message_type in {"auth.error", "hello.error"}:
+            raise PermissionError(str(message.get("error_code") or message.get("error") or message_type))
         if message_type == "ping":
             if self._ws:
                 await self._ws.send(json.dumps({"type": "pong"}, separators=(",", ":")))
@@ -1331,11 +1335,17 @@ async def _fetch_snapshot_async(config: Config, timeout: float, *, events_mode: 
             hello["subscribe"]["events_mode"] = events_mode
         if config.token:
             hello["token"] = config.token
+        stream_id = _resolved_rpc_from_stream_id()
+        stream_token = _stream_token_from_env()
+        if stream_id and stream_token:
+            hello.update(from_stream_id=stream_id, stream_token=stream_token)
         await ws.send(json.dumps(hello, separators=(",", ":")))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             raw = await asyncio.wait_for(ws.recv(), timeout=max(0.01, deadline - time.monotonic()))
             message = json.loads(raw)
+            if message.get("type") in {"auth.error", "hello.error"}:
+                raise PermissionError(str(message.get("error_code") or message.get("error") or message["type"]))
             if message.get("type") == "ping":
                 await ws.send(json.dumps({"type": "pong"}, separators=(",", ":")))
                 continue
@@ -1363,6 +1373,8 @@ def fetch_snapshot(config: Config, timeout: float | None = None, *, events_mode:
                     events_mode=events_mode,
                 )
             )
+        except PermissionError:
+            raise
         except (asyncio.TimeoutError, SnapshotTimeout, OSError) as exc:
             last_exc = exc
             delay, giveup_reason = _retry_next_delay(policy, deadline, attempts)
@@ -1506,8 +1518,8 @@ async def _read_rpc_frame(
         if message_type == "ping":
             await ws.send(json.dumps({"type": "pong"}, separators=(",", ":")))
             continue
-        if message_type == "auth.error":
-            raise PermissionError(str(message.get("error") or "auth.error"))
+        if message_type in {"auth.error", "hello.error"}:
+            raise PermissionError(str(message.get("error_code") or message.get("error") or message_type))
         if message_type in {"welcome", "ready", "snapshot"}:
             continue
         if request_id is not None and message.get("request_id") != request_id:

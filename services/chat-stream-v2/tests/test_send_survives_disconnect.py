@@ -24,6 +24,8 @@ class _FakeWebSocket:
     the per-client writer loop. Optionally blocks after the last frame until
     `hold` is released, to model a still-open connection."""
 
+    remote_address = ("127.0.0.1", 54321)
+
     def __init__(self, frames: list[str], *, hold: asyncio.Event | None = None) -> None:
         self._frames = list(frames)
         self._hold = hold

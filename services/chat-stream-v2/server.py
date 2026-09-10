@@ -23,6 +23,7 @@ import asyncio
 import errno
 import hmac
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -386,6 +387,7 @@ class Server:
         # websocket for the lifetime of the connection so a caller cannot use
         # one authenticated request to pivot the same socket to another stream.
         self._client_authenticated_streams: dict[Any, str] = {}
+        self._client_token_hashes: dict[Any, str] = {}
         #: Wire-provided client names are claims only. A UI principal enters this
         #: connection-local map only after an auth-v2 proof checks against the
         #: existing operator credential registry.
@@ -571,12 +573,19 @@ class Server:
         ))):
             return
         inflight: set[asyncio.Task] = set()
+        hello_barrier: asyncio.Task | None = None
         try:
             async for raw in websocket:
                 # One task per request: a verb that parks (`await_report`) must
                 # not hold up the requests behind it. Replies correlate by
                 # `request_id`, so out-of-order completion is expected.
-                task = asyncio.create_task(self._serve(websocket, raw))
+                try:
+                    is_hello = json.loads(raw).get("type") == "hello"
+                except (ValueError, TypeError, AttributeError):
+                    is_hello = False
+                task = asyncio.create_task(self._serve_after_hello(websocket, raw, hello_barrier))
+                if is_hello:
+                    hello_barrier = task
                 # spec_example_2026_01:
                 # an accepted send's injection must NOT be aborted when this
                 # submitter disconnects, so track send tasks at daemon level
@@ -607,6 +616,13 @@ class Server:
             if self.blobs is not None:
                 await self.blobs.abort_connection(websocket)
 
+    async def _serve_after_hello(self, websocket: Any, raw: Any, barrier: asyncio.Task | None) -> None:
+        # CLI callers may send the RPC immediately after hello. Authenticate
+        # that hello first, without serializing long-running ordinary RPCs.
+        if barrier is not None:
+            await asyncio.shield(barrier)
+        await self._serve(websocket, raw)
+
     async def _serve(self, websocket: Any, raw: Any) -> None:
         # Reply frames write straight to their originating socket. A handler may
         # return an async iterator to STREAM frames (blob fetch: 1 MiB slices
@@ -629,7 +645,10 @@ class Server:
                     isinstance(frame, dict) and frame.get("type") == "hello.error"
                     for frame in result
                 ):
-                    self._activate_client(websocket)
+                    if (self._is_loopback_client(websocket)
+                            or self._operator_authenticated(websocket)
+                            or websocket in self._client_authenticated_streams):
+                        self._activate_client(websocket)
                     result = [
                         self.hosts_stats_frame()
                         if isinstance(frame, dict) and frame.get("type") == "hosts.stats"
@@ -658,6 +677,10 @@ class Server:
             tuple[bool, frozenset[str] | None, frozenset[str], bool, str], list[Any],
         ] = {}
         for websocket in tuple(recipients):
+            if not self._is_loopback_client(websocket) and not self._operator_authenticated(websocket):
+                auth = await self._auth_context(websocket, {})
+                if not auth.get("token_verified"):
+                    continue
             key = (
                 bool(self._client_include_subagents.get(websocket, False)),
                 self._client_opened_by_host_ids.get(websocket),
@@ -721,6 +744,7 @@ class Server:
         self._client_inflight_coalescible.pop(websocket, None)
         self._host_stats_clients.discard(websocket)
         self._client_authenticated_streams.pop(websocket, None)
+        self._client_token_hashes.pop(websocket, None)
         self._operator_challenges.pop(websocket, None)
         self._connection_trust.pop(websocket, None)
         self._client_send_queues.pop(websocket, None)
@@ -949,6 +973,24 @@ class Server:
         }
         if websocket is not None:
             dispatch_msg["_auth_context"] = await self._auth_context(websocket, msg)
+            if not self._is_loopback_client(websocket) and verb not in {
+                "ping", "hello", "enroll", "event.push", "host.stats",
+            }:
+                auth = dispatch_msg["_auth_context"]
+                code = None
+                if not any(auth.get(key) for key in (
+                    "operator_authenticated", "token_verified", "service_authenticated",
+                )):
+                    code = "authentication_required"
+                elif verb in {"grant_token", "spawn_freeze", "spawn_unfreeze"} and not (
+                    auth.get("operator_authenticated") or auth.get("service_authenticated")
+                ):
+                    code = "operator_auth_required"
+                if code:
+                    denied = {"type": f"{verb}.error", "error_code": code}
+                    if request_id is not None:
+                        denied["request_id"] = request_id
+                    return [denied]
             if verb in {
                 "hello", "list_sessions", "inspect_stream", "request_stream_events", "send.receipt.get",
                 # Upload verbs carry the owning connection so an interrupted
@@ -1016,7 +1058,8 @@ class Server:
             "service_authenticated": False,
             "service_actor": "",
         }
-        if not self._token_auth_requested(msg):
+        cached_hash = self._client_token_hashes.get(websocket)
+        if not self._token_auth_requested(msg) and not cached_hash:
             return context
 
         token = msg.get("stream_token")
@@ -1031,14 +1074,18 @@ class Server:
         # Keep wire-controlled values out of telemetry labels. The operation
         # label is intentionally a fixed vocabulary, even for malformed input.
         operation = "identity"
-        reason_code = self._token_input_reason(token)
+        # A tokenless RPC can follow an authenticated hello on this socket.
+        # Keep only its hash and revalidate against current durable state.
+        # An explicitly supplied bad token never falls back to the binding.
+        use_binding = "stream_token" not in msg and cached_hash is not None
+        reason_code = None if use_binding else self._token_input_reason(token)
         owner: str | None = None
 
         if reason_code is None:
             if self.store is None:
                 reason_code = TOKEN_REASON_INTERNAL_ERROR
             else:
-                token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+                token_hash = cached_hash if use_binding else hashlib.sha256(token.encode("utf-8")).hexdigest()
                 try:
                     state = await self.store.stream_token_state(token_hash)
                     if state is None:
@@ -1067,6 +1114,7 @@ class Server:
             else:
                 owner = str(owner)
                 self._client_authenticated_streams[websocket] = owner
+                self._client_token_hashes[websocket] = token_hash
 
         if reason_code == TOKEN_REASON_VERIFIED:
             self.token_telemetry.record_verification(
@@ -1075,6 +1123,8 @@ class Server:
                 operation=operation,
             )
         else:
+            self._client_authenticated_streams.pop(websocket, None)
+            self._client_token_hashes.pop(websocket, None)
             telemetry_stream_id = claim if ":" in claim else ""
             self.token_telemetry.record_verification(
                 reason_code=reason_code or TOKEN_REASON_INTERNAL_ERROR,
@@ -1322,6 +1372,10 @@ class Server:
     def _frame_for_client(
         self, websocket: Any, frame_type: str, payload: dict[str, Any],
     ) -> dict[str, Any] | None:
+        if not (self._is_loopback_client(websocket)
+                or self._operator_authenticated(websocket)
+                or websocket in self._client_authenticated_streams):
+            return None
         # The server speaks first, but a connection has the restrictive default
         # immediately: broadcasts may race the client's hello and must never
         # leak hidden/nested work during that window.
@@ -1374,6 +1428,20 @@ class Server:
             and trust.client_kind in operator_auth.CLIENT_KINDS
         )
 
+    @staticmethod
+    def _is_loopback_client(websocket: Any) -> bool:
+        """Local bootstrap trusts the actual transport peer, never wire claims."""
+        peer = getattr(websocket, "remote_address", None)
+        if not isinstance(peer, (tuple, list)) or not peer:
+            return False
+        try:
+            address = ipaddress.ip_address(peer[0])
+        except (ValueError, TypeError):
+            return False
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        return address.is_loopback
+
     def _authenticate_operator_hello(self, websocket: Any, msg: dict[str, Any]) -> str | None:
         """Bind a v2 UI principal to this socket, or fail the claimed proof closed."""
         challenge = self._operator_challenges.pop(websocket, None)
@@ -1424,6 +1492,13 @@ class Server:
             error_code = self._authenticate_operator_hello(websocket, msg)
             if error_code:
                 return [{"type": "hello.error", "error_code": error_code}]
+            auth = msg.get("_auth_context") or {}
+            if not self._is_loopback_client(websocket) and not (
+                self._operator_authenticated(websocket) or auth.get("token_verified")
+                or (auth.get("service_authenticated") and not snapshot_requested
+                    and str(subscribe.get("mode") or "").lower() == "rpc")
+            ):
+                return [{"type": "hello.error", "error_code": "authentication_required"}]
             self._client_include_subagents[websocket] = include_subagents
             self._client_opened_by_host_ids[websocket] = opened_by_host_ids
             self._client_exclude_event_types[websocket] = exclude_event_types
