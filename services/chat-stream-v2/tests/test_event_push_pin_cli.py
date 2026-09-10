@@ -42,6 +42,7 @@ def _seed_runtime(db: Path) -> None:
 
 
 def test_stage_requires_gate_tag_before_the_store_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(event_push_pin, "SATELLITE_HOSTS", ("workstation",))
     verified: list[str] = []
     monkeypatch.setattr(event_push_pin, "_require_gate_passed_sha", verified.append)
     monkeypatch.setattr(

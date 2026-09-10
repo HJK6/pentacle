@@ -20,8 +20,13 @@ on BOTH ends and they match.
 - **Satellite host**: write `~/.config/pentacle/satellite.env` (mode 600):
 
   ```
+  PENTACLE_SATELLITE_HOST=workstation
+  PENTACLE_SATELLITE_WS=ws://coordinator.example:7791
   PENTACLE_EVENT_PUSH_SECRET=<the same secret>
   ```
+
+Replace `workstation` with this satellite's registered machine name and
+`coordinator.example` with the reachable daemon address before installation.
 
 Generate once with `openssl rand -hex 32` and share it across the fleet the same
 way other fleet secrets are provisioned.
@@ -33,9 +38,9 @@ satellite's checkout. Give it its own clone so it never disturbs in-flight work:
 
 ```
 # linux-workstation (WSL)
-git clone git@github.com:example-org/pentacle.git ~/repos/pentacle-satellite
+git clone https://github.com/HJK6/pentacle.git ~/repos/pentacle-satellite
 # workstation (macOS)
-git clone git@github.com:example-org/pentacle.git ~/repos/pentacle-satellite
+git clone https://github.com/HJK6/pentacle.git ~/repos/pentacle-satellite
 ```
 
 `__CHECKOUT__` below is that path (e.g. `/home/example/repos/pentacle-satellite` on
@@ -86,16 +91,16 @@ the live row's `working` / `working_label` overlay through the existing
 
 ## Knobs / kill switches (env, `PENTACLE_SATELLITE_*`)
 
-- `HOST` — fleet name; MUST match the registry host (`linux-workstation`/`workstation`).
-- WebSocket endpoint: set the full environment key `PENTACLE_SATELLITE_BART_WS=ws://127.0.0.1:7791` for a local daemon, or use your configured daemon endpoint. This legacy key is part of the satellite API.
-- `SESSION_GLOB` — tmux session-name filter, default `v2-*`.
-- `HISTORY_BYTES` — first-bind history horizon (default 1 MiB): on initial bind
+- `PENTACLE_SATELLITE_HOST` — fleet name; MUST match the registry host (`linux-workstation`/`workstation`).
+- `PENTACLE_SATELLITE_WS` — reachable coordinator WebSocket endpoint. The legacy `PENTACLE_SATELLITE_BART_WS` is a fallback when WS is unset; otherwise the default is `ws://127.0.0.1:7791`.
+- `PENTACLE_SATELLITE_SESSION_GLOB` — tmux session-name filter, default `v2-*`.
+- `PENTACLE_SATELLITE_HISTORY_BYTES` — first-bind history horizon (default 1 MiB): on initial bind
   the tail starts within the last this-many bytes of a transcript so live turns
   reach mobile ahead of the backlog. `-1` replays the whole file.
-- `DISABLE=1` — kill switch: stay connected, push nothing.
-- `NO_AUTOUPDATE=1` — never git-checkout/exec-restart (stay on the running SHA;
+- `PENTACLE_SATELLITE_DISABLE=1` — kill switch: stay connected, push nothing.
+- `PENTACLE_SATELLITE_NO_AUTOUPDATE=1` — never git-checkout/exec-restart (stay on the running SHA;
   coordinator still accepts pushes flagged-stale and alerts).
-- `INTERVAL_S`, `MAX_EVENTS`, `MAX_READ_BYTES`, `UPDATE_MIN_INTERVAL_S` — existing loop knobs.
+- `PENTACLE_SATELLITE_INTERVAL_S`, `PENTACLE_SATELLITE_MAX_EVENTS`, `PENTACLE_SATELLITE_MAX_READ_BYTES`, `PENTACLE_SATELLITE_UPDATE_MIN_INTERVAL_S` — existing loop knobs.
 
 Working freshness does not add a knob: the local scan remains one pass and the
 working heartbeat uses the daemon's existing five-second tracker constant.

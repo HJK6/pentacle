@@ -24,4 +24,9 @@ Load the theme once, add `.cosmic` to the chat root, and use the component entry
 
 ## Visual tests
 
-Render synthetic `coordinator` through `satellite` fixtures at the same viewport, seed, and device scale. Compare DOM structure and bounded screenshots. Do not use live dashboard data, captured transcripts, or real machine labels as visual fixtures.
+The shared TypeScript scene builder in `test/cosmic_scene_builder.ts` uses a
+synthetic `mage` stream and seven deterministic states. Structural tests and
+the screenshot generator consume the same builder; see
+[visual regression](desktop_cosmic_visual_regression.md). Sigil names describe
+presentation, independently of the configured fleet. Do not use live dashboard
+data, captured transcripts, or real machine labels as visual fixtures.

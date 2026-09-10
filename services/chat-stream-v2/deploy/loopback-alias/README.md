@@ -38,7 +38,7 @@ macOS; `bootstrap` is the supported operation.
 ## Verify the gate prerequisite
 
 ```sh
-services/chat-stream-v2/tools/gate_preflight.sh
+../../tools/gate_preflight.sh
 ```
 
 A missing alias is reported as `loopback_alias_missing` with this README as the

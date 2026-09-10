@@ -175,6 +175,10 @@ def configured_host_names(env_key: str, *, remote_only: bool = False) -> tuple[s
         hosts = tuple(host.strip() for host in os.environ[env_key].split(",") if host.strip())
         if not hosts or len(hosts) != len(set(hosts)):
             raise ValueError(f"{env_key} must name a nonempty, unique host list")
+        if remote_only:
+            remote_names = {machine.name for machine in load_machines() if not machine.is_local}
+            if any(host not in remote_names for host in hosts):
+                raise ValueError(f"{env_key} must name configured remote machines only")
         return hosts
     return tuple(machine.name for machine in load_machines() if not remote_only or not machine.is_local)
 

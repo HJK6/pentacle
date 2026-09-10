@@ -928,8 +928,8 @@ def main() -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument(
         "--hosts",
-        required=True,
-        help="comma-separated names from --host-config (default map: local only)",
+        default="local",
+        help="comma-separated names from --host-config (default: local; must exist in the map)",
     )
     parser.add_argument("--host-config", metavar="PATH", help="JSON mapping names to ssh and absolute release_root")
     parser.add_argument("--run-host", default="local", metavar="NAME", help="configured name of this machine")

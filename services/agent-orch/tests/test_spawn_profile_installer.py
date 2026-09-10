@@ -1015,3 +1015,29 @@ def test_activation_replaces_existing_active_and_previous_symlinks(tmp_path: Pat
     assert (root / "rollouts" / f"{stamp}.previous").resolve() == old_release
     assert (root / "rollouts" / f"{stamp}.release").resolve() == release
     assert not any(old_release.glob("*.new"))
+
+
+def test_main_without_hosts_defaults_to_local_dry_run(monkeypatch, tmp_path):
+    targets = []
+    monkeypatch.setenv("PENTACLE_RELEASE_ROLLOUT_LOCK", str(tmp_path / "rollout.lock"))
+    monkeypatch.setattr(installer, "_rollout_stamp", lambda *a, **k: "rollout-test")
+    monkeypatch.setattr(installer, "_archive", lambda *a, **k: {"stamp": "rollout-test"})
+    monkeypatch.setattr(installer, "_read_pointer", lambda *a, **k: None)
+    def stage(target, *args, **kwargs):
+        assert kwargs["dry_run"] is True
+        targets.append(target)
+        return "dry_run"
+    monkeypatch.setattr(installer, "stage", stage)
+    monkeypatch.setattr(installer, "activate", lambda *a, **k: {})
+    monkeypatch.setattr(installer.sys, "argv", ["install", "--commit", "a" * 40, "--dry-run"])
+    assert installer.main() == 0
+    assert [(target.name, target.local) for target in targets] == [("local", True)]
+
+
+def test_custom_map_without_local_requires_explicit_selection(monkeypatch, tmp_path):
+    host_config = tmp_path / "hosts.json"
+    host_config.write_text(json.dumps({"office": {"ssh": "localhost", "release_root": "/tmp/releases"}}))
+    monkeypatch.setattr(installer.sys, "argv", ["install", "--commit", "a" * 40, "--host-config", str(host_config), "--dry-run"])
+    with pytest.raises(SystemExit) as error:
+        installer.main()
+    assert error.value.code == 2

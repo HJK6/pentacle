@@ -28,6 +28,13 @@ CONTRACT_DIR = "/tmp/pentacle-auth-context"
 CONTRACT_BYTES = b"provider_auth_context_unavailable\n"
 
 
+@pytest.fixture(autouse=True)
+def configured_marker_host(monkeypatch):
+    # Pin the fixture's explicit opt-in without changing the process environment
+    # or leaking the setting into other tests that imported spawnctl already.
+    monkeypatch.setattr(spawnctl_mod, "AUTH_CONTEXT_MARKER_HOST", HOSTC)
+
+
 class _Tmux:
     def __init__(self) -> None:
         self.alive = False

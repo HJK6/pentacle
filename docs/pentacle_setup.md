@@ -1,56 +1,58 @@
 # Pentacle desktop topology
 
-Use this guide to choose where the Electron desktop attaches to tmux and where it reaches the chat daemon. All examples are local or synthetic.
+The desktop's WebSocket connection and terminal transport are configured
+separately. Start with [developer onboarding](developer_onboarding.md) for a
+local daemon with scratch stores, and [desktop configuration](desktop_config.md)
+for the complete supported configuration contract.
 
-## Desktop modes
+## Local desktop
 
-| Mode | Configuration | Terminal attachment |
-|---|---|---|
-| Host | no `remote` block | local tmux through node-pty |
-| Client | a `remote` block | SSH tmux through the configured adapter |
-
-A `localWsl` block adds WSL on Windows. A `peers` array adds optional terminal hosts. None of these settings changes the websocket source for structured chat.
-
-## Daemon ownership
-
-`chatStream.url` chooses the websocket independently of terminal mode.
-
-- `autoStart: true` starts a disposable local daemon owned by the desktop.
-- `autoStart: false` connects to a daemon that the developer started separately.
-
-For public development, use `ws://127.0.0.1:7791` and a temporary store. The daemon's `--help` output is the option authority.
-
-## Host mode
+Save a private JavaScript module and select it with `PENTACLE_CONFIG`:
 
 ```js
+module.exports = {
+  appName: 'Pentacle',
+  chatStream: {
+    url: 'ws://127.0.0.1:7791',
+    localHost: 'local',
+    hosts: ['local'],
+  },
+};
+```
+
+The desktop connects to the daemon started separately. Set daemon bind addresses
+with `--bind`, identity with `--local-host`, and machine configuration with
+`PENTACLE_MACHINES_FILE` or `PENTACLE_MACHINES_JSON`. Match the desktop local
+identity to the daemon identity, or provide an explicit `chatStream.hostMap`.
+The daemon owns provider executables and session working directories.
+
+## Remote terminal transport
+
+A synthetic remote example adds the following keys to that module:
+
+```js
+hosts: { workstation: { host: 'example.local', user: 'example', port: 22, tmux: '/usr/bin/tmux' } },
 chatStream: {
   url: 'ws://127.0.0.1:7791',
-  autoStart: true,
-  localHost: 'coordinator',
-  binds: ['127.0.0.1'],
-  machinesFile: '/tmp/pentacle-example/machines.json',
+  localHost: 'local',
+  hosts: ['local', 'workstation'],
 },
 ```
 
-## Client and WSL fixtures
+Configure the matching daemon machine separately. Public main attaches local
+terminal IDs through local tmux; other IDs need an entry in `hosts` or the
+legacy `remote` transport for the literal `remote` ID. Display labels do not
+configure transport. The retained `hosts.js` helper's `localWsl` and `peers`
+inputs do not configure public main's terminal path.
 
-An adapter test may use the reserved names `example.local` and `10.0.0.0`:
-
-```js
-remote: { host: 'example.local', user: 'example', port: 22, tmux: '/usr/bin/tmux' },
-chatStream: { url: 'ws://127.0.0.1:7791', autoStart: false },
-```
-
-Run SSH and WSL checks only in an isolated test environment. Do not put a private key, real host, or real user in a committed config.
+Use remote examples only with an explicitly configured environment. Keep
+credentials and private topology outside the repository.
 
 ## Verification
 
 | Symptom | First check |
 |---|---|
-| Sidebar is empty | Check the loopback URL and `agent-orch list`. |
+| Sidebar is empty | Check the WebSocket URL and `agent-orch list`. |
 | Structured chat is unavailable | Enable `features.chatUi` and inspect the daemon health result. |
-| Terminal attach fails | Test tmux through the selected adapter outside the UI. |
-| Local daemon exits | Run the documented command directly and inspect its typed startup error. |
-| WSL fixture fails | Verify the distro, user, tmux binary, and script path inside the fixture. |
-
-No managed remote, deployment, installation, or rollback path is part of this public setup.
+| Terminal attach fails | Check the selected ID and test its tmux transport outside the UI. |
+| Local daemon exits | Run the daemon command directly and inspect its startup error. |

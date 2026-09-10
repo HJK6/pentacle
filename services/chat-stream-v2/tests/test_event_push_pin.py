@@ -97,6 +97,8 @@ def test_stage_treats_quota_exhausted_smoke_as_non_blocking(
     as a daemon failure); the exhausted host surfaces on the returned record."""
     import subprocess as _subprocess
 
+    monkeypatch.setattr(event_push_pin, "SATELLITE_HOSTS", ("workstation",))
+
     async def go() -> None:
         db = str(tmp_path / "sessions.db")
         store = Store(db)
@@ -132,6 +134,7 @@ def test_stage_treats_quota_exhausted_smoke_as_non_blocking(
 def test_stage_fails_closed_with_last_stale_runtime_state(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(event_push_pin, "SATELLITE_HOSTS", ("workstation",))
     async def go() -> None:
         db = str(tmp_path / "sessions.db")
         store = Store(db)

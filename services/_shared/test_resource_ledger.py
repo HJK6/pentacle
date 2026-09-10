@@ -410,7 +410,8 @@ def _safe_agent_orch_workspace(path: Path) -> Path:
 
 def _canonical_host(host: str) -> str:
     lowered = str(host).strip().lower()
-    aliases = LOCAL_HOST_ALIASES | {os.environ.get("PENTACLE_TEST_LOCAL_HOST", "").strip().lower()}
+    configured = os.environ.get("PENTACLE_TEST_LOCAL_HOST", "").strip().lower()
+    aliases = LOCAL_HOST_ALIASES | ({configured} if configured else set())
     return "local" if lowered in aliases else lowered
 
 

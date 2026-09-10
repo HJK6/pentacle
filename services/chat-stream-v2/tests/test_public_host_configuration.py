@@ -77,3 +77,17 @@ def test_smoke_rejects_empty_matrix_before_sessions(monkeypatch, tmp_path):
     monkeypatch.setattr(spawn_fleet_smoke, "HOSTS", ())
     with pytest.raises(ValueError, match="host|cell"):
         spawn_fleet_smoke.run_matrix("ws://unused", tmp_path / "token", 1)
+
+
+@pytest.mark.parametrize("hosts", ["hub", "unknown", "travel,hub"])
+def test_explicit_satellites_reject_local_and_unknown_names(monkeypatch, hosts):
+    monkeypatch.setenv("PENTACLE_MACHINES_JSON", json.dumps(_fleet()))
+    monkeypatch.setenv("PENTACLE_SATELLITE_HOSTS", hosts)
+    with pytest.raises(ValueError, match="remote"):
+        machines.configured_host_names("PENTACLE_SATELLITE_HOSTS", remote_only=True)
+
+
+def test_explicit_satellite_subset_uses_configured_remote(monkeypatch):
+    monkeypatch.setenv("PENTACLE_MACHINES_JSON", json.dumps(_fleet()))
+    monkeypatch.setenv("PENTACLE_SATELLITE_HOSTS", "travel")
+    assert machines.configured_host_names("PENTACLE_SATELLITE_HOSTS", remote_only=True) == ("travel",)

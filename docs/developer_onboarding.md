@@ -7,9 +7,10 @@ This walkthrough runs Pentacle and the chat daemon locally with disposable state
 Install Node.js, Python 3, tmux, and a provider CLI that can be replaced by a fixture command in tests. Install dependencies from the repository's documented lockfiles.
 
 ```bash
-npm install
+npm ci
 python3 -m venv .venv-dev
 .venv-dev/bin/pip install -r services/chat-stream-v2/requirements.txt
+.venv-dev/bin/pip install -e services/agent-orch
 ```
 
 ## 2. Prepare a scratch directory
@@ -26,15 +27,32 @@ Use the daemon's `--help` output as the option authority. A representative loopb
 
 ```bash
 .venv-dev/bin/python services/chat-stream-v2/main.py \
-  --bind 127.0.0.1 --port 7791 \
-  --db /tmp/pentacle-example/stores/sessions.sqlite
+  --bind 127.0.0.1 --port 7791 --local-host local \
+  --db /tmp/pentacle-example/stores/sessions.sqlite \
+  --notifications-db /tmp/pentacle-example/stores/notifications.sqlite \
+  --assets-db /tmp/pentacle-example/stores/assets.sqlite \
+  --blob-root /tmp/pentacle-example/stores/blobs \
+  --spawn-cwd /tmp/pentacle-example/work \
+  --projects-root /tmp/pentacle-example/projects
 ```
 
-If the implementation uses separate store flags, pass matching paths under `/tmp/pentacle-example/stores`. Start with authentication disabled only for local fixture work.
+Select a local-only machines file explicitly if you already have private fleet
+configuration; see [machine configuration](agent_orchestration_setup.md#machines-file).
+Keep its name and the daemon `--local-host` identical. The example above uses
+`local`. Start with authentication disabled only for local fixture work.
 
 ## 4. Check the CLI
 
-Install the CLI in the same environment and use a local configuration with `local_host_id: "coordinator"` and `ws://127.0.0.1:7791`. Then run:
+Use the CLI installed in the same environment and explicitly match the daemon identity:
+
+```bash
+source .venv-dev/bin/activate
+export AGENT_ORCH_HOST_ID=local
+export AGENT_ORCH_WS_URL=ws://127.0.0.1:7791
+export AGENT_ORCH_RUNTIME_DIR=/tmp/pentacle-example/cli
+```
+
+Then run:
 
 ```bash
 agent-orch list
@@ -45,13 +63,21 @@ Create one fixture session, send `hello from fixture`, observe the typed reply, 
 
 ## 5. Run the desktop
 
-Copy `pentacle.config.example.js` to a scratch config and set:
+Save this JavaScript module as `/tmp/pentacle-example/pentacle.config.js`.
+The desktop connects to the separately started daemon; session working
+directories and provider paths belong to the daemon configuration. See
+[desktop configuration](desktop_config.md) for the complete supported fields.
 
 ```js
-appName: 'PentacleExample',
-workingDirectory: '/tmp/pentacle-example/work',
-features: { chatUi: true },
-chatStream: { url: 'ws://127.0.0.1:7791', autoStart: false },
+module.exports = {
+  appName: 'PentacleExample',
+  features: { chatUi: true },
+  chatStream: {
+    url: 'ws://127.0.0.1:7791',
+    localHost: 'local',
+    hosts: ['local'],
+  },
+};
 ```
 
 Start with `PENTACLE_CONFIG=/tmp/pentacle-example/pentacle.config.js npm start`. The desktop should show the synthetic session and render a bounded fixture response. A credential file, if enabled by a local test, belongs outside the repository, is owner-readable only, and contains a placeholder or generated value rather than a committed secret.

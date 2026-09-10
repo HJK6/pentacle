@@ -16,6 +16,8 @@ def test_live_test_admission_requires_explicit_host_allowlist(monkeypatch):
 
 def test_resource_ledger_local_alias_is_configured(monkeypatch):
     monkeypatch.delenv("PENTACLE_TEST_LOCAL_HOST", raising=False)
+    assert test_resource_ledger._canonical_host("") == ""
+    assert test_resource_ledger._canonical_host("   ") == ""
     assert test_resource_ledger._canonical_host("localhost") == "local"
     assert test_resource_ledger._canonical_host("workstation") == "workstation"
     monkeypatch.setenv("PENTACLE_TEST_LOCAL_HOST", "workstation")

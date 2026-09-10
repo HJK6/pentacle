@@ -29,7 +29,8 @@ Start from a synthetic local-only configuration. Host ids are public labels; the
       "name": "coordinator",
       "ssh_target": null,
       "tmux_bin": "tmux",
-      "provider_bin": "example-provider",
+      "claude_bin": "/absolute/path/to/claude",
+      "codex_bin": "/absolute/path/to/codex",
       "cwd": "/tmp/pentacle-example/work",
       "projects_root": "/tmp/pentacle-example/projects",
       "label": "Example host"
@@ -38,20 +39,37 @@ Start from a synthetic local-only configuration. Host ids are public labels; the
 }
 ```
 
-Save a local copy outside the repository, for example at `$XDG_CONFIG_HOME/pentacle-example/machines.json`, with owner-only permissions. Absolute paths make the fixture deterministic. A remote adapter may use the same schema with an explicitly configured `example.local` host, but this public guide does not prescribe a managed service or deployment path.
+Replace the provider paths with installed executables and create the configured
+working and projects directories. Save the file outside the repository with
+owner-only permissions, for example `/tmp/pentacle-example/machines.json`.
+Select it explicitly in the shell that starts the daemon:
 
-The daemon resolves the machines file from the documented environment variables, then the configured local path, then a synthesized local entry. Unknown hosts should return a typed `unsupported_host` response.
+```bash
+unset PENTACLE_MACHINES_JSON
+export PENTACLE_MACHINES_FILE=/tmp/pentacle-example/machines.json
+```
+
+Resolution is inline `PENTACLE_MACHINES_JSON`, then `PENTACLE_MACHINES_FILE`,
+then `~/.config/pentacle-stream/machines.json`, then a synthesized `local` entry.
+`XDG_CONFIG_HOME` does not select this file. Start the daemon as in
+[developer onboarding](developer_onboarding.md), changing `--local-host local`
+to `--local-host coordinator` for this example. Unknown hosts return the typed
+`unsupported_host` response.
 
 ## Install and configure the CLI
 
-Install the direct CLI from the checkout and verify that the invoking shell can find it:
+The editable pip install above installs the CLI in `.venv-dev/bin`. Activate that
+environment and verify that the invoking shell can find it:
 
 ```bash
-bash services/agent-orch/install.sh --dry-run
+source .venv-dev/bin/activate
 command -v agent-orch
 ```
 
-Use a loopback websocket for local development:
+For a persistent CLI config, save the following as `~/.agent-orch/config.json`
+without overwriting an existing private setup. Alternatively set
+`AGENT_ORCH_HOST_ID=coordinator` and `AGENT_ORCH_WS_URL=ws://127.0.0.1:7791`
+in the current shell. Use a loopback websocket for local development:
 
 ```json
 {

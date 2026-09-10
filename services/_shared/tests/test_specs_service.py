@@ -18,7 +18,7 @@ def _write_spec(folder: Path, *, status: str = "in_progress", title: str = "T") 
     folder.mkdir(parents=True)
     (folder / "spec.md").write_text(textwrap.dedent(f"""\
         ---
-        id: spec_x
+        id: spec_{folder.name}
         title: {title}
         type: spec
         status: {status}
@@ -30,7 +30,7 @@ def _write_spec(folder: Path, *, status: str = "in_progress", title: str = "T") 
         """), encoding="utf-8")
     (folder / "summary.md").write_text(textwrap.dedent(f"""\
         ---
-        id: work_x
+        id: work_{folder.name}
         type: work
         status: {status}
         ---
@@ -165,7 +165,7 @@ def test_declared_frontmatter_id_resolves_to_hyphenated_folder(tmp_path):
     folder = tmp_path / "work" / "in_progress" / "example__hyphen-folder"
     _write_spec(folder, status="in_progress")
     (folder / "spec.md").write_text(
-        (folder / "spec.md").read_text(encoding="utf-8").replace("id: spec_x", "id: spec_declared__underscore_folder"),
+        (folder / "spec.md").read_text(encoding="utf-8").replace(f"id: spec_{folder.name}", "id: spec_declared__underscore_folder"),
         encoding="utf-8",
     )
     s = _make_subsystem(tmp_path)
@@ -185,7 +185,7 @@ def test_duplicate_declared_ids_return_typed_ambiguity(tmp_path):
     for folder in folders:
         _write_spec(folder, status="in_progress")
         (folder / "spec.md").write_text(
-            (folder / "spec.md").read_text(encoding="utf-8").replace("id: spec_x", "id: spec_duplicate"),
+            (folder / "spec.md").read_text(encoding="utf-8").replace(f"id: spec_{folder.name}", "id: spec_duplicate"),
             encoding="utf-8",
         )
     s = _make_subsystem(tmp_path)
@@ -206,11 +206,11 @@ def test_declared_id_wins_over_slug_alias_collision(tmp_path):
     _write_spec(declared, status="in_progress")
     _write_spec(slug_alias, status="in_progress")
     (declared / "spec.md").write_text(
-        (declared / "spec.md").read_text(encoding="utf-8").replace("id: spec_x", "id: spec_declared__owner"),
+        (declared / "spec.md").read_text(encoding="utf-8").replace(f"id: spec_{declared.name}", "id: spec_declared__owner"),
         encoding="utf-8",
     )
     (slug_alias / "spec.md").write_text(
-        (slug_alias / "spec.md").read_text(encoding="utf-8").replace("id: spec_x", "id: spec_other"),
+        (slug_alias / "spec.md").read_text(encoding="utf-8").replace(f"id: spec_{slug_alias.name}", "id: spec_other"),
         encoding="utf-8",
     )
     s = _make_subsystem(tmp_path)

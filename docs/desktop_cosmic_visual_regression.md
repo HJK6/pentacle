@@ -4,14 +4,23 @@ Visual regression tests for the desktop chat surface use only deterministic fixt
 
 ## Fixture matrix
 
-Render these cases:
+`test/cosmic_scene_builder.ts` is the shared source for the structural test
+(`test/cosmic_visual.test.ts`) and HTML gallery generator
+(`test/generate_cosmic_chat_states.js`). Its `STATES` are:
 
-1. an idle `coordinator` session with an empty transcript;
-2. a working `workstation` session with one assistant row;
-3. a question for `linux-workstation` with two options and one selected option; and
-4. a `satellite` session with a warning status and a short update history.
+1. `empty`;
+2. `populated`;
+3. `working`;
+4. `question_single`;
+5. `question_multiselect`;
+6. `markdown_code`; and
+7. `markdown_table`.
 
-Each fixture supplies a stable stream id such as `coordinator:visual-fixture`, a fixed timestamp, and bounded text. It should be serializable JSON stored beside the test, with no absolute paths or external URLs.
+The builder supplies synthetic `mage:claude-mage-cosmic` stream identities,
+fixed timestamps, bounded text, and production renderer components. These are
+TypeScript fixtures, not separate JSON files. Production sigil order is
+`djinni`, `sun`, `mage`, `flower`; it does not define an infrastructure host roster.
+
 
 ## Assertions
 
