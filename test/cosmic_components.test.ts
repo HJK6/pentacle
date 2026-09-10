@@ -187,7 +187,7 @@ test('machineSigil(flower) emits 6 petals + center + face/stem paths', () => {
 // ---------------------------------------------------------------------------
 
 test('arcaneRingFrame draws outer ring + dashed inner + 12 ticks and hosts the sigil', () => {
-  const frame = arcaneRingFrame({ machine: 'hostc', size: 80 });
+  const frame = arcaneRingFrame({ machine: 'mage', size: 80 });
   assert.equal(frame.tagName.toLowerCase(), 'div');
   const ring = frame.querySelector('svg[viewBox="0 0 100 100"]')!;
   assert.ok(ring, 'ring svg present');
@@ -201,7 +201,7 @@ test('arcaneRingFrame draws outer ring + dashed inner + 12 ticks and hosts the s
   assert.equal(circles[1].getAttribute('stroke-dasharray'), '1.5 3');
   assert.equal(ring.querySelectorAll('line').length, 12, '12 ticks');
   // accent resolved from the machine, and the mage sigil is embedded
-  assert.equal(circles[0].getAttribute('stroke'), MACHINES['hostc'].accent);
+  assert.equal(circles[0].getAttribute('stroke'), MACHINES['mage'].accent);
   const sigil = frame.querySelector('svg[viewBox="0 0 64 64"]');
   assert.ok(sigil, 'embeds the machine sigil svg');
 });

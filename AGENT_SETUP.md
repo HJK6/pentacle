@@ -37,6 +37,12 @@ not tasks the agent should pretend it completed.
 4. **Set up the desktop if requested.** Issue its credential and launch it using
    the README commands. Keep `features.chatUi: false`: structured desktop Chat
    is experimental. The normal session surface is the terminal.
+   Read [desktop configuration](docs/desktop_config.md). For multiple hosts,
+   populate hostNames/hostColors and exact chatStream.hostMap aliases; verify
+   the local badge. Configure a running mic server before enabling features.mic,
+   and enable features.usage only with the daemon limits collector configured.
+   Machine-stat cards come from daemon hostsStats; machineStats is ignored.
+   Preserve the private overlay and existing saved Settings during upgrades.
 5. **Set up mobile if requested.** Clone
    [pentacle-mobile](https://github.com/HJK6/pentacle-mobile), then follow its
    [mobile setup guide](https://github.com/HJK6/pentacle-mobile/blob/main/AGENT_SETUP.md).

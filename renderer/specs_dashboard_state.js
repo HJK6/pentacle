@@ -185,20 +185,9 @@ function decideAction(row) {
   return { kind: 'spawn_additional', leaderChips };
 }
 
-// Normalize a host-ish name (spec frontmatter `machine:`, env hostname,
-// renderer host id) onto the agent-orch host id local daemon uses in
-// specs.capabilities ("hosta" / "hostc" / "hostb" / "hostd"). The
-// substring rules mirror renderer/app.js streamHostForHostId — we keep the
-// alias table local rather than reaching across the renderer surface so the
-// helper module stays standalone-testable.
+// Daemon capability identities are exact IDs; labels never imply aliases.
 function normalizeHostAlias(name) {
-  const raw = String(name == null ? '' : name).toLowerCase().trim();
-  if (!raw) return null;
-  if (raw.includes('hosta')) return 'hosta';
-  if (raw.includes('hostc')) return 'hostc';
-  if (raw.includes('hostb')) return 'hostb';
-  if (raw.includes('hostd')) return 'hostd';
-  return raw;
+  return String(name == null ? '' : name).toLowerCase().trim() || null;
 }
 
 // Gate hosts for the modal dropdown using daemon capabilities + the spec's
@@ -216,7 +205,7 @@ function normalizeHostAlias(name) {
 //      via comma-separation), fall back to the current host if enabled,
 //      then to the first enabled entry, then to the first entry at all.
 //
-// `currentHost` may be a renderer-host id like "local" or "hosta"; we
+// `currentHost` may be a renderer-host id like "local" or "workstation"; we
 // pipe it through normalizeHostAlias so callers don't have to.
 function gateHosts(capabilitiesPayload, specMachine, currentHost) {
   const hostsMap = (capabilitiesPayload && capabilitiesPayload.hosts) || {};

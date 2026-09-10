@@ -54,7 +54,10 @@ const {
   replaceSchedulesFromInventory,
   applyScheduleEvent,
 } = require('./schedule_ui_state');
-const CONFIG = require('../config-loader').loadConfig(path.join(__dirname, '..')).config;
+const loadedConfig = require('../config-loader').loadConfig(path.join(__dirname, '..'));
+const CONFIG = loadedConfig.config;
+const hostPresentation = require('./host_presentation');
+const limitsContract = require('../main/limits_contract');
 const CHAT_POPOUT_CONTEXT = window.cc?.chatPopoutContext?.() || null;
 const IS_CHAT_POPOUT = !!CHAT_POPOUT_CONTEXT;
 let chatPopoutBound = false;
@@ -344,27 +347,11 @@ const CFG_READY = (async () => {
     // still toggle to local for WSL/macbook-local sessions.
     if (HOST_IDS.includes('remote')) newSessionLocation = 'remote';
     renderTitlebarMachines();
+    renderConfigWarnings();
     _perfRecord('renderer:cfg-ready-end');
     return cfg;
   } catch { _perfRecord('renderer:cfg-ready-error'); return null; }
 })();
-
-const CANONICAL_SOURCE_NAMES = {
-  hosta: 'hosta',
-  hosta: 'hosta',
-  remote: 'hosta',
-  hostb: 'hostb',
-  hostc: 'hostc',
-  hostd: 'hostd',
-};
-
-const CANONICAL_SOURCE_COLORS = {
-  hosta: 'forest-green',
-  hosta: 'forest-green',
-  hostb: 'red',
-  hostc: 'royal-blue',
-  hostd: 'orange',
-};
 
 // ── State ──────────────────────────────────────────────────────
 
@@ -912,37 +899,14 @@ if (typeof window !== 'undefined' && window.PentacleHarness && window.PentacleHa
 }
 
 function streamHostForHostId(hostId) {
-  const configured = CONFIG.chatStream?.hostMap?.[hostId];
-  if (configured) return configured;
-  const names = CONFIG.hostNames || {};
-  const label = String(names[hostId] || hostId || '').toLowerCase();
-  if (label.includes('hosta')) return 'hosta';
-  if (label.includes('hostc') || label.includes('abra')) return 'hostc';
-  if (label.includes('hostb')) return 'hostb';
-  if (hostId === 'remote') return 'hosta';
-  if (hostId === 'hostb') return 'hostb';
-  if (hostId === 'local') {
-    const hostname = String(window.HOST?.hostname || '').toLowerCase();
-    if (hostname.includes('hostc')) return 'hostc';
-    if (hostname.includes('hostb')) return 'hostb';
-    return 'hosta';
-  }
-  return hostId || 'hosta';
+  return hostPresentation.streamHost(CONFIG, hostId);
 }
 
-// Reverse of streamHostForHostId — given a chat-stream host (e.g. 'hosta'),
-// pick the desktop hostId whose forward mapping resolves to it.
-// Returns null if no configured HOST_IDS map to this stream host.
+// Resolve configured desktop aliases without inferring identity from labels.
 function _streamHostToHostId(streamHost) {
   const target = String(streamHost || '').trim().toLowerCase();
   if (!target) return null;
-  for (const id of HOST_IDS) {
-    if (String(streamHostForHostId(id) || '').toLowerCase() === target) return id;
-  }
-  // Fallback for client-mode where the desktop only knows 'remote' but the
-  // chat-stream host is the explicit machine name ('hosta').
-  if (target === 'hosta' && HOST_IDS.includes('remote')) return 'remote';
-  return null;
+  return HOST_IDS.find(id => String(streamHostForHostId(id)).toLowerCase() === target) || null;
 }
 
 // Coalesce rapid chat-stream inventory updates into a single sidebar
@@ -2781,7 +2745,7 @@ function renderSlotChat(slot) {
   // (which previously called this selector once per frame before the gate and
   // re-emitted "rendered" for content the user could not see).
   let detail = null;
-  const chrome = chatUi.hostChrome(remoteSessionState?.host || streamHost);
+  const chrome = chatUi.hostChrome(_streamHostToHostId(remoteSessionState?.host || streamHost) || streamHost, CONFIG, HOST_IDS);
   const remoteDraft = isCodexHelperPromptText(remoteDraftState?.text || '') ? '' : (remoteDraftState?.text || '');
   const remotePending = !!remoteDraftState?.raw?.pending;
   const remoteWorking = !!remoteDraftState?.raw?.working;
@@ -2958,7 +2922,7 @@ function renderSlotChat(slot) {
   // the ArcaneRingFrame-wrapped MachineSigil, the Cinzel epithet, and the
   // provider + working/idle status tags. Styling-only: degrades to the plain hero
   // when the cosmic bundle is absent or the host is not a known PublicDash machine
-  // (chrome.title is the machine name, e.g. 'hostc', keying the MACHINES map).
+  // Optional decorative metadata is keyed by sigil name, independently of host identity.
   let cosmicSigilHtml = '';
   let cosmicEpithetHtml = '';
   let cosmicTagsHtml = '';
@@ -3965,22 +3929,19 @@ function getSlotForSession(name, hostId) {
 // ── Activity Detection & Summaries ────────────────────────────
 
 function getSourceForSession(sessionName, hostId) {
-  if (!hostId) return null;
-  const names = CONFIG.hostNames || {};
-  const configured = names[hostId];
-  if (configured) return configured;
-  return CANONICAL_SOURCE_NAMES[String(hostId).toLowerCase()] || hostId;
+  return hostId ? hostPresentation.hostLabel(CONFIG, hostId) : null;
 }
 
 function getSourceColorForSession(sessionName, hostId) {
-  const sourceName = getSourceForSession(sessionName, hostId);
-  const canonicalColor = CANONICAL_SOURCE_COLORS[String(sourceName || '').toLowerCase()];
-  if (canonicalColor) return canonicalColor;
-  const aliasedName = CANONICAL_SOURCE_NAMES[String(hostId || '').toLowerCase()];
-  const aliasedColor = CANONICAL_SOURCE_COLORS[String(aliasedName || '').toLowerCase()];
-  if (aliasedColor) return aliasedColor;
-  const colors = CONFIG.hostColors || {};
-  return colors[hostId] || 'green';
+  return hostPresentation.hostColor(CONFIG, hostId, HOST_IDS);
+}
+
+function renderConfigWarnings() {
+  const banner = document.getElementById('config-warning-banner');
+  if (!banner) return;
+  const warnings = CONFIG.configWarnings || loadedConfig.warnings || [];
+  banner.textContent = warnings.map(warning => warning.message).join(' ');
+  banner.hidden = warnings.length === 0;
 }
 
 function renderTitlebarMachines() {
@@ -3996,7 +3957,7 @@ function renderTitlebarMachines() {
 }
 
 function getSourceInitial(source) {
-  return String(source || '').trim().charAt(0).toUpperCase();
+  return hostPresentation.initial(source);
 }
 
 function findSession(sessionName, hostId) {
@@ -6052,8 +6013,16 @@ function paintLimits(limits) {
 }
 
 function renderLimits(limits, health) {
-  void health;
-  paintLimits(limits);
+  const rows = limitsContract.validatedLimits(limits);
+  const validatedHealth = limitsContract.validatedLimitsHealth(health ?? null);
+  if (!rows || validatedHealth === undefined) return;
+  paintLimits(rows);
+  const banner = document.getElementById('limits-health');
+  if (banner) {
+    const error = validatedHealth?.claude?.error;
+    banner.textContent = error ? `Usage probe failed; showing retained values. ${error.message.slice(0, 500)}` : '';
+    banner.hidden = !error;
+  }
 }
 
 // ── Machine Stats Footer ─────────────────────────────────────
@@ -6198,13 +6167,7 @@ startMachineStatsStaleReevaluation();
 const MIC_API = resolveMicUrl(CONFIG);
 
 function resolveLocalMicCaller() {
-  const explicit = CONFIG.localHostId || (CONFIG.chatStream && CONFIG.chatStream.hostMap && CONFIG.chatStream.hostMap.local);
-  if (explicit) return String(explicit);
-  const hostname = String(window.HOST && window.HOST.hostname || '').toLowerCase();
-  if (hostname.includes('hostb')) return 'hostb';
-  if (hostname.includes('hosta')) return 'hosta';
-  if (hostname.includes('hostc') || hostname.includes('abra')) return 'hostc';
-  return 'unknown';
+  return hostPresentation.localIdentity(CONFIG);
 }
 
 function micModeBody(extra = {}) {
@@ -6691,6 +6654,7 @@ document.getElementById('mic-btn-meeting').addEventListener('click', async () =>
   if (titleEl) titleEl.textContent = CONFIG.appName.toUpperCase();
   document.title = CONFIG.appName;
   renderTitlebarMachines();
+  renderConfigWarnings();
 
   applyAppearanceSettings();
 

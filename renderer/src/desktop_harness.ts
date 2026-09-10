@@ -69,7 +69,7 @@ export function emitHarness(name: string, fields: BeaconFields = {}): void {
     seq: ++seq,
     ...(fields.streamId !== undefined ? { streamId: 'fixture-stream' } : {}),
     ...(fields.slot !== undefined && Number.isFinite(fields.slot) ? { slot: fields.slot } : {}),
-    ...(fields.host !== undefined ? { host: safeLabel(fields.host, 'hosta') } : {}),
+    ...(fields.host !== undefined ? { host: safeLabel(fields.host, 'local') } : {}),
     ...(fields.provider !== undefined ? { provider: safeLabel(fields.provider, 'fixture-provider') } : {}),
     ...(safeData(fields.data) ? { data: safeData(fields.data) } : {}),
   };

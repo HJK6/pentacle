@@ -134,8 +134,8 @@ test('user bubble resolves to the JetBrains Mono family inside .cosmic', () => {
 
 // ── 4. MachineSigil renders in the header for the active machine ───────
 test('the header arcaneRingFrame embeds the active machine MachineSigil SVG', () => {
-  // hostc is this machine; the header keys MACHINES by chrome.title.
-  const frame = arcaneRingFrame({ machine: 'hostc', size: 44, sigilSize: 27 });
+  // mage is this machine; the header keys MACHINES by chrome.title.
+  const frame = arcaneRingFrame({ machine: 'mage', size: 44, sigilSize: 27 });
   assert.equal(frame.tagName.toLowerCase(), 'div');
   const ring = frame.querySelector('svg[viewBox="0 0 100 100"]');
   assert.ok(ring, 'arcane ring present');
@@ -152,17 +152,17 @@ test('every Public machine renders a distinct sigil for the header', () => {
 });
 
 test('the header tags render for claude + working/idle status', () => {
-  const claude = providerTag('claude', { color: MACHINES['hostc'].accent });
+  const claude = providerTag('claude', { color: MACHINES['mage'].accent });
   assert.match(claude.textContent || '', /Claude/);
-  const working = statusTag('working', { color: MACHINES['hostc'].accent });
+  const working = statusTag('working', { color: MACHINES['mage'].accent });
   assert.ok(working.querySelector('.activity-spinner'), 'working tag shows the shared spinner');
   assert.equal(working.querySelector('.cosmic-spinner'), null);
-  const idle = statusTag('idle', { color: MACHINES['hostc'].accent });
+  const idle = statusTag('idle', { color: MACHINES['mage'].accent });
   assert.match(idle.textContent || '', /Idle/);
 });
 
 test('MACHINES in the component lib is the single source of truth (cosmic_tokens.ts)', () => {
   assert.equal(MACHINES, TOKEN_MACHINES, 'component MACHINES is re-exported from cosmic_tokens');
-  assert.equal(MACHINES['hostc'].accent, '#29d4ff');
-  assert.equal(MACHINES['hostc'].epithet, 'the mage');
+  assert.equal(MACHINES['mage'].accent, '#29d4ff');
+  assert.equal(MACHINES['mage'].epithet, 'the mage');
 });

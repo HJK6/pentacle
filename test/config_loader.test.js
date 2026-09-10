@@ -3,6 +3,44 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 const { candidateConfigPaths, machineKey, withThemeDefaults } = require('../config-loader');
+const { configWarnings, loadConfig } = require('../config-loader');
+
+test('warnings identify omitted multi-host presentation maps individually', () => {
+  const config = { chatStream: { hosts: ['local', 'workstation'] } };
+  assert.equal(configWarnings(config).length, 1);
+  assert.match(configWarnings(config)[0].message, /hostNames.*hostColors/);
+  assert.match(configWarnings({ ...config, hostNames: {} })[0].message, /hostColors/);
+  assert.deepEqual(configWarnings({ ...config, hostNames: {}, hostColors: {} }), []);
+  assert.deepEqual(configWarnings({ chatStream: { hosts: ['local'] } }), []);
+});
+
+test('warnings flag enabled mic without an explicit endpoint', () => {
+  assert.match(configWarnings({ features: { mic: true } })[0].message, /mic/);
+  assert.equal(configWarnings({ features: { mic: true }, mic: {} }).length, 1);
+  assert.deepEqual(configWarnings({ features: { mic: false } }), []);
+  assert.deepEqual(configWarnings({ features: { mic: true }, micServerUrl: 'http://localhost:7780' }), []);
+  assert.deepEqual(configWarnings({ features: { mic: true }, mic: { useStreamHost: true }, chatStream: { url: 'ws://localhost:7791' } }), []);
+});
+
+test('unknown top-level keys warn without exposing their values', () => {
+  const warnings = configWarnings({ hostColros: { secret: 'do not log me' } });
+  assert.match(warnings[0].message, /hostColros/);
+  assert.doesNotMatch(warnings[0].message, /do not log me/);
+});
+
+test('loadConfig returns warnings and writes them to stderr', (t) => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-config-test-'));
+  const file = path.join(dir, 'config.js');
+  fs.writeFileSync(file, 'module.exports = { hostColros: {} };');
+  const seen = [];
+  t.mock.method(console, 'warn', message => seen.push(message));
+  t.after(() => { fs.unlinkSync(file); fs.rmdirSync(dir); });
+  const loaded = loadConfig(dir, { PENTACLE_CONFIG: file });
+  assert.equal(loaded.warnings.length, 1);
+  assert.match(seen[0], /hostColros/);
+});
 
 // Regression guard (public_e2e_harness): a config missing dark/terminal crashed
 // the app at launch (main.js `backgroundColor: CONFIG.dark.bg` → "Cannot read

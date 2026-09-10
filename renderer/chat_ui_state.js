@@ -11,28 +11,19 @@ function normalizedEventText(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
-function hostTitle(host) {
-  if (host === 'hosta') return 'hosta';
-  if (host === 'hostc' || host === 'hostc') return 'hostc';
-  if (host === 'hostb') return 'hostb';
-  if (host === 'hostd') return 'hostd';
-  return host ? String(host).charAt(0).toUpperCase() + String(host).slice(1) : 'Agent';
+const hostPresentation = require('./host_presentation');
+
+function hostTitle(host, config = {}) {
+  return host ? hostPresentation.hostLabel(config, host) : 'Agent';
 }
 
-function hostChrome(host) {
-  const normalized = String(host || '').toLowerCase();
-  const bridgeAccent =
-    normalized === 'hosta' ? '#166534'
-      : normalized === 'hostc' || normalized === 'hostc' ? '#1d4ed8'
-        : normalized === 'hostb' ? '#f47067'
-          : normalized === 'hostd' ? '#f0883e'
-            : 'var(--pc-accent)';
+function hostChrome(host, config = {}, roster) {
   return {
     header: 'var(--pc-header)',
-    accent: bridgeAccent,
+    accent: hostPresentation.ACCENTS[hostPresentation.hostColor(config, host, roster)],
     surface: 'var(--pc-chip-bg)',
     border: 'var(--pc-line)',
-    title: hostTitle(normalized),
+    title: hostTitle(host, config),
   };
 }
 

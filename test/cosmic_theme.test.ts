@@ -75,10 +75,10 @@ test('cosmic CSS vars resolve on a .cosmic-scoped element', () => {
   assert.equal(v('--cosmic-codepanel'), '#04100a');
 
   // machine accents
-  assert.equal(v('--cosmic-machine-hosta'), '#3dff66');
-  assert.equal(v('--cosmic-machine-hostb'), '#ff2e3e');
-  assert.equal(v('--cosmic-machine-hostc'), '#29d4ff');
-  assert.equal(v('--cosmic-machine-hostd'), '#b14dff');
+  assert.equal(v('--cosmic-machine-djinni'), '#3dff66');
+  assert.equal(v('--cosmic-machine-sun'), '#ff2e3e');
+  assert.equal(v('--cosmic-machine-mage'), '#29d4ff');
+  assert.equal(v('--cosmic-machine-flower'), '#b14dff');
 
   // status + severity
   assert.equal(v('--cosmic-status-working'), '#3dff66');
@@ -131,11 +131,11 @@ test('font helper classes resolve to Rajdhani / JetBrains Mono / Cinzel', () => 
 
 // ── 3. JS token exports mirror constants/Colors.ts exactly ────────────
 test('cosmic_tokens MACHINES map has correct kind/accent/epithet', () => {
-  assert.deepEqual(MACHINE_ORDER, ['hosta', 'hostb', 'hostc', 'hostd']);
-  assert.deepEqual(MACHINES['hosta'], { kind: 'djinni', accent: '#3dff66', epithet: 'the djinni' });
-  assert.deepEqual(MACHINES['hostb'], { kind: 'sun', accent: '#ff2e3e', epithet: 'the flame' });
-  assert.deepEqual(MACHINES['hostc'], { kind: 'mage', accent: '#29d4ff', epithet: 'the mage' });
-  assert.deepEqual(MACHINES['hostd'], { kind: 'flower', accent: '#b14dff', epithet: 'the bloom' });
+  assert.deepEqual(MACHINE_ORDER, ['djinni', 'sun', 'mage', 'flower']);
+  assert.deepEqual(MACHINES['djinni'], { kind: 'djinni', accent: '#3dff66', epithet: 'the djinni' });
+  assert.deepEqual(MACHINES['sun'], { kind: 'sun', accent: '#ff2e3e', epithet: 'the flame' });
+  assert.deepEqual(MACHINES['mage'], { kind: 'mage', accent: '#29d4ff', epithet: 'the mage' });
+  assert.deepEqual(MACHINES['flower'], { kind: 'flower', accent: '#b14dff', epithet: 'the bloom' });
 });
 
 test('cosmic_tokens STATUS + SEV maps have correct hex values', () => {

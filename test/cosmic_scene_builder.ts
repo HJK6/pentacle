@@ -32,10 +32,10 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { renderMultiSelectQuestion } = require('../renderer/multiselect_question');
 
-// ── This machine (hostc the mage) drives the header chrome ────────────
-const MACHINE = 'hostc' as const;
+// ── This machine (mage the mage) drives the header chrome ────────────
+const MACHINE = 'mage' as const;
 const META = MACHINES[MACHINE];
-const STREAM = 'hostc:claude-hostc-cosmic';
+const STREAM = 'mage:claude-mage-cosmic';
 const stateStream = (name: StateName): string => `${STREAM}-${name}`;
 const CHROME = {
   accent: META.accent,
@@ -82,10 +82,10 @@ function event(kind: string, text: string, over: Record<string, unknown> = {}): 
   seqCounter += 1;
   return {
     daemon_seq: seqCounter,
-    host: 'hostc',
+    host: 'mage',
     provider: 'claude',
     session_id: 'sess-cosmic',
-    session_name: 'claude-hostc-cosmic',
+    session_name: 'claude-mage-cosmic',
     stream_id: STREAM,
     timestamp: '2026-06-03T17:30:00.000Z',
     kind,
@@ -97,10 +97,10 @@ function event(kind: string, text: string, over: Record<string, unknown> = {}): 
 function session(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     stream_id: STREAM,
-    host: 'hostc',
+    host: 'mage',
     provider: 'claude',
-    session_name: 'claude-hostc-cosmic',
-    display_name: 'claude-hostc-cosmic',
+    session_name: 'claude-mage-cosmic',
+    display_name: 'claude-mage-cosmic',
     last_event_at: '2026-06-03T17:30:00.000Z',
     // Default to no session-summary last_text so non-working baselines do not
     // grow a stray fallback row; states that need it (working repro, idle probe)
@@ -122,7 +122,7 @@ function seed(
   streamId = STREAM,
 ): ChatStoreController {
   const controller = new ChatStoreController();
-  const sessionName = streamId.split(':').pop() || 'claude-hostc-cosmic';
+  const sessionName = streamId.split(':').pop() || 'claude-mage-cosmic';
   controller.applyFrame({
     type: 'snapshot',
     events: events.map((item) => ({
@@ -224,7 +224,7 @@ function detailFor(name: StateName) {
     case 'markdown_table':
       return seed([
         userEvent('list the Public machines and sigils'),
-        assistEvent('| Machine | Kind | Accent |\n| --- | --- | --- |\n| hosta | djinni | #3dff66 |\n| hostb | sun | #ff2e3e |\n| hostc | mage | #29d4ff |\n| hostd | flower | #b14dff |'),
+        assistEvent('| Machine | Kind | Accent |\n| --- | --- | --- |\n| djinni | djinni | #3dff66 |\n| sun | sun | #ff2e3e |\n| mage | mage | #29d4ff |\n| flower | flower | #b14dff |'),
       ], {}, streamId).selectSessionDetail(streamId);
     case 'question_single':
     case 'question_multiselect':
@@ -293,7 +293,7 @@ function buildHero(doc: Document, activity: 'working' | 'idle'): HTMLElement {
 
   const title = doc.createElement('div');
   title.className = 'slot-chat-session-title';
-  title.textContent = 'claude-hostc-cosmic';
+  title.textContent = 'claude-mage-cosmic';
   head.appendChild(title);
 
   const tags = doc.createElement('div');

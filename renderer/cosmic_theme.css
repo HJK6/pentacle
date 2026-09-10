@@ -123,10 +123,10 @@
   --cosmic-backdrop: rgba(3, 7, 5, 0.8);
 
   /* Machine accents — MACHINES[name].accent */
-  --cosmic-machine-hosta: #3dff66;
-  --cosmic-machine-hostb: #ff2e3e;
-  --cosmic-machine-hostc: #29d4ff;
-  --cosmic-machine-hostd: #b14dff;
+  --cosmic-machine-djinni: #3dff66;
+  --cosmic-machine-sun: #ff2e3e;
+  --cosmic-machine-mage: #29d4ff;
+  --cosmic-machine-flower: #b14dff;
 
   /* Status — STATUS map */
   --cosmic-status-working: #3dff66;

@@ -30,10 +30,10 @@
   --pc-chip-tx: #8bf0c0;
   --pc-user-bg: #16352880;
   --pc-user-line: #2e5947;
-  --bridge-hostb: #f47067;
-  --bridge-hostc: #1d4ed8;
-  --bridge-hosta: #166534;
-  --bridge-hostd: #f0883e;
+  --bridge-red: #f47067;
+  --bridge-royal-blue: #1d4ed8;
+  --bridge-forest-green: #166534;
+  --bridge-orange: #f0883e;
 }
 
 [data-theme="light"] {
@@ -128,10 +128,10 @@ body {
   font-size: 10px;
   font-weight: 800;
 }
-.titlebar-machine.color-red { color: var(--bridge-hostb); }
-.titlebar-machine.color-royal-blue { color: var(--bridge-hostc); }
-.titlebar-machine.color-forest-green { color: var(--bridge-hosta); }
-.titlebar-machine.color-orange { color: var(--bridge-hostd); }
+.titlebar-machine.color-red { color: var(--bridge-red); }
+.titlebar-machine.color-royal-blue { color: var(--bridge-royal-blue); }
+.titlebar-machine.color-forest-green { color: var(--bridge-forest-green); }
+.titlebar-machine.color-orange { color: var(--bridge-orange); }
 
 /* ── Settings Button ──────────────────────────── */
 
@@ -317,23 +317,23 @@ body {
 }
 .source-filter-btn:hover { border-color: var(--pc-accent-dim); color: var(--pc-text); }
 .source-filter-btn.active { background: var(--pc-chip-bg); color: var(--pc-text); border-color: var(--pc-accent-dim); }
-.source-filter-btn.color-red    { color: #fff; border-color: var(--bridge-hostb); background: var(--bridge-hostb); }
+.source-filter-btn.color-red    { color: #fff; border-color: var(--bridge-red); background: var(--bridge-red); }
 .source-filter-btn.color-purple { color: #fff; border-color: var(--purple); background: var(--purple); }
 .source-filter-btn.color-yellow { color: #fff; border-color: var(--yellow); background: var(--yellow); }
 .source-filter-btn.color-green  { color: #fff; border-color: var(--green); background: var(--green); }
 .source-filter-btn.color-blue   { color: #fff; border-color: var(--blue); background: var(--blue); }
-.source-filter-btn.color-orange { color: #fff; border-color: var(--bridge-hostd); background: var(--bridge-hostd); }
-.source-filter-btn.color-royal-blue { color: #fff; border-color: var(--bridge-hostc); background: var(--bridge-hostc); }
-.source-filter-btn.color-forest-green { color: #fff; border-color: var(--bridge-hosta); background: var(--bridge-hosta); }
+.source-filter-btn.color-orange { color: #fff; border-color: var(--bridge-orange); background: var(--bridge-orange); }
+.source-filter-btn.color-royal-blue { color: #fff; border-color: var(--bridge-royal-blue); background: var(--bridge-royal-blue); }
+.source-filter-btn.color-forest-green { color: #fff; border-color: var(--bridge-forest-green); background: var(--bridge-forest-green); }
 .source-filter-btn.color-deep-raspberry { color: #fff; border-color: #b83280; background: #b83280; }
-.source-filter-btn.color-red.active    { color: #fff; border-color: var(--bridge-hostb); background: var(--bridge-hostb); }
+.source-filter-btn.color-red.active    { color: #fff; border-color: var(--bridge-red); background: var(--bridge-red); }
 .source-filter-btn.color-purple.active { color: #fff; border-color: var(--purple); background: var(--purple); }
 .source-filter-btn.color-yellow.active { color: #fff; border-color: var(--yellow); background: var(--yellow); }
 .source-filter-btn.color-green.active  { color: #fff; border-color: var(--green); background: var(--green); }
 .source-filter-btn.color-blue.active   { color: #fff; border-color: var(--blue); background: var(--blue); }
-.source-filter-btn.color-orange.active { color: #fff; border-color: var(--bridge-hostd); background: var(--bridge-hostd); }
-.source-filter-btn.color-royal-blue.active { color: #fff; border-color: var(--bridge-hostc); background: var(--bridge-hostc); }
-.source-filter-btn.color-forest-green.active { color: #fff; border-color: var(--bridge-hosta); background: var(--bridge-hosta); }
+.source-filter-btn.color-orange.active { color: #fff; border-color: var(--bridge-orange); background: var(--bridge-orange); }
+.source-filter-btn.color-royal-blue.active { color: #fff; border-color: var(--bridge-royal-blue); background: var(--bridge-royal-blue); }
+.source-filter-btn.color-forest-green.active { color: #fff; border-color: var(--bridge-forest-green); background: var(--bridge-forest-green); }
 .source-filter-btn.color-deep-raspberry.active { color: #fff; border-color: #b83280; background: #b83280; }
 
 .session-list {
@@ -405,10 +405,10 @@ body {
   border: 1px solid var(--green);
   background: var(--green);
 }
-.s-machine-avatar.color-red { color: #fff; border-color: var(--bridge-hostb); background: var(--bridge-hostb); }
-.s-machine-avatar.color-royal-blue { color: #fff; border-color: var(--bridge-hostc); background: var(--bridge-hostc); }
-.s-machine-avatar.color-forest-green { color: #fff; border-color: var(--bridge-hosta); background: var(--bridge-hosta); }
-.s-machine-avatar.color-orange { color: #fff; border-color: var(--bridge-hostd); background: var(--bridge-hostd); }
+.s-machine-avatar.color-red { color: #fff; border-color: var(--bridge-red); background: var(--bridge-red); }
+.s-machine-avatar.color-royal-blue { color: #fff; border-color: var(--bridge-royal-blue); background: var(--bridge-royal-blue); }
+.s-machine-avatar.color-forest-green { color: #fff; border-color: var(--bridge-forest-green); background: var(--bridge-forest-green); }
+.s-machine-avatar.color-orange { color: #fff; border-color: var(--bridge-orange); background: var(--bridge-orange); }
 
 .s-offline-badge {
   color: #f5d08a;
@@ -692,14 +692,14 @@ body.chat-stream-degraded button[data-cleanup-action] {
   margin-top: 4px;
 }
 
-.machine-stat-card.color-red { border-left-color: var(--bridge-hostb); }
+.machine-stat-card.color-red { border-left-color: var(--bridge-red); }
 .machine-stat-card.color-purple { border-left-color: var(--purple); }
 .machine-stat-card.color-yellow { border-left-color: var(--yellow); }
 .machine-stat-card.color-green { border-left-color: var(--green); }
 .machine-stat-card.color-blue { border-left-color: var(--blue); }
-.machine-stat-card.color-orange { border-left-color: var(--bridge-hostd); }
-.machine-stat-card.color-royal-blue { border-left-color: var(--bridge-hostc); }
-.machine-stat-card.color-forest-green { border-left-color: var(--bridge-hosta); }
+.machine-stat-card.color-orange { border-left-color: var(--bridge-orange); }
+.machine-stat-card.color-royal-blue { border-left-color: var(--bridge-royal-blue); }
+.machine-stat-card.color-forest-green { border-left-color: var(--bridge-forest-green); }
 .machine-stat-card.color-deep-raspberry { border-left-color: #b83280; }
 
 .machine-stat-head,
@@ -725,14 +725,14 @@ body.chat-stream-degraded button[data-cleanup-action] {
   font-weight: 800;
 }
 
-.machine-stat-card.color-red .machine-stat-mark { background: var(--bridge-hostb); }
+.machine-stat-card.color-red .machine-stat-mark { background: var(--bridge-red); }
 .machine-stat-card.color-purple .machine-stat-mark { background: var(--purple); }
 .machine-stat-card.color-yellow .machine-stat-mark { background: var(--yellow); }
 .machine-stat-card.color-green .machine-stat-mark { background: var(--green); }
 .machine-stat-card.color-blue .machine-stat-mark { background: var(--blue); }
-.machine-stat-card.color-orange .machine-stat-mark { background: var(--bridge-hostd); }
-.machine-stat-card.color-royal-blue .machine-stat-mark { background: var(--bridge-hostc); }
-.machine-stat-card.color-forest-green .machine-stat-mark { background: var(--bridge-hosta); }
+.machine-stat-card.color-orange .machine-stat-mark { background: var(--bridge-orange); }
+.machine-stat-card.color-royal-blue .machine-stat-mark { background: var(--bridge-royal-blue); }
+.machine-stat-card.color-forest-green .machine-stat-mark { background: var(--bridge-forest-green); }
 .machine-stat-card.color-deep-raspberry .machine-stat-mark { background: #b83280; }
 
 .machine-stat-name {
@@ -4038,14 +4038,14 @@ body.chat-stream-degraded button[data-cleanup-action] {
   font-weight: 800;
 }
 
-.new-session-machine.color-red .new-session-option-mark { background: var(--bridge-hostb); }
+.new-session-machine.color-red .new-session-option-mark { background: var(--bridge-red); }
 .new-session-machine.color-purple .new-session-option-mark { background: var(--purple); }
 .new-session-machine.color-yellow .new-session-option-mark { background: var(--yellow); }
 .new-session-machine.color-green .new-session-option-mark { background: var(--green); }
 .new-session-machine.color-blue .new-session-option-mark { background: var(--blue); }
-.new-session-machine.color-orange .new-session-option-mark { background: var(--bridge-hostd); }
-.new-session-machine.color-royal-blue .new-session-option-mark { background: var(--bridge-hostc); }
-.new-session-machine.color-forest-green .new-session-option-mark { background: var(--bridge-hosta); }
+.new-session-machine.color-orange .new-session-option-mark { background: var(--bridge-orange); }
+.new-session-machine.color-royal-blue .new-session-option-mark { background: var(--bridge-royal-blue); }
+.new-session-machine.color-forest-green .new-session-option-mark { background: var(--bridge-forest-green); }
 .new-session-machine.color-deep-raspberry .new-session-option-mark { background: #b83280; }
 
 .new-session-agent .new-session-option-mark {
@@ -4376,14 +4376,14 @@ body.chat-stream-degraded button[data-cleanup-action] {
   letter-spacing: 0;
   flex-shrink: 0;
 }
-.s-source-tag.color-red,    .cell-source-tag.color-red    { color: #fff; background: var(--bridge-hostb); }
+.s-source-tag.color-red,    .cell-source-tag.color-red    { color: #fff; background: var(--bridge-red); }
 .s-source-tag.color-purple, .cell-source-tag.color-purple { color: #fff; background: var(--purple); }
 .s-source-tag.color-yellow, .cell-source-tag.color-yellow { color: #fff; background: var(--yellow); }
 .s-source-tag.color-green,  .cell-source-tag.color-green  { color: #fff; background: var(--green); }
 .s-source-tag.color-blue,   .cell-source-tag.color-blue   { color: #fff; background: var(--blue); }
-.s-source-tag.color-orange, .cell-source-tag.color-orange { color: #fff; background: var(--bridge-hostd); }
-.s-source-tag.color-royal-blue, .cell-source-tag.color-royal-blue { color: #fff; background: var(--bridge-hostc); }
-.s-source-tag.color-forest-green, .cell-source-tag.color-forest-green { color: #fff; background: var(--bridge-hosta); }
+.s-source-tag.color-orange, .cell-source-tag.color-orange { color: #fff; background: var(--bridge-orange); }
+.s-source-tag.color-royal-blue, .cell-source-tag.color-royal-blue { color: #fff; background: var(--bridge-royal-blue); }
+.s-source-tag.color-forest-green, .cell-source-tag.color-forest-green { color: #fff; background: var(--bridge-forest-green); }
 .s-source-tag.color-deep-raspberry, .cell-source-tag.color-deep-raspberry { color: #fff; background: #b83280; }
 
 /* ── Session Summary in Sidebar ───────────────── */
@@ -5557,3 +5557,16 @@ body.chat-stream-degraded button[data-cleanup-action] {
   from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* Optional named colours share the host badge presentation. */
+.titlebar-machine.color-green { color: var(--green); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag).color-green { color: #fff; background: var(--green); border-color: var(--green); }
+.titlebar-machine.color-blue { color: var(--blue); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag).color-blue { color: #fff; background: var(--blue); border-color: var(--blue); }
+.titlebar-machine.color-purple { color: var(--purple); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag).color-purple { color: #fff; background: var(--purple); border-color: var(--purple); }
+.titlebar-machine.color-yellow { color: var(--yellow); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag).color-yellow { color: #fff; background: var(--yellow); border-color: var(--yellow); }
+.titlebar-machine.color-cyan { color: var(--cyan); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag).color-cyan { color: #fff; background: var(--cyan); border-color: var(--cyan); }
+#limits-health { padding: 6px 10px; color: var(--yellow); font-size: 11px; overflow-wrap: anywhere; }

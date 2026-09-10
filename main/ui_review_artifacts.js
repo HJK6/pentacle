@@ -138,7 +138,7 @@ function legacyHtmlArtifact(filePath, machine) {
   };
 }
 
-function listLocalArtifacts(config = {}, machine = 'hosta') {
+function listLocalArtifacts(config = {}, machine = 'local') {
   const artifacts = [];
   const seen = new Set();
   const normalizedMachine = publicMachineLabel(machine);

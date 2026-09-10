@@ -48,14 +48,49 @@ function withThemeDefaults(config, root) {
   return config;
 }
 
+const TOP_LEVEL_KEYS = new Set([
+  'appName', 'appId', 'agents', 'dark', 'terminal', 'features', 'chatStream',
+  'hosts', 'remote', 'tmux', 'hostNames', 'hostColors', 'localHostId', 'mic',
+  'micServerUrl', 'wakeWord', 'machineStats', 'artifactDirs', 'repoRoots',
+  'dashboardHub', 'localSsh', 'localWsl', 'localTmux', 'peers',
+]);
+const loggedWarnings = new Set();
+const isMap = value => value && typeof value === 'object' && !Array.isArray(value);
+const nonblank = value => typeof value === 'string' && value.trim().length > 0;
+
+function configWarnings(config = {}) {
+  const warnings = [];
+  if (Array.isArray(config.chatStream?.hosts) && config.chatStream.hosts.length > 1) {
+    const missing = ['hostNames', 'hostColors'].filter(key => !isMap(config[key]));
+    if (missing.length) warnings.push({ code: 'multi-host-presentation', message: `Multiple hosts configured without ${missing.join(' and ')}. Using capitalised names and the indexed colour palette; configure these maps to customise them.` });
+  }
+  if (config.features?.mic === true && !nonblank(config.micServerUrl)
+      && !(config.mic?.useStreamHost === true && nonblank(config.chatStream?.url))) {
+    warnings.push({ code: 'mic-endpoint', message: 'Microphone enabled without an explicit endpoint. Set micServerUrl or mic.useStreamHost with chatStream.url; the fallback is http://127.0.0.1:7780.' });
+  }
+  const unknown = Object.keys(config).filter(key => !TOP_LEVEL_KEYS.has(key)).sort();
+  if (unknown.length) warnings.push({ code: 'unknown-top-level', message: `Unknown desktop config keys: ${unknown.map(key => JSON.stringify(key)).join(', ')}. Check docs/desktop_config.md for supported keys.` });
+  return warnings;
+}
+
 function loadConfig(root = __dirname, env = process.env, hostname = os.hostname()) {
   const tried = [];
   for (const file of candidateConfigPaths(root, env, hostname)) {
     tried.push(file);
     if (!fs.existsSync(file)) continue;
-    return { config: withThemeDefaults(require(file), root), path: file, tried };
+    const config = withThemeDefaults(require(file), root);
+    const warnings = configWarnings(config);
+    if (process.type !== 'renderer') {
+      for (const warning of warnings) {
+        const key = `${file}:${warning.code}`;
+        if (loggedWarnings.has(key)) continue;
+        loggedWarnings.add(key);
+        console.warn(`[desktop-config:${warning.code}] ${warning.message}`);
+      }
+    }
+    return { config, warnings, path: file, tried };
   }
   throw new Error(`No Pentacle config found. Tried: ${tried.join(', ')}`);
 }
 
-module.exports = { loadConfig, machineKey, candidateConfigPaths, withThemeDefaults };
+module.exports = { loadConfig, machineKey, candidateConfigPaths, withThemeDefaults, configWarnings };

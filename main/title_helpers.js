@@ -22,7 +22,6 @@ function cleanTitleCandidate(raw) {
     .trim();
   if (!title || title.includes('-')) return '';
   if (/^(codex|claude)( code| chat)?$/i.test(title)) return '';
-  if (/^(hosta|hostb|hostc|hostd)$/i.test(title)) return '';
   const words = title.split(/\s+/).filter(Boolean);
   if (words.length < 2 || words.length > 7) return '';
   if (/\d{6,}/.test(title)) return '';

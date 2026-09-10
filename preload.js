@@ -190,7 +190,6 @@ window.cc = {
   setBatchGate: (batch, gate, setting) => ipcRenderer.invoke('dashboard:set-batch-gate', { batch, gate, setting }),
   get0dteStats: (traderId) => ipcRenderer.invoke('dashboard:0dte-stats', traderId),
   list0dteTraders: () => ipcRenderer.invoke('dashboard:0dte-list-traders'),
-  gethostbOcrStats: () => ipcRenderer.invoke('dashboard:hostb-ocr-stats'),
   getChatStreamState: () => ipcRenderer.invoke('chat-stream:get-state'),
   listUiReviewArtifacts: () => ipcRenderer.invoke('ui-review:list-artifacts'),
 

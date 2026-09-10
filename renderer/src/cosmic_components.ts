@@ -64,10 +64,10 @@ export const MACHINES = TOKEN_MACHINES;
 // Derived from MACHINES so it stays in lockstep with the single source of truth.
 // This does NOT affect any ported path `d` — only the stroke color.
 export const KIND_ACCENT: Record<MachineSigilKind, string> = {
-  djinni: MACHINES['hosta'].accent,
-  sun: MACHINES['hostb'].accent,
-  mage: MACHINES['hostc'].accent,
-  flower: MACHINES['hostd'].accent,
+  djinni: MACHINES['djinni'].accent,
+  sun: MACHINES['sun'].accent,
+  mage: MACHINES['mage'].accent,
+  flower: MACHINES['flower'].accent,
 };
 
 // ---------------------------------------------------------------------------

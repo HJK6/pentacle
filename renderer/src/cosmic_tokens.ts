@@ -4,7 +4,7 @@
 // tokens, not a machine inventory, and the module has no side effects.
 
 export type MachineSigilKind = 'djinni' | 'sun' | 'mage' | 'flower';
-export type MachineName = 'hosta' | 'hostb' | 'hostc' | 'hostd';
+export type MachineName = 'djinni' | 'sun' | 'mage' | 'flower';
 export type ProviderName = 'claude' | 'codex' | 'CLAUDE' | 'CODEX';
 export type WorkStatus = 'working' | 'idle' | 'WORKING' | 'IDLE';
 export type Severity = 'info' | 'warning' | 'critical' | 'INFO' | 'WARNING' | 'CRITICAL';
@@ -33,13 +33,13 @@ export const Fonts = {
 export const FONT_FAMILIES = Fonts;
 
 export const MACHINES = {
-  'hosta': { kind: 'djinni', accent: '#3dff66', epithet: 'the djinni' },
-  'hostb': { kind: 'sun', accent: '#ff2e3e', epithet: 'the flame' },
-  'hostc': { kind: 'mage', accent: '#29d4ff', epithet: 'the mage' },
-  'hostd': { kind: 'flower', accent: '#b14dff', epithet: 'the bloom' },
+  'djinni': { kind: 'djinni', accent: '#3dff66', epithet: 'the djinni' },
+  'sun': { kind: 'sun', accent: '#ff2e3e', epithet: 'the flame' },
+  'mage': { kind: 'mage', accent: '#29d4ff', epithet: 'the mage' },
+  'flower': { kind: 'flower', accent: '#b14dff', epithet: 'the bloom' },
 } as const satisfies Record<MachineName, { kind: MachineSigilKind; accent: string; epithet: string }>;
 
-export const MACHINE_ORDER = ['hosta', 'hostb', 'hostc', 'hostd'] as const;
+export const MACHINE_ORDER = ['djinni', 'sun', 'mage', 'flower'] as const;
 
 export const STATUS = {
   working: '#3dff66',

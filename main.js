@@ -21,9 +21,11 @@ const FALLBACK_CONFIG = {
 
 let CONFIG = FALLBACK_CONFIG;
 let configError = null;
+let configWarnings = [];
 try {
   const loaded = loadConfig(__dirname);
   CONFIG = (loaded && loaded.config) || loaded || FALLBACK_CONFIG;
+  configWarnings = loaded.warnings || [];
 } catch (error) {
   configError = error;
 }
@@ -46,7 +48,7 @@ function resultError(message) { return { ok: false, error: normalizeChatStreamEr
 function publicConfig() {
   const { token, tokenPath, ...chatStream } = CONFIG.chatStream || {};
   return { ...CONFIG, chatStream, hostIds: CONFIG.chatStream?.hosts || ['local'], platform: process.platform,
-    hostname: os.hostname(), isClient: Boolean(CONFIG.remote), configError: configError?.message || null };
+    hostname: os.hostname(), isClient: Boolean(CONFIG.remote), configError: configError?.message || null, configWarnings };
 }
 async function command(action) {
   try { return { ok: true, ...await action() }; }
@@ -191,4 +193,3 @@ app.on('activate', () => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
-

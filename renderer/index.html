@@ -34,6 +34,7 @@
         <button class="view-btn active" id="view-chats" data-view="chats">Agents</button>
         <button class="view-btn" id="view-dashboards" data-view="dashboards">Dashboards</button>
       </div>
+      <div id="config-warning-banner" class="chat-stream-degraded-banner" role="status" aria-live="polite" hidden></div>
       <div id="chat-stream-degraded-banner" class="chat-stream-degraded-banner" role="status" aria-live="polite" hidden></div>
 
       <!-- Sessions Panel -->
@@ -82,6 +83,7 @@
           <span class="sidebar-section-title">Limits</span>
         </button>
         <div class="sidebar-section-body" id="usage-section-body">
+          <div id="limits-health" role="status" aria-live="polite" hidden></div>
           <div class="usage-footer" id="limits-footer"></div>
         </div>
       </div>

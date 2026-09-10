@@ -106,7 +106,7 @@ test('usage footer renders all three percent cards and ignores health presentati
   assert.doesNotMatch(footer.innerHTML, /As of:|Last attempt:|fresh|stale|error|Upstream|Probed|usage-freshness|aria-label/i);
 });
 
-test('limits health remains wired internally without a freshness timer or footer diagnostics', () => {
+test('limits health is validated and shown as text without a polling timer', () => {
   const app = read('renderer/app.js');
 
   assert.match(app, /function renderLimits\(limits, health\)/);
@@ -114,7 +114,8 @@ test('limits health remains wired internally without a freshness timer or footer
   const renderStart = app.indexOf('function renderLimits(limits, health)');
   const machineStatsStart = app.indexOf('// ── Machine Stats Footer', renderStart);
   const renderSource = app.slice(renderStart, machineStatsStart);
-  assert.match(renderSource, /void health/);
+  assert.match(renderSource, /validatedLimitsHealth/);
+  assert.match(renderSource, /banner.textContent/);
   assert.doesNotMatch(renderSource, /setInterval|fresh|stale|As of|Last attempt|Upstream|Probed|aria-label/i);
   assert.doesNotMatch(app, /limitsFreshnessTimer|renderedLimitsHealth/);
 });
@@ -136,7 +137,7 @@ test('desktop reskin preserves bridge colors for filters, avatars, stats, and so
   const css = read('renderer/styles.css');
   const app = read('renderer/app.js');
 
-  for (const token of ['--bridge-hostb: #f47067', '--bridge-hostc: #1d4ed8', '--bridge-hosta: #166534', '--bridge-hostd: #f0883e']) {
+  for (const token of ['--bridge-red: #f47067', '--bridge-royal-blue: #1d4ed8', '--bridge-forest-green: #166534', '--bridge-orange: #f0883e']) {
     assert.match(css, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   for (const klass of ['color-red', 'color-royal-blue', 'color-forest-green', 'color-orange']) {
@@ -145,10 +146,9 @@ test('desktop reskin preserves bridge colors for filters, avatars, stats, and so
     assert.match(css, new RegExp(`machine-stat-card\\.${klass}`));
     assert.match(css, new RegExp(`s-source-tag\\.${klass}`));
   }
-  assert.match(css, /\.s-machine-avatar\.color-royal-blue \{ color: #fff; border-color: var\(--bridge-hostc\); background: var\(--bridge-hostc\); \}/);
+  assert.match(css, /\.s-machine-avatar\.color-royal-blue \{ color: #fff; border-color: var\(--bridge-royal-blue\); background: var\(--bridge-royal-blue\); \}/);
   assert.doesNotMatch(css, /s-machine-avatar\.color-royal-blue[^{]*\{[^}]*color-mix/);
-  assert.match(app, /hosta:\s*'forest-green'/);
-  assert.match(app, /hostd:\s*'orange'/);
+  assert.deepEqual(require('../renderer/host_presentation').PALETTE, ['forest-green', 'royal-blue', 'red', 'orange']);
   assert.match(app, /s-machine-avatar color-\$\{machineColor\}/);
   assert.doesNotMatch(app, /s-machine-label color-\$\{machineColor\}/);
   assert.match(app, /configuredHostIds\.length \? configuredHostIds : visibleHostIds/);

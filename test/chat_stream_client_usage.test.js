@@ -2,6 +2,29 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const WebSocket = require('ws');
+const providerFailure = require('./fixtures/limits_provider_failure.json');
+
+test('real collector failure retains limits and health at startup and live refresh', (t) => {
+  const { client, ws } = openClient();
+  t.after(() => client.destroy());
+  sendFrame(ws, { type: 'snapshot', events: [], sessions: [], ...providerFailure.failed });
+  assert.deepEqual(client.snapshot().limits, providerFailure.failed.limits);
+  assert.deepEqual(client.snapshot().limits_health, providerFailure.failed.limits_health);
+  sendFrame(ws, { type: 'limits.update', ...providerFailure.healthy });
+  assert.deepEqual(client.snapshot().limits_health, providerFailure.healthy.limits_health);
+  sendFrame(ws, { type: 'limits.update', ...providerFailure.failed });
+  assert.deepEqual(client.snapshot().limits, providerFailure.failed.limits);
+  assert.deepEqual(client.snapshot().limits_health, providerFailure.failed.limits_health);
+});
+
+test('buffered handshake accepts real collector failure with retained values', (t) => {
+  const { client } = openClient();
+  t.after(() => client.destroy());
+  client._queueHandshakeLimitsUpdate({ type: 'limits.update', ...providerFailure.failed });
+  client._flushHandshakeLimitsUpdate();
+  assert.deepEqual(client.snapshot().limits, providerFailure.failed.limits);
+  assert.deepEqual(client.snapshot().limits_health, providerFailure.failed.limits_health);
+});
 
 function loadClientWithFakeWebSocket(FakeWebSocket) {
   const clientPath = require.resolve('../main/chat_stream_client');
