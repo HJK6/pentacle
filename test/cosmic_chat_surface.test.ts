@@ -21,6 +21,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
+import hostPresentation from '../renderer/host_presentation';
 import { JSDOM } from 'jsdom';
 
 // jsdom globals BEFORE the component factories run (module load is DOM-free).
@@ -134,7 +136,7 @@ test('user bubble resolves to the JetBrains Mono family inside .cosmic', () => {
 
 // ── 4. MachineSigil renders in the header for the active machine ───────
 test('the header arcaneRingFrame embeds the active machine MachineSigil SVG', () => {
-  // mage is this machine; the header keys MACHINES by chrome.title.
+  // The header selects a decorative identity independently of the host label.
   const frame = arcaneRingFrame({ machine: 'mage', size: 44, sigilSize: 27 });
   assert.equal(frame.tagName.toLowerCase(), 'div');
   const ring = frame.querySelector('svg[viewBox="0 0 100 100"]');
@@ -165,4 +167,24 @@ test('MACHINES in the component lib is the single source of truth (cosmic_tokens
   assert.equal(MACHINES, TOKEN_MACHINES, 'component MACHINES is re-exported from cosmic_tokens');
   assert.equal(MACHINES['mage'].accent, '#29d4ff');
   assert.equal(MACHINES['mage'].epithet, 'the mage');
+});
+
+test('example hosts render real app header ornaments independently of their labels', () => {
+  const start = appJs.indexOf("  let cosmicSigilHtml = '';");
+  const end = appJs.indexOf('  const listHtml', start);
+  assert.ok(start > 0 && end > start);
+  const code = appJs.slice(start, end) + '\nresult = { cosmicSigilHtml, cosmicEpithetHtml, cosmicTagsHtml };';
+  const CONFIG = { chatStream: { hosts: ['local', 'workstation'] }, hostNames: { local: 'My desk' } };
+  for (const hostId of CONFIG.chatStream.hosts) {
+    const context: any = { CONFIG, HOST_IDS: CONFIG.chatStream.hosts, hostPresentation,
+      _streamHostToHostId: (id: string) => id,
+      session: { hostId, name: 'codex' }, chrome: { title: hostPresentation.hostLabel(CONFIG, hostId) },
+      window: { PentacleCosmic: { MACHINES, arcaneRingFrame, providerTag, statusTag } },
+      document: bootDom.window.document, esc: (s: string) => s, providerForSession: () => 'codex', activity: 'idle' };
+    vm.runInNewContext(code, context);
+    assert.match(context.result.cosmicSigilHtml, /viewBox="0 0 64 64"/);
+    assert.match(context.result.cosmicEpithetHtml, /cosmic-myth/);
+    assert.match(context.result.cosmicTagsHtml, /Codex/);
+    assert.match(context.result.cosmicTagsHtml, /Idle/);
+  }
 });

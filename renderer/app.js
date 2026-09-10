@@ -2921,16 +2921,17 @@ function renderSlotChat(slot) {
   // Cosmic theme (workstream D): arcane header ornaments for the ACTIVE machine —
   // the ArcaneRingFrame-wrapped MachineSigil, the Cinzel epithet, and the
   // provider + working/idle status tags. Styling-only: degrades to the plain hero
-  // when the cosmic bundle is absent or the host is not a known PublicDash machine
+  // when the cosmic bundle is absent.
   // Optional decorative metadata is keyed by sigil name, independently of host identity.
   let cosmicSigilHtml = '';
   let cosmicEpithetHtml = '';
   let cosmicTagsHtml = '';
   const cosmic = window.PentacleCosmic;
-  const machineMeta = cosmic && cosmic.MACHINES ? cosmic.MACHINES[chrome.title] : null;
+  const sigil = hostPresentation.hostSigil(CONFIG, _streamHostToHostId(session.hostId) || session.hostId, HOST_IDS);
+  const machineMeta = cosmic && cosmic.MACHINES ? cosmic.MACHINES[sigil] : null;
   if (cosmic && machineMeta) {
     try {
-      cosmicSigilHtml = cosmic.arcaneRingFrame({ machine: chrome.title, size: 44, sigilSize: 27 }).outerHTML;
+      cosmicSigilHtml = cosmic.arcaneRingFrame({ machine: sigil, size: 44, sigilSize: 27 }).outerHTML;
       cosmicEpithetHtml = `<span class="slot-chat-session-epithet cosmic-myth">${esc(machineMeta.epithet)}</span>`;
       const providerName = providerForSession(session.name, session.hostId);
       const tagsWrap = document.createElement('div');

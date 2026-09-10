@@ -44,6 +44,10 @@ Supported colour tokens are `forest-green`, `royal-blue`, `red`, `orange`,
 indexed default. Keeping roster order stable keeps default colours stable;
 use explicit maps when colours should survive reordering.
 
+Chat header ornaments follow the configured host colour independently of its
+label: green selects the djinni, blue/cyan the mage, red/yellow the sun, and
+orange/purple the flower. Renaming a host preserves its ornament.
+
 ## Connection and terminal transport
 
 | Key | Type and default | Effect |

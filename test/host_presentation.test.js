@@ -76,3 +76,13 @@ test('limits renderer retains valid values, shows escaped provider error, and cl
   context.renderLimits(fixture.healthy.limits, fixture.healthy.limits_health);
   assert.equal(banner.hidden, true); assert.equal(banner.textContent, '');
 });
+
+test('local presentation overrides do not change transport and own their colour', () => {
+  const config = { localHostId: 'display-machine', chatStream: { localHost: 'legacy-local' }, hostColors: { 'display-machine': 'red', 'transport-machine': 'royal-blue' } };
+  assert.equal(host.streamHost(config, 'local'), 'legacy-local');
+  config.chatStream.hostMap = { local: 'transport-machine' };
+  assert.equal(host.streamHost(config, 'local'), 'transport-machine');
+  assert.equal(host.hostColor(config, 'local'), 'red');
+  config.hostColors.local = 'orange';
+  assert.equal(host.hostColor(config, 'local'), 'orange');
+});

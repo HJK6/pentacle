@@ -10,7 +10,7 @@ function localIdentity(config = {}) {
 
 function streamHost(config = {}, hostId) {
   const id = text(hostId) || 'local';
-  return text(config.chatStream?.hostMap?.[id]) || (id === 'local' ? localIdentity(config) : id);
+  return text(config.chatStream?.hostMap?.[id]) || (id === 'local' ? text(config.chatStream?.localHost) || 'local' : id);
 }
 
 function hostLabel(config = {}, hostId) {
@@ -24,7 +24,7 @@ function hostLabel(config = {}, hostId) {
 
 function hostColor(config = {}, hostId, roster = config.chatStream?.hosts || ['local']) {
   const id = text(hostId) || 'local';
-  const identity = streamHost(config, id);
+  const identity = id === 'local' ? localIdentity(config) : streamHost(config, id);
   const configured = text(config.hostColors?.[id]) || text(config.hostColors?.[identity]);
   if (configured && Object.hasOwn(ACCENTS, configured)) return configured;
   const ids = Array.isArray(roster) ? roster : ['local'];
@@ -33,6 +33,12 @@ function hostColor(config = {}, hostId, roster = config.chatStream?.hosts || ['l
   return PALETTE[Math.max(0, index) % PALETTE.length];
 }
 
+// Decorative identity follows the palette, never an operator's display label.
+function hostSigil(config = {}, hostId, roster = config.chatStream?.hosts || ['local']) {
+  const color = hostColor(config, hostId, roster);
+  return ({ 'forest-green': 'djinni', green: 'djinni', 'royal-blue': 'mage', blue: 'mage', cyan: 'mage', red: 'sun', orange: 'flower', purple: 'flower', yellow: 'sun' })[color];
+}
+
 function initial(label) { return (Array.from(text(label))[0] || '').toUpperCase(); }
 
-module.exports = { PALETTE, ACCENTS, localIdentity, streamHost, hostLabel, hostColor, initial };
+module.exports = { PALETTE, ACCENTS, localIdentity, streamHost, hostLabel, hostColor, hostSigil, initial };
