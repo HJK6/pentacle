@@ -39,9 +39,10 @@ not tasks the agent should pretend it completed.
    is experimental. The normal session surface is the terminal.
    Read [desktop configuration](docs/desktop_config.md). For multiple hosts,
    populate hostNames/hostColors and exact chatStream.hostMap aliases; verify
-   the local badge. Configure a running mic server before enabling features.mic,
+   the local badge. The public checkout has no runnable mic service entrypoint yet; configure an
+   independently installed, running mic endpoint before enabling features.mic,
    and enable features.usage only with the daemon limits collector configured.
-   Machine-stat cards come from daemon hostsStats; machineStats is ignored.
+   Machine-stat cards come from daemon hosts.stats frames (hosts payload); machineStats is ignored.
    Preserve the private overlay and existing saved Settings during upgrades.
 5. **Set up mobile if requested.** Clone
    [pentacle-mobile](https://github.com/HJK6/pentacle-mobile), then follow its

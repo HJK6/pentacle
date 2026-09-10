@@ -91,11 +91,13 @@ provider models and effort. See [daemon setup](../services/chat-stream-v2/README
 | `wakeWord` | String; absent | Text displayed in the sleeping mic state. Set it to the server's actual configured wake word. |
 | `machineStats` | Object; absent, ignored | Accepted compatibility key for old overlays. No fields in this object configure public desktop stats. |
 
-Run/configure the microphone service separately, set its URL (or useStreamHost),
-then enable mic. The request caller follows localHostId → hostMap.local →
+Microphone controls require an independently installed, running compatible HTTP
+service. This checkout does not yet include a runnable microphone server
+entrypoint; keep `features.mic: false` unless you already operate that endpoint.
+Set its URL (or useStreamHost), verify its `/status` response, then enable mic. The request caller follows localHostId → hostMap.local →
 chatStream.localHost → local; it never guesses from your OS hostname.
 
-Machine-stat cards render the daemon's `hosts.stats`/`hostsStats` data and are
+Machine-stat cards render the `hosts` payload in daemon `hosts.stats` frames and are
 hidden when none exists. Usage values come from the daemon limits collector;
 enabling a flag does not install that collector. With a valid retained limits
 pair, collector errors keep the previous numeric values visible and show an

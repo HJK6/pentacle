@@ -14,7 +14,7 @@
 //   // mic.useStreamHost derives http://<chatStream URL hostname>:7780.
 //   // autoSpawn is compatibility-only; public main probes, never starts a server.
 // wakeWord: 'Computer', // no built-in default; optional mic display text
-// machineStats: {}, // accepted compatibility key, ignored; daemon hostsStats supplies cards
+// machineStats: {}, // accepted compatibility key, ignored; daemon hosts.stats frames (hosts payload) supply cards
 // artifactDirs: ['/path/to/artifacts'], // default: <working directory>/test/artifacts
 // repoRoots: [], // default: no additional artifact repository roots
 // hosts: { workstation: { host: 'host.example', user: 'operator', port: 22, tmux: 'tmux' } },
@@ -85,7 +85,7 @@ module.exports = {
     "inputBar": true, // compatibility-only, currently unused
     "usage": false, // example default false; enables daemon usage/limits subscriptions
     "dashboards": false, // default false; optional dashboard adapters
-    "mic": false, // default false; requires a separately running mic server
+    "mic": false, // default false; requires an independently installed, running mic endpoint
     "sourceTags": false, // default false; session host tags
     "showTurnDuration": false, // default false; timing annotations in Chat
     "rawTmux": false // compatibility-only, currently unused
