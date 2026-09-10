@@ -39,24 +39,29 @@ import hashlib
 from typing import Any
 from dataclasses import dataclass
 
-#: v1 session.py:1348 — the one tool a spawned Claude seat must not expose
-#: (operator questions route through `agent-orch prompt ask`, not AskUserQuestion).
+#: The one tool a spawned Claude seat must not expose. Visible seats ask in the
+#: active chat; hidden workers route questions through their visible parent.
 CLAUDE_DISALLOWED_TOOLS = "AskUserQuestion"
 
-#: v1 codex_provider.py:864 — flags every orchestrated Codex seat needs.
-CODEX_REQUIRED_FLAGS = ("--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen")
+#: Keep orchestrated Codex seats non-blocking while preserving Codex's
+#: workspace sandbox and external approval review. Full approval/sandbox bypass
+#: is not acceptable on managed developer machines.
+CODEX_REQUIRED_FLAGS = ("--approve-for-me", "--no-alt-screen")
+CODEX_STARTUP_CONFIG = (
+    "check_for_update_on_startup=false",
+)
+CODEX_DISABLED_FEATURES = ("plugins",)
 
-#: v1 codex_provider.py:842 — the operator-question mandate, injected as a
-#: launch-level developer_instructions override (ranks above AGENTS.md). Lifted
-#: verbatim; no apostrophes/quotes so `shlex.quote` of the `key=value` argv
-#: element stays clean.
+#: Operator-question policy injected as a launch-level developer_instructions
+#: override (ranks above AGENTS.md). Updates are not a reliable question surface
+#: for this fleet, so visible seats ask in the active chat.
 CODEX_OPERATOR_QUESTION_INSTRUCTION = (
-    "Orchestrated Pentacle seat: never ask the operator a question by emitting a "
-    "prose question and ending your turn, and never via a native approval or "
-    "request_user_input surface. When you need operator input, run agent-orch "
-    "prompt ask (asynchronous and durable) then continue or report; if that is "
-    "impossible, report blocked to your lead. Do not stop your turn waiting for an "
-    "operator reply in the pane."
+    "Orchestrated Pentacle seat: when operator input is genuinely required, a "
+    "visible seat asks one concise question in the active chat and ends the turn. "
+    "Do not use request_user_input or agent-orch prompt ask for operator questions. "
+    "A hidden worker routes its question to its visible parent with agent-orch tell "
+    "and continues independent work or reports blocked. Never treat silence or "
+    "elapsed time as approval."
 )
 
 # The marker is deliberately stable: spawnctl uses it to distinguish a real
@@ -430,6 +435,11 @@ def _codex_command(
     if os.environ.get("PENTACLE_CODEX_ENABLE_APPS") not in ("1", "true", "True"):
         if "features.apps=false" not in args:
             args.extend(["-c", "features.apps=false"])
+    for config_override in CODEX_STARTUP_CONFIG:
+        if config_override not in args:
+            args.extend(["-c", config_override])
+    for feature in CODEX_DISABLED_FEATURES:
+        args.extend(["--disable", feature])
     # developer_instructions is last-wins in codex: strip any preexisting one,
     # merge its text ahead of the mandate, append the merged value last (v1 QA
     # 2026-07-06 — a bare guard would let a custom value suppress the mandate).
@@ -468,6 +478,7 @@ def _codex_command(
             "exec \"$@\" \"$prompt\"",
         ))
         return (
+            f"cd {shlex.quote(machine.codex_cwd)} && "
             f"{agent_orch_path_export(machine, provider_bin=executable)}"
             f"{_codex_path_export(executable)}"
             f"{env_prefix}exec /bin/sh -c {shlex.quote(launcher)} "
@@ -475,6 +486,7 @@ def _codex_command(
             f"{shlex.quote(initial_prompt_file)} {argv}"
         )
     return (
+        f"cd {shlex.quote(machine.codex_cwd)} && "
         f"{agent_orch_path_export(machine, provider_bin=executable)}"
         f"{_codex_path_export(executable)}"
         f"{env_prefix}exec {argv}"
