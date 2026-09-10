@@ -1507,11 +1507,12 @@ class Server:
                 stream_id=telemetry_stream_id,
                 operation=operation,
             )
+        token_verified = reason_code == TOKEN_REASON_VERIFIED
         context.update(
             {
                 "stream_id": owner or "",
                 "session_generation": verified_generation if reason_code == TOKEN_REASON_VERIFIED else None,
-                "token_verified": reason_code == TOKEN_REASON_VERIFIED,
+                "token_verified": token_verified,
                 "reason_code": reason_code or TOKEN_REASON_INTERNAL_ERROR,
                 "dot_principal": bool(
                     reason_code == TOKEN_REASON_VERIFIED
@@ -1524,6 +1525,15 @@ class Server:
             self._client_dot_connections.add(websocket)
         if retired_owner is not None and reason_code == TOKEN_REASON_EXPIRED:
             context["retired_handoff_owner"] = retired_owner
+        # A valid seat token is the fleet's operator-authority boundary. Agents
+        # are the operator interface on headless/CLI installations, so requiring
+        # a second human-auth proof would make privileged RPCs impossible while
+        # adding no identity information beyond the verified seat. Unverified,
+        # expired, wrong-seat, and anonymous connections remain fail-closed.
+        if token_verified:
+            context["operator_authenticated"] = True
+            context["operator_principal"] = context["operator_principal"] or f"agent:{owner}"
+            context["operator_authority_source"] = "stream_token"
         return context
 
     @staticmethod

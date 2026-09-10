@@ -18,8 +18,10 @@ token. Persistent clients, snapshots and one-shot RPCs carry that identity.
 After a verified hello, the socket may omit repeated tokens; the daemon retains
 only the token hash and owner and revalidates the open seat on each RPC. Closed
 or replaced tokens fail. An explicitly invalid token cannot fall back to an
-earlier valid identity. Existing self/parent authorization checks still apply.
-Seat credentials cannot remotely grant tokens or freeze/unfreeze spawning.
+earlier valid identity. A verified seat has operator-equivalent RPC authority:
+agents are the operator interface for headless/CLI installations, including
+role changes, token grants, and spawn freeze/unfreeze controls. A separate
+human-authentication proof is not required after seat-token verification.
 
 A fresh operator CLI with no seat credential should run on the daemon machine
 (directly or over SSH), or use the enrolled UI to start an agent. Legacy token

@@ -79,7 +79,7 @@ def test_authenticated_operator_can_invoke_protected_rpc():
     asyncio.run(run())
 
 
-def test_bound_seat_token_is_revalidated_and_cannot_grant_admin_authority():
+def test_bound_seat_token_is_revalidated_and_grants_operator_authority():
     async def run():
         token = "synthetic-seat-token"
         state = {"stream_id": "local:seat", "status": "open", "token_hash_version": STREAM_TOKEN_HASH_VERSION}
@@ -90,14 +90,18 @@ def test_bound_seat_token_is_revalidated_and_cannot_grant_admin_authority():
         peer = Peer()
         async def handler(msg):
             assert msg["_auth_context"]["stream_id"] == "local:seat"
-            return {"type": "send.ok"}
+            assert msg["_auth_context"]["operator_authenticated"] is True
+            assert msg["_auth_context"]["operator_principal"] == "agent:local:seat"
+            assert msg["_auth_context"]["operator_authority_source"] == "stream_token"
+            return {"type": f'{msg["type"]}.ok'}
         daemon.handlers["send"] = handler
         daemon.handlers["grant_token"] = handler
+        daemon.handlers["spawn_freeze"] = handler
         first = {"type": "send", "from_stream_id": "local:seat", "stream_token": token}
         assert (await daemon._dispatch(json.dumps(first), websocket=peer))[0]["type"] == "send.ok"
         assert (await daemon._dispatch('{"type":"send"}', websocket=peer))[0]["type"] == "send.ok"
-        assert (await daemon._dispatch('{"type":"grant_token"}', websocket=peer))[0]["error_code"] == "operator_auth_required"
-        assert (await daemon._dispatch('{"type":"spawn_freeze"}', websocket=peer))[0]["error_code"] == "operator_auth_required"
+        assert (await daemon._dispatch('{"type":"grant_token"}', websocket=peer))[0]["type"] == "grant_token.ok"
+        assert (await daemon._dispatch('{"type":"spawn_freeze"}', websocket=peer))[0]["type"] == "spawn_freeze.ok"
         assert (await daemon._dispatch('{"type":"send","stream_token":"wrong"}', websocket=peer))[0]["error_code"] == "authentication_required"
         state.clear()
         assert (await daemon._dispatch('{"type":"send"}', websocket=peer))[0]["error_code"] == "authentication_required"

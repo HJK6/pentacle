@@ -1040,11 +1040,10 @@ class Sessions:
         `role` is daemon-owned metadata on the `sessions` row; the authority a
         role grants is read from `sessions.role` by `window_schedule`, so a
         post-hoc set changes scheduler authority. The nexus gate is the safety
-        check: only the operator-facing seat (operator/service auth, or a caller
-        whose own seat is already `nexus`) or the session's parent may grant
-        `nexus`; any other role is open to any authenticated caller. The verb is
-        authenticated exactly like `reparent`: a wire identity claim alone
-        cannot mutate a seat.
+        check: operator/service auth, the session's parent, or any
+        token-verified agent seat may grant `nexus`; any other role is also open
+        to any authenticated caller. The verb is authenticated exactly like
+        `reparent`: a wire identity claim alone cannot mutate a seat.
         """
         role = str(role or "").strip()
         if not role:
@@ -1076,7 +1075,10 @@ class Sessions:
         await self.assistant.authorize_role(target, role, auth)
 
         if role == "nexus":
-            operator_facing = operator or service
+            # Every verified agent seat has operator-equivalent authority. The
+            # daemon derives this identity from the stream token; wire claims
+            # alone never reach this branch as authenticated callers.
+            operator_facing = operator or service or token_verified
             if not operator_facing and caller and ":" in caller:
                 caller_host, caller_name = self.split(caller)
                 caller_row = self._inv.get(caller) or await self.store.fetch_session(
@@ -1093,7 +1095,7 @@ class Sessions:
             if not (operator_facing or is_parent):
                 raise VerbError(
                     "role_authority_denied",
-                    "setting role=nexus requires the operator-facing seat or the session's parent",
+                    "setting role=nexus requires a verified agent, operator, service, or the session's parent",
                 )
 
         updated = await self.store.update_session(host, session_name, role=role)

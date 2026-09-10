@@ -166,7 +166,27 @@ def test_set_nexus_allowed_for_parent() -> None:
     asyncio.run(run())
 
 
-def test_set_nexus_refused_for_unrelated_seat_leaves_row_unchanged() -> None:
+def test_set_nexus_allowed_for_token_verified_self() -> None:
+    async def run() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            sessions = Sessions(store, tmux=None, local_host=HOST)
+            await _open(store, sessions, "seat")
+            row = await sessions.set_role(
+                HOST, "seat", "nexus", auth_context=_seat(f"{HOST}:seat"),
+            )
+            assert row["role"] == "nexus"
+            stored = await store.fetch_role_source(HOST, "seat")
+            assert stored["role_source"] == "role_set"
+            assert stored["actor"] == f"{HOST}:seat"
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_set_nexus_allowed_for_unrelated_verified_seat() -> None:
     async def run() -> None:
         store = Store(":memory:")
         store.start()
@@ -174,14 +194,15 @@ def test_set_nexus_refused_for_unrelated_seat_leaves_row_unchanged() -> None:
             sessions = Sessions(store, tmux=None, local_host=HOST)
             await _open(store, sessions, "rando", role="lead")
             await _open(store, sessions, "seat", role="lead")
-            with pytest.raises(VerbError) as exc:
-                await sessions.set_role(
-                    HOST, "seat", "nexus", auth_context=_seat(f"{HOST}:rando"),
-                )
-            assert exc.value.code == "role_authority_denied"
+            row = await sessions.set_role(
+                HOST, "seat", "nexus", auth_context=_seat(f"{HOST}:rando"),
+            )
+            assert row["role"] == "nexus"
             persisted = await store.fetch_session(HOST, "seat")
-            assert persisted["role"] == "lead"  # unchanged
-            assert await store.fetch_role_source(HOST, "seat") is None
+            assert persisted["role"] == "nexus"
+            stored = await store.fetch_role_source(HOST, "seat")
+            assert stored["role_source"] == "role_set"
+            assert stored["actor"] == f"{HOST}:rando"
         finally:
             store.stop()
 
