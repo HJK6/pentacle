@@ -4,13 +4,14 @@ Pentacle is a desktop terminal workspace for coding agents, work specifications 
 
 Desktop **Chat view is experimental and disabled by default**. Use terminal view for normal work. Mobile is a separate client and is unaffected by this desktop setting.
 
-## Recommended setup: let an agent do it
+## Getting started
 
-Start a coding agent such as Fable or Astra on the computer where your agents will run. Give it the path to [SETUP.md](SETUP.md), or this README, and ask:
+The easiest setup is to start a coding agent such as Fable or Astra and give it
+[AGENT_SETUP.md](AGENT_SETUP.md). That separate guide contains the agent's full
+setup checklist. Have your provider account ready; login or device approvals
+may need your attention. The manual steps are below.
 
-> Set up Pentacle by following `/path/to/pentacle/SETUP.md`. Inspect this machine, install the dependencies, configure the daemon and desktop, and verify a real agent session. Keep desktop Chat view disabled. Complete everything you can and tell me only about any login or device action I must do myself.
-
-The guide gives the agent the setup order, configuration files and success checks. Have your provider account ready; the agent can do the setup but cannot complete your interactive login for you. For a phone, continue with the [mobile setup guide](https://github.com/HJK6/pentacle-mobile/blob/main/docs/FRIEND_SETUP.md).
+For a phone, see [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile).
 
 ## Which repositories do I need?
 
