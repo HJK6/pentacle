@@ -207,16 +207,24 @@ def with_bootstrap_state(
     seen = internal_seen if event_seen is None else event_seen
     if str(result.get("status") or "open") != "open":
         return result
-    if result.get("bootstrap_state") in {"queued", "starting", "ready", "failed"}:
+    if result.get("bootstrap_state") == "ready":
+        result["state"] = result["bootstrap_state"]
+        return result
+    # A current-generation normalized event is stronger evidence than a stale
+    # queued/starting/failed projection left by an admission timeout. This is
+    # especially important when transcript discovery settles just after the
+    # spawn request's bounded proof window.
+    if seen:
+        result["bootstrap_state"] = "started"
+        result["state"] = "started"
+        return result
+    if result.get("bootstrap_state") in {"queued", "starting", "failed"}:
         result["state"] = result["bootstrap_state"]
         return result
     # A Codex reset interstitial is not a transient boot state. Preserve the
     # typed block until an input path explicitly observes a usable composer and
     # clears it durably; event activity alone is not current-pane evidence.
     if result.get("bootstrap_state") == "reset_blocked":
-        return result
-    if seen:
-        result["bootstrap_state"] = "started"
         return result
     if result.get("bootstrap_state") == "unproven":
         return result

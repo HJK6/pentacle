@@ -51,8 +51,10 @@ def test_codex_launch_changes_to_configured_cwd(tmp_path: Path) -> None:
     assert plan.command.startswith(f"cd {shlex.quote(str(cwd))} && ")
     assert "--approve-for-me" in plan.command
     assert "check_for_update_on_startup=false" in plan.command
+    assert "sandbox_workspace_write.network_access=true" in plan.command
     assert "--disable plugins" in plan.command
     assert "--dangerously-bypass-approvals-and-sandbox" not in plan.command
     assert "asks one concise question in the active chat" in plan.command
     assert "Do not use request_user_input or agent-orch prompt ask" in plan.command
+    assert "retry only that agent-orch command with require_escalated" in plan.command
     assert "run agent-orch prompt ask" not in plan.command

@@ -49,6 +49,10 @@ CLAUDE_DISALLOWED_TOOLS = "AskUserQuestion"
 CODEX_REQUIRED_FLAGS = ("--approve-for-me", "--no-alt-screen")
 CODEX_STARTUP_CONFIG = (
     "check_for_update_on_startup=false",
+    # agent-orch is a loopback RPC client. Keep the workspace-write filesystem
+    # sandbox, but let spawned seats reach their local daemon without requiring
+    # every model turn to rediscover the escalation fallback.
+    "sandbox_workspace_write.network_access=true",
 )
 CODEX_DISABLED_FEATURES = ("plugins",)
 
@@ -60,8 +64,10 @@ CODEX_OPERATOR_QUESTION_INSTRUCTION = (
     "visible seat asks one concise question in the active chat and ends the turn. "
     "Do not use request_user_input or agent-orch prompt ask for operator questions. "
     "A hidden worker routes its question to its visible parent with agent-orch tell "
-    "and continues independent work or reports blocked. Never treat silence or "
-    "elapsed time as approval."
+    "and continues independent work or reports blocked. If an agent-orch command "
+    "is blocked because the workspace sandbox denies its loopback connection, "
+    "retry only that agent-orch command with require_escalated. Never treat silence "
+    "or elapsed time as approval."
 )
 
 # The marker is deliberately stable: spawnctl uses it to distinguish a real

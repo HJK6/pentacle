@@ -10,7 +10,7 @@ import pytest
 
 import spawnctl as spawnctl_mod
 from server import Server
-from sessions import Sessions, VerbError
+from sessions import Sessions, VerbError, with_bootstrap_state
 from spawnctl import SpawnCtl
 from tmux_transport import open_fields
 from store import Store
@@ -283,3 +283,15 @@ def test_refresh_restores_started_state_from_durable_event_history() -> None:
             store.stop()
 
     assert asyncio.run(run()) == "started"
+
+
+@pytest.mark.parametrize("stale_state", ["queued", "starting", "failed"])
+def test_current_event_supersedes_stale_bootstrap_projection(stale_state: str) -> None:
+    row = {
+        "status": "open",
+        "bootstrap_state": stale_state,
+        "_bootstrap_event_seen": True,
+    }
+    projected = with_bootstrap_state(row)
+    assert projected["bootstrap_state"] == "started"
+    assert projected["state"] == "started"
