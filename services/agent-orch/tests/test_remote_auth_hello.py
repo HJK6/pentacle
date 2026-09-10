@@ -28,3 +28,43 @@ def test_hello_rejection_fails_rpc_immediately():
                                   matches=lambda frame: frame.get("type") == "send.ok",
                                   timeout_message="should not time out")
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_snapshot_connection_authenticates_and_closes_on_rejection(monkeypatch, tmp_path, rejected):
+    from agent_orch import wsclient
+    monkeypatch.delenv("AGENT_ORCH_INTERNAL_LEADER_STREAM_ID", raising=False)
+    monkeypatch.delenv("AGENT_ORCH_STREAM_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("AGENT_ORCH_STREAM_ID", "local:seat")
+    monkeypatch.setenv("AGENT_ORCH_STREAM_TOKEN", "synthetic-seat-token")
+
+    class Socket:
+        closed = False
+        sent = None
+        async def send(self, data):
+            self.sent = json.loads(data)
+        async def recv(self):
+            if rejected:
+                return json.dumps({"type": "hello.error", "error_code": "authentication_required"})
+            return json.dumps({"type": "snapshot", "streams": []})
+        async def close(self):
+            self.closed = True
+
+    socket = Socket()
+    async def connect(*args, **kwargs):
+        return socket
+    monkeypatch.setattr(wsclient.websockets, "connect", connect)
+
+    async def run():
+        pending = wsclient._connect_ready(Config("ws://unused", "", "local", tmp_path), .1)
+        if rejected:
+            with pytest.raises(PermissionError, match="authentication_required"):
+                await pending
+            assert socket.closed
+        else:
+            connected, snapshot = await pending
+            assert connected is socket and snapshot["type"] == "snapshot"
+            assert not socket.closed
+        assert socket.sent["from_stream_id"] == "local:seat"
+        assert socket.sent["stream_token"] == "synthetic-seat-token"
+    asyncio.run(run())

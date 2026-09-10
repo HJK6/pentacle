@@ -1393,12 +1393,12 @@ def _hello(config: Config, from_stream_id: str | None = None, *, infer_internal_
         "host": config.host_id,
         "agent_orch_capabilities": _agent_orch_capabilities_payload(),
     }
-    if from_stream_id:
-        hello["from_stream_id"] = from_stream_id
-    elif infer_internal_leader:
-        leader_stream_id = os.environ.get("AGENT_ORCH_INTERNAL_LEADER_STREAM_ID")
-        if leader_stream_id:
-            hello["from_stream_id"] = leader_stream_id
+    resolved_stream_id = _resolved_rpc_from_stream_id(from_stream_id) if infer_internal_leader else from_stream_id
+    if resolved_stream_id:
+        hello["from_stream_id"] = resolved_stream_id
+        stream_token = _stream_token_from_env()
+        if stream_token:
+            hello["stream_token"] = stream_token
     if config.token:
         hello["token"] = config.token
     return hello
@@ -1471,20 +1471,23 @@ async def _connect_ready(config: Config, timeout: float, from_stream_id: str | N
         ping_timeout=keepalive.ping_timeout,
         close_timeout=keepalive.close_timeout,
     )
-    await ws.send(json.dumps(_hello(config, from_stream_id=from_stream_id), separators=(",", ":")))
-    deadline = time.monotonic() + snapshot_timeout
-    while time.monotonic() < deadline:
-        raw = await asyncio.wait_for(ws.recv(), timeout=max(0.01, deadline - time.monotonic()))
-        message = json.loads(raw)
-        if message.get("type") == "ping":
-            await ws.send(json.dumps({"type": "pong"}, separators=(",", ":")))
-            continue
-        if message.get("type") == "snapshot":
-            return ws, message
-        if message.get("type") == "auth.error":
-            raise PermissionError(str(message.get("error") or "auth.error"))
-    await ws.close()
-    raise SnapshotTimeout("snapshot_timeout")
+    try:
+        await ws.send(json.dumps(_hello(config, from_stream_id=from_stream_id), separators=(",", ":")))
+        deadline = time.monotonic() + snapshot_timeout
+        while time.monotonic() < deadline:
+            raw = await asyncio.wait_for(ws.recv(), timeout=max(0.01, deadline - time.monotonic()))
+            message = json.loads(raw)
+            if message.get("type") == "ping":
+                await ws.send(json.dumps({"type": "pong"}, separators=(",", ":")))
+                continue
+            if message.get("type") == "snapshot":
+                return ws, message
+            if message.get("type") in {"auth.error", "hello.error"}:
+                raise PermissionError(str(message.get("error_code") or message.get("error") or message["type"]))
+        raise SnapshotTimeout("snapshot_timeout")
+    except BaseException:
+        await ws.close()
+        raise
 
 
 async def _connect_rpc_ready(config: Config, from_stream_id: str | None = None, *, infer_from_env: bool = True):
