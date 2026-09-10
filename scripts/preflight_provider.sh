@@ -44,7 +44,7 @@ provider_cmd=$(resolve_provider_cmd "$provider") || {
 }
 
 # provider_signals.py uses module-level PEP 604 unions (tuple[str, dict] | None),
-# which need Python >= 3.10. Bare `python3` on some hosts (e.g. hosta's Xcode 3.9.6)
+# which need Python >= 3.10. Bare `python3` on some macOS developer toolchains (including Xcode 3.9.6)
 # is too old and crashes the drift import. Resolve a >=3.10 interpreter instead.
 # Probe with a sanitized env: a PYTHONHOME/PYTHONPATH inherited from the caller
 # (deploy.py's gate carries the invoker's PYTHONHOME) can make an otherwise-good

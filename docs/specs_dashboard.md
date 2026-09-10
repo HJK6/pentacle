@@ -14,4 +14,4 @@ Client-side filters may reapply repository, host label, status, and search text 
 
 The adapter reports `healthy`, `degraded`, or `disabled` with a bounded explanatory message. A disabled or degraded subsystem does not expose a private watcher, shared-memory path, remote service, or deployment command.
 
-Use synthetic rows and `hosta` through `hostd` labels in tests. The exact data source and request names belong to the public daemon contract when that adapter is implemented.
+Use synthetic rows and `coordinator` through `satellite` labels in tests. The exact data source and request names belong to the public daemon contract when that adapter is implemented.

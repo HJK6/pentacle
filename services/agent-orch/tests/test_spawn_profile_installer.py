@@ -72,12 +72,24 @@ def _localhost_runner(argv: list[str], **_kwargs: object) -> subprocess.Complete
     raise AssertionError(f"unexpected command: {argv}")
 
 
-def test_fleet_target_set_includes_all_handoff_capable_peers() -> None:
-    assert set(installer.HOSTS) == {"hosta", "hostb", "hostc", "hostd"}
-    assert installer.HOSTS["hostd"] == (
-        "hostd",
-        "/Users/example/.local/share/pentacle/releases",
-    )
+def test_default_install_targets_only_this_user_local_machine() -> None:
+    assert installer.HOSTS == {"local": ("localhost", str(Path.home() / ".local/share/pentacle/releases"))}
+
+
+@pytest.mark.parametrize("mapping", [{}, {"office": {}}, {"office": {"ssh": "office", "release_root": "relative"}}, {"office": {"ssh": "-oProxyCommand=bad", "release_root": "/tmp/releases"}}])
+def test_invalid_fleet_configuration_is_rejected_before_target_selection(tmp_path, mapping):
+    path = tmp_path / "hosts.json"
+    path.write_text(json.dumps(mapping))
+    with pytest.raises(ValueError):
+        installer._load_hosts(str(path))
+
+
+def test_configured_local_target_does_not_depend_on_its_name(tmp_path):
+    path = tmp_path / "hosts.json"
+    path.write_text(json.dumps({"office": {"ssh": "localhost", "release_root": "/tmp/releases"}}))
+    hosts = installer._load_hosts(str(path))
+    target = installer._targets(["office"], "office", {}, hosts)[0]
+    assert (target.name, target.root, target.local, target.loopback) == ("office", "/tmp/releases", True, True)
 
 
 def test_macos_path_launchers_include_homebrew_precedence() -> None:
@@ -96,7 +108,7 @@ def test_installer_cli_documents_all_handoff_capable_peers() -> None:
         capture_output=True,
     )
     assert help_result.returncode == 0
-    assert "hosta,hostb,hostc,hostd" in help_result.stdout
+    assert "--host-config" in help_result.stdout
 
     invalid_result = subprocess.run(
         [sys.executable, str(SCRIPT), "--commit", "a" * 40, "--hosts", "unknown", "--dry-run"],
@@ -104,7 +116,7 @@ def test_installer_cli_documents_all_handoff_capable_peers() -> None:
         capture_output=True,
     )
     assert invalid_result.returncode == 2
-    assert "hosta,hostb,hostc,hostd" in invalid_result.stderr
+    assert "configured hosts" in invalid_result.stderr
 
 
 def test_main_selects_local_run_host_and_ssh_target_alias(monkeypatch, tmp_path: Path) -> None:
@@ -122,6 +134,11 @@ def test_main_selects_local_run_host_and_ssh_target_alias(monkeypatch, tmp_path:
     monkeypatch.setattr(installer, "stage", fake_stage)
     monkeypatch.setattr(installer, "_read_pointer", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(installer, "activate", lambda *_args, **_kwargs: {"active": None, "previous": None})
+    host_config = tmp_path / "hosts.json"
+    host_config.write_text(json.dumps({
+        "travel": {"ssh": "travel-ssh", "release_root": "/tmp/travel-releases"},
+        "hub": {"ssh": "hub-ssh", "release_root": "/tmp/hub-releases"},
+    }))
     monkeypatch.setattr(
         installer.sys,
         "argv",
@@ -130,11 +147,13 @@ def test_main_selects_local_run_host_and_ssh_target_alias(monkeypatch, tmp_path:
             "--commit",
             "a" * 40,
             "--hosts",
-            "hostc,hosta",
+            "travel,hub",
+            "--host-config",
+            str(host_config),
             "--run-host",
-            "hostc",
+            "travel",
             "--ssh-target",
-            "hosta=hosta",
+            "hub=hub-alias",
             "--sftp-timeout",
             "5",
         ],
@@ -142,8 +161,8 @@ def test_main_selects_local_run_host_and_ssh_target_alias(monkeypatch, tmp_path:
 
     assert installer.main() == 0
     assert [(target.name, target.ssh, target.local) for target in targets] == [
-        ("hostc", "hostc", True),
-        ("hosta", "hosta", False),
+        ("travel", "travel-ssh", True),
+        ("hub", "hub-alias", False),
     ]
     assert [options["sftp_timeout"] for options in stage_options] == [5, 5]
 
@@ -162,18 +181,18 @@ def test_main_selects_local_run_host_and_ssh_target_alias(monkeypatch, tmp_path:
     installer._remote(targets[1], "true", dry_run=False, runner=recording_runner)
     assert calls == [
         ["sh", "-lc", "true"],
-        ["ssh", "-o", "BatchMode=yes", "hosta", "sh -lc true"],
+        ["ssh", "-o", "BatchMode=yes", "hub-alias", "sh -lc true"],
     ]
     assert installer._scp_argv(targets[1], tmp_path / "bundle", "/tmp/staging") == [
         "scp",
         str(tmp_path / "bundle" / "pentacle.tar"),
         str(tmp_path / "bundle" / "manifest.json"),
-        "hosta:/tmp/staging/",
+        "hub-alias:/tmp/staging/",
     ]
 
 
 def test_default_transport_argv_and_sftp_bound_are_unchanged(monkeypatch, tmp_path: Path) -> None:
-    target = installer._targets(["hosta"], "hosta", {})[0]
+    target = installer._targets(["local"], "local", {})[0]
     assert target.local is True
     assert target.loopback is True
     command = "printf '%s' 'alpha beta'"
@@ -194,7 +213,7 @@ def test_default_transport_argv_and_sftp_bound_are_unchanged(monkeypatch, tmp_pa
         seen.append((argv, kwargs))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    with pytest.raises(RuntimeError, match="release_hash_verify_failed:hosta"):
+    with pytest.raises(RuntimeError, match="release_hash_verify_failed:local"):
         installer.stage(
             target,
             tmp_path,
@@ -462,7 +481,7 @@ def test_main_serializes_overlapping_rollouts_and_reports_running_stamp(monkeypa
     monkeypatch.setattr(installer, "stage", lambda *_args, **_kwargs: "staged_verified")
     monkeypatch.setattr(installer, "_read_pointer", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(installer, "activate", lambda *_args, **_kwargs: {"active": None, "previous": None})
-    monkeypatch.setattr(installer.sys, "argv", ["install", "--commit", "a" * 40, "--hosts", "hosta"])
+    monkeypatch.setattr(installer.sys, "argv", ["install", "--commit", "a" * 40, "--hosts", "local"])
 
     worker = threading.Thread(target=lambda: first_result.append(installer.main()))
     worker.start()

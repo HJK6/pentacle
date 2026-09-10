@@ -1,0 +1,4 @@
+{
+  "coordinator": {"ssh": "localhost", "release_root": "/Users/example/.local/share/pentacle/releases"},
+  "workstation": {"ssh": "workstation", "release_root": "/home/example/.local/share/pentacle/releases"}
+}

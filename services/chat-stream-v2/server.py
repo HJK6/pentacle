@@ -912,7 +912,7 @@ class Server:
             if interleave_history and hasattr(frames, "__aiter__"):
                 try:
                     # Fetch/encode the next page outside the socket lock: a
-                    # paused backfill must not hold readiness or pongs hostage.
+                    # paused backfill must not block readiness or pongs.
                     async for frame in frames:
                         payload = frame.payload if isinstance(frame, _EncodedFrame) else _encode_frame(frame)
                         async with lock:

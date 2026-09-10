@@ -9,12 +9,6 @@ from typing import Any
 
 
 DEFAULT_WS_URL = "ws://127.0.0.1:7791"
-HOST_ID_BY_HOSTNAME = {
-    "hosta": "hosta",
-    "hostb": "hostb",
-    "hostc": "hostc",
-    "hostd": "hostd",
-}
 
 
 @dataclass(frozen=True)
@@ -73,9 +67,6 @@ def _sanitize_hostname(short_hostname: str) -> str:
 def _hostname_host_id() -> str:
     hostname = socket.gethostname()
     short_hostname = hostname.split(".", 1)[0]
-    canonical = HOST_ID_BY_HOSTNAME.get(short_hostname.lower())
-    if canonical:
-        return canonical
     sanitized = _sanitize_hostname(short_hostname)
     if sanitized:
         return sanitized

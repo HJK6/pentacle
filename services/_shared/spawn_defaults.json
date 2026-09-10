@@ -12,14 +12,7 @@
       "effort": "high"
     }
   },
-  "host_overrides": {
-    "hostb": {
-      "max_concurrent_boots": 2
-    },
-    "hosta": {
-      "max_concurrent_boots": 8
-    }
-  },
+  "host_overrides": {},
   "profiles": {
     "agent_orch": {
       "handoff": {

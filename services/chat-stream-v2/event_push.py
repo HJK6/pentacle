@@ -2,9 +2,9 @@
 
 A stateless per-host satellite agent (`satellite.py`) tails that host's local
 provider transcripts and pushes normalized wire events here over one outbound
-WebSocket. This verb is the hosta-side ingest sink that replaces both v1's
+WebSocket. This verb is the coordinator-side ingest sink that replaces both v1's
 per-session SSH tail pipes (the remote-tail wedge) and v2's never-built "remote
-host runs its own daemon" deferral, so hostc/hostb session chat reaches
+host runs its own daemon" deferral, so linux-workstation/workstation session chat reaches
 `session_event_tail` (and therefore mobile) with the same exactly-once
 guarantee as local ingest.
 
@@ -21,15 +21,15 @@ REUSES THE LOCAL-INGEST FLOOR (nothing new about dedupe):
 VERSION GATE + DEPLOY-OWNED PIN: every push carries the satellite's git SHA +
 wire schema version. The deploy procedure stages a full SHA in the durable
 `event_push.target_sha` key. There is no implicit daemon-HEAD default: an exact
-match ingests, while any unequal SHA is told to update to the target. hosta only
+match ingests, while any unequal SHA is told to update to the target. coordinator only
 names a SHA; code only ever comes from git origin (the satellite never runs
-hosta-supplied code).
+coordinator-supplied code).
 
 AUTH: a bearer push-secret (env `PENTACLE_EVENT_PUSH_SECRET`, kv fallback
 `event_push.secret`) verified constant-time BEFORE any insert/broadcast — the
 same authenticate-before-side-effect ordering as the fleet stream_token verbs
 (`ledger.ingest`), adapted for a host-level, multi-session agent that is not
-itself a registered session. Fail-closed: with no secret configured hosta refuses
+itself a registered session. Fail-closed: with no secret configured coordinator refuses
 every push (`event_push_unconfigured`) rather than accept unauthenticated bytes.
 
 LOOP RULE / kill switch: `--disable-event-push-ingest` (main.py) makes this verb

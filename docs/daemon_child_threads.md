@@ -6,7 +6,7 @@ The daemon models a child session as a normal session with a parent reference. T
 
 1. A caller requests a child with a unique `request_id`.
 2. The daemon validates the caller's ownership and the requested host id.
-3. The child receives a synthetic stream id such as `hosta:fixture-child`.
+3. The child receives a synthetic stream id such as `coordinator:fixture-child`.
 4. The parent receives a typed admission result and later lifecycle events.
 5. The child reports completion, a blocker, or an error before it closes.
 
@@ -14,8 +14,8 @@ Example fixture:
 
 ```json
 {
-  "parent_stream_id": "hosta:fixture-parent",
-  "child_stream_id": "hosta:fixture-child",
+  "parent_stream_id": "coordinator:fixture-parent",
+  "child_stream_id": "coordinator:fixture-child",
   "state": "starting"
 }
 ```
@@ -32,4 +32,4 @@ Closing a child retires pending inactivity work. An accepted final report can st
 
 ## Test guidance
 
-Use host ids such as `hosta`, request ids such as `fixture-request-1`, and deterministic timestamps. Test reconnect, duplicate registration, child close, and parent replacement without using live provider sessions or private stream identifiers.
+Use host ids such as `coordinator`, request ids such as `fixture-request-1`, and deterministic timestamps. Test reconnect, duplicate registration, child close, and parent replacement without using live provider sessions or private stream identifiers.

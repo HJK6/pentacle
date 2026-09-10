@@ -1410,7 +1410,7 @@ def deploy(
         # is applied, and EXIT_REFUSED (2) must keep meaning "nothing was kickstarted". NOTHING
         # here re-raises, so a post-activation failure (restart, readback, smoke, schedule, or the
         # stamp write itself) can never both mislabel a live daemon as refused AND lose the record
-        # — the 2026-09-05 laneM/laneN bounces did exactly that on a hostb fleet-smoke miss whose
+        # — the 2026-09-05 laneM/laneN bounces did exactly that on a workstation fleet-smoke miss whose
         # _checked() raised before the stamp write.
         _apply_post_activation(
             service,
@@ -1451,7 +1451,7 @@ def build_parser() -> argparse.ArgumentParser:
 # yet" vs "daemon is down" — opposite operator responses, collapsing them into 2 invited a
 # retry/force double-restart of a healthy fabric, 2026-07-26 windows 9127fa2, fe7e7e7), 5 for a
 # runtime-SHA readback that never confirmed the target, 6 for a post-boot fleet-smoke miss (the
-# 2026-09-05 laneM/laneN bounces, a hostb peer), 7 for any other post-activation error (the
+# 2026-09-05 laneM/laneN bounces, a workstation peer), 7 for any other post-activation error (the
 # restart or schedule install itself raised). None of 3-7 is a refusal: do NOT retry/force.
 EXIT_OK = 0
 EXIT_REFUSED = 2

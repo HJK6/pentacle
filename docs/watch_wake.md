@@ -6,7 +6,7 @@ An authenticated caller can register a bounded wake or watch for its current ses
 agent-orch wake --in 10m --note 'Check the fixture'
 agent-orch wake list
 agent-orch wake cancel <id>
-agent-orch watch hosta:fixture-child --on end,blocker,idle,quiet=5 --repeat
+agent-orch watch coordinator:fixture-child --on end,blocker,idle,quiet=5 --repeat
 agent-orch watch list
 agent-orch watch cancel <id>
 ```

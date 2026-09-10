@@ -69,11 +69,11 @@ class UsageStatePublisher:
             log.debug("usage_state unusable; holding prior limits frame")
             return False
         limits = [*(state.lkg or self._limits[:2]), state.codex_lkg or _empty_row("codex", "Codex")]
-        self._claude_health = state.health
-        if limits == self._limits:
+        if limits == self._limits and state.health == self._claude_health:
             return False
+        self._claude_health = state.health
         self._limits = limits
-        result = self._broadcast({"type": "limits.update", "limits": limits})
+        result = self._broadcast({"type": "limits.update", "limits": self.snapshot(), "limits_health": self.health_snapshot()})
         if inspect.isawaitable(result):
             await result
         return True

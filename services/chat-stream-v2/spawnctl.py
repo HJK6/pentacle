@@ -125,7 +125,7 @@ AUTH_CONTEXT_FAILURE_MARKER = "provider_auth_context_unavailable:"
 # failure prelude.  Its path never includes the raw stream id: a session name
 # is operator-controlled text, so the agreed SHA-256 derivation is part of the
 # cross-host contract, not an implementation detail.
-AUTH_CONTEXT_MARKER_HOST = os.environ.get("PENTACLE_AUTH_CONTEXT_MARKER_HOST", "hostb")
+AUTH_CONTEXT_MARKER_HOST = os.environ.get("PENTACLE_AUTH_CONTEXT_MARKER_HOST", "").strip()
 AUTH_CONTEXT_MARKER_DIR = "/tmp/pentacle-auth-context"
 AUTH_CONTEXT_MARKER_BYTES = b"provider_auth_context_unavailable\n"
 AUTH_CONTEXT_MARKER_READ_BYTES = 64
@@ -734,7 +734,7 @@ class SpawnCtl:
 
     @staticmethod
     def _uses_auth_context_marker(host: str, provider: str) -> bool:
-        return host == AUTH_CONTEXT_MARKER_HOST and provider == "claude"
+        return bool(AUTH_CONTEXT_MARKER_HOST) and host == AUTH_CONTEXT_MARKER_HOST and provider == "claude"
 
     async def _clear_auth_context_marker(self, host: str, name: str, provider: str) -> bool:
         """Fence one remote-host Claude launch against a marker from an earlier retry.

@@ -157,6 +157,28 @@ def get_local_machine_name(machines: tuple[MachineConfig, ...]) -> str | None:
     return None
 
 
+def configured_local_host() -> str:
+    """Resolve tool identity using explicit identity or the configured local machine."""
+    for key in ("PENTACLE_HOST_ID", "AGENT_ORCH_HOST_ID"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    host = get_local_machine_name(load_machines())
+    if not host:
+        raise ValueError("no local machine configured; set PENTACLE_HOST_ID")
+    return host
+
+
+def configured_host_names(env_key: str, *, remote_only: bool = False) -> tuple[str, ...]:
+    """Resolve live-tool targets from an explicit list or the machine allowlist."""
+    if env_key in os.environ:
+        hosts = tuple(host.strip() for host in os.environ[env_key].split(",") if host.strip())
+        if not hosts or len(hosts) != len(set(hosts)):
+            raise ValueError(f"{env_key} must name a nonempty, unique host list")
+        return hosts
+    return tuple(machine.name for machine in load_machines() if not remote_only or not machine.is_local)
+
+
 # -- remote SSH command construction (lifted from v1 session._run) ------------
 
 SSH_CONTROL_DIR_ENV = "PENTACLE_SSH_CONTROL_DIR"

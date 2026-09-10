@@ -240,7 +240,7 @@ def _agent_orch_bin_dir_default(
     """Infer the target host's install directory without coupling it to tmux.
 
     `tmux` is often installed by Homebrew while the orchestration CLI is a
-    user-local script (hosta's production daemon is exactly this shape). Provider
+    user-local script (coordinator's production daemon is exactly this shape). Provider
     paths are the useful profile signal; explicit ``agent_orch_bin_dir`` remains
     authoritative for hosts whose CLI lives elsewhere. Ambient PATH lookup is
     retained only for local fallback resolution; remote profiles must never use

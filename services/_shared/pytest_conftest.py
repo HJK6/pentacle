@@ -19,8 +19,6 @@ LIVE_DAEMON_START_FIXTURES = (
     "enrolled_ws_client",
     "tmux_isolated_server",
 )
-_ALLOWED_HOSTNAMES = {"hosta", "hosta", "hosta.example.local"}
-_ALLOWED_HOST_IDS = {"hosta", "hosta"}
 _STREAM_ID_ENV_VARS = ("PENTACLE_STREAM_ID", "AGENT_ORCH_STREAM_ID")
 _HOST_ID_ENV_VARS = ("AGENT_ORCH_HOST_ID", "PENTACLE_HOST_ID", "PENTACLE_MACHINE_ID")
 
@@ -139,9 +137,9 @@ def deselect_live_daemon_on_unapproved_host(config: pytest.Config, items: list[p
     Exact keep rules:
     - ``PENTACLE_FORCE_LIVE_DAEMON=1`` keeps all items.
     - ``socket.gethostname()`` lowercased, with any DNS suffix stripped, must
-      match an approved synthetic host label..
-    - A canonical host id exposed in env, such as ``AGENT_ORCH_HOST_ID=hosta``
-      or a stream id prefix like ``PENTACLE_STREAM_ID=hosta:...``, also keeps
+      match PENTACLE_LIVE_TEST_HOSTS (comma-separated explicit allowlist).
+    - A canonical host id exposed in env, such as ``AGENT_ORCH_HOST_ID=workstation``
+      or a stream id prefix like ``PENTACLE_STREAM_ID=workstation:...``, also keeps
       all items. This avoids importing daemon, tmux, or fixture helpers during
       collection.
     """
@@ -276,7 +274,7 @@ def refuse_live_daemon_if_non_fixture_chat_on_default_socket(
 
     History: this guard shipped 2026-06-02 as a hard refuse, was relaxed to
     warn-by-default the same day ("gate is self-safe", ff430eb), and on
-    2026-06-12 a live_daemon run on the generic test box wiped every live hosta
+    2026-06-12 a live_daemon run on the generic test box wiped every live coordinator
     agent (local store ``delete_missing`` mass-stamp + teardown). The relaxation
     rationale is disproven: a live_daemon failure mode that escapes isolation
     kills non_fixture sessions. Default is therefore REFUSE when non_fixture sessions are on
@@ -408,10 +406,15 @@ def _live_daemon_allowed_on_public_host() -> bool:
     return any(_host_id_is_allowed(host_id) for host_id in _canonical_host_id_candidates())
 
 
+def _allowed_live_test_hosts() -> set[str]:
+    return {value.strip().lower() for value in os.environ.get("PENTACLE_LIVE_TEST_HOSTS", "").split(",") if value.strip()}
+
+
 def _hostname_is_allowed_host(hostname: str) -> bool:
     lowered = hostname.strip().lower()
     short = lowered.split(".", 1)[0]
-    return lowered in _ALLOWED_HOSTNAMES or short in _ALLOWED_HOSTNAMES
+    allowed = _allowed_live_test_hosts()
+    return lowered in allowed or short in allowed
 
 
 def _canonical_host_id_candidates() -> list[str]:
@@ -428,7 +431,7 @@ def _canonical_host_id_candidates() -> list[str]:
 
 
 def _host_id_is_allowed(host_id: str) -> bool:
-    return host_id.strip().lower() in _ALLOWED_HOST_IDS
+    return host_id.strip().lower() in _allowed_live_test_hosts()
 
 
 def _item_has_marker(item: pytest.Item, marker: str) -> bool:

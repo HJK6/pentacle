@@ -19,7 +19,7 @@ export * from './services/questionPager';
 export * from './utils/telemetry';
 export * from './utils/telemetryEvents';
 
-// hostconfig injection seam. `getHostOrder` is intentionally NOT re-exported
+// host configuration injection seam. `getHostOrder` is intentionally NOT re-exported
 // from here because `pentacleChatModel` already re-exports it (both names refer
 // to the same delegating function); `export *`-ing it from both modules would
 // produce an ambiguous re-export. The host installs config via

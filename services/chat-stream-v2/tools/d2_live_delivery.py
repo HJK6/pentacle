@@ -26,11 +26,11 @@ for import_root in (WORKTREE / "services", WORKTREE / "services" / "agent-orch",
 from agent_orch.config import load_config
 from agent_orch.wsclient import _one_shot_rpc, _stream_token_from_env
 from live_window import LiveWindow, authenticated_operator_connection, write_receipt
-from machines import load_machines
+from machines import configured_local_host, load_machines
 
 
 LIVE_DB = Path(os.environ.get("PENTACLE_SESSION_DB", str(Path.home() / ".local/share/pentacle-stream/sessions.db"))).expanduser()
-LIVE_HOST = os.environ.get("PENTACLE_HOST_ID", "hosta")
+LIVE_HOST = configured_local_host()
 LIVE_TOKEN = Path.home() / ".config" / "pentacle-stream" / "token"
 LIVE_TMUX = "/opt/homebrew/bin/tmux"
 

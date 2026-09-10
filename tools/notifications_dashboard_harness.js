@@ -45,7 +45,7 @@ const dom = new JSDOM(
 );
 const win = dom.window;
 
-console.log('\n=== Notifications dashboard — local renderer harness (hostb) ===\n');
+console.log('\n=== Notifications dashboard — local renderer harness (workstation) ===\n');
 
 const ids = (win.DASHBOARDS || []).map((d) => d.id);
 log('dashboards_registered', { ids });
@@ -68,7 +68,7 @@ const sample = {
   notification_id: 'n-fixture-1', producer: 'sample-agent.action_items', severity: 'warning',
   title: 'synthetic action requires review', body: 'fixture notification body', state: 'open',
   created_at: new Date().toISOString(),
-  actions: [{ kind: 'ack' }, { kind: 'spawn_worker', provider: 'example', host: 'hosta', prompt: 'inspect fixture' }],
+  actions: [{ kind: 'ack' }, { kind: 'spawn_worker', provider: 'example', host: 'coordinator', prompt: 'inspect fixture' }],
   resolution: null,
 };
 let resolveArgs = null;

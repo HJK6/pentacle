@@ -1,4 +1,4 @@
-# systemd-user unit for the chat_streamd v2 per-host ingest satellite (hostc/WSL).
+# systemd-user unit for the chat_streamd v2 per-host ingest satellite (linux-workstation/WSL).
 #
 # Install (per README.md in this dir):
 #   cp pentacle-satellite.service ~/.config/systemd/user/
@@ -8,7 +8,7 @@
 #   systemctl --user enable --now pentacle-satellite
 #
 # The shared push secret is NOT committed: it is read from
-# ~/.config/pentacle/satellite.env (see README). hosta's daemon must carry the
+# ~/.config/pentacle/satellite.env (see README). coordinator's daemon must carry the
 # SAME PENTACLE_EVENT_PUSH_SECRET or every push is refused `unauthorized`.
 [Unit]
 Description=Pentacle chat_streamd v2 ingest satellite
@@ -22,9 +22,8 @@ Type=simple
 WorkingDirectory=__CHECKOUT__/services/chat-stream-v2
 # PATH MUST include the tmux dir (/usr/bin) — a bare systemd unit can start with
 # a minimal PATH, and a `tmux` that will not resolve makes discovery silently
-# ingest nothing (the macOS/hostb analogue of this outage). Pin the distro path.
+# ingest nothing (the macOS/workstation analogue of this outage). Pin the distro path.
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=PENTACLE_SATELLITE_HOST=hostc
 Environment=PENTACLE_SATELLITE_CHECKOUT=__CHECKOUT__
 EnvironmentFile=%h/.config/pentacle/satellite.env
 ExecStart=/usr/bin/python3 __CHECKOUT__/services/chat-stream-v2/satellite.py

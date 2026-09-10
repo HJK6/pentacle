@@ -6,12 +6,12 @@ Visual regression tests for the desktop chat surface use only deterministic fixt
 
 Render these cases:
 
-1. an idle `hosta` session with an empty transcript;
-2. a working `hostb` session with one assistant row;
-3. a question for `hostc` with two options and one selected option; and
-4. a `hostd` session with a warning status and a short update history.
+1. an idle `coordinator` session with an empty transcript;
+2. a working `workstation` session with one assistant row;
+3. a question for `linux-workstation` with two options and one selected option; and
+4. a `satellite` session with a warning status and a short update history.
 
-Each fixture supplies a stable stream id such as `hosta:visual-fixture`, a fixed timestamp, and bounded text. It should be serializable JSON stored beside the test, with no absolute paths or external URLs.
+Each fixture supplies a stable stream id such as `coordinator:visual-fixture`, a fixed timestamp, and bounded text. It should be serializable JSON stored beside the test, with no absolute paths or external URLs.
 
 ## Assertions
 

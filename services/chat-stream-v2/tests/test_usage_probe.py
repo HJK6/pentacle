@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 
 import usage_state
 from usage_publisher import UsageStatePublisher
+from usage_collector import UsageStateCollector
 from usage_state import UsageStateStore
 
 
@@ -49,7 +51,7 @@ def test_publisher_emits_three_row_golden_frame_and_keeps_hello_health(tmp_path:
 
     publisher = UsageStatePublisher(broadcast, state_path=state_path)
     assert asyncio.run(publisher.publish_if_changed())
-    expected = {"type": "limits.update", "limits": expected_limits}
+    expected = {"type": "limits.update", "limits": expected_limits, "limits_health": {"schema_version": 1, "claude": loaded.health}}
     # Byte-golden: exact key order, no sort_keys normalization.
     assert json.dumps(frames, separators=(",", ":")) == json.dumps(
         [expected], separators=(",", ":")
@@ -103,3 +105,32 @@ def test_publisher_holds_prior_frame_on_unreadable_state(tmp_path: Path) -> None
     assert len(frames) == 1  # no degraded republish
     assert publisher.snapshot() == good  # prior frame held
     assert publisher.health_snapshot() == good_health  # limits_health not dropped
+
+
+def test_real_collector_health_only_failure_and_recovery_publish_retained_rows(tmp_path: Path) -> None:
+    def command(payload):
+        return (sys.executable, "-c", "print(" + repr(json.dumps(payload)) + ")")
+
+    state_path = tmp_path / "usage.json"
+    good = command({"week_all_pct": 17, "week_all_resets": None,
+                    "week_fable_pct": 10, "week_fable_resets": None})
+    codex = command({"pct": 26, "resets_text": None, "resets_at_iso": None,
+                     "upstream_reported_at": "2026-09-10T06:00:00Z"})
+    no_update = command({"status": "no_update"})
+    failed = (sys.executable, "-c", "import sys; sys.stderr.write('provider fixture <unavailable>'); sys.exit(1)")
+    frames = []
+    publisher = UsageStatePublisher(frames.append, state_path=state_path)
+    for index, (claude_command, codex_command) in enumerate([(good, codex), (failed, no_update), (good, no_update)]):
+        collector = UsageStateCollector(
+            state_path=state_path, claude_command=claude_command, codex_command=codex_command,
+            now_fn=lambda: f"2026-09-10T06:0{index}:00Z",
+        )
+        collector.run_once()
+        assert asyncio.run(publisher.publish_if_changed())
+        assert frames[-1]["limits_health"] == publisher.health_snapshot()
+        assert [row["pct"] for row in frames[-1]["limits"]] == [17, 10, 26]
+    assert frames[1]["limits"] == frames[0]["limits"] == frames[2]["limits"]
+    assert frames[1]["limits_health"]["claude"]["outcome"] == "provider_error"
+    assert frames[1]["limits_health"]["claude"]["error"]["message"] == "provider fixture <unavailable>"
+    assert frames[2]["limits_health"]["claude"]["outcome"] == "ok"
+    assert not asyncio.run(publisher.publish_if_changed())

@@ -23,12 +23,10 @@ if str(SERVICE_DIR) not in sys.path:
     sys.path.insert(0, str(SERVICE_DIR))
 
 from store import Store  # noqa: E402
+from machines import configured_host_names  # noqa: E402
 
 
-SATELLITE_HOSTS = tuple(
-    host.strip() for host in os.environ.get("PENTACLE_SATELLITE_HOSTS", "hostb,hostc").split(",")
-    if host.strip()
-)
+SATELLITE_HOSTS = configured_host_names("PENTACLE_SATELLITE_HOSTS", remote_only=True)
 SATELLITE_READBACK_INTERVAL_SECONDS = 2
 SATELLITE_READBACK_DEADLINE_SECONDS = 90
 
@@ -46,6 +44,8 @@ def _require_gate_passed_sha(candidate: str) -> None:
 
 
 async def _run(db: str, *, stage: str | None, rollback: bool) -> dict[str, object]:
+    if not rollback and not SATELLITE_HOSTS:
+        raise ValueError("no satellite hosts configured; refusing to change the target pin")
     store = Store(db)
     store.start()
     try:

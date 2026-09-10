@@ -14,7 +14,7 @@ function singleQuestion(overrides: Partial<PentacleQuestion> = {}): PentacleQues
     prompt: 'Choose a deployment target:',
     options: [
       { index: 1, label: 'host_c' },
-      { index: 2, label: 'hosta' },
+      { index: 2, label: 'workstation' },
     ],
     ...overrides,
   };
@@ -248,7 +248,7 @@ test('round-trips an option answer with a note line', () => {
   });
   assert.deepEqual(parsePentacleQuestionAnswerText(text), {
     multiple: false,
-    items: [{ header: 'Deploy', selectedLabels: ['hosta'], note: 'Use the orchestrator.' }],
+    items: [{ header: 'Deploy', selectedLabels: ['workstation'], note: 'Use the orchestrator.' }],
   });
 });
 
@@ -319,7 +319,7 @@ test('parses the canonical fixtures into structured display models', () => {
   });
   assert.deepEqual(parsePentacleQuestionAnswerText(QUESTION_ANSWER_FORMAT_EXAMPLES.optionWithNote), {
     multiple: false,
-    items: [{ header: 'Deploy', selectedLabels: ['hosta'], note: 'Use the orchestrator.' }],
+    items: [{ header: 'Deploy', selectedLabels: ['workstation'], note: 'Use the orchestrator.' }],
   });
 });
 

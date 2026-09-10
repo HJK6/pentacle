@@ -21,7 +21,7 @@ from types import MappingProxyType
 from typing import Iterator, Mapping, Sequence
 
 
-LOCAL_HOST_ALIASES = {"hosta", "local", "localhost"}
+LOCAL_HOST_ALIASES = {"local", "localhost", "example.local"}
 DEFAULT_PROTECTED_PATTERNS: tuple[str, ...] = ("*:public-protected-*",)
 DEFAULT_BACKGROUND_DAEMON_PATTERNS: tuple[str, ...] = ("*:public-background-*",)
 PROTECT_FILE = Path.home() / ".config" / "public-test-protect.txt"
@@ -92,7 +92,7 @@ class ResourceLedger:
     ssh_subprocess_pids: set[int] = field(default_factory=set)
 
     def record_local_session(self, name: str) -> None:
-        _validate_test_owned_session("hosta", name, self)
+        _validate_test_owned_session("local", name, self)
         self.local_tmux_sessions.add(name)
 
     def record_isolated_server(self, tmpdir: Path, pid: int | None = None) -> None:
@@ -252,11 +252,11 @@ def diff_outside_ledger(diff: ResourceDiff, ledger: ResourceLedger) -> list[str]
     problems: list[str] = []
     added_local = {
         s for s in diff.added_local_tmux_sessions - ledger.local_tmux_sessions
-        if not (is_protected_session("hosta", s) or is_background_daemon_session("hosta", s))
+        if not (is_protected_session("local", s) or is_background_daemon_session("local", s))
     }
     removed_local = {
         s for s in diff.removed_local_tmux_sessions - ledger.local_tmux_sessions
-        if not is_background_daemon_session("hosta", s)
+        if not is_background_daemon_session("local", s)
     }
     if added_local:
         problems.append(f"unrecorded local tmux sessions appeared: {sorted(added_local)!r}")
@@ -301,7 +301,7 @@ def teardown_ledger(ledger: ResourceLedger) -> list[str]:
     tmux_bin = shutil.which("tmux")
     for session in sorted(ledger.local_tmux_sessions):
         try:
-            _validate_test_owned_session("hosta", session, ledger)
+            _validate_test_owned_session("local", session, ledger)
             if tmux_bin:
                 _run([tmux_bin, "kill-session", "-t", session], timeout_s=KILL_TIMEOUT_S)
         except Exception as exc:
@@ -410,7 +410,8 @@ def _safe_agent_orch_workspace(path: Path) -> Path:
 
 def _canonical_host(host: str) -> str:
     lowered = str(host).strip().lower()
-    return "hosta" if lowered in {"local", "localhost", "example.local", "hosta"} else lowered
+    aliases = LOCAL_HOST_ALIASES | {os.environ.get("PENTACLE_TEST_LOCAL_HOST", "").strip().lower()}
+    return "local" if lowered in aliases else lowered
 
 
 def _ssh_target(host: str) -> str:

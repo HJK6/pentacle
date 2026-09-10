@@ -34,7 +34,7 @@ If the implementation uses separate store flags, pass matching paths under `/tmp
 
 ## 4. Check the CLI
 
-Install the CLI in the same environment and use a local configuration with `local_host_id: "hosta"` and `ws://127.0.0.1:7791`. Then run:
+Install the CLI in the same environment and use a local configuration with `local_host_id: "coordinator"` and `ws://127.0.0.1:7791`. Then run:
 
 ```bash
 agent-orch list

@@ -30,10 +30,7 @@ from typing import Callable
 
 
 HOSTS = {
-    "hosta": ("localhost", "/Users/example/.local/share/pentacle/releases"),
-    "hostb": ("hostb", "/Users/example/.local/share/pentacle/releases"),
-    "hostc": ("hostc", "/home/example/.local/share/pentacle/releases"),
-    "hostd": ("hostd", "/Users/example/.local/share/pentacle/releases"),
+    "local": ("localhost", str(Path.home() / ".local/share/pentacle/releases")),
 }
 PINNED = {"claude": "2.1.207", "codex": "0.144.1"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -876,11 +873,31 @@ def _positive_seconds(value: str) -> int:
     return seconds
 
 
-def _parse_ssh_target_overrides(values: list[str]) -> dict[str, str]:
+def _load_hosts(path: str | None) -> dict[str, tuple[str, str]]:
+    if path is None:
+        return dict(HOSTS)
+    raw = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("--host-config must contain a nonempty host mapping")
+    hosts = {}
+    for name, config in raw.items():
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) or not isinstance(config, dict):
+            raise ValueError("invalid host name or host-config entry")
+        ssh, root = config.get("ssh"), config.get("release_root")
+        if not isinstance(ssh, str) or not ssh or ssh.startswith("-") or any(char.isspace() for char in ssh):
+            raise ValueError(f"invalid SSH target for {name}")
+        if not isinstance(root, str) or not root.startswith("/") or any(char in root for char in "\n\r\0"):
+            raise ValueError(f"release_root must be an absolute path for {name}")
+        hosts[name] = (ssh, root)
+    return hosts
+
+
+def _parse_ssh_target_overrides(values: list[str], hosts: dict[str, tuple[str, str]] | None = None) -> dict[str, str]:
+    hosts = HOSTS if hosts is None else hosts
     overrides: dict[str, str] = {}
     for value in values:
         name, separator, alias = value.partition("=")
-        if not separator or name not in HOSTS or not alias or any(char.isspace() for char in alias):
+        if not separator or name not in hosts or not alias or alias.startswith("-") or any(char.isspace() for char in alias):
             raise ValueError("--ssh-target must use NAME=ALIAS for a known host")
         if name in overrides:
             raise ValueError(f"--ssh-target specified more than once for {name}")
@@ -888,13 +905,14 @@ def _parse_ssh_target_overrides(values: list[str]) -> dict[str, str]:
     return overrides
 
 
-def _targets(names: list[str], run_host: str, ssh_overrides: dict[str, str]) -> list[Target]:
+def _targets(names: list[str], run_host: str, ssh_overrides: dict[str, str], hosts: dict[str, tuple[str, str]] | None = None) -> list[Target]:
+    hosts = HOSTS if hosts is None else hosts
     targets: list[Target] = []
     for name in names:
-        default_ssh, root = HOSTS[name]
+        default_ssh, root = hosts[name]
         ssh = ssh_overrides.get(name, default_ssh)
         local = name == run_host
-        targets.append(Target(name, ssh, root, local=local, loopback=local and name == "hosta" and ssh == "localhost"))
+        targets.append(Target(name, ssh, root, local=local, loopback=local and ssh in {"localhost", "127.0.0.1", "::1"}))
     return targets
 
 
@@ -911,9 +929,10 @@ def main() -> int:
     parser.add_argument(
         "--hosts",
         required=True,
-        help="comma-separated hosta,hostb,hostc,hostd",
+        help="comma-separated names from --host-config (default map: local only)",
     )
-    parser.add_argument("--run-host", choices=sorted(HOSTS), default="hosta", metavar="NAME")
+    parser.add_argument("--host-config", metavar="PATH", help="JSON mapping names to ssh and absolute release_root")
+    parser.add_argument("--run-host", default="local", metavar="NAME", help="configured name of this machine")
     parser.add_argument("--ssh-target", action="append", default=[], metavar="NAME=ALIAS")
     parser.add_argument("--sftp-timeout", type=_positive_seconds, default=DEFAULT_SFTP_TIMEOUT_SECONDS, metavar="SECONDS")
     parser.add_argument("--repo", default=str(Path(__file__).resolve().parents[3]))
@@ -923,18 +942,21 @@ def main() -> int:
     args = parser.parse_args()
     if not SHA.fullmatch(args.commit):
         parser.error("--commit must be a full immutable 40-character SHA")
-    names = args.hosts.split(",")
-    if not names or len(set(names)) != len(names) or any(name not in HOSTS for name in names):
-        parser.error("--hosts must name each of hosta,hostb,hostc,hostd at most once")
     try:
-        ssh_overrides = _parse_ssh_target_overrides(args.ssh_target)
-    except ValueError as exc:
+        hosts = _load_hosts(args.host_config)
+        names = [name.strip() for name in args.hosts.split(",")]
+        if not names or len(set(names)) != len(names) or any(name not in hosts for name in names):
+            raise ValueError("--hosts must name configured hosts at most once")
+        if args.run_host not in hosts:
+            raise ValueError("--run-host must name a configured host")
+        ssh_overrides = _parse_ssh_target_overrides(args.ssh_target, hosts)
+    except (ValueError, OSError) as exc:
         parser.error(str(exc))
     if args.resume and args.rollback:
         parser.error("--resume and --rollback are mutually exclusive")
     if (args.resume and not STAMP.fullmatch(args.resume)) or (args.rollback and not STAMP.fullmatch(args.rollback)):
         parser.error("rollout stamp is invalid")
-    targets = _targets(names, args.run_host, ssh_overrides)
+    targets = _targets(names, args.run_host, ssh_overrides, hosts)
     records: dict[str, object] = {"schema": "PentacleFleetInstallV1", "commit": args.commit, "hosts": {}}
     try:
         repo = Path(args.repo)

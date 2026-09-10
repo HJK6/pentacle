@@ -1,7 +1,7 @@
 import type { PentacleStreamState } from '../types/pentacle';
 import { normalizePentacleHost } from './pentacleHosts';
 
-// Platform-neutral hostconfig seam.
+// Platform-neutral host configuration seam.
 //
 // The chat-model selectors need two pieces of hostderived information:
 //   - the display ORDER of hosts (`getHostOrder`)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """satellite.py — stateless per-host chat-ingest push agent with auto-update.
 
-Runs supervised on a remote fleet host (systemd-user on hostc/WSL, launchd
-on hostb). Tails that host's LOCAL provider transcripts, normalizes each new
+Runs supervised on a remote fleet host (systemd-user on linux-workstation/WSL, launchd
+on workstation). Tails that host's LOCAL provider transcripts, normalizes each new
 turn with the provider-specific wire-stable normalizer, and pushes batches over
 one outbound WebSocket to coordinator's `event.push` verb. coordinator owns the durable store
 and exactly-once dedupe; the satellite holds NO local DB and only in-memory byte
@@ -18,7 +18,7 @@ DESIGN INVARIANTS (mirrors ingest.py, the local counterpart):
   - Session membership from LOCAL tmux, not coordinator's registry (the satellite has
     no registry). A pentacle session's tmux name IS its `session_name`, so
     `stream_id = f"{host}:{session_name}"` matches the row coordinator's registry holds
-    (this is what makes an hostc:v2-* push land on the right session).
+    (this is what makes an linux-workstation:v2-* push land on the right session).
   - NO per-file tail thread. One bounded-cadence pass reads new bytes off no
     event loop the daemon owns; a partial trailing line is left for next pass.
   - Four loop rules (event-loop rule 2): cadence, per-pass event cap, exponential
@@ -75,7 +75,7 @@ _TMUX_SOCKET_ABSENT_ERROR = re.compile(
     r"error connecting to (?P<socket>\S+) \(No such file or directory\)",
     re.IGNORECASE,
 )
-_TMUX_HOSTB_NO_SERVER = (
+_TMUX_SOCKET_NO_SERVER = (
     "error connecting to /tmp/tmux-1000/default (No such file or directory)"
 )
 
@@ -95,7 +95,7 @@ def _tmux_reports_authoritative_empty(returncode: int, stderr: str, stdout: str)
         return True
     lowered = detail.lower()
     return (
-        _TMUX_HOSTB_NO_SERVER.lower() in lowered
+        _TMUX_SOCKET_NO_SERVER.lower() in lowered
         or "no server running on " in lowered
         or "failed to connect to server" in lowered
     )

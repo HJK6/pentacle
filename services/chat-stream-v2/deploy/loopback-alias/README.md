@@ -2,13 +2,13 @@
 
 The v2 bind coverage intentionally exercises both `127.0.0.1` and
 `127.0.0.2` on one port. macOS does not treat every `127/8` address as usable
-for a listener, so hosta needs the `127.0.0.2` alias on `lo0`.
+for a listener, so coordinator needs the `127.0.0.2` alias on `lo0`.
 
 This is a root `launchd` one-shot (`com.pentacle.loopback-alias`) rather than a
 per-user agent: `ifconfig lo0 alias` requires administrator privilege. It is
 idempotent, runs at boot, and exits after the alias is present.
 
-## Install on hosta
+## Install on coordinator
 
 Run from this directory in the deployed v2 checkout. The `sudo -n` form is a
 safe preflight; if it reports that a password is required, rerun the install

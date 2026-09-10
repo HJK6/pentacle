@@ -19,8 +19,8 @@ connects like a real client, runs the desktop handshake (unsolicited `welcome`
 `request_stream_events`), and ASSERTS the reply is what a client can actually
 render. It exits non-zero on any violation so it runs as a GATE, not prose.
 
-Usage (post-deploy read-back against prod, from hosta):
-    python3 tools/client_contract_probe.py --stream hosta:example-session
+Usage (post-deploy read-back against prod, from coordinator):
+    python3 tools/client_contract_probe.py --stream coordinator:example-session
     # remote:  --url ws://example.local:7791
 A stream KNOWN to have history is required (default --min-events 1) — an empty
 stream is indistinguishable from the empty-chat bug, so pick one with turns.
@@ -573,7 +573,7 @@ def assert_client_consumable(events: list[dict], *, min_events: int) -> list[str
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", default="ws://127.0.0.1:7791", help="daemon WS url (default: local prod)")
-    ap.add_argument("--stream", required=True, help="stream_id with known history, e.g. hosta:example-session")
+    ap.add_argument("--stream", required=True, help="stream_id with known history, e.g. coordinator:example-session")
     ap.add_argument("--limit", type=int, default=500)
     ap.add_argument("--min-events", type=int, default=1)
     ap.add_argument("--events-mode", default="summary")

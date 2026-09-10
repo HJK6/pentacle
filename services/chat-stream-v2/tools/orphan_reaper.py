@@ -50,10 +50,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from machines import configured_local_host
+
 # --------------------------------------------------------------------------- #
 # Ruled thresholds (operator, 2026-09-05; see spec § Operator rulings/Design).
 # --------------------------------------------------------------------------- #
-HOST = os.environ.get("PENTACLE_HOST_ID", "hosta")
+HOST = configured_local_host()
 SHELL_IDLE_SECONDS = 6 * 3600               # idle default-server shell session > 6 h
 DAEMON_NO_CLIENT_SECONDS = 2 * 3600         # scratch daemon with no clients > 2 h
 PURGE_WINDOW_SECONDS = 24 * 3600            # phase-2 recovery window before a kill

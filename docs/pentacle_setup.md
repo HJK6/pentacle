@@ -26,7 +26,7 @@ For public development, use `ws://127.0.0.1:7791` and a temporary store. The dae
 chatStream: {
   url: 'ws://127.0.0.1:7791',
   autoStart: true,
-  localHost: 'hosta',
+  localHost: 'coordinator',
   binds: ['127.0.0.1'],
   machinesFile: '/tmp/pentacle-example/machines.json',
 },

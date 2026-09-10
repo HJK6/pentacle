@@ -9,8 +9,8 @@ checks the following precedence, from highest to lowest:
 4. `pentacle.config.js`.
 5. `pentacle.config.example.js`.
 
-Use a short synthetic machine key such as `local`, `hosta`, or
-`hostb`. Unknown hostnames should be normalized to a safe key; a fresh
+Use a short synthetic machine key such as `local`, `coordinator`, or
+`workstation`. Unknown hostnames should be normalized to a safe key; a fresh
 installation should fall back to `local`.
 
 ## Local override

@@ -14,7 +14,7 @@ The default deployment path is `/etc/ssh/sshd_config.d/publicdash-leader-env.con
 grep -i 'include.*sshd_config.d' /etc/ssh/sshd_config
 ```
 
-### macOS hosts (hosta, hostb, hostd)
+### macOS hosts (coordinator, workstation, satellite)
 
 ```bash
 sudo cp deploy/sshd_config.d/publicdash-leader-env.conf /etc/ssh/sshd_config.d/
@@ -22,7 +22,7 @@ sudo sshd -t
 sudo launchctl kickstart -k system/com.openssh.sshd
 ```
 
-### Linux / WSL hosts (hostc)
+### Linux / WSL hosts (linux-workstation)
 
 If the `Include` directive is present:
 

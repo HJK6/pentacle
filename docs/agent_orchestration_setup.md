@@ -26,7 +26,7 @@ Start from a synthetic local-only configuration. Host ids are public labels; the
 {
   "machines": [
     {
-      "name": "hosta",
+      "name": "coordinator",
       "ssh_target": null,
       "tmux_bin": "tmux",
       "provider_bin": "example-provider",
@@ -56,7 +56,7 @@ Use a loopback websocket for local development:
 ```json
 {
   "chat_stream": {"url": "ws://127.0.0.1:7791"},
-  "local_host_id": "hosta"
+  "local_host_id": "coordinator"
 }
 ```
 

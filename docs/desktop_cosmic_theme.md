@@ -6,16 +6,7 @@ The cosmic theme is a scoped presentation layer for the desktop chat surface. It
 
 The `.cosmic` root exposes `--cosmic-*` variables. Keep non-chat application styles in the ordinary root layer so the theme can be enabled or removed without changing layout code.
 
-Synthetic host accents are stable and public:
-
-| Host token | Accent |
-|---|---|
-| `hosta` | green |
-| `hostb` | red |
-| `hostc` | cyan |
-| `hostd` | violet |
-
-These labels are presentation fixtures, not a machine inventory.
+The desktop resolves cosmetic sigils separately from machine names. Stable sigil names are `djinni`, `sun`, `mage`, and `flower`. Host labels and colors come from desktop configuration; sigils do not define a machine inventory. See [desktop configuration](desktop_config.md).
 
 ## Components
 
@@ -33,4 +24,4 @@ Load the theme once, add `.cosmic` to the chat root, and use the component entry
 
 ## Visual tests
 
-Render synthetic `hosta` through `hostd` fixtures at the same viewport, seed, and device scale. Compare DOM structure and bounded screenshots. Do not use live dashboard data, captured transcripts, or real machine labels as visual fixtures.
+Render synthetic `coordinator` through `satellite` fixtures at the same viewport, seed, and device scale. Compare DOM structure and bounded screenshots. Do not use live dashboard data, captured transcripts, or real machine labels as visual fixtures.

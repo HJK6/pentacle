@@ -19,4 +19,18 @@ or establish production readiness for every structured-chat interaction.
 
 `services/chat-stream-v2/tests/smoke/test_public_socket.py` supplies the daemon runner's public socket smoke tier. Default service tests use synthetic fixtures and exclude the long soak mark. Real-provider opt-ins need installed, authenticated CLIs; passing the deterministic fixture does not claim those providers were contacted.
 
-The vendored core corresponds to public `HJK6/pentacle-chat-core` commit `3e19bdd5a03b04cfe86fbcf05fb3d5ed4fc7c8e3`. Its daemon update fixture is byte-identical to the service fixture, and its cursor identities are decoded and checked against their outer parent/child pair.
+The vendored core corresponds to public `HJK6/pentacle-chat-core` commit `add42ac39facc91af03a25bdbffadd09653e4f74`. Its daemon update fixture is byte-identical to the service fixture, and its cursor identities are decoded and checked against their outer parent/child pair.
+
+## Public identity and fixture policy
+
+Machine identities come from configuration, never a built-in fleet. The CLI uses `AGENT_ORCH_HOST_ID`, then `local_host_id` in its user config, then a sanitized local hostname. Daemon launch uses `--local-host` and the configured machine allowlist. Desktop identity and appearance follow [desktop configuration](desktop_config.md).
+
+Live tools use `PENTACLE_SMOKE_HOSTS` or `PENTACLE_SATELLITE_HOSTS` when supplied; otherwise they read the existing machine configuration (inline `PENTACLE_MACHINES_JSON`, `PENTACLE_MACHINES_FILE`, user machines.json, then a local-only default). Pinning selects remote machines only and refuses an empty target set before opening the Store. Empty or duplicate explicit lists fail. Scheduled smoke follows the same machine configuration. Local tool identity uses `PENTACLE_HOST_ID`, `AGENT_ORCH_HOST_ID`, then the configured local machine.
+
+The auth-context marker is disabled unless `PENTACLE_AUTH_CONTEXT_MARKER_HOST` identifies the host whose provider wrapper emits that marker. Shipped spawn policy applies the common concurrency cap; per-host overrides belong in the user's spawn configuration. Satellite service templates read their identity from `PENTACLE_SATELLITE_HOST` in the private satellite environment file.
+
+Fleet CLI installation defaults to the current user's local machine. For multiple hosts, pass `--host-config` with a JSON object mapping names to `ssh` and absolute `release_root`, then select `--hosts` and the local `--run-host`. See [release host example](../configs/fleet_release.example.json). Unknown names and malformed target maps are rejected before staging.
+
+`python3 scripts/check_public_residue.py` scans tracked UTF-8 file contents, including documentation, configuration and the checker itself. [The exact fixture allowlist](../configs/public_fixture_allowlist.json) documents each permitted synthetic test input. Its entries retain anonymizer-era identities only to exercise routing, rendering, protocol compatibility and isolation; they are not deployment defaults. No directory patterns or production exemptions are admitted. Live-provider test admission requires an explicit `PENTACLE_LIVE_TEST_HOSTS` allowlist or the existing deliberate force opt-in. Test resource accounting accepts `PENTACLE_TEST_LOCAL_HOST` as an optional local alias.
+
+Usage updates include `limits_health` alongside `limits`. A changed health record emits an update even when the last valid values remain the same; a healthy probe clears the error through the same path. Invalid state files retain the preceding valid frame and health. The desktop displays the retained values and escaped provider error according to the [limits contract](desktop_config.md).

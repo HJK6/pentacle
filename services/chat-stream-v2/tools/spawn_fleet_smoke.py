@@ -21,6 +21,7 @@ for _path in (SERVICE_DIR, SERVICES_DIR):
         sys.path.insert(0, str(_path))
 
 from boot_ready import codex_reset_interstitial_visible  # noqa: E402
+from machines import configured_host_names  # noqa: E402
 from client_contract_probe import (  # noqa: E402
     CONTROL_PLANE_P95_LIMIT_MS,
     CONVERGENCE_QUIET_LIMIT_MS,
@@ -45,10 +46,7 @@ from tools.live_window import (  # noqa: E402
 )
 
 
-HOSTS = tuple(
-    host.strip() for host in os.environ.get("PENTACLE_SMOKE_HOSTS", "hosta,hostb,hostc").split(",")
-    if host.strip()
-)
+HOSTS = configured_host_names("PENTACLE_SMOKE_HOSTS")
 PROVIDERS = ("claude", "codex")
 PROMPT_MODES = ("prompted", "promptless")
 ASSISTANT_KINDS = frozenset({"ASSIST", "ASSIST_TEXT"})
@@ -709,6 +707,8 @@ def run_matrix(
             (host, provider, prompt_mode)
             for host in HOSTS for provider in PROVIDERS for prompt_mode in PROMPT_MODES
         )
+    if not cells:
+        raise ValueError("no smoke host cells configured")
     failures: list[dict[str, str]] = []
     for host, provider, prompt_mode in cells:
         state_path = Path(tempfile.gettempdir()) / f"pentacle-live-window-{uuid.uuid4().hex}.json"

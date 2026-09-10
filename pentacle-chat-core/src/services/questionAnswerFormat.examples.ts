@@ -19,7 +19,7 @@ I need a machine
 that can run tests.`,
   optionWithNote: `Answering your question:
 
-Q1 (Deploy): hosta
+Q1 (Deploy): workstation
 note (Q1): Use the orchestrator.`,
   noteOnly: `Answering your question:
 

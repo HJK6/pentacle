@@ -20,7 +20,7 @@ the standard `unsupported_in_v2` response.
 
 | Command | Purpose |
 |---|---|
-| `agent-orch spawn [--provider P] [--model MODEL] [--effort LEVEL] [--host H] [--role R] [--phase X] [--spec-id ID ...] [--visibility V] [--parent STREAM_ID] [--handoff] [--confirm-model-change] [--top-level] [--resume SESSION_ID] [--at ISO \| --delay DURATION] [--initial-prompt TEXT \| --initial-prompt-file PATH]` | Issue an immediate `spawn` RPC, or create a durable daemon schedule when `--at` or `--delay` is present. Fresh scheduled spawns default to creator-as-parent; `--parent` and `--top-level` select the other lineage shapes. Scheduled `--handoff` preserves the retiring-seat workflow. Non-handoff spawns require `--provider` and resolve the configured `agent_orch` profile. Handoffs inherit omitted provider/model/effort fields from the retiring stream's observed effective tuple; see "Handoff." `--host` defaults to the CLI's resolved local host id (`AGENT_ORCH_HOST_ID` env, `local_host_id` in config.json, or hostname-derived — see the Configuration table). A non-matching `--host` is allowed; chat_streamd routes the spawn to the named target machine through its existing SSH path and is the source of truth for host availability. Returned `stream_id` matches the requested host (e.g. `hostc:codex-hostc-<ts>` from a hosta leader). chat_streamd returns `error_code: "host_unknown"` for hosts not in its `machines.json` and `error_code: "host_offline"` for hosts whose 1-Hz online probe is failing; the CLI preserves both as the `error` and `reason` fields. `parent_stream_id` defaults to leader's discovered id unless `--handoff`, explicit `--parent`, or `--top-level` changes the lineage. `--top-level` suppresses parent auto-inference and is useful with `--resume` from inside a registered session; it is incompatible with `--parent` and `--handoff`. Ownership-level sessions require `--spec-id`; repeat it for multiple tags. A changed handoff tuple warns and proceeds; `--confirm-model-change` suppresses only that warning. |
+| `agent-orch spawn [--provider P] [--model MODEL] [--effort LEVEL] [--host H] [--role R] [--phase X] [--spec-id ID ...] [--visibility V] [--parent STREAM_ID] [--handoff] [--confirm-model-change] [--top-level] [--resume SESSION_ID] [--at ISO \| --delay DURATION] [--initial-prompt TEXT \| --initial-prompt-file PATH]` | Issue an immediate `spawn` RPC, or create a durable daemon schedule when `--at` or `--delay` is present. Fresh scheduled spawns default to creator-as-parent; `--parent` and `--top-level` select the other lineage shapes. Scheduled `--handoff` preserves the retiring-seat workflow. Non-handoff spawns require `--provider` and resolve the configured `agent_orch` profile. Handoffs inherit omitted provider/model/effort fields from the retiring stream's observed effective tuple; see "Handoff." `--host` defaults to the CLI's resolved local host id (`AGENT_ORCH_HOST_ID` env, `local_host_id` in config.json, or hostname-derived — see the Configuration table). A non-matching `--host` is allowed; chat_streamd routes the spawn to the named target machine through its existing SSH path and is the source of truth for host availability. Returned `stream_id` matches the requested host (e.g. `linux-workstation:codex-linux-workstation-<ts>` from a coordinator leader). chat_streamd returns `error_code: "host_unknown"` for hosts not in its `machines.json` and `error_code: "host_offline"` for hosts whose 1-Hz online probe is failing; the CLI preserves both as the `error` and `reason` fields. `parent_stream_id` defaults to leader's discovered id unless `--handoff`, explicit `--parent`, or `--top-level` changes the lineage. `--top-level` suppresses parent auto-inference and is useful with `--resume` from inside a registered session; it is incompatible with `--parent` and `--handoff`. Ownership-level sessions require `--spec-id`; repeat it for multiple tags. A changed handoff tuple warns and proceeds; `--confirm-model-change` suppresses only that warning. |
 | `agent-orch await-spawn (--request-id RID \| --stream-id SID) [--timeout N]` | Resolve a spawn to its durable pending, succeeded, or failed outcome. |
 | `agent-orch spawn status <key\|request_id> [--host H]` | List the outcome/reservation rows and any admission hold for a spawn key or request id. See "Idempotent spawn retry, in-flight cancel, and admission freeze." |
 | `agent-orch spawn cancel <key\|request_id> [--host H]` | Cancel a pre-bind spawn (terminal `cancelled`); after bind returns `cancel_after_bind` naming the stream id to close instead. |
@@ -84,7 +84,7 @@ Peer sends are stamped for provenance. When the daemon sees a `from_stream_id` b
 Use `agent-orch tell` for one-way peer messages where the sender should continue immediately. In daemon v2 the paste is always submitted immediately, and the completed delivery record is available through `agent-orch ledger get` or `agent-orch audit inbound`; `submission_confirmed` is evidence, not a gate:
 
 ```bash
-agent-orch tell hostc:codex-hostc-1779000000 "I touched the shared parser; reload before your next test."
+agent-orch tell linux-workstation:codex-linux-workstation-1779000000 "I touched the shared parser; reload before your next test."
 agent-orch tell "$PEER" "retry-safe note" --from "$AGENT_ORCH_STREAM_ID" --ttl 900 --tell-id 6f1027b2-66f7-4422-a5fc-7b693cccb256
 ```
 
@@ -224,13 +224,13 @@ agent-orch spawn --handoff --effort xhigh --confirm-model-change \
 **Progeny forwarding.** `spawn --handoff` also records the retiring leader as a closed-stream predecessor of the new leader. Tells and child-report notifications addressed to the old stream are forwarded to the final live progeny and external senders are redirected there for future sends. Liveness/heartbeat noise is not forwarded. Successor chains resolve to the final live stream with a bounded loop guard. The same pointer can be set explicitly with `agent-orch close --progeny <successor> <old-stream>`.
 
 ```bash
-agent-orch spawn --handoff --host hosta --initial-prompt "Implement the completed spec and report back to the lead."
-agent-orch spawn --handoff --host hostc --initial-prompt-file /tmp/handoff_prompt.md
+agent-orch spawn --handoff --host coordinator --initial-prompt "Implement the completed spec and report back to the lead."
+agent-orch spawn --handoff --host linux-workstation --initial-prompt-file /tmp/handoff_prompt.md
 ```
 
 The daemon stores `handoff_from_stream_id` on the session row and echoes it in `snapshot.sessions`, `session.inventory`, and `chat.event` session summaries. The field is audit lineage only: it does not make the new session a child and does not hide it from default subscribers.
 
-Fleet activation uses `deploy/install_fleet_spawn_tooling.py --commit <full-main-sha> --hosts hosta,hostb,hostc,hostd`. The installer stages and verifies every immutable release before switching any active pointer, then reads every pointer back; daemon-side handoff rejection must not deploy until all four peers report the same CLI SHA.
+Fleet activation uses `deploy/install_fleet_spawn_tooling.py --commit <full-main-sha> --host-config /path/to/release-hosts.json --hosts coordinator,workstation --run-host coordinator`. The installer stages and verifies every immutable release before switching any active pointer, then reads every pointer back; daemon-side handoff rejection must not deploy until all four peers report the same CLI SHA.
 
 The spawned session inherits `PENTACLE_STREAM_ID=<host>:<session_name>` in its provider process environment, with the value computed from the actual session name passed to tmux. It also receives `AGENT_ORCH_STREAM_ID` with the same value. This lets the new leader call `agent-orch report --terminate` without depending on tmux-name snapshot discovery.
 
@@ -249,10 +249,10 @@ blind-retry the same logical spawn.
 {
   "type": "spawn.ok",
   "request_id": "spawn-<uuid>",
-  "session": {"stream_id": "hostc:codex-hostc-1779000000", "handoff_from_stream_id": "hosta:codex-hosta-1778999999"},
-  "initial_prompt_delivery": {"to_stream_id": "hostc:codex-hostc-1779000000", "delivery_status": "delivered", "proof_watermark": 1233, "proof_watermark_state": "reachable", "transport": "direct"},
+  "session": {"stream_id": "linux-workstation:codex-linux-workstation-1779000000", "handoff_from_stream_id": "coordinator:codex-coordinator-1778999999"},
+  "initial_prompt_delivery": {"to_stream_id": "linux-workstation:codex-linux-workstation-1779000000", "delivery_status": "delivered", "proof_watermark": 1233, "proof_watermark_state": "reachable", "transport": "direct"},
   "admitted_count": 1,
-  "admitted_sessions": ["hostc:codex-hostc-1779000000"],
+  "admitted_sessions": ["linux-workstation:codex-linux-workstation-1779000000"],
   "admitted_scope": "idempotency_key",
   "admitted_set_authoritative": true
 }
@@ -325,7 +325,7 @@ agent-orch spawn --handoff --provider codex --delay 3h \
   --initial-prompt "Resume the deployment check and report with --terminate."
 
 # For explicit cases, replace the placeholder with any ISO 8601 timestamp with offset, > now + 60s.
-agent-orch spawn --handoff --provider codex --host hostc \
+agent-orch spawn --handoff --provider codex --host linux-workstation \
   --at "<future-ISO-8601-with-offset>" \
   --initial-prompt-file /tmp/next_leader.md
 ```
@@ -412,7 +412,7 @@ Every agent-orch websocket hello advertises agent-orch capabilities:
 {
   "type": "hello",
   "client": "agent-orch",
-  "host": "hosta",
+  "host": "coordinator",
   "agent_orch_capabilities": {
     "version": "<agent-orch version>",
     "flags": ["spec_id"]
@@ -515,7 +515,7 @@ Operational guidance for callers:
   chat_streamd's event loop for longer than the 60 s pong window, especially
   during cross-host spawns where the daemon also waits on SSH for tmux session
   creation.
-- **If you observe a `1011` cluster in `/tmp/pentacle-chat-streamd.err` on hosta, that's a regression of the burst-failure class.** Capture the err file before any restart and file a follow-up against this spec.
+- **If you observe a `1011` cluster in `/tmp/pentacle-chat-streamd.err` on coordinator, that's a regression of the burst-failure class.** Capture the err file before any restart and file a follow-up against this spec.
 - **Direct CLI commands that time out during a `1011` cluster** should be
   retried after the daemon is responsive again. Retry-eligible agent-orch RPCs
   auto-retry bounded transport failures; for non-eligible operations, inspect
@@ -523,7 +523,7 @@ Operational guidance for callers:
 
 ## Lossy-link resilience
 
-agent-orch's websocket client is tuned for lossy or high-latency links such as a hostb-to-hosta DERP route. Before this hardening, the client used the websockets library's keepalive defaults (`ping_interval=20`, `ping_timeout=20`) and most direct RPCs were single-attempt. A few dropped packets could close the socket with `1011 keepalive ping timeout` while an otherwise deliverable RPC was in flight, leaving the caller with a hard transport failure.
+agent-orch's websocket client is tuned for lossy or high-latency links such as a workstation-to-coordinator DERP route. Before this hardening, the client used the websockets library's keepalive defaults (`ping_interval=20`, `ping_timeout=20`) and most direct RPCs were single-attempt. A few dropped packets could close the socket with `1011 keepalive ping timeout` while an otherwise deliverable RPC was in flight, leaving the caller with a hard transport failure.
 
 The client now applies the same keepalive envelope to every agent-orch websocket connection: persistent `WebsocketClient` sessions, snapshot/list fetches, and one-shot direct CLI RPCs. Defaults are `ping_interval=30`, `ping_timeout=60`, and `close_timeout=5`; env configuration is clamped so `ping_timeout` is never less than `ping_interval`. With the defaults, a genuinely dead idle peer is still detected in roughly 95 seconds or less (30 s interval + 60 s pong wait + 5 s close timeout).
 
@@ -688,7 +688,7 @@ The raw daemon request shape is:
   "type": "report",
   "request_id": "report-<uuid>",
   "report_id": "<reporter-supplied-or-cli-generated-uuid>",
-  "from_stream_id": "hostc:codex-hostc-1779000000",
+  "from_stream_id": "linux-workstation:codex-linux-workstation-1779000000",
   "msg_id": 42,
   "status": "done",
   "summary": "short leader-facing result",
@@ -772,7 +772,7 @@ the inline report.
   "type": "completion.report",
   "report_id": "<uuid>",
   "ledger_row_id": 123,
-  "from_stream_id": "hostc:codex-hostc-1779000000",
+  "from_stream_id": "linux-workstation:codex-linux-workstation-1779000000",
   "to_stream_id": null,
   "recovery_for_stream_id": null,
   "msg_id": 42,
@@ -824,7 +824,7 @@ For an explicit self-close, a delivered peer tell from the child to its current 
 ```bash
 # Stream mode: no msg_id to coordinate. Resolves on the worker's terminal
 # report (any msg_id) or on close.
-agent-orch await --from hostc:codex-hostc-1779000000
+agent-orch await --from linux-workstation:codex-linux-workstation-1779000000
 ```
 
 This collapses the spawn/await handshake to **"spawn it, then await it"**: the lead never has to agree on a `msg_id` with the worker, so the wait side is identical for `--initial-prompt-file` (tell-driven) and `send`-driven spawns. The worker's contract is **unchanged** — it still ends with `agent-orch report --msg-id <N> --status done ... --terminate`, and the stream await matches that terminal report whatever `<N>` is. (A tell-driven one-shot worker with no awaitable inbox message reports with `--msg-id 0` — see the `report` command row above and "Self-closing one-shot workers"; stream mode matches it the same.) This is an ergonomic change — it removes the msg_id-mismatch failure class — not a robustness change: msg_id mode already resolves to `closed_without_report` on close, and both modes still time out when a worker neither reports nor closes.
@@ -867,7 +867,7 @@ Inline-inbox payloads are capped at **65,536 bytes** (after JSON serialization).
 
 ### Direct RPC error codes
 
-These error codes can appear in `agent-orch send`/`spawn`/`await` responses and survive verbatim through the `error` and (for the hostclass errors) `reason` fields:
+These error codes can appear in `agent-orch send`/`spawn`/`await` responses and survive verbatim through the `error` and (for the host class errors) `reason` fields:
 
 | Code | Origin | Meaning |
 |---|---|---|
@@ -936,7 +936,7 @@ Sources are listed in precedence order:
 |---|---|---|
 | Websocket URL | `AGENT_ORCH_WS_URL` > `chat_stream.url` in config.json | `ws://127.0.0.1:7791` |
 | Auth token | `AGENT_ORCH_TOKEN` > `~/.config/pentacle-stream/token` | `""` (unauthenticated; valid only when daemon has no token configured) |
-| Local host id | `AGENT_ORCH_HOST_ID` > `local_host_id` in config.json > hostname-derived fallback | Set an explicit stable host ID such as `hosta` in the environment or configuration. |
+| Local host id | `AGENT_ORCH_HOST_ID` > `local_host_id` in config.json > hostname-derived fallback | Set an explicit stable host ID such as `coordinator` in the environment or configuration. |
 | Runtime dir | `AGENT_ORCH_RUNTIME_DIR` | `~/.agent-orch/` |
 | Memory repo path | `memory_repo_path` in config.json | Optional role-baseline directory; no memory repository is required for daemon startup. |
 | No-chat-events threshold | `AGENT_ORCH_NO_CHAT_EVENTS_THRESHOLD` | `30.0` seconds. Values parse as seconds and are clamped to `>= 0.0`. |
@@ -1174,7 +1174,7 @@ by the reporting stream. Close refuses open obligations unless
 
 ### Service actors
 
-Coordination RPCs accept a non-session `--from <actor>` when the request carries the system-producer token (`AGENT_ORCH_STREAM_TOKEN` set to the secret behind the daemon's `PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN[_FILE]`) — the same trust level that authorizes top-level self-close spawns. This is how hosta's memory-cadence sweeper obliges/waives as `hosta:memory-cadence` under stream-ownership enforce mode. Waive authorization is unchanged: creator or operator surface.
+Coordination RPCs accept a non-session `--from <actor>` when the request carries the system-producer token (`AGENT_ORCH_STREAM_TOKEN` set to the secret behind the daemon's `PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN[_FILE]`) — the same trust level that authorizes top-level self-close spawns. This is how coordinator's memory-cadence sweeper obliges/waives as `coordinator:memory-cadence` under stream-ownership enforce mode. Waive authorization is unchanged: creator or operator surface.
 
 ### V2 schedule receipts
 
