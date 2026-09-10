@@ -54,15 +54,21 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
   });
   ipcMain.on('pty:write', (event, slot, data) => slots.get(key(event, slot))?.process?.write(String(data)));
   ipcMain.on('pty:resize', (event, slot, cols, rows) => { if (Number.isInteger(cols) && cols > 0 && Number.isInteger(rows) && rows > 0) slots.get(key(event, slot))?.process?.resize(cols, rows); });
-  function tmuxAction(event, slot, args) {
+  function tmuxAction(event, slot, ...commands) {
     const record = slots.get(key(event, slot));
     if (!record?.paneId) return;
-    const command = target(record.host, [args[0], '-t', record.paneId, ...args.slice(1)]);
+    const command = target(record.host, commands.flatMap((args, index) => [
+      ...(index ? [';'] : []), args[0], '-t', record.paneId, ...args.slice(1),
+    ]));
     void execute(command.file, command.args, { timeout: 5000 }).catch((error) => console.warn('Terminal command failed:', error.message));
   }
   ipcMain.on('pty:tmux-send', (event, slot, ...keys) => tmuxAction(event, slot, ['send-keys', ...keys.map(String)]));
   ipcMain.on('pty:exit-copy-mode', (event, slot) => tmuxAction(event, slot, ['send-keys', '-X', 'cancel']));
-  ipcMain.on('pty:scroll', (event, slot, direction, lines = 1) => tmuxAction(event, slot, ['send-keys', '-X', '-N', String(Math.max(1, Math.min(100, Number(lines) || 1))), direction === 'up' ? 'scroll-up' : 'scroll-down']));
+  // Copy commands require copy-mode; keep entry and scrolling in one tmux call
+  // so both operations target this window's current pane, including over SSH.
+  ipcMain.on('pty:scroll', (event, slot, direction, lines = 1) => tmuxAction(event, slot,
+    ['copy-mode', '-e'],
+    ['send-keys', '-X', '-N', String(Math.max(1, Math.min(100, Number(lines) || 1))), direction === 'up' ? 'scroll-up' : 'scroll-down']));
   return () => { for (const record of slots.values()) record.process?.kill(); slots.clear(); };
 }
 module.exports = { registerTerminalIpc };

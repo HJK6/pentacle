@@ -52,3 +52,44 @@ test('Windows remote terminal uses an executable filename that ConPTY can resolv
   assert.equal(spawned.options.env.LANG, 'en_US.UTF-8');
   cleanup();
 });
+
+for (const remote of [false, true]) {
+  test(`scroll enters copy-mode and routes both commands to the window's pane (${remote ? 'SSH' : 'local'})`, async () => {
+    const handlers = new Map(), listeners = new Map(), calls = [];
+    const makeEvent = (id) => {
+      const sender = new EventEmitter(); sender.id = id; sender.isDestroyed = () => false;
+      return { sender };
+    };
+    const first = makeEvent(20), second = makeEvent(21);
+    let nextPane = 40;
+    const cleanup = registerTerminalIpc({ handle: (n, fn) => handlers.set(n, fn), on: (n, fn) => listeners.set(n, fn) },
+      { tmux: 'fixture-tmux', hosts: { peer: { host: 'peer.example', user: 'operator', tmux: '/usr/bin/tmux' } } }, {},
+      { execute: async (file, args) => { calls.push({ file, args }); return { stdout: `%${nextPane++}\n` }; },
+        pty: { spawn: () => ({ onData() {}, onExit() {}, kill() {} }) } });
+    try {
+      await handlers.get('pty:create')(first, 0, 'first', remote ? 'peer' : 'local');
+      await handlers.get('pty:create')(second, 0, 'second', remote ? 'peer' : 'local');
+      calls.length = 0;
+      listeners.get('pty:scroll')(first, 0, 'up', 15);
+      listeners.get('pty:scroll')(second, 0, 'down', 250);
+      assert.equal(calls.length, 2);
+      for (const [index, pane, count, direction] of [[0, '%40', '15', 'scroll-up'], [1, '%41', '100', 'scroll-down']]) {
+        if (remote) {
+          assert.equal(calls[index].file, process.platform === 'win32' ? 'ssh.exe' : 'ssh');
+          assert.deepEqual(calls[index].args.slice(0, -1), ['-tt', '-p', '22', '--', 'operator@peer.example']);
+          assert.equal(calls[index].args.at(-1), `LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 '/usr/bin/tmux' 'copy-mode' '-t' '${pane}' '-e' ';' 'send-keys' '-t' '${pane}' '-X' '-N' '${count}' '${direction}'`);
+        } else {
+          assert.equal(calls[index].file, 'fixture-tmux');
+          assert.deepEqual(calls[index].args, ['copy-mode', '-t', pane, '-e', ';', 'send-keys', '-t', pane, '-X', '-N', count, direction]);
+        }
+      }
+      await handlers.get('pty:kill')(first, 0);
+      listeners.get('pty:scroll')(first, 0, 'up', 15);
+      assert.equal(calls.length, 2, 'a detached slot cannot scroll another window');
+      listeners.get('pty:exit-copy-mode')(second, 0);
+      assert.equal(calls.length, 3);
+      if (remote) assert.match(calls[2].args.at(-1), /'send-keys' '-t' '%41' '-X' 'cancel'$/);
+      else assert.deepEqual(calls[2].args, ['send-keys', '-t', '%41', '-X', 'cancel']);
+    } finally { cleanup(); }
+  });
+}
