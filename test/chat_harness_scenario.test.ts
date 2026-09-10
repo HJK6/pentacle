@@ -32,15 +32,15 @@ import {
   type ViewChrome,
 } from '../renderer/src/shared_transcript_view';
 
-const STREAM = 'hostc:provider_c-hostc-1';
+const STREAM = 'hostc:codex-hostc-1';
 const CHROME: ViewChrome = {
   header: '#102a4a', accent: '#4da3ff', surface: '#0c1827', border: '#2f6ca5', title: 'hostc',
 };
 
 function makeSession(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    stream_id: STREAM, host: 'hostc', provider: 'provider_c', session_name: 'provider_c-hostc-1',
-    display_name: 'provider_c-hostc-1', last_event_at: '2026-05-25T12:00:00.000Z', last_text: '',
+    stream_id: STREAM, host: 'hostc', provider: 'codex', session_name: 'codex-hostc-1',
+    display_name: 'codex-hostc-1', last_event_at: '2026-05-25T12:00:00.000Z', last_text: '',
     last_kind: 'ASSIST', draft: '', pending: false, working: false, online: true, ...over,
   };
 }
@@ -49,8 +49,8 @@ let seq = 1;
 function ev(over: Record<string, unknown> = {}): Record<string, unknown> {
   seq += 1;
   return {
-    daemon_seq: seq, host: 'hostc', provider: 'provider_c', session_id: 'sess-1',
-    session_name: 'provider_c-hostc-1', stream_id: STREAM,
+    daemon_seq: seq, host: 'hostc', provider: 'codex', session_id: 'sess-1',
+    session_name: 'codex-hostc-1', stream_id: STREAM,
     timestamp: new Date().toISOString(), kind: 'ASSIST', text: 'x', ...over,
   };
 }
@@ -67,8 +67,8 @@ function flush(): Promise<void> {
 // ── Gating sanity: the harness must NOT arm by default ──────────────
 test('harness is gated OFF by default (no env, no CONFIG flag)', () => {
   assert.equal(isHarnessArmed({}, undefined), false, 'unarmed with no env + no config');
-  assert.equal(isHarnessArmed({ PUBLIC_HARNESS: '0' }, { features: {} }), false, 'PUBLIC_HARNESS=0 stays off');
-  assert.equal(isHarnessArmed({ PUBLIC_HARNESS: '1' }, undefined), true, 'PUBLIC_HARNESS=1 arms');
+  assert.equal(isHarnessArmed({ PENTACLE_HARNESS: '0' }, { features: {} }), false, 'PENTACLE_HARNESS=0 stays off');
+  assert.equal(isHarnessArmed({ PENTACLE_HARNESS: '1' }, undefined), true, 'PENTACLE_HARNESS=1 arms');
   assert.equal(isHarnessArmed({}, { features: { chatHarnessTelemetry: true } }), true, 'CONFIG flag arms');
 });
 
@@ -90,7 +90,7 @@ test('attachChatHarnessTelemetry is INERT when not armed (installs nothing)', ()
 test('scripted session: QA outcomes asserted PURELY from harness telemetry', async () => {
   const controller = new ChatStoreController();
   // Arm the harness deterministically (force) — no env mutation needed. This is
-  // exactly what window-side arming does when PUBLIC_HARNESS=1.
+  // exactly what window-side arming does when PENTACLE_HARNESS=1.
   const harness = attachChatHarnessTelemetry(controller, { force: true, resetCounts: true });
   assert.equal(harness.armed, true, 'harness armed for the scenario');
   assert.equal(harness.eventsOfType(TELEMETRY_EVENTS.HARNESS_HARNESS_ARMED).length, 1, 'armed beacon emitted');
@@ -126,7 +126,7 @@ test('scripted session: QA outcomes asserted PURELY from harness telemetry', asy
     { frameEvent: ev({ kind: 'ASSIST', text: 'Here is the result of the run.' }), expectRow: true, family: 'bubble:assistant' },
     // working-status noise -> hidden:status (dropped, NO row)
     { frameEvent: ev({ kind: 'ASSIST', text: 'Working (5s • esc to interrupt)' }), expectRow: false, family: 'hidden' },
-    // provider_c-helper suggestion on a USER event -> hidden:helper (dropped, NO row)
+    // codex-helper suggestion on a USER event -> hidden:helper (dropped, NO row)
     { frameEvent: ev({ kind: 'USER', text: 'explore the repository structure' }), expectRow: false, family: 'hidden' },
   ];
 
@@ -198,7 +198,7 @@ test('scripted session: QA outcomes asserted PURELY from harness telemetry', asy
   );
   // The two intentional drops carry the SHARED classifier reasons.
   assert.equal(counts!.dropped_count_by_reason.noise_filter, 1, 'working-status -> noise_filter drop');
-  assert.equal(counts!.dropped_count_by_reason.helper_suggestion, 1, 'provider_c helper -> helper_suggestion drop');
+  assert.equal(counts!.dropped_count_by_reason.helper_suggestion, 1, 'codex helper -> helper_suggestion drop');
 
   // ============================================================
   // (b) RENDERED ROWS MATCH EXPECTED DISPLAY RULES — read from

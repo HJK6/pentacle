@@ -23,8 +23,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     UsageStateCollector(
         state_path=args.state,
-        provider_a_command=(sys.executable, str(args.shared_scripts / "check_provider_a_usage.py"), "--local-fallback", "--json"),
-        provider_c_command=(sys.executable, str(args.shared_scripts / "check_provider_c_usage.py"), "--json"),
+        claude_command=(sys.executable, str(args.shared_scripts / "check_claude_usage.py"), "--local-fallback", "--json"),
+        codex_command=(sys.executable, str(args.shared_scripts / "check_codex_usage.py"), "--json"),
     ).run_once()
     return 0
 

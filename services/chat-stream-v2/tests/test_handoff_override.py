@@ -15,7 +15,7 @@ from store import Store
 
 
 SOURCE_STREAM = "hosta:codex-old"
-SOURCE_TUPLE = {"provider": "codex", "model": "model-b", "effort": "high", "role": "qa"}
+SOURCE_TUPLE = {"provider": "codex", "model": "gpt-5.6-sol", "effort": "high", "role": "qa"}
 REQUESTED_TUPLE = {**SOURCE_TUPLE, "effort": "xhigh"}
 
 
@@ -25,7 +25,7 @@ def _message(**overrides):
         "handoff": True,
         "handoff_from_stream_id": SOURCE_STREAM,
         "provider": "codex",
-        "model": "model-b",
+        "model": "gpt-5.6-sol",
         "effort": "xhigh",
         # A missing role is intentionally inherited from the retiring session.
         "spec_ids": ["example_spec__handoff_confirmation"],
@@ -119,13 +119,13 @@ def test_drift_recovery_resolves_requested_tuple_without_a_ceremony() -> None:
         store, ctl = await _ctl(drifted_source)
         try:
             resolved = await ctl._resolve_handoff(
-                _message(model="model-c", effort="xhigh", role="nexus"),
+                _message(model="gpt-5.6-terra", effort="xhigh", role="nexus"),
                 "hostb",
                 name="v2-successor",
             )
             assert {field: resolved[field] for field in ("provider", "model", "effort", "role")} == {
                 "provider": "codex",
-                "model": "model-c",
+                "model": "gpt-5.6-terra",
                 "effort": "xhigh",
                 "role": "nexus",
             }
@@ -146,7 +146,7 @@ def test_confirm_flag_suppresses_warning_and_accepts_old_cli_tuple_shape() -> No
                 _message(
                     confirm_model_change=True,
                     handoff_model_change_override={
-                        "flag": "--confirm-model-change",
+                        "flag": "--confirm-gpt-5.6-terrahange",
                         "source": {key: SOURCE_TUPLE[key] for key in ("provider", "model", "effort")},
                         "requested": {key: REQUESTED_TUPLE[key] for key in ("provider", "model", "effort")},
                         "changed_fields": ["effort"],

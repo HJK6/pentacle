@@ -1,92 +1,30 @@
-# Chat stream v2
+# Chat stream daemon
 
-This directory contains small, testable building blocks for turning provider
-observations into chat-stream events.  The public examples are deliberately
-local and deterministic: they do not connect to a fleet, deploy services, or
-send data to a remote endpoint.
+The daemon launches configured Claude/Codex CLI sessions in tmux, ingests their native JSONL transcripts, persists session and coordination state, and serves WebSocket clients. It includes the `agent-orch` coordination RPCs, assets, schedules, notifications and authenticated desktop/mobile transport.
 
-## What is included
+Use the complete [local startup recipe](../../README.md#local-setup) first. It aligns the desktop and daemon host identity (`local`), native transcript directory, loopback endpoint and desktop credential. Python 3.11+ and tmux are required; provider CLIs require their own accounts and authentication.
 
-- `boot_ready.py` contains pure predicates for recognizing an idle provider
-  prompt and for distinguishing a submitted prompt from an editable draft.
-- `claude_jsonl_norm.py` and `codex_rollout_norm.py` normalize provider JSONL
-  records into the same event vocabulary.
-- `context_adapters.py` extracts usage readings and classifies context levels.
-- `session_names.py` provides a bounded classifier for synthetic session names.
-- `machines.example.json` documents the shape of a local configuration without
-  assuming a particular username, directory layout, or host.
+## Private configuration
 
-The normalizers accept ordinary Python dictionaries, return ordinary Python
-dictionaries, and perform no I/O.  A caller can therefore choose its own input
-source, persistence layer, and transport while testing the transformation logic
-in isolation.
+`PENTACLE_MACHINES_FILE` selects a private machine JSON file; `PENTACLE_MACHINES_JSON` supplies the same shape inline. [machines.example.json](machines.example.json) demonstrates a single local machine. Set executable locations and working directories for your machine. `projects_root` must point to the actual Claude `.claude/projects` directory. A daemon's `--local-host` must match its machine name and the host used by clients.
 
-## Local setup
+Without peer configuration, the daemon runs locally. To keep specs and QA records outside the checkout, configure the documented memory root for the orchestration CLI and daemon. Do not put transcripts, credentials, runtime databases or real work receipts in the public source tree.
 
-Run the checks from the repository root with a supported Python interpreter:
+`python services/chat-stream-v2/main.py --help` lists runtime options. `--port 0 --db :memory:` is useful for a temporary probe; ephemeral sessions alone do not isolate every optional service database. The desktop smoke explicitly sets separate session, notification, asset and blob paths and uses its own tmux socket.
+
+## Desktop and mobile credentials
+
+`tools/operator_auth_cli.py issue --client-kind pentacle` issues a desktop credential; `--client-kind pentacle-mobile` issues a separate mobile credential. The JSON output's `code` field is secret. Store desktop credentials in a mode-0600 file under a mode-0700 directory and point `chatStream.tokenPath` at its canonical path. Do not place a v2 credential inline in the desktop config. The CLI's `list`, `revoke` and `rotate` commands manage credentials in the daemon's registry.
+
+For mobile, make the daemon reachable through your private LAN/VPN or a tunnel and configure the app's WebSocket endpoint and mobile credential. Loopback is the default. Use the [transport admission policy](../../docs/REMOTE_AUTH.md) when exposing a listener beyond loopback. An SSH tunnel can retain a loopback daemon listener; forwarded connections inherit the tunnel endpoint's trust boundary. Keep tunnel access restricted to the operator.
+
+## Tests and supported integrations
 
 ```sh
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -r services/chat-stream-v2/requirements.txt
-python3 -m pytest services/chat-stream-v2/tests
+python -m pip install -r services/chat-stream-v2/requirements.txt -e services/agent-orch
+python -m pytest services/chat-stream-v2/tests
+python -m pytest services/agent-orch/tests
+python services/chat-stream-v2/tools/run_gate.py merge
 ```
 
-The test fixtures contain synthetic session identifiers, timestamps, pane text,
-and short example messages.  They are examples of input shapes, not captured
-provider sessions.  When adding a fixture, use the same convention and avoid
-real user text, hostnames, paths, credentials, or service URLs.
-
-## Run the daemon
-
-The daemon (`main.py`) is a self-contained CLI. A local, non-live run binds
-loopback on a configurable port and keeps all state ephemeral:
-
-```sh
-cp machines.example.json machines.local.json      # edit for your machine names/paths
-export HOME="$(mktemp -d)"                          # throwaway HOME for all local state
-export PENTACLE_MACHINES_FILE="$PWD/machines.local.json"
-python3 main.py --host 127.0.0.1 --port 0 --db :memory:   # --port 0 picks a free port (never collides with a running daemon)
-```
-
-- `--host 127.0.0.1` keeps the daemon off any live/public interface; `--port`
-  is yours to choose (use `--port 0` to pick a free port). Never bind a
-  production port.
-- `--db :memory:` uses an ephemeral session store ("example memory"); pass a
-  file path under the throwaway `HOME` to persist a local example instead.
-- Peer machines come from `machines.local.json` via `PENTACLE_MACHINES_FILE`
-  (or inline `PENTACLE_MACHINES_JSON`); with a single local entry the daemon
-  runs standalone with no remote transport.
-
-Optional spawn/transport flags (`--spawn-command`, `--claude-bin`,
-`--codex-bin`, `--ssh-bin`, …) stay empty until you configure your own agent
-tools; the daemon starts and serves without them.
-
-## Event shape
-
-Normalized events have a compact common shape:
-
-```json
-{
-  "host": "hosta",
-  "provider": "codex",
-  "session_id": "sample-session",
-  "session_name": "codex-sample",
-  "stream_id": "hosta:codex-sample",
-  "timestamp": "2030-01-01T00:00:00Z",
-  "kind": "USER",
-  "text": "A synthetic example",
-  "raw": {}
-}
-```
-
-`raw` keeps provider-specific details needed by a caller that wants to inspect
-the original shape.  The public normalizers add stable per-record indexes so a
-caller can deduplicate a replay without depending on a database.
-
-## Configuration boundary
-
-Use an environment variable or an application-owned configuration file to
-select a local working directory.  The example machine file is only a schema
-reference; executable locations, workspace roots, and provider authentication
-remain deployment-specific choices made by the application owner.
+Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the real desktop smoke. Fixtures must use invented content and valid public wire identifiers.

@@ -212,10 +212,10 @@ def test_peer_tmux_quotes_exact_target_for_zsh() -> None:
 
 def test_ssh_command_drops_multiplexing_when_the_socket_path_would_overflow(tmp_path) -> None:
     long_dir = tmp_path / ("x" * 120)
-    os.environ["EXAMPLE_SSH_CONTROL_DIR"] = str(long_dir)
+    os.environ["PENTACLE_SSH_CONTROL_DIR"] = str(long_dir)
     try:
         argv = ssh_command("user@example.local", "true")
         assert "ControlMaster=auto" not in argv  # multiplexing skipped, ssh still valid
         assert "BatchMode=yes" in argv
     finally:
-        del os.environ["EXAMPLE_SSH_CONTROL_DIR"]
+        del os.environ["PENTACLE_SSH_CONTROL_DIR"]

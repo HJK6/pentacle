@@ -1055,6 +1055,8 @@ export class ChatStoreController {
       const requestId = frame.request_id as string;
       if (frame.delivery === 'landed') {
         this.setState(markOptimisticAckedByRequestId(this.state, requestId, Date.now()));
+      } else if (frame.action_committed === true || frame.confirmation_pending === true) {
+        this.setState(markOptimisticIndeterminateByRequestId(this.state, requestId, Date.now()));
       } else {
         const reason = String(frame.reason || frame.delivery || 'send_failed');
         this.setState(markOptimisticFailedByRequestId(this.state, requestId, reason));

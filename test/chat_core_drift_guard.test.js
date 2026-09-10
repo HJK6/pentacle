@@ -13,7 +13,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const repoRoot = path.join(__dirname, '..');
-const coreRoot = path.join(repoRoot, 'chat-core');
+const coreRoot = path.join(repoRoot, 'pentacle-chat-core');
 const coreSrcRoot = path.join(coreRoot, 'src');
 
 const CANONICAL_SYMBOLS = [
@@ -136,7 +136,8 @@ test('desktop adapters do not reimplement public chat-core functions', () => {
   );
 });
 
-test('public chat-core source stays platform-neutral', { skip: coreFiles().length === 0 }, () => {
+test('public chat-core source stays platform-neutral', () => {
+  assert.ok(coreFiles().length > 0, 'public core source is present');
   const bannedImports = ['electron', 'react-native', 'react-dom'];
   const bannedGlobals = ['document', 'window', 'navigator', 'localStorage', 'HTMLElement'];
   const offenders = [];
@@ -153,7 +154,7 @@ test('public chat-core source stays platform-neutral', { skip: coreFiles().lengt
       }
       const stripped = stripCommentsAndStrings(lines[i]);
       for (const name of bannedGlobals) {
-        if (new RegExp(`(^|[^\\w$.])${name}\\b`).test(stripped)) {
+        if (new RegExp(`(^|[^\\w$])(?:globalThis\\.)?${name}\\s*[.\\[]`).test(stripped)) {
           offenders.push(`${rel}:${i + 1}: uses ${name}`);
         }
       }

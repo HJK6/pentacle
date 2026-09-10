@@ -302,16 +302,16 @@ test('pill renders a tinted bordered label', () => {
 // tags
 // ---------------------------------------------------------------------------
 
-test('providerTag(provider_a) shows the spark + "Provider A"', () => {
-  const el = providerTag('provider_a');
+test('providerTag(claude) shows the spark + "Claude"', () => {
+  const el = providerTag('claude');
   assert.equal(el.querySelector('path')!.getAttribute('d'), SPARK_PATH);
-  assert.match(el.textContent || '', /Provider A/);
+  assert.match(el.textContent || '', /Claude/);
 });
 
-test('providerTag(provider_c) shows the </> brackets + "Provider C"', () => {
+test('providerTag(codex) shows the </> brackets + "Codex"', () => {
   const el = providerTag('PROVIDER_C');
   assert.deepEqual(paths(el), ['M9 7l-5 5 5 5', 'M15 7l5 5-5 5']);
-  assert.match(el.textContent || '', /Provider C/);
+  assert.match(el.textContent || '', /Codex/);
 });
 
 test('statusTag(working) shows the spinner ring; idle shows a plain circle', () => {

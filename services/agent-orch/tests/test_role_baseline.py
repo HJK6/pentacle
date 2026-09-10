@@ -16,14 +16,14 @@ def _config(memory_repo_path: Path | None = None) -> Config:
     )
 
 
-def test_resolve_memory_repo_path_uses_config_field_first(monkeypatch, tmp_path: Path) -> None:
+def test_resolve_memory_repo_path_uses_explicit_env_override(monkeypatch, tmp_path: Path) -> None:
     env_repo = tmp_path / "env-memory"
     config_repo = tmp_path / "config-memory"
     env_repo.mkdir()
     config_repo.mkdir()
     monkeypatch.setenv("AGENT_ORCH_MEMORY_REPO", str(env_repo))
 
-    assert resolve_memory_repo_path(_config(config_repo)) == config_repo
+    assert resolve_memory_repo_path(_config(config_repo)) == env_repo
 
 
 def test_resolve_memory_repo_path_uses_env_var(monkeypatch, tmp_path: Path) -> None:
@@ -35,24 +35,24 @@ def test_resolve_memory_repo_path_uses_env_var(monkeypatch, tmp_path: Path) -> N
     assert resolve_memory_repo_path(_config()) == env_repo
 
 
-def test_resolve_memory_repo_path_uses_home_repos_default(monkeypatch, tmp_path: Path) -> None:
+def test_resolve_memory_repo_path_does_not_probe_home_repos(monkeypatch, tmp_path: Path) -> None:
     home = tmp_path / "home"
     memory_repo = home / "repos" / "hosta-memory"
     memory_repo.mkdir(parents=True)
     monkeypatch.delenv("AGENT_ORCH_MEMORY_REPO", raising=False)
     monkeypatch.setenv("HOME", str(home))
 
-    assert resolve_memory_repo_path(_config()) == memory_repo
+    assert resolve_memory_repo_path(_config()) is None
 
 
-def test_resolve_memory_repo_path_uses_home_fallback(monkeypatch, tmp_path: Path) -> None:
+def test_resolve_memory_repo_path_does_not_probe_home_fallback(monkeypatch, tmp_path: Path) -> None:
     home = tmp_path / "home"
     memory_repo = home / "hosta-memory"
     memory_repo.mkdir(parents=True)
     monkeypatch.delenv("AGENT_ORCH_MEMORY_REPO", raising=False)
     monkeypatch.setenv("HOME", str(home))
 
-    assert resolve_memory_repo_path(_config()) == memory_repo
+    assert resolve_memory_repo_path(_config()) is None
 
 
 def test_resolve_memory_repo_path_returns_none_when_missing(monkeypatch, tmp_path: Path) -> None:

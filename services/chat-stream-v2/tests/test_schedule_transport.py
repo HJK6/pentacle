@@ -12,7 +12,7 @@ from _shared import operator_auth
 from server import Server
 
 
-CREDENTIAL_ID = "credential-a"
+CREDENTIAL_ID = "00000000-0000-4000-8000-000000000001"
 
 
 def _trust(client_kind: str = "pentacle") -> operator_auth.ConnectionTrust:

@@ -67,7 +67,7 @@ def test_unicode_inventory_and_snapshot_encoding_preserves_dedupe_and_other_fram
             return True
         daemon._enqueue = enqueue
         daemon._has_different_pending_coalescible = lambda *_args: False
-        row = {"stream_id": "hosta:parent", "objective": "Check a synthetic sample"}
+        row = {"stream_id": "hosta:parent", "objective": "Check a synthetic sample text"}
         frame = {"type": "session.inventory", "sessions": [row]}
         await daemon.broadcast(frame)
         await daemon.broadcast(frame)

@@ -610,10 +610,10 @@ def test_defaults_overrides_compliance_reset_and_disable_flag() -> None:
     assert defaults.engaged_window_s == NUDGE_DEFAULT_ENGAGED_WINDOW_S == 1800.0
     assert defaults.cooldown_s == NUDGE_DEFAULT_COOLDOWN_S == 3600.0
     overridden = NudgeConfig.from_env({
-        "EXAMPLE_NUDGE_INTERVAL_S": "7",
-        "EXAMPLE_NUDGE_STATUS_STALE_S": "8",
-        "EXAMPLE_NUDGE_ENGAGED_WINDOW_S": "9",
-        "EXAMPLE_NUDGE_COOLDOWN_S": "11",
+        "PENTACLE_NUDGE_INTERVAL_S": "7",
+        "PENTACLE_NUDGE_STATUS_STALE_S": "8",
+        "PENTACLE_NUDGE_ENGAGED_WINDOW_S": "9",
+        "PENTACLE_NUDGE_COOLDOWN_S": "11",
     })
     assert (overridden.interval_s, overridden.status_stale_s, overridden.engaged_window_s,
             overridden.cooldown_s) == (7, 8, 9, 11)

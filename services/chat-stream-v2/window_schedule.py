@@ -188,11 +188,11 @@ class WindowSchedule:
     async def _schedule_transport_row(
         self, row: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        """Project a schedule without reading or broadcasting prompt contents."""
+        """Project a bounded prompt preview for authenticated operator clients."""
         if row is None:
             return None
         projected = _project_schedule(row) or {}
-        projected["prompt_preview"] = ""
+        projected["prompt_preview"] = self._prompt_preview(base64.b64decode(row.get("prompt_b64") or "").decode("utf-8"))
         return projected
 
     async def schedule_inventory(self) -> list[dict[str, Any]]:

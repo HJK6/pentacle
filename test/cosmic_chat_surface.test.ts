@@ -151,9 +151,9 @@ test('every Public machine renders a distinct sigil for the header', () => {
   }
 });
 
-test('the header tags render for provider_a + working/idle status', () => {
-  const provider_a = providerTag('provider_a', { color: MACHINES['hostc'].accent });
-  assert.match(provider_a.textContent || '', /Provider A/);
+test('the header tags render for claude + working/idle status', () => {
+  const claude = providerTag('claude', { color: MACHINES['hostc'].accent });
+  assert.match(claude.textContent || '', /Claude/);
   const working = statusTag('working', { color: MACHINES['hostc'].accent });
   assert.ok(working.querySelector('.activity-spinner'), 'working tag shows the shared spinner');
   assert.equal(working.querySelector('.cosmic-spinner'), null);

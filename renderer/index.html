@@ -5,8 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Terminal Dashboard</title>
   <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css">
-  <!-- Shared dashboard design tokens from the publicdashdefs submodule. -->
-  <link rel="stylesheet" href="dashboards/vendor/publicdashdefs/dist/tokens.css">
   <link rel="stylesheet" href="styles.css">
   <!-- Cosmic / arcane theme (workstream B token+font layer, scoped to `.cosmic`)
        MUST come after styles.css so its `--cosmic-*` vars + @font-face faces are
@@ -216,20 +214,8 @@
 
   <!-- Shared dashboard definition layer (classic UMD global; MUST load before
        registry.js + boards so window.PublicDashDashboards exists at registration). -->
-  <script src="dashboards/vendor/publicdashdefs/dist/publicdashdefs.js"></script>
   <script src="dashboards/registry.js"></script>
-  <script src="dashboards/0dte.js"></script>
-  <script src="dashboards/foreclosure.js"></script>
-  <script src="dashboards/business.js"></script>
-  <script src="dashboards/pentacle-mobile-testing.js"></script>
-  <script src="dashboards/scraper-bot.js"></script>
-  <script src="dashboards/hostb.js"></script>
-  <script src="dashboards/chat-stream.js"></script>
-  <script src="dashboards/ui-review.js"></script>
-  <script src="dashboards/pi-control.js"></script>
-  <script src="dashboards/specs.js"></script>
   <script src="dashboards/demo.js"></script>
-  <script src="dashboards/notifications.js"></script>
 
   <!-- In-DOM toast notifications (replaces native window.alert; see renderer/toast.js) -->
   <div id="toast-container" aria-live="polite"></div>

@@ -9,4 +9,8 @@ import pytest
     "module", ("example_runtime.heartbeat_contract", "public_tools.heartbeat", "heartbeat_supervisor")
 )
 def test_retired_heartbeat_modules_are_not_importable(module: str) -> None:
-    assert find_spec(module) is None
+    try:
+        found = find_spec(module)
+    except ModuleNotFoundError:
+        found = None
+    assert found is None

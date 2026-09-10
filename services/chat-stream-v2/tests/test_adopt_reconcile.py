@@ -122,7 +122,7 @@ async def _adopt(name: str, tmux: AdoptTmux) -> tuple[dict | None, dict]:
 def _held_transcript(tmp_path: Path, content: str):
     """A provider `.jsonl` THIS process holds open (so lsof against our own pid —
     handed in as the pane pid — locates it), seeded with `content`."""
-    log = tmp_path / "transcripts" / "example" / "sess.jsonl"
+    log = tmp_path / ".claude" / "projects" / "example" / "sess.jsonl"
     log.parent.mkdir(parents=True)
     log.write_text(content)
     return open(log)  # noqa: SIM115 - held open for the probe's lifetime

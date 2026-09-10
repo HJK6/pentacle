@@ -15,7 +15,7 @@ log = logging.getLogger("public_chat_stream.usage_publisher")
 
 def _empty_row(identifier: str, label: str) -> dict:
     # Canonical LKG key order so a v1/empty fallback row is byte-consistent with
-    # the loaded/validated Provider A and Provider B rows in the same frame.
+    # the loaded/validated Claude and Fable rows in the same frame.
     return {
         "id": identifier,
         "label": label,
@@ -32,8 +32,8 @@ class UsageStatePublisher:
         self._broadcast = broadcast
         self._store = UsageStateStore(state_path) if state_path else None
         self._mtime_ns: int | None = None
-        self._limits = [_empty_row("provider_a", "Provider A"), _empty_row("provider_b", "Provider B"), _empty_row("provider_c", "Provider C")]
-        self._provider_a_health: dict | None = None
+        self._limits = [_empty_row("claude", "Claude"), _empty_row("fable", "Fable"), _empty_row("codex", "Codex")]
+        self._claude_health: dict | None = None
 
     def snapshot(self) -> list[dict]:
         # Defensive copy: the same rows feed the broadcast frame and every hello
@@ -41,9 +41,9 @@ class UsageStatePublisher:
         return [dict(row) for row in self._limits]
 
     def health_snapshot(self) -> dict | None:
-        if not self._provider_a_health:
+        if not self._claude_health:
             return None
-        return {"schema_version": 1, "provider_a": dict(self._provider_a_health)}
+        return {"schema_version": 1, "claude": dict(self._claude_health)}
 
     def _changed_mtime(self) -> bool:
         if self._store is None:
@@ -63,13 +63,13 @@ class UsageStatePublisher:
         state = self._store.load()
         # load() returns the empty sentinel (health is None) for a missing or
         # unreadable/invalid state file. Hold the prior published frame and health
-        # rather than broadcast a degraded frame (provider_c blanked, limits_health
+        # rather than broadcast a degraded frame (codex blanked, limits_health
         # dropped from hello) built from a half-empty sentinel.
         if state.health is None:
             log.debug("usage_state unusable; holding prior limits frame")
             return False
-        limits = [*(state.lkg or self._limits[:2]), state.provider_c_lkg or _empty_row("provider_c", "Provider C")]
-        self._provider_a_health = state.health
+        limits = [*(state.lkg or self._limits[:2]), state.codex_lkg or _empty_row("codex", "Codex")]
+        self._claude_health = state.health
         if limits == self._limits:
             return False
         self._limits = limits

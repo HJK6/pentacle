@@ -25,23 +25,22 @@ function loadRenderer() {
     window.document.body.appendChild(s);
   };
   // index.html order: submodule shared lib BEFORE registry + boards.
-  run(read('vendor/publicdashdefs/dist/publicdashdefs.js'));
   run(read('registry.js'));
   run(read('demo.js'));
   return window;
 }
 
-test('submodule shared lib exposes the global after its classic script runs', () => {
+test('standalone demo does not need an external dashboard package', () => {
   const window = loadRenderer();
-  assert.ok(window.PublicDashDashboards, 'window.PublicDashDashboards set');
-  assert.ok(window.PublicDashDashboards.boards.demo, 'demo board present in shared lib');
+  assert.equal(window.PublicDashboardLibrary, undefined);
+  assert.equal(window.DASHBOARDS.length, 1);
 });
 
 test('demo board self-registers into window.DASHBOARDS', () => {
   const window = loadRenderer();
   const entry = (window.DASHBOARDS || []).find((d) => d.id === 'shared-demo');
   assert.ok(entry, 'shared-demo registered');
-  assert.equal(entry.name, 'Shared Layer Demo');
+  assert.equal(entry.name, 'Shared Demo');
   assert.equal(typeof entry.mount, 'function');
 });
 
@@ -50,9 +49,10 @@ test('desktop INTERACTIVE mount renders the interactive-only control', () => {
   const entry = window.DASHBOARDS.find((d) => d.id === 'shared-demo');
   const container = window.document.createElement('div');
   const refs = entry.mount(container);
-  assert.match(container.innerHTML, /data-el="title"/);
-  assert.match(container.innerHTML, /data-el="refresh-btn"/); // present on desktop
-  assert.match(container.innerHTML, /mode: interactive/);
+  assert.match(container.textContent, /desktop fixture ready/);
+  entry.update(refs, { demo: { message: '<img src=x onerror=alert(1)>' } });
+  assert.equal(container.querySelector('img'), null);
+  assert.match(container.textContent, /<img/);
   entry.update(refs, { demo: { message: 'changed' } });
   assert.match(container.innerHTML, /changed/);
   entry.unmount(refs);

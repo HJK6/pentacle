@@ -69,7 +69,7 @@ test('test_resolve_mic_url_stream_host_invalid_chat_url_falls_back', async () =>
 
 test('test_resolve_mic_url_with_input_rehearsal', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-mic-config-'));
-  const configPath = path.join(tmp, 'app.config.js');
+  const configPath = path.join(tmp, 'pentacle.config.js');
   fs.writeFileSync(configPath, `
 module.exports = {
   features: { mic: true },

@@ -15,7 +15,7 @@ from submission_events import (
 from store import Store
 
 
-STREAM = "hostb:session-parent"
+STREAM = "hostb:v2-parent"
 BODY = "[public-notice:notice-001]\nexact report notice"
 
 

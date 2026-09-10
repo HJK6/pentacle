@@ -252,7 +252,7 @@ test('header glyph toggles the full card view; every section renders; body hidde
   assert.ok(!glyph.classList.contains('has-attention'), 'no attention dot while open');
   assert.equal(glyph.getAttribute('aria-pressed'), 'true');
 
-  assert.match(card.querySelector('.is-goal .session-status-goal-text').textContent, /Ship the session status card/);
+  assert.match(card.querySelector('.is-goal .session-status-goal-text').textContent, /Demonstrate the session status card/);
   assert.equal(card.querySelector('.session-status-rollup').textContent, 'Step 2 of 3');
   assert.equal(card.querySelector('.session-status-progress-fill').style.width, '33%');
   const steps = card.querySelectorAll('.session-status-step');

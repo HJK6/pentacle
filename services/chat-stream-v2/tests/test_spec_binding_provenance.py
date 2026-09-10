@@ -22,7 +22,7 @@ from specs_parser import DEFAULT_STATUSES  # noqa: E402
 from _shared.specs_service import SpecsSubsystem  # noqa: E402
 
 
-SPEC_ID = "example-spec-new"
+SPEC_ID = "example__spec_new"
 CANONICAL_SPEC_ID = f"spec_{SPEC_ID}"
 SYNTHETIC_STATUS = "release_candidate"
 CONFIGURED_STATUS_NAMES = tuple(status["name"] for status in DEFAULT_STATUSES) + (
@@ -33,8 +33,8 @@ CONFIGURED_STATUS_NAMES = tuple(status["name"] for status in DEFAULT_STATUSES) +
 @pytest.mark.parametrize(
     ("raw", "expected"),
     (
-        ([" example-topic ", "spec-topic"], ["spec-topic"]),
-        (["spec-topic", "spec_spec-topic"], ["spec-topic"]),
+        ([" example__topic ", "spec_example__topic"], ["spec_example__topic"]),
+        (["spec_example__topic", "spec_spec_example__topic"], ["spec_example__topic"]),
         (["", "  ", None], []),
     ),
 )
@@ -137,7 +137,7 @@ def test_live_spawn_scan_resolves_every_status_from_statuses_json(
 ) -> None:
     root = tmp_path / "memory"
     _write_statuses(root)
-    spec_id = f"example-status-{status}"
+    spec_id = f"example__status_{status}"
     _write_spec(root / "work" / status / spec_id, spec_id)
     catalog = _stale_catalog(root, monkeypatch)
     catalog._folder_index_cache = {}
@@ -154,8 +154,8 @@ def test_peer_needs_qa_folder_and_declared_id_spellings_resolve(
 ) -> None:
     root = tmp_path / "memory"
     _write_statuses(root)
-    folder_id = "provider-capabilities"
-    declared_id = "spec-provider-capabilities"
+    folder_id = "example__provider_capabilities"
+    declared_id = "spec_example__provider_capabilities"
     _write_spec(
         root / "work" / "needs_qa" / folder_id,
         folder_id,
@@ -177,15 +177,15 @@ def test_resolver_uses_declared_document_identity_without_folded_collisions(
 ) -> None:
     root = tmp_path / "memory"
     _write_statuses(root)
-    folder_alias = "process-doc"
-    canonical_id = "spec-process-doc"
+    folder_alias = "example__process_doc"
+    canonical_id = "spec_example__process_doc"
     _write_spec(
         root / "work" / "in_progress" / folder_alias,
         folder_alias,
         declared_id=canonical_id,
     )
-    folded_left = "spec-legal-a__identity"
-    folded_right = "spec-legal-b__identity"
+    folded_left = "spec_legal-a__identity"
+    folded_right = "spec_legal-b__identity"
     _write_spec(
         root / "work" / "analysis" / "legal-alpha__identity",
         "legal-alpha__identity",
@@ -208,8 +208,8 @@ def test_resolver_uses_declared_document_identity_without_folded_collisions(
 @pytest.mark.parametrize(
     "requested_id",
     [
-        "provider-capabilities",
-        "spec-provider-capabilities",
+        "example__provider_capabilities",
+        "spec_example__provider_capabilities",
     ],
 )
 def test_equivalent_declared_id_ambiguity_cannot_be_bypassed_by_spelling(
@@ -217,8 +217,8 @@ def test_equivalent_declared_id_ambiguity_cannot_be_bypassed_by_spelling(
 ) -> None:
     root = tmp_path / "memory"
     _write_statuses(root)
-    folder_id = "provider-capabilities"
-    declared_id = "spec-provider-capabilities"
+    folder_id = "example__provider_capabilities"
+    declared_id = "spec_example__provider_capabilities"
     _write_spec(
         root / "work" / "needs_qa" / folder_id,
         folder_id,
@@ -319,7 +319,7 @@ def test_unknown_spawn_spec_fails_before_reservation() -> None:
             ctl = SpawnCtl(store, sessions, tmux=object(), specs=Catalog())
             with pytest.raises(VerbError) as raised:
                 await ctl._resolve_spec_binding(
-                    {"spec_id": "example-missing"},
+                    {"spec_id": "example__missing"},
                     "alpha",
                     "unknown",
                 )
@@ -398,7 +398,7 @@ def test_live_tree_wins_when_existing_cached_path_now_owns_another_id(
 
     new.parent.mkdir(parents=True)
     old.rename(new)
-    replacement_id = "example-analysis-replacement"
+    replacement_id = "example__analysis_replacement"
     _write_spec(old, replacement_id)
 
     resolution = catalog.resolve_for_spawn(SPEC_ID)
@@ -450,7 +450,7 @@ def test_unknown_spec_error_names_catalog_and_live_tree_lookup(
         (root / "work").mkdir(parents=True)
         catalog = _stale_catalog(root, monkeypatch)
         catalog._folder_index_cache = {}
-        missing = "example-analysis"
+        missing = "example__analysis"
 
         store = Store(":memory:")
         store.start()
@@ -525,7 +525,7 @@ def test_cataloged_spawn_persists_binding_and_inspect_reads_it(
                 "command": "run",
                 "session_name": "unknown-catalog-item",
                 "request_id": "spawn-unknown",
-                "spec_id": "example-unknown",
+                "spec_id": "example__unknown",
             }))
             assert rejected["type"] == "spawn.error"
             assert rejected["error_code"] == "spec_unresolved"
@@ -544,8 +544,8 @@ def test_spawn_materializes_resolver_canonical_binding_after_store_restart(
     async def go() -> None:
         root = tmp_path / "memory"
         _write_statuses(root)
-        folder_alias = "process-doc"
-        canonical_id = "spec-process-doc"
+        folder_alias = "example__process_doc"
+        canonical_id = "spec_example__process_doc"
         _write_spec(
             root / "work" / "in_progress" / folder_alias,
             folder_alias,

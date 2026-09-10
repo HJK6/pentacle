@@ -1,4 +1,5 @@
-// Synthetic-only harness telemetry for local renderer tests.
+// Opt-in diagnostics capture around the actual shared reducer and renderer.
+import { teeTelemetrySink, logTelemetry, TELEMETRY_EVENTS, recordInbound, recordPersistedDelta, recordDrop, classifyDrop, snapshotCounts, reset } from 'chat-core';
 
 export type HarnessConfigLike = { features?: { chatHarnessTelemetry?: boolean } };
 export type TelemetryPayload = {
@@ -48,25 +49,20 @@ export function attachChatHarnessTelemetry(
     env?: Record<string, string | undefined>;
     config?: HarnessConfigLike;
     force?: boolean;
+    resetCounts?: boolean;
   } = {},
 ): HarnessHandle {
   const armed = options.force === true || isHarnessArmed(options.env, options.config);
   if (!armed) return INERT;
 
-  const events: CapturedTelemetry[] = [{
-    subsystem: 'harness',
-    message: 'harness:armed',
-    data: { surface: 'desktop', mode: 'synthetic' },
-  }];
-  const counts = new Map<string, StreamFlowCounts>();
-  const hook: ChatStoreDiagnosticsHook = ({ event, persistedDelta }) => {
-    const streamId = typeof event.stream_id === 'string' ? 'fixture-stream' : 'fixture-unknown';
-    const prior = counts.get(streamId) || { inbound: 0, persisted: 0, dropped: 0 };
-    counts.set(streamId, {
-      inbound: prior.inbound + 1,
-      persisted: prior.persisted + Math.max(0, persistedDelta),
-      dropped: prior.dropped + (persistedDelta > 0 ? 0 : 1),
-    });
+  if (options.resetCounts) reset();
+  const events: CapturedTelemetry[] = [];
+  const detachSink = teeTelemetrySink((payload) => events.push(payload));
+  logTelemetry(TELEMETRY_EVENTS.HARNESS_HARNESS_ARMED, { surface: 'desktop' });
+  const hook: ChatStoreDiagnosticsHook = ({ event, persistedDelta, duplicate }) => {
+    recordInbound(event as never);
+    recordPersistedDelta(event.stream_id || '', persistedDelta);
+    if (persistedDelta <= 0) recordDrop(event.stream_id || '', classifyDrop(event as never, { duplicate }) || 'unaccounted');
   };
   controller?.setDiagnosticsHook?.(hook);
   let detached = false;
@@ -74,10 +70,11 @@ export function attachChatHarnessTelemetry(
     armed: true,
     events,
     eventsOfType(name) { return events.filter((event) => event.message === name); },
-    flowCounts() { return new Map(counts); },
+    flowCounts() { return snapshotCounts() as never; },
     detach() {
       if (detached) return;
       detached = true;
+      detachSink();
       controller?.setDiagnosticsHook?.(null);
     },
   };

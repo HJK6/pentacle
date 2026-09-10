@@ -205,7 +205,7 @@ def test_ingest_advances_summary_only_from_persisted_turn_event() -> None:
             broadcasts.append(frame)
 
         try:
-            await store.open_session("h", "v2-codex", visibility="visible", pane_pid="8123", created_at="2026-08-01T00:00:00Z")
+            await store.open_session("h", "v2-codex", visibility="visible", pane_pid="8123", created_at="2024-12-31T00:00:00Z")
             sessions = Sessions(store, local_host="h")
             await sessions.refresh()
             ingest = Ingest(

@@ -96,3 +96,21 @@ test('production reducer renders dropped FINAL exactly once after 1011 reconnect
     client.destroy();
   }
 });
+
+test('send receipt resolves IPC and reaches the renderer exactly once', async () => {
+  const FakeWebSocket = makeFakeWebSocket();
+  const client = loadProductionClient(FakeWebSocket);
+  const emitted = [];
+  client._readToken = () => '';
+  client.init({ chatStream: { url: 'ws://fixture' } }, (frame) => emitted.push(frame));
+  const socket = FakeWebSocket.instances[0];
+  helloAndSnapshot(socket);
+  try {
+    const pending = client.sendMessage({ host: 'local', sessionName: 'session', text: 'hello', requestId: 'send-fixture' });
+    const receipt = { type: 'send.result', request_id: 'send-fixture', delivery: 'landed', submission_confirmed: true };
+    socket.emit('message', JSON.stringify(receipt));
+    assert.equal(client._pending.has('send-fixture'), false, 'receipt settles the pending request');
+    assert.equal((await pending).delivery, 'landed');
+    assert.equal(emitted.filter((frame) => frame.type === 'send.result').length, 1);
+  } finally { client.destroy(); }
+});

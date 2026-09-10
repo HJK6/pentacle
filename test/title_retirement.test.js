@@ -36,11 +36,11 @@ test('desktop transcript summarizer entry points are retired', () => {
 
 test('session creation no longer writes the New Chat tmux title', () => {
   const main = readRepoFile('main.js');
-  const body = functionBody(main, 'initializeSessionTitle');
+  const body = main.slice(main.indexOf("ipcMain.handle('chat-stream:spawn'"), main.indexOf("ipcMain.handle('chat-stream:send'"));
 
   assert.doesNotMatch(body, /renameTmuxWindow/);
   assert.doesNotMatch(body, /New Chat/);
-  assert.match(body, /markSessionLive/);
+  assert.match(body, /chatStreamClient.spawnSession/);
 });
 
 test('desktop chat manual rename sends the manual source flag', () => {

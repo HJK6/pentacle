@@ -1,7 +1,7 @@
-"""Crash-safe, versioned persistence for Provider A usage freshness state.
+"""Crash-safe, versioned persistence for Claude usage freshness state.
 
-The state file deliberately contains only the joint Provider A/Provider B last-known-good
-rows and the Provider A probe-health record.  It is not a provider cache and never
+The state file deliberately contains only the joint Claude/Fable last-known-good
+rows and the Claude probe-health record.  It is not a provider cache and never
 stores pane output, credentials, commands, or exception text.
 """
 
@@ -21,9 +21,9 @@ from typing import Callable
 log = logging.getLogger("public_chat_stream.usage_state")
 
 STATE_SCHEMA_VERSION = 1
-STATE_KEYS = {"schema_version", "provider_a_provider_b_lkg", "provider_a_health"}
+STATE_KEYS = {"schema_version", "claude_fable_lkg", "claude_health"}
 STATE_SCHEMA_VERSION_V2 = 2
-STATE_KEYS_V2 = STATE_KEYS | {"provider_c_lkg", "provider_c_health"}
+STATE_KEYS_V2 = STATE_KEYS | {"codex_lkg", "codex_health"}
 LKG_ROW_KEYS = {
     "id", "label", "pct", "resets_at_iso", "resets_text",
     "upstream_reported_at", "probed_at",
@@ -32,7 +32,7 @@ HEALTH_KEYS = {
     "attempted_at", "outcome", "error", "upstream_reported_at",
     "probed_at", "stale_after_seconds",
 }
-PROVIDER_A_FAILURES = {
+CLAUDE_FAILURES = {
     "auth_error",
     "parser_error",
     "provider_error",
@@ -40,43 +40,43 @@ PROVIDER_A_FAILURES = {
     "transport_error",
     "internal_error",
 }
-PERSISTED_OUTCOMES = {"never", "ok", *PROVIDER_A_FAILURES}
+PERSISTED_OUTCOMES = {"never", "ok", *CLAUDE_FAILURES}
 ERRORS = {
     "auth_error": {
-        "code": "provider_a_not_authenticated",
-        "message": "Provider A is not authenticated",
+        "code": "claude_not_authenticated",
+        "message": "Claude is not authenticated",
     },
     "provider_error": {
         "code": "usage_provider_error",
         "message": "Provider usage is unavailable",
     },
     "parser_error": {
-        "code": "provider_a_usage_parse_failed",
-        "message": "Provider A usage could not be parsed",
+        "code": "claude_usage_parse_failed",
+        "message": "Claude usage could not be parsed",
     },
     "timeout": {
-        "code": "provider_a_usage_timeout",
-        "message": "Provider A usage probe timed out",
+        "code": "claude_usage_timeout",
+        "message": "Claude usage probe timed out",
     },
     "transport_error": {
-        "code": "provider_a_usage_transport_failed",
-        "message": "Provider A usage transport failed",
+        "code": "claude_usage_transport_failed",
+        "message": "Claude usage transport failed",
     },
     "internal_error": {
-        "code": "provider_a_usage_internal_error",
-        "message": "Provider A usage probe failed internally",
+        "code": "claude_usage_internal_error",
+        "message": "Claude usage probe failed internally",
     },
     "store_error": {
         "code": "usage_state_write_failed",
-        "message": "Provider A usage state could not be saved",
+        "message": "Claude usage state could not be saved",
     },
 }
 
 PROVIDER_ERROR_CODES = {
-    "provider_a": "provider_a_usage_provider_error",
-    "provider_c": "provider_c_usage_provider_error",
+    "claude": "claude_usage_provider_error",
+    "codex": "codex_usage_provider_error",
 }
-LEGACY_PROVIDER_ERROR_CODES = {"provider_a_subscription_unavailable"}
+LEGACY_PROVIDER_ERROR_CODES = {"claude_subscription_unavailable"}
 
 _UTC_RFC3339 = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$"
@@ -99,8 +99,8 @@ class UsageStatePostReplaceError(UsageStateError):
 class LoadedUsageState:
     lkg: list[dict] | None
     health: dict | None
-    provider_c_lkg: dict | None = None
-    provider_c_health: dict | None = None
+    codex_lkg: dict | None = None
+    codex_health: dict | None = None
 
 
 def utc_rfc3339(value: object, *, nullable: bool = True) -> datetime | None:
@@ -133,7 +133,7 @@ def _validate_lkg_row(row: object, expected_id: str, expected_label: str) -> dic
     if pct is None and (row["resets_at_iso"] is not None or row["resets_text"] is not None):
         raise ValueError("null LKG percentage has reset text")
     if row["upstream_reported_at"] is not None or row["probed_at"] is not None:
-        raise ValueError("Provider A/Provider B LKG stamps must be null")
+        raise ValueError("Claude/Fable LKG stamps must be null")
     return {key: row[key] for key in (
         "id", "label", "pct", "resets_at_iso", "resets_text",
         "upstream_reported_at", "probed_at",
@@ -144,7 +144,7 @@ def validate_health(
     health: object,
     *,
     allow_store_error: bool = False,
-    provider: str = "provider_a",
+    provider: str = "claude",
 ) -> dict:
     if not isinstance(health, dict) or set(health) != HEALTH_KEYS:
         raise ValueError("invalid provider health shape")
@@ -167,10 +167,10 @@ def validate_health(
             raise ValueError("invalid provider health error")
         if outcome == "provider_error":
             accepted_codes = {ERRORS[outcome]["code"]}
-            provider_code = PROVIDER_ERROR_CODES.get(provider)
-            if provider_code is not None:
-                accepted_codes.add(provider_code)
-            if provider == "provider_a":
+            codexode = PROVIDER_ERROR_CODES.get(provider)
+            if codexode is not None:
+                accepted_codes.add(codexode)
+            if provider == "claude":
                 accepted_codes.update(LEGACY_PROVIDER_ERROR_CODES)
             if (
                 error["code"] not in accepted_codes
@@ -213,29 +213,29 @@ def validate_state(payload: object) -> LoadedUsageState:
         base_payload = {key: payload[key] for key in STATE_KEYS}
         base_payload["schema_version"] = STATE_SCHEMA_VERSION
         base = validate_state(base_payload)
-        provider_c_lkg = _validate_provider_c_lkg(payload["provider_c_lkg"])
-        provider_c_health = validate_health(payload["provider_c_health"], provider="provider_c")
+        codex_lkg = _validate_codex_lkg(payload["codex_lkg"])
+        codex_health = validate_health(payload["codex_health"], provider="codex")
         return LoadedUsageState(
             lkg=base.lkg,
             health=base.health,
-            provider_c_lkg=provider_c_lkg,
-            provider_c_health=provider_c_health,
+            codex_lkg=codex_lkg,
+            codex_health=codex_health,
         )
     if not isinstance(payload, dict) or set(payload) != STATE_KEYS:
         raise ValueError("invalid usage state shape")
     if payload["schema_version"] != STATE_SCHEMA_VERSION:
         raise ValueError("unknown usage state schema")
-    raw_lkg = payload["provider_a_provider_b_lkg"]
+    raw_lkg = payload["claude_fable_lkg"]
     if raw_lkg is None:
         lkg = None
     else:
         if not isinstance(raw_lkg, list) or len(raw_lkg) != 2:
             raise ValueError("invalid usage LKG")
         lkg = [
-            _validate_lkg_row(raw_lkg[0], "provider_a", "Provider A"),
-            _validate_lkg_row(raw_lkg[1], "provider_b", "Provider B"),
+            _validate_lkg_row(raw_lkg[0], "claude", "Claude"),
+            _validate_lkg_row(raw_lkg[1], "fable", "Fable"),
         ]
-    health = validate_health(payload["provider_a_health"])
+    health = validate_health(payload["claude_health"])
     if health["outcome"] == "never" and lkg is not None:
         raise ValueError("never health cannot have LKG")
     if health["outcome"] == "ok" and lkg is None:
@@ -250,13 +250,13 @@ def validate_state(payload: object) -> LoadedUsageState:
 def canonical_state(lkg: list[dict] | None, health: dict) -> dict:
     validated = validate_state({
         "schema_version": STATE_SCHEMA_VERSION,
-        "provider_a_provider_b_lkg": lkg,
-        "provider_a_health": health,
+        "claude_fable_lkg": lkg,
+        "claude_health": health,
     })
     return {
         "schema_version": STATE_SCHEMA_VERSION,
-        "provider_a_provider_b_lkg": validated.lkg,
-        "provider_a_health": validated.health,
+        "claude_fable_lkg": validated.lkg,
+        "claude_health": validated.health,
     }
 
 
@@ -264,35 +264,35 @@ def canonical_state_v2(
     lkg: list[dict] | None,
     health: dict,
     *,
-    provider_c_lkg: dict,
-    provider_c_health: dict,
+    codex_lkg: dict,
+    codex_health: dict,
 ) -> dict:
     payload = canonical_state(lkg, health)
     payload["schema_version"] = STATE_SCHEMA_VERSION_V2
-    payload["provider_c_lkg"] = _validate_provider_c_lkg(provider_c_lkg)
-    payload["provider_c_health"] = validate_health(provider_c_health, provider="provider_c")
+    payload["codex_lkg"] = _validate_codex_lkg(codex_lkg)
+    payload["codex_health"] = validate_health(codex_health, provider="codex")
     return payload
 
 
-def _validate_provider_c_lkg(row: object) -> dict:
+def _validate_codex_lkg(row: object) -> dict:
     if not isinstance(row, dict) or set(row) != LKG_ROW_KEYS:
-        raise ValueError("invalid Provider C LKG row")
-    # Provider C carries an upstream receipt stamp and the collector's completion
+        raise ValueError("invalid Codex LKG row")
+    # Codex carries an upstream receipt stamp and the collector's completion
     # stamp; both must be UTC RFC3339 (or null). Null them only for the shared
-    # row-shape check, which forbids stamps on the Provider A/Provider B rows.
+    # row-shape check, which forbids stamps on the Claude/Fable rows.
     upstream_reported_at = utc_rfc3339(row["upstream_reported_at"])
     probed_at = utc_rfc3339(row["probed_at"])
     if (upstream_reported_at is None) != (probed_at is None):
-        raise ValueError("Provider C LKG timestamps must be paired")
+        raise ValueError("Codex LKG timestamps must be paired")
     if (
         upstream_reported_at is not None
         and upstream_reported_at.replace(microsecond=0) > probed_at.replace(microsecond=0)
     ):
-        raise ValueError("Provider C upstream timestamp cannot follow collection")
+        raise ValueError("Codex upstream timestamp cannot follow collection")
     normalized = dict(row)
     normalized["upstream_reported_at"] = None
     normalized["probed_at"] = None
-    _validate_lkg_row(normalized, "provider_c", "Provider C")
+    _validate_lkg_row(normalized, "codex", "Codex")
     # Re-emit in the canonical LKG key order (matching _validate_lkg_row and the
     # old probe's wire order) so the three-row limits frame is byte-consistent.
     return {key: row[key] for key in (
@@ -334,18 +334,18 @@ class UsageStateStore:
         lkg: list[dict] | None,
         health: dict,
         *,
-        provider_c_lkg: dict | None = None,
-        provider_c_health: dict | None = None,
+        codex_lkg: dict | None = None,
+        codex_health: dict | None = None,
     ) -> None:
         try:
             payload = (
                 canonical_state(lkg, health)
-                if provider_c_lkg is None and provider_c_health is None
+                if codex_lkg is None and codex_health is None
                 else canonical_state_v2(
                     lkg,
                     health,
-                    provider_c_lkg=provider_c_lkg or {},
-                    provider_c_health=provider_c_health or {},
+                    codex_lkg=codex_lkg or {},
+                    codex_health=codex_health or {},
                 )
             )
         except Exception as exc:  # noqa: BLE001 - classify as pre-replace write failure

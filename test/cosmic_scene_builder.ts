@@ -35,7 +35,7 @@ const { renderMultiSelectQuestion } = require('../renderer/multiselect_question'
 // ── This machine (hostc the mage) drives the header chrome ────────────
 const MACHINE = 'hostc' as const;
 const META = MACHINES[MACHINE];
-const STREAM = 'hostc:provider_a-hostc-cosmic';
+const STREAM = 'hostc:claude-hostc-cosmic';
 const stateStream = (name: StateName): string => `${STREAM}-${name}`;
 const CHROME = {
   accent: META.accent,
@@ -83,9 +83,9 @@ function event(kind: string, text: string, over: Record<string, unknown> = {}): 
   return {
     daemon_seq: seqCounter,
     host: 'hostc',
-    provider: 'provider_a',
+    provider: 'claude',
     session_id: 'sess-cosmic',
-    session_name: 'provider_a-hostc-cosmic',
+    session_name: 'claude-hostc-cosmic',
     stream_id: STREAM,
     timestamp: '2026-06-03T17:30:00.000Z',
     kind,
@@ -98,9 +98,9 @@ function session(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     stream_id: STREAM,
     host: 'hostc',
-    provider: 'provider_a',
-    session_name: 'provider_a-hostc-cosmic',
-    display_name: 'provider_a-hostc-cosmic',
+    provider: 'claude',
+    session_name: 'claude-hostc-cosmic',
+    display_name: 'claude-hostc-cosmic',
     last_event_at: '2026-06-03T17:30:00.000Z',
     // Default to no session-summary last_text so non-working baselines do not
     // grow a stray fallback row; states that need it (working repro, idle probe)
@@ -122,7 +122,7 @@ function seed(
   streamId = STREAM,
 ): ChatStoreController {
   const controller = new ChatStoreController();
-  const sessionName = streamId.split(':').pop() || 'provider_a-hostc-cosmic';
+  const sessionName = streamId.split(':').pop() || 'claude-hostc-cosmic';
   controller.applyFrame({
     type: 'snapshot',
     events: events.map((item) => ({
@@ -293,12 +293,12 @@ function buildHero(doc: Document, activity: 'working' | 'idle'): HTMLElement {
 
   const title = doc.createElement('div');
   title.className = 'slot-chat-session-title';
-  title.textContent = 'provider_a-hostc-cosmic';
+  title.textContent = 'claude-hostc-cosmic';
   head.appendChild(title);
 
   const tags = doc.createElement('div');
   tags.className = 'slot-chat-session-tags';
-  tags.appendChild(providerTag('provider_a', { color: META.accent }));
+  tags.appendChild(providerTag('claude', { color: META.accent }));
   tags.appendChild(statusTag(activity, { color: META.accent }));
   head.appendChild(tags);
 

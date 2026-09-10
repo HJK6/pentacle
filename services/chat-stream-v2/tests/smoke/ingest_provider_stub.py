@@ -31,7 +31,7 @@ if not safe_id:
 path = Path(root) / slug / (safe_id + ".jsonl")
 path.parent.mkdir(parents=True, exist_ok=True)
 with path.open("a", buffering=1) as transcript:
-    print("READY\npublic fixture provider ready\n> ", flush=True)
+    print("READY\n⏵⏵ bypass permissions on (public fixture)\n❯ ", flush=True)
     for line in sys.stdin:
         line = line.rstrip("\r\n")
         if line:
@@ -42,4 +42,10 @@ with path.open("a", buffering=1) as transcript:
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "message": {"role": "user", "content": line},
             }) + "\n")
-            print(f"ECHO {line}", flush=True)
+            response = f"Public fixture assistant: {line}"
+            transcript.write(json.dumps({
+                "type": "assistant", "sessionId": native_id, "uuid": str(uuid.uuid4()),
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "message": {"role": "assistant", "content": [{"type": "text", "text": response}]},
+            }) + "\n")
+            print(f"ECHO {line}\n{response}\n⏵⏵ bypass permissions on (public fixture)\n❯ ", flush=True)

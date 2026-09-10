@@ -1,59 +1,63 @@
 # Pentacle
 
-Pentacle is a desktop workspace for coding-agent sessions, shared work specifications and review evidence. Optional services add structured chat, questions and coordination across machines.
+Pentacle is a desktop workspace for coding agents, structured chat, work specifications and review evidence. The desktop connects to the included Python daemon; the daemon launches your configured agent CLIs in tmux and streams their transcripts. [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile) connects to the same daemon.
 
-## Run from source
+## Local setup
 
-Install Node.js and npm, tmux, and the agent command-line tools you intend to use. Configure those tools with your own accounts. The Python services require Python 3.11 or newer.
+Use macOS or Linux with Node.js 22, Python 3.11 or newer, tmux and at least one configured agent CLI (`claude` or `codex`). Authenticate the CLI with your own account before using it through Pentacle. Windows needs a separately configured SSH terminal host; the local setup below targets macOS/Linux.
+
+From this repository:
 
 ```sh
-npm install
-mkdir -p "$HOME/.config/pentacle-private"
-cp pentacle.config.example.js "$HOME/.config/pentacle-private/pentacle.config.js"
-PENTACLE_CONFIG="$HOME/.config/pentacle-private/pentacle.config.js" npm start
+npm ci
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r services/chat-stream-v2/requirements.txt -e services/agent-orch
+mkdir -p "$HOME/.config/pentacle" "$HOME/workspace"
+chmod 700 "$HOME/.config/pentacle"
+cp pentacle.config.example.js "$HOME/.config/pentacle/pentacle.config.js"
 ```
 
-No lockfile is published; `npm install` resolves dependencies (a `package-lock.json` is regenerated as your repository's first follow-up commit). Edit your private configuration to set the workspace and agent commands for your machine. Optional service features are disabled in the example until their backends are configured. See the [daemon setup](services/chat-stream-v2/README.md) and [orchestration CLI](services/agent-orch/README.md) for those components. Keep credentials, runtime databases and machine-specific configuration outside the source tree.
+Issue a desktop credential without printing it to your terminal:
+
+```sh
+python services/chat-stream-v2/tools/operator_auth_cli.py issue --client-kind pentacle --label desktop |
+  python -c 'import json,os,pathlib,sys; p=pathlib.Path.home()/".config/pentacle/desktop.token"; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.write(fd,json.load(sys.stdin)["code"].encode()); os.close(fd); p.chmod(0o600)'
+```
+
+Start the daemon in one terminal. The `local` identity matches the desktop example; the provider binaries come from your PATH, and transcripts remain in the provider's native directories.
+
+```sh
+python services/chat-stream-v2/main.py --host 127.0.0.1 --port 7791 \
+  --local-host local --db "$HOME/.config/pentacle/sessions.db" \
+  --claude-bin "$(command -v claude)" --codex-bin "$(command -v codex)" \
+  --spawn-cwd "$HOME/workspace" --projects-root "$HOME/.claude/projects"
+```
+
+An absent provider resolves to an empty binary and cannot be launched; use the provider you installed. Choose a different port in both the daemon command and private desktop config if 7791 is already in use. In another terminal, from the repository:
+
+```sh
+PENTACLE_CONFIG="$HOME/.config/pentacle/pentacle.config.js" npm start
+```
+
+Use **New Chat**, select `local`, then the provider/model. New sessions open as terminals; switch the slot to **Chat** for the structured transcript. A disconnected daemon produces an error and creates no synthetic session. Keep the daemon running while using desktop or mobile.
+
+The private config selects `chatStream.url`, `chatStream.tokenPath`, host labels, terminal transports and optional features. The token must be a regular mode-0600 file inside a mode-0700 directory, using a path without symbolic-link ancestors. Do not commit credentials or runtime databases. See [daemon setup and remote clients](services/chat-stream-v2/README.md) and [public support boundaries](docs/public_release.md).
 
 ## Build and test
 
-The desktop shell itself needs no separate compile step to run (`npm start` runs it directly). Build the renderer bundle and run the JavaScript checks and Python service tests from a throwaway `HOME`:
-
 ```sh
-npm run build:renderer       # bundle the renderer (no bundling is needed for `npm start`)
-npm test                     # renderer/main unit checks
-python3 -m pytest services/chat-stream-v2/tests   # daemon unit tests (Python 3.11+)
+npm run prestart                          # all renderer bundles
+npm test                                  # desktop unit/renderer tests
+python -m pytest services/chat-stream-v2/tests
+python -m pytest services/agent-orch/tests
+python tools/public_desktop_smoke.py       # real Electron + isolated daemon/provider
 ```
 
-## Daemon and CLI
+The desktop smoke requires an available graphical desktop, tmux and lsof. It uses an isolated tmux socket, temporary credentials and deterministic provider JSONL; it never launches your paid provider CLI. The default Python suite excludes the explicitly marked long-running soak tier. Tests needing real provider CLIs are opt-in with `PENTACLE_LIVE_TESTS=1`.
 
-Install the orchestration CLI and start a standalone, non-live daemon (loopback, caller-chosen free port, ephemeral memory) from a throwaway `HOME`:
+The certified daemon runner is `python services/chat-stream-v2/tools/run_gate.py merge` from a clean Git checkout. It runs unit and socket smoke tiers and writes evidence outside the repository. On macOS its multi-bind preflight requires the documented [loopback alias](services/chat-stream-v2/deploy/loopback-alias/README.md). CI runs these same public checks.
 
-```sh
-bash services/agent-orch/install.sh                 # install the agent-orch CLI
-export PENTACLE_MACHINES_FILE="$PWD/services/chat-stream-v2/machines.local.json"
-python3 services/chat-stream-v2/main.py --host 127.0.0.1 --port 0 --db :memory:
-```
+## Work process
 
-`--port 0` picks a free port so it never collides with any running daemon; `--db :memory:` keeps state ephemeral. Full daemon options are in the [daemon setup](services/chat-stream-v2/README.md) and CLI usage in [services/agent-orch/README.md](services/agent-orch/README.md). All commands run offline against the source tree; none require a live service, network access, or a production port.
-
-## Use the full development process
-
-Start with [PROCESS.md](PROCESS.md) and the [workspace setup guide](process/README.md). The bundled process includes:
-
-- A root [AGENTS.md](AGENTS.md) for common agent instructions and role baselines.
-- Spec and summary templates, lifecycle directories, schemas, catalog generation, validation and search tools.
-- [Development guidelines](process/docs/config/development_process.md) and [QA guidelines](process/docs/config/qa_guidelines.md) covering failing-journey diagnosis, independent checks, evidence and closure.
-- [Agent coordination](process/docs/config/agent_orchestration.md) and [private configuration](process/docs/config/private_configuration.md) guidance.
-
-Copy the process workspace to a private location before adding real specifications or receipts. You can follow the spec and QA workflow using the bundled Python tools without running Pentacle; the orchestration commands require the separately configured daemon and CLI.
-
-
-## Known test gaps
-
-The published default test suites are not fully green yet; these failures are behavioral/environment drift and descoped-private-feature coverage, not privacy, install, or start/build issues (install, `npm run build:renderer`, the agent-orch CLI install, and a free-port daemon start all pass). They are being greened in the open as the first follow-up.
-
-- **JS (`npm test`), ~42:** renderer interpreter / display-rule drift; the generated `publicdashdefs` dist (built by the dashboards `npm run build`, not shipped); ChatStreamClient limits; spawn/asset/schedule IPC; governance; harness-telemetry; singleton lifecycles.
-- **Daemon (`pytest`), ~75 (+6):** coverage for descoped private features (attestations, blob-prompt, spawn-catalog models); casing/API drift; tests needing `working_state` fixtures or the predeploy workflow; env-sensitive headless tests.
-
-Tests that require a live provider CLI are skipped by default; set `PENTACLE_LIVE_TESTS=1` to run them.
+Start with [PROCESS.md](PROCESS.md), [workspace setup](process/README.md) and [AGENTS.md](AGENTS.md). The included process supplies spec templates, lifecycle directories, validation and search tools, development and QA guidelines, and optional daemon-backed agent coordination. Copy the process workspace to a private directory before adding real work or receipts.

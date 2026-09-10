@@ -219,7 +219,7 @@ def test_result_blob_variant_is_rejected_with_inline_hint_before_persistence() -
                 )
 
             assert raised.value.code == "unsupported_in_v2"
-            assert "coordination-tool report --result" in raised.value.extra["hint"]
+            assert "agent-orch report --result" in raised.value.extra["hint"]
             assert await store.get_report("file-variant") is None
         finally:
             store.stop()
@@ -297,14 +297,14 @@ def test_report_ack_echoes_every_submitted_governance_field() -> None:
                 "qa_verdict": "accept",
                 "target_sha": "0123456789abcdef0123456789abcdef01234567",
                 "qa_attestation": {"stream_id": "alpha:qa", "report_id": "qa-1"},
-                "coordination_tool_attestation": agent_attestation,
+                "agent_orch_attestation": agent_attestation,
             })
             assert reply["completion_kind"] == "implementation_ready"
             assert reply["qa_verdict"] == "accept"
             assert reply["target_sha"] == "0123456789abcdef0123456789abcdef01234567"
             assert reply["qa_attestation"] == {"stream_id": "alpha:qa", "report_id": "qa-1"}
-            assert reply["coordination_tool_attestation"] == agent_attestation
-            assert (await store.get_report("ack-governance-fields"))["coordination_tool_attestation"] == agent_attestation
+            assert reply["agent_orch_attestation"] == agent_attestation
+            assert (await store.get_report("ack-governance-fields"))["agent_orch_attestation"] == agent_attestation
             with pytest.raises(VerbError) as raised:
                 await ledger.report({
                     "report_id": "ack-governance-fields",
@@ -318,7 +318,7 @@ def test_report_ack_echoes_every_submitted_governance_field() -> None:
                     "qa_verdict": "accept",
                     "target_sha": "0123456789abcdef0123456789abcdef01234567",
                     "qa_attestation": {"stream_id": "alpha:qa", "report_id": "qa-1"},
-                    "coordination_tool_attestation": {
+                    "agent_orch_attestation": {
                         **agent_attestation, "release_id": "other-build",
                     },
                 })

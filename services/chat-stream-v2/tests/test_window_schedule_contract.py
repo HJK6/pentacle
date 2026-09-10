@@ -23,7 +23,7 @@ from store import Store
 from window_schedule import WindowSchedule, receipt_id
 
 
-SPEC = "spec-schedule-contract"
+SPEC = "spec_example__schedule_contract"
 TARGET_SHA = "1" * 40
 
 
@@ -139,6 +139,9 @@ class RouteProbeTmux:
     async def stage_text(self, path: str, data: bytes) -> None:
         self.staged.append((path, bytes(data)))
 
+    async def run(self, *args: str, **kwargs) -> tuple[int, str]:
+        return 0, ""
+
 
 class RouteProbeHosts:
     def __init__(self, peer_tmux: RouteProbeTmux) -> None:
@@ -157,6 +160,9 @@ class RouteProbeHosts:
                 agent_orch_bin_dir="/tmp/public-peer/bin",
             ),
         }
+
+    async def run_command(self, host: str, *args: str, **kwargs) -> tuple[int, str]:
+        return 0, ""
 
     async def ensure_reachable(self, host: str, operation: str) -> None:
         self.reachability.append((host, operation))
@@ -396,7 +402,7 @@ def test_schedule_admission_rejects_outsider_from_seat_owner_binding(tmp_path) -
 
 
 def test_schedule_admission_persists_canonicalized_alias_binding(tmp_path) -> None:
-    alias = "spec-schedule-contract"
+    alias = "spec_example__schedule_contract"
     binding = _canonical_binding([SPEC])
     store, _sessions, _comms, _spawn, surface = harness(tmp_path, admission_binding=binding)
     try:
@@ -429,7 +435,7 @@ def test_schedule_admission_rejects_empty_or_partial_canonical_provenance(
 
 
 def test_schedule_service_actor_persists_only_canonical_admission_binding(tmp_path) -> None:
-    alias = "spec-schedule-contract"
+    alias = "spec_example__schedule_contract"
     binding = _canonical_binding([SPEC])
     store, _sessions, _comms, _spawn, surface = harness(tmp_path, admission_binding=binding)
     try:
@@ -552,23 +558,15 @@ def test_schedule_inventory_and_lifecycle_pushes_cover_every_mutation(tmp_path) 
         store.stop()
 
 
-def test_schedule_inventory_supplies_blob_backed_prompt_preview(tmp_path) -> None:
-    class PromptBlobs:
-        async def read_prompt(self, sha: str) -> str:
-            assert sha == "a" * 64
-            return "blob prompt\nwith detail"
-
+def test_schedule_blob_prompt_is_rejected_before_persistence(tmp_path) -> None:
     store, _sessions, _comms, spawn, surface = harness(tmp_path)
-    spawn.prompt_blobs = PromptBlobs()
     try:
-        inserted = schedule_insert(surface, initial_prompt_blob_sha="a" * 64)
-        inventory = run(surface.schedule_inventory())
-        row = next(
-            item for item in inventory
-            if item["schedule_id"] == inserted["schedule"]["schedule_id"]
-        )
-        assert row["prompt_preview"] == "blob prompt with detail"
-        assert "prompt_blob_id" not in row
+        with pytest.raises(VerbError, match="inline prompt") as refused:
+            schedule_insert(surface, initial_prompt_blob_sha="a" * 64)
+        assert refused.value.code == "unsupported_configuration"
+        assert run(surface.schedule_inventory()) == []
+        assert spawn.calls == []
+        assert spawn.admissions == []
     finally:
         store.stop()
 
@@ -793,7 +791,6 @@ def test_remote_scheduled_fire_routes_profile_tmux_prompt_and_child_token_to_pee
             target_host="hostb",
             initial_prompt="peer route proof " * 80,
             target_sha=TARGET_SHA,
-            agent_orch_attestation=release_attestation(),
         )
         sid = inserted["schedule"]["schedule_id"]
         run(surface._fire_schedule(sid))
@@ -809,7 +806,7 @@ def test_remote_scheduled_fire_routes_profile_tmux_prompt_and_child_token_to_pee
         assert fenced["tmux"] is peer_tmux
         assert "/tmp/public-peer/bin/claude" in fenced["command"]
         assert "/tmp/public-local/bin/claude" not in fenced["command"]
-        assert fenced["brief"].startswith("Read /tmp/public-test")
+        assert fenced["brief"].startswith("Read /tmp/pentacle-prompt-stage/")
         assert fenced["token_hash"]
         assert len(peer_tmux.staged) == 2
         assert any("/.pentacle-stream-tokens/" in path for path, _ in peer_tmux.staged)
@@ -920,31 +917,16 @@ def test_schedule_generation_key_replays_once_and_rejects_changed_payload(tmp_pa
         store.stop()
 
 
-def test_ungated_present_malformed_attestation_is_preserved_and_refused_at_fire(
-    tmp_path,
-) -> None:
+@pytest.mark.parametrize("attestation", ["malformed", release_attestation()])
+def test_installation_attestation_is_rejected_before_persistence(tmp_path, attestation) -> None:
     store, _sessions, _comms, spawn, surface = harness(tmp_path)
     try:
-        inserted = schedule_insert(
-            surface,
-            target_sha=TARGET_SHA,
-            agent_orch_attestation="malformed",
-        )
-        sid = inserted["schedule"]["schedule_id"]
-        stored = run(store.submit(lambda conn: conn.execute(
-            "SELECT attestation_json FROM v2_schedules WHERE schedule_id=?", (sid,),
-        ).fetchone()[0]))
-        assert stored == json.dumps("malformed", separators=(",", ":"))
-
-        with pytest.raises(VerbError) as refused:
-            run(surface._fire_schedule(sid))
-        assert refused.value.code == "failed"
+        with pytest.raises(VerbError, match="attestations are unsupported") as refused:
+            schedule_insert(surface, target_sha=TARGET_SHA, agent_orch_attestation=attestation)
+        assert refused.value.code == "unsupported_configuration"
+        assert run(surface.schedule_inventory()) == []
         assert spawn.calls == []
-        schedule = run(store.submit(lambda conn: dict(conn.execute(
-            "SELECT * FROM v2_schedules WHERE schedule_id=?", (sid,),
-        ).fetchone())))
-        assert schedule["state"] == "failed"
-        assert schedule["last_error_code"] == "attestation_invalid"
+        assert spawn.admissions == []
     finally:
         store.stop()
 
@@ -957,14 +939,13 @@ def test_recovery_classifies_claimed_malformed_attestation_through_same_choke_po
         inserted = schedule_insert(
             surface,
             target_sha=TARGET_SHA,
-            agent_orch_attestation="malformed",
         )
         sid = inserted["schedule"]["schedule_id"]
         operation_id = str(uuid.uuid4())
         now = future_time(-1)
         run(store.submit(lambda conn: (
             conn.execute(
-                "UPDATE v2_schedules SET state='firing',fires_at_utc=?,updated_at=? "
+                "UPDATE v2_schedules SET attestation_json='\"malformed\"',state='firing',fires_at_utc=?,updated_at=? "
                 "WHERE schedule_id=?",
                 (now, now, sid),
             ),
@@ -994,7 +975,7 @@ def test_recovery_classifies_claimed_malformed_attestation_through_same_choke_po
         ).fetchone())))
         assert spawn.calls == []
         assert schedule["state"] == "failed"
-        assert schedule["last_error_code"] == "attestation_invalid"
+        assert schedule["last_error_code"] == "unsupported_configuration"
     finally:
         store.stop()
 

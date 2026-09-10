@@ -77,21 +77,21 @@ function sendFrame(ws, frame) {
 }
 
 const NULL_LIMITS = Object.freeze([
-  Object.freeze({ id: 'provider_a', label: 'Provider A', pct: null, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),
-  Object.freeze({ id: 'provider_b', label: 'Provider B', pct: null, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),
-  Object.freeze({ id: 'provider_c', label: 'Provider C', pct: null, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),
+  Object.freeze({ id: 'claude', label: 'Claude', pct: null, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),
+  Object.freeze({ id: 'fable', label: 'Fable', pct: null, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),
+  Object.freeze({ id: 'codex', label: 'Codex', pct: null, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),
 ]);
 
 const LIMITS_A = Object.freeze([
-  Object.freeze({ id: 'provider_a', label: 'Provider A', pct: 21, resets_at_iso: '2026-08-24T00:00:00Z', resets_text: 'tomorrow 7 pm', upstream_reported_at: null, probed_at: null }),
-  Object.freeze({ id: 'provider_b', label: 'Provider B', pct: 43, resets_at_iso: null, resets_text: '6d', upstream_reported_at: null, probed_at: null }),
-  Object.freeze({ id: 'provider_c', label: 'Provider C', pct: 65, resets_at_iso: '2026-08-30T00:00:00Z', resets_text: '7d', upstream_reported_at: '2026-08-26T09:30:00Z', probed_at: '2026-08-26T09:30:01Z' }),
+  Object.freeze({ id: 'claude', label: 'Claude', pct: 21, resets_at_iso: '2026-08-24T00:00:00Z', resets_text: 'tomorrow 7 pm', upstream_reported_at: null, probed_at: null }),
+  Object.freeze({ id: 'fable', label: 'Fable', pct: 43, resets_at_iso: null, resets_text: '6d', upstream_reported_at: null, probed_at: null }),
+  Object.freeze({ id: 'codex', label: 'Codex', pct: 65, resets_at_iso: '2026-08-30T00:00:00Z', resets_text: '7d', upstream_reported_at: '2026-08-26T09:30:00Z', probed_at: '2026-08-26T09:30:01Z' }),
 ]);
 
 const LIMITS_B = Object.freeze([
-  Object.freeze({ id: 'provider_a', label: 'Provider A', pct: 87, resets_at_iso: null, resets_text: '8h', upstream_reported_at: null, probed_at: null }),
-  Object.freeze({ id: 'provider_b', label: 'Provider B', pct: 9, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),
-  Object.freeze({ id: 'provider_c', label: 'Provider C', pct: 11, resets_at_iso: '2026-09-01T00:00:00Z', resets_text: null, upstream_reported_at: '2026-08-26T09:35:00Z', probed_at: '2026-08-26T09:35:01Z' }),
+  Object.freeze({ id: 'claude', label: 'Claude', pct: 87, resets_at_iso: null, resets_text: '8h', upstream_reported_at: null, probed_at: null }),
+  Object.freeze({ id: 'fable', label: 'Fable', pct: 9, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),
+  Object.freeze({ id: 'codex', label: 'Codex', pct: 11, resets_at_iso: '2026-09-01T00:00:00Z', resets_text: null, upstream_reported_at: '2026-08-26T09:35:00Z', probed_at: '2026-08-26T09:35:01Z' }),
 ]);
 
 const ITEM5_LIMITS = Object.freeze([
@@ -106,7 +106,7 @@ const ITEM5_LIMITS = Object.freeze([
 
 const LIMITS_HEALTH_OK = Object.freeze({
   schema_version: 1,
-  provider_a: Object.freeze({
+  claude: Object.freeze({
     attempted_at: '2026-08-28T07:00:00Z',
     outcome: 'ok',
     error: null,
@@ -142,7 +142,7 @@ test('ChatStreamClient installs limits and health atomically and clears health f
   assert.deepEqual(client.snapshot().limits, LIMITS_A);
   assert.deepEqual(client.snapshot().limits_health, LIMITS_HEALTH_OK);
 
-  const malformed = { ...LIMITS_HEALTH_OK, provider_a: { ...LIMITS_HEALTH_OK.provider_a, outcome: 'not-a-real-outcome' } };
+  const malformed = { ...LIMITS_HEALTH_OK, claude: { ...LIMITS_HEALTH_OK.claude, outcome: 'not-a-real-outcome' } };
   sendFrame(ws, { type: 'limits.update', limits: LIMITS_B, limits_health: malformed });
   assert.deepEqual(client.snapshot().limits, LIMITS_A, 'malformed health retains the prior limits pair');
   assert.deepEqual(client.snapshot().limits_health, LIMITS_HEALTH_OK, 'malformed health retains the prior health pair');
@@ -295,7 +295,7 @@ test('ChatStreamClient rejects malformed limits lists atomically', (t) => {
   const invalid = [
     LIMITS_B.slice(0, 2),
     [LIMITS_B[1], LIMITS_B[0], LIMITS_B[2]],
-    [{ ...LIMITS_B[0], label: 'Provider A Weekly' }, LIMITS_B[1], LIMITS_B[2]],
+    [{ ...LIMITS_B[0], label: 'Claude Weekly' }, LIMITS_B[1], LIMITS_B[2]],
     [{ ...LIMITS_B[0], extra: true }, LIMITS_B[1], LIMITS_B[2]],
     [{ ...LIMITS_B[0], pct: true }, LIMITS_B[1], LIMITS_B[2]],
     [{ ...LIMITS_B[0], resets_at_iso: 123 }, LIMITS_B[1], LIMITS_B[2]],
@@ -309,7 +309,7 @@ test('ChatStreamClient rejects malformed limits lists atomically', (t) => {
   assert.deepEqual(emitted.at(-1).limits, LIMITS_B.slice(0, 2));
 });
 
-test('item5 ChatStreamClient validates and preserves Provider C freshness stamps atomically', (t) => {
+test('item5 ChatStreamClient validates and preserves Codex freshness stamps atomically', (t) => {
   const { client, emitted, ws } = openClient();
   t.after(() => client.destroy());
 
@@ -351,7 +351,7 @@ test('item5 ChatStreamClient validates and preserves Provider C freshness stamps
   assert.equal(emitted.length, invalid.length + 1);
 });
 
-test('ChatStreamClient orders Provider C freshness stamps at whole-second granularity', (t) => {
+test('ChatStreamClient orders Codex freshness stamps at whole-second granularity', (t) => {
   // The live collector stamps upstream_reported_at with microseconds while a
   // whole-second probed_at can land in the same second; usage_state.py accepts
   // that pair, so the desktop must not drop the whole limits set for it.

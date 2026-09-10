@@ -20,16 +20,16 @@ function freshDoc() {
 
 function loadSharedChatCore() {
   const bundled = esbuild.buildSync({
-    entryPoints: [path.join(root, 'chat-core', 'src', 'index.ts')],
+    entryPoints: [path.join(root, 'pentacle-chat-core', 'src', 'index.ts')],
     bundle: true,
     platform: 'node',
     format: 'cjs',
     write: false,
     logLevel: 'silent',
   });
-  const mod = new Module(path.join(root, 'chat-core', 'src', 'index.ts'), module);
-  mod.filename = path.join(root, 'chat-core', 'src', 'index.ts');
-  mod.paths = Module._nodeModulePaths(path.join(root, 'chat-core'));
+  const mod = new Module(path.join(root, 'pentacle-chat-core', 'src', 'index.ts'), module);
+  mod.filename = path.join(root, 'pentacle-chat-core', 'src', 'index.ts');
+  mod.paths = Module._nodeModulePaths(path.join(root, 'pentacle-chat-core'));
   mod._compile(bundled.outputFiles[0].text, mod.filename);
   return mod.exports;
 }

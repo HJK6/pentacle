@@ -363,7 +363,7 @@
             "truncated": false
           }
         ],
-        "next_cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RhOnYyLWZpeHR1cmUtY2hpbGQiLCJjaGlsZF9nZW5lcmF0aW9uIjoiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJwYXJlbnQiOiJob3N0YTp2Mi1maXh0dXJlLW5leHVzIiwicGFyZW50X2dlbmVyYXRpb24iOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsInYiOjF9",
+        "next_cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RfYjp2Mi1maXh0dXJlLWNoaWxkIiwiY2hpbGRfZ2VuZXJhdGlvbiI6IjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwicGFyZW50IjoiaG9zdF9iOnYyLWZpeHR1cmUtbmV4dXMiLCJwYXJlbnRfZ2VuZXJhdGlvbiI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwidiI6MX0",
         "parent_generation": "11111111111111111111111111111111",
         "child_generation": "22222222222222222222222222222222"
       },
@@ -390,7 +390,7 @@
         "parent_stream_id": "host_b:v2-fixture-nexus",
         "child_stream_id": "host_b:v2-fixture-child",
         "limit": 2,
-        "cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RhOnYyLWZpeHR1cmUtY2hpbGQiLCJjaGlsZF9nZW5lcmF0aW9uIjoiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJwYXJlbnQiOiJob3N0YTp2Mi1maXh0dXJlLW5leHVzIiwicGFyZW50X2dlbmVyYXRpb24iOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsInYiOjF9"
+        "cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RfYjp2Mi1maXh0dXJlLWNoaWxkIiwiY2hpbGRfZ2VuZXJhdGlvbiI6IjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwicGFyZW50IjoiaG9zdF9iOnYyLWZpeHR1cmUtbmV4dXMiLCJwYXJlbnRfZ2VuZXJhdGlvbiI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwidiI6MX0"
       },
       "response": {
         "type": "thread.read.ok",
@@ -462,7 +462,7 @@
             "truncated": false
           }
         ],
-        "next_cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RhOnYyLWZpeHR1cmUtY2hpbGQiLCJjaGlsZF9nZW5lcmF0aW9uIjoiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJwYXJlbnQiOiJob3N0YTp2Mi1maXh0dXJlLW5leHVzIiwicGFyZW50X2dlbmVyYXRpb24iOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsInYiOjF9",
+        "next_cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RfYjp2Mi1maXh0dXJlLWNoaWxkIiwiY2hpbGRfZ2VuZXJhdGlvbiI6IjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwicGFyZW50IjoiaG9zdF9iOnYyLWZpeHR1cmUtbmV4dXMiLCJwYXJlbnRfZ2VuZXJhdGlvbiI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwidiI6MX0",
         "parent_generation": "11111111111111111111111111111111",
         "child_generation": "22222222222222222222222222222222"
       }

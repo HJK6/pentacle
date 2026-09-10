@@ -47,7 +47,7 @@ const CHROME: ViewChrome = {
 };
 const SHOW_TURN_DURATION = { showTurnDuration: true };
 
-const STREAM = 'hostc:provider_c-hostc-1';
+const STREAM = 'hostc:codex-hostc-1';
 
 let seq = 1000;
 function makeEvent(over: Partial<PentacleEvent> & Record<string, unknown> = {}): PentacleEvent {
@@ -55,9 +55,9 @@ function makeEvent(over: Partial<PentacleEvent> & Record<string, unknown> = {}):
   return {
     daemon_seq: seq,
     host: 'hostc',
-    provider: 'provider_c',
+    provider: 'codex',
     session_id: 'sess-1',
-    session_name: 'provider_c-hostc-1',
+    session_name: 'codex-hostc-1',
     stream_id: STREAM,
     timestamp: '2026-05-25T12:00:00.000Z',
     kind: 'ASSIST',
@@ -70,9 +70,9 @@ function makeSession(over: Record<string, unknown> = {}): Record<string, unknown
   return {
     stream_id: STREAM,
     host: 'hostc',
-    provider: 'provider_c',
-    session_name: 'provider_c-hostc-1',
-    display_name: 'provider_c-hostc-1',
+    provider: 'codex',
+    session_name: 'codex-hostc-1',
+    display_name: 'codex-hostc-1',
     last_event_at: '2026-05-25T12:00:00.000Z',
     last_text: '',
     last_kind: 'ASSIST',
@@ -116,8 +116,8 @@ const FIXTURES: Fixture[] = [
     expectedFamily: 'bubble:user',
   },
   {
-    name: 'USER (provider_a-jsonl) -> bubble:user',
-    event: makeEvent({ kind: 'USER', text: 'structured user', raw: { source: 'provider_a-jsonl' } as never }),
+    name: 'USER (claude-jsonl) -> bubble:user',
+    event: makeEvent({ kind: 'USER', text: 'structured user', raw: { source: 'claude-jsonl' } as never }),
     expectedFamily: 'bubble:user',
   },
   {
@@ -130,7 +130,7 @@ const FIXTURES: Fixture[] = [
     expectedFamily: 'bubble:user',
   },
   {
-    name: 'USER provider_c-helper suggestion -> hidden:helper (NO row)',
+    name: 'USER codex-helper suggestion -> hidden:helper (NO row)',
     event: makeEvent({ kind: 'USER', text: 'explore the repository structure' }),
     expectedFamily: 'hidden',
   },
@@ -141,8 +141,8 @@ const FIXTURES: Fixture[] = [
     expectedFamily: 'bubble:assistant',
   },
   {
-    name: 'ASSIST_TEXT (provider_a-jsonl) -> bubble:assistant',
-    event: makeEvent({ kind: 'ASSIST_TEXT', text: 'Structured assistant text.', raw: { source: 'provider_a-jsonl' } as never }),
+    name: 'ASSIST_TEXT (claude-jsonl) -> bubble:assistant',
+    event: makeEvent({ kind: 'ASSIST_TEXT', text: 'Structured assistant text.', raw: { source: 'claude-jsonl' } as never }),
     expectedFamily: 'bubble:assistant',
   },
   {
@@ -167,8 +167,8 @@ const FIXTURES: Fixture[] = [
     expectedFamily: 'activity',
   },
   {
-    name: 'THINKING (provider_a-jsonl) -> activity:thinking',
-    event: makeEvent({ kind: 'THINKING', text: 'Considering options', raw: { source: 'provider_a-jsonl' } as never }),
+    name: 'THINKING (claude-jsonl) -> activity:thinking',
+    event: makeEvent({ kind: 'THINKING', text: 'Considering options', raw: { source: 'claude-jsonl' } as never }),
     expectedFamily: 'activity',
   },
   // ── TOOL / TOOL_USE / TOOL_RESULT / TOOL_BATCH_SUMMARY ──
@@ -183,18 +183,18 @@ const FIXTURES: Fixture[] = [
     expectedFamily: 'activity',
   },
   {
-    name: 'TOOL_USE (provider_a-jsonl) -> activity (command)',
-    event: makeEvent({ kind: 'TOOL_USE', text: 'ls -la', raw: { source: 'provider_a-jsonl', tool_name: 'Bash' } as never }),
+    name: 'TOOL_USE (claude-jsonl) -> activity (command)',
+    event: makeEvent({ kind: 'TOOL_USE', text: 'ls -la', raw: { source: 'claude-jsonl', tool_name: 'Bash' } as never }),
     expectedFamily: 'activity',
   },
   {
-    name: 'TOOL_RESULT (provider_a-jsonl) -> activity:tool-output',
-    event: makeEvent({ kind: 'TOOL_RESULT', text: 'ok', raw: { source: 'provider_a-jsonl', tool_name: 'Edit', is_error: false, tool_input: { old_string: 'a', new_string: 'a\nb' } } as never }),
+    name: 'TOOL_RESULT (claude-jsonl) -> activity:tool-output',
+    event: makeEvent({ kind: 'TOOL_RESULT', text: 'ok', raw: { source: 'claude-jsonl', tool_name: 'Edit', is_error: false, tool_input: { old_string: 'a', new_string: 'a\nb' } } as never }),
     expectedFamily: 'activity',
   },
   {
-    name: 'TOOL_BATCH_SUMMARY (provider_a-jsonl) -> activity:tool-batch',
-    event: makeEvent({ kind: 'TOOL_BATCH_SUMMARY', text: 'Ran 3 tools', raw: { source: 'provider_a-jsonl' } as never }),
+    name: 'TOOL_BATCH_SUMMARY (claude-jsonl) -> activity:tool-batch',
+    event: makeEvent({ kind: 'TOOL_BATCH_SUMMARY', text: 'Ran 3 tools', raw: { source: 'claude-jsonl' } as never }),
     expectedFamily: 'activity',
   },
   // ── SYSTEM / turn-summary / compacted ──
@@ -204,8 +204,8 @@ const FIXTURES: Fixture[] = [
     expectedFamily: 'activity',
   },
   {
-    name: 'SYSTEM turn-summary (provider_a-jsonl) -> activity:turn-summary',
-    event: makeEvent({ kind: 'SYSTEM', text: 'Turn complete', raw: { source: 'provider_a-jsonl', subtype: 'turn-summary' } as never }),
+    name: 'SYSTEM turn-summary (claude-jsonl) -> activity:turn-summary',
+    event: makeEvent({ kind: 'SYSTEM', text: 'Turn complete', raw: { source: 'claude-jsonl', subtype: 'turn-summary' } as never }),
     expectedFamily: 'activity',
   },
   {
@@ -213,15 +213,15 @@ const FIXTURES: Fixture[] = [
     event: makeEvent({ kind: 'ASSIST', text: 'Context Compacted to save tokens' }),
     expectedFamily: 'system:compacted',
   },
-  // ── WORKING (provider_a-jsonl structured) ──
+  // ── WORKING (claude-jsonl structured) ──
   {
-    name: 'WORKING (provider_a-jsonl) -> hidden:status (NO row)',
-    event: makeEvent({ kind: 'WORKING', text: 'Working…', raw: { source: 'provider_a-jsonl' } as never }),
+    name: 'WORKING (claude-jsonl) -> hidden:status (NO row)',
+    event: makeEvent({ kind: 'WORKING', text: 'Working…', raw: { source: 'claude-jsonl' } as never }),
     expectedFamily: 'hidden',
   },
   // ── terminal furniture ("Worked for" duration line) ──
   // Converged shared-core behavior: a raw "Worked for" terminal-furniture line
-  // (ASSIST/SYSTEM Provider C pane scrape) is classified as hidden furniture by
+  // (ASSIST/SYSTEM Codex pane scrape) is classified as hidden furniture by
   // isTerminalFurnitureText — the same suppression mobile applies (asserted in
   // chat-core tests/peerAgentMessages.test.ts). The interpreter no
   // longer emits `terminal:divider` from these events; that displayRule is now

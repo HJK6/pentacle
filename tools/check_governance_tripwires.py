@@ -45,7 +45,7 @@ _FIELD_RE = re.compile(
     re.IGNORECASE,
 )
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-_GOVERNANCE_WORDS = re.compile(r"remove|replace|public_", re.IGNORECASE)
+_GOVERNANCE_WORDS = re.compile(r"\bnew\b|remove|replace|public_", re.IGNORECASE)
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _TAG_FIELDS = ("workflow_id", "run_id", "run_url", "headSha", "old_main_sha", "candidate_sha", "timestamp")
 

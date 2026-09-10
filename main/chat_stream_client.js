@@ -626,7 +626,8 @@ try {
     const type = String(msg.type || '');
     // `close` replies with `close.already_closed` (success) or an honest
     // `close.failed` (row left open); both must settle the pending promise.
-    const isOk = type.endsWith('.ok') || type.endsWith('.already_closed');
+    const isSendReceipt = type === 'send.result' || type === 'send.indeterminate';
+    const isOk = type.endsWith('.ok') || type.endsWith('.already_closed') || isSendReceipt;
     const isError = type.endsWith('.error') || type.endsWith('.failed');
     if (!isOk && !isError) return false;
     const pending = this._pending.get(msg.request_id);
@@ -646,6 +647,7 @@ try {
         if (!msg.size_bytes && Number.isFinite(chunks.size_bytes)) msg.size_bytes = chunks.size_bytes;
       }
     }
+    if (isSendReceipt) this._forwardFrame(msg);
     if (isError) {
       this._streamEventChunks.delete(msg.request_id);
       this._fetchBlobChunks.delete(msg.request_id);

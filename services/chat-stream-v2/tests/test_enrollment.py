@@ -20,10 +20,10 @@ def _secure_dir(path: Path) -> Path:
 
 
 def _registry(tmp_path: Path, payload: dict[str, object]) -> tuple[EnrollmentRegistry, Path]:
-    mobile = _secure_dir(tmp_path / "example-client")
+    mobile = _secure_dir(tmp_path / "pentacle-mobile")
     stream = _secure_dir(tmp_path / "example-stream")
     codes_path = mobile / "enrollment-codes.json"
-    operator_auth.atomic_write_json(codes_path, {"TEST": payload})
+    operator_auth.atomic_write_json(codes_path, {"TEST2345": payload})
     credentials = operator_auth.OperatorCredentialRegistry(stream / "operator-credentials.json")
     return EnrollmentRegistry(codes_path=codes_path, credential_registry=credentials), codes_path
 
@@ -36,7 +36,7 @@ def _v2_code(*, expires_at: float | None = None) -> dict[str, object]:
         "label": "simulator test",
         "protocol_version": 2,
         "scheme": operator_auth.AUTH_SCHEME,
-        "client_kind": "example-client",
+        "client_kind": "pentacle-mobile",
         "replaces_credential_id": None,
     }
 
@@ -44,8 +44,8 @@ def _v2_code(*, expires_at: float | None = None) -> dict[str, object]:
 def _enroll(registry: EnrollmentRegistry, **overrides: object) -> dict[str, object]:
     request: dict[str, object] = {
         "type": "enroll",
-        "client": "example-client",
-        "code": "TEST",
+        "client": "pentacle-mobile",
+        "code": "TEST2345",
         "protocol_version": 2,
         "scheme": operator_auth.AUTH_SCHEME,
     }
@@ -61,11 +61,11 @@ def test_v2_enroll_consumes_existing_code_and_returns_a_mobile_credential(tmp_pa
     assert response["type"] == "enroll.ok"
     assert response["protocol_version"] == 2
     assert response["scheme"] == operator_auth.AUTH_SCHEME
-    assert response["client_kind"] == "example-client"
+    assert response["client_kind"] == "pentacle-mobile"
     assert str(response["token"]).startswith(operator_auth.ENVELOPE_PREFIX)
-    assert operator_auth.decode_envelope(response["token"])["client_kind"] == "example-client"
+    assert operator_auth.decode_envelope(response["token"])["client_kind"] == "pentacle-mobile"
     codes, _signature = operator_auth.read_secure_json(codes_path)
-    assert codes["TEST"]["used_at"]
+    assert codes["TEST2345"]["used_at"]
 
     replay = _enroll(registry)
 
@@ -79,7 +79,7 @@ def test_v2_enroll_rejects_a_mismatched_request_without_consuming_the_code(tmp_p
 
     assert response == {"type": "enroll.error", "error": "Enrollment protocol mismatch"}
     codes, _signature = operator_auth.read_secure_json(codes_path)
-    assert codes["TEST"]["used_at"] == ""
+    assert codes["TEST2345"]["used_at"] == ""
 
 
 def test_v2_enroll_rejects_expired_existing_registry_code(tmp_path: Path) -> None:

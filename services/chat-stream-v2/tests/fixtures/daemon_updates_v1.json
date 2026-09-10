@@ -2,10 +2,10 @@
   "schema": "daemon_updates_v1",
   "status": "locked_planning_contract_not_runtime_evidence",
   "source": {
-    "example-service": "0000000000000000000000000000000000000000",
-    "example-client": "0000000000000000000000000000000000000000",
-    "example-client-core": "0000000000000000000000000000000000000000",
-    "example-service_core": "0000000000000000000000000000000000000000"
+    "pentacle": "93cb745e57808452dace8b2a18e2d7a542c19441",
+    "mobile": "4cb5c70bb1a96d6a7d173a88d8d6feb87ce8e07d",
+    "mobile_core": "d50cc7de1830fa5f96c7852aa104f05891ccae26",
+    "pentacle_core": "90736f11b95ed64ab313f970f3b41441984a6871"
   },
   "contract": {
     "agent_required": [
@@ -70,18 +70,18 @@
       "max_options": 5
     },
     "answer": "prompt.answer {request_id,question_id,selections?,text?}; same serializer on both surfaces",
-    "spawn_fixture_precondition": "Seed the example spawn catalog with a valid model and effort; public_default is the public wire profile."
+    "spawn_fixture_precondition": "Seed the existing spawn catalog with fixture-catalog-v1 and the named valid model/effort; desktop_manual is the existing mobile wire profile identifier, not a client implementation scope."
   },
   "inventory_cases": [
     {
-      "label": "privileged_no_card",
+      "label": "nexus_no_card",
       "frame": {
         "type": "session.inventory",
         "sessions": [
           {
-            "stream_id": "hosta:example-parent",
-            "host": "hosta",
-            "session_name": "example-parent",
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
             "provider": "codex",
             "role": "nexus",
             "visibility": "default",
@@ -91,12 +91,12 @@
             "session_generation": "11111111111111111111111111111111",
             "agents": [
               {
-                "stream_id": "hosta:example-child",
+                "stream_id": "host_b:v2-fixture-child",
                 "display_name": "Fixture child",
                 "role": "lead",
                 "objective": "Check the fixture journey",
                 "state": "working",
-                "model": "model-a",
+                "model": "gpt-6-astra",
                 "since": "2026-09-08T00:00:00Z",
                 "session_generation": "22222222222222222222222222222222"
               }
@@ -107,7 +107,7 @@
       "expected_mobile": {
         "status_reachable": true,
         "sub_agents": [
-          "hosta:example-child"
+          "host_b:v2-fixture-child"
         ],
         "history_action": true
       }
@@ -118,9 +118,9 @@
         "type": "snapshot",
         "sessions": [
           {
-            "stream_id": "hosta:example-parent",
-            "host": "hosta",
-            "session_name": "example-parent",
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
             "provider": "codex",
             "role": "nexus",
             "visibility": "default",
@@ -130,12 +130,12 @@
             "session_generation": "11111111111111111111111111111111",
             "agents": [
               {
-                "stream_id": "hosta:example-child",
+                "stream_id": "host_b:v2-fixture-child",
                 "display_name": "Fixture child",
                 "role": "lead",
                 "objective": "Check the fixture journey",
                 "state": "working",
-                "model": "model-a",
+                "model": "gpt-6-astra",
                 "since": "2026-09-08T00:00:00Z",
                 "session_generation": "22222222222222222222222222222222"
               }
@@ -145,19 +145,19 @@
       },
       "expected_mobile": {
         "sub_agents": [
-          "hosta:example-child"
+          "host_b:v2-fixture-child"
         ]
       }
     },
     {
-      "label": "non_privileged_parent",
+      "label": "non_nexus_parent",
       "frame": {
         "type": "session.inventory",
         "sessions": [
           {
-            "stream_id": "hosta:example-parent",
-            "host": "hosta",
-            "session_name": "example-parent",
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
             "provider": "codex",
             "role": "lead",
             "visibility": "default",
@@ -167,12 +167,12 @@
             "session_generation": "11111111111111111111111111111111",
             "agents": [
               {
-                "stream_id": "hosta:example-child",
+                "stream_id": "host_b:v2-fixture-child",
                 "display_name": "Fixture child",
                 "role": "lead",
                 "objective": "Check the fixture journey",
                 "state": "working",
-                "model": "model-a",
+                "model": "gpt-6-astra",
                 "since": "2026-09-08T00:00:00Z",
                 "session_generation": "22222222222222222222222222222222"
               }
@@ -191,9 +191,9 @@
         "type": "session.inventory",
         "sessions": [
           {
-            "stream_id": "hosta:example-parent",
-            "host": "hosta",
-            "session_name": "example-parent",
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
             "provider": "codex",
             "role": "nexus",
             "visibility": "default",
@@ -215,9 +215,9 @@
         "type": "session.inventory",
         "sessions": [
           {
-            "stream_id": "hosta:example-parent",
-            "host": "hosta",
-            "session_name": "example-parent",
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
             "provider": "codex",
             "role": "nexus",
             "visibility": "default",
@@ -227,7 +227,7 @@
             "session_generation": "11111111111111111111111111111111",
             "agents": [
               {
-                "stream_id": "hosta:example-child",
+                "stream_id": "host_b:v2-fixture-child",
                 "display_name": "Fixture child",
                 "role": null,
                 "objective": null,
@@ -242,7 +242,7 @@
       },
       "expected_mobile": {
         "sub_agents": [
-          "hosta:example-child"
+          "host_b:v2-fixture-child"
         ]
       }
     },
@@ -252,9 +252,9 @@
         "type": "session.inventory",
         "sessions": [
           {
-            "stream_id": "hosta:example-parent",
-            "host": "hosta",
-            "session_name": "example-parent",
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
             "provider": "codex",
             "role": "nexus",
             "visibility": "default",
@@ -264,12 +264,12 @@
             "session_generation": "11111111111111111111111111111111",
             "agents": [
               {
-                "stream_id": "hosta:example-child",
+                "stream_id": "host_b:v2-fixture-child",
                 "display_name": "Fixture child",
                 "role": "lead",
                 "objective": "Check the fixture journey",
                 "state": "idle",
-                "model": "model-a",
+                "model": "gpt-6-astra",
                 "since": "2026-09-08T00:00:00Z",
                 "session_generation": "44444444444444444444444444444444"
               }
@@ -280,7 +280,7 @@
       "expected_mobile": {
         "history_invalidated": true,
         "sub_agents": [
-          "hosta:example-child"
+          "host_b:v2-fixture-child"
         ]
       }
     },
@@ -290,9 +290,9 @@
         "type": "session.inventory",
         "sessions": [
           {
-            "stream_id": "hosta:example-parent",
-            "host": "hosta",
-            "session_name": "example-parent",
+            "stream_id": "host_b:v2-fixture-nexus",
+            "host": "host_b",
+            "session_name": "v2-fixture-nexus",
             "provider": "codex",
             "role": "nexus",
             "visibility": "default",
@@ -302,12 +302,12 @@
             "session_generation": "11111111111111111111111111111111",
             "agents": [
               {
-                "stream_id": "hosta:example-child",
+                "stream_id": "host_b:v2-fixture-child",
                 "display_name": "Fixture child",
                 "role": "lead",
-                "objective": "Check a synthetic sample",
+                "objective": "Vérifier 東京 🌈",
                 "state": "working",
-                "model": "model-a",
+                "model": "gpt-6-astra",
                 "since": "2026-09-08T00:00:00Z",
                 "session_generation": "22222222222222222222222222222222"
               }
@@ -318,7 +318,7 @@
       "expected_mobile": {
         "status_reachable": true,
         "sub_agents": [
-          "hosta:example-child"
+          "host_b:v2-fixture-child"
         ],
         "history_action": true
       }
@@ -333,16 +333,16 @@
       "request": {
         "type": "thread.read",
         "request_id": "thread-fixture-1",
-        "parent_stream_id": "hosta:example-parent",
-        "child_stream_id": "hosta:example-child",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
         "limit": 2
       },
       "response": {
         "type": "thread.read.ok",
         "request_id": "thread-fixture-1",
         "ok": true,
-        "parent_stream_id": "hosta:example-parent",
-        "child_stream_id": "hosta:example-child",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
         "rows": [
           {
             "row_id": "tell:tell-fixture-2",
@@ -363,14 +363,14 @@
             "truncated": false
           }
         ],
-        "next_cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RhOmV4YW1wbGUtY2hpbGQiLCJjaGlsZF9nZW5lcmF0aW9uIjoiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJwYXJlbnQiOiJob3N0YTpleGFtcGxlLXBhcmVudCIsInBhcmVudF9nZW5lcmF0aW9uIjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJ2IjoxfQ",
+        "next_cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RfYjp2Mi1maXh0dXJlLWNoaWxkIiwiY2hpbGRfZ2VuZXJhdGlvbiI6IjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwicGFyZW50IjoiaG9zdF9iOnYyLWZpeHR1cmUtbmV4dXMiLCJwYXJlbnRfZ2VuZXJhdGlvbiI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwidiI6MX0",
         "parent_generation": "11111111111111111111111111111111",
         "child_generation": "22222222222222222222222222222222"
       },
       "given": {
         "open_parent_generation": "11111111111111111111111111111111",
         "open_child_generation": "22222222222222222222222222222222",
-        "child_parent_stream_id": "hosta:example-parent",
+        "child_parent_stream_id": "host_b:v2-fixture-nexus",
         "committed_sequences": [
           1,
           2,
@@ -387,17 +387,17 @@
       "request": {
         "type": "thread.read",
         "request_id": "thread-fixture-2",
-        "parent_stream_id": "hosta:example-parent",
-        "child_stream_id": "hosta:example-child",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
         "limit": 2,
-        "cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RhOmV4YW1wbGUtY2hpbGQiLCJjaGlsZF9nZW5lcmF0aW9uIjoiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJwYXJlbnQiOiJob3N0YTpleGFtcGxlLXBhcmVudCIsInBhcmVudF9nZW5lcmF0aW9uIjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJ2IjoxfQ"
+        "cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RfYjp2Mi1maXh0dXJlLWNoaWxkIiwiY2hpbGRfZ2VuZXJhdGlvbiI6IjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwicGFyZW50IjoiaG9zdF9iOnYyLWZpeHR1cmUtbmV4dXMiLCJwYXJlbnRfZ2VuZXJhdGlvbiI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwidiI6MX0"
       },
       "response": {
         "type": "thread.read.ok",
         "request_id": "thread-fixture-2",
         "ok": true,
-        "parent_stream_id": "hosta:example-parent",
-        "child_stream_id": "hosta:example-child",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
         "rows": [
           {
             "row_id": "brief:spawn-fixture-1",
@@ -427,21 +427,21 @@
       "label": "agent_parent",
       "auth": {
         "token_verified": true,
-        "stream_id": "hosta:example-parent",
+        "stream_id": "host_b:v2-fixture-nexus",
         "session_generation": "11111111111111111111111111111111"
       },
       "request": {
         "type": "thread.read",
         "request_id": "thread-fixture-1",
-        "child_stream_id": "hosta:example-child",
+        "child_stream_id": "host_b:v2-fixture-child",
         "limit": 2
       },
       "response": {
         "type": "thread.read.ok",
         "request_id": "thread-fixture-1",
         "ok": true,
-        "parent_stream_id": "hosta:example-parent",
-        "child_stream_id": "hosta:example-child",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
         "rows": [
           {
             "row_id": "tell:tell-fixture-2",
@@ -462,7 +462,7 @@
             "truncated": false
           }
         ],
-        "next_cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RhOmV4YW1wbGUtY2hpbGQiLCJjaGlsZF9nZW5lcmF0aW9uIjoiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJwYXJlbnQiOiJob3N0YTpleGFtcGxlLXBhcmVudCIsInBhcmVudF9nZW5lcmF0aW9uIjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJ2IjoxfQ",
+        "next_cursor": "eyJiZWZvcmVfc2VxIjozLCJjaGlsZCI6Imhvc3RfYjp2Mi1maXh0dXJlLWNoaWxkIiwiY2hpbGRfZ2VuZXJhdGlvbiI6IjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwicGFyZW50IjoiaG9zdF9iOnYyLWZpeHR1cmUtbmV4dXMiLCJwYXJlbnRfZ2VuZXJhdGlvbiI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwidiI6MX0",
         "parent_generation": "11111111111111111111111111111111",
         "child_generation": "22222222222222222222222222222222"
       }
@@ -475,8 +475,8 @@
       "request": {
         "type": "thread.read",
         "request_id": "thread-fixture-1",
-        "parent_stream_id": "hosta:example-parent",
-        "child_stream_id": "hosta:example-child",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
         "limit": 2
       },
       "response": {
@@ -496,7 +496,7 @@
         "type": "thread.read",
         "request_id": "thread-fixture-1",
         "parent_stream_id": null,
-        "child_stream_id": "hosta:example-child",
+        "child_stream_id": "host_b:v2-fixture-child",
         "limit": 2
       },
       "response": {
@@ -511,13 +511,13 @@
       "label": "agent_forged_parent",
       "auth": {
         "token_verified": true,
-        "stream_id": "hosta:example-other"
+        "stream_id": "host_b:v2-other"
       },
       "request": {
         "type": "thread.read",
         "request_id": "thread-fixture-1",
-        "parent_stream_id": "hosta:example-parent",
-        "child_stream_id": "hosta:example-child",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
         "limit": 2
       },
       "response": {
@@ -536,8 +536,8 @@
       "request": {
         "type": "thread.read",
         "request_id": "thread-fixture-1",
-        "parent_stream_id": "hosta:example-parent",
-        "child_stream_id": "hosta:example-grandchild",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-grandchild",
         "limit": 2
       },
       "response": {
@@ -548,7 +548,7 @@
         "message": "not direct child"
       },
       "given": {
-        "target_parent_stream_id": "hosta:example-child"
+        "target_parent_stream_id": "host_b:v2-fixture-child"
       }
     },
     {
@@ -559,8 +559,8 @@
       "request": {
         "type": "thread.read",
         "request_id": "thread-fixture-1",
-        "parent_stream_id": "hosta:example-parent",
-        "child_stream_id": "hosta:example-child",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
         "limit": 2
       },
       "response": {
@@ -582,8 +582,8 @@
       "request": {
         "type": "thread.read",
         "request_id": "thread-fixture-1",
-        "parent_stream_id": "hosta:example-parent",
-        "child_stream_id": "hosta:example-child",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
         "limit": 2,
         "cursor": "cross-pair-fixture"
       },
@@ -603,8 +603,8 @@
       "request": {
         "type": "thread.read",
         "request_id": "thread-fixture-1",
-        "parent_stream_id": "hosta:example-parent",
-        "child_stream_id": "hosta:example-child",
+        "parent_stream_id": "host_b:v2-fixture-nexus",
+        "child_stream_id": "host_b:v2-fixture-child",
         "limit": 51
       },
       "response": {
@@ -622,9 +622,9 @@
       "envelope": {
         "schema_version": 1,
         "question_id": "question-fixture-1",
-        "producer_stream_id": "hosta:example-parent",
+        "producer_stream_id": "host_b:v2-fixture-nexus",
         "producer_session_generation": "11111111111111111111111111111111",
-        "dedup_key": "question:hosta:example-parent:question-fixture-1",
+        "dedup_key": "agent-question:host_b:v2-fixture-nexus:question-fixture-1",
         "title": "Please unlock the fixture phone",
         "body": "I need the phone unlocked to install the build.\n\nDone resumes installation. Not yet leaves it pending while I run independent checks.",
         "context": null,
@@ -649,9 +649,9 @@
       "envelope": {
         "schema_version": 1,
         "question_id": "question-fixture-free",
-        "producer_stream_id": "hosta:example-parent",
+        "producer_stream_id": "host_b:v2-fixture-nexus",
         "producer_session_generation": "11111111111111111111111111111111",
-        "dedup_key": "question:hosta:example-parent:question-fixture-1",
+        "dedup_key": "agent-question:host_b:v2-fixture-nexus:question-fixture-1",
         "title": "What destination should I use?",
         "body": "I need the destination before I can choose the route.",
         "context": null,
@@ -665,9 +665,9 @@
       "envelope": {
         "schema_version": 1,
         "question_id": "question-fixture-multi",
-        "producer_stream_id": "hosta:example-parent",
+        "producer_stream_id": "host_b:v2-fixture-nexus",
         "producer_session_generation": "11111111111111111111111111111111",
-        "dedup_key": "question:hosta:example-parent:question-fixture-1",
+        "dedup_key": "agent-question:host_b:v2-fixture-nexus:question-fixture-1",
         "title": "Which checks should run?",
         "body": "The next run depends on your selection.\n\nFirst check validates the roster. Second check validates history.",
         "context": null,
@@ -740,10 +740,10 @@
         "type": "prompt.answer",
         "request_id": "answer-fixture-4",
         "question_id": "question-fixture-free",
-        "text": "Example City"
+        "text": "Chicago"
       },
       "expected_store": {
-        "text": "Example City"
+        "text": "Chicago"
       }
     }
   ],
@@ -753,12 +753,12 @@
       "request": {
         "type": "spawn",
         "schema": "SpawnRequestV2",
-        "host": "hosta",
+        "host": "host_b",
         "provider": "codex",
-        "model": "model-a",
+        "model": "gpt-6-astra",
         "effort": "high",
-        "spawn_profile": "public_default",
-        "catalog_version": "example-catalog",
+        "spawn_profile": "desktop_manual",
+        "catalog_version": "fixture-catalog-v1",
         "resolution_source": "explicit_override",
         "idempotency_key": "33333333-3333-4333-8333-000000000001"
       },
@@ -769,12 +769,12 @@
       "request": {
         "type": "spawn",
         "schema": "SpawnRequestV2",
-        "host": "hosta",
+        "host": "host_b",
         "provider": "codex",
-        "model": "model-a",
+        "model": "gpt-6-astra",
         "effort": "high",
-        "spawn_profile": "public_default",
-        "catalog_version": "example-catalog",
+        "spawn_profile": "desktop_manual",
+        "catalog_version": "fixture-catalog-v1",
         "resolution_source": "explicit_override",
         "idempotency_key": "33333333-3333-4333-8333-000000000002",
         "objective": "Check the fixture journey"
@@ -786,12 +786,12 @@
       "request": {
         "type": "spawn",
         "schema": "SpawnRequestV2",
-        "host": "hosta",
+        "host": "host_b",
         "provider": "codex",
-        "model": "model-a",
+        "model": "gpt-6-astra",
         "effort": "high",
-        "spawn_profile": "public_default",
-        "catalog_version": "example-catalog",
+        "spawn_profile": "desktop_manual",
+        "catalog_version": "fixture-catalog-v1",
         "resolution_source": "explicit_override",
         "idempotency_key": "33333333-3333-4333-8333-000000000003",
         "objective": "Check without default watch",
@@ -802,12 +802,12 @@
   ],
   "navigation": {
     "header_back": "chats_list",
-    "history_x": "protected_status",
+    "history_x": "nexus_status",
     "status_x": "session_chat",
-    "content_back": "protected_status",
+    "content_back": "nexus_status",
     "entry_points": [
-      "protected_status_child",
-      "protected_chat_child_row"
+      "nexus_status_child",
+      "nexus_chat_child_row"
     ]
   }
 }

@@ -47,13 +47,20 @@ function htmlTitle(filePath) {
 }
 
 function repoNameForArtifact(filePath) {
-  return path.basename(path.dirname(filePath));
+  const dir = path.dirname(filePath);
+  return path.basename(dir).toLowerCase() === 'artifacts' && path.basename(path.dirname(dir)) === 'test'
+    ? path.basename(path.dirname(path.dirname(dir))) : path.basename(dir);
 }
 
 function reviewArtifactSearchDirs(config = {}) {
   const configured = Array.isArray(config.artifactDirs)
     ? config.artifactDirs.map(expandHome)
     : [path.join(process.cwd(), 'test', 'artifacts')];
+  for (const root of (config.repoRoots || []).map(expandHome)) {
+    for (const repo of safeReadDir(root).filter((entry) => entry.isDirectory())) {
+      configured.push(path.join(root, repo.name, '.ui-review'), path.join(root, repo.name, 'test', 'artifacts'));
+    }
+  }
   return Array.from(new Set(configured.filter((dir) => typeof dir === 'string' && dir)));
 }
 
@@ -68,8 +75,7 @@ function safeBundleEntry(root, entry) {
 
 function publicMachineLabel(value) {
   const raw = String(value || '').toLowerCase();
-  if (raw === 'hosta' || raw === 'hostb' || raw === 'hostc' || raw === 'hostd') return raw;
-  return 'hosta';
+  return slug(raw) || 'local';
 }
 
 function manifestArtifact(manifestPath, machine) {
@@ -100,7 +106,7 @@ function manifestArtifact(manifestPath, machine) {
     entryUrl: pathToFileURL(entryPath).href,
     fileName: path.basename(entryPath),
     sizeBytes: stat.size,
-    source: { localFallback: true },
+    source: { localFallback: true, manifest },
   };
 }
 
@@ -154,7 +160,7 @@ function listLocalArtifacts(config = {}, machine = 'hosta') {
     schema: 'pentacle.uiReviewIndex.v1',
     generatedAt: new Date().toISOString(),
     machine: normalizedMachine,
-    source: 'local-fixture',
+    source: 'local-fallback',
     artifacts,
   };
 }
@@ -168,7 +174,7 @@ function normalizeHubIndex(envelope, connected) {
   const base = {
     schema: data.schema || 'pentacle.uiReviewIndex.v1',
     generatedAt: data.generatedAt || envelope.updated_at || new Date().toISOString(),
-    source: 'adapter',
+    source: 'hub',
     artifacts: [],
     _updated_at: envelope.updated_at,
     _server_received_at: envelope.server_received_at,
@@ -177,7 +183,7 @@ function normalizeHubIndex(envelope, connected) {
     _data_stale: ageSec != null ? ageSec > ttl : false,
   };
   if (data.schema && data.schema !== 'pentacle.uiReviewIndex.v1') {
-    return { ...base, schema: data.schema, error: 'Malformed UI review index: unsupported schema.' };
+    return { ...base, schema: data.schema, error: 'Malformed UI Review index: unsupported schema.' };
   }
   const invalidArtifacts = [];
   const artifacts = Array.isArray(data.artifacts) ? data.artifacts.map((item) => {

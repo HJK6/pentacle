@@ -7,12 +7,10 @@
       "claude_bin": "claude",
       "codex_bin": "codex",
       "tmux_bin": "tmux",
-      "projects_root": "~/.config/example/projects",
-      "codex_history_path": "~/.config/example/history.jsonl",
-      "codex_state_db_path": "~/.cache/example/state.sqlite",
+      "projects_root": "~/.claude/projects",
+      "codex_history_path": "~/.codex/history.jsonl",
       "cwd": "~/workspace",
       "codex_cwd": "~/workspace",
-      "prompt": "Reply with exactly: local example ready",
       "show_gpu": false
     }
   ]

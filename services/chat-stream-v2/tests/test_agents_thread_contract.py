@@ -23,7 +23,7 @@ def wire_fixture():
     import hashlib
     exported = Path(__file__).with_name("fixtures") / "daemon_updates_v1.json"
     payload = exported.read_bytes()
-    assert hashlib.sha256(payload).hexdigest() == "463f38fee5127cf48553380d1ccfae5557695488ee2745cf3201802e2b8e0dd3"
+    assert hashlib.sha256(payload).hexdigest() == "8b7f65de33e1904f2615f8770141f5c18293603e5d9b071ae62bc33c71f2765f"
     core = Path(__file__).resolve().parents[3] / "pentacle-chat-core/tests/fixtures/daemon_updates_v1.json"
     if core.exists():
         assert core.read_bytes() == payload
@@ -179,7 +179,7 @@ def test_committed_core_fixture_through_daemon_summary_and_thread_handler():
             expected = fixture["thread_cases"][0]["response"]
             parent, child = expected["parent_stream_id"], expected["child_stream_id"]
             for sid, parent_sid, generation in ((parent, None, expected["parent_generation"]),
-                (child, parent, expected["child_generation"]), ("hosta:example-grandchild", child, "3" * 32)):
+                (child, parent, expected["child_generation"]), ("host_b:v2-fixture-grandchild", child, "3" * 32)):
                 host, name = sid.split(":", 1)
                 await store.open_session(host, name, parent_stream_id=parent_sid, session_generation=generation)
             rows = fixture["thread_cases"][1]["response"]["rows"] + expected["rows"]

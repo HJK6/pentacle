@@ -1,4 +1,4 @@
-"""External collector that persists shared Provider A and Provider C CLI observations."""
+"""External collector that persists shared Claude and Codex CLI observations."""
 
 from __future__ import annotations
 
@@ -9,22 +9,22 @@ from pathlib import Path
 
 from usage_state import (
     UsageStateStore,
-    _validate_provider_c_lkg,
+    _validate_codex_lkg,
     canonical_state,
 )
 
 
-_PROVIDER_A_USAGE_FIELDS = frozenset({
-    "week_all_pct", "week_all_resets", "week_provider_b_pct", "week_provider_b_resets",
+_CLAUDE_USAGE_FIELDS = frozenset({
+    "week_all_pct", "week_all_resets", "week_fable_pct", "week_fable_resets",
 })
-_PROVIDER_C_USAGE_FIELDS = frozenset({
+_CODEX_USAGE_FIELDS = frozenset({
     "pct", "resets_text", "resets_at_iso", "upstream_reported_at",
 })
 _BENIGN_STATUSES = frozenset({"no_update", "fallback_required"})
 
 
 def _now() -> str:
-    # Keep sub-second precision: the Provider C probe stamps ``upstream_reported_at``
+    # Keep sub-second precision: the Codex probe stamps ``upstream_reported_at``
     # with microseconds, and the desktop validator requires the collector's
     # completion stamp to not precede it. Truncating here made a same-second
     # completion look earlier than the upstream receipt.
@@ -62,33 +62,33 @@ def _require_fields(payload: dict, fields: frozenset[str], provider: str) -> Non
         raise ValueError(f"{provider} usage payload missing: {', '.join(missing)}")
 
 
-def _provider_a_rows(payload: dict) -> list[dict]:
-    """Map the shared ``check_provider_a_usage.py --json`` canonical payload onto the
-    Provider A (weekly all-models) and Provider B last-known-good rows."""
-    _require_fields(payload, _PROVIDER_A_USAGE_FIELDS, "Provider A")
+def _claude_rows(payload: dict) -> list[dict]:
+    """Map the shared ``check_claude_usage.py --json`` canonical payload onto the
+    Claude (weekly all-models) and Fable last-known-good rows."""
+    _require_fields(payload, _CLAUDE_USAGE_FIELDS, "Claude")
     return [
         _row(
-            "provider_a",
-            "Provider A",
+            "claude",
+            "Claude",
             pct=payload.get("week_all_pct"),
             resets_text=payload.get("week_all_resets") or None,
         ),
         _row(
-            "provider_b",
-            "Provider B",
-            pct=payload.get("week_provider_b_pct"),
-            resets_text=payload.get("week_provider_b_resets") or None,
+            "fable",
+            "Fable",
+            pct=payload.get("week_fable_pct"),
+            resets_text=payload.get("week_fable_resets") or None,
         ),
     ]
 
 
-def _provider_c_row(payload: dict, now: str) -> dict:
-    """Map the shared ``check_provider_c_usage.py --json`` weekly payload onto the
-    Provider C row, stamping ``probed_at`` with this collector's completion time."""
-    _require_fields(payload, _PROVIDER_C_USAGE_FIELDS, "Provider C")
+def _codex_row(payload: dict, now: str) -> dict:
+    """Map the shared ``check_codex_usage.py --json`` weekly payload onto the
+    Codex row, stamping ``probed_at`` with this collector's completion time."""
+    _require_fields(payload, _CODEX_USAGE_FIELDS, "Codex")
     return _row(
-        "provider_c",
-        "Provider C",
+        "codex",
+        "Codex",
         pct=payload.get("pct"),
         resets_text=payload.get("resets_text"),
         resets_at_iso=payload.get("resets_at_iso"),
@@ -122,7 +122,7 @@ def _ok(now: str) -> dict:
 def _failed(
     previous: dict | None,
     now: str,
-    provider: str = "provider_a",
+    provider: str = "claude",
     error: Exception | None = None,
 ) -> dict:
     previous = previous or _never()
@@ -147,14 +147,14 @@ class UsageStateCollector:
         self,
         *,
         state_path: str | Path,
-        provider_a_command: tuple[str, ...],
-        provider_c_command: tuple[str, ...],
+        claude_command: tuple[str, ...],
+        codex_command: tuple[str, ...],
         run=subprocess.run,
         now_fn=_now,
     ) -> None:
         self._store = UsageStateStore(state_path)
-        self._provider_a_command = provider_a_command
-        self._provider_c_command = provider_c_command
+        self._claude_command = claude_command
+        self._codex_command = codex_command
         self._run = run
         self._now = now_fn
 
@@ -186,26 +186,26 @@ class UsageStateCollector:
         # (prior LKG retained, health recorded) instead of aborting the write.
         state = self._store.load()
         lkg = state.lkg
-        provider_c_lkg = state.provider_c_lkg or _row("provider_c", "Provider C")
-        provider_a_health = state.health or _never()
-        provider_c_health = state.provider_c_health or _never()
+        codex_lkg = state.codex_lkg or _row("codex", "Codex")
+        claude_health = state.health or _never()
+        codex_health = state.codex_health or _never()
         try:
-            payload = self._json(self._provider_a_command)
+            payload = self._json(self._claude_command)
             if payload is not None:  # None == benign no-update: keep prior
-                rows = _provider_a_rows(payload)
+                rows = _claude_rows(payload)
                 done = self._now()
                 health = _ok(done)
                 canonical_state(rows, health)  # reject malformed rows -> _failed
-                lkg, provider_a_health = rows, health
+                lkg, claude_health = rows, health
         except Exception as exc:
-            provider_a_health = _failed(provider_a_health, self._now(), provider="provider_a", error=exc)
+            claude_health = _failed(claude_health, self._now(), provider="claude", error=exc)
         try:
-            payload = self._json(self._provider_c_command)
+            payload = self._json(self._codex_command)
             if payload is not None:
                 done = self._now()
-                row = _provider_c_row(payload, done)
-                _validate_provider_c_lkg(row)  # reject malformed row -> _failed
-                provider_c_lkg, provider_c_health = row, _ok(done)
+                row = _codex_row(payload, done)
+                _validate_codex_lkg(row)  # reject malformed row -> _failed
+                codex_lkg, codex_health = row, _ok(done)
         except Exception as exc:
-            provider_c_health = _failed(provider_c_health, self._now(), provider="provider_c", error=exc)
-        self._store.save(lkg, provider_a_health, provider_c_lkg=provider_c_lkg, provider_c_health=provider_c_health)
+            codex_health = _failed(codex_health, self._now(), provider="codex", error=exc)
+        self._store.save(lkg, claude_health, codex_lkg=codex_lkg, codex_health=codex_health)
