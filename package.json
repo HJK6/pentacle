@@ -35,18 +35,18 @@
     "@xterm/addon-unicode11": "^0.9.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^5.5.0",
+    "chat-core": "file:./pentacle-chat-core",
     "pentacle-chat-core": "file:./pentacle-chat-core",
     "ssh2": "^1.17.0",
-    "ws": "^8.20.0",
-    "chat-core": "file:./pentacle-chat-core"
+    "ws": "^8.20.0"
   },
   "optionalDependencies": {
     "node-pty": "^1.0.0"
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.7.1",
-    "electron": "^35.0.0",
-    "electron-builder": "^25.1.8",
+    "@electron/rebuild": "^4.2.0",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "jsdom": "^24.1.3"
   },
