@@ -4,7 +4,7 @@ Pentacle is a desktop workspace for coding agents, structured chat, work specifi
 
 ## Local setup
 
-Use macOS or Linux with Node.js 22, Python 3.11 or newer, tmux and at least one configured agent CLI (`claude` or `codex`). Authenticate the CLI with your own account before using it through Pentacle. Windows needs a separately configured SSH terminal host; the local setup below targets macOS/Linux.
+Use macOS or Linux with Node.js 22.12 or newer, Python 3.11 or newer, tmux and at least one configured agent CLI (`claude` or `codex`). Authenticate the CLI with your own account before using it through Pentacle. Windows needs a separately configured SSH terminal host; the local setup below targets macOS/Linux.
 
 From this repository:
 
