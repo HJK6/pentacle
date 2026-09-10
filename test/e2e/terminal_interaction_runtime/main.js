@@ -22,7 +22,8 @@ const remoteTmux = process.env.PENTACLE_RUNTIME_REMOTE_TMUX || "tmux";
 const localPython = process.env.PENTACLE_RUNTIME_PYTHON || "python3";
 const remotePython = process.env.PENTACLE_RUNTIME_REMOTE_PYTHON || "python3";
 const native = require(path.join(dependencyRoot, "node-pty"));
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "pentacle-terminal-fixture-"));
+const root=process.env.PENTACLE_RUNTIME_FIXTURE_ROOT;
+if(!root){console.error("Use the Node run.js launcher for post-exit cleanup.");app.exit(2);return;}
 const quote = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
 const sshArgs = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-p", remotePort, "--", remoteTarget].filter((x) => x !== void 0);
 const wrapper = path.join(root, "tmux-fixture");
@@ -33,7 +34,7 @@ const fixtureRun = (file, args) => mode === "local" ? run(file, args, { timeout:
 const tmux = (...args) => fixtureRun(fixtureTmux, args);
 const readRaw = async () => mode === "local" ? fs.existsSync(rawPath) ? fs.readFileSync(rawPath) : Buffer.alloc(0) : Buffer.from((await fixtureRun(remotePython, ["-c", 'import base64,sys; print(base64.b64encode(open(sys.argv[1],"rb").read()).decode())', rawPath])).stdout.trim(), "base64");
 try { app.setPath("userData", path.join(root, "profile")); } catch(error) { fs.rmSync(root,{recursive:true,force:true}); throw error; }
-const receipt = { electron: process.versions.electron, kind: "terminal-interaction-" + mode, files: {}, tests: [], commands: [] };
+const receipt = { fixtureRoot:root, electron: process.versions.electron, kind: "terminal-interaction-" + mode, files: {}, tests: [], commands: [] };
 try { for (const file of ["renderer/app.js", "renderer/terminal_paste.js", "main/terminal_adapter.js", "main/clipboard_ipc_bridge.js", "preload.js"]) receipt.files[file] = crypto.createHash("sha256").update(fs.readFileSync(path.join(sourceRoot, file))).digest("hex"); } catch(error) { fs.rmSync(root,{recursive:true,force:true}); throw error; }
 receipt.harness={}; for(const file of ["main.js","renderer.js","index.html","raw.py","cleanup.js"]) receipt.harness[file]=crypto.createHash("sha256").update(fs.readFileSync(path.join(__dirname,file))).digest("hex");
 let win, saved = null, ownedText = null, dispose = null, finishing = false, ownsFixture = false;

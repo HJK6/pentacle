@@ -8,7 +8,7 @@ focus is available. `npm test` does not invoke it.
 From the repository root, with Electron/native dependencies installed:
 
 ```sh
-PENTACLE_RUNTIME_CLIPBOARD=1 node_modules/.bin/electron test/e2e/terminal_interaction_runtime
+PENTACLE_RUNTIME_CLIPBOARD=1 node test/e2e/terminal_interaction_runtime/run.js
 ```
 
 The harness snapshots every available clipboard item/type into memory before
@@ -17,7 +17,9 @@ clipboard still contains its last known sentinel. It never logs the previous
 clipboard. A changed external clipboard aborts dependent copy/paste cells.
 
 It creates an isolated Electron profile, uniquely named tmux server, and raw
-stdin fixtures. It changes only that server's settings and its own sessions;
+stdin fixtures. A Node parent supervises Electron and removes its exact temporary
+profile directory after the child exits, including storage files recreated
+during Chromium shutdown. It changes only that server's settings and its own sessions;
 it never attaches an existing user session. Normal completion, failures,
 SIGINT, and SIGTERM dispose owned PTYs, kill the private server, and remove
 fixture directories. Results remain in the printed output directory. Exit 0
@@ -28,6 +30,7 @@ Configuration is through environment variables:
 
 | Variable | Default / purpose |
 | --- | --- |
+| `PENTACLE_RUNTIME_ELECTRON` | Installed `electron` package executable; override to select a development Electron bundle. |
 | `PENTACLE_RUNTIME_CLIPBOARD` | Must explicitly equal `1`. |
 | `PENTACLE_RUNTIME_SOURCE` | Repository root; may point to a packaged `app.asar`. |
 | `PENTACLE_RUNTIME_DEPENDENCIES` | `<source>/node_modules`; must contain xterm addons and node-pty matching the running Electron ABI. |
@@ -64,7 +67,7 @@ harness does not test chat composer behavior or non-macOS input conventions.
 Cleanup fault injection runs without Electron or clipboard access:
 
 ```sh
-node --test test/e2e/terminal_interaction_runtime/cleanup.test.js
+node --test test/e2e/terminal_interaction_runtime/cleanup.test.js test/e2e/terminal_interaction_runtime/supervisor.test.js
 ```
 
 Cleanup aggregates stage errors and still attempts independent work. If server
@@ -72,3 +75,9 @@ termination cannot be established, it preserves fixture directories and records
 recovery paths/socket in the receipt. A transport failure is never treated as
 proof that the remote server is absent. Native gestures wait for parsed output,
 attach/control commands, and document focus before mutating the clipboard.
+
+The supervisor writes `post-exit-cleanup.json`; a missing or mismatched child
+receipt preserves the fixture for recovery. Spawn failures before a child starts
+can safely remove the unused root. SIGINT/SIGTERM are forwarded to the child; the
+parent waits for child closure before any removal. A stale successful receipt
+from an earlier invocation cannot authorize deleting the current fixture.
