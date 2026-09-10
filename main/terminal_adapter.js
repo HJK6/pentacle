@@ -53,6 +53,22 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
     return { sessionName, hostId: session?.host || host };
   });
   ipcMain.on('pty:write', (event, slot, data) => slots.get(key(event, slot))?.process?.write(String(data)));
+  ipcMain.handle('pty:paste', (event, slot, data) => {
+    const id = key(event, slot);
+    const record = slots.get(id);
+    if (!record?.paneId || !record.process || typeof data !== 'string' || !data) return false;
+    const current = () => slots.get(id) === record && !event.sender.isDestroyed();
+    const operation = (record.pasteTail || Promise.resolve()).then(async () => {
+      if (!current()) return false;
+      const command = target(record.host, ['copy-mode', '-q', '-t', record.paneId]);
+      await execute(command.file, command.args, { timeout: 5000 });
+      if (!current()) return false;
+      record.process.write(data);
+      return true;
+    });
+    record.pasteTail = operation.catch(() => {});
+    return operation;
+  });
   ipcMain.on('pty:resize', (event, slot, cols, rows) => { if (Number.isInteger(cols) && cols > 0 && Number.isInteger(rows) && rows > 0) slots.get(key(event, slot))?.process?.resize(cols, rows); });
   function tmuxAction(event, slot, ...commands) {
     const record = slots.get(key(event, slot));

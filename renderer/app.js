@@ -5,7 +5,7 @@ const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { Unicode11Addon } = require('@xterm/addon-unicode11'); // REQUIRED: without this, ❯ and other unicode renders as __
 const { WebglAddon } = require('@xterm/addon-webgl'); // GPU-accelerated rendering — fixes partial text paint on screen refresh
-const { clipboard: electronClipboard } = require('electron'); // reliable synchronous read; navigator.clipboard needs focus
+const { createTerminalPaste } = require('./terminal_paste');
 const path = require('path');
 const chatUi = require('./chat_ui_state');
 const assetRender = require('./asset_render');
@@ -4493,6 +4493,14 @@ async function attachSession(slot, sessionName, displayName, hostId) {
   if (state.slotGen[slot] !== gen) { try { term.dispose(); } catch {} return; }
   fitAddon.fit();
 
+  const terminalPaste = createTerminalPaste({
+    term,
+    readClipboard: () => window.cc.readClipboard(),
+    pastePty: (data) => window.cc.pastePty(slot, data),
+    isCurrent: () => state.slotGen[slot] === gen && state.terminals[slot]?.term === term && !!state.slots[slot]?.paneId,
+  });
+  term.element.addEventListener('paste', terminalPaste.nativePaste, { capture: true });
+
   // Keyboard enhancements for terminal input
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true;
@@ -4516,28 +4524,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
       // no selection + no shift → fall through so Ctrl+C becomes SIGINT
     }
 
-    // Paste: Cmd+V on mac. Ctrl+V / Ctrl+Shift+V on Win/Linux. preventDefault
-    // is REQUIRED — without it Chromium dispatches a native `paste` into
-    // xterm's hidden textarea, causing a double paste.
-    // Use Electron's clipboard API: navigator.clipboard.readText() silently
-    // rejects when the document isn't focused (xterm's WebGL canvas swallows
-    // document focus on click), so paste into the terminal stopped working.
-    const pasteCombo = (e.metaKey && e.key === 'v') ||
-                       (!isMac && e.ctrlKey && !e.metaKey && (e.key === 'v' || e.key === 'V'));
-    if (pasteCombo) {
-      e.preventDefault();
-      e.stopPropagation();
-      try {
-        const text = electronClipboard.readText();
-        if (text) {
-          window.cc.exitCopyMode(slot);
-          window.cc.writePty(slot, text);
-        }
-      } catch (err) {
-        console.warn('[paste] electron clipboard read failed:', err);
-      }
-      return false;
-    }
+    if (!terminalPaste.key(e, isMac)) return false;
 
     // Ctrl+Enter → insert newline in Claude Code (send CSI u via tmux send-keys -H)
     if (e.ctrlKey && e.key === 'Enter') {
@@ -4572,6 +4559,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
 
   // Wire input — exit tmux copy-mode before sending keystrokes
   term.onData(data => {
+    if (terminalPaste.captureData(data)) return;
     window.cc.exitCopyMode(slot);
     window.cc.writePty(slot, data);
   });

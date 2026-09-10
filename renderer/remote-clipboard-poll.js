@@ -24,7 +24,7 @@ function createRemoteClipboardPoller({
       const data = await fetchSince(idx);
       const lines = Array.isArray(data && data.lines) ? data.lines : [];
       for (const line of lines) {
-        writeClipboard(line);
+        await writeClipboard(line);
       }
       if (data && Number.isFinite(Number(data.total))) {
         idx = Number(data.total);

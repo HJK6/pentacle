@@ -1,7 +1,7 @@
 // With nodeIntegration enabled, preload just sets up IPC convenience functions
 // on window.cc for the renderer to use.
 
-const { clipboard, ipcRenderer } = require('electron');
+const { ipcRenderer } = require('electron');
 const os = require('os');
 const path = require('path');
 const { loadConfig } = require('./config-loader');
@@ -60,6 +60,7 @@ window.cc = {
   // server its session lives on. Defaults to 'local' for backcompat.
   createPty: (slot, sessionName, hostId, cols, rows) => ipcRenderer.invoke('pty:create', slot, sessionName, hostId || 'local', cols, rows),
   writePty: (slot, data) => ipcRenderer.send('pty:write', slot, data),
+  pastePty: (slot, data) => ipcRenderer.invoke('pty:paste', slot, data),
   tmuxSend: (slot, ...keys) => ipcRenderer.send('pty:tmux-send', slot, ...keys),
   resizePty: (slot, cols, rows) => ipcRenderer.send('pty:resize', slot, cols, rows),
   // Scroll now takes slot (the main process looks up host+paneId from the slot).
@@ -83,8 +84,8 @@ window.cc = {
 
   // Mic server
   startMicServer: () => ipcRenderer.invoke('mic:start-server'),
-  writeClipboard: (text) => clipboard.writeText(String(text || '')),
-  readClipboard: () => clipboard.readText(),
+  writeClipboard: (text) => ipcRenderer.invoke('clipboard:write-text', String(text ?? '')),
+  readClipboard: () => ipcRenderer.invoke('clipboard:read-text'),
 
   // Meeting window
   openMeeting: () => ipcRenderer.send('meeting:open'),

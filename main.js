@@ -6,7 +6,7 @@
  * adapters; this file never contains credentials, fleet routing, or network
  * promotion logic.
  */
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, clipboard } = require('electron');
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
@@ -67,6 +67,7 @@ async function openPublicUrl(value) {
 }
 
 function registerIpc() {
+  require('./main/clipboard_ipc_bridge').registerClipboardIpc(ipcMain, clipboard);
   ipcMain.handle('open-external', (_event, url) => openPublicUrl(url));
   ipcMain.handle('get-config', () => publicConfig());
 

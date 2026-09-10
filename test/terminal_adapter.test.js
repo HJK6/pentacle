@@ -93,3 +93,40 @@ for (const remote of [false, true]) {
     } finally { cleanup(); }
   });
 }
+
+test('paste waits for history exit, keeps order, and discards an attachment replaced during SSH', async () => {
+  const handlers = new Map(), pending = [], writes = [], commands = [];
+  const sender = new EventEmitter(); sender.id = 30; sender.isDestroyed = () => false;
+  let pane = 50;
+  const cleanup = registerTerminalIpc({ handle: (n, fn) => handlers.set(n, fn), on() {} },
+    { hosts: { peer: { host: 'peer.example' } } }, {}, {
+      execute: async (file, args) => {
+        if (args.at(-1).includes('display-message')) return { stdout: `%${pane++}` };
+        commands.push({ file, args }); return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+      },
+      pty: { spawn: () => ({ onData() {}, onExit() {}, kill() {}, write: text => writes.push(text) }) },
+    });
+  const event = { sender }, flush = () => new Promise(resolve => setImmediate(resolve));
+  try {
+    await handlers.get('pty:create')(event, 0, 'fixture', 'peer');
+    const first = handlers.get('pty:paste')(event, 0, 'one');
+    const second = handlers.get('pty:paste')(event, 0, 'two');
+    await flush(); assert.deepEqual(writes, []); assert.equal(commands.length, 1);
+    assert.match(commands[0].args.at(-1), /'copy-mode' '-q' '-t' '%50'$/);
+    pending.shift().resolve({ stdout: '' }); assert.equal(await first, true);
+    await flush(); assert.deepEqual(writes, ['one']); assert.equal(commands.length, 2);
+    pending.shift().resolve({ stdout: '' }); assert.equal(await second, true);
+    assert.deepEqual(writes, ['one', 'two']);
+    const stale = handlers.get('pty:paste')(event, 0, 'stale'); await flush();
+    await handlers.get('pty:create')(event, 0, 'replacement', 'peer');
+    pending.shift().resolve({ stdout: '' }); assert.equal(await stale, false);
+    assert.deepEqual(writes, ['one', 'two']);
+    const failed = handlers.get('pty:paste')(event, 0, 'failed');
+    const rejects = assert.rejects(failed, /SSH unavailable/); await flush();
+    pending.shift().reject(Error('SSH unavailable')); await rejects;
+    assert.deepEqual(writes, ['one', 'two']);
+    const recovered = handlers.get('pty:paste')(event, 0, 'recovered'); await flush();
+    pending.shift().resolve({ stdout: '' }); assert.equal(await recovered, true);
+    assert.deepEqual(writes, ['one', 'two', 'recovered']);
+  } finally { cleanup(); }
+});
