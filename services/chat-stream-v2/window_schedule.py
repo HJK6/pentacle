@@ -9,7 +9,7 @@ attestations are unsupported and fail closed, including on recovered rows.
 
 from __future__ import annotations
 
-from _shared.spawn_objective import objective_error
+from _shared.spawn_objective import objective_error, resolve_objective
 
 import asyncio
 import base64
@@ -401,8 +401,7 @@ class WindowSchedule:
         return await self._receipt_read(msg, "schedule")
 
     async def schedule_insert(self, msg: dict[str, Any]) -> dict[str, Any]:
-        if error := objective_error(msg.get("objective")):
-            raise VerbError(error, error)
+        # Objective resolution is lineage-aware and needs the parent, computed below.
         request_id = _valid_uuid(msg.get("request_id"))
         kind, actor, seat = await self._actor(msg)
         if msg.get("agent_orch_attestation") is not None:
@@ -438,6 +437,17 @@ class WindowSchedule:
         parent_stream_id = str(msg.get("parent_stream_id") or "").strip() or None
         if parent_stream_id is not None and await self._session(parent_stream_id) is None:
             raise VerbError("parent_not_found", "scheduled parent must exist at create")
+        # Mirror live-spawn admission: a parented scheduled child requires an
+        # objective; a top-level/handoff scheduled spawn derives one from its
+        # brief so the stored row carries a concrete objective for fire.
+        objective, objective_source, error = resolve_objective(
+            msg.get("objective"), objective_supported=msg.get("objective_supported"),
+            parent_stream_id=parent_stream_id,
+            brief=str(msg.get("initial_prompt") or ""), title=msg.get("title"),
+        )
+        if error:
+            raise VerbError(error, error)
+        msg = {**msg, "objective": objective, "objective_source": objective_source}
         for field in ("reparent_children", "self_close_on_completion", "no_watch"):
             if field in msg and not isinstance(msg.get(field), bool):
                 raise VerbError("invalid_request", f"{field} must be boolean when specified")
@@ -548,8 +558,8 @@ class WindowSchedule:
                         "target_host,role,phase,visibility,requested_provider,requested_model,requested_effort,"
                         "resolved_provider,resolved_model,resolved_effort,disposition_waived_reason,confirm_model_change,"
                         "fires_at_utc,state,generation,prompt_sha256,prompt_b64,prompt_blob_id,created_at,updated_at,"
-                        "target_sha,attestation_json,reparent_children,self_close_on_completion,objective,no_watch) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',1,?,?,?,?,?,?,?,?,?,?,?)",
+                        "target_sha,attestation_json,reparent_children,self_close_on_completion,objective,objective_source,no_watch) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',1,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (schedule_id, request_id, actor if kind == "seat" else None,
                          actor if kind == "service" else None, _compact(spec_ids), _compact(provenance),
                          parent_stream_id, msg.get("handoff_from_stream_id"),
@@ -562,7 +572,7 @@ class WindowSchedule:
                          target_sha, attestation_json,
                          None if "reparent_children" not in msg else int(bool(msg["reparent_children"])),
                          None if "self_close_on_completion" not in msg else int(bool(msg["self_close_on_completion"])),
-                         msg["objective"], int(bool(msg.get("no_watch")))),
+                         msg["objective"], msg.get("objective_source"), int(bool(msg.get("no_watch")))),
                     )
                     prior = _row(conn.execute("SELECT * FROM v2_schedules WHERE schedule_id=?", (schedule_id,)).fetchone())
                 result = {
@@ -774,6 +784,9 @@ class WindowSchedule:
                 schedule = _row(conn.execute("SELECT * FROM v2_schedules WHERE schedule_id=?", (schedule_id,)).fetchone())
                 if schedule is None:
                     raise VerbError("not_found", "schedule not found")
+                # A properly-inserted schedule always carries a resolved objective
+                # (parented required, top-level derived at insert); a blank one is a
+                # legacy row to retire, so this re-validation stays presence-only.
                 if error := objective_error(schedule.get("objective")):
                     conn.execute("UPDATE v2_schedules SET state='failed',last_error_code=?,terminal_at=?,updated_at=? WHERE schedule_id=?", (error, timestamp, timestamp, schedule_id))
                     conn.commit()
@@ -850,6 +863,7 @@ class WindowSchedule:
             "effort": schedule["resolved_effort"], "role": schedule.get("role"),
             "phase": schedule.get("phase"), "visibility": schedule.get("visibility"),
             "objective": schedule.get("objective"),
+            "objective_source": schedule.get("objective_source"),
             "parent_stream_id": schedule.get("parent_stream_id"),
             "no_watch": bool(schedule.get("no_watch")),
             "handoff_from_stream_id": schedule.get("handoff_from_stream_id"),
@@ -978,6 +992,9 @@ class WindowSchedule:
 
     async def recover(self) -> None:
         def retire_legacy(conn):
+            # Post-fix inserts always store a resolved objective (parented required,
+            # top-level derived), so a NULL objective marks a pre-objective legacy
+            # row that must not fire; retire it regardless of lineage.
             conn.execute("UPDATE v2_schedules SET state='failed',last_error_code='objective_required',terminal_at=?,updated_at=? WHERE objective IS NULL AND state IN ('pending','retry_pending','firing')", (_now(), _now()))
             conn.commit()
         await self.store.submit(retire_legacy)

@@ -95,6 +95,13 @@ def patched_close(monkeypatch, tmp_path):
     return Handle()
 
 
+def test_offline_close_prints_deferred_reap_status(patched_close, capsys):
+    patched_close.set_response({"type": "close.ok", "reap_status": "deferred_host_offline"})
+    assert cli.close(_close_args(operator_confirm=True)) == 0
+    assert patched_close.calls[0]["operator_confirm"] is True
+    assert json.loads(capsys.readouterr().out)["reap_status"] == "deferred_host_offline"
+
+
 def test_self_close_drives_close_once_with_operator_confirm(patched_close, capsys):
     # `agent-orch close --operator-confirm $AGENT_ORCH_STREAM_ID` from a
     # wrapper-less worker: discovery resolves the caller to its own stream, so

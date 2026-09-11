@@ -73,14 +73,119 @@ def test_legacy_admission_persists_and_projects_provenance(tmp_path, fields, exp
 
 @pytest.mark.parametrize("fields,code", [
     ({"objective_supported": True}, "objective_required"),
-    ({"objective": ""}, "objective_required"),
-    ({"objective": None}, "objective_required"),
-    ({"objective": " \t"}, "objective_required"),
-    ({"objective": "line\nbreak"}, "objective_invalid"),
-    ({"objective": "x" * 121}, "objective_invalid"),
-    ({"objective": 23}, "objective_invalid"),
+    ({"objective_supported": True, "objective": ""}, "objective_required"),
+    ({"objective_supported": True, "objective": None}, "objective_required"),
+    ({"objective_supported": True, "objective": " \t"}, "objective_required"),
+    ({"objective_supported": True, "objective": "line\nbreak"}, "objective_invalid"),
+    ({"objective_supported": True, "objective": "x" * 121}, "objective_invalid"),
+    ({"objective_supported": True, "objective": 23}, "objective_invalid"),
 ])
 def test_strict_requests_reject_before_effects(fields, code):
+    # Strict lineage = a protocol-aware caller (objective_supported) spawning a
+    # parented child: a blank/absent objective is objective_required and a
+    # malformed one objective_invalid, both before effects.
+    async def run():
+        store = Store(); store.start()
+        pane = EchoPane()
+        ctl = SpawnCtl(store, Sessions(store, tmux=pane), tmux=pane)
+        try:
+            with pytest.raises(VerbError) as error:
+                await ctl.spawn({"command": "run", "prompt": "A useful derivation exists",
+                    "parent_stream_id": "localhost:parent", **fields}, "localhost")
+            assert error.value.code == code
+            assert not pane.alive
+            assert not await store.reservations()
+            assert not await store.list_sessions()
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fields,expected,source", [
+    # Top-level (no parent) blank/absent objectives derive instead of rejecting;
+    # objectives feed the parent roster, and a top-level seat has no parent.
+    ({"objective_supported": True, "prompt": "Ship the roster fix"}, "Ship the roster fix", "derived"),
+    ({"objective": "", "prompt": "Ship the roster fix"}, "Ship the roster fix", "derived"),
+    ({"objective": None, "title": "Ship the roster fix"}, "Ship the roster fix", "derived"),
+    ({"objective": " \t", "objective_supported": True, "prompt": "Ship the roster fix"}, "Ship the roster fix", "derived"),
+    # A present, valid explicit objective on a top-level spawn is kept as explicit.
+    ({"objective": "Top-level goal", "objective_supported": True, "prompt": "ignored"}, "Top-level goal", "explicit"),
+])
+def test_top_level_derives_or_keeps_objective(tmp_path, fields, expected, source):
+    async def run():
+        path = str(tmp_path / "sessions.db")
+        store = Store(path); store.start()
+        pane = EchoPane()
+        sessions = Sessions(store, tmux=pane)
+        ctl = SpawnCtl(store, sessions, tmux=pane)
+        try:
+            response = await ctl.spawn({"command": "run", "session_name": "child",
+                "request_id": "top-level-compat", **fields}, "localhost")
+            await asyncio.gather(*list(ctl._background_spawns))
+            assert response["type"] == "spawn.ok"
+            row = await store.fetch_session("localhost", "child")
+            assert (row["objective"], row["objective_source"]) == (expected, source)
+        finally:
+            if pane.alive:
+                await pane.kill_session("child")
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fields,expected_source", [
+    # A fired schedule pre-derives its objective (to survive the NULL-objective
+    # sweep) and carries objective_source=derived; spawn() must preserve that
+    # provenance for the top-level session rather than relabel it explicit.
+    ({"objective": "Roll the roster fix", "objective_source": "derived"}, "derived"),
+    ({"objective": "Explicit top goal", "objective_source": "explicit"}, "explicit"),
+    ({"objective": "Live top goal"}, "explicit"),  # live callers never send a source
+])
+def test_top_level_honors_trusted_derived_objective_source(tmp_path, fields, expected_source):
+    async def run():
+        path = str(tmp_path / "sessions.db"); store = Store(path); store.start()
+        pane = EchoPane(); sessions = Sessions(store, tmux=pane); ctl = SpawnCtl(store, sessions, tmux=pane)
+        try:
+            response = await ctl.spawn({"command": "run", "session_name": "child",
+                "request_id": "sched-src", "prompt": "a brief", **fields}, "localhost")
+            await asyncio.gather(*list(ctl._background_spawns))
+            assert response["type"] == "spawn.ok"
+            row = await store.fetch_session("localhost", "child")
+            assert (row["objective"], row["objective_source"]) == (fields["objective"], expected_source)
+        finally:
+            if pane.alive:
+                await pane.kill_session("child")
+            store.stop()
+    asyncio.run(run())
+
+
+def test_parented_child_cannot_self_relabel_derived_source(tmp_path):
+    # A trusted 'derived' source only applies to non-strict spawns; a parented
+    # child spawn stays explicit and cannot use it to relabel/bypass.
+    async def run():
+        path = str(tmp_path / "sessions.db"); store = Store(path); store.start()
+        pane = EchoPane(); sessions = Sessions(store, tmux=pane); ctl = SpawnCtl(store, sessions, tmux=pane)
+        try:
+            await sessions.open("localhost", "parent")
+            await ctl.spawn({"command": "run", "session_name": "child", "request_id": "child-src",
+                "objective": "Child goal", "objective_source": "derived",
+                "objective_supported": True, "parent_stream_id": "localhost:parent"}, "localhost")
+            await asyncio.gather(*list(ctl._background_spawns))
+            row = await store.fetch_session("localhost", "child")
+            assert row["objective_source"] == "explicit"
+        finally:
+            if pane.alive:
+                await pane.kill_session("child")
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fields,code", [
+    ({"objective": "line\nbreak", "objective_supported": True}, "objective_invalid"),
+    ({"objective": "x" * 121, "objective_supported": True}, "objective_invalid"),
+])
+def test_top_level_present_objective_still_shape_validated(fields, code):
+    # A top-level spawn never *requires* an objective, but a present malformed one
+    # is still rejected on shape before effects.
     async def run():
         store = Store(); store.start()
         pane = EchoPane()
@@ -90,7 +195,6 @@ def test_strict_requests_reject_before_effects(fields, code):
                 await ctl.spawn({"command": "run", "prompt": "A useful derivation exists", **fields}, "localhost")
             assert error.value.code == code
             assert not pane.alive
-            assert not await store.reservations()
             assert not await store.list_sessions()
         finally:
             store.stop()

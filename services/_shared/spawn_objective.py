@@ -22,3 +22,51 @@ def objective_error(value: object) -> str | None:
     if any(char in value for char in "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"):
         return "objective_invalid"
     return None
+
+
+def objective_required_for(objective_supported: object, parent_stream_id: object) -> bool:
+    """The lineage-aware objective predicate.
+
+    An objective is consumed only where it is projected: the parent's sub-agent
+    roster. So it is required only for a parented child spawn produced by a
+    protocol-aware caller. Top-level, `--top-level`, handoff, and
+    scheduled-without-parent spawns (parent None) set their own goal and never
+    require one; producers predating the objective protocol
+    (`objective_supported` falsy \u2014 e.g. the desktop client) always derive.
+    """
+    parent = str(parent_stream_id).strip() if parent_stream_id is not None else ""
+    return bool(objective_supported) and bool(parent)
+
+
+def resolve_objective(
+    objective: object, *, objective_supported: object, parent_stream_id: object,
+    brief: str = "", title: object = None, objective_source: object = None,
+) -> tuple[object, str, str | None]:
+    """Resolve `(objective, objective_source, error)` under the lineage rule.
+
+    Strict (`objective_required_for`) \u2192 the objective is required and
+    shape-validated; `error` is `objective_required`/`objective_invalid` on a
+    blank/absent/malformed value. Not strict \u2192 a blank or absent objective is
+    derived from the brief/title (`objective_source='derived'`), while an
+    explicitly supplied objective is shape-validated and kept (`'explicit'`).
+    A re-validation site that carries an already-resolved objective and no brief
+    consumes only `error`: a non-strict blank yields no error (tolerated), a
+    strict or malformed one still does.
+
+    `objective_source` lets a *trusted internal* producer preserve provenance a
+    lineage re-resolution would otherwise lose: a **top-level (parentless)** spawn
+    carrying a valid objective already stamped `'derived'` (e.g. a fired schedule
+    that pre-derived its objective to survive the NULL-objective sweep) keeps
+    `'derived'` rather than being relabelled `'explicit'`. Any parented spawn
+    ignores the caller-supplied source (a top-level objective is informational,
+    so honouring it there cannot relabel or bypass a required child objective).
+    """
+    strict = objective_required_for(objective_supported, parent_stream_id)
+    blank_or_absent = objective is None or (isinstance(objective, str) and not objective.strip())
+    if not strict and blank_or_absent:
+        return derived_objective(brief, title), "derived", None
+    error = objective_error(objective)
+    parent_absent = not (str(parent_stream_id).strip() if parent_stream_id is not None else "")
+    if parent_absent and error is None and objective_source == "derived":
+        return objective, "derived", None
+    return objective, "explicit", error

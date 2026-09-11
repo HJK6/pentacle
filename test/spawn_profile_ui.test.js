@@ -48,7 +48,7 @@ function renderProfileForTest(selection, models, emissions, catalogOverride = nu
     models: { [selection.provider]: models },
   };
   const renderSpawnProfileOptions = new Function(
-    'document', 'esc', 'modelLabel', 'modelFamily', 'updateNewSessionStatus',
+    'document', 'esc', 'modelLabel', 'updateNewSessionStatus',
     'catalogTuple', 'catalogProviders', 'providerLabelForHero', 'saveSpawnPreference',
     'selectionForProvider', 'renderNewSessionModal',
     'newSessionSelection', 'newSessionCatalog', 'newSessionError',
@@ -57,7 +57,6 @@ function renderProfileForTest(selection, models, emissions, catalogOverride = nu
     dom.window.document,
     String,
     loadModelLabel(),
-    (model) => (String(model).startsWith('gpt-') ? 'GPT' : 'Opus'),
     () => {},
     (provider, candidate) => {
       emissions.push({ provider, model: candidate.model });
@@ -167,8 +166,10 @@ test('spawn picker stays catalog-driven — model list and efforts derive from t
   assert.match(app, /const efforts = entries\[selection\.model\]\?\.efforts/);
 });
 
-test('manual spawn UI exposes four labelled native controls and modal live status', () => {
-  for (const label of ['Provider', 'Model', 'Version / variant', 'Effort']) assert.match(app, new RegExp(label));
+test('manual spawn UI exposes three labelled native controls and modal live status', () => {
+  const labels = [...app.matchAll(/<label[^>]*>([^<]+)<\/label>/g)].map((match) => match[1]);
+  assert.deepEqual(labels, ['Provider', 'Model', 'Effort']);
+  assert.doesNotMatch(app, /id="spawn-family"/);
   assert.match(app, /id="spawn-provider"/);
   assert.match(app, /<select id="spawn-provider"/);
   assert.match(app, /id="spawn-model"/);

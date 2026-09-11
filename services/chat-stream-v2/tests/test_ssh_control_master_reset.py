@@ -121,7 +121,10 @@ def _hosts(fake: FakeSSH) -> Hosts:
     peer = MachineConfig(name="peer", ssh_target=fake.target, tmux_bin="tmux")
     return Hosts(
         "local", {"peer": peer}, ssh_bin=str(fake.bin),
-        config=HostsConfig(probe_timeout_s=0.3, breaker_threshold=3),
+        # The executable fixture starts a Python interpreter for each leg.
+        # Give it scheduling headroom; timeout/reset decisions have explicit
+        # deterministic transport cases below, independent of host load.
+        config=HostsConfig(probe_timeout_s=2.0, breaker_threshold=3),
     )
 
 
@@ -265,6 +268,17 @@ def test_down_host_records_only_fresh_health_and_never_resets(
     fake_ssh.configure(fresh_rc=255, mux="nonzero")
     unlinks = _track_unlinks(monkeypatch)
     hosts = _hosts(fake_ssh)
+    calls: list[list[str]] = []
+
+    async def down_peer(*args: str, timeout: float) -> tuple[int, str]:
+        # This test measures breaker and no-reset decisions. A Python fixture
+        # can miss the 0.3s subprocess deadline before writing its event; make
+        # the peer's failed result deterministic at the transport boundary.
+        calls.append(list(args))
+        assert "ControlPath=none" in args and args[-1] == "true"
+        return 255, "peer offline"
+
+    monkeypatch.setattr(hosts_module, "_exec", down_peer)
 
     assert asyncio.run(hosts.probe_once("peer")) is False
     assert hosts._state["peer"].consecutive_failures == 1
@@ -277,8 +291,9 @@ def test_down_host_records_only_fresh_health_and_never_resets(
     assert _exit_events(fake_ssh) == []
     mux_events = [event for event in fake_ssh.events() if f"ControlPath={path}" in event]
     assert mux_events == []
-    assert len(fake_ssh.events()) == 3
-    assert all("ControlMaster=no" in event for event in fake_ssh.events())
+    assert len(calls) == 3
+    assert fake_ssh.events() == []  # no multiplexed/control subprocess at all
+    assert all("ControlMaster=no" in event for event in calls)
 
 
 def test_control_exit_timeout_still_unlinks_within_bound_and_rebuilds(

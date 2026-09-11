@@ -130,8 +130,6 @@ class SessionReconciler:
         return f"reconciler:offline:{host}"
 
     async def reconcile_once(self) -> dict[str, Any]:
-        if self.spawnctl is not None:
-            await self.spawnctl.reconcile_spawn_intents(limit=1, recurring=True)
         counters: dict[str, Any] = {
             "checked": 0,
             "closed": 0,
@@ -173,6 +171,15 @@ class SessionReconciler:
         else:
             selected_ids = set()
             self._last_observations = {}
+
+        # Presence probes hosts even when they have no open rows. Reap first;
+        # the store and adoption fences also protect boot/concurrent adoption.
+        for deferred in await self.store.list_deferred_reaps():
+            await self.sessions.surface_offline_close(self.notify, deferred)
+            if self.hosts.is_online(deferred["host"]):
+                await self.sessions.reap_deferred(deferred)
+        if self.spawnctl is not None:
+            await self.spawnctl.reconcile_spawn_intents(limit=1, recurring=True)
 
         open_by_sid = {
             f"{row.get('host')}:{row.get('session_name')}": row

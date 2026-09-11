@@ -90,6 +90,8 @@ def test_below_floor_ladder_is_absent_and_readiness_stays_live() -> None:
     store_source = store_source.replace("ALTER TABLE v2_reports ADD COLUMN exchange_json TEXT", "D1 additive receipt")
     # D1b adds provenance above the retained floor; historical migrations stay forbidden.
     store_source = store_source.replace("ALTER TABLE sessions ADD COLUMN objective_source TEXT", "D1b additive provenance")
+    # D1b provenance also lands on v2_schedules so a fired schedule keeps its derived source.
+    store_source = store_source.replace("ALTER TABLE v2_schedules ADD COLUMN objective_source TEXT", "D1b additive schedule provenance")
     # D2 introduces two additive fields above the existing fleet floor.
     for statement in (
         "ALTER TABLE sessions ADD COLUMN no_watch INTEGER NOT NULL DEFAULT 0",

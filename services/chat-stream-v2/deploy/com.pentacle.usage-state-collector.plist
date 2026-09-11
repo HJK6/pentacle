@@ -8,6 +8,7 @@
     <string>__PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/.venv/bin/python</string>
     <string>__PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/tools/collect_usage_state.py</string>
     <string>--state</string><string>__PENTACLE_USER_HOME__/.local/share/pentacle-stream/usage_state.json</string>
+    <string>--shared-scripts</string><string>__PENTACLE_RELEASE_CHECKOUT__/scripts</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

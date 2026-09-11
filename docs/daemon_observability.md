@@ -33,6 +33,29 @@ These records are process-local. A daemon restart resets unsupported-verb, seat-
 
 Use `agent-orch reconcile status --json` for durable-session-versus-tmux reconciliation, and `agent-orch inspect <stream-id>` for one seat. Those contracts belong to [`services/agent-orch/README.md`](../services/agent-orch/README.md), not this process snapshot.
 
+## Operator-confirmed offline closes
+
+`agent-orch inspect <stream-id>` exposes `session.close_kind`, `close_audit`, and
+`deferred_reap`. The latter is durable across restarts and contains `stream_id`,
+`host`, `session_name`, `generation`, `requested_at`, `attempts`, `last_error`,
+`done_at`, `exhausted_at`, and the saved `pane_identity` lease. A null `done_at`
+means pane death has not been verified. `close_kind: operator_offline_close`
+remains unchanged after cleanup, preserving how the row was closed.
+
+The daemon logs `operator_offline_close` with caller, generation, and timestamp,
+and creates an Updates notification for the close. Each reachable cleanup
+attempt logs `deferred_reap`; five failed attempts set `exhausted_at` and emit
+`deferred_reap_exhausted`. Exhaustion stops automatic retries and retains the
+record and adoption fence for inspection. Offline passes consume no attempts.
+Identity mismatch or unavailable identity never authorizes a kill. An exhausted
+intent requires investigation of the named peer and pane; there is no automatic
+reset or bulk cleanup verb.
+
+The close row, audit, and `v2_deferred_reap` entry commit in one session-database
+transaction. A pending close is separate from the verified-death `session_reap`
+ledger. See the [close protocol](chat_protocol.md#close-on-an-offline-host) for
+request and reply semantics.
+
 ## Nonexistent controls
 
 Do not configure `--daemon-stats-*` options or `PENTACLE_DAEMON_STATS_*` variables: `services/chat-stream-v2/main.py --help` exposes neither. There is no v2 `daemon_stats.jsonl` output path to tail or rotate.

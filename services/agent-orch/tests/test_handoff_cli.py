@@ -90,6 +90,27 @@ def test_handoff_short_initial_prompt_is_inlined(monkeypatch, capsys, tmp_path):
     assert '"stream_id":"hostb:codex-new"' in capsys.readouterr().out
 
 
+def test_handoff_without_objective_succeeds(monkeypatch, capsys, tmp_path):
+    # A handoff successor inherits its predecessor's goal; no --objective is required.
+    captured = {}
+
+    async def fake_spawn_once(_config, payload, timeout):
+        captured["payload"] = payload
+        return _delivered_spawn(payload)
+
+    monkeypatch.setattr(cli, "load_config", lambda: Config("ws://test", "tok", "hostb", tmp_path))
+    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _config: "hostb:codex-old")
+    monkeypatch.setattr(cli, "spawn_once", fake_spawn_once)
+
+    assert cli.spawn(_args(objective=None)) == 0
+
+    payload = captured["payload"]
+    assert payload["handoff"] is True
+    assert payload["objective"] is None
+    assert payload["objective_supported"] is True
+    assert "parent_stream_id" not in payload
+
+
 def test_handoff_long_initial_prompt_file_uploads_prompt_blob(monkeypatch, capsys, tmp_path):
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("x" * (cli.INITIAL_PROMPT_INLINE_CAP_BYTES + 1), encoding="utf-8")

@@ -18,7 +18,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--shared-scripts",
         type=Path,
-        default=Path.cwd() / "scripts",
+        # Resolve relative to this file, not the process CWD. Under launchd the
+        # collector runs with CWD="/", which turned a CWD-relative default into
+        # "/scripts/check_claude_usage.py" and broke every usage probe.
+        default=Path(__file__).resolve().parents[3] / "scripts",
     )
     parser.add_argument("--skip-codex", action="store_true", help="collect only Claude; preserve prior Codex state without probing")
     args = parser.parse_args(argv)

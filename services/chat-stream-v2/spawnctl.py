@@ -29,7 +29,7 @@ may be triggered by a daemon-internal failure signal.
 
 from __future__ import annotations
 
-from _shared.spawn_objective import derived_objective, objective_error
+from _shared.spawn_objective import objective_error, objective_required_for, resolve_objective
 
 import asyncio
 import tmux_transport
@@ -995,14 +995,22 @@ class SpawnCtl:
 
     async def spawn(self, msg: dict[str, Any], local_host: str) -> dict[str, Any]:
         """Keep the durable spawn obligation running after request cancellation."""
-        if "objective" not in msg and not msg.get("objective_supported"):
-            msg = {**msg, "objective": derived_objective(await self._brief_from_message(msg), msg.get("title")),
-                   "objective_source": "derived"}
-        else:
-            # Caller-supplied provenance cannot relabel an explicit objective.
-            msg = {**msg, "objective_source": "explicit"}
-        if error := objective_error(msg.get("objective")):
+        # Objectives are required only for parented child spawns (roster projection);
+        # a top-level/handoff spawn derives one, and the brief is read only then.
+        supported, parent = msg.get("objective_supported"), msg.get("parent_stream_id")
+        obj = msg.get("objective")
+        will_derive = not objective_required_for(supported, parent) and (
+            obj is None or (isinstance(obj, str) and not obj.strip())
+        )
+        brief = await self._brief_from_message(msg) if will_derive else ""
+        objective, objective_source, error = resolve_objective(
+            obj, objective_supported=supported, parent_stream_id=parent,
+            brief=brief, title=msg.get("title"), objective_source=msg.get("objective_source"),
+        )
+        if error:
             raise VerbError(error, error)
+        # Caller-supplied provenance cannot relabel a resolved objective.
+        msg = {**msg, "objective": objective, "objective_source": objective_source}
         if "no_watch" in msg and not isinstance(msg["no_watch"], bool):
             raise VerbError("invalid_request", "no_watch must be boolean")
         admission: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
@@ -1038,6 +1046,8 @@ class SpawnCtl:
         Scheduling freezes this measured result; it must not reserve a stream,
         stage a token, create a pane, or otherwise begin dispatch.
         """
+        # The insert path resolves the objective (parented required, top-level
+        # derived) before this runs, so presence re-validation is sufficient.
         if error := objective_error(msg.get("objective")):
             raise VerbError(error, error)
         host = str(msg.get("host") or local_host).strip()
@@ -3058,6 +3068,15 @@ class SpawnCtl:
         *, idempotency_key: str | None = None, request_payload_hash: str | None = None,
         reservation: dict[str, Any] | None = None,
     ) -> str:
+        deferred = await self.store.get_deferred_reap(f"{host}:{name}")
+        if deferred is not None and (
+            not deferred["done_at"]
+            or not (intent.get("open_fields") or {}).get("session_generation")
+            or (intent.get("open_fields") or {}).get("session_generation") == deferred["generation"]
+        ):
+            # Retain the tombstone even after completion: a stale interrupted
+            # spawn must not resurrect the closed generation or brief its pane.
+            return "deferred"
         if reservation is None:
             reservations = [r for r in await self.store.reservations(include_expired=True)
                             if r["host"] == host and r["session_name"] == name

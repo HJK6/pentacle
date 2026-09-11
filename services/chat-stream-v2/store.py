@@ -443,6 +443,24 @@ SESSION_REAP_INDEX_DDL = (
 )
 MAX_SESSION_REAP_SURVIVORS = 256
 
+# Operator intent is not evidence of death. Keep it out of session_reap until
+# a reachable peer confirms the pane gone. Retain completed records for audit.
+DEFERRED_REAP_DDL = """
+CREATE TABLE IF NOT EXISTS v2_deferred_reap (
+    stream_id TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    done_at TEXT,
+    exhausted_at TEXT,
+    pane_identity TEXT
+)
+"""
+DEFERRED_REAP_MAX_ATTEMPTS = 5
+
 # v2-only.  `created_at` is a display/ordering field and is only second
 # resolution in the shared sessions contract.  Reconciliation needs a durable
 # per-open-generation identity so a close/reopen in one second cannot let an
@@ -644,6 +662,7 @@ SCHEDULE_DDL = (
       owner_spec_provenance_json TEXT NOT NULL CHECK(json_valid(owner_spec_provenance_json)),
       parent_stream_id TEXT,
       objective TEXT,
+      objective_source TEXT,
       handoff_from_stream_id TEXT,
       created_by_stream_id TEXT,
       target_host TEXT NOT NULL,
@@ -1089,6 +1108,7 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
             conn.execute(SESSION_ROLE_DDL)
             conn.execute(NUDGE_STATE_DDL)
             conn.execute(SESSION_REAP_DDL)
+            conn.execute(DEFERRED_REAP_DDL)
             conn.execute(SESSION_REAP_INDEX_DDL)
             conn.execute(SESSION_GENERATIONS_DDL)
             conn.execute(ROUTING_INTEGRITY_DDL)
@@ -1123,6 +1143,9 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
             if "objective_source" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN objective_source TEXT")
                 conn.execute("UPDATE sessions SET objective_source='explicit' WHERE objective IS NOT NULL")
+            if "objective_source" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_schedules)")}:
+                conn.execute("ALTER TABLE v2_schedules ADD COLUMN objective_source TEXT")
+                conn.execute("UPDATE v2_schedules SET objective_source='explicit' WHERE objective IS NOT NULL")
             if "exchange_json" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
                 conn.execute("ALTER TABLE v2_reports ADD COLUMN exchange_json TEXT")
             if "observer_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
@@ -1256,6 +1279,13 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
         cols["closed_at"] = None
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            if conn.execute(
+                "SELECT 1 FROM v2_deferred_reap WHERE stream_id=? AND done_at IS NULL",
+                (f"{host}:{session_name}",),
+            ).fetchone():
+                # Includes exhausted intents: automatic adoption must never
+                # undo the operator's close, even after retries stop.
+                return None
             if spawn_request_id is not None:
                 reservation = _spawn_reservation(conn, host, session_name, spawn_request_id)
                 if reservation is None:
@@ -1590,6 +1620,9 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
             if close_kind is not None:
                 set_cols += ", close_kind=?"
                 params.append(close_kind)
+            if close_kind == "operator_offline_close":
+                set_cols += ", dead_open_closed_at=?"
+                params.append(closed_at)
             params += [host, session_name]
             predicate = "host=? AND session_name=? AND status='open'"
             if expected_generation:
@@ -1629,6 +1662,16 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
                     )
                 return None
             stream_id = f"{host}:{session_name}"
+            if close_kind == "operator_offline_close":
+                generation_row = conn.execute(
+                    "SELECT generation FROM v2_session_generations WHERE host=? AND session_name=?",
+                    (host, session_name),
+                ).fetchone()
+                conn.execute(
+                    "INSERT OR REPLACE INTO v2_deferred_reap "
+                    "(stream_id,host,session_name,generation,requested_at) VALUES (?,?,?,?,?)",
+                    (stream_id, host, session_name, generation_row[0], closed_at),
+                )
             stamp = _routing_iso_now()
             conn.execute(
                 """UPDATE v2_outbound_notices
@@ -1655,7 +1698,10 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
         lifecycle_lock = self.routing_integrity_lifecycle_lock(stream_id)
         try:
             async with lifecycle_lock:
-                return await self.submit(_op)
+                def transaction(conn: sqlite3.Connection) -> dict[str, Any] | None:
+                    with conn:
+                        return _op(conn)
+                return await self.submit(transaction)
         finally:
             self._retire_routing_integrity_lifecycle_lock(stream_id)
 
@@ -1783,6 +1829,49 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
         return await self.submit(_op)
 
     # -- durable close/reap state -----------------------------------------
+
+    async def get_deferred_reap(self, stream_id: str) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute("SELECT * FROM v2_deferred_reap WHERE stream_id=?", (stream_id,)).fetchone()
+            return dict(row) if row else None
+        return await self.submit(_op)
+
+    async def list_deferred_reaps(self) -> list[dict[str, Any]]:
+        return await self.submit(lambda conn: [dict(row) for row in conn.execute(
+            "SELECT * FROM v2_deferred_reap WHERE done_at IS NULL AND exhausted_at IS NULL "
+            "ORDER BY requested_at, stream_id"
+        )])
+
+    async def update_deferred_reap(
+        self, stream_id: str, generation: str, *, error: str | None = None,
+        done: bool = False, pane_identity: dict[str, Any] | None = None,
+    ) -> None:
+        def _op(conn: sqlite3.Connection) -> None:
+            with conn:
+                if pane_identity is not None:
+                    conn.execute(
+                        "UPDATE v2_deferred_reap SET pane_identity=? "
+                        "WHERE stream_id=? AND generation=? AND done_at IS NULL",
+                        (json.dumps(pane_identity, sort_keys=True), stream_id, generation),
+                    )
+                    return
+                stamp = iso_now()
+                conn.execute(
+                    "UPDATE v2_deferred_reap SET attempts=attempts+1, last_error=?, done_at=?, "
+                    "exhausted_at=CASE WHEN ?=0 AND attempts+1>=? THEN ? ELSE exhausted_at END "
+                    "WHERE stream_id=? AND generation=? AND done_at IS NULL AND exhausted_at IS NULL",
+                    (error, stamp if done else None, int(done), DEFERRED_REAP_MAX_ATTEMPTS,
+                     stamp, stream_id, generation),
+                )
+                if done:
+                    conn.execute(
+                        "UPDATE sessions SET pane_status='pane_dead' WHERE host || ':' || session_name=? "
+                        "AND status='closed' AND close_kind='operator_offline_close' AND EXISTS "
+                        "(SELECT 1 FROM v2_session_generations g WHERE g.host=sessions.host "
+                        "AND g.session_name=sessions.session_name AND g.generation=?)",
+                        (stream_id, generation),
+                    )
+        await self.submit(_op)
 
     async def upsert_session_reap(
         self,
