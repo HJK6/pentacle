@@ -59,3 +59,16 @@ test('preload exposes window.cc.reloadApp that sends app:reload', () => {
   win.cc.reloadApp();
   assert.deepEqual(sent.at(-1), ['app:reload'], 'reloadApp sends the app:reload IPC message');
 });
+
+test('the Settings reload button is wired to window.cc.reloadApp, not a bare location.reload()', () => {
+  // Regression guard for the fix: a revert of the click handler back to a plain
+  // location.reload() would be swallowed again by the will-navigate guard. The
+  // main/preload behaviour is covered above; this pins the renderer wiring
+  // (a full JSDOM click test would depend on the env-fragile jsdom harness).
+  const source = fs.readFileSync(path.join(root, 'renderer', 'app.js'), 'utf8');
+  const start = source.indexOf("reloadBtn?.addEventListener('click'");
+  assert.ok(start >= 0, 'the reload button click handler is present');
+  const handler = source.slice(start, source.indexOf('});', start) + 3);
+  assert.match(handler, /window\.cc\??\.reloadApp/,
+    'the reload button routes through window.cc.reloadApp');
+});
