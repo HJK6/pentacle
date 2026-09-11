@@ -445,14 +445,21 @@ def test_schedule_objective_admission_round_trip_and_legacy_retirement(tmp_path)
                                 parent_stream_id="hosta:participant")
             assert exc.value.code == objective_error(value)
         assert asyncio.run(store.submit(lambda conn: conn.execute("SELECT COUNT(*) FROM v2_schedules").fetchone()[0])) == 0
-        # Top-level scheduled spawn without an objective derives one from its brief.
-        derived = schedule_insert(surface, objective=None, initial_prompt="Roll the roster fix")["schedule"]
+        # Top-level scheduled spawn without an objective derives one from its brief,
+        # and the derived provenance is carried through fire (so the fired session
+        # reports objective_source=derived, not explicit — the child-only AC).
+        derived = schedule_insert(surface, objective=None, title="Roll the roster fix")["schedule"]
         assert derived["objective"] == "Roll the roster fix"
+        asyncio.run(surface._fire_schedule(derived["schedule_id"]))
+        assert spawn.calls[-1]["objective"] == "Roll the roster fix"
+        assert spawn.calls[-1]["objective_source"] == "derived"
+        # An explicit objective round-trips through insert and fire as explicit.
         inserted = schedule_insert(surface, objective="Vérifier 東京 🌈")
         row = inserted["schedule"]
         assert row["objective"] == "Vérifier 東京 🌈"
         asyncio.run(surface._fire_schedule(row["schedule_id"]))
         assert spawn.calls[-1]["objective"] == "Vérifier 東京 🌈"
+        assert spawn.calls[-1]["objective_source"] == "explicit"
         # A legacy row whose objective is NULL is retired regardless of lineage.
         legacy = schedule_insert(surface)["schedule"]["schedule_id"]
         asyncio.run(store.submit(lambda conn: (

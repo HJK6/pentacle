@@ -558,8 +558,8 @@ class WindowSchedule:
                         "target_host,role,phase,visibility,requested_provider,requested_model,requested_effort,"
                         "resolved_provider,resolved_model,resolved_effort,disposition_waived_reason,confirm_model_change,"
                         "fires_at_utc,state,generation,prompt_sha256,prompt_b64,prompt_blob_id,created_at,updated_at,"
-                        "target_sha,attestation_json,reparent_children,self_close_on_completion,objective,no_watch) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',1,?,?,?,?,?,?,?,?,?,?,?)",
+                        "target_sha,attestation_json,reparent_children,self_close_on_completion,objective,objective_source,no_watch) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',1,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (schedule_id, request_id, actor if kind == "seat" else None,
                          actor if kind == "service" else None, _compact(spec_ids), _compact(provenance),
                          parent_stream_id, msg.get("handoff_from_stream_id"),
@@ -572,7 +572,7 @@ class WindowSchedule:
                          target_sha, attestation_json,
                          None if "reparent_children" not in msg else int(bool(msg["reparent_children"])),
                          None if "self_close_on_completion" not in msg else int(bool(msg["self_close_on_completion"])),
-                         msg["objective"], int(bool(msg.get("no_watch")))),
+                         msg["objective"], msg.get("objective_source"), int(bool(msg.get("no_watch")))),
                     )
                     prior = _row(conn.execute("SELECT * FROM v2_schedules WHERE schedule_id=?", (schedule_id,)).fetchone())
                 result = {
@@ -863,6 +863,7 @@ class WindowSchedule:
             "effort": schedule["resolved_effort"], "role": schedule.get("role"),
             "phase": schedule.get("phase"), "visibility": schedule.get("visibility"),
             "objective": schedule.get("objective"),
+            "objective_source": schedule.get("objective_source"),
             "parent_stream_id": schedule.get("parent_stream_id"),
             "no_watch": bool(schedule.get("no_watch")),
             "handoff_from_stream_id": schedule.get("handoff_from_stream_id"),

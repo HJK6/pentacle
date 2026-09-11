@@ -40,7 +40,7 @@ def objective_required_for(objective_supported: object, parent_stream_id: object
 
 def resolve_objective(
     objective: object, *, objective_supported: object, parent_stream_id: object,
-    brief: str = "", title: object = None,
+    brief: str = "", title: object = None, objective_source: object = None,
 ) -> tuple[object, str, str | None]:
     """Resolve `(objective, objective_source, error)` under the lineage rule.
 
@@ -52,9 +52,21 @@ def resolve_objective(
     A re-validation site that carries an already-resolved objective and no brief
     consumes only `error`: a non-strict blank yields no error (tolerated), a
     strict or malformed one still does.
+
+    `objective_source` lets a *trusted internal* producer preserve provenance a
+    lineage re-resolution would otherwise lose: a **top-level (parentless)** spawn
+    carrying a valid objective already stamped `'derived'` (e.g. a fired schedule
+    that pre-derived its objective to survive the NULL-objective sweep) keeps
+    `'derived'` rather than being relabelled `'explicit'`. Any parented spawn
+    ignores the caller-supplied source (a top-level objective is informational,
+    so honouring it there cannot relabel or bypass a required child objective).
     """
     strict = objective_required_for(objective_supported, parent_stream_id)
     blank_or_absent = objective is None or (isinstance(objective, str) and not objective.strip())
     if not strict and blank_or_absent:
         return derived_objective(brief, title), "derived", None
-    return objective, "explicit", objective_error(objective)
+    error = objective_error(objective)
+    parent_absent = not (str(parent_stream_id).strip() if parent_stream_id is not None else "")
+    if parent_absent and error is None and objective_source == "derived":
+        return objective, "derived", None
+    return objective, "explicit", error

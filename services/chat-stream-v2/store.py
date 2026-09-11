@@ -662,6 +662,7 @@ SCHEDULE_DDL = (
       owner_spec_provenance_json TEXT NOT NULL CHECK(json_valid(owner_spec_provenance_json)),
       parent_stream_id TEXT,
       objective TEXT,
+      objective_source TEXT,
       handoff_from_stream_id TEXT,
       created_by_stream_id TEXT,
       target_host TEXT NOT NULL,
@@ -1142,6 +1143,9 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
             if "objective_source" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN objective_source TEXT")
                 conn.execute("UPDATE sessions SET objective_source='explicit' WHERE objective IS NOT NULL")
+            if "objective_source" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_schedules)")}:
+                conn.execute("ALTER TABLE v2_schedules ADD COLUMN objective_source TEXT")
+                conn.execute("UPDATE v2_schedules SET objective_source='explicit' WHERE objective IS NOT NULL")
             if "exchange_json" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
                 conn.execute("ALTER TABLE v2_reports ADD COLUMN exchange_json TEXT")
             if "observer_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:

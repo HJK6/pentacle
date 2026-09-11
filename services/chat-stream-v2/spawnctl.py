@@ -1005,7 +1005,7 @@ class SpawnCtl:
         brief = await self._brief_from_message(msg) if will_derive else ""
         objective, objective_source, error = resolve_objective(
             obj, objective_supported=supported, parent_stream_id=parent,
-            brief=brief, title=msg.get("title"),
+            brief=brief, title=msg.get("title"), objective_source=msg.get("objective_source"),
         )
         if error:
             raise VerbError(error, error)
