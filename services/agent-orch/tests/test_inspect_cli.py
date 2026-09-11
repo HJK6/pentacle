@@ -85,6 +85,23 @@ def test_inspect_pretty_prints_requested_and_effective_routing(monkeypatch, caps
     assert "bootstrap_state: unsubmitted" in output
 
 
+def test_inspect_pretty_prints_offline_close_and_deferred_state(capsys):
+    cli._print_inspect_pretty({
+        "stream_id": "hostb:v2-offline",
+        "session": {"status": "closed", "close_kind": "operator_offline_close"},
+        "deferred_reap": {"host": "hostb", "requested_at": "2026-09-10T00:00:00Z",
+                          "attempts": 5, "last_error": "ssh_unreachable",
+                          "done_at": None, "exhausted_at": "2026-09-10T00:05:00Z"},
+    })
+    output = capsys.readouterr().out
+    assert "close_kind: operator_offline_close" in output
+    assert "deferred_reap:" in output
+    assert "attempts: 5" in output
+    assert "last_error: ssh_unreachable" in output
+    assert "done_at: None" in output
+    assert "exhausted_at: 2026-09-10T00:05:00Z" in output
+
+
 def test_inspect_pretty_prints_close_audit_attribution(monkeypatch, capsys, tmp_path):
     async def fake_inspect(_config, stream_id, **_kwargs):
         return {
@@ -170,4 +187,3 @@ def test_inspect_max_text_honors_exact_cap(limit, expected):
 
     assert rendered == expected
     assert len(rendered) == limit
-

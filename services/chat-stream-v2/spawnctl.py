@@ -3058,6 +3058,15 @@ class SpawnCtl:
         *, idempotency_key: str | None = None, request_payload_hash: str | None = None,
         reservation: dict[str, Any] | None = None,
     ) -> str:
+        deferred = await self.store.get_deferred_reap(f"{host}:{name}")
+        if deferred is not None and (
+            not deferred["done_at"]
+            or not (intent.get("open_fields") or {}).get("session_generation")
+            or (intent.get("open_fields") or {}).get("session_generation") == deferred["generation"]
+        ):
+            # Retain the tombstone even after completion: a stale interrupted
+            # spawn must not resurrect the closed generation or brief its pane.
+            return "deferred"
         if reservation is None:
             reservations = [r for r in await self.store.reservations(include_expired=True)
                             if r["host"] == host and r["session_name"] == name

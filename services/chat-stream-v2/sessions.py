@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
@@ -1231,6 +1232,7 @@ class Sessions:
         requires_idle: bool = False,
         requires_hidden: bool = False,
         operator_override: bool = False,
+        operator_confirm: bool = False,
         defer_if_working: bool = False,
         attribution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -1261,6 +1263,7 @@ class Sessions:
                 expected_generation=expected_generation, close_kind=close_kind,
                 requires_idle=requires_idle, requires_hidden=requires_hidden,
                 operator_override=operator_override,
+                operator_confirm=operator_confirm,
                 defer_if_working=defer_if_working, attribution=attribution,
             )
 
@@ -1293,13 +1296,16 @@ class Sessions:
         requires_idle: bool = False,
         requires_hidden: bool = False,
         operator_override: bool = False,
+        operator_confirm: bool = False,
         defer_if_working: bool = False,
         attribution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Bounded, idempotent, keyed on CONFIRMED process death (ledger req 5).
 
         The order is always terminate -> confirm -> mark closed, never
-        mark-then-kill: a closed row with a live tree is the wedge that killed
+        mark-then-kill, except explicit operator-confirmed offline intent
+        (separate deferred-reap ledger, never recorded as verified death).
+        A closed row with a live tree is the wedge that killed
         live work. A row is NEVER marked closed while a userspace-runnable
         process still exists, so the v1 `row_closed_tree_alive` cascade stays
         impossible. `_terminate_pane` runs the escalation ladder and returns one
@@ -1323,6 +1329,7 @@ class Sessions:
                 expected_generation=expected_generation, close_kind=close_kind,
                 requires_idle=requires_idle, requires_hidden=requires_hidden,
                 operator_override=operator_override,
+                operator_confirm=operator_confirm,
                 defer_if_working=defer_if_working, attribution=attribution,
             )
         self.assert_local(host, "close")
@@ -1598,6 +1605,100 @@ class Sessions:
             await asyncio.sleep(CLOSE_POLL_INTERVAL_S)
         return True
 
+    async def _close_offline_locked(
+        self, row: dict[str, Any], reason: str, generation: str | None,
+        attribution: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        host, name = row["host"], row["session_name"]
+        sid = f"{host}:{name}"
+        closed = await self.store.mark_closed(
+            host, name, closed_at=iso_now(), pane_status="unknown",
+            expected_generation=generation, close_kind="operator_offline_close",
+            attribution=attribution, reason=reason or "operator_confirmed_host_offline",
+        )
+        if closed is None:
+            return await self._stale_close_result(sid, await self.store.fetch_session(host, name) or row)
+        with self._inventory_context():
+            self._pop_inventory_locked(sid)
+        if emit := getattr(self._inventory_emitter, "emit_if_changed", None):
+            await emit(immediate=True)
+        # No confirmed-dead awaiter resolution or session_reap='reaped' write:
+        # this transition records intent, not process death.
+        self._alert(
+            "operator_offline_close", subsystem="sessions",
+            bug_ref="offline_host_operator_close_2026_09", stream_id=sid,
+            host=host, requested_at=closed["closed_at"],
+            closed_by=(attribution or {}).get("closed_by"),
+        )
+        log.info("operator_offline_close stream=%s generation=%s actor=%s at=%s",
+                 sid, generation, (attribution or {}).get("closed_by"), closed["closed_at"])
+        return {"already_closed": False, "closed": True, "failed": False,
+                "session": closed, "reap_status": "deferred_host_offline", "survivors": []}
+
+    async def surface_offline_close(self, notify: Any, deferred: dict[str, Any]) -> None:
+        if notify is None:
+            return
+        sid = deferred["stream_id"]
+        audit = await self.store.latest_close_audit(sid) or {}
+        try:
+            await notify.create_internal_notification(
+                producer="session_close", title="Offline session closed",
+                body=f"{audit.get('closed_by') or 'Authorized caller'} closed {sid} on "
+                     f"{deferred['host']} at {deferred['requested_at']}. Pane cleanup is deferred "
+                     "until the host returns; process death has not been verified.",
+                dedup_key=f"operator_offline_close:{sid}:{deferred['generation']}",
+            )
+        except Exception:  # notification failure cannot undo committed intent
+            log.exception("offline close notification failed stream=%s", sid)
+
+    async def reap_deferred(self, deferred: dict[str, Any]) -> None:
+        """One bounded attempt on a reachable peer, serialized with open/close."""
+        host, name, sid = deferred["host"], deferred["session_name"], deferred["stream_id"]
+        async with self._lifecycle_lock(host, name):
+            current = await self.store.get_deferred_reap(sid)
+            if not current or current["done_at"] or current["exhausted_at"]:
+                return
+            generation = current["generation"]
+            row = await self.store.fetch_session(host, name)
+            error = None
+            done = False
+            try:
+                if not row or row["status"] != "closed" or self._row_generation(row) != generation:
+                    raise VerbError("generation_changed", "deferred close no longer owns row")
+                tmux = self.hosts.tmux_for(host)
+                state = await tmux.session_state(name)
+                if state == "alive":
+                    identity = await tmux.pane_identity(name)
+                    if not identity:
+                        raise VerbError("pane_identity_unavailable", "cannot lease deferred pane")
+                    if current["pane_identity"]:
+                        if identity != json.loads(current["pane_identity"]):
+                            raise VerbError("pane_identity_changed", "deferred pane lease changed")
+                    else:
+                        if row.get("pane_pid") and str(identity.get("pane_pid")) != str(row["pane_pid"]):
+                            raise VerbError("pane_identity_changed", "pane differs from closed row")
+                        await self.store.update_deferred_reap(sid, generation, pane_identity=identity)
+                    await tmux.kill_session(name)
+                    deadline = time.monotonic() + CLOSE_GRACEFUL_CONFIRM_S
+                    while True:
+                        state = await tmux.session_state(name)
+                        if state != "alive" or time.monotonic() >= deadline:
+                            break
+                        await asyncio.sleep(CLOSE_POLL_INTERVAL_S)
+                done = state == "gone"
+                if not done:
+                    error = "ssh_unreachable" if state == "unreachable" else "pane_still_alive_after_kill"
+            except Exception as exc:  # retry transport/identity failures within the durable cap
+                error = exc.code if isinstance(exc, VerbError) else type(exc).__name__
+            await self.store.update_deferred_reap(sid, generation, error=error, done=done)
+            updated = await self.store.get_deferred_reap(sid)
+            log.info("deferred_reap stream=%s generation=%s done=%s attempts=%s error=%s exhausted=%s",
+                     sid, generation, done, updated["attempts"], error, updated["exhausted_at"])
+            if updated["exhausted_at"]:
+                self._alert("deferred_reap_exhausted", subsystem="sessions",
+                            bug_ref="offline_host_operator_close_2026_09",
+                            stream_id=sid, host=host, attempts=updated["attempts"], last_error=error)
+
     async def _close_remote(
         self,
         host: str,
@@ -1609,6 +1710,7 @@ class Sessions:
         requires_idle: bool = False,
         requires_hidden: bool = False,
         operator_override: bool = False,
+        operator_confirm: bool = False,
         defer_if_working: bool = False,
         attribution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -1619,8 +1721,10 @@ class Sessions:
         connection makes a plain `has-session` exit non-zero, which reads as
         "pane gone". So liveness here uses the TRI-STATE `session_state`, which
         tells "gone" (tmux exit 1) apart from "unreachable" (ssh failed), and
-        every unreachable settles `close.failed` (reason `ssh_unreachable`, row
-        LEFT OPEN), never a confirmed death:
+        an unreachable normally settles `close.failed` (reason `ssh_unreachable`,
+        row LEFT OPEN). Explicit operator confirmation at the initial failed
+        host probe instead records closed intent and a durable deferred reap,
+        never a confirmed death:
 
           host unreachable at any step          -> close.failed / ssh_unreachable
           pane confirmed gone (tmux said so)     -> close.ok (mark closed)
@@ -1632,12 +1736,13 @@ class Sessions:
             raise VerbError("unsupported_host", f"v2 close does not know host {host}")
         row = await self.store.fetch_session(host, session_name) or self._inv.get(sid)
         if row is not None and str(row.get("status") or "open") != "open":
+            deferred = await self.store.get_deferred_reap(sid)
             reap = await self.store.get_session_reap(sid)
             return {
                 "already_closed": True,
                 "failed": False,
                 "session": row,
-                "reap_status": (reap or {}).get("reap_status", "unknown"),
+                "reap_status": "deferred_host_offline" if deferred and not deferred["done_at"] else (reap or {}).get("reap_status", "unknown"),
                 "survivors": (reap or {}).get("survivors", []),
                 "live_children": await self._live_children(sid),
             }
@@ -1670,6 +1775,8 @@ class Sessions:
         # rather than waiting out the per-call tmux timeout. `session_state`
         # below is still the correctness guard for a host that drops mid-close.
         if not await self.hosts.probe_once(host):
+            if operator_confirm and row is not None:
+                return await self._close_offline_locked(row, reason, expected_generation, attribution)
             return self._close_failed(row, "ssh_unreachable")
         tmux = self.hosts.tmux_for(host)
         identity_reader = getattr(tmux, "pane_identity", None)

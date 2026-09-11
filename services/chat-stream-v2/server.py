@@ -1709,6 +1709,7 @@ class Server:
             "send_frames": dict(SEND_FRAMES_NOT_IMPLEMENTED),
             "existing_report": existing_report,
             "close_audit": close_audit,
+            "deferred_reap": await self.store.get_deferred_reap(stream_id),
         }
 
     async def _on_rename(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -2094,6 +2095,7 @@ class Server:
             requires_idle=bool(msg.get("requires_idle") or msg.get("reap")),
             operator_override=bool(msg.get("operator_override"))
             and (operator_authenticated or coordinator_authorized),
+            operator_confirm=msg.get("operator_confirm") is True,
             defer_if_working=defer_if_working,
             attribution=attribution,
         )
@@ -2119,9 +2121,14 @@ class Server:
             }
         # `already_closed` is still a non-error reply: a repeated close succeeds.
         kind = "close.already_closed" if result["already_closed"] else "close.ok"
+        if result.get("reap_status") == "deferred_host_offline":
+            deferred = await self.store.get_deferred_reap(target_stream_id)
+            if deferred:
+                await self.sessions.surface_offline_close(self.notify, deferred)
         return {
             "type": kind, "ok": True, "host": host, "session_name": name,
             "already_closed": result["already_closed"], "session": result.get("session"),
+            "reap_status": result.get("reap_status", "unknown"),
             **_claim_wire_fields(claim_verified, claim_mismatch),
         }
 

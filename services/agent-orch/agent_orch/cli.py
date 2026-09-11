@@ -3920,6 +3920,7 @@ def _print_inspect_pretty(response: dict[str, object], *, max_text: int | None =
         "role_source",
         "opened_at",
         "closed_at",
+        "close_kind",
         "self_close_on_completion",
         "requested_model",
         "requested_effort",
@@ -3960,6 +3961,11 @@ def _print_inspect_pretty(response: dict[str, object], *, max_text: int | None =
         ):
             if key in close_audit:
                 print(f"  {key}: {close_audit.get(key)}")
+    deferred = inspect.get("deferred_reap")
+    if isinstance(deferred, dict):
+        print("deferred_reap:")
+        for key in ("host", "requested_at", "attempts", "last_error", "done_at", "exhausted_at"):
+            print(f"  {key}: {deferred.get(key)}")
     events = inspect.get("recent_events") if isinstance(inspect.get("recent_events"), list) else []
     print(f"recent_events: {len(events)}")
     for event in events:
