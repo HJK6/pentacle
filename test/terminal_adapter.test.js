@@ -237,3 +237,36 @@ test('wheel bursts coalesce without moving history changes across queued typing'
     pending.shift()({ stdout: '' }); await flush(); assert.equal(calls.length, 3);
   } finally { cleanup(); }
 });
+
+test('local terminal attachment runs tmux through wsl.exe when localWsl.distro is set', async () => {
+  const handlers = new Map(), executed = [], spawned = [];
+  const sender = new EventEmitter(); sender.id = 8; sender.isDestroyed = () => false; sender.send = () => {};
+  const native = { spawn(file, args) { spawned.push({ file, args }); return { onData() {}, onExit() {}, kill() {}, write() {}, resize() {} }; } };
+  registerTerminalIpc({ handle: (name, fn) => handlers.set(name, fn), on: () => {} },
+    { tmux: 'fixture-tmux', localWsl: { distro: 'Ubuntu-24.04', user: 'operator', tmux: '/usr/bin/tmux' } }, {},
+    { pty: native, execute: async (file, args) => { executed.push({ file, args }); return { stdout: '%7\n' }; } });
+  assert.equal(await handlers.get('pty:create')({ sender }, 0, 'wsl-session', 'local'), '%7');
+  // Pane lookup, per-session setup and the interactive attach share one shape:
+  // the whole tmux command line is a single `bash -lc` argument, so tmux
+  // formats such as #{pane_id} never reach wsl.exe's own argv.
+  assert.equal(executed[0].file, 'wsl.exe');
+  assert.deepEqual(executed[0].args, ['-d', 'Ubuntu-24.04', '-u', 'operator', '--', '/bin/bash', '-lc',
+    "'/usr/bin/tmux' 'display-message' '-p' '-t' '=wsl-session:' '#{pane_id}'"]);
+  assert.equal(executed[1].file, 'wsl.exe');
+  assert.equal(spawned[0].file, 'wsl.exe');
+  assert.deepEqual(spawned[0].args.slice(0, 7), ['-d', 'Ubuntu-24.04', '-u', 'operator', '--', '/bin/bash', '-lc']);
+  assert.equal(spawned[0].args[7], "'/usr/bin/tmux' '-u' 'attach-session' '-t' '=wsl-session'");
+
+  // The user is optional, and without localWsl the local transport stays the plain tmux executable.
+  const noUser = new Map();
+  registerTerminalIpc({ handle: (name, fn) => noUser.set(name, fn), on: () => {} }, { localWsl: { distro: 'Debian' } }, {},
+    { pty: native, execute: async (file, args) => { executed.push({ file, args }); return { stdout: '%8\n' }; } });
+  await noUser.get('pty:create')({ sender }, 1, 'default-user', 'local');
+  assert.deepEqual(executed.at(-1).args.slice(0, 4), ['-d', 'Debian', '--', '/bin/bash']);
+  const plain = new Map();
+  registerTerminalIpc({ handle: (name, fn) => plain.set(name, fn), on: () => {} }, { tmux: 'fixture-tmux' }, {},
+    { pty: native, execute: async (file, args) => { executed.push({ file, args }); return { stdout: '%9\n' }; } });
+  await plain.get('pty:create')({ sender }, 2, 'plain', 'local');
+  assert.equal(executed.at(-1).file, 'fixture-tmux');
+  assert.equal(spawned.at(-1).file, 'fixture-tmux');
+});

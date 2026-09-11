@@ -25,7 +25,7 @@ For a phone, see [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile).
 
 See the [desktop config reference](docs/desktop_config.md) for host defaults, optional mic/limits setup, warnings and upgrade behavior.
 
-Use macOS or Linux with Node.js 22.12 or newer, Python 3.11 or newer, tmux and at least one configured agent CLI (`claude` or `codex`). Authenticate the CLI with your own account before using it through Pentacle. Windows needs a separately configured SSH terminal host; the local setup below targets macOS/Linux.
+Use macOS or Linux with Node.js 22.12 or newer, Python 3.11 or newer, tmux and at least one configured agent CLI (`claude` or `codex`). Authenticate the CLI with your own account before using it through Pentacle. On Windows, run the daemon and tmux inside WSL and set `localWsl` in the desktop config so local terminals attach through `wsl.exe`, or configure a separate SSH terminal host; the shell commands below target macOS/Linux (or a WSL shell).
 
 From this repository:
 

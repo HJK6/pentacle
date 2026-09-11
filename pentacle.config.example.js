@@ -5,6 +5,8 @@
 // For a remote terminal host, add hosts: { workstation: { host: 'host.example',
 // user: 'operator', port: 22, tmux: '/usr/bin/tmux' } }, include workstation in
 // chatStream.hosts, and use the daemon's matching machine identity.
+// On Windows with the daemon and tmux inside WSL, add localWsl: { distro:
+// 'Ubuntu-24.04', user: 'operator' } so local terminals attach through wsl.exe.
 // Full reference: docs/desktop_config.md. Missing maps use the defaults below.
 // hostNames: { workstation: 'Workstation' }, // default: capitalise host identity
 // hostColors: { workstation: 'royal-blue' }, // default: indexed palette, wrapping
