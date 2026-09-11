@@ -5045,10 +5045,6 @@ function modelLabel(model) {
   return labels[model] ?? model;
 }
 
-function modelFamily(model) {
-  return String(model || '').startsWith('gpt-') ? 'GPT' : 'Opus';
-}
-
 function updateNewSessionStatus(message = '', isError = false) {
   const status = document.getElementById('new-session-status');
   if (!status) return;
@@ -5168,7 +5164,6 @@ function renderSpawnProfileOptions(container) {
   const entries = newSessionCatalog.models?.[selection.provider] || {};
   const models = Object.keys(entries);
   const providers = catalogProviders(newSessionCatalog);
-  const family = modelFamily(selection.model);
   const efforts = entries[selection.model]?.efforts || [];
   const title = document.getElementById('new-session-title');
   const subtitle = document.getElementById('new-session-subtitle');
@@ -5177,8 +5172,7 @@ function renderSpawnProfileOptions(container) {
   container.innerHTML = `
     <div class="spawn-profile-controls" aria-label="Chat spawn profile">
       <div class="spawn-profile-row"><label for="spawn-provider">Provider</label><select id="spawn-provider" class="spawn-profile-control" aria-label="Provider">${providers.map((provider) => `<option value="${esc(provider)}"${provider === selection.provider ? ' selected' : ''}>${esc(providerLabelForHero(provider))}</option>`).join('')}</select></div>
-      <div class="spawn-profile-row"><label for="spawn-family">Model</label><select id="spawn-family" class="spawn-profile-control" aria-label="Model family"><option>${esc(family)}</option></select></div>
-      <div class="spawn-profile-row"><label for="spawn-model">Version / variant</label><select id="spawn-model" class="spawn-profile-control" aria-label="Model version and variant">${models.map((model) => `<option value="${esc(model)}"${model === selection.model ? ' selected' : ''}>${esc(modelLabel(model))}</option>`).join('')}</select></div>
+      <div class="spawn-profile-row"><label for="spawn-model">Model</label><select id="spawn-model" class="spawn-profile-control" aria-label="Model">${models.map((model) => `<option value="${esc(model)}"${model === selection.model ? ' selected' : ''}>${esc(modelLabel(model))}</option>`).join('')}</select></div>
       <div class="spawn-profile-row"><label for="spawn-effort">Effort</label><select id="spawn-effort" class="spawn-profile-control" aria-label="Reasoning effort">${efforts.map((effort) => `<option value="${esc(effort)}"${effort === selection.effort ? ' selected' : ''}>${esc(effort)}</option>`).join('')}</select></div>
     </div>`;
   container.querySelector('#spawn-provider')?.addEventListener('change', (event) => {
