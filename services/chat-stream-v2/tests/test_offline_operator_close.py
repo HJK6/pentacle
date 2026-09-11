@@ -16,8 +16,8 @@ from spawnctl import SpawnCtl
 
 
 class Peer:
-    local_host = "hosta"
-    peers = {"hostb": object()}
+    local_host = "local-peer"
+    peers = {"remote-peer": object()}
 
     def __init__(self):
         self.online = False
@@ -25,7 +25,7 @@ class Peer:
         self.kills = 0
 
     def known(self, host):
-        return host in {"hosta", "hostb"}
+        return host in {"local-peer", "remote-peer"}
 
     def is_local(self, host):
         return host == self.local_host
@@ -57,16 +57,16 @@ async def build(path=":memory:"):
     store = Store(path)
     store.start()
     peer = Peer()
-    sessions = Sessions(store, tmux=None, hosts=peer, local_host="hosta")
-    row = await store.open_session("hostb", "v2-offline", pane_pid="123", pane_status="pane_alive")
+    sessions = Sessions(store, tmux=None, hosts=peer, local_host="local-peer")
+    row = await store.open_session("remote-peer", "v2-offline", pane_pid="123", pane_status="pane_alive")
     await sessions.refresh()
-    server = Server(store=store, sessions=sessions, local_host="hosta")
+    server = Server(store=store, sessions=sessions, local_host="local-peer")
     server.notify = AsyncMock()
     return store, peer, sessions, server, row
 
 
 def frame(**fields):
-    return {"stream_id": "hostb:v2-offline", "request_id": "offline-close-test",
+    return {"stream_id": "remote-peer:v2-offline", "request_id": "offline-close-test",
             "_auth_context": {"operator_authenticated": True,
                               "operator_principal": "operator:test",
                               "connection_client": "desktop", "transport": "v2"}, **fields}
@@ -79,12 +79,12 @@ def test_operator_confirmation_closes_offline_row_and_inspect_exposes_intent():
             reply = await server._on_close(frame(operator_confirm=True))
             assert reply["type"] == "close.ok", reply
             assert reply["reap_status"] == "deferred_host_offline"
-            closed = await store.fetch_session("hostb", "v2-offline")
+            closed = await store.fetch_session("remote-peer", "v2-offline")
             assert closed["close_kind"] == "operator_offline_close"
             assert closed["closed_at"] == closed["dead_open_closed_at"]
             assert closed["pane_status"] != "pane_dead"
             assert await store.list_sessions("open") == []
-            assert sessions.get("hostb:v2-offline") is None
+            assert sessions.get("remote-peer:v2-offline") is None
             inspected = await server._on_inspect_stream(frame(event_tail=0))
             assert inspected["deferred_reap"]["done_at"] is None
             assert inspected["deferred_reap"]["attempts"] == 0
@@ -103,7 +103,7 @@ def test_without_confirmation_offline_close_still_refuses():
             reply = await server._on_close(frame(force=True))
             assert reply["type"] == "close.failed"
             assert reply["reason"] == "ssh_unreachable"
-            assert (await store.fetch_session("hostb", "v2-offline"))["status"] == "open"
+            assert (await store.fetch_session("remote-peer", "v2-offline"))["status"] == "open"
             assert peer.kills == 0
         finally:
             store.stop()
@@ -114,7 +114,7 @@ def test_closed_offline_row_is_reaped_on_simulated_host_return():
     async def run():
         store, peer, sessions, server, row = await build()
         try:
-            await store.mark_closed("hostb", "v2-offline", closed_at="2026-09-10T00:00:00Z",
+            await store.mark_closed("remote-peer", "v2-offline", closed_at="2026-09-10T00:00:00Z",
                                     pane_status="unknown", close_kind="operator_offline_close",
                                     expected_generation=row["session_generation"])
             await sessions.refresh()
@@ -125,9 +125,9 @@ def test_closed_offline_row_is_reaped_on_simulated_host_return():
             peer.online = True
             await reconciler.reconcile_once()
             assert peer.kills == 1
-            deferred = await store.get_deferred_reap("hostb:v2-offline")
+            deferred = await store.get_deferred_reap("remote-peer:v2-offline")
             assert deferred["done_at"]
-            assert (await store.fetch_session("hostb", "v2-offline"))["status"] == "closed"
+            assert (await store.fetch_session("remote-peer", "v2-offline"))["status"] == "closed"
             await reconciler.reconcile_once()
             assert peer.kills == 1
         finally:
@@ -145,11 +145,11 @@ def test_pending_intent_survives_restart_and_migration_is_idempotent(tmp_path):
             store = Store(path)
             store.start()
             try:
-                deferred = await store.get_deferred_reap("hostb:v2-offline")
+                deferred = await store.get_deferred_reap("remote-peer:v2-offline")
                 assert deferred["generation"] == row["session_generation"]
                 assert deferred["attempts"] == 0
                 assert await store.list_sessions("open") == []
-                assert (await store.latest_close_audit("hostb:v2-offline"))["request_id"] == "offline-close-test"
+                assert (await store.latest_close_audit("remote-peer:v2-offline"))["request_id"] == "offline-close-test"
             finally:
                 store.stop()
     asyncio.run(run())
@@ -168,9 +168,9 @@ def test_failed_intent_insert_rolls_back_close_and_audit():
             # Force a subsequent commit too: a queued failure must not leave
             # its half-close transaction available for another call to commit.
             await store.put("transaction-test", "committed")
-            assert (await store.fetch_session("hostb", "v2-offline"))["status"] == "open"
-            assert await store.latest_close_audit("hostb:v2-offline") is None
-            assert await store.get_deferred_reap("hostb:v2-offline") is None
+            assert (await store.fetch_session("remote-peer", "v2-offline"))["status"] == "open"
+            assert await store.latest_close_audit("remote-peer:v2-offline") is None
+            assert await store.get_deferred_reap("remote-peer:v2-offline") is None
         finally:
             store.stop()
     asyncio.run(run())
@@ -185,23 +185,23 @@ def test_retries_are_capped_and_exhaustion_still_blocks_adoption(monkeypatch):
             # Offline passes consume no attempt budget.
             reconciler = SessionReconciler(sessions, peer)
             await reconciler.reconcile_once()
-            assert (await store.get_deferred_reap("hostb:v2-offline"))["attempts"] == 0
+            assert (await store.get_deferred_reap("remote-peer:v2-offline"))["attempts"] == 0
             peer.online = True
             peer.kill_session = AsyncMock()  # command returns but pane survives
             for _ in range(7):
                 await reconciler.reconcile_once()
-            deferred = await store.get_deferred_reap("hostb:v2-offline")
+            deferred = await store.get_deferred_reap("remote-peer:v2-offline")
             assert deferred["attempts"] == 5
             assert deferred["exhausted_at"] and deferred["done_at"] is None
             assert deferred["last_error"] == "pane_still_alive_after_kill"
             assert peer.kill_session.await_count == 5
-            assert await store.open_session("hostb", "v2-offline") is None
+            assert await store.open_session("remote-peer", "v2-offline") is None
             with pytest.raises(VerbError):
-                await sessions.open("hostb", "v2-offline")
+                await sessions.open("remote-peer", "v2-offline")
             spawn = object.__new__(SpawnCtl)
             spawn.store = store
-            assert await spawn._adopt_interrupted_spawn("hostb", "v2-offline", "stale", {}, peer) == "deferred"
-            assert (await store.fetch_session("hostb", "v2-offline"))["status"] == "closed"
+            assert await spawn._adopt_interrupted_spawn("remote-peer", "v2-offline", "stale", {}, peer) == "deferred"
+            assert (await store.fetch_session("remote-peer", "v2-offline"))["status"] == "closed"
         finally:
             store.stop()
     asyncio.run(run())
@@ -219,7 +219,7 @@ def test_reap_requires_death_evidence_and_never_kills_replacement(state):
             else:
                 peer.pane_identity = AsyncMock(return_value={"pane_pid": "999", "pane_id": "%2"})
             await SessionReconciler(sessions, peer).reconcile_once()
-            deferred = await store.get_deferred_reap("hostb:v2-offline")
+            deferred = await store.get_deferred_reap("remote-peer:v2-offline")
             assert bool(deferred["done_at"]) == (state == "gone")
             assert peer.kills == 0
             if state == "replacement":
@@ -237,8 +237,8 @@ def test_confirmation_does_not_grant_close_authority_or_bypass_generation():
                 await server._on_close(frame(operator_confirm=True, _auth_context={}))
             reply = await server._on_close(frame(operator_confirm=True, expected_generation="stale"))
             assert reply["type"] == "close.already_closed"
-            assert (await store.fetch_session("hostb", "v2-offline"))["status"] == "open"
-            assert await store.get_deferred_reap("hostb:v2-offline") is None
+            assert (await store.fetch_session("remote-peer", "v2-offline"))["status"] == "open"
+            assert await store.get_deferred_reap("remote-peer:v2-offline") is None
             assert peer.kills == 0
         finally:
             store.stop()
@@ -250,12 +250,12 @@ def test_repeated_confirmed_close_preserves_original_request_and_attempts():
         store, peer, sessions, server, row = await build()
         try:
             await server._on_close(frame(operator_confirm=True))
-            before = await store.get_deferred_reap("hostb:v2-offline")
+            before = await store.get_deferred_reap("remote-peer:v2-offline")
             reply = await server._on_close(frame(operator_confirm=True, request_id="retry"))
             assert reply["type"] == "close.already_closed"
             assert reply["reap_status"] == "deferred_host_offline"
-            assert await store.get_deferred_reap("hostb:v2-offline") == before
-            assert (await store.latest_close_audit("hostb:v2-offline"))["request_id"] == "offline-close-test"
+            assert await store.get_deferred_reap("remote-peer:v2-offline") == before
+            assert (await store.latest_close_audit("remote-peer:v2-offline"))["request_id"] == "offline-close-test"
         finally:
             store.stop()
     asyncio.run(run())
@@ -281,7 +281,7 @@ def test_cli_wire_close_and_inspect_round_trip(monkeypatch):
 
         monkeypatch.setattr(wsclient, "_connect_rpc_ready", AsyncMock(return_value=Wire()))
         try:
-            reply = await wsclient.close_once(None, "hostb:v2-offline", operator_confirm=True)
+            reply = await wsclient.close_once(None, "remote-peer:v2-offline", operator_confirm=True)
             assert reply["type"] == "close.ok"
             assert reply["reap_status"] == "deferred_host_offline"
             inspected = await server._on_inspect_stream(frame(event_tail=0))
@@ -300,11 +300,11 @@ def test_reap_precedes_adoption_and_old_intent_stays_fenced_after_completion():
             peer.online = True
             async def adopt(**kwargs):
                 assert peer.kills == 1
-                assert (await store.get_deferred_reap("hostb:v2-offline"))["done_at"]
+                assert (await store.get_deferred_reap("remote-peer:v2-offline"))["done_at"]
                 spawn = object.__new__(SpawnCtl)
                 spawn.store = store
                 intent = {"open_fields": {"session_generation": row["session_generation"]}}
-                assert await spawn._adopt_interrupted_spawn("hostb", "v2-offline", "old", intent, peer) == "deferred"
+                assert await spawn._adopt_interrupted_spawn("remote-peer", "v2-offline", "old", intent, peer) == "deferred"
             spawnctl = AsyncMock()
             spawnctl.reconcile_spawn_intents.side_effect = adopt
             await SessionReconciler(sessions, peer, spawnctl=spawnctl).reconcile_once()
@@ -327,7 +327,7 @@ def test_persisted_identity_lease_fences_replacement_on_later_attempt(monkeypatc
             # A new reconciler still reads the durable lease from attempt one.
             await SessionReconciler(sessions, peer).reconcile_once()
             assert peer.kill_session.await_count == 1
-            assert (await store.get_deferred_reap("hostb:v2-offline"))["last_error"] == "pane_identity_changed"
+            assert (await store.get_deferred_reap("remote-peer:v2-offline"))["last_error"] == "pane_identity_changed"
         finally:
             store.stop()
     asyncio.run(run())

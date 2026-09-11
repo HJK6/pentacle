@@ -91,7 +91,7 @@ and exhausted intents prevent reopening or adopting that stream. Pane identity
 changes are refused and retained for inspection. `inspect_stream.ok` includes
 the session's close kind, `close_audit`, and `deferred_reap` (or null).
 
-`agent-orch close --operator-confirm hostb:v2-example` sends the confirmation
+`agent-orch close --operator-confirm remote-peer:v2-example` sends the confirmation
 and prints the reply including `reap_status`. `agent-orch inspect` shows the
 close kind and deferred state; `--json` retains the complete record.
 
