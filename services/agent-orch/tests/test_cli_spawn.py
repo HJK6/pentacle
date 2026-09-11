@@ -157,6 +157,76 @@ def test_spawn_and_handoff_without_manifest_need_no_target_sha(
         cli.build_parser().parse_args(["spawn", "--objective", "Exercise the existing spawn contract", "--provider", "codex", "--target-sha", "f" * 40])
 
 
+def test_parented_spawn_without_objective_returns_two(monkeypatch, tmp_path: Path, capsys) -> None:
+    # Objectives are required for parented child spawns (they feed the parent roster).
+    sent: list[dict[str, object]] = []
+
+    async def fake_spawn_once(_config, payload, timeout):
+        sent.append(dict(payload))
+        return {"type": "spawn.ok", "session": {"stream_id": "hostc:codex-child"}}
+
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))
+    monkeypatch.setattr(cli, "spawn_once", fake_spawn_once)
+    args = _spawn_args(tmp_path)
+    args.objective = None
+
+    assert cli.spawn(args) == 2
+    assert sent == []  # rejected client-side before any RPC
+    assert "objective_required" in capsys.readouterr().err
+
+
+def test_top_level_spawn_without_objective_succeeds(monkeypatch, tmp_path: Path, capsys) -> None:
+    # A top-level operator spawn sets its own goal; the daemon derives the objective.
+    captured: dict[str, object] = {}
+
+    async def fake_spawn_once(_config, payload, timeout):
+        captured["payload"] = dict(payload)
+        return {"type": "spawn.ok", "session": {"stream_id": "hostc:codex-child"}}
+
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))
+    monkeypatch.setattr(cli, "spawn_once", fake_spawn_once)
+    args = _spawn_args(tmp_path)
+    args.objective = None
+    args.parent = None
+    args.top_level = True
+
+    assert cli.spawn(args) == 0
+    _printed_json(capsys)
+    assert captured["payload"]["objective"] is None
+    assert captured["payload"]["objective_supported"] is True
+    assert "parent_stream_id" not in captured["payload"]
+
+
+def test_top_level_spawn_keeps_explicit_objective(monkeypatch, tmp_path: Path, capsys) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_spawn_once(_config, payload, timeout):
+        captured["payload"] = dict(payload)
+        return {"type": "spawn.ok", "session": {"stream_id": "hostc:codex-child"}}
+
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))
+    monkeypatch.setattr(cli, "spawn_once", fake_spawn_once)
+    args = _spawn_args(tmp_path)
+    args.objective = "Top-level goal"
+    args.parent = None
+    args.top_level = True
+
+    assert cli.spawn(args) == 0
+    _printed_json(capsys)
+    assert captured["payload"]["objective"] == "Top-level goal"
+
+
+def test_top_level_spawn_rejects_malformed_objective(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))
+    args = _spawn_args(tmp_path)
+    args.objective = "line\nbreak"
+    args.parent = None
+    args.top_level = True
+
+    assert cli.spawn(args) == 2
+    assert "objective_invalid" in capsys.readouterr().err
+
+
 def test_spawn_help_lists_spec_id_flag() -> None:
     result = subprocess.run(
         [

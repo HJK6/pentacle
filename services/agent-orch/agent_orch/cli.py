@@ -862,11 +862,10 @@ def _derive_default_idempotency_key(
 
 def spawn(args: argparse.Namespace) -> int:
     """Spawn directly through chat_streamd."""
-    from _shared.spawn_objective import objective_error
+    from _shared.spawn_objective import resolve_objective
+    # An objective is required only for a parented child spawn (it feeds the
+    # parent's roster); it is validated below once lineage is known.
     objective = getattr(args, "objective", None)
-    if error := objective_error(objective):
-        print(f"agent-orch spawn: {error}", file=sys.stderr)
-        return 2
     config = load_config()
     host = args.host or config.host_id
     handoff = bool(getattr(args, "handoff", False))
@@ -904,6 +903,14 @@ def spawn(args: argparse.Namespace) -> int:
     parent = args.parent if args.parent is not None else (
         None if (handoff or top_level) else caller_stream_id
     )
+    # Objectives are required only for parented child spawns; the daemon derives
+    # one for a top-level/handoff seat. A present objective is still shape-checked.
+    _, _, objective_error_code = resolve_objective(
+        objective, objective_supported=True, parent_stream_id=parent,
+    )
+    if objective_error_code:
+        print(f"agent-orch spawn: {objective_error_code}", file=sys.stderr)
+        return 2
     resume_session_id = getattr(args, "resume", None)
     if top_level and (handoff or args.parent is not None):
         print("agent-orch spawn: validation failed: --top-level is incompatible with --handoff/--parent", file=sys.stderr)
@@ -4208,7 +4215,7 @@ def build_parser() -> argparse.ArgumentParser:
     thread_parser.add_argument("--cursor")
     thread_parser.add_argument("--timeout", type=float, default=30.0)
     thread_parser.set_defaults(func=thread)
-    spawn_parser.add_argument("--objective", help="Immutable one-line objective (at most 120 code points)")
+    spawn_parser.add_argument("--objective", help="Immutable one-line objective, at most 120 code points; required for parented child spawns, optional otherwise (top-level/--top-level/--handoff derive one)")
     spawn_parser.add_argument("--visibility", choices=["default", "nested", "hidden"])
     spawn_parser.add_argument("--parent")
     spawn_parser.add_argument("--handoff", action="store_true")

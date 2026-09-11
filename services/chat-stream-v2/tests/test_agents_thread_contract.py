@@ -46,7 +46,8 @@ def test_spawn_admission_before_effects_and_immutable_generation():
         try:
             for objective in (None, "", "a\nb", "x" * 121):
                 with pytest.raises(VerbError) as exc:
-                    await ctl.spawn({"command": "run", "objective": objective}, "localhost")
+                    await ctl.spawn({"command": "run", "objective_supported": True,
+                        "objective": objective, "parent_stream_id": "localhost:parent"}, "localhost")
                 assert exc.value.code == objective_error(objective)
                 assert not tmux.alive and not await store.reservations()
                 assert not await store.list_sessions()
@@ -235,8 +236,14 @@ def test_visibility_and_lifecycle_are_independent(role, handoff, visibility, sel
     assert fields["self_close_on_completion"] is self_close
 
 
-def test_cli_objective_rejects_before_rpc(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "load_config", lambda: pytest.fail("configuration/RPC before admission"))
+def test_cli_objective_rejects_before_rpc(monkeypatch, capsys, tmp_path):
+    # A default spawn is a parented child, so strictness is known only after
+    # lineage resolution (config + leader discovery); the objective is then
+    # rejected client-side before the spawn RPC.
+    from agent_orch.config import Config
+    monkeypatch.setattr(cli, "load_config", lambda: Config("ws://unused", "", "hosta", tmp_path))
+    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _config: "hosta:leader")
+    monkeypatch.setattr(cli, "spawn_once", lambda *a, **k: pytest.fail("RPC before admission"))
     args = cli.build_parser().parse_args(["spawn", "--provider", "codex"])
     assert cli.spawn(args) == 2
     assert "objective_required" in capsys.readouterr().err
@@ -360,7 +367,9 @@ def test_real_rpc_admission_and_verified_parent_from_committed_fixture():
                             return frame
                 fixture = wire_fixture()
                 bad_spawn = next(case["request"] for case in fixture["spawn_cases"] if case["label"] == "missing_objective")
-                result = await rpc({**bad_spawn, "objective_supported": True, "request_id": "rpc-objective"})
+                # Parented child: strict objective admission still rejects before effects.
+                result = await rpc({**bad_spawn, "objective_supported": True,
+                                    "parent_stream_id": "hosta:parent", "request_id": "rpc-objective"})
                 assert result["type"] == "spawn.error" and result["error_code"] == "objective_required"
                 assert not await store.reservations()
                 request = dict(type="thread.read", request_id="rpc-thread", child_stream_id="hosta:child", stream_token=token)
@@ -429,16 +438,22 @@ def test_schedule_objective_admission_round_trip_and_legacy_retirement(tmp_path)
     from tests.test_window_schedule_contract import harness, schedule_insert, message
     store, _sessions, _comms, spawn, surface = harness(tmp_path)
     try:
+        # Parented scheduled child: strict objective admission (required + shape).
         for value in (None, " ", "two\nlines", "x" * 121):
             with pytest.raises(VerbError) as exc:
-                schedule_insert(surface, objective=value)
+                schedule_insert(surface, objective=value, objective_supported=True,
+                                parent_stream_id="hosta:participant")
             assert exc.value.code == objective_error(value)
         assert asyncio.run(store.submit(lambda conn: conn.execute("SELECT COUNT(*) FROM v2_schedules").fetchone()[0])) == 0
+        # Top-level scheduled spawn without an objective derives one from its brief.
+        derived = schedule_insert(surface, objective=None, initial_prompt="Roll the roster fix")["schedule"]
+        assert derived["objective"] == "Roll the roster fix"
         inserted = schedule_insert(surface, objective="Vérifier 東京 🌈")
         row = inserted["schedule"]
         assert row["objective"] == "Vérifier 東京 🌈"
         asyncio.run(surface._fire_schedule(row["schedule_id"]))
         assert spawn.calls[-1]["objective"] == "Vérifier 東京 🌈"
+        # A legacy row whose objective is NULL is retired regardless of lineage.
         legacy = schedule_insert(surface)["schedule"]["schedule_id"]
         asyncio.run(store.submit(lambda conn: (
             conn.execute("UPDATE v2_schedules SET objective=NULL WHERE schedule_id=?", (legacy,)), conn.commit())))
