@@ -121,7 +121,10 @@ def _hosts(fake: FakeSSH) -> Hosts:
     peer = MachineConfig(name="peer", ssh_target=fake.target, tmux_bin="tmux")
     return Hosts(
         "local", {"peer": peer}, ssh_bin=str(fake.bin),
-        config=HostsConfig(probe_timeout_s=0.3, breaker_threshold=3),
+        # The executable fixture starts a Python interpreter for each leg.
+        # Give it scheduling headroom; timeout/reset decisions have explicit
+        # deterministic transport cases below, independent of host load.
+        config=HostsConfig(probe_timeout_s=2.0, breaker_threshold=3),
     )
 
 
@@ -290,7 +293,7 @@ def test_down_host_records_only_fresh_health_and_never_resets(
     assert mux_events == []
     assert len(calls) == 3
     assert fake_ssh.events() == []  # no multiplexed/control subprocess at all
-    assert all("ControlMaster=no" in event for event in fake_ssh.events())
+    assert all("ControlMaster=no" in event for event in calls)
 
 
 def test_control_exit_timeout_still_unlinks_within_bound_and_rebuilds(
