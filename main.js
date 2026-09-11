@@ -144,6 +144,12 @@ function registerIpc() {
     log_path: null,
     buffered_events: telemetry.length,
   }));
+
+  // Reload the requesting window from the main process. A renderer-initiated
+  // location.reload() emits will-navigate, which the guard in createMainWindow
+  // cancels; a main-process reload does not, so this is how the Settings
+  // "Reload now" button applies changes.
+  ipcMain.on('app:reload', (event) => event.sender.reload());
 }
 
 async function createMainWindow() {

@@ -91,6 +91,10 @@ window.cc = {
   openMeeting: () => ipcRenderer.send('meeting:open'),
   closeMeeting: () => ipcRenderer.send('meeting:close'),
 
+  // Reload the window from the main process. A renderer location.reload() is
+  // cancelled by the will-navigate guard in main.js, so route it over IPC.
+  reloadApp: () => ipcRenderer.send('app:reload'),
+
   // Kill a tmux session directly on a specific host (bypasses the Python API).
   // Used by the trash flow so trashing on any machine actually removes the
   // session from tmux, not just from DynamoDB.
