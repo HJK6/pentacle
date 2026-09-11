@@ -4885,7 +4885,7 @@ async function deleteSession(name, hostId) {
     // operator_confirm:true must stay opt-in at this trash-click site — do
     // NOT default it inside chat_stream_client.closeSession, or other close
     // callers would silently bypass the daemon's operator-target gate.
-    const result = await window.cc.chatClose(hostId, name, { operator_confirm: true, force: true });
+    const result = await window.cc.chatClose(hostId, name, { operatorConfirm: true, force: true });
     if (!result?.ok) {
       showToast(result?.error || 'Failed to close chat', { type: 'error' });
       return;

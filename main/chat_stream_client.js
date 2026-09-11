@@ -701,12 +701,12 @@ try {
     return this._projectScheduleReply(reply);
   }
 
-  closeSession({ host, sessionName, operatorConfirm, force }) {
+  closeSession({ host, sessionName, operatorConfirm, operator_confirm, force }) {
     const payload = { type: 'close', host, session_name: sessionName };
     // operator_confirm must be opt-in from the caller, not defaulted here —
     // the daemon's _close_identity_check assumes the desktop trash-button
     // is the only operator-of-last-resort surface among pentacle callers.
-    if (operatorConfirm === true) payload.operator_confirm = true;
+    if (operatorConfirm === true || operator_confirm === true) payload.operator_confirm = true;
     if (force === true) payload.force = true;
     return this.sendCommand(payload, 'close');
   }
