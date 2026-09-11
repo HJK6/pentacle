@@ -63,10 +63,14 @@ orange/purple the flower. Renaming a host preserves its ornament.
 | `tmux` | String; `tmux` | Local executable and default remote tmux executable. |
 | `hosts` | Object of host ID → transport object; `{}` | SSH terminal transports for nonlocal IDs. Each entry has `host` (required string), `user` (local OS username), `port` (22), `tmux` (top-level tmux). |
 | `remote` | Transport object; absent | Legacy transport for the literal ID `remote`, also the client-mode marker. Fields match a hosts entry. |
+| `localWsl` | Object; absent | Windows only: attach the local terminal inside a WSL distribution. `distro` (required) names the distribution, `user` the WSL account (omit for the distribution default), `tmux` the tmux executable inside it (top-level tmux). Every local tmux command runs as `wsl.exe -d <distro> [-u <user>] -- /bin/bash -lc '<tmux ...>'`. |
 
 Public main attaches terminals locally when the selected ID is `local` or
 equals chatStream.localHost. Other IDs need an entry in `hosts` (or `remote`
 for that alias). Host labels and `localHostId` do not alter this decision.
+On Windows, where the daemon and tmux usually live in WSL, set `localWsl.distro`
+so those local attachments run inside that distribution; without it, main runs
+the `tmux` executable on the Windows host directly.
 The daemon owns session creation, provider executables, working directories,
 provider models and effort. See [daemon setup](../services/chat-stream-v2/README.md).
 
@@ -120,14 +124,14 @@ characters. See [limits health contract](#limits-health-contract).
 | `dashboardHub` | Object; absent | Preload exposes it to optional dashboard adapters when `url` (string) is set. No bundled hub is started. Additional adapter-owned fields pass through. |
 
 The retained `hosts.js` helper accepts the following legacy inputs. Current
-public main uses `hosts`, `remote`, and `tmux` through terminal_adapter instead;
-these helper inputs do not configure that terminal path.
+public main uses `hosts`, `remote`, `tmux` and `localWsl` through terminal_adapter
+instead; the other helper inputs do not configure that terminal path.
 
 | Key | Type and helper default | Effect |
 | --- | --- | --- |
 | `localTmux` | String; macOS `/opt/homebrew/bin/tmux`, otherwise `tmux` | Helper's local tmux executable. |
 | `localSsh` | Object; absent | Windows helper's local SSH: host required, port 2222, user from localWsl.user or null, tmux from localWsl.tmux or `tmux`. |
-| `localWsl` | Object; `{distro:'Ubuntu', user:null, tmux:'tmux'}` | Windows helper's WSL transport defaults. |
+| `localWsl` | Object; `{distro:'Ubuntu', user:null, tmux:'tmux'}` | Windows helper's WSL transport defaults. Public main reads the same `distro`, `user` and `tmux` fields for local terminal attachment (see the transport table above); the helper default distro does not apply there. |
 | `peers` | Object array; `[]` | Helper peer entries require id, host, user; port defaults 22 and tmux defaults `tmux`. |
 
 Main adds these read-only IPC fields; they are not user-config keys:

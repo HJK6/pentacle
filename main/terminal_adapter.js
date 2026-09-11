@@ -11,7 +11,23 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
   function target(host, args) {
     const local = config.chatStream?.localHost || 'local';
     const tmux = config.tmux || 'tmux';
-    if (host === 'local' || host === local) return { file: tmux, args };
+    if (host === 'local' || host === local) {
+      // On Windows the local tmux lives inside a WSL distro. Run every tmux verb
+      // — the pane lookup (execFile) and the interactive attach (node-pty) — as
+      // `wsl.exe -d <distro> [-u <user>] -- /bin/bash -lc '<tmux ...>'`. Wrapping
+      // the whole command in a single `bash -lc` string keeps tmux format args
+      // like #{pane_id} out of wsl.exe's argv (where a leading # is dropped) and
+      // gives the same shape to lookup and attach.
+      const wsl = config.localWsl;
+      if (wsl && wsl.distro) {
+        const line = [wsl.tmux || 'tmux', ...args].map(quote).join(' ');
+        const wslArgs = ['-d', String(wsl.distro)];
+        if (wsl.user) wslArgs.push('-u', String(wsl.user));
+        wslArgs.push('--', '/bin/bash', '-lc', line);
+        return { file: 'wsl.exe', args: wslArgs };
+      }
+      return { file: tmux, args };
+    }
     const remote = config.hosts?.[host] || (host === 'remote' ? config.remote : null);
     if (!remote?.host) throw new Error(`No terminal transport configured for ${host}`);
     return { file: platform === 'win32' ? 'ssh.exe' : 'ssh', args: ['-tt', '-p', String(remote.port || 22), '--',
