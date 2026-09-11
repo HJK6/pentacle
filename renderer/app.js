@@ -6803,7 +6803,13 @@ function setupSettingsPanel() {
 
   btn.addEventListener('click', open);
   closeBtn?.addEventListener('click', close);
-  reloadBtn?.addEventListener('click', () => location.reload());
+  reloadBtn?.addEventListener('click', () => {
+    // location.reload() is cancelled by the will-navigate guard in main.js;
+    // reload from the main process over IPC instead. Fall back to the direct
+    // call in non-Electron contexts (e.g. the test harness) where cc is absent.
+    if (window.cc?.reloadApp) window.cc.reloadApp();
+    else location.reload();
+  });
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && overlay.style.display !== 'none') close();
