@@ -102,7 +102,7 @@ test('durable-only answers project once at resolution time and yield to a matchi
   const echo = row({ id: 'echo', text: 'Answered: Green', eventCase: 'agent-question-answer',
     notificationId: 'durable-1', displayRule: 'activity:question' });
   const echoed = renderTranscriptTimelineHtml({ transcriptItems: [before, echo, after] } as never, undefined, options);
-  assert.equal((echoed.match(/Green/g) || []).length, 1, 'matching authoritative answer suppresses projection');
+  assert.equal((new JSDOM(echoed).window.document.body.textContent?.match(/Green/g) || []).length, 1, 'matching authoritative answer suppresses projection');
 });
 
 
@@ -142,4 +142,39 @@ test('disclosure expansion persists across refresh and remains isolated to its s
   assert.equal(container.querySelector('details')!.open, true);
   renderStreamTranscript('local:second', container, { store });
   assert.equal(container.querySelector('details')!.open, false);
+});
+
+
+test('transcript rows and disclosures expose the locked accessible names and roles', () => {
+  const disclosure = { mode: 'collapsed-preview', previewText: 'Preview', expandedText: 'Full result', expandable: true };
+  const cases = [
+    { item: row({ isUser: true, displayRule: 'bubble:user' }), name: 'User message' },
+    { item: row({ tone: 'tool', displayRule: 'activity:tool-output', disclosure }), name: 'Tool result', summary: 'Show full tool result' },
+    { item: row({ tone: 'agent', label: 'Researcher', displayRule: 'bubble:agent', disclosure }), name: 'Subagent · Researcher', summary: 'Show full Researcher output' },
+    { item: row({ displayRule: 'activity:code-block' }), name: 'Code block' },
+    { item: row({ displayRule: 'activity:tool-batch' }), name: 'Tool activity' },
+    { item: row({ displayRule: 'activity:thinking', text: 'Thinking about the change' }), name: 'Thinking about the change' },
+    { item: row({ displayRule: 'system:compacted' }), name: 'Compacted transcript' },
+  ];
+  for (const c of cases) {
+    const doc = rendered(c.item);
+    assert.equal(doc.querySelector('article')?.getAttribute('aria-label'), c.name);
+    if (c.summary) assert.equal(doc.querySelector('summary')?.getAttribute('aria-label'), c.summary);
+  }
+  const file = rendered(row({ text: 'Edited example.js (1 line)\n    indented body' }));
+  assert.equal(file.querySelector('.slot-chat-file-card')?.tagName, 'ARTICLE');
+  assert.equal(file.querySelector('.slot-chat-file-card')?.getAttribute('aria-label'), 'File Edited example.js');
+  assert.equal(file.querySelector('summary')?.getAttribute('aria-label'), 'Show file body');
+  for (const displayRule of ['terminal:divider', 'activity:turn-summary']) {
+    const doc = new JSDOM(renderTranscriptItemHtml(row({ displayRule }), undefined, { showTurnDuration: true })).window.document;
+    assert.ok(doc.querySelector('[role="separator"]'));
+  }
+});
+
+
+test('file body disclosure and copy preserve indentation and trailing whitespace', () => {
+  const body = '    const value = 1;  \n  return value;\n';
+  const doc = rendered(row({ text: 'Edited example.js (2 lines)\n' + body }));
+  assert.equal(doc.querySelector('details pre code')?.textContent, body);
+  assert.equal(doc.querySelector('details .slot-chat-code-copy')?.getAttribute('data-copy-text'), body);
 });
