@@ -151,3 +151,47 @@ test('an unbuilt bundle answers with a build hint instead of a stack trace', asy
   const traversal = await fetch(`http://127.0.0.1:${port}/../../package.json`, { redirect: 'manual' });
   assert.ok(traversal.status === 403 || traversal.status === 404, `traversal returned ${traversal.status}`);
 });
+
+test('two concurrent connections keep their local tmux sessions isolated', { skip: !TMUX && 'tmux is not installed' }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-test-'));
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home);
+  const realHome = process.env.HOME;
+  process.env.HOME = home;
+  const host = await main(['--profile', writeProfile(dir), '--port', '0']);
+  const { port } = host;
+
+  const sessA = `ptest-web-a-${process.pid}`;
+  const sessB = `ptest-web-b-${process.pid}`;
+  const a = connect(port);
+  const b = connect(port);
+  await Promise.all([a.ready, b.ready]);
+
+  t.after(async () => {
+    a.close();
+    b.close();
+    for (const s of [sessA, sessB]) { try { execFileSync('tmux', ['kill-session', '-t', `=${s}`], { stdio: 'ignore' }); } catch {} }
+    await host.close();
+    if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
+  });
+
+  // Two real local tmux sessions, each attached over its own connection.
+  execFileSync('tmux', ['new-session', '-d', '-s', sessA, 'sh', '-c', 'stty raw -echo; exec cat']);
+  execFileSync('tmux', ['new-session', '-d', '-s', sessB, 'sh', '-c', 'stty raw -echo; exec cat']);
+  assert.equal((await a.call('pty:create', 0, sessA, 'local', 80, 24)).ok, true);
+  assert.equal((await b.call('pty:create', 0, sessB, 'local', 80, 24)).ok, true);
+
+  // Each connection sees only its own bytes, on the same slot index (0).
+  a.fire('pty:write', 0, 'AAA-ONLY\r');
+  await a.waitForPush((p) => p.event === 'pty:data' && p.args[0] === 0 && String(p.args[1]).includes('AAA-ONLY'));
+  b.fire('pty:write', 0, 'BBB-ONLY\r');
+  await b.waitForPush((p) => p.event === 'pty:data' && p.args[0] === 0 && String(p.args[1]).includes('BBB-ONLY'));
+
+  assert.ok(!a.pushes.some((p) => p.event === 'pty:data' && String(p.args[1]).includes('BBB-ONLY')), 'A must never see B\'s bytes');
+  assert.ok(!b.pushes.some((p) => p.event === 'pty:data' && String(p.args[1]).includes('AAA-ONLY')), 'B must never see A\'s bytes');
+
+  // Closing A's terminal leaves B's live.
+  await a.call('pty:kill', 0);
+  b.fire('pty:write', 0, 'BBB-AGAIN\r');
+  await b.waitForPush((p) => p.event === 'pty:data' && String(p.args[1]).includes('BBB-AGAIN'));
+});

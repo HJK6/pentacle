@@ -79,15 +79,22 @@ async function run(args) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const report = new Report(path.join(__dirname, 'runs', stamp, 'web_smoke'));
   const sessionName = `ptest-web-${process.pid}-${Date.now().toString(36)}`;
+  const sessionName2 = `${sessionName}-b`;   // second connection's own local session
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-smoke-'));
+  const userDataDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-smoke2-'));
   let host = null;
   let chrome = null;
+  let chrome2 = null;
   let session = null;
+  let session2 = null;
 
   const cleanup = async () => {
     try { if (session) session.close(); } catch {}
+    try { if (session2) session2.close(); } catch {}
     try { if (chrome && !args.keep) chrome.kill('SIGTERM'); } catch {}
+    try { if (chrome2 && !args.keep) chrome2.kill('SIGTERM'); } catch {}
     try { tmux(['kill-session', '-t', `=${sessionName}`], { stdio: 'ignore' }); } catch {}
+    try { tmux(['kill-session', '-t', `=${sessionName2}`], { stdio: 'ignore' }); } catch {}
     try { if (host) await host.close(); } catch {}
   };
 
@@ -240,9 +247,54 @@ async function run(args) {
     fs.writeFileSync(path.join(report.dir, 'chat-transcript.txt'), painted.text.slice(0, 20000));
     }
 
+    // ── a second browser connection, isolated from the first ────────────────
+    // A second Chrome (its own /cc socket) proves the multi-client contract
+    // lane 2 owns: each connection attaches its OWN local tmux session, neither
+    // sees the other's pty bytes, and both share the daemon connection. A
+    // separate browser process is used rather than window.open because headless
+    // Chrome blocks a programmatic popup.
+    const cdpPort2 = args.cdpPort + 1;
+    chrome2 = spawn(resolveChrome(), [
+      '--headless=new',
+      `--remote-debugging-port=${cdpPort2}`,
+      `--user-data-dir=${userDataDir2}`,
+      '--no-first-run', '--no-default-browser-check', '--disable-gpu',
+      '--window-size=1600,1000',
+      url,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    chrome2.stdout.on('data', (d) => chromeLog.push(String(d)));
+    chrome2.stderr.on('data', (d) => chromeLog.push(String(d)));
+    session2 = await cdp.connect(cdpPort2, { match: new RegExp(`127\\.0\\.0\\.1:${host.port}|Terminal Dashboard`) });
+    await session2.waitFor('!!(window.cc && window.HOST)', { timeoutMs: args.timeoutMs, label: 'second window.cc installed' });
+    report.ok('a second browser connection installs its own window.cc', true);
+
+    // Both connections attach their own local tmux session on slot 0.
+    // sessionName already exists from the single-connection section (it survived
+    // killPty); the second connection gets its own new session.
+    tmux(['new-session', '-d', '-s', sessionName2, 'sh', '-c', 'stty raw -echo; exec cat']);
+    await session.eval(`(() => { window.__a = ''; window.cc.onPtyData((s, d) => { if (s === 0) window.__a += d; }); return true; })()`);
+    await session2.eval(`(() => { window.__b = ''; window.cc.onPtyData((s, d) => { if (s === 0) window.__b += d; }); return true; })()`);
+    const paneA = await session.eval(`window.cc.createPty(0, ${JSON.stringify(sessionName)}, 'local', 80, 24)`, { awaitPromise: true });
+    const paneB = await session2.eval(`window.cc.createPty(0, ${JSON.stringify(sessionName2)}, 'local', 80, 24)`, { awaitPromise: true });
+    report.ok('both connections attach their own tmux session on slot 0', /^%\d+$/.test(String(paneA)) && /^%\d+$/.test(String(paneB)) && paneA !== paneB, { paneA, paneB });
+
+    await session.eval("window.cc.writePty(0, 'FIRST-KEEPS-TYPING\\r'), true");
+    await session2.eval("window.cc.writePty(0, 'SECOND-ONLY\\r'), true");
+    const aBuf = await waitForValue(session, 'window.__a', (d) => String(d).includes('FIRST-KEEPS-TYPING'),
+      { timeoutMs: args.timeoutMs, label: 'first connection echoes its own input' });
+    const bBuf = await waitForValue(session2, 'window.__b', (d) => String(d).includes('SECOND-ONLY'),
+      { timeoutMs: args.timeoutMs, label: 'second connection echoes its own input' });
+    report.ok('neither connection sees the other\'s pty bytes',
+      !String(aBuf).includes('SECOND-ONLY') && !String(bBuf).includes('FIRST-KEEPS-TYPING'),
+      { aHasB: String(aBuf).includes('SECOND-ONLY'), bHasA: String(bBuf).includes('FIRST-KEEPS-TYPING') });
+
+    const streamState2 = await waitForValue(session2, 'window.cc.getChatStreamState()', (s) => s && s.connected === true,
+      { timeoutMs: args.timeoutMs, label: 'second connection reaches the daemon' });
+    report.ok('the second connection shares the daemon connection', streamState2.connected === true);
+
     fs.writeFileSync(path.join(report.dir, 'chrome.log'), chromeLog.join(''));
     fs.writeFileSync(path.join(report.dir, 'console.log'), (session.consoleLines || []).join('\n'));
-    const verdict = report.write({ profile: args.profile, url, tmuxSession: sessionName });
+    const verdict = report.write({ profile: args.profile, url, tmuxSession: sessionName, tmuxSession2: sessionName2 });
     console.log(`\n◀ web_smoke: ${verdict.status}\n  artifacts: ${report.dir}`);
     return verdict.status === 'PASS' ? 0 : 1;
   } catch (e) {
