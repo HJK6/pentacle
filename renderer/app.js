@@ -6,6 +6,7 @@ const { FitAddon } = require('@xterm/addon-fit');
 const { Unicode11Addon } = require('@xterm/addon-unicode11'); // REQUIRED: without this, ❯ and other unicode renders as __
 const { WebglAddon } = require('@xterm/addon-webgl'); // GPU-accelerated rendering — fixes partial text paint on screen refresh
 const { createTerminalPaste } = require('./terminal_paste');
+const { normalizeSplit, createGridColResizer } = require('./grid_col_resizer');
 const path = require('path');
 const chatUi = require('./chat_ui_state');
 const assetRender = require('./asset_render');
@@ -137,7 +138,7 @@ function saveSettingsOverride(key, value) {
 function normalizeAppearance(raw = {}) {
   const theme = raw.theme === 'light' ? 'light' : 'dark';
   const density = raw.density === 'compact' ? 'compact' : 'comfortable';
-  return { theme, density };
+  return { theme, density, ...(raw.gridColSplit !== undefined ? { gridColSplit: normalizeSplit(raw.gridColSplit) } : {}) };
 }
 
 function loadAppearanceSettings() {
@@ -3861,6 +3862,7 @@ function updateSlotViewMode(slot, mode) {
   }
   if (chatUiEnabled()) renderSlotChat(slot);
   ensureSlotAssetTabs(slot);
+  if (mode === 'terminal') scheduleVisibleSlotFits();
 }
 
 function ensureSlotModeToggle(slot) {
@@ -4635,13 +4637,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       if (!state.terminals[slot]) return;
-      const { term: t, fitAddon: fa } = state.terminals[slot];
-      const oldCols = t.cols;
-      const oldRows = t.rows;
-      fa.fit();
-      if (t.cols !== oldCols || t.rows !== oldRows) {
-        window.cc.resizePty(slot, t.cols, t.rows);
-      }
+      fitVisibleSlot(slot);
     }, 50);
   });
   ro.observe(container);
@@ -4749,6 +4745,31 @@ function focusTerminal(slot) {
   }
 }
 
+// A hidden terminal must retain its last real geometry. Both IPC and browser
+// transports use the same resizePty path after FitAddon changes dimensions.
+function fitVisibleSlot(slot) {
+  if (state.currentView !== 'chats' || (state.maximizedSlot !== null && state.maximizedSlot !== slot)) return false;
+  const entry = state.terminals[slot];
+  const mount = entry?.term.element?.parentElement;
+  if (!mount || mount.clientWidth <= 0 || mount.clientHeight <= 0 || !mount.getClientRects().length) return false;
+  const css = window.getComputedStyle(mount);
+  if (css.display === 'none' || css.visibility === 'hidden') return false;
+  const { term, fitAddon } = entry;
+  const oldCols = term.cols, oldRows = term.rows;
+  fitAddon.fit();
+  if (term.cols !== oldCols || term.rows !== oldRows) window.cc.resizePty(slot, term.cols, term.rows);
+  return true;
+}
+let slotFitFrame = null;
+function scheduleVisibleSlotFits() {
+  if (slotFitFrame !== null) return;
+  slotFitFrame = requestAnimationFrame(() => {
+    slotFitFrame = null;
+    for (let slot = 0; slot < 4; slot++) fitVisibleSlot(slot);
+  });
+}
+let gridColResizer = null;
+
 // ── Maximize / Minimize ───────────────────────────────────────
 
 function maximizeSlot(slot) {
@@ -4769,18 +4790,9 @@ function maximizeSlot(slot) {
     cell.classList.toggle('maximized-cell', i === slot);
   }
 
-  // Refit the maximized terminal after layout settles
+  gridColResizer?.refresh();
   requestAnimationFrame(() => {
-    if (state.terminals[slot]) {
-      const { term: t, fitAddon: fa } = state.terminals[slot];
-      const oldCols = t.cols;
-      const oldRows = t.rows;
-      fa.fit();
-      if (t.cols !== oldCols || t.rows !== oldRows) {
-        window.cc.resizePty(slot, t.cols, t.rows);
-      }
-      t.focus();
-    }
+    if (fitVisibleSlot(slot)) state.terminals[slot].term.focus();
   });
 
   renderSidebar();
@@ -4796,20 +4808,8 @@ function minimizeAll() {
     document.getElementById(`cell-${i}`).classList.remove('maximized-cell');
   }
 
-  // Refit all terminals — only resize PTY when size actually changes
-  requestAnimationFrame(() => {
-    for (let i = 0; i < 4; i++) {
-      if (state.terminals[i]) {
-        const { term: t, fitAddon: fa } = state.terminals[i];
-        const oldCols = t.cols;
-        const oldRows = t.rows;
-        fa.fit();
-        if (t.cols !== oldCols || t.rows !== oldRows) {
-          window.cc.resizePty(i, t.cols, t.rows);
-        }
-      }
-    }
-  });
+  gridColResizer?.refresh();
+  scheduleVisibleSlotFits();
 
   renderSidebar();
 }
@@ -5577,6 +5577,7 @@ function switchView(view) {
 
   // Toggle DOM visibility
   document.querySelector('.grid').style.display = view === 'chats' ? '' : 'none';
+  gridColResizer?.refresh();
   document.getElementById('dashboard-content').style.display = view === 'dashboards' ? '' : 'none';
   document.getElementById('panel-dashboards').style.display = view === 'dashboards' ? 'flex' : 'none';
 
@@ -5587,20 +5588,7 @@ function switchView(view) {
   if (view === 'chats') {
     // Restore sessions panel.
     document.getElementById('panel-sessions').style.display = 'flex';
-    // Refit all terminals
-    requestAnimationFrame(() => {
-      for (let i = 0; i < 4; i++) {
-        if (state.terminals[i]) {
-          const { term: t, fitAddon: fa } = state.terminals[i];
-          const oldCols = t.cols;
-          const oldRows = t.rows;
-          fa.fit();
-          if (t.cols !== oldCols || t.rows !== oldRows) {
-            window.cc.resizePty(i, t.cols, t.rows);
-          }
-        }
-      }
-    });
+    scheduleVisibleSlotFits();
   } else {
     // Hide chat panels
     document.getElementById('panel-sessions').style.display = 'none';
@@ -6918,6 +6906,19 @@ function setupSettingsPanel() {
   });
 }
 setupSettingsPanel();
+const slotGrid = document.querySelector('.grid');
+const columnHandle = slotGrid?.querySelector('.grid-col-resizer');
+if (columnHandle) gridColResizer = createGridColResizer({
+  grid: slotGrid, handle: columnHandle, initialSplit: state.appearance.gridColSplit,
+  isVisible: () => state.currentView === 'chats',
+  save: fraction => {
+    state.appearance.gridColSplit = fraction;
+    saveAppearanceSetting('gridColSplit', fraction);
+  },
+  onResize: scheduleVisibleSlotFits,
+  emit: (name, data) => window.PentacleHarness?.emit?.(`slot-layout:${name}`, { data }),
+});
+window.addEventListener('beforeunload', () => gridColResizer?.destroy());
 
 // Set empty state for all cells.
 for (let i = 0; i < 4; i++) {

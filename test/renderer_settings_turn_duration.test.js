@@ -385,6 +385,61 @@ test('theme and density settings restore from localStorage on renderer boot', as
   );
 });
 
+test('column preference survives the real settings save/load normalizer without eager writes', async () => {
+  const first = installRenderer();
+  await flush(); await flush();
+  assert.equal(first.dom.window.localStorage.getItem('pentacle.settings.v1'), null);
+  vm.runInContext("saveAppearanceSetting('gridColSplit', .68)", first.context);
+  const stored = JSON.parse(first.dom.window.localStorage.getItem('pentacle.settings.v1'));
+  const next = installRenderer({ settingsRecord: stored });
+  await flush(); await flush();
+  assert.equal(vm.runInContext('state.appearance.gridColSplit', next.context), .68);
+  vm.runInContext("state.appearance.theme = 'light'; applyAppearanceSettings()", next.context);
+  assert.equal(vm.runInContext('state.appearance.gridColSplit', next.context), .68);
+  assert.deepEqual(JSON.parse(next.dom.window.localStorage.getItem('pentacle.settings.v1')), stored);
+  for (const invalid of [null, true, [], -1, 0, 1, 'invalid']) {
+    assert.equal(vm.runInContext(`normalizeAppearance({gridColSplit:${JSON.stringify(invalid)}}).gridColSplit`, next.context), .5);
+  }
+  first.dom.window.close(); next.dom.window.close();
+});
+
+test('visible-fit policy skips dashboard, maximized-away and hidden terminal views', async () => {
+  const { context, dom } = installRenderer();
+  await flush(); await flush();
+  vm.runInContext(`
+    window.resizeCalls = [];
+    window.fitCalls = [];
+    window.cc.resizePty = (...args) => window.resizeCalls.push(args);
+    for (let slot = 0; slot < 4; slot++) {
+      const mount = document.getElementById('term-'+slot);
+      Object.defineProperty(mount, 'clientWidth', { configurable:true, value:400 });
+      Object.defineProperty(mount, 'clientHeight', { configurable:true, value:300 });
+      mount.getClientRects = () => mount.style.display === 'none' ? [] : [{ width:400, height:300 }];
+      const element = document.createElement('div'); mount.append(element);
+      const term = { element, cols:80, rows:24 };
+      state.terminals[slot] = { term, fitAddon:{ fit(){window.fitCalls.push(slot); term.cols=90;term.rows=30;} } };
+    }
+    for (let slot=0;slot<4;slot++) fitVisibleSlot(slot);
+  `, context);
+  assert.deepEqual(Array.from(dom.window.fitCalls), [0,1,2,3]);
+  assert.equal(dom.window.resizeCalls.length, 4);
+  vm.runInContext(`
+    window.fitCalls.length = 0;
+    state.maximizedSlot=2;
+    for (let slot=0;slot<4;slot++) fitVisibleSlot(slot);
+  `, context);
+  assert.deepEqual(Array.from(dom.window.fitCalls), [2]);
+  assert.equal(dom.window.resizeCalls.length, 4, 'unchanged cols/rows never resize the PTY');
+  vm.runInContext(`
+    window.fitCalls.length=0; state.currentView='dashboards'; fitVisibleSlot(2);
+    state.currentView='chats'; document.getElementById('term-2').style.display='none'; fitVisibleSlot(2);
+    state.maximizedSlot=null;
+    Object.defineProperty(document.getElementById('term-0'),'clientWidth',{value:0}); fitVisibleSlot(0);
+  `, context);
+  assert.equal(dom.window.fitCalls.length, 0);
+  dom.window.close();
+});
+
 test('usage panel toggle collapses and expands the sidebar section', async () => {
   const { dom } = installRenderer();
   await flush();
@@ -412,4 +467,3 @@ test('usage panel toggle collapses and expands the sidebar section', async () =>
   assert.equal(body.hidden, false);
   assert.equal(section.classList.contains('is-collapsed'), false);
 });
-
