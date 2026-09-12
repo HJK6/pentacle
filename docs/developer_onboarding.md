@@ -94,3 +94,26 @@ python3 services/chat-stream-v2/tools/run_gate.py unit
 ```
 
 Evidence should contain only synthetic fixture ids, result summaries, and the candidate identifier. Remove temporary stores after the run.
+
+## 8. Pushing safely
+
+Enable the repository's push guard once per clone:
+
+```bash
+git config core.hooksPath scripts/hooks
+```
+
+`scripts/hooks/pre-push` then refuses three classes of accident (each overridable with `git push --no-verify` when you are certain):
+
+- **Wrong destination** — a push to a remote *named* `public` whose URL is not the public `HJK6/pentacle`. The resolved URL is printed on every push so you can see where it is going.
+- **No explicit refspec** — a bare `git push <remote>` or a matching-branch push. Always name what you push: `git push public my-branch:refs/heads/my-branch`.
+- **Foreign history** — a branch whose tip shares no merge-base with the remote's `main` (for example a different repository's line of history). Branch from and rebase on the public `main` before pushing.
+
+Push with an explicit refspec and read the remote back before announcing a push landed:
+
+```bash
+git push public my-branch:refs/heads/my-branch
+git ls-remote public my-branch
+```
+
+Its checks are covered by `test/pre_push_hook.test.js`, which runs under `npm test`.

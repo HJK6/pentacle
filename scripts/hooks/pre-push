@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+#
+# pre-push — refuse pushes that would put the wrong history in the wrong place.
+#
+# Enable it in a clone with:
+#
+#     git config core.hooksPath scripts/hooks
+#
+# It runs three checks and refuses (exit 1) if any fails; a refused push can be
+# forced past with `git push --no-verify` when you are certain.
+#
+#   (a) Destination — when pushing to a remote *named* `public`, the resolved URL
+#       must be the public repository (github.com/HJK6/pentacle). The resolved
+#       URL is always printed so you can see where a push is going.
+#   (b) Explicit refspec — a bare `git push <remote>` (no refspec) or a
+#       matching-branch push is refused; name what you are pushing, e.g.
+#       `git push public my-branch:refs/heads/my-branch`.
+#   (c) Shared history — every ref being pushed must share a merge-base with the
+#       remote's `main`. A tip with no common ancestor is foreign history (a
+#       different repository's line) and is refused.
+#
+# Origin: 2026-09-12 — a private branch carrying the whole `pentacle-private`
+# history (no merge base with this repo) was pushed to public `HJK6/pentacle` by
+# a branch-name mixup. Checks (a)+(b) catch the mixup at the source; (c) catches
+# the foreign history itself regardless of how the push was spelled.
+
+set -u
+
+remote_name="${1:-}"
+remote_url="${2:-}"
+zero='0000000000000000000000000000000000000000'
+fail=0
+
+warn() { printf 'pre-push: %s\n' "$*" >&2; }
+
+# ── always show where the push is going ─────────────────────────────────────
+warn "pushing to '${remote_name}' -> ${remote_url}"
+
+# ── (a) destination: a remote named `public` must be the public repo ─────────
+# Built-in allow-list; PENTACLE_ALLOWED_PUBLIC_REMOTES (space/':'-separated) adds
+# entries for tests and mirrors. `.git` and a trailing slash are ignored.
+canonicalize_url() { printf '%s' "${1%/}" | sed 's/\.git$//'; }
+
+if [ "$remote_name" = "public" ]; then
+  allowed=(
+    "git@github.com:HJK6/pentacle"
+    "https://github.com/HJK6/pentacle"
+    "ssh://git@github.com/HJK6/pentacle"
+  )
+  if [ -n "${PENTACLE_ALLOWED_PUBLIC_REMOTES:-}" ]; then
+    # split on whitespace and ':' that is not part of scheme://; simplest: split
+    # on whitespace, callers pass one entry per token.
+    for extra in ${PENTACLE_ALLOWED_PUBLIC_REMOTES}; do allowed+=("$extra"); done
+  fi
+  got="$(canonicalize_url "$remote_url")"
+  ok=0
+  for want in "${allowed[@]}"; do
+    [ "$got" = "$(canonicalize_url "$want")" ] && { ok=1; break; }
+  done
+  if [ "$ok" -ne 1 ]; then
+    warn "REFUSED: remote 'public' resolves to '${remote_url}', which is not the public HJK6/pentacle."
+    warn "         a remote named 'public' must point at github.com/HJK6/pentacle."
+    fail=1
+  fi
+fi
+
+# ── (b) explicit refspec: no bare / matching-branch pushes ───────────────────
+# git runs builtins in-process, so the parent process ($PPID) is the very
+# `git push …` command; its argv tells us whether a refspec was given. If we
+# cannot read it (non-Linux, unusual invocation) we skip this check — (c) is the
+# load-bearing safety net and always runs.
+if [ -r "/proc/$PPID/cmdline" ]; then
+  mapfile -d '' -t pcmd < "/proc/$PPID/cmdline"
+  # locate the `push` subcommand
+  pi=-1
+  for i in "${!pcmd[@]}"; do
+    if [ "${pcmd[$i]}" = "push" ]; then pi=$i; break; fi
+  done
+  if [ "$pi" -ge 0 ]; then
+    value_opts=" -o --push-option --repo --receive-pack --exec "
+    positionals=()
+    j=$((pi + 1))
+    while [ "$j" -lt "${#pcmd[@]}" ]; do
+      tok="${pcmd[$j]}"
+      case "$tok" in
+        --) j=$((j + 1)); while [ "$j" -lt "${#pcmd[@]}" ]; do positionals+=("${pcmd[$j]}"); j=$((j + 1)); done; break ;;
+        --*=*) : ;;                                   # inline value, no extra arg
+        -*)
+          if printf '%s' "$value_opts" | grep -q -- " ${tok} "; then j=$((j + 1)); fi
+          ;;
+        *) positionals+=("$tok") ;;
+      esac
+      j=$((j + 1))
+    done
+    # positionals[0] is the remote (or a refspec if the remote was defaulted);
+    # a compliant push names at least one refspec after the remote.
+    refspec_count=$(( ${#positionals[@]} > 0 ? ${#positionals[@]} - 1 : 0 ))
+    if [ "${#positionals[@]}" -le 1 ]; then
+      warn "REFUSED: no refspec. Push explicitly, e.g. 'git push ${remote_name} <branch>:refs/heads/<branch>'."
+      warn "         a bare 'git push ${remote_name}' or a matching-branch push is not allowed."
+      fail=1
+    fi
+    : "$refspec_count"
+  fi
+fi
+
+# ── (c) shared history: every pushed tip must share a merge-base with main ────
+# Resolve the remote's main into a local object. Prefer the tracking ref; fall
+# back to asking the remote directly (and fetching the object if we lack it).
+remote_main=''
+if git rev-parse --verify --quiet "refs/remotes/${remote_name}/main" >/dev/null 2>&1; then
+  remote_main="$(git rev-parse "refs/remotes/${remote_name}/main")"
+fi
+if [ -z "$remote_main" ] && [ -n "$remote_url" ]; then
+  ls_main="$(git ls-remote --heads "$remote_url" main 2>/dev/null | awk 'NR==1{print $1}')"
+  if [ -n "$ls_main" ]; then
+    if git cat-file -e "${ls_main}^{commit}" 2>/dev/null; then
+      remote_main="$ls_main"
+    elif git fetch -q "$remote_url" main 2>/dev/null; then
+      remote_main="$(git rev-parse FETCH_HEAD)"
+    fi
+  fi
+fi
+
+if [ -z "$remote_main" ]; then
+  # Remote has no `main` yet (fresh repo) — nothing to be foreign to.
+  warn "note: '${remote_name}' has no 'main' branch to compare against; skipping the shared-history check."
+else
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ -z "${local_sha:-}" ] && continue
+    [ "$local_sha" = "$zero" ] && continue                    # deletion
+    if ! git merge-base "$local_sha" "$remote_main" >/dev/null 2>&1; then
+      warn "REFUSED: ${_local_ref:-<ref>} shares no merge-base with ${remote_name}/main (${remote_main:0:12})."
+      warn "         this looks like foreign history (a different repository's line)."
+      fail=1
+    fi
+    : "$remote_sha"
+  done
+fi
+
+if [ "$fail" -ne 0 ]; then
+  warn "push blocked. If this is genuinely correct, re-run with 'git push --no-verify'."
+  exit 1
+fi
+exit 0
