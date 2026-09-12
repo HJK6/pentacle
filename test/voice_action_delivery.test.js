@@ -125,21 +125,19 @@ test('web shim and host bridge preserve voice prompt, tuple and idempotency with
   }
 });
 
-test('omitted voice effort uses canonical provider and host defaults without replacing model', () => {
-  const input = capture(); input.action.effort = '';
-  const live = { ...catalog, spawn_defaults: { schema_version: 1,
-    providers: { codex: { model: 'gpt-5.6-luna', effort: 'high' } }, host_overrides: {} } };
-  assert.equal(prepareVoiceSpawn(input, live).effort, 'high');
-  assert.equal(prepareVoiceSpawn(input, live).model, input.action.model);
-  live.spawn_defaults.host_overrides[input.action.host] = { codex: { effort: 'medium' } };
-  live.models = { codex: { [input.action.model]: { efforts: ['high', 'medium'] } } };
-  assert.equal(prepareVoiceSpawn(input, live).effort, 'medium');
-  input.action.effort = 'high';
-  assert.equal(prepareVoiceSpawn(input, live).effort, 'high');
-  input.action.effort = '';
+test('model-only protocol2 spawn opens an idle agent without inventing a task', () => {
+  const input = capture(); input.action.version = 2; input.action.task = '';
+  input.action.effort = 'high'; input.action.effort_source = 'model_guidance_default';
+  const request = prepareVoiceSpawn(input, catalog);
+  assert.equal(request.model, 'gpt-6-astra');
+  assert.equal(request.effort, 'high');
+  assert.equal(request.host, 'amaterasu');
+  assert.equal(request.initialPrompt, '');
+  assert.equal(request.objective, 'Voice-opened gpt-6-astra agent');
+  input.action.version = 1;
   assert.throws(() => prepareVoiceSpawn(input, catalog));
-  live.spawn_defaults.host_overrides[input.action.host].codex.effort = 'unsupported';
-  assert.throws(() => prepareVoiceSpawn(input, live));
+  input.action.version = 2; input.action.model = '';
+  assert.throws(() => prepareVoiceSpawn(input, catalog));
 });
 
 test('follow-up status tracks waiting, capture and inference without consuming a claim', () => {
@@ -156,12 +154,12 @@ test('follow-up status tracks waiting, capture and inference without consuming a
 });
 
 test('resolved default effort and provenance are returned in the actual outcome receipt', async () => {
-  const f = fixture(); f.claims[0].action.effort = '';
+  const f = fixture(); f.claims[0].action.effort = 'high'; f.claims[0].action.effort_source = 'model_guidance_default';
   const live = { ...catalog, spawn_defaults: { providers: { codex: { effort: 'high' } } } };
   f.helper = f.make({ getSpawnCatalog: async () => live });
   await f.helper.tick(f.status);
   assert.equal(f.outcomes[0].receipt.effort, 'high');
-  assert.equal(f.outcomes[0].receipt.effort_source, 'provider_host_default');
+  assert.equal(f.outcomes[0].receipt.effort_source, 'model_guidance_default');
   assert.equal(f.spawns[0].idempotencyKey, 'voice:a-unique-capture');
   assert.equal(f.sends.length, 0);
 });

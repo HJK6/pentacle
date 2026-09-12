@@ -109,7 +109,7 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
         let result;
         try { result = await spawnAgent(request); outcome = spawnOutcome(result); } catch { /* No new key or automatic retry. */ }
         note = outcome === 'spawned' ? 'Voice agent started.' : outcome === 'queued' ? 'Voice agent queued.' : 'Voice spawn unconfirmed; inspect Pentacle before repeating.';
-        const receipt = { stream_id: result?.streamId || result?.stream_id || result?.session?.stream_id || null, state: result?.state || 'unconfirmed', idempotency_key: request.idempotencyKey, host: request.host, model: request.model, effort: request.effort, effort_source: capture.action.effort === '' ? 'provider_host_default' : 'explicit' };
+        const receipt = { stream_id: result?.streamId || result?.stream_id || result?.session?.stream_id || null, state: result?.state || 'unconfirmed', idempotency_key: request.idempotencyKey, host: request.host, model: request.model, effort: request.effort, effort_source: capture.action.effort_source || 'explicit' };
         await api('POST', '/actions/outcome', { id: capture.id, generation: capture.generation, outcome, receipt });
         return;
       }
