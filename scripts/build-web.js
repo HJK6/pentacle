@@ -94,7 +94,14 @@ function copyExternalScripts() {
 
 // Icons referenced from <link rel="icon"> / apple-touch-icon are copied next to the page.
 function copyIcons(html) {
-  for (const m of html.matchAll(/<link[^>]+rel="(?:icon|apple-touch-icon)"[^>]+href="([^"]+)"/g)) {
+  const refs = [];
+  for (const m of html.matchAll(/<link[^>]+rel="(?:icon|apple-touch-icon|manifest)"[^>]+href="([^"]+)"/g)) refs.push(m[1]);
+  // A web app manifest lists its own icons; ship those too so the page is installable.
+  for (const ref of refs.filter((r) => r.endsWith('.webmanifest'))) {
+    const manifest = JSON.parse(fs.readFileSync(path.resolve(RENDERER, ref), 'utf8'));
+    for (const icon of manifest.icons || []) refs.push(icon.src);
+  }
+  for (const m of refs.map((r) => [null, r])) {
     const from = path.resolve(RENDERER, m[1]);
     const to = path.join(OUT, m[1]);
     fs.mkdirSync(path.dirname(to), { recursive: true });
