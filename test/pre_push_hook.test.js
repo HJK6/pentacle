@@ -47,12 +47,13 @@ function commitFile(work, name, body, msg) {
   git(work, [...ID, 'add', name]);
   git(work, [...ID, 'commit', '-m', msg]);
 }
-function sandbox({ seedMain = true } = {}) {
+function sandbox({ seedMain = true, objectFormat = null } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-prepush-'));
   const remote = path.join(dir, 'public.git');
   const work = path.join(dir, 'work');
-  execFileSync('git', ['init', '--bare', '-b', 'main', remote], { stdio: 'ignore' });
-  execFileSync('git', ['init', '-b', 'main', work], { stdio: 'ignore' });
+  const fmt = objectFormat ? [`--object-format=${objectFormat}`] : [];
+  execFileSync('git', ['init', '--bare', '-b', 'main', ...fmt, remote], { stdio: 'ignore' });
+  execFileSync('git', ['init', '-b', 'main', ...fmt, work], { stdio: 'ignore' });
   commitFile(work, 'README', 'seed\n', 'seed main');
   git(work, ['remote', 'add', 'public', remote]);
   if (seedMain) { git(work, [...ID, 'push', 'public', 'main:refs/heads/main']); git(work, ['fetch', 'public', 'main']); }
@@ -247,6 +248,15 @@ test('a deletion (push :refs/heads/x) is ALLOWED', () => {
   const del = tryGit(sb.work, withHook(['push', 'public', ':refs/heads/todelete']), pub(sb.remote));
   assert.equal(del.status, 0, `expected deletion allowed, got ${del.status}\n${del.stderr}`);
 });
+test('a SHA-256 deletion (64-zero old id) is ALLOWED, not false-rejected', () => {
+  const sb = sandbox({ objectFormat: 'sha256' });
+  git(sb.work, [...ID, 'checkout', '-b', 'todelete', 'main']);
+  commitFile(sb.work, 'd.txt', 'd\n', 'to delete');
+  assert.equal(tryGit(sb.work, withHook(['push', 'public', 'todelete:refs/heads/todelete']), pub(sb.remote)).status, 0);
+  const del = tryGit(sb.work, withHook(['push', 'public', ':refs/heads/todelete']), pub(sb.remote));
+  assert.equal(del.status, 0, `sha256 deletion must be allowed, got ${del.status}\n${del.stderr}`);
+});
+
 test('a multi-ref push with one foreign ref is REJECTED', () => {
   const sb = sandbox();
   git(sb.work, [...ID, 'checkout', '-b', 'good', 'main']);

@@ -47,7 +47,6 @@ PREPUSH_STDIN="$(cat 2>/dev/null || true)"
 
 remote_name="${1:-}"
 remote_url="${2:-}"
-zero='0000000000000000000000000000000000000000'
 fail=0
 
 # The invoking `git push` is this hook's parent. Capture it at top level: in
@@ -261,7 +260,12 @@ is_full_sha() {
   case "$1" in *[!0-9a-f]*) return 1 ;; esac
   [ "${#1}" = 40 ] || [ "${#1}" = 64 ]
 }
-valid_oid() { [ "$1" = "$zero" ] || is_full_sha "$1"; }
+# The deletion sentinel is an all-zero id: 40 zeros (sha1) or 64 zeros (sha256).
+is_zero_oid() {
+  case "$1" in *[!0]*) return 1 ;; esac
+  [ "${#1}" = 40 ] || [ "${#1}" = 64 ]
+}
+valid_oid() { is_zero_oid "$1" || is_full_sha "$1"; }
 
 records=0
 while read -r lref lsha rref rsha extra; do
@@ -278,7 +282,7 @@ while read -r lref lsha rref rsha extra; do
   # git sends "(delete)" as the local ref of a deletion; otherwise refs/*.
   case "$lref" in refs/*|'(delete)') : ;; *) if [ "$is_public" -eq 1 ]; then warn "REFUSED: malformed local ref '${lref}' (fail closed)."; fail=1; fi; continue ;; esac
   case "$rref" in refs/*) : ;; *) if [ "$is_public" -eq 1 ]; then warn "REFUSED: malformed remote ref '${rref}' (fail closed)."; fail=1; fi; continue ;; esac
-  if [ "$lsha" = "$zero" ]; then records=$((records + 1)); continue; fi   # deletion
+  if is_zero_oid "$lsha"; then records=$((records + 1)); continue; fi   # deletion (sha1 or sha256 all-zero)
   records=$((records + 1))
   [ -n "$main_roots" ] || continue           # non-public with no comparable main
   tip_roots="$(git rev-list --max-parents=0 "$lsha" 2>/dev/null)"
