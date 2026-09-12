@@ -52,19 +52,24 @@ const CONTENT_TYPES = {
 };
 
 function parseArgs(argv) {
-  const args = { port: DEFAULT_PORT, bind: DEFAULT_BIND, profile: null, tokenFile: null };
+  const args = { port: DEFAULT_PORT, bind: DEFAULT_BIND, profile: null, tokenFile: null, tokenPath: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--profile') args.profile = argv[++i];
     else if (a === '--port') args.port = Number(argv[++i]);
     else if (a === '--bind') args.bind = argv[++i];
-    else if (a === '--token-file') args.tokenFile = argv[++i];
+    else if (a === '--token-file') args.tokenFile = argv[++i];   // web login auth (this host)
+    else if (a === '--token-path') args.tokenPath = argv[++i];   // chat-stream daemon credential
     else if (a === '--help' || a === '-h') args.help = true;
     else throw new Error(`unknown argument: ${a}`);
   }
   if (!Number.isInteger(args.port) || args.port < 0 || args.port > 65535) {
     throw new Error(`invalid --port: ${args.port}`);
   }
+  // Normalize the bind so the address classified for auth is exactly the address
+  // node listens on; an empty/whitespace bind (a wildcard listener) is rejected.
+  args.bind = String(args.bind ?? '').trim();
+  if (!args.bind) throw new Error('invalid --bind: empty (a bind address is required; default is 127.0.0.1)');
   return args;
 }
 
@@ -78,8 +83,11 @@ function parseArgs(argv) {
 // is the transport boundary and HTTPS is a named follow-up (see server/README).
 
 function isLoopbackBind(bind) {
-  if (!bind) return true;
-  const b = String(bind).toLowerCase();
+  // Fail CLOSED: an empty/whitespace/unspecified bind makes node listen on the
+  // wildcard (all interfaces), so it must NOT be treated as loopback — otherwise
+  // a `--bind ''` would come up on every interface with auth disabled.
+  const b = String(bind ?? '').trim().toLowerCase();
+  if (!b) return false;
   return b === 'localhost' || b === '::1' || b === '::ffff:127.0.0.1' || /^127(\.\d{1,3}){3}$/.test(b);
 }
 
@@ -218,7 +226,7 @@ function serveStatic(res, urlPath, configJson) {
 async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
-    console.log('usage: node server --profile <name> [--port 7795] [--bind 127.0.0.1] [--token-file <path>]');
+    console.log('usage: node server --profile <name> [--port 7795] [--bind 127.0.0.1] [--token-file <path>] [--token-path <path>]');
     return 0;
   }
 
@@ -251,6 +259,15 @@ async function main(argv = process.argv.slice(2)) {
   }
 
   // The same handler set main.js registers on ipcMain, collected into a table.
+  // The chat-stream v2 operator auth refuses an *implicit* credential path
+  // (error `operator_auth_v2_private_path_required`), so a web host talking to a
+  // credentialed daemon must name the credential explicitly: `--token-path`, or
+  // `chatStream.tokenPath` in the profile. It stays server-side — `publicConfig`
+  // strips `token`/`tokenPath`, so it never reaches the browser.
+  if (args.tokenPath) {
+    CONFIG.chatStream = { ...(CONFIG.chatStream || {}), tokenPath: args.tokenPath };
+  }
+
   const ccHandlers = createCcHandlers({ CONFIG, chatStreamClient, configError, configWarnings,
     terminalOptions: { maxPtysPerConnection: MAX_PTYS_PER_CONNECTION } });
   const collector = createCollector();

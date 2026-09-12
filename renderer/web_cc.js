@@ -280,16 +280,19 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
     onPtyData: (callback) => on('pty:data', (slot, data) => callback(slot, data)),
     onPtyExit: (callback) => on('pty:exit', (slot, exitCode) => callback(slot, exitCode)),
 
-    // No mic service for a browser viewer; inform them instead of probing the host.
-    startMicServer: () => { notInWeb('The microphone'); return Promise.resolve({ ok: false, error: 'unavailable in web mode' }); },
+    // No mic service for a browser viewer; inform them and resolve FALSY so
+    // app.js's `if (ok)` treats the mic as unavailable (a truthy object would
+    // make it proceed as if the mic had started).
+    startMicServer: () => { notInWeb('The microphone'); return Promise.resolve(null); },
     // The viewer's clipboard, not the host's — see WEB_LOCAL.
     writeClipboard: (text) => clipboard.writeText(String(text ?? '')),
     readClipboard: () => clipboard.readText(),
 
-    // No native meeting window in a browser; toast on open, no-op on close (the
-    // host still refuses meeting:* as a safety net if anything else calls them).
+    // No native meeting window in a browser; both meeting:* surface the toast
+    // (per the spec Target State) and never reach the host, which still refuses
+    // meeting:* as a safety net.
     openMeeting: () => { notInWeb('The meeting window'); return undefined; },
-    closeMeeting: () => undefined,
+    closeMeeting: () => { notInWeb('The meeting window'); return undefined; },
     reloadApp: () => { reload(); return undefined; },
 
     killTmuxSession: (hostId, sessionName) => call('tmux:kill-session', hostId, sessionName),

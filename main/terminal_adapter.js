@@ -12,6 +12,18 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
   // connection cannot exhaust the host by opening unbounded terminals.
   const perConnectionCap = Number.isInteger(maxPtysPerConnection) && maxPtysPerConnection > 0 ? maxPtysPerConnection : Infinity;
   const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
+  // SSH peer hosts, resolved by id, mirroring hosts.js buildHostRegistry: each
+  // peer becomes an SSH target keyed by its id, with the same guards
+  // (id/host/user required; never clobber local/remote). A peer entry already
+  // carries the {host, port, user, tmux} fields the ssh branch below reads, so
+  // no transformation is needed. This is what makes a `peers` profile (e.g.
+  // daffodil) attachable in web mode, at parity with the Electron host registry.
+  const peerHosts = {};
+  for (const p of (Array.isArray(config.peers) ? config.peers : [])) {
+    if (!p || !p.id || !p.host || !p.user) continue;
+    if (p.id === 'local' || p.id === 'remote' || peerHosts[p.id]) continue;
+    peerHosts[p.id] = { host: p.host, port: p.port || 22, user: p.user, tmux: p.tmux || 'tmux' };
+  }
   function target(host, args) {
     const local = config.chatStream?.localHost || 'local';
     const tmux = config.tmux || 'tmux';
@@ -32,7 +44,7 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
       }
       return { file: tmux, args };
     }
-    const remote = config.hosts?.[host] || (host === 'remote' ? config.remote : null);
+    const remote = config.hosts?.[host] || (host === 'remote' ? config.remote : null) || peerHosts[host];
     if (!remote?.host) throw new Error(`No terminal transport configured for ${host}`);
     return { file: platform === 'win32' ? 'ssh.exe' : 'ssh', args: ['-tt', '-p', String(remote.port || 22), '--',
       `${remote.user ? remote.user + '@' : ''}${remote.host}`, 'LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 ' + [remote.tmux || 'tmux', ...args].map(quote).join(' ')] };

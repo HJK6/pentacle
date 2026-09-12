@@ -45,7 +45,8 @@ works as-is.
 | `--profile <name>` | see below | `configs/<name>.local.js`, else `configs/<name>.js`; an argument containing a path separator or ending in `.js` is used verbatim |
 | `--port <n>` | `7795` | `0` picks a free port (the startup line prints the real one) |
 | `--bind <addr>` | `127.0.0.1` | the interface to listen on — read § Security below before changing it |
-| `--token-file <path>` | none | required for any non-loopback `--bind`; enables cookie auth (§ Security) |
+| `--token-file <path>` | none | **web login** auth for *this* host; required for any non-loopback `--bind` (§ Security) |
+| `--token-path <path>` | none | the **chat-stream daemon** credential (§ Daemon credential) — distinct from `--token-file` |
 
 With no `--profile`, the host does **not** look for `configs/<machine>.js`: it
 follows `config-loader`'s ordinary precedence — `PENTACLE_CONFIG` if it is set in
@@ -59,6 +60,23 @@ the browser sees the config the desktop would see. `get-config` and
 `/api/config` both answer with the same computed object, and both strip
 `chatStream.token` and `chatStream.tokenPath` — the daemon credential never
 reaches a browser.
+
+### Daemon credential
+
+A web host that talks to a **credentialed** chat-stream daemon must name the
+credential **explicitly**: the v2 operator auth refuses an implicit default path
+(it fails the connection with `operator_auth_v2_private_path_required`). Provide
+it as `--token-path <path>`, or set `chatStream.tokenPath` in the profile —
+either way it stays server-side (stripped from the browser config above). A
+loopback daemon with no credential registry needs neither. Example against a
+tailnet daemon:
+
+```bash
+node server --profile daffodil \
+  --token-path ~/.config/pentacle-stream/token \   # daemon credential
+  --bind 100.80.28.24 --port 7796 \
+  --token-file ~/.config/pentacle-web/daffodil.token   # web login (routable bind)
+```
 
 ## HTTP
 
@@ -119,6 +137,13 @@ Each connection is capped at 8 concurrent ptys (the renderer uses four slots;
 the headroom covers reconnect churn), so one connection cannot exhaust a shared
 host by opening unbounded terminals. The (N+1)th `pty:create` on a connection is
 refused; re-creating an already-owned slot is a replacement, not a new one.
+
+Host resolution covers `local`, `remote` (`config.remote`), an explicit
+`config.hosts` map, **and `config.peers`** — each peer becomes an SSH target
+keyed by its id (mirroring the Electron host registry in `hosts.js`), so a
+`peers` profile (e.g. daffodil) is attachable in web mode at parity with the
+desktop. (Live attach to a *production* peer session is out of scope here — the
+smoke rule keeps shared daemons read-only.)
 
 ### What never reaches the host
 
@@ -201,7 +226,8 @@ to `module.exports` — and `app.js` is bundled behind shims for `path` and
 | `test/ws_bridge.test.js` | dispatch, error propagation, malformed frames, pty routing and ownership |
 | `test/ws_bridge_multiclient.test.js` | two sockets over the real handler table: slot isolation, broadcast, disconnect cleanup, per-connection cap |
 | `test/web_server.test.js` | the real host: HTTP surface, a refused native channel, a live local tmux attach, and two concurrent connections keeping their tmux sessions isolated |
-| `test/web_auth.test.js` | the bind guard (routable bind refuses without a token), loopback-needs-none, `/login`, and cookie-gated `/api` + `/cc` |
+| `test/web_auth.test.js` | the bind guard (routable bind refuses without a token), loopback-needs-none, `/login`, cookie-gated `/api` + `/cc`, and the `--token-path` flag |
+| `test/terminal_peer_host.test.js` | terminal host resolution for a `peers[]` profile entry (SSH target), plus local/remote and the unknown-host refusal |
 | `test/web_cc.test.js` | the browser shim: method parity with `preload.js`, queueing, reject-on-drop, reconnect, and the native-method shims (toast, save-image download, context menu) |
 | `test/web_bundle.test.js` | no Electron/Node requires survive; the page ships everything it references |
 | `test/e2e/web_smoke.js` | headless Chrome against a real daemon, incl. a second browser connection isolated from the first — run by hand: `node test/e2e/web_smoke.js --profile test/e2e/configs/web_mode_local_smoke.js` |

@@ -15,7 +15,7 @@ const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
 
-const { main, isLoopbackBind } = require('../server/index.js');
+const { main, isLoopbackBind, parseArgs } = require('../server/index.js');
 
 function scratch() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-auth-'));
@@ -60,13 +60,32 @@ function cookieFrom(setCookie) {
   return String(setCookie || '').split(';')[0];  // "pentacle_web=<hash>"
 }
 
-test('isLoopbackBind classifies loopback and routable addresses', () => {
-  for (const b of ['127.0.0.1', 'localhost', '::1', '127.0.0.5', undefined]) {
+test('--token-path (daemon credential) and --token-file (web login) are distinct flags', () => {
+  const a = parseArgs(['--profile', 'x', '--token-path', '/home/u/.config/pentacle-stream/token', '--token-file', '/tmp/web.token']);
+  assert.equal(a.tokenPath, '/home/u/.config/pentacle-stream/token', 'the daemon credential path is captured');
+  assert.equal(a.tokenFile, '/tmp/web.token', 'the web login token file is separate');
+  assert.equal(parseArgs([]).tokenPath, null, 'no daemon credential path by default');
+});
+
+test('isLoopbackBind classifies loopback addresses and FAILS CLOSED on empty/malformed', () => {
+  for (const b of ['127.0.0.1', 'localhost', '::1', '127.0.0.5', '  127.0.0.1  ']) {
     assert.equal(isLoopbackBind(b), true, `${b} is loopback`);
   }
-  for (const b of ['100.80.28.24', '0.0.0.0', '192.168.1.5', '::']) {
-    assert.equal(isLoopbackBind(b), false, `${b} is routable`);
+  // Routable AND empty/whitespace/undefined (a wildcard listener) must be non-loopback,
+  // so auth is required rather than silently disabled.
+  for (const b of ['100.80.28.24', '0.0.0.0', '192.168.1.5', '::', '', '   ', undefined, null]) {
+    assert.equal(isLoopbackBind(b), false, `${JSON.stringify(b)} must not be treated as loopback`);
   }
+});
+
+test('an empty --bind is rejected outright (no accidental wildcard listener)', async (t) => {
+  const { profile, home } = scratch();
+  const realHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => { if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome; });
+  assert.throws(() => parseArgs(['--profile', profile, '--bind', '']), /invalid --bind/);
+  assert.throws(() => parseArgs(['--profile', profile, '--bind', '   ']), /invalid --bind/);
+  await assert.rejects(main(['--profile', profile, '--bind', '', '--port', '0']), /invalid --bind/);
 });
 
 test('a routable bind refuses to start without a token file', async (t) => {
