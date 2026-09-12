@@ -3,6 +3,7 @@ const fs = require("fs"), path = require("path"), crypto = require("crypto");
 const { execFile } = require("child_process");
 const run = require("util").promisify(execFile);
 const {cleanupOwnedFixtures,isVerifiedAbsent}=require("./cleanup");
+const {snapshotClipboard,restoreClipboard}=require("./clipboard_snapshot");
 if (process.platform !== "darwin" || process.env.PENTACLE_RUNTIME_CLIPBOARD !== "1") {
   console.error("Requires macOS and explicit PENTACLE_RUNTIME_CLIPBOARD=1.");
   app.exit(2);
@@ -36,7 +37,7 @@ const readRaw = async () => mode === "local" ? fs.existsSync(rawPath) ? fs.readF
 try { app.setPath("userData", path.join(root, "profile")); } catch(error) { fs.rmSync(root,{recursive:true,force:true}); throw error; }
 const receipt = { fixtureRoot:root, electron: process.versions.electron, kind: "terminal-interaction-" + mode, files: {}, tests: [], commands: [] };
 try { for (const file of ["renderer/app.js", "renderer/terminal_paste.js", "main/terminal_adapter.js", "main/clipboard_ipc_bridge.js", "preload.js"]) receipt.files[file] = crypto.createHash("sha256").update(fs.readFileSync(path.join(sourceRoot, file))).digest("hex"); } catch(error) { fs.rmSync(root,{recursive:true,force:true}); throw error; }
-receipt.harness={}; for(const file of ["main.js","renderer.js","index.html","raw.py","cleanup.js"]) receipt.harness[file]=crypto.createHash("sha256").update(fs.readFileSync(path.join(__dirname,file))).digest("hex");
+receipt.harness={}; for(const file of ["main.js","renderer.js","index.html","raw.py","cleanup.js","clipboard_snapshot.js"]) receipt.harness[file]=crypto.createHash("sha256").update(fs.readFileSync(path.join(__dirname,file))).digest("hex");
 let win, saved = null, ownedText = null, dispose = null, finishing = false, ownsFixture = false;
 let activeCommands=0,lastCommandFinished=Date.now();
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -48,13 +49,14 @@ async function waitFor(predicate, label) {
   throw Error("Timed out: " + label);
 }
 async function preserve() {
-  saved = await Promise.all((await clipboard.read()).map(async (item) => new ClipboardItem(Object.fromEntries(await Promise.all(item.types.map(async (type) => [type, await item.getType(type)]))))));
+  saved = await snapshotClipboard(clipboard, ClipboardItem);
   receipt.clipboardSnapshotComplete = true;
+  receipt.clipboardSnapshotItems = saved.length;
 }
 async function restore() {
   if (saved !== null && ownedText !== null) {
     if (await clipboard.readText() === ownedText) {
-      await clipboard.write(saved);
+      await restoreClipboard(clipboard, saved);
       receipt.clipboardRestored = true;
     } else receipt.clipboardRestored = "skipped newer clipboard";
     ownedText = null;
