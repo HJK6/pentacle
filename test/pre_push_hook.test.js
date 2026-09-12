@@ -232,11 +232,21 @@ test('a public record with an invalid remote sha is fail-closed', () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /malformed push record|cannot resolve the public repo/);
 });
-test('a public record with a non-refs/* ref is fail-closed', () => {
+test('a public record with a non-refs/* remote ref is fail-closed', () => {
   const r = runHookDirect('public', 'git@github.com:HJK6/pentacle.git',
-    { stdin: `badref ${HEX40} refs/heads/x ${HEX40}\n` });
+    { stdin: `refs/heads/x ${HEX40} badremoteref ${HEX40}\n` });
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /malformed local ref|malformed push record|cannot resolve the public repo/);
+  assert.match(r.stderr, /malformed remote ref|malformed push record|cannot resolve the public repo/);
+});
+test('pushing a raw commit id (git push public <sha>:refs/heads/x) is ACCEPTED', () => {
+  // The local ref of a <sha>:<dst> push is the sha itself, not refs/* — a valid
+  // pattern (e.g. landing a specific commit). It must not be false-rejected.
+  const sb = sandbox();
+  git(sb.work, [...ID, 'checkout', '-b', 'src']);
+  commitFile(sb.work, 's.txt', 's\n', 'src commit');
+  const sha = git(sb.work, ['rev-parse', 'HEAD']).trim();
+  const r = tryGit(sb.work, withHook(['push', 'public', `${sha}:refs/heads/bysha`]), pub(sb.remote));
+  assert.equal(r.status, 0, `raw-sha push must be allowed, got ${r.status}\n${r.stderr}`);
 });
 
 // ── deletions / multi-ref / tags ─────────────────────────────────────────────

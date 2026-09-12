@@ -280,7 +280,10 @@ while read -r lref lsha rref rsha extra; do
     continue
   fi
   # git sends "(delete)" as the local ref of a deletion; otherwise refs/*.
-  case "$lref" in refs/*|'(delete)') : ;; *) if [ "$is_public" -eq 1 ]; then warn "REFUSED: malformed local ref '${lref}' (fail closed)."; fail=1; fi; continue ;; esac
+  # The REMOTE ref (destination) is always a full refname; validate its shape.
+  # The LOCAL ref (source) is only a label and legitimately varies — a branch,
+  # a tag, HEAD, a raw commit id (`git push public <sha>:refs/heads/x`), or
+  # "(delete)" — so it is NOT shape-validated; the object ids + (c) carry safety.
   case "$rref" in refs/*) : ;; *) if [ "$is_public" -eq 1 ]; then warn "REFUSED: malformed remote ref '${rref}' (fail closed)."; fail=1; fi; continue ;; esac
   if is_zero_oid "$lsha"; then records=$((records + 1)); continue; fi   # deletion (sha1 or sha256 all-zero)
   records=$((records + 1))
