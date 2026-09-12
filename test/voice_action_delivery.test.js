@@ -75,3 +75,52 @@ test('client forwards existing daemon prompt and dedup fields, preserving legacy
     assert.deepEqual(legacy, { type: 'spawn', host: 'local', provider: 'codex' });
   } finally { client.sendCommand = original; }
 });
+
+test('web shim and host bridge preserve voice prompt, tuple and idempotency without chat', async () => {
+  const { buildCc } = require('../renderer/web_cc');
+  const { createCcHandlers, createCollector } = require('../main/cc_handlers');
+  const { createWsBridge } = require('../server/ws_bridge');
+  const client = require('../main/chat_stream_client');
+  const original = client.sendCommand;
+  const payloads = [];
+  client.sendCommand = async payload => {
+    payloads.push(payload);
+    return { state: 'ready', stream_id: 'amaterasu:voice-web-fixture' };
+  };
+  const stub = new Proxy({
+    getSpawnCatalog: async () => catalog,
+    spawnSession: input => client.spawnSession(input),
+  }, { get: (obj, key) => obj[key] || (async () => ({})) });
+  const collector = createCollector();
+  const stop = createCcHandlers({ CONFIG: { chatStream: {} }, chatStreamClient: stub, harness: true }).register(collector);
+  const bridge = createWsBridge({ table: collector.table });
+  let response;
+  const socket = { send: raw => { response = JSON.parse(raw); } };
+  bridge.addSocket(socket);
+  const cc = buildCc({
+    async call(method, ...args) {
+      response = null;
+      await bridge.handleMessage(socket, JSON.stringify({ id: 1, method, args }));
+      assert.equal(response.ok, true);
+      return response.result;
+    }, fire() {}, on() {},
+  }, { clipboard: {}, chatPopoutContext: null, reload() {} });
+  try {
+    const f = fixture();
+    const helper = f.make({ getSpawnCatalog: () => cc.chatSpawnCatalog(), spawnAgent: request => cc.chatSpawnV2(request) });
+    await helper.tick(f.status);
+    assert.equal(payloads.length, 1);
+    assert.equal(payloads[0].type, 'spawn');
+    assert.equal(payloads[0].initial_prompt, 'Operator voice request:\nreview tests');
+    assert.equal(payloads[0].idempotency_key, 'voice:a-unique-capture');
+    assert.equal(payloads[0].model, 'gpt-6-astra');
+    assert.equal(payloads[0].effort, 'high');
+    assert.equal(payloads[0].host, 'amaterasu');
+    assert.equal(f.sends.length, 0);
+    assert.equal(f.outcomes[0].outcome, 'spawned');
+  } finally {
+    bridge.removeSocket(socket);
+    if (typeof stop === 'function') stop();
+    client.sendCommand = original;
+  }
+});
