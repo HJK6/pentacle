@@ -18,6 +18,8 @@
     "build:cosmic-tokens": "esbuild renderer/src/cosmic_tokens_entry.ts --bundle --format=iife --target=chrome134 --outfile=renderer/dist/cosmic_tokens.bundle.js",
     "build:cosmic-components": "esbuild renderer/src/cosmic_components_entry.ts --bundle --format=iife --target=chrome134 --outfile=renderer/dist/cosmic_components.bundle.js",
     "prestart": "npm run build:renderer && npm run build:cosmic-tokens && npm run build:cosmic-components",
+    "build:web": "node scripts/build-web.js",
+    "web": "npm run build:web && node server",
     "start": "electron .",
     "test": "node scripts/run-tests.js \"test/*.test.js\" \"test/*.test.ts\" \"test/e2e/terminal_interaction_runtime/*.test.js\"",
     "test:terminal-interactions": "node test/e2e/terminal_interaction_runtime/run.js",
