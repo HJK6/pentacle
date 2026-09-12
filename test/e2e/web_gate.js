@@ -114,9 +114,12 @@ class Report {
   note(text) { console.log(`   · ${text}`); }
   write(extra = {}) {
     const failedScenarios = extra.failedScenarios || 0;
+    // A setup/teardown error (the catch path) is a FAIL even though no scenario
+    // step recorded a failure — the verdict artifact must match the non-zero exit.
+    const status = (this.steps.every((s) => s.ok) && failedScenarios === 0 && !extra.error) ? 'PASS' : 'FAIL';
     const verdict = {
       scenario: 'web_gate', at: new Date().toISOString(),
-      status: (this.steps.every((s) => s.ok) && failedScenarios === 0) ? 'PASS' : 'FAIL',
+      status,
       steps: this.steps, ...extra,
     };
     fs.writeFileSync(path.join(this.dir, 'verdict.json'), JSON.stringify(verdict, null, 2));
