@@ -103,11 +103,20 @@ Enable the repository's push guard once per clone:
 git config core.hooksPath scripts/hooks
 ```
 
-`scripts/hooks/pre-push` then refuses three classes of accident (each overridable with `git push --no-verify` when you are certain):
+`scripts/hooks/pre-push` then refuses accidental pushes. It is **bypassable by design** — `git push --no-verify` skips it — so it stops mistakes, not a determined push. Exactly what it protects:
 
-- **Wrong destination** — a push to a remote *named* `public` whose URL is not the public `HJK6/pentacle`. The resolved URL is printed on every push so you can see where it is going.
-- **No explicit refspec** — a bare `git push <remote>` or a matching-branch push. Always name what you push: `git push public my-branch:refs/heads/my-branch`.
-- **Foreign history** — a branch whose tip shares no merge-base with the remote's `main` (for example a different repository's line of history). Branch from and rebase on the public `main` before pushing.
+| Situation | Result |
+|---|---|
+| Remote *named* `public` whose URL is not `github.com/HJK6/pentacle` | **REJECTED** (destination) |
+| Any push whose URL is `github.com/HJK6/pentacle` — under any remote name (`public`, `origin`) or a raw URL | Public rules applied (resolved URL printed) |
+| Bare `git push <remote>` (no refspec) or a matching-branch push | **REJECTED** (name what you push) |
+| `git push <remote> my-branch` (same-name branch) | **Allowed** — maps to the same name; this check does *not* force `src:refs/heads/dst`, so a wrong *branch name* is out of scope (content is still checked below) |
+| A tip that reaches a root commit which is not a root of the remote's `main` — a foreign orphan branch, **or a merge that pulls another repository's history into a clean branch** | **REJECTED** (foreign ancestry) |
+| Public destination whose `main` cannot be resolved (no ref, fetch fails) | **REJECTED** (fail closed) |
+| Non-public destination with no resolvable `main` | Allowed with a note (nothing to compare) |
+| Any of the above run with `git push --no-verify` | **Not protected** (bypass by design) |
+
+The foreign-ancestry check is a root-set comparison, not a shared-ancestor test: a merge of unrelated history still shares a merge-base with `main`, so `git merge-base` is not enough. The explicit-refspec check reads the invoking `git push` from `/proc` (Linux) or `ps` (macOS/BSD); if that argv cannot be read at all, a push to the public repo fails closed.
 
 Push with an explicit refspec and read the remote back before announcing a push landed:
 
@@ -116,4 +125,4 @@ git push public my-branch:refs/heads/my-branch
 git ls-remote public my-branch
 ```
 
-Its checks are covered by `test/pre_push_hook.test.js`, which runs under `npm test`.
+Its behavior is covered by `test/pre_push_hook.test.js`, which runs under `npm test`.
