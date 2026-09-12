@@ -26,7 +26,11 @@ test('renderer paints limits already cached before the window opened', async () 
   const context = { window: { cc: { getChatStreamState: async () => ({ limits, limits_health: 'ok' }) } },
     applyChatStreamState() {}, warmSpawnCatalog() {}, bindChatPopout() {}, IS_CHAT_POPOUT: false,
     renderLimits(rows, health) { context.rows = rows; context.health = health; } };
-  const start = source.indexOf('window.cc.getChatStreamState().then((snapshot) => {');
+  // lastIndexOf: the STARTUP snapshot pull is the last getChatStreamState().then
+  // in the file. The web reconnect re-sync uses the same idiom earlier
+  // (spec_pentacle__web_reconnect_input_frozen_2026_09), so anchor on the last
+  // occurrence to keep targeting the startup paint.
+  const start = source.lastIndexOf('window.cc.getChatStreamState().then((snapshot) => {');
   await vm.runInNewContext(source.slice(start, source.indexOf('\n  });', start) + 6), context);
   assert.equal(context.rows, limits);
   assert.equal(context.health, 'ok');

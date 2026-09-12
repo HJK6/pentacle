@@ -4769,6 +4769,28 @@ window.cc.onChatStreamFrame((frame) => {
   applyChatStreamPayload(frame);
 });
 
+// Web only: the /cc websocket reconnected to a (possibly fresh) web host
+// process — e.g. after `pentacle-web-start stop && pentacle-web-start`. The
+// desktop preload has no onReconnect (its ipcRenderer transport never drops),
+// so this is a no-op there. A fresh web host pushes no snapshot on connect and
+// may already have completed its daemon handshake, so no connected:true frame
+// arrives on its own; without this the live app stays connected:false and the
+// composer send-gate keeps the input frozen until a manual reload. Re-pull the
+// snapshot (mirroring the startup pull) so the input re-enables and the
+// inventory re-syncs. Reset the connection-state version baseline first: the
+// fresh host's state_version namespace restarts at 0, so a lower version would
+// otherwise be rejected as stale by applyVersionedConnectionState.
+window.cc.onReconnect?.(() => {
+  state.chatStream.stateVersion = -1;
+  window.cc.getChatStreamState().then((snapshot) => {
+    applyChatStreamState(snapshot);
+    if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'limits')) {
+      renderLimits(snapshot.limits, snapshot.limits_health ?? null);
+    }
+    window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...(snapshot || {}) });
+  }).catch(() => { /* the next reconnect retries the re-sync */ });
+});
+
 window.cc.onAssetDock?.((payload) => {
   dockAssetFromPayload(payload);
 });

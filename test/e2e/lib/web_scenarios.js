@@ -165,6 +165,84 @@ async function chatTranscriptPaint(ctx) {
     { items: painted.items, chars: painted.text.length, containsSeededText: textOk });
 }
 
+// A web host restart mid-session must restore full interaction WITHOUT a manual
+// reload: the frozen (degraded) chat input re-enables and the reconnected socket
+// serves the live daemon inventory. Regression guard for
+// spec_pentacle__web_reconnect_input_frozen_2026_09.
+//
+// The failing journey (operator report 2026-09-12): a chat-stream drop latches
+// the live app into connected:false (degraded / input frozen); the operator
+// restarts the web host; the page's /cc websocket reconnects to a FRESH host
+// process, but that host already completed its daemon handshake before the
+// browser reconnected — so its connected:true frame was broadcast to nobody, and
+// no snapshot is pushed on connect. Without a reconnect re-sync the browser
+// never learns it is connected again: state.chatStream.connected stays false,
+// chatControlTargetForSlot returns {error:'Chat stream offline.'}, and the input
+// stays frozen until a manual reload (which re-pulls getChatStreamState).
+//
+// Distinct from reconnect_survival, which cycles the host↔daemon link via
+// forceReconnect while the browser↔host websocket stays up (the host itself
+// pushes connected:false→true). Here the browser↔host websocket is what drops,
+// exactly as `pentacle-web-start stop && pentacle-web-start` does.
+async function hostRestartRestoresInput(ctx) {
+  const { session, report, cdp, timeoutMs, fixture, stopHost, startHostSamePort, killDaemon, startDaemonSamePort } = ctx;
+  if (!fixture) { report.note('no fixture: skipping host-restart scenario (observational run)'); return; }
+  if (![stopHost, startHostSamePort, killDaemon, startDaemonSamePort].every((f) => typeof f === 'function')) {
+    report.note('host/daemon lifecycle primitives unavailable: skipping host-restart scenario'); return;
+  }
+  const degraded = 'document.body.classList.contains("chat-stream-degraded")';
+
+  await waitForValue(session, cdp, 'window.cc.getChatStreamState().then((s) => s.connected === true)', (v) => v === true,
+    { timeoutMs, label: 'connected before the drop' });
+  await waitForValue(session, cdp, degraded, (v) => v === false, { timeoutMs, label: 'not degraded before the drop' });
+
+  // A chat-stream drop latches the live app into connected:false — the frozen
+  // input the operator reported.
+  await killDaemon();
+  await waitForValue(session, cdp, degraded, (v) => v === true, { timeoutMs, label: 'input frozen (degraded) after the chat-stream drop' });
+  report.ok('the live app freezes (degraded) when the chat-stream connection drops', true);
+
+  // Restart the web host PROCESS with the daemon brought up FIRST, so the fresh
+  // host completes its daemon handshake and broadcasts connected:true BEFORE the
+  // browser's websocket reconnects — i.e. the recovery frame reaches nobody. The
+  // page stays loaded throughout; only its /cc websocket drops and reconnects.
+  //
+  // This makes the walk RED without the fix on the overwhelming majority of runs:
+  // the daemon is already up, so host2's handshake broadcast fires within ms of
+  // it listening, while the browser sits in a backoff grown near its 5s cap. A
+  // narrow residual window remains (host2 accepts sockets between server.listen()
+  // and the async handshake resolving), so a browser reconnect landing inside it
+  // could catch the live broadcast and recover without the fix — a rare potential
+  // false GREEN, never a false RED. The DETERMINISTIC guard for the underlying
+  // logic is test/chat_stream_connection_state.test.js (version-reset RED/GREEN);
+  // this e2e is the integration belt on top of it.
+  await stopHost();
+  await cdp.sleep(8000); // let the browser's reconnect backoff grow toward its 5s cap
+  await startDaemonSamePort();
+  const newHostPort = await startHostSamePort();
+  report.note(`daemon-then-host back up on 127.0.0.1:${newHostPort}; browser has not reconnected yet`);
+
+  // THE FIX: on websocket reconnect the browser re-pulls the chat-stream snapshot
+  // (resetting its connection-state version baseline first, since the fresh
+  // host's state_version namespace restarts), so it learns it is connected again
+  // and degraded mode clears — WITHOUT a reload. Before the fix the input stays
+  // frozen until a manual reload.
+  const recovered = await waitForValue(session, cdp, degraded, (v) => v === false,
+    { timeoutMs, label: 'input restored (not degraded) after host restart, NO reload' });
+  report.ok('a host restart restores interaction without a manual reload', recovered === false);
+
+  // And the reconnected socket serves the live daemon inventory again (re-sync).
+  // Assert connected + a non-empty inventory rather than a specific stream_id:
+  // earlier scenarios (e.g. closed-chat-slot) may retire the seeded fixture, so
+  // the seeded session is not guaranteed to survive to this last walk — but the
+  // daemon always has at least one session and the reconnected socket must serve
+  // it.
+  const invOk = await waitForValue(session, cdp,
+    'window.cc.getChatStreamState().then((s) => s.connected === true && Array.isArray(s.sessions) && s.sessions.length >= 1)',
+    (v) => v === true, { timeoutMs, label: 'daemon inventory re-synced over the reconnected socket' });
+  report.ok('the reconnected socket re-syncs the daemon inventory', invOk === true);
+}
+
 // The ordered gate: names map to functions; web_gate runs them in this order.
 // These four are fully deterministic against the seeded loopback daemon.
 //
@@ -184,6 +262,9 @@ const SCENARIOS = [
   ['chat-transcript-paint', chatTranscriptPaint],
   ['slot-column-split', runGridSplit],
   ['closed-chat-slot', closedChatSlot],
+  // Host-restart walk runs LAST: it tears the host process (and briefly the
+  // daemon) down, so it must not disturb the deterministic scenarios above.
+  ['host-restart-restores-input', hostRestartRestoresInput],
 ];
 
 module.exports = {
@@ -193,5 +274,6 @@ module.exports = {
   sidebarFromInventory,
   slotAttachTypeResizeKill,
   chatTranscriptPaint,
+  hostRestartRestoresInput,
   SCENARIOS,
 };

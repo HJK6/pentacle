@@ -131,6 +131,12 @@ window.cc = {
   // E2E walk harness only: force a ws reconnect (main registers the handler only
   // under PENTACLE_HARNESS=1, so this invoke rejects/no-ops in production).
   forceReconnect: () => ipcRenderer.invoke('harness:force-reconnect'),
+  // Surface parity with renderer/web_cc.js. On the desktop the ipcRenderer
+  // transport never drops (main and the renderer share a process), so there is
+  // no websocket reconnect to signal: this is a deliberate no-op. In web mode
+  // the same method notifies app.js so it can re-pull state after the /cc
+  // websocket reconnects (see renderer/web_cc.js).
+  onReconnect: () => {},
   chatClose: (hostId, sessionName, options) => ipcRenderer.invoke('chat-stream:close', hostId || 'local', sessionName, options || null),
 
   // Phase C parity bridges — replace renderer's old api() HTTP calls into

@@ -348,6 +348,51 @@ test('the transport reconnects after a drop', (t) => {
   assert.equal(fake.instances.length, 2, 'a dropped socket is replaced');
 });
 
+test('onReconnect fires on a socket RE-open, never the first connect', (t) => {
+  const fake = installFakeWebSocket();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const transport = createTransport({ url: 'ws://host/cc', logger: { warn() {} } });
+  t.after(() => { transport.close(); fake.restore(); });
+
+  let reconnects = 0;
+  transport.onReconnect(() => { reconnects += 1; });
+
+  fake.instances[0].open();
+  assert.equal(reconnects, 0, 'the first open is the initial connect, not a reconnect');
+
+  fake.instances[0].close();
+  t.mock.timers.tick(5000);
+  fake.instances[1].open();
+  assert.equal(reconnects, 1, 'the RE-open after a drop fires onReconnect');
+
+  fake.instances[1].close();
+  t.mock.timers.tick(5000);
+  fake.instances[2].open();
+  assert.equal(reconnects, 2, 'each subsequent reconnect fires it again — the fix re-pulls state every time');
+});
+
+test('a reconnect handler that throws does not break the reconnect', (t) => {
+  const fake = installFakeWebSocket();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const transport = createTransport({ url: 'ws://host/cc', logger: { warn() {} } });
+  t.after(() => { transport.close(); fake.restore(); });
+
+  transport.onReconnect(() => { throw new Error('boom'); });
+  fake.instances[0].open();
+  fake.instances[0].close();
+  t.mock.timers.tick(5000);
+  assert.doesNotThrow(() => fake.instances[1].open(), 'a throwing handler is swallowed');
+});
+
+test('buildCc exposes onReconnect and wires it straight through to the transport', () => {
+  let registered = null;
+  const transport = { ...fakeTransport(), onReconnect(cb) { registered = cb; } };
+  const cc = buildCc(transport, { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });
+  const handler = () => {};
+  cc.onReconnect(handler);
+  assert.equal(registered, handler, 'cc.onReconnect delegates to transport.onReconnect');
+});
+
 // ── native-method browser shims (lane 2) ─────────────────────────────────────
 
 test('showWebToast renders into the DOM and is a no-op without one', () => {

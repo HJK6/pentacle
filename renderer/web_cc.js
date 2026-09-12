@@ -48,6 +48,8 @@ function createTransport({ url, logger = console } = {}) {
   let nextId = 1;
   let attempt = 0;
   let closed = false;
+  let hasOpenedBefore = false;
+  let reconnectHandler = null;
 
   function flush() {
     while (queued.length && socket && socket.readyState === WebSocket.OPEN) {
@@ -63,7 +65,20 @@ function createTransport({ url, logger = console } = {}) {
   function connect() {
     if (closed) return;
     socket = new WebSocket(url);
-    socket.addEventListener('open', () => { attempt = 0; flush(); });
+    socket.addEventListener('open', () => {
+      attempt = 0;
+      flush();
+      // A RE-open means the /cc host went away and came back — e.g. the web host
+      // process was restarted. The fresh host pushes no snapshot on connect and
+      // may already have completed its daemon handshake, so no connected:true
+      // frame will arrive on its own; notify the app so it can re-pull state and
+      // re-enable the input. The FIRST open is the initial connect, already
+      // covered by the app's startup snapshot pull, so it is skipped.
+      if (hasOpenedBefore && reconnectHandler) {
+        try { reconnectHandler(); } catch (e) { logger.warn('[web] reconnect handler threw:', e); }
+      }
+      hasOpenedBefore = true;
+    });
     socket.addEventListener('message', (event) => {
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
@@ -113,6 +128,13 @@ function createTransport({ url, logger = console } = {}) {
     },
     /** Replaces any previous handler, mirroring preload's removeAllListeners. */
     on(event, handler) { listeners.set(event, handler); },
+    /**
+     * Register a callback fired on every socket RE-open (not the first
+     * connect). Web-only: preload.js has no equivalent because the desktop's
+     * ipcRenderer transport never drops, so app.js code guarded by
+     * `window.cc.onReconnect?.(…)` is a no-op on the desktop.
+     */
+    onReconnect(handler) { reconnectHandler = handler; },
     /**
      * Deliver an event to the local listener as if the host had pushed it. The
      * web context menu uses this to fire `assign-slot`/`action` — on the desktop
@@ -326,6 +348,10 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
     chatDismissQuestion: (hostId, sessionName, payload) => call('chat-stream:dismiss-question', hostId || 'local', sessionName, payload || {}),
     chatRename: (hostId, sessionName, displayName) => call('chat-stream:rename', hostId || 'local', sessionName, displayName),
     forceReconnect: () => call('harness:force-reconnect'),
+    // Web-only: fires when the /cc websocket reconnects to the host (e.g. after
+    // a web host restart). app.js uses it to re-pull chat-stream state so the
+    // input re-enables and inventory re-syncs without a manual reload.
+    onReconnect: (callback) => transport.onReconnect(callback),
     chatClose: (hostId, sessionName, options) => call('chat-stream:close', hostId || 'local', sessionName, options || null),
 
     chatKill: (args) => call('chat-stream:kill', args || {}),

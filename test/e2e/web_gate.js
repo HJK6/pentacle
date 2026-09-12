@@ -209,9 +209,15 @@ async function run(args) {
     try { if (chrome && !args.keep) chrome.kill('SIGTERM'); } catch {}
     try { if (runtime.tmuxSession) tmux(['kill-session', '-t', `=${runtime.tmuxSession}`], { stdio: 'ignore' }); } catch {}
     try { if (host) await host.close(); } catch {}
-    // Kill the daemon via the runtime handle (registered at spawn, so a
-    // readiness-failure mid-startup is still cleaned up) and await its exit.
-    const dproc = (daemon && daemon.proc) || runtime.daemonProc;
+    // A restarted host runs as a subprocess (see restartHost); kill it too.
+    try { if (runtime.hostProc) runtime.hostProc.kill('SIGTERM'); } catch {}
+    await onceExit(runtime.hostProc);
+    // Kill the daemon via the runtime handle FIRST: it always tracks the live
+    // daemon (startDaemon sets it, and startDaemonSamePort replaces it on a
+    // restart, whereas daemon.proc still points at the original), so preferring
+    // it avoids orphaning a restarted daemon. `daemon.proc` is the fallback for
+    // a readiness-failure mid-startup where runtime.daemonProc was cleared.
+    const dproc = runtime.daemonProc || (daemon && daemon.proc);
     try { if (dproc) dproc.kill('SIGTERM'); } catch {}
     await onceExit(dproc);
     try { if (!args.keep) fs.rmSync(scratch, { recursive: true, force: true }); } catch {}
@@ -229,9 +235,81 @@ async function run(args) {
       report.note(`external daemon via profile ${profile} (observational: sidebar/transcript non-fatal)`);
     }
 
-    host = await startHost(['--profile', profile, '--port', '0']);
+    // A FIXED port (not 0), so a restart rebinds the same address and the
+    // already-loaded page reconnects to a fresh host process — the scenario the
+    // host-restart walk needs (see restartHost below).
+    const hostPort = await freePort();
+    host = await startHost(['--profile', profile, '--port', String(hostPort)]);
     const url = `http://127.0.0.1:${host.port}/`;
     report.note(`web host ${url}`);
+
+    // Simulate `pentacle-web-start stop && pentacle-web-start`: tear the host
+    // down and bring a FRESH host PROCESS up on the SAME port. The browser keeps
+    // running; only its websocket to /cc drops and reconnects to the new
+    // process. It MUST be a real subprocess, not another in-process startHost():
+    // main/chat_stream_client is a module singleton, so a second in-process host
+    // reuses the daemon connection the first host's close() already destroyed
+    // (never reconnecting), which is a test artifact, not the shipped runtime.
+    // A subprocess gets its own singleton, exactly like the operator's restart.
+    // The daemon is a separate process and stays up, so inventory is preserved.
+    const startHostProcess = async () => {
+      let lastErr;
+      for (let i = 0; i < 40; i++) {
+        const hostLog = fs.openSync(path.join(scratch, 'host.log'), 'a');
+        const proc = spawn(process.execPath, [path.join(ROOT, 'server'), '--profile', profile, '--port', String(hostPort)],
+          { cwd: ROOT, stdio: ['ignore', hostLog, hostLog] });
+        runtime.hostProc = proc;
+        let dead = false;
+        proc.once('exit', () => { dead = true; });
+        try { await waitForListen(hostPort, 8000, () => dead); return proc; }
+        catch (e) { lastErr = e; try { proc.kill('SIGKILL'); } catch {} await onceExit(proc); runtime.hostProc = null; await cdp.sleep(150); }
+      }
+      throw lastErr || new Error(`host process did not listen on ${hostPort}`);
+    };
+    const stopHost = async () => {
+      try { if (host) await host.close(); } catch {}
+      host = null;
+      try { if (runtime.hostProc) runtime.hostProc.kill('SIGTERM'); } catch {}
+      await onceExit(runtime.hostProc);
+      runtime.hostProc = null;
+    };
+    const startHostSamePort = async () => { await startHostProcess(); return hostPort; };
+    const restartHost = async () => { await stopHost(); await startHostSamePort(); return hostPort; };
+
+    // Daemon lifecycle primitives (hermetic runs only), so a scenario can model
+    // a chat-stream daemon blip around a host restart — the real trigger for the
+    // input-freeze bug: the browser latches connected:false at a high state
+    // version, then a fresh host's connected:true (a reset, lower version) is
+    // rejected as stale. The daemon rebuilds its inventory from the same on-disk
+    // DB, so a same-port restart preserves the seeded session.
+    const killDaemon = daemon ? async () => {
+      const proc = runtime.daemonProc;
+      try { if (proc) proc.kill('SIGKILL'); } catch {}
+      await onceExit(proc);
+      runtime.daemonProc = null;
+    } : null;
+    const startDaemonSamePort = daemon ? async () => {
+      const db = path.join(scratch, 'sessions.db');
+      let lastErr;
+      for (let i = 0; i < 40; i++) {
+        const dlog = fs.openSync(path.join(scratch, 'daemon.log'), 'a');
+        const proc = spawn(args.python, [DAEMON,
+          '--host', '127.0.0.1', '--port', String(daemon.port), '--local-host', 'local',
+          '--db', db,
+          '--notifications-db', path.join(scratch, 'notifications.db'),
+          '--assets-db', path.join(scratch, 'assets.db'),
+          '--blob-root', path.join(scratch, 'blobs'),
+          '--disable-hosts', '--disable-mirror', '--disable-nudges',
+          '--disable-outbound-notices', '--disable-remote-presence',
+        ], { cwd: ROOT, stdio: ['ignore', dlog, dlog] });
+        runtime.daemonProc = proc;
+        let dead = false;
+        proc.once('exit', () => { dead = true; });
+        try { await waitForListen(daemon.port, 8000, () => dead); return daemon.port; }
+        catch (e) { lastErr = e; try { proc.kill('SIGKILL'); } catch {} await onceExit(proc); runtime.daemonProc = null; await cdp.sleep(150); }
+      }
+      throw lastErr || new Error(`daemon did not re-listen on ${daemon.port}`);
+    } : null;
 
     const chromeBin = resolveChrome();
     const chromeLog = [];
@@ -261,7 +339,7 @@ async function run(args) {
     }
     if (!session) throw cdpErr || new Error('could not attach Chrome over CDP');
 
-    const ctx = { session, report, cdp, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime };
+    const ctx = { session, report, cdp, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort };
     let failed = 0;
     for (const [name, fn] of scenarios.SCENARIOS) {
       console.log(`\n▸ ${name}`);

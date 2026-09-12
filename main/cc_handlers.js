@@ -100,6 +100,7 @@ const UNCALLED = {
 // `window.cc` methods with no IPC channel at all.
 const PRELOAD_LOCAL = {
   chatPopoutContext: 'parsed from argv (Electron) / the query string (web)',
+  onReconnect: 'websocket reconnect hook — a no-op on the desktop (ipcRenderer never drops); in web mode it re-pulls chat-stream state after a /cc reconnect',
 };
 
 function safeString(value, fallback = '') { return String(value ?? '').trim() || fallback; }

@@ -135,6 +135,31 @@ adapter's `destroyed` hook, the same signal a closing window gives, so a reload
 cannot leak attachments; the tmux session itself is untouched. Daemon frames
 (`chat-stream:frame`) are broadcast to every connection.
 
+### Reconnect after a host restart
+
+A daemon frame is broadcast only to sockets that are connected *at that instant*,
+and a new socket gets **no snapshot on connect** — the browser pulls
+`chat-stream:get-state` once at startup instead. That is fine while the host
+process lives, but a host restart (`pentacle-web-start stop && pentacle-web-start`)
+drops every `/cc` socket and the page reconnects to a *fresh* process. That
+process may already have finished its daemon handshake before the page
+reconnects, so its `connected:true` frame reached nobody; and because
+`chat-stream` `state_version` is per-process, a fresh (lower) version would be
+gated as stale by the renderer's versioned-connection-state guard even if it did
+arrive. Without a reconnect signal the page would sit at `connected:false` and
+the chat input would stay frozen until a manual reload.
+
+So `renderer/web_cc.js` fires an `onReconnect` callback on every socket **re-open**
+(not the first connect), and `renderer/app.js` uses it to reset its
+connection-state version baseline and re-pull `chat-stream:get-state` — the same
+snapshot path startup uses — which re-enables the input and re-syncs the daemon
+inventory with no reload. The desktop `preload.js` exposes `onReconnect` as a
+no-op (its ipcRenderer transport never drops), so the surface stays at parity and
+desktop behaviour is unchanged. Regression coverage:
+`test/e2e/lib/web_scenarios.js` (`host-restart-restores-input`, driven by
+`web_gate.js`'s host/daemon restart primitives) and the
+`test/chat_stream_connection_state.test.js` version-reset cases.
+
 Each connection is capped at 8 concurrent ptys (the renderer uses four slots;
 the headroom covers reconnect churn), so one connection cannot exhaust a shared
 host by opening unbounded terminals. The (N+1)th `pty:create` on a connection is
