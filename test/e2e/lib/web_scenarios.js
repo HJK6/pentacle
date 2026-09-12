@@ -1,4 +1,5 @@
 'use strict';
+const { runGridSplit } = require('./grid_split_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
 // page (window.cc over the websocket) and a chat-stream-v2 daemon. web_gate.js
@@ -180,6 +181,7 @@ const SCENARIOS = [
   ['sidebar-from-inventory', sidebarFromInventory],
   ['slot-attach-type-resize-kill', slotAttachTypeResizeKill],
   ['chat-transcript-paint', chatTranscriptPaint],
+  ['slot-column-split', runGridSplit],
 ];
 
 module.exports = {

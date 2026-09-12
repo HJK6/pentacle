@@ -166,6 +166,23 @@ localHostId, hostMap, mic/micServerUrl and your feature flags when those explici
 choices differ from the defaults. A legacy machineStats object may remain but
 does not configure cards. Use config mappings for old local/remote aliases.
 
+The divider between the two slot columns works in both the desktop app and web
+mode. Drag it to give either column more room. Double-click or double-tap it to
+reset to 50/50. With the divider focused, Left/Right adjust by two percentage
+points, Home/End move to the width limits, and Enter resets the split.
+
+Each column keeps at least 220px when the workspace has room. A narrower
+workspace uses equal halves; widening it restores the preferred split. In
+narrow columns, scroll the header controls horizontally or use Tab to reach
+them. Maximizing a slot hides the divider; restoring the grid restores its split.
+Rows and sidebar width are unchanged.
+
+The preferred left fraction is saved as `appearance.gridColSplit` in
+`pentacle.settings.v1` only after a completed adjustment or reset. It survives
+reloads and desktop restarts. Desktop profiles and browser origins each remember
+their own split. Invalid values use 50/50; resizing the window does not overwrite
+the preference.
+
 Settings overrides are stored under `pentacle.settings.v1` in the renderer's
 localStorage. They override config defaults both before and after asynchronous
 configuration arrives. Existing saved Chat opt-in therefore survives an upgrade
