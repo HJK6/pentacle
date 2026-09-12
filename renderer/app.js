@@ -13,6 +13,7 @@ const assetRender = require('./asset_render');
 const { showToast } = require('./toast');
 const { decideUseChatClose } = require('./delete_session_gate');
 const { configuredAssistantRole, isConfiguredAssistant } = require('./assistant_role');
+const { createClosedChatSlots } = require('./closed_chat_slots');
 const { applyVersionedConnectionState } = require('./chat_stream_connection_state');
 const { resolveMicUrl } = require('../main/mic-url');
 const { createSpawnCatalogLoader } = require('./spawn_catalog_loader');
@@ -1678,6 +1679,28 @@ function ensureSlotAssetTabs(slot) {
   return tabs;
 }
 
+const closedChatSlots = createClosedChatSlots({
+  readState: () => ({
+    connected: state.chatStream.connected,
+    epoch: state.chatStream.stateVersion,
+    slots: state.slots.map((slot, index) => slot && ({
+      host: streamHostForHostId(slot.hostId), name: slot.name,
+      generation: state.slotGen[index], bot: state.botSlots[index],
+    })),
+  }),
+  retire: (slot, streamId) => {
+    // The portal owns a moved question node; restore/remove it before refs vanish.
+    const questionEl = state.slotChatRefs[slot]?.questionEl;
+    if (questionEl) closeDesktopQuestionPortal(streamId, questionEl);
+    delete state.desktopQuestionOverlayOpen[streamId];
+    delete state.desktopQuestionPortalHomes[streamId];
+    delete state.questionDrafts[`${streamId}:flow`];
+    delete state.questionPageIndexByStream[`${streamId}:flow`];
+    clearSlotAttachments(slot);
+    detachSlot(slot);
+  },
+});
+
 function applyChatStreamState(data) {
   // NOT gated on chatUiEnabled(): the sidebar visibility filter consumes
   // state.chatStream.sessions regardless of whether the in-slot chat UI is
@@ -1706,6 +1729,7 @@ function applyChatStreamState(data) {
     spawnFailureNotifications: state.chatStream.spawnFailureNotifications,
     onSpawnFailure: (session) => showToast(session.reason, { type: 'error' }),
   });
+  closedChatSlots.update(data);
   reconcileLocallyClosedStreamIds();
   state.durableQuestionHydrationByStream = {};
   if (Array.isArray(data.schedules)) {
@@ -1792,7 +1816,7 @@ function applyChatStreamPayload(payload) {
       state_version: payload.state_version,
       events: payload.events || [],
       drafts: payload.drafts || {},
-      sessions: payload.sessions || [],
+      sessions: payload.sessions,
       schedules: payload.schedules || [],
       notifications: payload.notifications || [],
       hosts_stats: payload.hosts_stats || state.chatStream.hostsStats,
@@ -1824,10 +1848,13 @@ function applyChatStreamPayload(payload) {
     return;
   }
   if (payload.type === 'session.inventory' && Array.isArray(payload.sessions)) {
+    if (!applyVersionedConnectionState(state.chatStream,
+      { ...payload, connected: state.chatStream.connected }, setDegradedMode)) return;
     state.chatStream.sessions = nextChatStreamSessions(state.chatStream.sessions, payload, {
       spawnFailureNotifications: state.chatStream.spawnFailureNotifications,
       onSpawnFailure: (session) => showToast(session.reason, { type: 'error' }),
     });
+    closedChatSlots.update(payload);
     reconcileLocallyClosedStreamIds();
     state.durableQuestionHydrationByStream = {};
     if (state.chatStream.connected) {
@@ -4343,6 +4370,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
   state.slotGen[slot]++;
   const gen = state.slotGen[slot]; // capture generation to detect stale async resumes
   state.slots[slot] = { name: sessionName, displayName, hostId };
+  closedChatSlots.update();
   window.PentacleHarness?.emit?.('slot:attach', { slot, host: hostId, data: { sessionName } });
 
   // Update header
@@ -4558,6 +4586,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
 }
 
 function detachSlot(slot) {
+  closedChatSlots.forget(slot);
   const wasBot = state.botSlots[slot];
   const sessionName = state.slots[slot] && state.slots[slot].name;
 

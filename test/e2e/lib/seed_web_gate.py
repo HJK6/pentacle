@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import hashlib
 import os
 import sys
 
@@ -49,7 +50,7 @@ def _event(stream_id: str, kind: str, text: str, index: int) -> dict:
     }
 
 
-async def seed(db: str, host: str, session: str, objective: str) -> dict:
+async def seed(db: str, host: str, session: str, objective: str, token_file: str | None = None) -> dict:
     store = Store(db)
     store.start()
     try:
@@ -66,6 +67,10 @@ async def seed(db: str, host: str, session: str, objective: str) -> dict:
             host, session, visibility="default", role="worker",
             provider="claude", objective=objective,
         )
+        if token_file:
+            with open(token_file) as source:
+                token = source.read().strip()
+            assert await store.grant_stream_token(host, session, hashlib.sha256(token.encode()).hexdigest(), "sha256:v1") == "ok"
         appended = 0
         for index, (kind, text) in enumerate(TRANSCRIPT):
             event = _event(stream_id, kind, text, index)
@@ -85,8 +90,9 @@ def main() -> int:
     parser.add_argument("--host", default="local")
     parser.add_argument("--session", default="web-gate-1")
     parser.add_argument("--objective", default="web gate fixture")
+    parser.add_argument("--token-file")
     args = parser.parse_args()
-    result = asyncio.run(seed(args.db, args.host, args.session, args.objective))
+    result = asyncio.run(seed(args.db, args.host, args.session, args.objective, args.token_file))
     print(json.dumps(result))
     return 0
 
