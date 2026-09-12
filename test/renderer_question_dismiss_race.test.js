@@ -283,8 +283,16 @@ test('configured assistant role removes UI mutation routes and blocks direct clo
   assert.equal(dom.window.document.querySelector('#header-0 .cell-trash').disabled, true);
   assert.equal(dom.window.document.querySelector('#header-0 .cell-edit').hidden, true);
   assert.equal(dom.window.document.querySelector('#header-0 .cell-edit').disabled, true);
+  const css = fs.readFileSync(path.join(root, 'renderer', 'styles.css'), 'utf8');
+  assert.match(css, /\.cell-edit\[hidden\],\s*\.cell-trash\[hidden\]\s*\{[^}]*display:\s*none;/s);
   vm.runInContext("state.chatStream.sessions[0].display_name = 'Ordinary collision'", context);
   assert.equal(vm.runInContext("isProtectedAssistantNameHost('Ordinary collision', 'local')", context), false);
+
+  vm.runInContext("state.slots[0] = { name: 'Ordinary collision', displayName: 'Ordinary collision', hostId: 'local' }; syncSlotAssistantControls(0)", context);
+  assert.equal(dom.window.document.querySelector('#header-0 .cell-trash').hidden, false);
+  assert.equal(dom.window.document.querySelector('#header-0 .cell-trash').disabled, false);
+  assert.equal(dom.window.document.querySelector('#header-0 .cell-edit').hidden, false);
+  assert.equal(dom.window.document.querySelector('#header-0 .cell-edit').disabled, false);
 
   vm.runInContext("showRenameModal('assistant', 'Unrelated title', 'local')", context);
   assert.equal(dom.window.document.querySelector('#modal-overlay').style.display, 'none');

@@ -1894,6 +1894,10 @@ body.chat-stream-degraded button[data-cleanup-action] {
   align-items: center;
   transition: color 0.1s;
 }
+.cell-edit[hidden],
+.cell-trash[hidden] {
+  display: none;
+}
 .cell-edit:hover { color: var(--blue); }
 .cell-trash:hover { color: var(--red); }
 
