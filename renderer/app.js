@@ -1964,13 +1964,14 @@ function isProtectedAssistantNameHost(sessionName, hostId) {
 
 function syncSlotAssistantControls(slot) {
   const header = document.getElementById(`header-${slot}`);
-  const trash = header?.querySelector('.cell-trash');
-  if (!trash) return;
+  if (!header) return;
   const session = state.slots[slot];
   const protectedAssistant = !!session && isProtectedAssistantNameHost(session.name, session.hostId);
-  trash.hidden = protectedAssistant;
-  trash.disabled = protectedAssistant;
-  trash.setAttribute('aria-hidden', protectedAssistant ? 'true' : 'false');
+  header.querySelectorAll('.cell-trash, .cell-edit').forEach((control) => {
+    control.hidden = protectedAssistant;
+    control.disabled = protectedAssistant;
+    control.setAttribute('aria-hidden', protectedAssistant ? 'true' : 'false');
+  });
 }
 
 function isCodexHelperPromptText(text) {
@@ -4242,7 +4243,7 @@ function renderSidebar() {
     html += renderSessionItem(row);
   }
   list.innerHTML = html;
-  list.querySelectorAll('.session-item.assistant-protected .s-trash-btn').forEach((button) => button.remove());
+  list.querySelectorAll('.session-item.assistant-protected .s-trash-btn, .session-item.assistant-protected .s-edit-btn').forEach((button) => button.remove());
   setupSidebarCollapsibles(list);
   syncActivitySpinnerPhase(document);
   syncWorkingTimer();
@@ -5491,7 +5492,12 @@ async function newTerminalSession(agent = 'codex', locationOverride = null) {
 let renameTarget = null;
 
 function showRenameModal(sessionName, currentTitle, hostId) {
-  renameTarget = { sessionName, hostId: hostId || (IS_CLIENT ? 'remote' : 'local') };
+  const resolvedHostId = hostId || (IS_CLIENT ? 'remote' : 'local');
+  if (isProtectedAssistantNameHost(sessionName, resolvedHostId)) {
+    showToast('This configured assistant cannot be renamed', { type: 'error' });
+    return;
+  }
+  renameTarget = { sessionName, hostId: resolvedHostId };
   document.getElementById('modal-title').textContent = `Rename: ${sessionName}`;
   document.getElementById('modal-input').value = currentTitle || sessionName;
   document.getElementById('modal-overlay').style.display = 'flex';
@@ -5512,6 +5518,11 @@ document.getElementById('modal-overlay').addEventListener('click', (e) => {
 document.getElementById('modal-confirm').addEventListener('click', async () => {
   const newName = document.getElementById('modal-input').value.trim();
   if (newName && renameTarget) {
+    if (isProtectedAssistantNameHost(renameTarget.sessionName, renameTarget.hostId)) {
+      showToast('This configured assistant cannot be renamed', { type: 'error' });
+      hideRenameModal();
+      return;
+    }
     const streamSession = chatSessionStateForNameHost(renameTarget.sessionName, renameTarget.hostId);
     const isChatSession = !!streamSession?.stream_id;
     if (isChatSession) {

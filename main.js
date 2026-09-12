@@ -40,11 +40,17 @@ const { registerScheduleIpcHandlers } = require('./main/schedule_ipc_bridge');
 const { probeMicServer } = require('./main/mic-url');
 const { registerNotificationIpcHandlers } = require('./main/notification_ipc_bridge');
 const { createAssetPopoutManager } = require('./main/asset_popout_windows');
+const { isProtectedAssistantRename } = require('./main/assistant_role_guard');
 const assetPopouts = createAssetPopoutManager({ BrowserWindow, appRoot: __dirname, getMainWindow: () => [...windows][0] });
 function safeString(value, fallback = '') { return String(value ?? '').trim() || fallback; }
 function nowIso() { return new Date().toISOString(); }
 function normalizeChatStreamError(error) { return String(error?.error || error?.message || error || 'Daemon unavailable'); }
 function resultError(message) { return { ok: false, error: normalizeChatStreamError(message) }; }
+function protectedAssistantRenameError(host, sessionName) {
+  return isProtectedAssistantRename(CONFIG, chatStreamClient.snapshot(), host, sessionName)
+    ? resultError('This configured assistant cannot be renamed')
+    : null;
+}
 function publicConfig() {
   const { token, tokenPath, ...chatStream } = CONFIG.chatStream || {};
   return { ...CONFIG, chatStream, hostIds: CONFIG.chatStream?.hosts || ['local'], platform: process.platform,
@@ -96,8 +102,10 @@ function registerIpc() {
   ipcMain.handle('chat-stream:interrupt', (_event, host, sessionName) => command(() => chatStreamClient.interruptMessage({ host, sessionName })));
   ipcMain.handle('chat-stream:dismiss-question', (_event, host, sessionName, payload = {}) =>
     command(() => chatStreamClient.dismissQuestion({ host, sessionName, questionKey: payload.questionKey || payload.question_key, text: payload.text })));
-  ipcMain.handle('chat-stream:rename', (_event, host, sessionName, displayName) =>
-    command(() => chatStreamClient.renameSession({ host, sessionName, displayName, source: 'manual' })));
+  ipcMain.handle('chat-stream:rename', (_event, host, sessionName, displayName) => {
+    const protectedError = protectedAssistantRenameError(host, sessionName);
+    return protectedError || command(() => chatStreamClient.renameSession({ host, sessionName, displayName, source: 'manual' }));
+  });
   ipcMain.handle('chat-stream:close', (_event, host, sessionName, options) => command(() => chatStreamClient.closeSession({ ...options, host, sessionName })));
   ipcMain.handle('chat-stream:kill', (_event, args) => command(() => chatStreamClient.killSessionRpc(args)));
   ipcMain.handle('chat-stream:upload-blob', (_event, payload) => command(() => chatStreamClient.uploadBlob({ ...payload,
@@ -107,7 +115,10 @@ function registerIpc() {
   registerScheduleIpcHandlers(ipcMain, chatStreamClient, normalizeChatStreamError);
   registerNotificationIpcHandlers(ipcMain, chatStreamClient, normalizeChatStreamError);
   ipcMain.handle('tmux:kill-session', (_event, host, sessionName) => command(() => chatStreamClient.killSessionRpc({ host, sessionName })));
-  ipcMain.handle('tmux:set-window-title', (_event, host, sessionName, displayName) => command(() => chatStreamClient.renameSession({ host, sessionName, displayName, source: 'manual' })));
+  ipcMain.handle('tmux:set-window-title', (_event, host, sessionName, displayName) => {
+    const protectedError = protectedAssistantRenameError(host, sessionName);
+    return protectedError || command(() => chatStreamClient.renameSession({ host, sessionName, displayName, source: 'manual' }));
+  });
   if (process.env.PENTACLE_HARNESS === '1') ipcMain.handle('harness:force-reconnect', () => { chatStreamClient.forceReconnect('harness'); return { ok: true }; });
 
   const stopTerminals = require('./main/terminal_adapter').registerTerminalIpc(ipcMain, CONFIG, chatStreamClient);

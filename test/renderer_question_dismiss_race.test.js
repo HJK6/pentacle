@@ -84,6 +84,7 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '' }
   const sendCalls = [];
   const closeCalls = [];
   const killCalls = [];
+  const renameCalls = [];
   const contextMenuCalls = [];
   const config = {
     appName: 'Pentacle',
@@ -172,6 +173,8 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '' }
     onAction() {},
     onChatStreamFrame() {},
     showContextMenu() {},
+    chatRename: async (...args) => { renameCalls.push({ kind: 'chat', args }); return { ok: true }; },
+    setWindowTitle: async (...args) => { renameCalls.push({ kind: 'terminal', args }); return { ok: true }; },
     chatClose: async (...args) => { closeCalls.push(args); return { ok: true }; },
     chatKill: async (...args) => { killCalls.push(args); return { ok: true }; },
     killTmuxSession: async (...args) => { killCalls.push(args); return { ok: true }; },
@@ -223,7 +226,7 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '' }
     filename: 'renderer/app.js',
   });
   dom.window.cc.showContextMenu = (...args) => contextMenuCalls.push(args);
-  return { context, dismissCalls, notificationResolveCalls, sendCalls, closeCalls, killCalls, contextMenuCalls, dom };
+  return { context, dismissCalls, notificationResolveCalls, sendCalls, closeCalls, killCalls, renameCalls, contextMenuCalls, dom };
 }
 
 function mountRaceSlot(context) {
@@ -249,8 +252,8 @@ function mountRaceSlot(context) {
   `, context);
 }
 
-test('configured assistant role removes UI deletion routes and blocks direct close', async () => {
-  const { context, dom, closeCalls, killCalls, contextMenuCalls } = installRenderer({ assistantRole: 'persistent-assistant' });
+test('configured assistant role removes UI mutation routes and blocks direct close or rename', async () => {
+  const { context, dom, closeCalls, killCalls, renameCalls, contextMenuCalls } = installRenderer({ assistantRole: 'persistent-assistant' });
   await flush();
   await flush();
   vm.runInContext(`
@@ -270,10 +273,20 @@ test('configured assistant role removes UI deletion routes and blocks direct clo
   const sidebarRow = dom.window.document.querySelector('.session-item.assistant-protected');
   assert.ok(sidebarRow);
   assert.equal(sidebarRow.querySelector('.s-trash-btn'), null);
+  assert.equal(sidebarRow.querySelector('.s-edit-btn'), null);
   sidebarRow.dispatchEvent(new dom.window.MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
   assert.equal(contextMenuCalls.length, 0);
   assert.equal(dom.window.document.querySelector('#header-0 .cell-trash').hidden, true);
   assert.equal(dom.window.document.querySelector('#header-0 .cell-trash').disabled, true);
+  assert.equal(dom.window.document.querySelector('#header-0 .cell-edit').hidden, true);
+  assert.equal(dom.window.document.querySelector('#header-0 .cell-edit').disabled, true);
+
+  vm.runInContext("showRenameModal('assistant', 'Unrelated title', 'local')", context);
+  assert.equal(dom.window.document.querySelector('#modal-overlay').style.display, 'none');
+  vm.runInContext("renameTarget = { sessionName: 'assistant', hostId: 'local' }; document.getElementById('modal-input').value = 'blocked rename'", context);
+  dom.window.document.querySelector('#modal-confirm').click();
+  await flush();
+  assert.deepEqual(renameCalls, []);
 
   await vm.runInContext("deleteSession('assistant', 'local')", context);
   assert.deepEqual(closeCalls, []);
