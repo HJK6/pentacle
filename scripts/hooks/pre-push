@@ -206,12 +206,16 @@ fi
 # returned ref name, fetch the commit; never trust a (possibly stale) tracking
 # ref. Other remotes: best-effort (tracking ref, else ls-remote).
 resolve_public_main() {
-  ls="$(git ls-remote "$remote_url" refs/heads/main 2>/dev/null)"
-  # take only an exact refs/heads/main line (default IFS splits on space/tab)
+  # A nonzero ls-remote (unreachable/refused) is a failure even if it printed
+  # something — do not fall through to a partial read.
+  ls="$(git ls-remote "$remote_url" refs/heads/main 2>/dev/null)" || return 1
+  # take only an exact refs/heads/main line; the id must be a FULL object id
+  # (a short/abbreviated id could resolve to the wrong local object).
   sha=''
   while read -r shacol refcol _; do
     [ "$refcol" = "refs/heads/main" ] || continue
-    case "$shacol" in ""|*[!0-9a-f]*) continue ;; esac
+    case "$shacol" in *[!0-9a-f]*) continue ;; esac
+    [ "${#shacol}" = 40 ] || [ "${#shacol}" = 64 ] || continue
     sha="$shacol"; break
   done <<EOF
 $ls
@@ -257,26 +261,24 @@ is_full_sha() {
   case "$1" in *[!0-9a-f]*) return 1 ;; esac
   [ "${#1}" = 40 ] || [ "${#1}" = 64 ]
 }
+valid_oid() { [ "$1" = "$zero" ] || is_full_sha "$1"; }
 
 records=0
-while read -r lref lsha rref rsha; do
+while read -r lref lsha rref rsha extra; do
   [ -z "${lref:-}" ] && [ -z "${lsha:-}" ] && continue          # blank line
-  # a well-formed update record needs all four fields
-  if [ -z "${lref:-}" ] || [ -z "${lsha:-}" ] || [ -z "${rref:-}" ] || [ -z "${rsha:-}" ]; then
-    if [ "$is_public" -eq 1 ]; then
-      warn "REFUSED: malformed push record on stdin (fail closed)."
-      fail=1
-    fi
+  # A well-formed update record is EXACTLY four fields — <lref> <lsha> <rref>
+  # <rsha> — with both object ids a full 40/64-hex or the zero id, and both refs
+  # shaped like refs/*. Anything else (extra columns, junk sha, junk ref) is a
+  # malformed record and fails closed for a public push.
+  if [ -n "${extra:-}" ] || [ -z "${rref:-}" ] || [ -z "${rsha:-}" ] \
+     || ! valid_oid "$lsha" || ! valid_oid "$rsha"; then
+    if [ "$is_public" -eq 1 ]; then warn "REFUSED: malformed push record on stdin (fail closed)."; fail=1; fi
     continue
   fi
+  # git sends "(delete)" as the local ref of a deletion; otherwise refs/*.
+  case "$lref" in refs/*|'(delete)') : ;; *) if [ "$is_public" -eq 1 ]; then warn "REFUSED: malformed local ref '${lref}' (fail closed)."; fail=1; fi; continue ;; esac
+  case "$rref" in refs/*) : ;; *) if [ "$is_public" -eq 1 ]; then warn "REFUSED: malformed remote ref '${rref}' (fail closed)."; fail=1; fi; continue ;; esac
   if [ "$lsha" = "$zero" ]; then records=$((records + 1)); continue; fi   # deletion
-  if ! is_full_sha "$lsha"; then
-    if [ "$is_public" -eq 1 ]; then
-      warn "REFUSED: push record local sha '${lsha}' is not a full object id (fail closed)."
-      fail=1
-    fi
-    continue
-  fi
   records=$((records + 1))
   [ -n "$main_roots" ] || continue           # non-public with no comparable main
   tip_roots="$(git rev-list --max-parents=0 "$lsha" 2>/dev/null)"

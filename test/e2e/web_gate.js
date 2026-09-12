@@ -78,19 +78,29 @@ function freePort() {
   });
 }
 
-function waitForListen(port, timeoutMs) {
+function waitForListen(port, timeoutMs, isDead = () => false) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
     const tryOnce = () => {
+      if (isDead()) { reject(new Error(`daemon exited before listening on ${port}`)); return; }
       const sock = net.connect(port, '127.0.0.1');
       sock.once('connect', () => { sock.destroy(); resolve(); });
       sock.once('error', () => {
         sock.destroy();
-        if (Date.now() > deadline) reject(new Error(`daemon did not listen on ${port} within ${timeoutMs}ms`));
+        if (isDead()) reject(new Error(`daemon exited before listening on ${port}`));
+        else if (Date.now() > deadline) reject(new Error(`daemon did not listen on ${port} within ${timeoutMs}ms`));
         else setTimeout(tryOnce, 150);
       });
     };
     tryOnce();
+  });
+}
+
+function onceExit(proc) {
+  return new Promise((resolve) => {
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) { resolve(); return; }
+    proc.once('exit', () => resolve());
+    setTimeout(resolve, 3000); // don't hang teardown on a stuck child
   });
 }
 
@@ -134,25 +144,44 @@ function writeProfile(scratch, daemonPort) {
   return file;
 }
 
-async function startDaemon(args, scratch) {
-  const port = await freePort();
+async function startDaemon(args, scratch, runtime) {
   const db = path.join(scratch, 'sessions.db');
   // Seed BEFORE boot: the daemon rebuilds its inventory purely from this DB.
   const seed = execFileSync(args.python, [SEEDER, '--db', db, '--host', FIXTURE.host, '--session', FIXTURE.sessionName],
     { encoding: 'utf8', cwd: ROOT });
-
   const daemonLog = fs.openSync(path.join(scratch, 'daemon.log'), 'a');
-  const proc = spawn(args.python, [DAEMON,
-    '--host', '127.0.0.1', '--port', String(port), '--local-host', 'local',
-    '--db', db,
-    '--notifications-db', path.join(scratch, 'notifications.db'),
-    '--assets-db', path.join(scratch, 'assets.db'),
-    '--blob-root', path.join(scratch, 'blobs'),
-    '--disable-hosts', '--disable-mirror', '--disable-nudges',
-    '--disable-outbound-notices', '--disable-remote-presence',
-  ], { cwd: ROOT, stdio: ['ignore', daemonLog, daemonLog] });
-  await waitForListen(port, args.timeoutMs);
-  return { proc, port, seed: seed.trim() };
+
+  // Retry on a lost port race (another process grabs the freePort() port before
+  // the daemon binds it): a fresh port each attempt. The child is registered in
+  // `runtime` BEFORE the readiness await so teardown can always kill it even if
+  // startup fails mid-flight (no leaked daemon).
+  let lastErr;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const port = await freePort();
+    const proc = spawn(args.python, [DAEMON,
+      '--host', '127.0.0.1', '--port', String(port), '--local-host', 'local',
+      '--db', db,
+      '--notifications-db', path.join(scratch, 'notifications.db'),
+      '--assets-db', path.join(scratch, 'assets.db'),
+      '--blob-root', path.join(scratch, 'blobs'),
+      '--disable-hosts', '--disable-mirror', '--disable-nudges',
+      '--disable-outbound-notices', '--disable-remote-presence',
+    ], { cwd: ROOT, stdio: ['ignore', daemonLog, daemonLog] });
+    runtime.daemonProc = proc;
+    let dead = false;
+    proc.once('exit', () => { dead = true; });
+    try {
+      await waitForListen(port, args.timeoutMs, () => dead);
+      return { proc, port, seed: seed.trim() };
+    } catch (e) {
+      lastErr = e;
+      try { proc.kill('SIGKILL'); } catch {}
+      await onceExit(proc);
+      runtime.daemonProc = null;
+    }
+  }
+  try { fs.closeSync(daemonLog); } catch {}
+  throw lastErr || new Error('daemon failed to start');
 }
 
 async function run(args) {
@@ -169,7 +198,11 @@ async function run(args) {
     try { if (chrome && !args.keep) chrome.kill('SIGTERM'); } catch {}
     try { if (runtime.tmuxSession) tmux(['kill-session', '-t', `=${runtime.tmuxSession}`], { stdio: 'ignore' }); } catch {}
     try { if (host) await host.close(); } catch {}
-    try { if (daemon && daemon.proc) daemon.proc.kill('SIGTERM'); } catch {}
+    // Kill the daemon via the runtime handle (registered at spawn, so a
+    // readiness-failure mid-startup is still cleaned up) and await its exit.
+    const dproc = (daemon && daemon.proc) || runtime.daemonProc;
+    try { if (dproc) dproc.kill('SIGTERM'); } catch {}
+    await onceExit(dproc);
     try { if (!args.keep) fs.rmSync(scratch, { recursive: true, force: true }); } catch {}
     try { if (!args.keep) fs.rmSync(userDataDir, { recursive: true, force: true }); } catch {}
   };
@@ -177,7 +210,7 @@ async function run(args) {
   try {
     let profile = args.profile;
     if (!profile) {
-      daemon = await startDaemon(args, scratch);
+      daemon = await startDaemon(args, scratch, runtime);
       profile = writeProfile(scratch, daemon.port);
       report.note(`seeded loopback daemon on 127.0.0.1:${daemon.port} (${daemon.seed})`);
     } else {
@@ -188,17 +221,33 @@ async function run(args) {
     const url = `http://127.0.0.1:${host.port}/`;
     report.note(`web host ${url}`);
 
-    const cdpPort = args.cdpPort || await freePort();
     const chromeBin = resolveChrome();
-    chrome = spawn(chromeBin, [
-      '--headless=new', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
-      '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1600,1000', url,
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
     const chromeLog = [];
-    chrome.stdout.on('data', (d) => chromeLog.push(String(d)));
-    chrome.stderr.on('data', (d) => chromeLog.push(String(d)));
-
-    session = await cdp.connect(cdpPort, { match: new RegExp(`127\\.0\\.0\\.1:${host.port}|Terminal Dashboard`) });
+    const cdpMatch = new RegExp(`127\\.0\\.0\\.1:${host.port}|Terminal Dashboard`);
+    // Retry on a lost CDP port race (fresh port each attempt) unless a fixed
+    // --cdp-port was requested.
+    let cdpErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const cdpPort = args.cdpPort || await freePort();
+      chrome = spawn(chromeBin, [
+        '--headless=new', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
+        '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1600,1000', url,
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      chrome.stdout.on('data', (d) => chromeLog.push(String(d)));
+      chrome.stderr.on('data', (d) => chromeLog.push(String(d)));
+      try {
+        session = await cdp.connect(cdpPort, { match: cdpMatch });
+        cdpErr = null;
+        break;
+      } catch (e) {
+        cdpErr = e;
+        try { chrome.kill('SIGKILL'); } catch {}
+        await onceExit(chrome);
+        chrome = null;
+        if (args.cdpPort) break; // a fixed port was requested; don't rebind
+      }
+    }
+    if (!session) throw cdpErr || new Error('could not attach Chrome over CDP');
 
     const ctx = { session, report, cdp, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime };
     let failed = 0;

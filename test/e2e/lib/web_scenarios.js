@@ -75,9 +75,15 @@ async function sidebarFromInventory(ctx) {
     return;
   }
 
-  const inState = (streamState.sessions || []).some((s) => s.stream_id === fixture.streamId);
-  report.ok('the seeded session is present in the daemon inventory', inState,
-    { want: fixture.streamId, have: (streamState.sessions || []).map((s) => s.stream_id).slice(0, 12) });
+  // The hello snapshot can arrive marked connected before the daemon's inventory
+  // refresh has run, so poll for the seeded session rather than asserting on the
+  // first connected state (a CI-scheduling race).
+  const inState = await waitForValue(session, cdp,
+    `window.cc.getChatStreamState().then(s => (s.sessions||[]).some(x => x.stream_id === ${JSON.stringify(fixture.streamId)}))`,
+    (v) => v === true,
+    { timeoutMs, label: 'seeded session appears in the daemon inventory' });
+  report.ok('the seeded session is present in the daemon inventory', inState === true,
+    { want: fixture.streamId });
 
   const row = await waitForValue(session, cdp,
     `(() => { const el = document.querySelector('#session-list .session-item[data-stream-id="${fixture.streamId}"]'); return el ? { name: el.dataset.name, host: el.dataset.host, streamId: el.dataset.streamId } : null; })()`,

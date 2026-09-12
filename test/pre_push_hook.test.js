@@ -217,6 +217,27 @@ test('a malformed / non-full-hex tip sha is fail-closed for a public push', () =
   assert.match(r.stderr, /not a full object id|no verifiable push records|cannot resolve the public repo/);
 });
 
+// ── strict record validation (round-3 findings) ──────────────────────────────
+const HEX40 = 'a'.repeat(40);
+test('a public record with extra fields is fail-closed', () => {
+  const r = runHookDirect('public', 'git@github.com:HJK6/pentacle.git',
+    { stdin: `refs/heads/x ${HEX40} refs/heads/x ${HEX40} EXTRA\n` });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /malformed push record|no verifiable push records|cannot resolve the public repo/);
+});
+test('a public record with an invalid remote sha is fail-closed', () => {
+  const r = runHookDirect('public', 'git@github.com:HJK6/pentacle.git',
+    { stdin: `refs/heads/x ${HEX40} refs/heads/x not-a-sha\n` });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /malformed push record|cannot resolve the public repo/);
+});
+test('a public record with a non-refs/* ref is fail-closed', () => {
+  const r = runHookDirect('public', 'git@github.com:HJK6/pentacle.git',
+    { stdin: `badref ${HEX40} refs/heads/x ${HEX40}\n` });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /malformed local ref|malformed push record|cannot resolve the public repo/);
+});
+
 // ── deletions / multi-ref / tags ─────────────────────────────────────────────
 test('a deletion (push :refs/heads/x) is ALLOWED', () => {
   const sb = sandbox();
