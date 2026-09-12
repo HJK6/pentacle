@@ -52,6 +52,7 @@ def test_claude_events_populate_status_list_and_inspect_context_fields(tmp_path)
             await sessions.open(
                 HOST,
                 "claude-context",
+                created_at="2026-08-14T00:00:00Z",
                 provider="claude",
                 requested_model="claude-fable-5",
                 requested_effort="high",
@@ -102,7 +103,7 @@ def test_claude_events_populate_status_list_and_inspect_context_fields(tmp_path)
             for surface in (listed["active"][0], inspect["session"], status["session"]):
                 assert surface["context_tokens"] == 265_000
                 assert surface["model_context_window"] == 1_000_000
-                assert surface["context_level"] == "advisory"
+                assert surface["context_level"] == "none"
                 assert surface["context_updated_at"] == "2026-08-14T12:26:10Z"
         finally:
             store.stop()
@@ -150,6 +151,7 @@ def test_fd_bound_codex_token_count_populates_context_without_event_tail_row(tmp
             await sessions.open(
                 HOST,
                 "codex-fd-context",
+                created_at="2026-08-14T00:00:00Z",
                 provider="codex",
                 requested_model="gpt-5.6-terra",
                 requested_effort="xhigh",

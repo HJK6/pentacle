@@ -326,8 +326,8 @@ def test_spawn_payload_omits_model_when_unset(monkeypatch, tmp_path: Path, capsy
 
     assert cli.spawn(_spawn_args(tmp_path)) == 0
     _printed_json(capsys)
-    assert captured["payload"]["model"] == "gpt-5.6-sol"
-    assert captured["payload"]["effort"] == "high"
+    assert captured["payload"]["model"] == "gpt-5.6-luna"
+    assert captured["payload"]["effort"] == "max"
     assert captured["payload"]["resolution_source"] == "profile_default"
 
 
@@ -870,8 +870,8 @@ def test_spawn_starting_is_a_durable_success(monkeypatch, tmp_path: Path, capsys
         "session": {
             "stream_id": "hostc:codex-child",
             "spawn_readiness": "pending",
-            "model": "gpt-5.6-sol",
-            "effort": "high",
+            "model": "gpt-5.6-luna",
+            "effort": "max",
             "spawn_profile": "agent_orch",
             "catalog_version": "spawn-catalog-v2",
             "resolution_source": "profile_default",

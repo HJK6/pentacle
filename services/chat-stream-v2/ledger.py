@@ -1301,7 +1301,7 @@ class AwaiterResolutionJob:
 
 
 # --------------------------------------------------------------------------- #
-# title / status-card reminder nudges (KEPT — operator 2026-08-04)
+# Context crossings and title/status-card reminders
 # --------------------------------------------------------------------------- #
 #
 # Lifted from v1's `_nudge_unnamed_top_level_sessions` +
@@ -1313,21 +1313,24 @@ class AwaiterResolutionJob:
 # than v1's queue.
 #
 # The pinned dead-nudge-spam class (D2) drove the adaptations, all here:
-#   * candidates are ONLY live (pane alive) AND visible (visibility != hidden)
-#     top-level sessions — a dead pane or a hidden worker is never nudged;
+#   * title/card candidates are live AND visible (visibility != hidden)
+#     top-level sessions; context notifications independently include hidden children;
 #   * a bounded cadence with a per-pass cap and exponential backoff;
 #   * a durable per-(stream, kind) cooldown (`v2_nudge_state`) so a restart or a
 #     sleep/wake flap cannot re-fire — the exact v1 failure (in-memory episode
 #     timestamp re-minted on restart);
 #   * the `--disable-nudges` kill switch (main.py never constructs the job).
 #
-# Context-handoff/threshold nudges remain out of scope. Both providers require
+# Context nudges have independent eligibility and durable ingestion epochs.
+# For title/card reminders, both providers require
 # two admitted current-generation operator USER turns. Trusted local mirror or
 # remote capture must prove an idle, visible, live top-level session. Only USER
 # engagement rearms reminders; tool/assistant/reminder feedback cannot do so.
 
 NUDGE_KIND_TITLE = "title"
 NUDGE_KIND_CARD = "status_card"
+NUDGE_KIND_CONTEXT_ADVISORY = "context_advisory"
+NUDGE_KIND_CONTEXT_HANDOFF = "context_handoff"
 
 NUDGE_TITLE_TEXT = 'Please run: agent-orch title "<succinct durable goal>" (2-7 words).'
 NUDGE_CARD_TEXT = (
@@ -1386,7 +1389,7 @@ class NudgeConfig:
     """Loop-rule knobs (v2_design.md § Event loop rules, rule 2).
 
     cadence      `interval_s`, default 5m, env `PENTACLE_NUDGE_INTERVAL_S`
-    per-pass cap `max_per_pass` tells emitted per pass (title + card combined)
+    per-pass cap `max_per_pass` delivery attempts across context and title/card
     cooldown     `cooldown_s` per (stream, kind); restart-safe via `v2_nudge_state`
     staleness    `status_stale_s` — a card older than this is worth a nudge
     backoff      exponential from `backoff_base_s`, capped at `backoff_max_s`
@@ -1438,6 +1441,8 @@ class NudgeConfig:
 
 @dataclass
 class NudgePassResult:
+    attempted: int = 0
+    pending: int = 0
     candidates: int = 0  # tell candidates eligible after the cooldown gate
     sent: int = 0
     errors: int = 0
@@ -1450,22 +1455,20 @@ class NudgePassResult:
 
 
 class NudgeJob:
-    """The title / status-card reminder passes on a cadence, driven from the
-    asyncio loop but keeping every SQLite touch on `store.py`'s worker thread
-    and every pane injection on `comms.tell`.
+    """One capped cadence for context crossings and title/card reminders.
 
-    One pass: read the O(open) registry, keep only live + visible + top-level
-    sessions, work out which need a title and/or a card nudge, drop any still
-    inside their durable cooldown, then emit up to `max_per_pass` tells. A dead
-    pane, a hidden worker, and a session already nudged this cooldown window are
-    all silent — the dead-nudge-spam class (D2) is why.
+    Context eligibility includes hidden/nested/working seats and uses durable
+    ingestion episodes. Title/card reminders retain their existing visible,
+    idle, operator-engaged eligibility. SQLite stays on the store worker and
+    pane input stays on Comms; parentless context notices use Notify.
     """
 
-    def __init__(self, sessions: Any, comms: Any, store: Any, config: NudgeConfig | None = None) -> None:
+    def __init__(self, sessions: Any, comms: Any, store: Any, config: NudgeConfig | None = None, *, notify: Any = None) -> None:
         self.sessions = sessions
         self.comms = comms
         self.store = store
         self.config = config or NudgeConfig()
+        self.notify = notify
         self._last_tell_epoch_token: dict[str, int] = {}
 
     # -- eligibility (v1 candidate predicate, minus v1-only I/O machinery) --
@@ -1637,6 +1640,156 @@ class NudgeJob:
         self._last_tell_epoch_token[stream_id] = token
         return token
 
+    @classmethod
+    def _context_recipient_live(cls, row: dict[str, Any]) -> bool:
+        return (row.get("status") == "open" and cls._is_live(row)
+                and row.get("host_status") != "offline"
+                and row.get("routing_integrity") != "mismatch")
+
+    def _context_fresh(self, row: dict[str, Any], now: float) -> bool:
+        stamp = _nudge_epoch(row.get("context_updated_at"))
+        created = _nudge_epoch(row.get("created_at"))
+        tokens, window = row.get("context_tokens"), row.get("model_context_window")
+        return bool(
+            self._context_recipient_live(row)
+            and row.get("provider") in _NUDGE_PROVIDERS
+            and row.get("context_level") in {"advisory", "handoff"}
+            and isinstance(tokens, (int, float)) and not isinstance(tokens, bool)
+            and math.isfinite(tokens) and tokens >= 0
+            and isinstance(window, (int, float)) and not isinstance(window, bool)
+            and math.isfinite(window) and window > 0
+            and stamp is not None and created is not None
+            and created <= stamp <= now and now - stamp <= 1800
+        )
+
+    @staticmethod
+    def _context_delivery_outcome(reply: dict[str, Any]) -> str:
+        status = str(reply.get("delivery_status") or "indeterminate")
+        # Legacy Claude tells may label an unconfirmed paste "delivered".
+        # A context advisory must not turn that into a receipt-backed success.
+        if status == "delivered" and reply.get("submission_confirmed") is not True:
+            return "committed_pending_proof"
+        return status
+
+    async def _context_pass(self, rows: list[dict[str, Any]], now: float) -> NudgePassResult:
+        result = NudgePassResult()
+        for initial in sorted(rows, key=lambda r: str(r.get("stream_id") or "")):
+            sid = str(initial.get("stream_id") or "")
+            if not sid:
+                continue
+            async with self.store.routing_integrity_lifecycle_lock(sid):
+                row = self.sessions.get(sid) or {}
+                if not self._context_fresh(row, now):
+                    log.debug("subsystem=context_nudge bug_ref=context_notifications_handoff_proof "
+                              "suppressed source=%s reason=ineligible_or_stale", sid)
+                    continue
+                kind = "context_" + row["context_level"]
+                state = await self.store.nudge_state(sid, kind)
+                basis = json.loads(state["basis"]) if state else {}
+                if (not basis.get("active") or basis.get("superseded")
+                        or basis.get("generation") != row.get("created_at")):
+                    continue
+                recipients = [(sid, str(row["created_at"]))]
+                parent = str(row.get("parent_stream_id") or "")
+                if parent:
+                    route = await self.comms.resolve_route_target(parent)
+                    target = str(route.get("final_target") or "")
+                    parent_row = self.sessions.get(target) or {}
+                    if route.get("ok") and target != sid and self._context_recipient_live(parent_row):
+                        recipients.append((target, str(parent_row["created_at"])))
+                    else:
+                        log.debug("subsystem=context_nudge bug_ref=context_notifications_handoff_proof "
+                                  "suppressed source=%s parent=%s reason=parent_unavailable", sid, parent)
+                else:
+                    recipients.append(("operator", "operator"))
+                deliveries = basis["deliveries"]
+                for target, generation in recipients:
+                    key = json.dumps([target, generation], separators=(",", ":"))
+                    delivery = deliveries.get(key)
+                    if delivery is not None:
+                        if target != "operator":
+                            prior = await self.store.get_tell_delivery(delivery["tell_id"])
+                            if prior is not None:
+                                # A committed receipt owns recovery. Never re-paste
+                                # pending/unsubmitted messages to manufacture green.
+                                delivery["outcome"] = self._context_delivery_outcome(prior["reply"])
+                                await self.store.record_nudge(sid, kind, now, json.dumps(basis, sort_keys=True))
+                                continue
+                        if delivery["outcome"] == "attempting":
+                            delivery["outcome"] = "indeterminate"
+                            await self.store.record_nudge(sid, kind, now, json.dumps(basis, sort_keys=True))
+                            log.warning("subsystem=context_nudge bug_ref=context_notifications_handoff_proof "
+                                        "receipt_missing source=%s target=%s tell_id=%s action=owner_reconcile",
+                                        sid, target, delivery["tell_id"])
+                        if delivery["outcome"] not in {"retryable", "notify_retryable"}:
+                            continue
+                        if now - delivery["last_attempt"] < self.config.cooldown_s:
+                            continue
+                    result.candidates += 1
+                    if result.attempted >= self.config.max_per_pass:
+                        result._capped = True
+                        continue
+                    if target == "operator" and self.notify is None:
+                        result.errors += 1
+                        log.warning("subsystem=context_nudge bug_ref=context_notifications_handoff_proof "
+                                    "operator_route_unavailable source=%s", sid)
+                        continue
+                    if delivery is None:
+                        identity = [sid, row["created_at"], kind, basis["epoch"], target, generation]
+                        tell_id = "context-nudge:" + hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+                        crossing = basis["crossing"]
+                        action = ("Prepare a cold-resumable checkpoint and arrange succession with your parent/Nexus."
+                                  if kind == NUDGE_KIND_CONTEXT_HANDOFF else
+                                  "Review context quality and prepare your next checkpoint.")
+                        if target != sid:
+                            action = (f"Coordinate a checkpoint and succession for {sid}."
+                                      if kind == NUDGE_KIND_CONTEXT_HANDOFF else
+                                      f"Review context quality and checkpoint readiness for {sid}.")
+                        text = (f"{kind}: {sid} crossed {crossing['tokens']:,} context tokens "
+                                f"of {crossing['window']:,} at {crossing['observed_at']}. {action}")
+                        delivery = {"tell_id": tell_id, "message": text}
+                        deliveries[key] = delivery
+                    delivery.update(outcome="attempting", last_attempt=now)
+                    # Crash without a receipt is ambiguous; the durable attempt
+                    # fences automatic resubmission after restart.
+                    await self.store.record_nudge(sid, kind, now, json.dumps(basis, sort_keys=True))
+                    result.attempted += 1
+                    try:
+                        if target == "operator":
+                            receipt = await self.notify.create_internal_notification(
+                                producer="context_nudge", title=kind.replace("_", " ").capitalize(),
+                                body=delivery["message"], dedup_key=delivery["tell_id"], severity="warning")
+                            delivery.update(outcome="delivered", notification_id=receipt["notification_id"])
+                            result.sent += 1
+                        else:
+                            reply = await self.comms.tell({"tell_id": delivery["tell_id"],
+                                                         "stream_id": target, "message": delivery["message"]})
+                            delivery["outcome"] = self._context_delivery_outcome(reply)
+                            if delivery["outcome"] == "delivered":
+                                result.sent += 1
+                            else:
+                                result.pending += 1
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # a failure must never mint a new tell ID
+                        result.errors += 1
+                        # Only route refusals prove there was no pane input.
+                        # Generic delivery/transport errors may follow a paste.
+                        precommit = isinstance(exc, VerbError) and exc.code in {
+                            "unknown_session", "host_offline", "routing_integrity_mismatch",
+                            "codex_reset_blocked", "codex_initial_prompt_pending",
+                        }
+                        delivery["outcome"] = ("notify_retryable" if target == "operator" else
+                                               "retryable" if precommit else "indeterminate")
+                        log.warning("subsystem=context_nudge bug_ref=context_notifications_handoff_proof "
+                                    "delivery_failed source=%s target=%s outcome=%s error=%s",
+                                    sid, target, delivery["outcome"], exc)
+                    await self.store.record_nudge(sid, kind, now, json.dumps(basis, sort_keys=True))
+                    log.info("subsystem=context_nudge bug_ref=context_notifications_handoff_proof "
+                             "source=%s kind=%s epoch=%s target=%s outcome=%s tell_id=%s",
+                             sid, kind, basis["epoch"], target, delivery["outcome"], delivery["tell_id"])
+        return result
+
     # -- one pass ----------------------------------------------------------
 
     async def run_pass(self) -> NudgePassResult:
@@ -1680,9 +1833,12 @@ class NudgeJob:
             if due:
                 candidates.append((sid, tuple(due), row))
 
-        result = NudgePassResult(candidates=len(candidates))
-        result._capped = len(candidates) > self.config.max_per_pass
-        for sid, kinds, row in candidates[: self.config.max_per_pass]:
+        result = await self._context_pass(rows, now)
+        remaining = max(0, self.config.max_per_pass - result.attempted)
+        result.candidates += len(candidates)
+        result._capped = result._capped or len(candidates) > remaining
+        for sid, kinds, row in candidates[:remaining]:
+            result.attempted += 1
             combined = len(kinds) == 2
             text = (
                 "\n".join((NUDGE_TITLE_TEXT, NUDGE_CARD_TEXT))

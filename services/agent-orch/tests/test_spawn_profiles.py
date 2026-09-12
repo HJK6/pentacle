@@ -76,7 +76,7 @@ def test_all_codex_models_are_spawnable_at_max_effort() -> None:
         assert (revalidated["model"], revalidated["effort"]) == (model, "max")
 
 
-def test_astra_is_cataloged_with_sol_effort_ladder_and_defaults_unchanged() -> None:
+def test_astra_is_cataloged_with_effort_ladder_and_policy_defaults() -> None:
     astra = catalog()["models"]["codex"]["gpt-6-astra"]
     assert astra == {
         "aliases": ("gpt-6-astra", "astra"),
@@ -84,7 +84,7 @@ def test_astra_is_cataloged_with_sol_effort_ladder_and_defaults_unchanged() -> N
     }
     for profile in ("agent_orch", "desktop_manual"):
         request = resolve_spawn(provider="codex", spawn_profile=profile)
-        assert (request["model"], request["effort"]) == ("gpt-5.6-sol", "high")
+        assert (request["model"], request["effort"]) == ("gpt-5.6-luna", "max")
 
 
 def test_astra_alias_resolves_to_canonical_model() -> None:
@@ -102,13 +102,36 @@ def test_bogus_claude_model_still_rejected() -> None:
         raise AssertionError("bogus model was accepted")
 
 
-def test_profiles_are_entrypoint_specific() -> None:
-    assert resolve_spawn(provider="codex")["model"] == "gpt-5.6-sol"
-    assert resolve_spawn(provider="codex", spawn_profile="desktop_manual")["model"] == "gpt-5.6-sol"
+def test_profiles_derive_same_provider_default_and_legacy_fallback() -> None:
+    for profile in ("agent_orch", "desktop_manual"):
+        request = resolve_spawn(provider="codex", spawn_profile=profile)
+        assert (request["model"], request["effort"], request["resolution_source"]) == (
+            "gpt-5.6-luna", "max", "profile_default",
+        )
     legacy = resolve_spawn(provider="codex", legacy=True)
     assert (legacy["model"], legacy["effort"], legacy["resolution_source"]) == (
-        "gpt-5.6-sol", "high", "legacy_server_fallback",
+        "gpt-5.6-luna", "max", "legacy_server_fallback",
     )
+    for profile in ("agent_orch", "desktop_manual"):
+        request = resolve_spawn(provider="claude", spawn_profile=profile)
+        assert (request["model"], request["effort"]) == ("claude-opus-4-8", "high")
+
+
+def test_codex_partial_explicit_overrides_are_pinned_for_both_profiles() -> None:
+    cases = (
+        (None, None, "gpt-5.6-luna", "max", "profile_default"),
+        ("sol", None, "gpt-5.6-sol", "max", "explicit_override"),
+        (None, "high", "gpt-5.6-luna", "high", "explicit_override"),
+        ("sol", "high", "gpt-5.6-sol", "high", "explicit_override"),
+    )
+    for profile in ("agent_orch", "desktop_manual"):
+        for model, effort, expected_model, expected_effort, source in cases:
+            request = resolve_spawn(
+                provider="codex", spawn_profile=profile, model=model, effort=effort,
+            )
+            assert (request["model"], request["effort"], request["resolution_source"]) == (
+                expected_model, expected_effort, source,
+            )
 
 
 def test_host_override_and_policy_readback_share_one_config(monkeypatch, tmp_path) -> None:
@@ -119,17 +142,17 @@ def test_host_override_and_policy_readback_share_one_config(monkeypatch, tmp_pat
     monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", config_path)
     spawn_profiles.load_spawn_config.cache_clear()
     try:
-        assert (resolve_spawn(provider="codex", host="hostc")["model"], resolve_spawn(provider="codex", host="hostc")["effort"]) == ("gpt-5.6-terra", "high")
-        assert resolve_spawn(provider="codex", host="hosta")["model"] == "gpt-5.6-sol"
+        assert (resolve_spawn(provider="codex", host="hostc")["model"], resolve_spawn(provider="codex", host="hostc")["effort"]) == ("gpt-5.6-terra", "max")
+        assert resolve_spawn(provider="codex", host="hosta")["model"] == "gpt-5.6-luna"
         assert validate_v2(
             provider="codex", spawn_profile="agent_orch", schema="SpawnRequestV2",
-            model="gpt-5.6-terra", effort="high", catalog_version="spawn-catalog-v2",
+            model="gpt-5.6-terra", effort="max", catalog_version="spawn-catalog-v2",
             resolution_source="profile_default", host="hostc",
         )["model"] == "gpt-5.6-terra"
         try:
             validate_v2(
                 provider="codex", spawn_profile="agent_orch", schema="SpawnRequestV2",
-                model="gpt-5.6-sol", effort="high", catalog_version="spawn-catalog-v2",
+                model="gpt-5.6-sol", effort="max", catalog_version="spawn-catalog-v2",
                 resolution_source="profile_default", host="hostc",
             )
         except SpawnProfileError as exc:

@@ -1503,6 +1503,7 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
                 return None
             if closing:
                 stream_id = f"{host}:{session_name}"
+                conn.execute("DELETE FROM v2_nudge_state WHERE stream_id=?", (stream_id,))
                 stamp = _routing_iso_now()
                 # Closing is a lifecycle boundary. Retire active routing
                 # delivery/quarantine state before a later reopen seeds a fresh row.
@@ -1537,6 +1538,86 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
             finally:
                 self._retire_routing_integrity_lifecycle_lock(stream_id)
             return result
+        return await self.submit(_op)
+
+    async def update_context(
+        self, host: str, session_name: str, *, expected_generation: str,
+        context_tokens: int, model_context_window: int,
+        context_level: str, context_updated_at: str,
+    ) -> dict[str, Any] | None:
+        """Persist telemetry and every threshold transition in one transaction.
+
+        The observer holds the source lifecycle lock, also used by NudgeJob.
+        Recording transitions here preserves a compaction between nudge sweeps.
+        The existing nudge basis holds the episode; no sessions schema changes.
+        """
+        ranks = {"none": 0, "advisory": 1, "handoff": 2}
+        if context_level not in ranks or context_tokens < 0 or model_context_window <= 0:
+            return None
+        def epoch(stamp: str) -> float | None:
+            try:
+                dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                return dt.timestamp() if dt.utcoffset() is not None else None
+            except (ValueError, TypeError, OverflowError):
+                return None
+        observed = epoch(context_updated_at)
+        if observed is None:
+            return None
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute("SELECT * FROM sessions WHERE host=? AND session_name=?",
+                               (host, session_name)).fetchone()
+            if row is None or row["status"] != "open" or row["created_at"] != expected_generation:
+                return None
+            prior_at = epoch(str(row["context_updated_at"] or ""))
+            created_at = epoch(expected_generation)
+            if (prior_at is not None and observed < prior_at
+                    or created_at is not None and observed < created_at):
+                return None
+            sid = f"{host}:{session_name}"
+            try:
+                conn.execute("""UPDATE sessions SET context_tokens=?, model_context_window=?,
+                             context_level=?, context_updated_at=? WHERE host=? AND session_name=?""",
+                             (context_tokens, model_context_window, context_level,
+                              context_updated_at, host, session_name))
+                for level in ("advisory", "handoff"):
+                    kind = "context_" + level
+                    prior = conn.execute("SELECT basis FROM v2_nudge_state WHERE stream_id=? AND kind=?",
+                                         (sid, kind)).fetchone()
+                    basis = json.loads(prior[0]) if prior is not None else {}
+                    active = ranks[context_level] >= ranks[level]
+                    if prior is None and not active:
+                        continue
+                    if basis.get("generation") != expected_generation or active and not basis.get("active"):
+                        basis = {
+                            "version": 1, "generation": expected_generation,
+                            "epoch": uuid.uuid4().hex, "deliveries": {},
+                            "crossing": {"observed_at": context_updated_at,
+                                         "tokens": context_tokens, "window": model_context_window,
+                                         "level": level},
+                        }
+                    basis["active"] = active
+                    if level == "advisory" and context_level == "handoff":
+                        basis["superseded"] = True
+                    conn.execute("""INSERT INTO v2_nudge_state (stream_id,kind,last_nudged_at,basis)
+                                 VALUES (?,?,0,?) ON CONFLICT(stream_id,kind)
+                                 DO UPDATE SET basis=excluded.basis""",
+                                 (sid, kind, json.dumps(basis, sort_keys=True)))
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            return _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
+            ).fetchone())
+        return await self.submit(_op)
+
+    async def nudge_state(self, stream_id: str, kind: str) -> dict[str, Any] | None:
+        """Read one episode after acquiring its source lifecycle lock."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute("SELECT * FROM v2_nudge_state WHERE stream_id=? AND kind=?",
+                               (stream_id, kind)).fetchone()
+            return dict(row) if row is not None else None
         return await self.submit(_op)
 
     async def set_session_role_source(
@@ -1681,6 +1762,7 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
                 (stamp, "session_closed", stream_id),
             )
             conn.execute("DELETE FROM v2_routing_integrity WHERE stream_id=?", (stream_id,))
+            conn.execute("DELETE FROM v2_nudge_state WHERE stream_id=?", (stream_id,))
             # Attribute the close in the SAME transaction as the CAS UPDATE, so a
             # closed row can never exist without its audit row.
             _insert_close_audit(conn, _close_audit_payload(
@@ -1744,6 +1826,7 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
                 (stamp, "session_closed", stream_id),
             )
             conn.execute("DELETE FROM v2_routing_integrity WHERE stream_id=?", (stream_id,))
+            conn.execute("DELETE FROM v2_nudge_state WHERE stream_id=?", (stream_id,))
             # The presumed-dead reconciler transition bypasses mark_closed but is
             # still an affirmative close — attribute it in the same transaction.
             _insert_close_audit(conn, _close_audit_payload(

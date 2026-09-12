@@ -387,7 +387,10 @@ def test_context_only_update_flushes_to_an_already_connected_client() -> None:
         # behind throttling; only a semantic context change may emit twice.
         observer.inventory_emitter.min_interval_s = 0.0
         try:
-            await sessions.open("host", "context", provider="codex", visibility="visible")
+            await sessions.open(
+                "host", "context", provider="codex", visibility="visible",
+                created_at="2026-08-15T00:00:00Z",
+            )
             persisted = await observer.observe_context(
                 "host",
                 "context",

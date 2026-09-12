@@ -53,3 +53,49 @@ python services/chat-stream-v2/tools/run_gate.py merge
 ```
 
 Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the real desktop smoke. Fixtures must use invented content and valid public wire identifiers.
+
+## Context crossing notifications
+
+`NudgeJob` sends `context_advisory` and `context_handoff` notices to an open,
+reachable seat and its current live parent, including hidden and working seats.
+Parentless seats also get a daemon-owned operator notification through `Notify`.
+Title/card reminders keep their existing visible, idle, operator-engaged filter.
+Context notices do not refuse spawns or implement a `handoff_planned` exemption.
+
+Claude defaults follow the fleet handoff policy: advisory at
+`min(400000, 70% of model window)`, handoff at `min(600000, 85%)`.
+`PENTACLE_CONTEXT_ADVISORY_ABS`, `PENTACLE_CONTEXT_HANDOFF_ABS`, and the matching
+`_PCT` overrides remain supported. Codex keeps its reported-window 50%/75% lines.
+
+Telemetry ingestion atomically stores the reading and threshold episodes in
+`v2_nudge_state.basis`. Each kind has a source-generation-bound epoch, immutable
+crossing snapshot, and per-recipient delivery records. A reading below a kind's
+threshold rearms its next crossing, even between sweeps. A handoff supersedes
+an unsent advisory until context falls below advisory again. Restart preserves
+an episode; a reopened source generation starts a new one. Close prunes its state.
+
+Only valid readings no older than 1800 seconds and no earlier than session
+creation qualify. Future/malformed readings, offline/dead sources and routing
+mismatches are suppressed. An unavailable parent is deferred; it is not treated
+as a parentless seat. The retired park API is not restored.
+
+Each recipient uses a stable tell ID and frozen body. A delivered receipt prevents
+resending; a committed but unconfirmed paste stays pending and is reconciled
+read-only. A crash after a persisted attempt without a receipt is indeterminate:
+the owner must investigate it, and the job does not blindly paste again. Proven
+pre-input route refusals retry the same ID after the existing cooldown. Operator
+cards use the same stable ID as their notification dedup key.
+
+Context delivery attempts share the existing cadence, per-pass cap, cooldown,
+and whole-pass error backoff with title/card work. Context gets the available
+slots first. `--disable-nudges` disables the combined job. Tagged logs use
+`subsystem=context_nudge bug_ref=context_notifications_handoff_proof` and retain
+source, kind, epoch, target, outcome and tell ID.
+
+The installed handoff verifier runs without daemon mutation:
+`python3 services/chat-stream-v2/tools/context_handoff_proof.py <evidence-directory>`.
+It checks delivered successor evidence, source/witness generations, inherited
+Fable 5.1/high tuple, predecessor closure and witness parentage. The evidence
+producer owns the three disposable seats and must verify all three are closed
+and their panes absent after capture. A successful spawn reply alone is
+insufficient: existing handoff post-steps are best-effort on reparent failure.

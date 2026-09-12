@@ -568,14 +568,13 @@ async def run(args: argparse.Namespace) -> int:
     if not args.disable_notification_expiry:
         expiry = NotificationExpiry(notify, interval_s=args.notification_expiry_interval_s)
         tasks.append(asyncio.create_task(expiry.run_forever(), name="notification-expiry"))
-    # Title/status-card reminder nudges (KEPT, operator 2026-08-04): only live
-    # visible top-level sessions, per-pass cap, durable cooldown, backoff, kill
-    # switch. Needs the registry (candidates), comms (the one tell path), and the
-    # store (restart-safe cooldown).
+    # One bounded nudge cadence: context crossings include hidden children;
+    # title/card reminders retain their visible top-level filter. Notify owns
+    # the parentless operator route; the existing kill switch disables both.
     if not args.disable_nudges:
         nudge_cfg = NudgeConfig.from_env()
         tasks.append(asyncio.create_task(
-            NudgeJob(sessions, comms, store, nudge_cfg).run_forever(), name="nudges"))
+            NudgeJob(sessions, comms, store, nudge_cfg, notify=notify).run_forever(), name="nudges"))
         log.info("nudges: every %.0fs, cap %d/pass, cooldown %.0fs",
                  nudge_cfg.interval_s, nudge_cfg.max_per_pass, nudge_cfg.cooldown_s)
     # Usage limits: watch the externally collected usage_state.json and publish

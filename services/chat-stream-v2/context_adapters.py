@@ -89,14 +89,14 @@ def context_fields(provider: str, reading: ContextReading) -> tuple[int, int, st
         window = _claude_window(reading.model)
         advisory = min(
             env_number(
-                os.environ, "PENTACLE_CONTEXT_ADVISORY_ABS", 250_000,
+                os.environ, "PENTACLE_CONTEXT_ADVISORY_ABS", 400_000,
                 lambda raw: int(float(raw)),
             ),
             round(env_number(os.environ, "PENTACLE_CONTEXT_ADVISORY_PCT", 0.70, float) * window),
         )
         handoff = min(
             env_number(
-                os.environ, "PENTACLE_CONTEXT_HANDOFF_ABS", 300_000,
+                os.environ, "PENTACLE_CONTEXT_HANDOFF_ABS", 600_000,
                 lambda raw: int(float(raw)),
             ),
             round(env_number(os.environ, "PENTACLE_CONTEXT_HANDOFF_PCT", 0.85, float) * window),

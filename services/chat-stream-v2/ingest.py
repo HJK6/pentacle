@@ -539,20 +539,20 @@ class Ingest:
             return 0
 
         if provider == "codex" and st.session_id and self.routing_integrity is not None:
-            latest_context = None
+            # Preserve every crossing in this bounded, identity-checked span.
+            # Keeping only the final reading hides a compaction and subsequent
+            # rise when both arrive before the next ingest/nudge pass.
             for record in records:
                 reading = parse_codex_context_reading(record)
-                if reading is not None:
-                    latest_context = (str(record.get("timestamp") or "") or None, reading)
-            if latest_context is not None:
-                observed_at, reading = latest_context
+                if reading is None:
+                    continue
                 try:
                     await self.routing_integrity.observe_context(
                         host,
                         name,
                         provider="codex",
                         reading=reading,
-                        observed_at=observed_at,
+                        observed_at=str(record.get("timestamp") or "") or None,
                         expected_generation=str(row.get("created_at") or "") or None,
                     )
                 except Exception as exc:  # noqa: BLE001 - event ingest remains available

@@ -145,7 +145,7 @@ class RoutingIntegrity:
             updated_at = str(observed_at or "").strip() or time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
             )
-            persisted = await self.store.update_session(
+            persisted = await self.store.update_context(
                 host,
                 session_name,
                 expected_generation=generation,
