@@ -227,3 +227,11 @@ collector's 75s per-probe subprocess timeout (same `provider_error` result).
 With the compatible mic service configured, the per-chat mic button captures a message until a standalone `over` utterance or a second button click. Manual stop requires a service that drains pending audio/transcription before returning `/copy/stop`. The service must clear `on_last_copied` on every `/copy/start`; `/status` supplies the completed text when `on_listener_state` leaves `CAPTURING`.
 
 Each recording has its own completion guard. Identical consecutive messages are valid and send separately. The destination is the conversation selected when capture starts, even if the visible slot changes while transcription finishes. Agent replies remain text.
+
+### Optional wake-to-assistant voice
+
+A separately installed compatible local mic service can expose natural wake capture. This desktop does not bundle that service or a speech model. Enable `features.mic`, configure the exact protected `features.assistantRole`, and explicitly set `mic.wakeTargetHost` to that assistant's canonical host ID. Keep `chatStream.snapshot` enabled (the default); `snapshot: false` is unsupported for wake delivery. Public defaults remain inactive.
+
+When the service reports wake capture enabled, say **Hey Bart**, speak the message, then pause and say **over**. The desktop uses fresh connected session inventory to select the unique current role holder on the configured host, regardless of the focused chat. Ambiguous or disconnected inventory defers delivery. The mic panel shows readiness, pending work and errors. Manual mic-button capture continues to send to its original chat.
+
+The service's completion claim is atomic across clients. The desktop holds one claimed message while waiting for an assistant and creates only one `sendTurn` for it; the existing chat send/retry lifecycle handles subsequent transport. Turning the mic Off cancels held work before the request, and service lifecycle changes invalidate older work. Pending and latest-claim review data are in memory; a service or desktop crash can lose an unsent claim. Review an unconfirmed claim in the local service and check the chat before explicitly retrying; the desktop does not reconstruct or automatically create a second message. Startup and persistent-mute behavior are controlled by the external service.

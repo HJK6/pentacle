@@ -21,6 +21,7 @@ const {
   shouldShowAlwaysOn,
 } = require('./mic-state');
 const { createRemoteClipboardPoller } = require('./remote-clipboard-poll');
+const { createWakeDelivery } = require('./wake_delivery');
 const {
   filterSidebarSessions,
   collectSourceFilterHostIds,
@@ -6241,6 +6242,7 @@ async function micApi(method, path, body) {
 }
 
 async function postMicMode(mode, extra) {
+  if (mode === 'off') wakeDelivery?.cancel();
   const result = await micApi('POST', `/mode/${mode}`, micModeBody(extra));
   if (result && result.status === 409) {
     showMicConflict(result);
@@ -6455,7 +6457,7 @@ async function toggleVoiceRecordInner(slot) {
     const s = await micApi('GET', '/status');
     if (voiceState.capture !== capture) return; // stopped, or a newer recording took over
     if (!s) return;
-    if (s.on_listener_state !== 'CAPTURING') {
+    if (s.on_listener_state !== 'CAPTURING' || s.capture_origin === 'wake') {
       stopVoicePoll(slot);
       await deliverVoiceCapture(capture, s.on_last_copied);
     }
@@ -6483,6 +6485,8 @@ for (const btn of document.querySelectorAll('.cell-voice')) {
 }
 
 // ── Mic Control ───────────────────────────────────────────────
+
+let wakeDelivery = null;
 
 const micState = {
   mode: 'off',
@@ -6633,6 +6637,11 @@ function updateMicUI(data) {
       : `<span style="color:var(--yellow)">${esc(text)}</span>`;
   }
 
+  if (!busy.visible && !busy.lastError && wakeDelivery) {
+    const wakeMessage = wakeDelivery.message(data);
+    if (wakeMessage) info.textContent = wakeMessage;
+  }
+
   // Close meeting window tracking if we left meeting
   const inMeeting = isMeeting || (isOn && (data.on_listener_state === 'MEETING'));
   if (!inMeeting && micState.meetingWindowOpen) {
@@ -6643,6 +6652,7 @@ function updateMicUI(data) {
 async function fetchMicStatus() {
   const data = await micApi('GET', '/status');
   updateMicUI(data);
+  void wakeDelivery?.tick(data);
 
   // If in meeting mode, fetch new transcript lines
   if (data && data.mode === 'meeting') {
@@ -7004,6 +7014,15 @@ CFG_READY.then((cfg) => {
   // Mic panel — enabled on any platform when features.mic is true.
   // The mic server is cross-platform (MicServer.app on macOS, Python direct on Windows/Linux).
   if (CONFIG.features.mic) {
+    wakeDelivery = createWakeDelivery({
+      config: CONFIG,
+      getState: () => window.PentacleChatStore?.sendTurn ? window.cc.getChatStreamState() : null,
+      api: micApi,
+      sendTurn: (streamId, text) => window.PentacleChatStore.sendTurn(streamId, text),
+      onStatus: (text) => {
+        if (text && micState.mode === 'on') document.getElementById('mic-info').textContent = text;
+      },
+    });
     fetchMicStatus();
     setInterval(fetchMicStatus, 1000);
   } else {
