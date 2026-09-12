@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
 # pre-push — refuse pushes that would put the wrong history in the wrong place.
 #
@@ -7,45 +7,42 @@
 #     git config core.hooksPath scripts/hooks
 #
 # It is bypassable **by design** with `git push --no-verify` — it stops
-# accidents, not a determined push. What it protects (and does not):
+# accidents, not a determined adversary. What it protects (and does not):
 #
 #   (a) Destination — a remote *named* `public` whose URL is not the public
-#       repository (github.com/HJK6/pentacle, any URL spelling) is REFUSED, and
-#       the public-repo rules below apply whenever the destination URL resolves
-#       to that repo under ANY remote name or a raw URL. The resolved URL is
-#       always printed.
+#       repository (github.com/HJK6/pentacle, any URL spelling, case-insensitive
+#       owner/repo) is REFUSED, and the public-repo rules below apply whenever the
+#       destination URL resolves to that repo under ANY remote name or a raw URL.
+#       The resolved URL is always printed.
 #   (b) Explicit refspec — a bare `git push <remote>` (no refspec) or a
-#       matching-branch push (a `:` refspec) is REFUSED. A same-name branch
-#       refspec (`git push public my-branch`) is ALLOWED: it maps to the same
-#       branch name and cannot misroute — this does NOT force `src:refs/heads/dst`
-#       (a wrong branch *name* is out of scope and is instead caught in (c)).
+#       matching-branch push (`:` or `+:`) is REFUSED. A same-name branch refspec
+#       (`git push public my-branch`) is ALLOWED.
 #   (c) Foreign ancestry — every root commit reachable from a pushed tip must
-#       also be a root of the remote's `main`. A tip with an extra root — a
-#       foreign orphan branch, OR a merge that pulls another repository's history
-#       into a clean branch — is REFUSED.
+#       also be a root of the remote's `main`. A foreign orphan branch, OR a merge
+#       that pulls another repository's history into a clean branch, is REFUSED.
 #
-# FAIL CLOSED. For a push to the public repo the hook REFUSES (never exit 0)
-# when it cannot fully verify: no/blank/malformed push records on stdin, an
-# unresolvable current `main`, or an unreadable invoking argv. It never trusts a
-# possibly-stale remote-tracking ref for the public repo — it re-resolves the
-# remote's `main` from the live remote (`git ls-remote`) on every invocation.
+# FAIL CLOSED. A push to the public repo is REFUSED (never a silent exit 0) when
+# the hook cannot fully verify: no/blank/malformed push records, a tip sha that
+# is not a full 40/64-hex object or an exact deletion, a tip whose roots cannot
+# be enumerated, an unresolvable live `main`, or an invoking argv it cannot parse.
 #
-# Portability: written for bash 3.2 (the macOS default /bin/bash 3.2.57) — no
-# associative arrays, `mapfile`, or bash-4 parameter expansions. The root-set
-# comparison uses only bash builtins + `git` (no `grep`/`head`/`awk`/`sed`/`tr`
-# in the decision path), so a stripped PATH cannot silently disable a check. The
-# explicit-refspec check reads the invoking `git push` argv from /proc (Linux)
-# or `ps` (macOS/BSD); it parses git's global options so `-C`/`-c` values cannot
-# be mistaken for the subcommand.
+# Written as POSIX **sh** on purpose: a non-interactive `sh` reads neither
+# `BASH_ENV` nor `ENV`, so an environment startup script (e.g. a fleet interop
+# heal) can neither consume the hook's stdin nor `exit 0` out of the hook before
+# it runs — a bash hook is vulnerable to both. This also removes any bash-version
+# dependency. The decision path uses only `git` + shell builtins; `tr`/`ps` are
+# used only to read the invoking argv and degrade to a public fail-closed if
+# absent. Never trusts a remote-tracking ref for the public repo — it re-resolves
+# the live `refs/heads/main` via `git ls-remote` every invocation.
 #
 # Origin: 2026-09-12 — a private branch (no merge base with this repo) was pushed
-# to public `HJK6/pentacle` by a branch-name mixup. Hardened against a QA review
-# (empty-stdin/tooling fail-open, stale-ref trust, argv and URL edge cases).
+# to public `HJK6/pentacle` by a branch-name mixup. Hardened across QA review
+# (env-driven silent skip, partial/empty stdin, stale-ref, ls-remote pattern,
+# sha validation, `+:` force-matching, argv and URL edge cases).
 
 set -u
 
-# ── 0. Capture stdin FIRST, before anything (a BASH_ENV startup script or any
-# subshell) could consume the update records git feeds the hook. ──────────────
+# ── 0. Capture stdin first (sh won't source a startup file, but harmless). ────
 PREPUSH_STDIN="$(cat 2>/dev/null || true)"
 
 remote_name="${1:-}"
@@ -53,52 +50,60 @@ remote_url="${2:-}"
 zero='0000000000000000000000000000000000000000'
 fail=0
 
+# The invoking `git push` is this hook's parent. Capture it at top level: in
+# POSIX sh, $PPID inside a $(command substitution) is the subshell's parent (this
+# hook), not git — so the argv reader must use this captured value.
+GIT_PARENT_PID="$PPID"
+
 warn() { printf 'pre-push: %s\n' "$*" >&2; }
 
-# Only `git` is needed for the decision path; refuse if it is missing.
 if ! command -v git >/dev/null 2>&1; then
   warn "REFUSED: 'git' not found; cannot verify this push (fail closed)."
   exit 1
 fi
 
-# ── URL classification ───────────────────────────────────────────────────────
-# Does this URL address github.com/HJK6/pentacle? Handles ssh scp-like, ssh://,
-# https:// and git:// forms, userinfo (user[:pass]@), an explicit or default
-# port, a trailing slash, a .git suffix, and a case-insensitive host. It does
-# NOT match HJK6/pentacle-private or any other path.
+TMPD="${TMPDIR:-/tmp}/prepush.$$"
+mkdir -p "$TMPD" 2>/dev/null || TMPD=""
+cleanup() { [ -n "$TMPD" ] && rm -rf "$TMPD" 2>/dev/null; }
+trap cleanup EXIT INT TERM
+
+# ── URL classification (case-insensitive owner/repo; not pentacle-private) ────
+# Reduce a URL to host + path, then match github.com/HJK6/pentacle exactly
+# (case-insensitive) via shell globs — no external tools.
 is_github_pentacle_url() {
-  local u="$1" host path before aftercolon hostport
+  u="$1"
   [ -n "$u" ] || return 1
-  case "$u" in *://*) u="${u#*://}";; esac   # drop scheme
-  u="${u##*@}"                                # drop userinfo
+  case "$u" in *://*) u="${u#*://}" ;; esac      # drop scheme
+  u="${u##*@}"                                     # drop userinfo
   before="${u%%/*}"
   case "$before" in
     *:*)
       hostport="${u%%:*}"; aftercolon="${u#*:}"
       case "$aftercolon" in
-        [0-9]*/*|[0-9]*) host="$hostport"; path="${u#*/}" ;;  # host:port/path
+        [0-9]*/*|[0-9]*) host="$hostport"; path="${u#*/}" ;;   # host:port/path
         *)               host="$hostport"; path="$aftercolon" ;; # scp host:path
       esac ;;
     *) host="${u%%/*}"; path="${u#*/}" ;;
   esac
   host="${host%%:*}"
-  path="${path#/}"; path="${path%/}"; path="${path%.git}"
+  path="${path#/}"; path="${path%/}"; path="${path%.git}"; path="${path%/}"
   case "$host" in
     [Gg][Ii][Tt][Hh][Uu][Bb].[Cc][Oo][Mm]) : ;;
     *) return 1 ;;
   esac
-  [ "$path" = "HJK6/pentacle" ]
+  case "$path" in
+    [Hh][Jj][Kk]6/[Pp][Ee][Nn][Tt][Aa][Cc][Ll][Ee]) return 0 ;;   # exact, case-insensitive
+    *) return 1 ;;
+  esac
 }
 
 is_public=0
 if is_github_pentacle_url "$remote_url"; then
   is_public=1
 elif [ "${PENTACLE_PREPUSH_TEST_MODE:-}" = 1 ] && [ -n "${PENTACLE_ALLOWED_PUBLIC_REMOTES:-}" ]; then
-  # Test/mirror-only escape hatch: only honored under an explicit test-mode flag,
-  # announced loudly, and NEVER able to reclassify a pentacle-private lookalike.
   can_u="${remote_url%/}"; can_u="${can_u%.git}"
   case "$can_u" in
-    *pentacle-private*) : ;;                  # never treat the private repo as public
+    *[Pp][Ee][Nn][Tt][Aa][Cc][Ll][Ee]-[Pp][Rr][Ii][Vv][Aa][Tt][Ee]*) : ;;  # never the private repo
     *)
       for _extra in ${PENTACLE_ALLOWED_PUBLIC_REMOTES}; do
         _e="${_extra%/}"; _e="${_e%.git}"
@@ -123,103 +128,105 @@ if [ "$remote_name" = "public" ] && [ "$is_public" -ne 1 ]; then
   fail=1
 fi
 
-# ── (b) explicit refspec: no bare / matching-branch pushes ───────────────────
-# Read the invoking `git push` argv ($PPID; git runs builtins in-process). Prints
-# one token per line, or nothing if it cannot be read.
+# ── (b) explicit refspec: no bare / matching-branch (`:` or `+:`) pushes ─────
 read_parent_argv() {
-  if [ -r "/proc/$PPID/cmdline" ]; then
-    tr '\0' '\n' < "/proc/$PPID/cmdline"
-  elif command -v ps >/dev/null 2>&1; then
-    ps -ww -o args= -p "$PPID" 2>/dev/null | tr ' ' '\n'
+  if [ -r "/proc/$GIT_PARENT_PID/cmdline" ] && command -v tr >/dev/null 2>&1; then
+    tr '\0' '\n' < "/proc/$GIT_PARENT_PID/cmdline"
+  elif command -v ps >/dev/null 2>&1 && command -v tr >/dev/null 2>&1; then
+    ps -ww -o args= -p "$GIT_PARENT_PID" 2>/dev/null | tr ' ' '\n'
   fi
 }
 
-# Echo the push refspec arguments (positionals after the remote), one per line;
-# echo the sentinel "__UNKNOWN__" if the argv or the `push` subcommand cannot be
-# located. Git global options are parsed (incl. their separate-arg values) so a
-# `-C push` value is never mistaken for the subcommand.
+# Echo the push refspec arguments (positionals after the remote), one per line,
+# or "__UNKNOWN__" if the argv / the `push` subcommand cannot be cleanly located.
 push_refspecs() {
-  local -a argv=()
-  local line
-  while IFS= read -r line; do argv+=("$line"); done < <(read_parent_argv)
-  [ "${#argv[@]}" -eq 0 ] && { printf '__UNKNOWN__\n'; return; }
-  local global_value=" -C -c --git-dir --work-tree --namespace --super-prefix --config-env --attr-source "
-  local push_value=" -o --push-option --repo --receive-pack --exec "
-  local i=1 tok
-  # skip git global options to find the subcommand
-  while [ "$i" -lt "${#argv[@]}" ]; do
-    tok="${argv[$i]}"
-    case "$tok" in
-      push) break ;;
-      --*=*) i=$((i + 1)); continue ;;
-      -*) case "$global_value" in *" $tok "*) i=$((i + 2));; *) i=$((i + 1));; esac; continue ;;
-      *) printf '__UNKNOWN__\n'; return ;;   # first positional is not `push`
-    esac
-  done
-  [ "$i" -ge "${#argv[@]}" ] && { printf '__UNKNOWN__\n'; return; }
-  # now argv[i] == push; collect positionals after it (remote + refspecs)
-  local -a positionals=()
-  local j=$((i + 1))
-  while [ "$j" -lt "${#argv[@]}" ]; do
-    tok="${argv[$j]}"
-    case "$tok" in
-      --) j=$((j + 1)); while [ "$j" -lt "${#argv[@]}" ]; do positionals+=("${argv[$j]}"); j=$((j + 1)); done; break ;;
-      --*=*) : ;;
-      -*) case "$push_value" in *" $tok "*) j=$((j + 1));; esac ;;
-      *) positionals+=("$tok") ;;
-    esac
-    j=$((j + 1))
-  done
-  # positionals[0] is the remote; the rest are refspecs.
-  local k=1
-  while [ "$k" -lt "${#positionals[@]}" ]; do printf '%s\n' "${positionals[$k]}"; k=$((k + 1)); done
+  [ -n "$TMPD" ] || { printf '__UNKNOWN__'; return; }
+  read_parent_argv > "$TMPD/argv" 2>/dev/null || true
+  if [ ! -s "$TMPD/argv" ]; then printf '__UNKNOWN__'; return; fi
+  state=pre; skip=0; rest=0; npos=0; refspecs=''; bad=0; first=1
+  while IFS= read -r tok; do
+    if [ "$first" = 1 ]; then first=0; continue; fi   # argv[0] = the program name
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    if [ "$rest" = 1 ]; then
+      npos=$((npos + 1)); [ "$npos" -ge 2 ] && refspecs="$refspecs
+$tok"; continue
+    fi
+    if [ "$state" = pre ]; then
+      case "$tok" in
+        push) state=post ;;
+        --*=*) : ;;
+        -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--attr-source) skip=1 ;;
+        -*) : ;;
+        *) bad=1; break ;;   # a positional before `push` => garbled/split argv
+      esac
+    else
+      case "$tok" in
+        --) rest=1 ;;
+        --*=*) : ;;
+        -o|--push-option|--repo|--receive-pack|--exec) skip=1 ;;
+        -*) : ;;
+        *) npos=$((npos + 1)); [ "$npos" -ge 2 ] && refspecs="$refspecs
+$tok" ;;
+      esac
+    fi
+  done < "$TMPD/argv"
+  if [ "$bad" = 1 ] || [ "$state" = pre ]; then printf '__UNKNOWN__'; return; fi
+  printf '%s' "$refspecs"
 }
 
 refspec_out="$(push_refspecs)"
 if [ "$refspec_out" = "__UNKNOWN__" ]; then
   if [ "$is_public" -eq 1 ]; then
-    warn "REFUSED: could not read the invoking 'git push' to verify an explicit refspec (fail closed)."
+    warn "REFUSED: could not read/parse the invoking 'git push' to verify an explicit refspec (fail closed)."
     fail=1
   else
     warn "note: could not read the invoking 'git push' argv; skipping the explicit-refspec check."
   fi
 else
-  refspec_count=0; matching_only=1
-  while IFS= read -r _rs; do
-    [ -z "$_rs" ] && continue
-    refspec_count=$((refspec_count + 1))
-    case "$_rs" in ":") : ;; *) matching_only=0 ;; esac   # ":" alone = matching push
+  rc=0; matching_only=1
+  while IFS= read -r rs; do
+    [ -z "$rs" ] && continue
+    rc=$((rc + 1))
+    stripped="${rs#+}"                       # a leading '+' is force; strip before classifying
+    case "$stripped" in ":") : ;; *) matching_only=0 ;; esac
   done <<EOF
 $refspec_out
 EOF
-  if [ "$refspec_count" -eq 0 ]; then
+  if [ "$rc" -eq 0 ]; then
     warn "REFUSED: no refspec. Push explicitly, e.g. 'git push ${remote_name} <branch>:refs/heads/<branch>'."
     fail=1
   elif [ "$matching_only" -eq 1 ]; then
-    warn "REFUSED: a matching-branch push (':') is not allowed; name what you push."
+    warn "REFUSED: a matching-branch push (':' or '+:') is not allowed; name what you push."
     fail=1
   fi
 fi
 
 # ── resolve the remote's main into a local commit object ─────────────────────
-# For the public repo, NEVER trust a possibly-stale remote-tracking ref: resolve
-# the live remote's main via ls-remote and fetch that exact commit; fail closed
-# if it cannot be resolved. For other remotes, best-effort (tracking ref first).
-remote_main=''
-resolve_via_ls_remote() {
-  local ls
-  ls="$(git ls-remote --heads "$remote_url" main 2>/dev/null)"
-  ls="${ls%%$'\n'*}"; ls="${ls%%$'\t'*}"; ls="${ls%% *}"
-  [ -n "$ls" ] || return 1
-  if git cat-file -e "${ls}^{commit}" 2>/dev/null; then
-    printf '%s' "$ls"; return 0
+# Public: query the EXACT ref refs/heads/main from the live remote, validate the
+# returned ref name, fetch the commit; never trust a (possibly stale) tracking
+# ref. Other remotes: best-effort (tracking ref, else ls-remote).
+resolve_public_main() {
+  ls="$(git ls-remote "$remote_url" refs/heads/main 2>/dev/null)"
+  # take only an exact refs/heads/main line (default IFS splits on space/tab)
+  sha=''
+  while read -r shacol refcol _; do
+    [ "$refcol" = "refs/heads/main" ] || continue
+    case "$shacol" in ""|*[!0-9a-f]*) continue ;; esac
+    sha="$shacol"; break
+  done <<EOF
+$ls
+EOF
+  [ -n "$sha" ] || return 1
+  if git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+    printf '%s' "$sha"; return 0
   fi
-  git fetch -q "$remote_url" main 2>/dev/null || return 1
+  git fetch -q "$remote_url" refs/heads/main 2>/dev/null || return 1
   git rev-parse FETCH_HEAD 2>/dev/null
 }
 
+remote_main=''
 if [ "$is_public" -eq 1 ]; then
-  if [ -n "$remote_url" ]; then remote_main="$(resolve_via_ls_remote || true)"; fi
+  [ -n "$remote_url" ] && remote_main="$(resolve_public_main || true)"
   if [ -z "$remote_main" ]; then
     warn "REFUSED: cannot resolve the public repo's live 'main' to verify shared history (fail closed)."
     fail=1
@@ -228,14 +235,10 @@ else
   if git rev-parse --verify --quiet "refs/remotes/${remote_name}/main" >/dev/null 2>&1; then
     remote_main="$(git rev-parse "refs/remotes/${remote_name}/main")"
   elif [ -n "$remote_url" ]; then
-    remote_main="$(resolve_via_ls_remote || true)"
+    remote_main="$(resolve_public_main || true)"
   fi
 fi
 
-# ── (c) foreign-ancestry root-set check (bash-only membership) ────────────────
-# A pushed tip is foreign if it reaches a root commit that is not a root of the
-# remote main. Uses only `git rev-list` + bash string comparison.
-sha_re='^[0-9a-f][0-9a-f]*$'
 main_roots=''
 if [ -n "$remote_main" ]; then
   main_roots="$(git rev-list --max-parents=0 "$remote_main" 2>/dev/null)"
@@ -249,26 +252,49 @@ if [ -n "$remote_main" ]; then
   fi
 fi
 
+# ── (c) foreign-ancestry root-set check + record validation ──────────────────
+is_full_sha() {
+  case "$1" in *[!0-9a-f]*) return 1 ;; esac
+  [ "${#1}" = 40 ] || [ "${#1}" = 64 ]
+}
+
 records=0
-while read -r _lref lsha _rref rsha; do
-  [ -z "${lsha:-}" ] && continue
-  case "$lsha" in
-    $zero) records=$((records + 1)); continue ;;              # deletion: a real record
-  esac
-  case "$lsha" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;; *) continue ;; esac
+while read -r lref lsha rref rsha; do
+  [ -z "${lref:-}" ] && [ -z "${lsha:-}" ] && continue          # blank line
+  # a well-formed update record needs all four fields
+  if [ -z "${lref:-}" ] || [ -z "${lsha:-}" ] || [ -z "${rref:-}" ] || [ -z "${rsha:-}" ]; then
+    if [ "$is_public" -eq 1 ]; then
+      warn "REFUSED: malformed push record on stdin (fail closed)."
+      fail=1
+    fi
+    continue
+  fi
+  if [ "$lsha" = "$zero" ]; then records=$((records + 1)); continue; fi   # deletion
+  if ! is_full_sha "$lsha"; then
+    if [ "$is_public" -eq 1 ]; then
+      warn "REFUSED: push record local sha '${lsha}' is not a full object id (fail closed)."
+      fail=1
+    fi
+    continue
+  fi
   records=$((records + 1))
-  [ -n "$main_roots" ] || continue   # nothing to compare against (non-public skip / public already failed)
+  [ -n "$main_roots" ] || continue           # non-public with no comparable main
+  tip_roots="$(git rev-list --max-parents=0 "$lsha" 2>/dev/null)"
+  if [ -z "$tip_roots" ]; then
+    if [ "$is_public" -eq 1 ]; then
+      warn "REFUSED: could not enumerate root commits of ${lref} (${lsha}) (fail closed)."
+      fail=1
+    fi
+    continue
+  fi
   extra_root=''
-  while IFS= read -r r; do
-    [ -z "$r" ] && continue
+  for r in $tip_roots; do
     found=0
     for m in $main_roots; do [ "$r" = "$m" ] && { found=1; break; }; done
     [ "$found" -eq 0 ] && { extra_root="$r"; break; }
-  done <<EOF
-$(git rev-list --max-parents=0 "$lsha" 2>/dev/null)
-EOF
+  done
   if [ -n "$extra_root" ]; then
-    warn "REFUSED: ${_lref:-<ref>} reaches a root commit (${extra_root:0:12}) that is not a root of ${remote_name}/main."
+    warn "REFUSED: ${lref} reaches a root commit ($(printf '%.12s' "$extra_root")) that is not a root of ${remote_name}/main."
     warn "         this is foreign history — an unrelated repository's line, or a merge that pulls one in."
     fail=1
   fi
@@ -277,8 +303,8 @@ done <<EOF
 $PREPUSH_STDIN
 EOF
 
-# Empty/blank/malformed input to a public push is a fail-closed refusal: without
-# a verifiable update record the shared-history check above cannot have run.
+# Empty/blank input to a public push is a fail-closed refusal: without a
+# verifiable update record the shared-history check above cannot have run.
 if [ "$records" -eq 0 ] && [ "$is_public" -eq 1 ]; then
   warn "REFUSED: no verifiable push records on stdin for a public push (fail closed)."
   fail=1
