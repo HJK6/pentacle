@@ -99,3 +99,10 @@ Fable 5.1/high tuple, predecessor closure and witness parentage. The evidence
 producer owns the three disposable seats and must verify all three are closed
 and their panes absent after capture. A successful spawn reply alone is
 insufficient: existing handoff post-steps are best-effort on reparent failure.
+
+### QA dispatch containment
+
+The optional [QA dispatch reject counter](../../docs/qa-dispatch-counter.md) adds
+`spec-issue adjudicate/diagnose/show` and explicit QA surface/cycle fields for
+immediate and scheduled reviews. Enforcement defaults off; the coordinated
+release owner activates it after upgrading callers.

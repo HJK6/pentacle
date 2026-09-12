@@ -62,6 +62,8 @@ def _session_row(conn: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str,
     state = conn.execute("SELECT status,ts FROM v2_agent_report_state WHERE stream_id=? AND generation=?", (out["stream_id"], out["session_generation"])).fetchone()
     if state:
         out["_agent_report_status"], out["_agent_report_ts"] = state
+    from store_usage import snapshot_conn
+    out['usage'] = snapshot_conn(conn, out)
     return out
 
 def normalize_spec_ids(spec_ids: object = None, spec_id: object = None) -> list[str]:

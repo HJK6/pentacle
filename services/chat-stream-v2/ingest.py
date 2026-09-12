@@ -495,6 +495,7 @@ class Ingest:
         new_offset = st.offset + len(consumed)
 
         records: list[dict] = []
+        malformed_usage_span = False
         # File offset just past each kept record's line, so the Codex per-pass cap
         # can advance the offset to exactly the last record it processed. Byte
         # lengths come off the RAW bytes (`splitlines(keepends=True)`); decoding
@@ -509,8 +510,10 @@ class Ingest:
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
+                malformed_usage_span = True
                 continue
             if not isinstance(record, dict):
+                malformed_usage_span = True
                 continue
             # never ingest another session's transcript into this stream. Codex
             # states its identity ONCE, in `session_meta`, instead of stamping
@@ -533,6 +536,18 @@ class Ingest:
                     return 0
             records.append(record)
             record_end_offsets.append(cursor)
+
+        # Legacy rows can lack an authoritative provider while the existing
+        # chat reader infers one from the session name. Keep that chat path;
+        # accounting stays unknown until the durable provider is classified.
+        if row.get("provider") in {"codex", "claude"}:
+            usage = await self.store.record_usage(
+                row, records, native_session_id=st.session_id,
+                collection_host=self.local_host, malformed=malformed_usage_span,
+            )
+            if usage is None:
+                return 0
+            self.sessions.apply_durable(sid, usage=usage)
 
         if not records:
             st.offset = new_offset

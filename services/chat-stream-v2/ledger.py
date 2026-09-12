@@ -478,6 +478,7 @@ class Ledger:
         notice_delivery = row.pop("_notice_delivery", None)
         reply: dict[str, Any] = {
             "type": "report.ok",
+            "usage_snapshot": row.get("usage_snapshot"),
             "report_id": row["report_id"],
             "ledger_row_id": row["ledger_row_id"],
             "durability_ack": True,

@@ -41,6 +41,8 @@ if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide module, never a
 
 from _shared.spawn_objective import objective_error, objective_required_for, resolve_objective
 
+import qa_dispatch
+
 import asyncio
 import tmux_transport
 import hashlib
@@ -1102,7 +1104,12 @@ class SpawnCtl:
         resolved_provider = str(resolved["provider"])
         if not str(msg.get("command") or "").strip() and self._launch_machine(host, resolved_provider) is None:
             raise VerbError("spawn_launch_unavailable", "no target-host machine profile for scheduled spawn")
+        qa = await qa_dispatch.admit(self.store, msg,
+            row={**binding, "role": resolved.get("role", msg.get("role")), "phase": msg.get("phase")},
+            reviewer=f"{host}:{admission_name}", generation="", msg_id=0,
+            check_only=True, handoff=bool(msg.get("handoff")))
         return {
+            "qa_owner_generation": (qa or {}).get("coordinator_generation"),
             "host": host,
             "role": resolved.get("role", msg.get("role")),
             "requested_provider": msg.get("requested_provider", msg.get("provider")),
@@ -1239,6 +1246,21 @@ class SpawnCtl:
         # contract is explicit rather than silent.
         if any(msg.get(k) for k in ("at", "delay", "fires_at_utc", "scheduled")):
             raise VerbError("unsupported_in_v2", "scheduled spawn/handoff is not supported in v2")
+        cwd = msg.get("cwd")
+        if cwd is not None:
+            if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute():
+                raise VerbError("invalid_cwd", "cwd must be an absolute path")
+            try:
+                cwd_is_directory = await tmux.cwd_exists(cwd)
+            except VerbError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - target transport is a typed gate
+                raise VerbError("cwd_validation_failed", str(exc)) from exc
+            if not cwd_is_directory:
+                raise VerbError(
+                    "invalid_cwd",
+                    f"cwd is not an existing directory on target host {host}: {cwd}",
+                )
         request_id = str(msg.get("request_id") or f"spawn-{uuid.uuid4().hex}")
         # Atomic claim below collapses concurrent same-key fires to one admission.
         idempotency_key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
@@ -1359,6 +1381,9 @@ class SpawnCtl:
                     host, excluding=f"{host}:{name}",
                     predecessor=str(msg.get("handoff_from_stream_id") or "") if msg.get("handoff") else "",
                 )
+            await qa_dispatch.admit(self.store, msg, row=open_flds, reviewer=f"{host}:{name}",
+                                    generation=spawn_generation, msg_id=0,
+                                    handoff=bool(msg.get("handoff") and open_flds.get("handoff_from_stream_id")))
             if await tmux.has_session(name):
                 raise VerbError(
                     "stream_id_unavailable",

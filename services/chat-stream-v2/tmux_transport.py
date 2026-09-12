@@ -234,6 +234,57 @@ class Tmux:
         rc, _ = await self.run("has-session", "-t", _target(name))
         return rc == 0
 
+    async def cwd_exists(self, cwd: str, *, timeout: float = 10.0) -> bool:
+        """Check a spawn cwd on this tmux transport's target host.
+
+        Local checks never invoke a shell. Remote checks run one bounded,
+        quoted ``test -d`` through the same SSH target used for tmux, so the
+        daemon cannot accidentally inspect its own host for a remote spawn.
+        ``False`` is reserved for a missing/non-directory path; transport and
+        timeout failures remain typed errors rather than false product proof.
+        """
+        if self.ssh_target is None:
+            try:
+                return await asyncio.to_thread(Path(cwd).is_dir)
+            except (OSError, ValueError):
+                return False
+
+        command = f"test -d {shlex.quote(cwd)}"
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_command(
+                    self.ssh_target,
+                    command,
+                    ssh_bin=self.ssh_bin,
+                    connect_timeout=self.connect_timeout,
+                ),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            await terminate_and_reap(proc)
+            raise VerbError("cwd_validation_failed", f"remote cwd check timed out after {timeout}s") from exc
+        except asyncio.CancelledError:
+            await terminate_and_reap(proc)
+            raise
+        except OSError as exc:
+            await terminate_and_reap(proc)
+            raise VerbError("cwd_validation_failed", str(exc)) from exc
+
+        rc = proc.returncode
+        if rc == 0:
+            return True
+        if rc == 1:
+            return False
+        detail = (out or b"").decode("utf-8", "replace").strip()
+        raise VerbError(
+            "cwd_validation_failed",
+            detail or f"remote cwd check failed with exit {rc}",
+        )
+
     async def session_state(self, name: str) -> str:
         """Tri-state liveness: `alive` / `gone` / `unreachable`.
 

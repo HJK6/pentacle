@@ -19,6 +19,8 @@ from `serve_forever()` so the ordering is enforceable, not aspirational.
 
 from __future__ import annotations
 
+import qa_dispatch
+
 import asyncio
 import errno
 import hmac
@@ -432,6 +434,7 @@ class Server:
             "set_visibility": self._on_set_visibility,
             "status_card": self._on_status_card,
             "spawn": self._on_spawn,
+            **{f"coordination.spec_issue.{verb}": self._on_qa_issue for verb in ("adjudicate", "diagnose", "show")},
             "await_spawn": self._on_await_spawn,
             "spawn_cancel": self._on_spawn_cancel,
             "spawn_status": self._on_spawn_status,
@@ -1341,7 +1344,7 @@ class Server:
             "qualified_spec_ids", "spec_binding_provenance", "spec_resolution",
             "visibility", "self_close_on_completion", "online", "pending",
             "working", "working_label", "parent_stream_id", "handoff_from_stream_id",
-            "opened_by_host_id", "status_card", "context_tokens",
+            "opened_by_host_id", "status_card", "usage", "context_tokens",
             "model_context_window", "context_updated_at", "context_level", "model",
             "effort", "requested_model", "requested_effort", "effective_model",
             "effective_effort", "routing_integrity", "routing_integrity_reason",
@@ -1732,6 +1735,9 @@ class Server:
         fields = {k: msg[k] for k in ("goal", "plan", "step_done", "update", "handoff_planned") if k in msg}
         session = await self.sessions.set_status_card(host, name, fields)
         return {"type": "status_card.ok", "session": session}
+
+    async def _on_qa_issue(self, msg):
+        return await qa_dispatch.issue(self.store, msg)
 
     async def _on_spawn(self, msg: dict[str, Any]) -> dict[str, Any]:
         # Hold a spawn until boot reconciliation has settled the reservation

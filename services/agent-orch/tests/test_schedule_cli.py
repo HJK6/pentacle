@@ -291,6 +291,7 @@ def test_spawn_parser_fresh_schedule_matrix_is_total_over_live_actions():
         "serialized": {
             "--objective", "--provider", "--model", "--effort", "--host", "--role", "--phase",
             "--spec-id", "--visibility", "--disposition-waived",
+            "--qa-spec-id", "--qa-surface", "--qa-cycle",
             "--no-reparent-children", "--parent", "--top-level",
             "--self-close-on-completion", "--no-self-close-on-completion",
             "--no-watch",
@@ -299,7 +300,7 @@ def test_spawn_parser_fresh_schedule_matrix_is_total_over_live_actions():
         "timing": {"--at", "--delay"},
         "client_only": {"--timeout", "--allow-past-time", "--allow-far-future"},
         "request_identity": {"--request-id"},
-        "rejected": {"--resume", "--confirm-model-change", "--idempotency-key"},
+        "rejected": {"--resume", "--confirm-model-change", "--idempotency-key", "--cwd"},
     }
     classified = [flag for values in groups.values() for flag in values]
     assert set(classified) == live_flags

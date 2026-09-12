@@ -158,6 +158,10 @@ class _StubSessions:
         return host, name
 
     @staticmethod
+    def apply_durable(_stream_id: str, **_fields):
+        return None
+
+    @staticmethod
     def apply_genuine_activity_event(_stream_id: str, _event: dict) -> None:
         return None
 
@@ -170,13 +174,12 @@ def _codex_ingest(store: Store, broadcast=None) -> "Ingest":
 
 
 
-def _codex_row(path: Path, stream_id: str = "h:v2-codex", *, pane_pid: str = "8123") -> dict:
-    return {
-        "stream_id": stream_id,
-        "provider": "codex",
-        "pane_pid": pane_pid,
-        "jsonl_path": str(path),
-    }
+async def _codex_row(store: Store, path: Path, stream_id: str = "h:v2-codex", *, pane_pid: str = "8123") -> dict:
+    # Ingest receives hydrated durable inventory rows in production. Bind the
+    # test's transcript there too, preserving the real generation/source fence.
+    host, name = stream_id.split(":", 1)
+    row = await store.update_session(host, name, provider="codex", jsonl_path=str(path))
+    return {**row, "pane_pid": pane_pid}
 
 
 def test_codex_stream_ingests_events_instead_of_returning_zero() -> None:
@@ -187,7 +190,7 @@ def test_codex_stream_ingests_events_instead_of_returning_zero() -> None:
             ingest = _codex_ingest(store)
             st = _StreamIngest()
             path = FIXTURES / "codex_rollout_first_turn.jsonl"
-            appended = await ingest._ingest_stream(_codex_row(path), st, 500)
+            appended = await ingest._ingest_stream(await _codex_row(store, path), st, 500)
             assert appended > 0, "a Codex stream must no longer ingest zero events"
             assert await _count_user_and_tell(store, "h:v2-codex") == 3
         finally:
@@ -220,7 +223,7 @@ def test_ingest_advances_summary_only_from_persisted_turn_event() -> None:
                 ),
             )
             await ingest._ingest_stream(
-                _codex_row(FIXTURES / "codex_rollout_first_turn.jsonl"),
+                await _codex_row(store, FIXTURES / "codex_rollout_first_turn.jsonl"),
                 _StreamIngest(),
                 500,
             )
@@ -250,8 +253,8 @@ def test_codex_replay_from_start_appends_no_duplicates() -> None:
             await store.open_session("h", "v2-codex", visibility="visible", pane_pid="8123")
             ingest = _codex_ingest(store)
             path = FIXTURES / "codex_rollout_first_turn.jsonl"
-            first = await ingest._ingest_stream(_codex_row(path), _StreamIngest(), 500)
-            replay = await ingest._ingest_stream(_codex_row(path), _StreamIngest(), 500)
+            first = await ingest._ingest_stream(await _codex_row(store, path), _StreamIngest(), 500)
+            replay = await ingest._ingest_stream(await _codex_row(store, path), _StreamIngest(), 500)
             assert first > 0 and replay == 0, (first, replay)
             assert await _count_user_and_tell(store, "h:v2-codex") == 3
         finally:
@@ -271,7 +274,9 @@ def test_codex_foreign_transcript_is_rejected_not_silently_ingested() -> None:
             st = _StreamIngest()
             st.session_id = "session-public-1"  # already bound
             foreign = FIXTURES / "codex_rollout_foreign_session.jsonl"
-            appended = await ingest._ingest_stream(_codex_row(foreign), st, 500)
+            row = await _codex_row(store, foreign)
+            st.generation = row["session_generation"]
+            appended = await ingest._ingest_stream(row, st, 500)
             assert appended == 0, "a foreign session's transcript must not be ingested"
             assert st.path == "", "the wrong binding must be dropped for re-discovery"
             assert await _count_user_and_tell(store, "h:v2-codex") == 0
@@ -294,7 +299,7 @@ def test_codex_first_bind_from_a_foreign_pane_is_rejected_before_broadcast() -> 
             ingest = _codex_ingest(store, broadcast)
             foreign = FIXTURES / "codex_rollout_foreign_session.jsonl"
             appended = await ingest._ingest_stream(
-                _codex_row(foreign, pane_pid="7001"), _StreamIngest(), 500,
+                await _codex_row(store, foreign, pane_pid="7001"), _StreamIngest(), 500,
             )
             assert appended == 0
             assert broadcasts == []
@@ -322,7 +327,7 @@ def test_codex_lifecycle_cas_loss_rejects_the_local_batch_without_broadcast() ->
             store.append_session_events_lifecycle_cas = cas_loss  # type: ignore[method-assign]
             ingest = _codex_ingest(store, broadcast)
             appended = await ingest._ingest_stream(
-                _codex_row(FIXTURES / "codex_rollout_first_turn.jsonl"), _StreamIngest(), 500,
+                await _codex_row(store, FIXTURES / "codex_rollout_first_turn.jsonl"), _StreamIngest(), 500,
             )
             assert appended == 0
             assert broadcasts == []
@@ -363,7 +368,7 @@ def test_codex_per_entry_drop_leaves_the_local_stream_unadvanced() -> None:
             ingest = _codex_ingest(store, broadcast)
             state = _StreamIngest()
             appended = await ingest._ingest_stream(
-                _codex_row(FIXTURES / "codex_rollout_first_turn.jsonl"), state, 500,
+                await _codex_row(store, FIXTURES / "codex_rollout_first_turn.jsonl"), state, 500,
             )
             assert appended == 0
             assert state.offset == 0
@@ -392,7 +397,7 @@ def test_codex_storage_failure_rejects_the_local_batch_without_broadcast() -> No
             store.append_session_events_lifecycle_cas = storage_failure  # type: ignore[method-assign]
             ingest = _codex_ingest(store, broadcast)
             appended = await ingest._ingest_stream(
-                _codex_row(FIXTURES / "codex_rollout_first_turn.jsonl"), _StreamIngest(), 500,
+                await _codex_row(store, FIXTURES / "codex_rollout_first_turn.jsonl"), _StreamIngest(), 500,
             )
             assert appended == 0
             assert broadcasts == []
@@ -431,7 +436,7 @@ def test_larger_replacement_file_does_not_ingest_a_foreign_session(tmp_path: Pat
             bound = tmp_path / "rollout.jsonl"
             bound.write_bytes((FIXTURES / "codex_rollout_first_turn.jsonl").read_bytes())
 
-            first = await ingest._ingest_stream(_codex_row(bound), st, 500)
+            first = await ingest._ingest_stream(await _codex_row(store, bound), st, 500)
             assert first > 0 and st.offset > 0
 
             # Replace in place with a different session's transcript, padded so
@@ -446,7 +451,7 @@ def test_larger_replacement_file_does_not_ingest_a_foreign_session(tmp_path: Pat
             bound.write_text(foreign + padding)
             assert bound.stat().st_size > st.offset, "the probe requires a LARGER replacement"
 
-            appended = await ingest._ingest_stream(_codex_row(bound), st, 500)
+            appended = await ingest._ingest_stream(await _codex_row(store, bound), st, 500)
             assert appended == 0, "a replaced transcript must not be ingested blind"
             assert st.path == "", "the stale binding must be dropped"
             assert st.session_id, "the bound identity is KEPT so the re-bind must match it"
@@ -469,12 +474,12 @@ def test_same_inode_in_place_replacement_is_rejected(tmp_path: Path) -> None:
             st = _StreamIngest()
             bound = tmp_path / "rollout.jsonl"
             bound.write_bytes((FIXTURES / "codex_rollout_first_turn.jsonl").read_bytes())
-            first = await ingest._ingest_stream(_codex_row(bound), st, 500)
+            first = await ingest._ingest_stream(await _codex_row(store, bound), st, 500)
             assert first > 0 and st.offset > 0
 
             foreign = (FIXTURES / "codex_rollout_foreign_session.jsonl").read_text()
             bound.write_text(foreign + (" " * 2400))
-            appended = await ingest._ingest_stream(_codex_row(bound), st, 500)
+            appended = await ingest._ingest_stream(await _codex_row(store, bound), st, 500)
             assert appended == 0
             assert st.path == ""
             assert await store.fetch_session_event_tail("h:v2-codex", limit=500)
@@ -493,7 +498,7 @@ def test_replacement_between_bind_and_read_is_rejected(tmp_path: Path, monkeypat
             st = _StreamIngest()
             bound = tmp_path / "rollout.jsonl"
             bound.write_bytes((FIXTURES / "codex_rollout_first_turn.jsonl").read_bytes())
-            first = await ingest._ingest_stream(_codex_row(bound), st, 500)
+            first = await ingest._ingest_stream(await _codex_row(store, bound), st, 500)
             assert first > 0 and st.offset > 0
 
             foreign = (FIXTURES / "codex_rollout_foreign_session.jsonl").read_text()
@@ -506,7 +511,7 @@ def test_replacement_between_bind_and_read_is_rejected(tmp_path: Path, monkeypat
                 return original_read(path, fd, start, end)
 
             monkeypatch.setattr(ingest_module, "_read_bound_span", replace_before_read)
-            appended = await ingest._ingest_stream(_codex_row(bound), st, 500)
+            appended = await ingest._ingest_stream(await _codex_row(store, bound), st, 500)
             assert appended == 0
             assert st.path == ""
             assert await store.fetch_session_event_tail("h:v2-codex", limit=500)

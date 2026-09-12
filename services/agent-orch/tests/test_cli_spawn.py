@@ -53,6 +53,7 @@ def _spawn_args(tmp_path: Path, role: str | None = None) -> SimpleNamespace:
         initial_prompt_file=None,
         timeout=1.0,
         self_close_on_completion=True,
+        cwd=None,
     )
 
 
@@ -242,6 +243,7 @@ def test_spawn_help_lists_spec_id_flag() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "--spec-id" in result.stdout
+    assert "--cwd" in result.stdout
 
 
 def test_spawn_parser_rejects_malformed_spec_id_values() -> None:
@@ -1024,6 +1026,82 @@ def test_spawn_help_subprocess_imports_the_tree_under_test() -> None:
     assert result.returncode == 0, result.stderr
     child_pkg = Path(result.stdout.strip()).resolve()
     assert child_pkg == Path(cli.__file__).resolve().parents[0] / "__init__.py"
+
+
+def test_spawn_cwd_is_forwarded_and_omitted_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))
+
+    async def fake_spawn_once(_config, payload, timeout):
+        captured["payload"] = dict(payload)
+        return {"type": "spawn.ok", "session": {"stream_id": "merlin:cwd-child"}}
+
+    monkeypatch.setattr(cli, "spawn_once", fake_spawn_once)
+    args = cli.build_parser().parse_args([
+        "spawn", "--objective", "Exercise the existing spawn contract",
+        "--provider", "codex", "--parent", "merlin:leader", "--visibility", "hidden",
+        "--cwd", str(tmp_path),
+    ])
+    assert cli.spawn(args) == 0
+    _printed_json(capsys)
+    assert captured["payload"]["cwd"] == str(tmp_path)
+
+    captured.clear()
+    args = _spawn_args(tmp_path)
+    assert cli.spawn(args) == 0
+    _printed_json(capsys)
+    assert "cwd" not in captured["payload"]
+
+
+def test_spawn_cwd_rejects_relative_path_before_rpc(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys,
+) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))
+
+    async def fake_spawn_once(_config, payload, timeout):
+        calls.append(dict(payload))
+        return {"type": "spawn.ok", "session": {"stream_id": "merlin:unexpected"}}
+
+    monkeypatch.setattr(cli, "spawn_once", fake_spawn_once)
+    args = cli.build_parser().parse_args([
+        "spawn", "--objective", "Exercise the existing spawn contract",
+        "--provider", "codex", "--parent", "merlin:leader", "--cwd", "relative/project",
+    ])
+    assert cli.spawn(args) == 2
+    captured = capsys.readouterr()
+    assert "--cwd must be an absolute path" in captured.err
+    assert calls == []
+
+
+@pytest.mark.parametrize("schedule", [("--at", "2030-01-01T00:00:00+00:00"), ("--delay", "1m")])
+def test_spawn_cwd_rejects_schedules_before_schedule_or_spawn_rpc(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, schedule: tuple[str, str],
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))
+
+    async def fake_schedule_once(_config, payload, timeout):
+        calls.append("schedule_once")
+        return {"type": "schedule.insert.ok", "schedule": {}}
+
+    async def fake_spawn_once(_config, payload, timeout):
+        calls.append("spawn_once")
+        return {"type": "spawn.ok", "session": {"stream_id": "merlin:unexpected"}}
+
+    monkeypatch.setattr(cli, "schedule_once", fake_schedule_once)
+    monkeypatch.setattr(cli, "spawn_once", fake_spawn_once)
+    args = cli.build_parser().parse_args([
+        "spawn", "--objective", "Exercise the existing spawn contract",
+        "--provider", "codex", "--parent", "merlin:leader", "--cwd", str(tmp_path),
+        schedule[0], schedule[1],
+    ])
+    assert cli.spawn(args) == 2
+    captured = capsys.readouterr()
+    assert "--cwd cannot be combined with --at or --delay" in captured.err
+    assert calls == []
 
 
 _PROMPTED_SPAWN_CONTRACT_CHILD = r"""

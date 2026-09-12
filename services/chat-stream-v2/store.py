@@ -38,6 +38,9 @@ from typing import Any, Callable
 import uuid
 
 import store_exchange
+import store_usage
+import store_qa
+from store_qa import QaStoreMixin
 from store_exchange import ExchangeStoreMixin
 
 from store_routing import (
@@ -895,7 +898,7 @@ REPORT_REJECTIONS_INDEX_DDL = (
 )
 
 REPORT_COLUMNS = (
-    "report_id", "from_stream_id", "msg_id", "session_generation", "status", "summary", "findings",
+    "usage_snapshot", "report_id", "from_stream_id", "msg_id", "session_generation", "status", "summary", "findings",
     "next_action", "details", "extras", "reason", "completion_kind", "qa_verdict", "target_sha",
     "qa_attestation", "ac_claim", "claim_verified", "ac_claim_mismatch", "agent_orch_attestation",
     "qa_attestation_validation", "to_stream_id", "request_payload_hash",
@@ -912,6 +915,7 @@ REPORT_IDENTITY_COLUMNS = (
 )
 #: Report columns holding JSON, decoded on read so a caller never sees a blob.
 REPORT_JSON_COLUMNS = (
+    "usage_snapshot",
     "findings", "details", "extras", "qa_attestation", "ac_claim", "ac_claim_mismatch",
     "agent_orch_attestation", "qa_attestation_validation",
     "provenance_qualified_spec_ids",
@@ -991,7 +995,7 @@ class QAAttestationUnverified(RuntimeError):
 from store_watch_wake import _WatchWakeStoreMixin, WATCH_WAKE_DDL, install_default_conn, lifecycle_watch_conn, report_watch_conn
 
 
-class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin):
+class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000) -> None:
@@ -1080,6 +1084,8 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
             conn.execute("BEGIN")
             conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
             conn.execute(SESSIONS_DDL)
+            for ddl in store_usage.DDL:
+                conn.execute(ddl)
             if "no_watch" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN no_watch INTEGER NOT NULL DEFAULT 0")
             for ddl in WATCH_WAKE_DDL:
@@ -1139,6 +1145,7 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
             for table in ("sessions", "v2_schedules"):
                 if "objective" not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN objective TEXT")
+            store_qa.initialize(conn)
             store_exchange.initialize(conn)
             if "objective_source" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN objective_source TEXT")
@@ -1150,6 +1157,8 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
                 conn.execute("ALTER TABLE v2_reports ADD COLUMN exchange_json TEXT")
             if "observer_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN observer_binding TEXT")
+            if "usage_snapshot" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
+                conn.execute("ALTER TABLE v2_reports ADD COLUMN usage_snapshot TEXT")
             store_exchange.repair(conn)
             self.schedule_schema_health = "ok"
             conn.commit()
@@ -2932,7 +2941,7 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
         store boundary and refuses a changed source before inserting anything.
         """
 
-        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+        def _put(conn: sqlite3.Connection) -> dict[str, Any]:
             existing = conn.execute(
                 "SELECT * FROM v2_reports WHERE report_id=?", (fields["report_id"],)
             ).fetchone()
@@ -2979,6 +2988,10 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
             if changed:
                 raise ReportProvenanceChanged(routing_snapshot, current)
             stored_fields = dict(fields)
+            usage_row = _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
+            ).fetchone())
+            stored_fields["usage_snapshot"] = usage_row["usage"]
             stored_fields.update({
                 "session_generation": str(routing_snapshot["session_generation"]),
                 "effective_model": routing_snapshot.get("effective_model"),
@@ -3039,6 +3052,11 @@ class Store(ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _Watc
             if stored is not None:
                 stored["_report_inserted"] = inserted
             return stored
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                return _put(conn)
 
         return await self.submit(_op)
 

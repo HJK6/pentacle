@@ -27,6 +27,8 @@ expired; backoff on failure; kill switch `--disable-notification-expiry`.
 
 from __future__ import annotations
 
+import qa_dispatch
+
 import asyncio
 from contextlib import nullcontext
 import hashlib
@@ -1462,6 +1464,7 @@ class Comms:
 
     async def _submit_send_plan(
         self, plan: SendPlan, *, request_id: str, receipt_id: str,
+        qa_generation: str | None = None,
     ) -> dict[str, Any]:
         """Inject one accepted plan and append its known durable outcome."""
         target = str(plan.route["final_target"])
@@ -1470,10 +1473,18 @@ class Comms:
             row = await self.store.fetch_session(host, name)
             lifecycle = (
                 self.sessions._lifecycle_lock(host, name)
-                if (row or {}).get("provider") == "claude" else nullcontext()
+                if qa_generation is not None or (row or {}).get("provider") == "claude" else nullcontext()
             )
             # Match bootstrap publishers: lifecycle before pane input, never the reverse.
             async with lifecycle, self._pane_input_lock(target):
+                if qa_generation is not None:
+                    current = await self.store.fetch_session(host, name) or {}
+                    if current.get("status") != "open" or current.get("session_generation") != qa_generation:
+                        raise VerbError(
+                            "qa_reviewer_generation_conflict",
+                            "QA reviewer lifecycle changed after admission",
+                            phase="not_started",
+                        )
                 await self._assert_claude_send_ready(plan.route)
                 confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)
         except VerbError as exc:
@@ -1536,6 +1547,14 @@ class Comms:
             if exc.code in {CODEX_RESET_BLOCKED, CODEX_INITIAL_PROMPT_PENDING, "bootstrap_not_ready"}:
                 await self._record_blocked_input(msg, request_id, exc)
             raise
+        target = str(plan.route["final_target"])
+        target_host, target_name = self.sessions.split(target)
+        target_row = await self.store.fetch_session(target_host, target_name) or {}
+        commission = await qa_dispatch.admit(
+            self.store, msg, row=target_row, reviewer=target,
+            generation=target_row.get("session_generation", ""),
+            msg_id=msg.get("msg_id", 0), existing_reviewer=True,
+        )
         receipt_id = f"receipt-{uuid.uuid4()}"
         await self._append_send_receipt(
             plan,
@@ -1555,4 +1574,5 @@ class Comms:
             )
         return await self._submit_send_plan(
             materialized, request_id=request_id, receipt_id=receipt_id,
+            qa_generation=commission["generation"] if commission is not None else None,
         )

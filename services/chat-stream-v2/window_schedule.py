@@ -574,6 +574,9 @@ class WindowSchedule:
                          None if "self_close_on_completion" not in msg else int(bool(msg["self_close_on_completion"])),
                          msg["objective"], msg.get("objective_source"), int(bool(msg.get("no_watch")))),
                     )
+                    conn.execute("UPDATE v2_schedules SET qa_spec_id=?,qa_surface=?,qa_cycle=?,qa_owner_generation=? WHERE schedule_id=?",
+                        (msg.get("qa_spec_id"), msg.get("qa_surface"), msg.get("qa_cycle"),
+                         admission.get("qa_owner_generation"), schedule_id))
                     prior = _row(conn.execute("SELECT * FROM v2_schedules WHERE schedule_id=?", (schedule_id,)).fetchone())
                 result = {
                     "type": "schedule.insert.ok", "schedule": _project_schedule(prior),
@@ -883,6 +886,12 @@ class WindowSchedule:
                 None if schedule.get("self_close_on_completion") is None
                 else bool(schedule.get("self_close_on_completion"))
             ),
+            "qa_spec_id": schedule.get("qa_spec_id"),
+            "qa_surface": schedule.get("qa_surface"),
+            "qa_cycle": schedule.get("qa_cycle"),
+            "_qa_owner_generation": schedule.get("qa_owner_generation"),
+            "_auth_context": {"token_verified": bool(schedule.get("owner_stream_id")),
+                              "stream_id": schedule.get("owner_stream_id")},
             "target_sha": schedule.get("target_sha"),
         }
         spawn_msg = {key: value for key, value in spawn_msg.items() if value is not None}

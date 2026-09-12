@@ -874,6 +874,20 @@ def spawn(args: argparse.Namespace) -> int:
     if getattr(args, "at", None) and getattr(args, "delay", None):
         print("agent-orch spawn: validation failed: --at and --delay are mutually exclusive", file=sys.stderr)
         return 2
+    cwd = getattr(args, "cwd", None)
+    if cwd is not None:
+        if not isinstance(cwd, str) or not cwd:
+            print("agent-orch spawn: validation failed: --cwd must be an absolute path", file=sys.stderr)
+            return 2
+        if not os.path.isabs(cwd):
+            print("agent-orch spawn: validation failed: --cwd must be an absolute path", file=sys.stderr)
+            return 2
+        if scheduled:
+            print(
+                "agent-orch spawn: validation failed: --cwd cannot be combined with --at or --delay",
+                file=sys.stderr,
+            )
+            return 2
     if scheduled and not handoff:
         if getattr(args, "resume", None) is not None:
             return _fresh_schedule_validation_error(
@@ -1003,6 +1017,7 @@ def spawn(args: argparse.Namespace) -> int:
             return 2
         payload: dict[str, object] = {
             "type": "schedule.insert",
+            **_qa_request_fields(args),
             "objective": objective,
             "objective_supported": True,
             "no_watch": bool(getattr(args, "no_watch", False)),
@@ -1075,6 +1090,7 @@ def spawn(args: argparse.Namespace) -> int:
         return prompt_exit
     payload: dict[str, object] = {
         "type": "spawn",
+        **_qa_request_fields(args),
         "objective": objective,
         "objective_supported": True,
         "no_watch": bool(getattr(args, "no_watch", False)),
@@ -1104,6 +1120,8 @@ def spawn(args: argparse.Namespace) -> int:
         if getattr(args, "reparent_children", None) is False:
             payload["reparent_children"] = False
     payload.update(initial_prompt_payload)
+    if cwd is not None:
+        payload["cwd"] = cwd
     if parent is not None:
         payload["parent_stream_id"] = parent
     # Hidden seats self-close by default (opt out with
@@ -1272,6 +1290,7 @@ def send(args: argparse.Namespace) -> int:
         return 2
     request: dict[str, object] = {
         "type": "send",
+        **_qa_request_fields(args),
         "host": host,
         "session_name": session_name,
         "text": args.prompt_text,
@@ -1582,8 +1601,20 @@ def obligation(args: argparse.Namespace) -> int:
     return 2
 
 
+def _qa_request_fields(args: argparse.Namespace) -> dict[str, object]:
+    return {key: getattr(args, key) for key in ("qa_spec_id", "qa_surface", "qa_cycle")
+            if getattr(args, key, None) is not None}
+
+
 def spec_issue(args: argparse.Namespace) -> int:
     command = str(getattr(args, "spec_issue_command", ""))
+    if command in {"adjudicate", "diagnose", "show"}:
+        payload = {"type": f"coordination.spec_issue.{command}",
+                   "spec_id": args.spec_id, "surface": args.surface}
+        for field in ("cycle", "report_id", "adjudicated_valid", "reason", "diagnosis_id", "diagnosis", "pivot"):
+            if getattr(args, field, None) is not None:
+                payload[field] = getattr(args, field)
+        return _coordination_request(args, payload, needs_actor=command != "show")
     if command == "list":
         return _coordination_request(
             args,
@@ -3937,6 +3968,7 @@ def _print_inspect_pretty(response: dict[str, object], *, max_text: int | None =
         "routing_integrity_reason",
         "routing_integrity_updated_at",
         "bootstrap_state",
+        "usage",
     ):
         print(f"  {key}: {session.get(key)}")
     attribution = inspect.get("attribution") if isinstance(inspect.get("attribution"), dict) else {}
@@ -4201,6 +4233,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     spawn_parser.add_argument("--effort", help="Per-spawn reasoning effort for Claude or Codex; defaults are resolved by the agent_orch profile.")
     spawn_parser.add_argument("--host")
+    spawn_parser.add_argument("--qa-spec-id", type=_spec_id_arg)
+    spawn_parser.add_argument("--qa-surface", help="Stable QA acceptance surface slug")
+    spawn_parser.add_argument("--qa-cycle", type=int, help="Expected current QA cycle (starts at 1)")
+    spawn_parser.add_argument(
+        "--cwd",
+        metavar="ABS_PATH",
+        help="Start the seat in this absolute project directory (immediate spawns only).",
+    )
     spawn_parser.add_argument("--role")
     spawn_parser.add_argument("--phase")
     spawn_parser.add_argument(
@@ -4419,6 +4459,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     send_parser.add_argument("--quiet", action="store_true", help="Suppress retry progress lines on stderr.")
     send_parser.add_argument("--timeout", type=float, default=30.0)
+    send_parser.add_argument("--qa-spec-id", type=_spec_id_arg)
+    send_parser.add_argument("--qa-surface", help="Stable QA acceptance surface slug")
+    send_parser.add_argument("--qa-cycle", type=int)
     send_parser.add_argument("stream_id")
     send_parser.add_argument("msg_id", type=int)
     send_parser.add_argument("prompt_text")
@@ -4525,6 +4568,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     spec_issue_parser = subparsers.add_parser("spec-issue")
     spec_issue_sub = spec_issue_parser.add_subparsers(dest="spec_issue_command", required=True)
+    for verb in ("adjudicate", "diagnose", "show"):
+        qa_parser = spec_issue_sub.add_parser(verb)
+        qa_parser.add_argument("--spec-id", required=True, type=_spec_id_arg)
+        qa_parser.add_argument("--surface", required=True)
+        qa_parser.add_argument("--from", dest="from_stream_id")
+        qa_parser.add_argument("--timeout", type=float, default=30.0)
+        if verb != "show":
+            qa_parser.add_argument("--cycle", required=True, type=int)
+        if verb == "adjudicate":
+            qa_parser.add_argument("report_id")
+            validity = qa_parser.add_mutually_exclusive_group(required=True)
+            validity.add_argument("--valid", dest="adjudicated_valid", action="store_true")
+            validity.add_argument("--void", dest="adjudicated_valid", action="store_false")
+            qa_parser.add_argument("--reason", required=True)
+        elif verb == "diagnose":
+            qa_parser.add_argument("--diagnosis-id", required=True)
+            qa_parser.add_argument("--diagnosis", required=True)
+            qa_parser.add_argument("--pivot", required=True)
+        qa_parser.set_defaults(func=spec_issue)
+
     spec_issue_list = spec_issue_sub.add_parser("list")
     spec_issue_list.add_argument("--stream")
     spec_issue_list.add_argument("--json", action="store_true")

@@ -253,16 +253,27 @@ def test_manifest_contract_and_stamp_come_from_requested_commit(tmp_path: Path) 
     contract = repo / "services" / "_shared" / "spawn_profiles.py"
     contract.parent.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    commit_env = os.environ.copy()
+    commit_env.update(
+        {
+            "GIT_AUTHOR_NAME": "Pentacle Test",
+            "GIT_AUTHOR_EMAIL": "pentacle-test@example.invalid",
+            "GIT_COMMITTER_NAME": "Pentacle Test",
+            "GIT_COMMITTER_EMAIL": "pentacle-test@example.invalid",
+        }
+    )
     old_bytes = b'CATALOG_VERSION = "spawn-catalog-v1"\n'
     contract.write_bytes(old_bytes)
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "old"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "old"], check=True, env=commit_env)
+    assert subprocess.check_output(
+        ["git", "-C", str(repo), "show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD"],
+        text=True,
+    ).strip() == "Pentacle Test <pentacle-test@example.invalid>|Pentacle Test <pentacle-test@example.invalid>"
     old_commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
 
     contract.write_text('CATALOG_VERSION = "spawn-catalog-v2"\n')
-    subprocess.run(["git", "-C", str(repo), "commit", "-qam", "new"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qam", "new"], check=True, env=commit_env)
     destination = tmp_path / "bundle"
     destination.mkdir()
     manifest = installer._archive(repo, old_commit, destination)
