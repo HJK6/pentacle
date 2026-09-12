@@ -1357,3 +1357,23 @@ def test_injective_receipts_exact_schema_handler_and_service_auth(tmp_path, monk
         assert service_auth["token_verified"] is False
     finally:
         store.stop()
+
+
+@pytest.mark.parametrize("owner_kind", ["seat", "service"])
+def test_schedule_fire_preserves_service_and_qa_owner_authority(tmp_path, owner_kind):
+    from assistant_policy import AssistantPolicy
+
+    store, _sessions, _comms, spawn, surface = harness(tmp_path)
+    try:
+        owner = "hosta:requester" if owner_kind == "seat" else "hosta:scheduler"
+        inserted = schedule_insert(surface, actor=owner, _auth_context=auth(owner, role=owner_kind))
+        run(surface._fire_schedule(inserted["schedule"]["schedule_id"]))
+        context = spawn.calls[0]["_auth_context"]
+        # Internal scheduled dispatch must retain the public policy authority,
+        # including service-owned schedules which have no reviewer owner token.
+        assert AssistantPolicy(store, "hosta").operator(context)
+        assert context["service_actor"] == "daemon:scheduler"
+        assert context["token_verified"] is (owner_kind == "seat")
+        assert context["stream_id"] == (owner if owner_kind == "seat" else None)
+    finally:
+        store.stop()

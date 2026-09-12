@@ -862,7 +862,11 @@ class WindowSchedule:
         spawn_msg = {
             # The durable schedule was owner-authorized at admission; this
             # internal identity is never accepted from a client payload.
-            "_auth_context": {"service_authenticated": True, "service_actor": "daemon:scheduler"},
+            "_auth_context": {
+                "service_authenticated": True, "service_actor": "daemon:scheduler",
+                "token_verified": bool(schedule.get("owner_stream_id")),
+                "stream_id": schedule.get("owner_stream_id"),
+            },
             "type": "spawn", "request_id": dispatch["spawn_request_id"],
             "idempotency_key": dispatch["spawn_key"], "host": schedule["target_host"],
             "provider": schedule["resolved_provider"], "model": schedule["resolved_model"],
@@ -890,8 +894,6 @@ class WindowSchedule:
             "qa_surface": schedule.get("qa_surface"),
             "qa_cycle": schedule.get("qa_cycle"),
             "_qa_owner_generation": schedule.get("qa_owner_generation"),
-            "_auth_context": {"token_verified": bool(schedule.get("owner_stream_id")),
-                              "stream_id": schedule.get("owner_stream_id")},
             "target_sha": schedule.get("target_sha"),
         }
         spawn_msg = {key: value for key, value in spawn_msg.items() if value is not None}
