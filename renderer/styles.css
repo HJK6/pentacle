@@ -530,7 +530,9 @@ body.chat-stream-degraded button[data-cleanup-action] {
   overflow-y: auto;
 }
 
-#usage-section .sidebar-section-body {
+/* :not(.is-collapsed) keeps this ID rule from outranking the collapse rule below
+   (the Limits section could never collapse otherwise). */
+#usage-section:not(.is-collapsed) .sidebar-section-body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 7px 12px;
