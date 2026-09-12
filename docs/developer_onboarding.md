@@ -97,10 +97,28 @@ Evidence should contain only synthetic fixture ids, result summaries, and the ca
 
 ## 8. Pushing safely
 
-Enable the repository's push guard once per clone:
+Enable the repository's push guard once per clone. `core.hooksPath` is a
+**repo-wide** setting shared by every worktree, and a **relative** value silently
+runs nothing in any worktree or branch that does not contain the file — for
+example a checkout parked on an unrelated branch — so a foreign push sails
+through with no output. Point it at an **absolute** path so it is active from
+every worktree and branch:
 
 ```bash
-git config core.hooksPath scripts/hooks
+git config core.hooksPath "$(git rev-parse --show-toplevel)/scripts/hooks"
+```
+
+If some worktrees track branches that do not carry the hook, copy `scripts/hooks/`
+to a stable location outside the tree and point `core.hooksPath` there instead,
+kept in sync with public `main`.
+
+Verify the guard is actually active with a dry-run foreign-history probe — it
+must be REFUSED, not silently pass (`git push --dry-run` still runs pre-push):
+
+```bash
+# from a branch whose history is unrelated to public main
+git push --dry-run public HEAD:refs/heads/tmp-foreign-probe
+# expect: "pre-push: REFUSED: … foreign history …" and a non-zero exit
 ```
 
 `scripts/hooks/pre-push` then refuses accidental pushes. It is **bypassable by design** — `git push --no-verify` skips it — so it stops mistakes, not a determined push. Exactly what it protects:

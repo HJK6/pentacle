@@ -121,6 +121,32 @@ test('hostId defaults match preload for every defaulted argument', () => {
   assert.deepEqual(transport.fires[0].args, [0, 'up', 1], 'scroll defaults to one line, as preload does');
 });
 
+test('chat send/spawn reach the bridge with the right method and host mapping', () => {
+  // The web CDP gate does not exercise a live send-turn (no public spawn/ingest
+  // fixture — see spec_pentacle__web_mode_e2e_gate_2026_09 § Findings), so the
+  // browser send path is pinned here: spawn and send forward over the websocket
+  // as the same channels + argument shapes preload uses, defaulting host to
+  // 'local' and preserving an explicit host.
+  const transport = fakeTransport();
+  const cc = buildCc(transport, { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });
+
+  cc.chatSpawn('claude');
+  cc.chatSpawn('codex', 'amaterasu');
+  cc.chatSpawnV2({ host: 'local', provider: 'claude' });
+  cc.chatSend(undefined, 'sess', 'hi');
+  cc.chatSend('amaterasu', 'sess2', 'yo');
+  cc.chatInterrupt(undefined, 'sess');
+
+  assert.deepEqual(transport.calls.map((c) => [c.method, c.args]), [
+    ['chat-stream:spawn', ['claude', 'local']],
+    ['chat-stream:spawn', ['codex', 'amaterasu']],
+    ['chat-stream:spawn', [{ host: 'local', provider: 'claude' }]],
+    ['chat-stream:send', ['local', 'sess', 'hi']],
+    ['chat-stream:send', ['amaterasu', 'sess2', 'yo']],
+    ['chat-stream:interrupt', ['local', 'sess']],
+  ]);
+});
+
 test('push subscriptions replace the previous handler, as removeAllListeners does', () => {
   const transport = fakeTransport();
   const cc = buildCc(transport, { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });

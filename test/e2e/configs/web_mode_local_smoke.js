@@ -16,7 +16,7 @@
 // match the url below. If 7796 is busy, change both.
 //
 // Run with:
-//   node test/e2e/web_smoke.js --profile test/e2e/configs/web_mode_local_smoke.js
+//   node test/e2e/web_gate.js --profile test/e2e/configs/web_mode_local_smoke.js
 //
 // Point --profile at any other config file to run the same smoke against a
 // different daemon; nothing here is machine-specific.

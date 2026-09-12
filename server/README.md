@@ -232,4 +232,4 @@ to `module.exports` — and `app.js` is bundled behind shims for `path` and
 | `test/terminal_peer_host.test.js` | terminal host resolution for a `peers[]` profile entry (SSH target), plus local/remote and the unknown-host refusal |
 | `test/web_cc.test.js` | the browser shim: method parity with `preload.js`, queueing, reject-on-drop, reconnect, and the native-method shims (toast, save-image download, context menu) |
 | `test/web_bundle.test.js` | no Electron/Node requires survive; the page ships everything it references |
-| `test/e2e/web_smoke.js` | headless Chrome against a real daemon, incl. a second browser connection isolated from the first — run by hand: `node test/e2e/web_smoke.js --profile test/e2e/configs/web_mode_local_smoke.js` |
+| `test/e2e/web_gate.js` | the deterministic web-mode E2E gate: seeds a loopback daemon and drives the served page in headless Chrome over CDP (`node test/e2e/web_gate.js`; `--profile <config.js>` runs against an external daemon by hand). Scenario functions live in `test/e2e/lib/web_scenarios.js`. Run by the `Public checks` workflow. |
