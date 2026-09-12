@@ -20,8 +20,10 @@ from typing import Any
 
 try:
     from tools.gate_owner_manifest import MANIFEST_ENV, ManifestError, initialize_manifest, mark_owner_stopping, reap_manifest
+    from tools.source_integrity import status as source_integrity_status
 except ModuleNotFoundError:  # direct execution from the tools directory
     from gate_owner_manifest import MANIFEST_ENV, ManifestError, initialize_manifest, mark_owner_stopping, reap_manifest  # type: ignore[no-redef]
+    from source_integrity import status as source_integrity_status  # type: ignore[no-redef]
 
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
@@ -61,7 +63,7 @@ def _junit_counts(path: Path) -> dict[str, Any] | None:
 def _sha() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
 def _git_status() -> str:
-    return subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=all"], cwd=REPO_ROOT, text=True)
+    return source_integrity_status(REPO_ROOT)
 def _python_bin() -> str:
     return os.environ.get("V2_PYTHON_BIN", sys.executable)
 

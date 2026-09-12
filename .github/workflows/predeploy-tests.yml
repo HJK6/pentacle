@@ -27,6 +27,8 @@ jobs:
         run: |
           wget -q -O "${RUNNER_TEMP:-/tmp}/google-chrome-stable_current_amd64.deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo apt-get install -y "${RUNNER_TEMP:-/tmp}/google-chrome-stable_current_amd64.deb"
+      - name: Source integrity after Chrome install
+        run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
       - name: Web mode E2E gate
         run: |
           npm run build:web
@@ -36,3 +38,5 @@ jobs:
           export PYTHONPATH="${GITHUB_WORKSPACE}/services:${GITHUB_WORKSPACE}/services/agent-orch"
           python services/chat-stream-v2/tools/run_gate.py merge
           python -m pytest services/agent-orch/tests
+      - name: Source integrity at gate end
+        run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
