@@ -10,6 +10,20 @@ import subprocess
 
 PATTERN = re.compile("|".join(["host" + suffix for suffix in "abc"] + ["ab" + "ra"]))
 
+# CGNAT / Tailscale range 100.64/10 (second octet 64-127): a concrete
+# tailnet address must never ship in the public tree. The residue check missed a
+# real one (server/README.md, a daffodil deploy example) — this makes it a guard.
+# Bounded by non-digit/non-dot on both sides so it never fires inside a larger
+# number, and second octet 64-127 excludes 100.0-63 / 100.128-255.
+CGNAT_PATTERN = re.compile(
+    r"(?<![0-9.])100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])"
+    r"\.[0-9]{1,3}\.[0-9]{1,3}(?![0-9.])"
+)
+
+
+def _line_hits(line: str) -> bool:
+    return bool(PATTERN.search(line) or CGNAT_PATTERN.search(line))
+
 
 def check(root: Path, allowlist: Path) -> dict:
     manifest = json.loads(allowlist.read_text())
@@ -34,7 +48,7 @@ def check(root: Path, allowlist: Path) -> dict:
             content = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        lines = [number for number, line in enumerate(content.splitlines(), 1) if PATTERN.search(line)]
+        lines = [number for number, line in enumerate(content.splitlines(), 1) if _line_hits(line)]
         if not lines:
             continue
         if name in fixtures:

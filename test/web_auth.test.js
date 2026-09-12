@@ -73,7 +73,7 @@ test('isLoopbackBind classifies loopback addresses and FAILS CLOSED on empty/mal
   }
   // Routable AND empty/whitespace/undefined (a wildcard listener) must be non-loopback,
   // so auth is required rather than silently disabled.
-  for (const b of ['100.80.28.24', '0.0.0.0', '192.168.1.5', '::', '', '   ', undefined, null]) {
+  for (const b of ['198.51.100.24', '0.0.0.0', '192.168.1.5', '::', '', '   ', undefined, null]) {
     assert.equal(isLoopbackBind(b), false, `${JSON.stringify(b)} must not be treated as loopback`);
   }
 });
@@ -94,7 +94,7 @@ test('a routable bind refuses to start without a token file', async (t) => {
   process.env.HOME = home;
   t.after(() => { if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome; });
   await assert.rejects(
-    main(['--profile', profile, '--bind', '100.80.28.24', '--port', '0']),
+    main(['--profile', profile, '--bind', '198.51.100.24', '--port', '0']),
     /token-file/,
     'binding a routable address without a token must refuse to start',
   );

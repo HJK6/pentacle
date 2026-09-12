@@ -29,7 +29,7 @@ test('pty:create resolves a peers[] host to an SSH target', async () => {
   const config = {
     chatStream: { localHost: 'local' },
     remote: { host: 'bart.example', user: 'bartimaeus', port: 22, tmux: '/opt/homebrew/bin/tmux' },
-    peers: [{ id: 'merlin', host: '100.70.128.35', user: 'vgujju', port: 2222, tmux: '/opt/homebrew/bin/tmux' }],
+    peers: [{ id: 'merlin', host: '198.51.100.35', user: 'vgujju', port: 2222, tmux: '/opt/homebrew/bin/tmux' }],
   };
   const c = collector();
   registerTerminalIpc(c, config, {}, { pty: makePty(), execute });
@@ -41,7 +41,7 @@ test('pty:create resolves a peers[] host to an SSH target', async () => {
   assert.ok(lookup, 'a pane lookup ran');
   assert.match(String(lookup.file), /^ssh(\.exe)?$/, 'a peer attaches over ssh, like remote does');
   const line = lookup.args.join(' ');
-  assert.match(line, /vgujju@100\.70\.128\.35/, 'ssh targets the peer host/user');
+  assert.match(line, /vgujju@198\.51\.100\.35/, 'ssh targets the peer host/user');
   assert.match(line, /-p 2222/, 'ssh uses the peer port');
 });
 
@@ -51,7 +51,7 @@ test('local and remote still resolve, and an unknown host is refused', async () 
   const config = {
     chatStream: { localHost: 'local' },
     remote: { host: 'bart.example', user: 'bartimaeus', port: 22, tmux: 'tmux' },
-    peers: [{ id: 'merlin', host: '100.70.128.35', user: 'vgujju' }],
+    peers: [{ id: 'merlin', host: '198.51.100.35', user: 'vgujju' }],
   };
   const c = collector();
   registerTerminalIpc(c, config, {}, { pty: makePty(), execute });

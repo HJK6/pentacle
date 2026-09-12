@@ -31,7 +31,9 @@ It seeds a scratch `chat-stream-v2` sessions DB before boot (`test/e2e/lib/seed_
 — one visible session plus a short transcript), starts a loopback daemon on an
 ephemeral port against that DB, serves the web bundle, drives the served page in
 real headless Chrome over CDP, runs the named scenario functions in
-`test/e2e/lib/web_scenarios.js`, and tears everything down. Ephemeral ports and a
+`test/e2e/lib/web_scenarios.js`, and tears everything down (by default; `--keep`
+intentionally leaves the browser and the scratch directory for debugging).
+Ephemeral ports and a
 seeded fixture make it deterministic; it exits non-zero on any scenario failure.
 
 Named scenarios: **transport-and-config** (window.cc/HOST install, config matches

@@ -20,6 +20,7 @@ jobs:
       - run: npm ci
       - run: npm run prestart
       - run: npm test
+      - run: python3 scripts/test_check_public_residue.py
       - run: python3 scripts/check_public_residue.py
       - run: python -m pip install -r services/chat-stream-v2/requirements.txt -e services/agent-orch
       - name: Install Chrome for the web E2E gate
