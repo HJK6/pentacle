@@ -29,6 +29,16 @@ may be triggered by a daemon-internal failure signal.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# `_shared` is the fleet-wide module beside this service; put the services root
+# on sys.path BEFORE importing it so a fresh `import spawnctl` works without a
+# caller-provided PYTHONPATH (test_public_host_configuration imports it fresh).
+SERVICES_ROOT = str(Path(__file__).resolve().parents[1])
+if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide module, never a v2 copy
+    sys.path.insert(0, SERVICES_ROOT)
+
 from _shared.spawn_objective import objective_error, objective_required_for, resolve_objective
 
 import asyncio
@@ -37,10 +47,8 @@ import hashlib
 import json
 import logging
 import os
-import sys
 import time
 import uuid
-from pathlib import Path
 from typing import Any, Awaitable, Callable, NamedTuple
 
 from boot_ready import (
@@ -67,9 +75,6 @@ from v2_runtime import iso_now
 
 import launch
 
-SERVICES_ROOT = str(Path(__file__).resolve().parents[1])
-if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide module, never a v2 copy
-    sys.path.insert(0, SERVICES_ROOT)
 
 from _shared.spawn_profiles import (  # noqa: E402
     HANDOFF_TUPLE_FIELDS,
