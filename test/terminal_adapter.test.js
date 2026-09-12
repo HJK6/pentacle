@@ -53,8 +53,17 @@ test('Windows remote terminal uses an executable filename that ConPTY can resolv
   cleanup();
 });
 
+const APP_OWNS_WHEEL = '#{&&:#{mouse_sgr_flag},#{==:#{pane_in_mode},0}}';
+const sgrHex = (button, col, row) => Buffer.from(`\x1b[<${button};${col};${row}M`, 'latin1').toString('hex').match(/../g).join(' ');
+function scrollArgs(pane, { events, count, direction, col = 40, row = 12 }) {
+  const button = direction === 'scroll-up' ? 64 : 65;
+  return ['if-shell', '-t', pane, '-F', APP_OWNS_WHEEL,
+    `send-keys -t ${pane} -N ${events} -H ${sgrHex(button, col, row)}`,
+    `copy-mode -t ${pane} -e ; send-keys -t ${pane} -X -N ${count} ${direction}`];
+}
+
 for (const remote of [false, true]) {
-  test(`scroll enters copy-mode and routes both commands to the window's pane (${remote ? 'SSH' : 'local'})`, async () => {
+  test(`scroll forwards the wheel to a mouse app or scrolls tmux history, on the window's pane (${remote ? 'SSH' : 'local'})`, async () => {
     const handlers = new Map(), listeners = new Map(), calls = [];
     const makeEvent = (id) => {
       const sender = new EventEmitter(); sender.id = id; sender.isDestroyed = () => false;
@@ -74,14 +83,15 @@ for (const remote of [false, true]) {
       listeners.get('pty:scroll')(second, 0, 'down', 250);
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(calls.length, 2);
-      for (const [index, pane, count, direction] of [[0, '%40', '15', 'scroll-up'], [1, '%41', '100', 'scroll-down']]) {
+      for (const [index, pane, events, count, direction] of [[0, '%40', 4, 15, 'scroll-up'], [1, '%41', 25, 100, 'scroll-down']]) {
+        const expected = scrollArgs(pane, { events, count, direction });
         if (remote) {
           assert.equal(calls[index].file, process.platform === 'win32' ? 'ssh.exe' : 'ssh');
           assert.deepEqual(calls[index].args.slice(0, -1), ['-tt', '-p', '22', '--', 'operator@peer.example']);
-          assert.equal(calls[index].args.at(-1), `LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 '/usr/bin/tmux' 'copy-mode' '-t' '${pane}' '-e' ';' 'send-keys' '-t' '${pane}' '-X' '-N' '${count}' '${direction}'`);
+          assert.equal(calls[index].args.at(-1), `LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 ${['/usr/bin/tmux', ...expected].map(a => `'${a}'`).join(' ')}`);
         } else {
           assert.equal(calls[index].file, 'fixture-tmux');
-          assert.deepEqual(calls[index].args, ['copy-mode', '-t', pane, '-e', ';', 'send-keys', '-t', pane, '-X', '-N', count, direction]);
+          assert.deepEqual(calls[index].args, expected);
         }
       }
       await handlers.get('pty:kill')(first, 0);
@@ -230,11 +240,34 @@ test('wheel bursts coalesce without moving history changes across queued typing'
     for (let i = 0; i < 5; i++) listeners.get('pty:scroll')(event, 0, 'up', 3);
     listeners.get('pty:write')(event, 0, 'barrier');
     for (let i = 0; i < 4; i++) listeners.get('pty:scroll')(event, 0, 'up', 2);
-    await flush(); assert.equal(calls.length, 1); assert.deepEqual(calls[0].slice(-2), ['15', 'scroll-up']);
+    await flush(); assert.equal(calls.length, 1); assert.deepEqual(calls[0], scrollArgs('%90', { events: 4, count: 15, direction: 'scroll-up' }));
     pending.shift()({ stdout: '' }); await flush(); assert.deepEqual(writes, []);
     pending.shift()({ stdout: '' }); await flush();
-    assert.deepEqual(writes, ['barrier']); assert.deepEqual(calls[2].slice(-2), ['8', 'scroll-up']);
+    assert.deepEqual(writes, ['barrier']); assert.deepEqual(calls[2], scrollArgs('%90', { events: 2, count: 8, direction: 'scroll-up' }));
     pending.shift()({ stdout: '' }); await flush(); assert.equal(calls.length, 3);
+  } finally { cleanup(); }
+});
+
+test('a forwarded wheel event lands mid-pane at the current terminal size', async () => {
+  const handlers = new Map(), listeners = new Map(), calls = [];
+  const sender = new EventEmitter(); sender.id = 47; sender.isDestroyed = () => false;
+  const resized = [];
+  const cleanup = registerTerminalIpc({ handle: (n, f) => handlers.set(n, f), on: (n, f) => listeners.set(n, f) }, {}, {}, {
+    execute: async (_file, args) => {
+      if (args[0] === 'display-message') return { stdout: '%95' };
+      if (args[0] !== 'set-option') calls.push(args);
+      return { stdout: '' };
+    }, pty: { spawn: () => ({ onData() {}, onExit() {}, kill() {}, resize: (c, r) => resized.push([c, r]) }) },
+  });
+  const event = { sender }, flush = () => new Promise(resolve => setImmediate(resolve));
+  try {
+    await handlers.get('pty:create')(event, 0, 'fixture', 'local', 101, 31);
+    listeners.get('pty:scroll')(event, 0, 'up', 1);
+    await flush(); assert.deepEqual(calls[0], scrollArgs('%95', { events: 1, count: 1, direction: 'scroll-up', col: 51, row: 16 }));
+    listeners.get('pty:resize')(event, 0, 160, 48);
+    assert.deepEqual(resized, [[160, 48]]);
+    listeners.get('pty:scroll')(event, 0, 'down', 9);
+    await flush(); assert.deepEqual(calls[1], scrollArgs('%95', { events: 3, count: 9, direction: 'scroll-down', col: 80, row: 24 }));
   } finally { cleanup(); }
 });
 

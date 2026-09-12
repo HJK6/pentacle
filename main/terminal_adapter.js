@@ -4,6 +4,21 @@ const os = require('node:os');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const run = promisify(execFile);
+// A forwarded wheel event scrolls an app by a few lines; convert the renderer's
+// line count so one wheel notch stays roughly one event.
+const WHEEL_LINES_PER_EVENT = 4;
+// Scroll only an app that asked for SGR mouse reports and only outside copy
+// mode; this is tmux's own WheelUpPane default. A full-screen TUI on the
+// alternate screen (e.g. Claude Code) keeps no tmux history, so copy mode has
+// nothing to show there.
+const APP_OWNS_WHEEL = '#{&&:#{mouse_sgr_flag},#{==:#{pane_in_mode},0}}';
+
+function sgrWheelHex(direction, cols, rows) {
+  const button = direction === 'up' ? 64 : 65;
+  const col = Math.max(1, Math.ceil((cols || 80) / 2));
+  const row = Math.max(1, Math.ceil((rows || 24) / 2));
+  return Buffer.from(`\x1b[<${button};${col};${row}M`, 'latin1').toString('hex').match(/../g);
+}
 
 function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = run, platform = process.platform, maxPtysPerConnection = null } = {}) {
   const slots = new Map();
@@ -69,7 +84,7 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
       throw new Error(`This connection has reached its terminal limit (${perConnectionCap})`);
     }
     close(event, slot);
-    const record = { process: null, sessionName, host, paneId: null, copyMode: true };
+    const record = { process: null, sessionName, host, paneId: null, copyMode: true, cols, rows };
     slots.set(key(event, slot), record);
     try {
       const lookup = target(host, ['display-message', '-p', '-t', `=${sessionName}:`, '#{pane_id}']);
@@ -150,7 +165,13 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
     if (typeof data !== 'string' || !data) return false;
     return input(event, slot, record => record.process.write(data), true);
   });
-  ipcMain.on('pty:resize', (event, slot, cols, rows) => { if (Number.isInteger(cols) && cols > 0 && Number.isInteger(rows) && rows > 0) slots.get(key(event, slot))?.process?.resize(cols, rows); });
+  ipcMain.on('pty:resize', (event, slot, cols, rows) => {
+    if (!(Number.isInteger(cols) && cols > 0 && Number.isInteger(rows) && rows > 0)) return;
+    const record = slots.get(key(event, slot));
+    if (!record) return;
+    record.cols = cols; record.rows = rows;
+    record.process?.resize(cols, rows);
+  });
   ipcMain.on('pty:tmux-send', (event, slot, ...keys) => {
     void input(event, slot, record => tmuxCommand(record, ['send-keys', ...keys.map(String)])).catch(reportCommandError);
   });
@@ -168,13 +189,16 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
       record.queuedScroll.count += count;
       return;
     }
-    const batch = { command, count };
+    const batch = { direction: direction === 'up' ? 'up' : 'down', command, count };
     record.queuedScroll = batch;
     void queue(event, slot, record => {
       if (record.queuedScroll === batch) record.queuedScroll = null;
       record.copyMode = true;
-      return tmuxCommand(record, ['copy-mode', '-e'],
-        ['send-keys', '-X', '-N', String(batch.count), batch.command]);
+      const pane = record.paneId;
+      const events = Math.max(1, Math.ceil(batch.count / WHEEL_LINES_PER_EVENT));
+      const forward = `send-keys -t ${pane} -N ${events} -H ${sgrWheelHex(batch.direction, record.cols, record.rows).join(' ')}`;
+      const history = `copy-mode -t ${pane} -e ; send-keys -t ${pane} -X -N ${batch.count} ${batch.command}`;
+      return tmuxCommand(record, ['if-shell', '-F', APP_OWNS_WHEEL, forward, history]);
     }, true).catch(reportCommandError);
   });
   return () => { for (const record of slots.values()) record.process?.kill(); slots.clear(); };
