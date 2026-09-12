@@ -1,9 +1,10 @@
 'use strict';
 const { configuredAssistantRole } = require('./assistant_role');
+const { prepareVoiceSpawn, spawnOutcome } = require('./voice_action_delivery');
 
 // Reuse the main client's full-snapshot handshake and existing correlated chat
 // lifecycle. A claim owns one utterance; sendTurn must only create one request.
-function createWakeDelivery({ config, getState, api, sendTurn, onStatus = () => {} }) {
+function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSpawnCatalog, onStatus = () => {} }) {
   let busy = false;
   let held = null;
   let epoch = 0;
@@ -39,9 +40,13 @@ function createWakeDelivery({ config, getState, api, sendTurn, onStatus = () => 
   function message(status) {
     if (!status?.wake?.enabled || status.mode !== 'on') return '';
     if (!enabled()) return 'Wake delivery is unavailable in this client.';
+    if (status.local_actions?.enabled && status.local_actions?.last?.state === "speaking") return "Speaking a local reply…";
     return status.wake.error || note || (held ? 'Wake message waiting for the current assistant.'
-      : status.capture_origin === 'wake' ? 'Recording for Bart — say over to send.'
-        : status.wake.pending_count ? 'Wake message pending.' : 'Say “Hey Bart” to speak; “over” to send.');
+      : status.capture_origin === 'local_action' ? 'Recording local action — say over.'
+        : status.capture_origin === 'wake' ? 'Recording for Bart — say over to send.'
+        : status.wake.pending_count ? 'Wake message pending.' : status.local_actions?.enabled
+          ? (status.local_actions.wake_policy === 'separate' ? 'Hey Bart for chat; Hey Amaterasu for actions. Say over to finish.' : 'Hey Bart for chat or local actions. Say over to finish.')
+          : 'Say “Hey Bart” to speak; “over” to send.');
   }
   async function tick(status) {
     observe(status);
@@ -51,14 +56,15 @@ function createWakeDelivery({ config, getState, api, sendTurn, onStatus = () => 
     const current = epoch;
     const valid = () => epoch === current && !muted;
     try {
-      const initialTarget = target(await getState());
+      const initialState = await getState();
+      const initialTarget = target(initialState);
       if (!valid()) return;
-      if (!initialTarget) {
+      if (!initialTarget && !(status.local_actions?.enabled && initialState?.connected && spawnAgent && getSpawnCatalog)) {
         note = 'Wake message waiting for a connected, unique assistant.';
         return;
       }
       if (!held) {
-        const response = await api('POST', '/wake/claim', {});
+        const response = await api('POST', '/wake/claim', spawnAgent && getSpawnCatalog ? { actions_version: 1 } : {});
         if (!valid()) return;
         if (!response || response.error || !Object.hasOwn(response, 'claim')) {
           note = 'Wake claim unconfirmed. Latest claim is available in the local mic service for review.';
@@ -76,6 +82,34 @@ function createWakeDelivery({ config, getState, api, sendTurn, onStatus = () => 
       observe(latestStatus);
       if (!valid() || !latestStatus || latestStatus.mode !== 'on'
         || latestStatus.wake?.generation !== held?.generation) return;
+      if (held.action) {
+        const capture = held;
+        let request;
+        try {
+          if (!spawnAgent || !getSpawnCatalog) throw new Error('This client cannot execute local actions');
+          request = prepareVoiceSpawn(capture, await getSpawnCatalog());
+        } catch {
+          held = null;
+          lastAttemptedId = capture.id;
+          note = 'Local spawn configuration unavailable.';
+          await api('POST', '/actions/outcome', { id: capture.id, generation: capture.generation, outcome: 'unavailable' });
+          return;
+        }
+        if (!valid()) return;
+        const beforeSpawn = await api('GET', '/status');
+        observe(beforeSpawn);
+        if (!valid() || beforeSpawn?.mode !== 'on' || beforeSpawn.wake?.generation !== capture.generation) return;
+        if (!(await getState())?.connected || !valid()) return;
+        held = null;
+        lastAttemptedId = capture.id;
+        let outcome = 'unconfirmed';
+        let result;
+        try { result = await spawnAgent(request); outcome = spawnOutcome(result); } catch { /* No new key or automatic retry. */ }
+        note = outcome === 'spawned' ? 'Voice agent started.' : outcome === 'queued' ? 'Voice agent queued.' : 'Voice spawn unconfirmed; inspect Pentacle before repeating.';
+        const receipt = { stream_id: result?.streamId || result?.stream_id || result?.session?.stream_id || null, state: result?.state || 'unconfirmed', idempotency_key: request.idempotencyKey, host: request.host, model: request.model, effort: request.effort };
+        await api('POST', '/actions/outcome', { id: capture.id, generation: capture.generation, outcome, receipt });
+        return;
+      }
       const latestTarget = target(await getState());
       if (!valid()) return;
       if (!latestTarget || latestTarget !== initialTarget) {

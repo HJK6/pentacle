@@ -6927,6 +6927,8 @@ CFG_READY.then((cfg) => {
       config: CONFIG,
       getState: () => window.PentacleChatStore?.sendTurn ? window.cc.getChatStreamState() : null,
       api: micApi,
+      spawnAgent: (request) => window.cc.chatSpawnV2(request),
+      getSpawnCatalog: () => window.cc.chatSpawnCatalog(),
       sendTurn: (streamId, text) => window.PentacleChatStore.sendTurn(streamId, text),
       onStatus: (text) => {
         if (text && micState.mode === 'on') document.getElementById('mic-info').textContent = text;
