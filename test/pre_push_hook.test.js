@@ -154,6 +154,27 @@ test('(4) destination by URL applies under remote name `origin` (not just `publi
   assert.match(bad.stderr, /not a root of origin\/main/);
 });
 
+test('the hook uses no bash 4+ only features (macOS /bin/bash 3.2 compatibility)', () => {
+  // CI runs Linux bash 5, so it cannot execute the hook under 3.2; guard the
+  // regression statically instead. A bash-4-only feature (e.g. `declare -A`)
+  // fails on macOS's default 3.2.57 and, without this, the hook falls through
+  // to accept (the 2026-09-12 Merlin regression). Comment lines are exempt.
+  const src = fs.readFileSync(path.join(hooksDir, 'pre-push'), 'utf8');
+  const codeLines = src.split('\n').filter((l) => !l.trimStart().startsWith('#'));
+  const code = codeLines.join('\n');
+  const forbidden = [
+    [/\bdeclare\s+-A\b/, 'declare -A (associative array)'],
+    [/\blocal\s+-A\b/, 'local -A (associative array)'],
+    [/\bmapfile\b/, 'mapfile'],
+    [/\breadarray\b/, 'readarray'],
+    [/\$\{[A-Za-z_][A-Za-z0-9_]*\^\^/, '${var^^} uppercase expansion'],
+    [/\$\{[A-Za-z_][A-Za-z0-9_]*,,/, '${var,,} lowercase expansion'],
+  ];
+  for (const [re, label] of forbidden) {
+    assert.ok(!re.test(code), `hook must not use ${label} (bash 4+ only)`);
+  }
+});
+
 test('(4) destination by URL applies to a raw-URL push', () => {
   const sb = sandbox();
   makeForeignBranch(sb.work, 'foreign');

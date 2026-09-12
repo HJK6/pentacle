@@ -27,10 +27,12 @@
 #       For non-public remotes the same root-set check runs when the remote's
 #       `main` is resolvable, and is skipped with a note when it is not.
 #
-# Portability: the explicit-refspec check reads the invoking `git push` argv from
-# /proc (Linux) or `ps` (macOS/BSD) — it runs everywhere those exist. `ps`
-# parsing is whitespace-based and best-effort; refspecs contain no spaces. If the
-# argv cannot be read at all, a push to the public repo is REFUSED (fail closed).
+# Portability: written for bash 3.2 (the macOS default /bin/bash 3.2.57) — no
+# associative arrays or other bash 4+ features — and it fails CLOSED, never
+# exit 0, when it cannot run (missing `git`/`grep`, an unresolvable remote main,
+# or an unreadable invoking argv on a public push). The explicit-refspec check
+# reads the invoking `git push` argv from /proc (Linux) or `ps` (macOS/BSD);
+# `ps` parsing is whitespace-based and best-effort (refspecs contain no spaces).
 #
 # Origin: 2026-09-12 — a private branch carrying the whole `pentacle-private`
 # history (no merge base with this repo) was pushed to public `HJK6/pentacle` by
@@ -45,6 +47,16 @@ zero='0000000000000000000000000000000000000000'
 fail=0
 
 warn() { printf 'pre-push: %s\n' "$*" >&2; }
+
+# Interpreter/tooling admission: if the checks below cannot run, fail CLOSED
+# rather than silently exit 0. (This hook uses only bash 3.2 features so it runs
+# on the macOS default /bin/bash 3.2.57; it needs `git` and `grep` present.)
+for _tool in git grep; do
+  if ! command -v "$_tool" >/dev/null 2>&1; then
+    warn "REFUSED: required tool '$_tool' not found; cannot verify this push (fail closed)."
+    exit 1
+  fi
+done
 
 # `.git` suffix and a trailing slash are cosmetic; drop them before comparing.
 canonicalize_url() { printf '%s' "${1%/}" | sed 's/\.git$//'; }
@@ -167,24 +179,45 @@ if [ -z "$remote_main" ]; then
     warn "note: '${remote_name}' has no resolvable 'main'; skipping the shared-history check."
   fi
 else
-  # roots of the remote main = the allowed root set
-  declare -A main_roots=()
-  while IFS= read -r r; do [ -n "$r" ] && main_roots["$r"]=1; done < <(git rev-list --max-parents=0 "$remote_main" 2>/dev/null)
-  while read -r _local_ref local_sha _remote_ref remote_sha; do
-    [ -z "${local_sha:-}" ] && continue
-    [ "$local_sha" = "$zero" ] && continue                    # deletion
-    extra_root=''
-    while IFS= read -r r; do
-      [ -z "$r" ] && continue
-      if [ -z "${main_roots[$r]:-}" ]; then extra_root="$r"; break; fi
-    done < <(git rev-list --max-parents=0 "$local_sha" 2>/dev/null)
-    if [ -n "$extra_root" ]; then
-      warn "REFUSED: ${_local_ref:-<ref>} reaches a root commit (${extra_root:0:12}) that is not a root of ${remote_name}/main."
-      warn "         this is foreign history — an unrelated repository's line, or a merge that pulls one in."
+  # The allowed root set = the roots of the remote main. Compared with plain
+  # lists + `grep -Fx`, NOT associative arrays, so this runs on bash 3.2 (the
+  # macOS default) — `declare -A` there fails and would let the check fall
+  # through to accept. `git rev-list --max-parents=0 <tip>` lists every root
+  # commit reachable from a tip.
+  main_roots="$(git rev-list --max-parents=0 "$remote_main" 2>/dev/null)"
+  if [ -z "$main_roots" ]; then
+    # Could not enumerate the remote main's roots: never fall through to accept.
+    if [ "$is_public" -eq 1 ]; then
+      warn "REFUSED: could not enumerate ${remote_name}/main's root commits (fail closed)."
       fail=1
+    else
+      warn "note: could not enumerate ${remote_name}/main's roots; skipping the shared-history check."
     fi
-    : "$remote_sha"
-  done
+  else
+    while read -r _local_ref local_sha _remote_ref remote_sha; do
+      [ -z "${local_sha:-}" ] && continue
+      [ "$local_sha" = "$zero" ] && continue                  # deletion
+      tip_roots="$(git rev-list --max-parents=0 "$local_sha" 2>/dev/null)"
+      if [ -z "$tip_roots" ]; then
+        # A real tip always has a root; empty output means we could not read it.
+        if [ "$is_public" -eq 1 ]; then
+          warn "REFUSED: could not determine the root commits of ${_local_ref:-<ref>} (fail closed)."
+          fail=1
+        else
+          warn "note: could not determine roots of ${_local_ref:-<ref>}; skipping its shared-history check."
+        fi
+        continue
+      fi
+      # Tip roots that are NOT roots of the remote main -> foreign history.
+      extra_root="$(printf '%s\n' "$tip_roots" | grep -Fxv -f <(printf '%s\n' "$main_roots") | head -n 1)"
+      if [ -n "$extra_root" ]; then
+        warn "REFUSED: ${_local_ref:-<ref>} reaches a root commit (${extra_root:0:12}) that is not a root of ${remote_name}/main."
+        warn "         this is foreign history — an unrelated repository's line, or a merge that pulls one in."
+        fail=1
+      fi
+      : "$remote_sha"
+    done
+  fi
 fi
 
 if [ "$fail" -ne 0 ]; then
