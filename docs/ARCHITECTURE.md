@@ -89,9 +89,12 @@ answers itself — the clipboard above all, since a round trip would read the
 browser equivalent. `UNIMPLEMENTED` ones are declared by `preload.js` but served
 by no main-process handler on either transport.
 
-The host is loopback-only and single-user: it has no authentication, and anyone
-who can reach the port gets the operator's full `window.cc`. Flags, the wire
-protocol and the routing rules are in [`server/README.md`](../server/README.md).
+The host has no authentication: any client that can open a socket to the port
+gets the operator's full `window.cc`. It *defaults* to `127.0.0.1`, but `--bind`
+accepts any address, so exposing it beyond loopback publishes that unauthenticated
+surface — don't, until token auth and deployment access control exist. Flags, the
+wire protocol and the routing rules are in
+[`server/README.md`](../server/README.md).
 
 ## Configuration ownership
 

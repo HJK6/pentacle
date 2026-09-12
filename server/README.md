@@ -5,18 +5,53 @@ main process does — owns the tmux attaches and the single chat-stream websocke
 connection — and exposes that to a page instead of to a BrowserWindow. Where it
 sits in the system is [`docs/ARCHITECTURE.md` § Web mode](../docs/ARCHITECTURE.md#web-mode-headless-host).
 
+## Prerequisites
+
+Node 20+ and `npm install` at the repo root. Beyond that: `tmux` on whichever
+host the terminals live on, Python 3 if you want to run the chat daemon locally,
+and Chrome or Chromium on `PATH` only if you intend to run the smoke.
+
+## Run it
+
 ```bash
+npm install
 npm run web                       # build the bundle, then serve
 node server --profile <name>      # serve an already-built bundle
 ```
+
+The process prints the URL and stays in the foreground; it does **not** open a
+browser. Open the printed `http://127.0.0.1:7795` yourself. Without a daemon to
+talk to, the page loads and the terminals work, but the sidebar is empty — start
+one first if you want sessions:
+
+```bash
+SCRATCH=$(mktemp -d)
+python3 services/chat-stream-v2/main.py --host 127.0.0.1 --port 7796 \
+  --local-host local --db "$SCRATCH/sessions.db" \
+  --notifications-db "$SCRATCH/notifications.db" \
+  --assets-db "$SCRATCH/assets.db" --blob-root "$SCRATCH/blobs" \
+  --disable-hosts --disable-mirror --disable-nudges \
+  --disable-outbound-notices --disable-remote-presence
+```
+
+then point the host at it — `test/e2e/configs/web_mode_local_smoke.js` is
+exactly that config, so `node server --profile test/e2e/configs/web_mode_local_smoke.js`
+works as-is.
 
 ## Flags
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--profile <name>` | the machine's own config | `configs/<name>.local.js`, else `configs/<name>.js`; a path or `*.js` argument is used verbatim |
+| `--profile <name>` | see below | `configs/<name>.local.js`, else `configs/<name>.js`; an argument containing a path separator or ending in `.js` is used verbatim |
 | `--port <n>` | `7795` | `0` picks a free port (the startup line prints the real one) |
-| `--bind <addr>` | `127.0.0.1` | loopback only by default |
+| `--bind <addr>` | `127.0.0.1` | the interface to listen on — read the warning below before changing it |
+
+With no `--profile`, the host does **not** look for `configs/<machine>.js`: it
+follows `config-loader`'s ordinary precedence — `PENTACLE_CONFIG` if it is set in
+the environment, then `pentacle.config.js`, then `pentacle.config.example.js`. A
+`--profile` that resolves to nothing is not fatal: the host logs
+`using fallback configuration` and starts with a minimal built-in config, which
+is why an empty sidebar can mean a mistyped profile rather than a dead daemon.
 
 The profile is loaded through `config-loader` exactly as `main.js` loads it, so
 the browser sees the config the desktop would see. `get-config` and
@@ -91,11 +126,25 @@ cannot leak attachments; the tmux session itself is untouched. Daemon frames
   channels). These are pre-existing desktop gaps, listed so the parity test
   fails if the set grows.
 
+## Security posture — read before changing `--bind`
+
+There is **no authentication of any kind**. Any client that can open a socket to
+the port gets the operator's full `window.cc`: every terminal, every daemon RPC,
+every file the handlers can reach.
+
+The *default* bind is `127.0.0.1`, not a property of the host — `--bind` accepts
+any address, and `--bind 0.0.0.0` publishes that unauthenticated surface to
+every machine that can route to this one. Do not use a non-loopback bind until
+token authentication and deployment-level access control exist.
+
 ## Not implemented here
 
-Auth, multi-connection isolation, tailnet bind and profile-switching UX. The
-host is single-user and loopback-only: anyone who can reach the port gets the
-operator's full `window.cc`. Do not bind it to a routable address.
+Authentication, cross-user authorization, a tailnet bind, and profile-switching
+UX. Note what this does *not* mean: terminal slots and their pty output are
+already isolated per websocket connection (see § Push routing), so two tabs
+cannot see each other's terminals. What is missing is any notion of *who* is
+connected — every connection is equally the operator. Daemon `chat-stream:frame`
+traffic is broadcast to all connections by design.
 
 ## Build
 

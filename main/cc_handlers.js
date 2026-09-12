@@ -11,8 +11,11 @@
 // `main/terminal_adapter.js` — whose slots are keyed by `event.sender.id` —
 // correct per-socket isolation and per-socket pty output for free.
 //
-// Electron-native handlers are NOT here: they stay in `main.js` and are listed
-// below so the websocket dispatcher can refuse them with a reason.
+// Electron-native handlers are NOT here: they stay in the Electron main-process
+// adapters — the clipboard pair in `main/clipboard_ipc_bridge.js`, and
+// `open-external`, `meeting:*` and `app:reload` directly in `main.js`. All of
+// them are listed below so the websocket dispatcher can refuse them with a
+// reason.
 
 const path = require('node:path');
 const os = require('node:os');

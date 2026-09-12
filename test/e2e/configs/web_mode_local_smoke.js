@@ -2,13 +2,18 @@
 
 // Gate config for the web-mode smoke. Points the desktop and the headless web
 // host at a loopback chat-stream daemon, so the gate never touches shared
-// infrastructure. Start one with:
+// infrastructure. Start one by pasting this verbatim:
 //
+//   SCRATCH=$(mktemp -d)
 //   python3 services/chat-stream-v2/main.py --host 127.0.0.1 --port 7796 \
-//     --db <scratch>/sessions.db --notifications-db <scratch>/notifications.db \
-//     --assets-db <scratch>/assets.db --blob-root <scratch>/blobs \
+//     --local-host local --db "$SCRATCH/sessions.db" \
+//     --notifications-db "$SCRATCH/notifications.db" \
+//     --assets-db "$SCRATCH/assets.db" --blob-root "$SCRATCH/blobs" \
 //     --disable-hosts --disable-mirror --disable-nudges \
 //     --disable-outbound-notices --disable-remote-presence
+//
+// `--local-host local` matches the `chatStream.localHost` below; the port must
+// match the url below. If 7796 is busy, change both.
 //
 // Run with:
 //   node test/e2e/web_smoke.js --profile test/e2e/configs/web_mode_local_smoke.js
