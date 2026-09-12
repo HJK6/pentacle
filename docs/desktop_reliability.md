@@ -21,3 +21,17 @@ The sidebar may show a disconnected or stale state while preserving the last saf
 ## Testing
 
 Exercise reconnect, delayed replies, duplicate frames, daemon restart, log rotation, and one failing optional adapter with synthetic clocks and loopback fixtures. Tests should run in any checkout using temporary stores. They must not assume a named workstation, a private SSH route, or a live operator session.
+
+## Chat history states
+
+`renderer/chat_events_lazy.js` tracks the actual history request independently
+from websocket connectivity. Before success, an empty transcript says Loading
+messages; only a successful empty reply permits No messages yet. Cached rows
+remain visible while syncing or reconnecting. A failed request retains the rows
+and draft and exposes Retry; repainting does not start a retry loop.
+
+Each attempt has a distinct identity. Disconnect invalidates old attempts, and
+reconnect fetches each active chat stream once. A late result cannot overwrite a
+new attempt. Successful zero-row replies still notify the renderer, so loading
+ends even when there is no event frame to repaint the view. Transport loss does
+not imply turn completion or message delivery.

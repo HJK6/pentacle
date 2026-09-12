@@ -3354,7 +3354,7 @@ body.chat-stream-degraded button[data-cleanup-action] {
   line-height: 1.35;
 }
 
-/* Desktop questions intentionally portal to document.body: never inherit cosmic chat tokens. */
+/* Questions portal to document.body; cosmic_chat_surface.css supplies host-scoped tokens. */
 @font-face {
   font-family: 'Desktop Questions Mono';
   font-style: normal;

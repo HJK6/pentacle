@@ -5,12 +5,18 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const Module = require('node:module');
+const esbuild = require('esbuild');
 const { createRequire } = require('node:module');
 const { JSDOM } = require('jsdom');
 
 const root = path.join(__dirname, '..');
 const rendererRequire = createRequire(path.join(root, 'renderer', 'app.js'));
 const STREAM = 'hostc:claude-hostc-race';
+const answerModule = new Module(path.join(root, 'pentacle-chat-core/src/services/questionAnswerFormat.ts'));
+answerModule._compile(esbuild.buildSync({ entryPoints: [answerModule.id], bundle: true, platform: 'node', format: 'cjs', write: false, logLevel: 'silent' }).outputFiles[0].text, answerModule.id);
+const { buildPentacleQuestionAnswerText } = answerModule.exports;
+
 
 function flush() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -22,7 +28,7 @@ function openDesktopQuestions(dom) {
   return dom.window.document.querySelector('.desktop-question-portal .slot-chat-question');
 }
 
-test('desktop question affordance opens a non-cosmic portal with desktop CSS contract', async () => {
+test('desktop question affordance opens a cosmic portal with desktop CSS contract', async () => {
   const { context, dom } = installRenderer();
   await flush();
   await flush();
@@ -36,7 +42,7 @@ test('desktop question affordance opens a non-cosmic portal with desktop CSS con
   const portal = dom.window.document.querySelector('.desktop-question-portal');
   assert.ok(portal);
   assert.equal(portal.parentElement, dom.window.document.body);
-  assert.equal(portal.classList.contains('cosmic'), false);
+  assert.equal(portal.classList.contains('cosmic'), true);
   assert.ok(portal.querySelector('.desktop-question-portal__close'));
   assert.ok(portal.querySelector('.desktop-question-portal__body'));
 
@@ -115,7 +121,7 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '' }
   const paneQuestion = questionOverride === undefined ? question : questionOverride;
 
   dom.window.PentacleChatCore = {
-    buildPentacleQuestionAnswerText: () => 'Answering your question:\n\nQ1 (Pick): Two',
+    buildPentacleQuestionAnswerText,
   };
   dom.window.PentacleChatStore = {
     selectSessionDetail(streamId) {
@@ -251,6 +257,45 @@ function mountRaceSlot(context) {
     renderSlotChat(0);
   `, context);
 }
+
+test('mobile parity: a pane group cannot submit until every page is answered', async () => {
+  const h = installRenderer({ dismissResult: { ok: true }, questionOverride: {
+    question_key: 'complete-group', multi: true,
+    questions: [
+      { index: 0, header: 'Color', prompt: 'Choose a color', options: [{ index: 1, label: 'Green' }] },
+      { index: 1, header: 'Size', prompt: 'Choose a size', options: [{ index: 1, label: 'Large' }] },
+    ],
+  } });
+  await flush(); await flush(); mountRaceSlot(h.context);
+  openDesktopQuestions(h.dom);
+  h.dom.window.document.querySelector('.slot-chat-question-option[data-option="1"]').click();
+  assert.equal(h.dom.window.document.querySelector('.slot-chat-question-submit').disabled, true);
+  assert.equal(h.dismissCalls.length, 0);
+  h.dom.window.document.querySelectorAll('.desktop-question-dot')[1].click();
+  h.dom.window.document.querySelector('.slot-chat-question-option[data-option="1"]').click();
+  h.dom.window.document.querySelector('.slot-chat-question-submit').click();
+  await flush(); await flush();
+  assert.equal(h.dismissCalls.length, 1);
+  assert.equal(h.dismissCalls[0].options.questionKey, 'complete-group');
+  assert.match(h.dismissCalls[0].options.text, /Q1 \(Color\): Green/);
+  assert.match(h.dismissCalls[0].options.text, /Q2 \(Size\): Large/);
+  h.dom.window.close();
+});
+
+test('mobile parity: pending history is loading and an RPC failure remains retryable', async () => {
+  const h = installRenderer({ questionOverride: null });
+  await flush(); await flush();
+  let finish;
+  h.dom.window.cc.requestStreamEvents = () => new Promise(resolve => { finish = resolve; });
+  h.dom.window.PentacleChatView.renderTranscriptTimelineHtml = () => '';
+  mountRaceSlot(h.context);
+  assert.match(h.dom.window.document.querySelector('.slot-chat-empty').textContent, /Loading/);
+  finish({ ok: false, error: 'History temporarily unavailable' });
+  await flush(); await flush();
+  assert.match(h.dom.window.document.querySelector('.slot-chat-empty').textContent, /could not|unable/i);
+  assert.ok(h.dom.window.document.querySelector('.slot-chat-history-retry'));
+  h.dom.window.close();
+});
 
 test('configured assistant role removes UI mutation routes and blocks direct close or rename', async () => {
   const { context, dom, closeCalls, killCalls, renameCalls, contextMenuCalls } = installRenderer({ assistantRole: 'persistent-assistant' });
@@ -765,4 +810,94 @@ test('durable ack question renders Acknowledge and submits its option value', as
   assert.equal(notificationResolveCalls.length, 1);
   assert.equal(notificationResolveCalls[0].actionKind, 'ack');
   assert.deepEqual(notificationResolveCalls[0].options.selections, ['acknowledged']);
+});
+
+test('mobile parity: pane and durable questions share one complete submission flow', async () => {
+  const h = installRenderer({ dismissResult: { ok: true } });
+  await flush(); await flush(); mountRaceSlot(h.context);
+  vm.runInContext(`indexDurableQuestionNotification({
+    notification_id: 'mixed-durable', producer: 'agent_question.v1', state: 'open',
+    title: 'Durable', body: 'Choose durable option', created_at: '2026-09-12T00:00:00Z',
+    question: { producer_stream_id: '${STREAM}', question_id: 'durable-question', state: 'open',
+      response_mode: 'single_choice', options: [{ label: 'Keep', value: 'keep' }] }
+  }); renderSlotChat(0);`, h.context);
+  openDesktopQuestions(h.dom);
+  const doc = h.dom.window.document;
+  assert.equal(doc.querySelectorAll('.desktop-question-dot').length, 2, 'pane and durable are both reachable');
+  doc.querySelector('.slot-chat-question-option[data-option="1"]').click();
+  assert.equal(doc.querySelector('.slot-chat-question-submit').disabled, true);
+  doc.querySelectorAll('.desktop-question-dot')[1].click();
+  doc.querySelector('.slot-chat-question-option[data-option="1"]').click();
+  assert.equal(doc.querySelector('.slot-chat-question-submit').disabled, false);
+  doc.querySelector('.slot-chat-question-submit').click();
+  await flush(); await flush();
+  assert.equal(h.dismissCalls.length, 1);
+  assert.equal(h.notificationResolveCalls.length, 1);
+  assert.equal(h.notificationResolveCalls[0].notificationId, 'mixed-durable');
+});
+
+test('mobile parity: composer cannot bypass incomplete multi-page questions', async () => {
+  const h = installRenderer({ dismissResult: { ok: true }, questionOverride: {
+    question_key: 'group-composer', multi: true, questions: [
+      { index: 0, prompt: 'First', options: [{ index: 1, label: 'One' }] },
+      { index: 1, prompt: 'Second', options: [{ index: 1, label: 'Two' }] },
+    ],
+  } });
+  await flush(); await flush(); mountRaceSlot(h.context);
+  const input = h.dom.window.document.querySelector('#cell-0 .slot-chat-compose-input');
+  input.value = 'Only one answer';
+  await vm.runInContext('sendChatComposer(0)', h.context);
+  assert.equal(h.dismissCalls.length, 0);
+  assert.equal(h.sendCalls.length, 0);
+  assert.equal(input.value, 'Only one answer');
+  assert.ok(h.dom.window.document.querySelector('.desktop-question-portal'));
+});
+
+function durableFixture(id) {
+  return { notification_id: id, producer: 'agent_question.v1', state: 'open', title: id,
+    answer_to_stream_id: STREAM, question: { question_id: id, producer_stream_id: STREAM,
+      state: 'open', response_mode: 'single_choice', options: [{ label: 'Keep', value: 'keep' }] } };
+}
+
+test('mobile parity: partial durable failure retains drafts and never repeats a successful answer', async () => {
+  const h = installRenderer({ questionOverride: null });
+  await flush(); await flush(); mountRaceSlot(h.context);
+  const first = durableFixture('a-first'); const second = durableFixture('b-second');
+  const calls = [];
+  h.dom.window.cc.notificationResolve = async id => {
+    calls.push(id);
+    if (id === 'b-second' && calls.filter(x => x === id).length === 1) return { ok: false, error: 'temporary failure' };
+    return { ok: true, notification: { ...(id === 'a-first' ? first : second), state: 'answered', question: { ...(id === 'a-first' ? first : second).question, state: 'answered', answer: { selections: ['keep'] } } } };
+  };
+  h.dom.window.cc.promptList = async () => ({ ok: true, questions: [{ notification_id: second.notification_id,
+    question_id: second.question.question_id, producer_stream_id: STREAM, state: 'open',
+    envelope: { title: second.title, response_mode: 'single_choice', options: second.question.options } }] });
+  vm.runInContext(`indexDurableQuestionNotification(${JSON.stringify(first)});indexDurableQuestionNotification(${JSON.stringify(second)});renderSlotChat(0);`, h.context);
+  const doc = h.dom.window.document;
+  openDesktopQuestions(h.dom);
+  doc.querySelector('.slot-chat-question-option').click();
+  doc.querySelectorAll('.desktop-question-dot')[1].click();
+  doc.querySelector('.slot-chat-question-option').click();
+  doc.querySelector('.slot-chat-question-submit').click();
+  await flush(); await flush();
+  assert.deepEqual(calls, ['a-first', 'b-second']);
+  assert.ok(doc.querySelector('.slot-chat-question-option.is-selected'));
+  assert.equal(doc.querySelector('.slot-chat-question-submit').disabled, false);
+  doc.querySelector('.slot-chat-question-submit').click();
+  await flush(); await flush();
+  assert.deepEqual(calls, ['a-first', 'b-second', 'b-second']);
+});
+
+test('mobile parity: a lost durable reply blocks resubmission until status is reconciled', async () => {
+  const h = installRenderer({ questionOverride: null });
+  await flush(); await flush(); mountRaceSlot(h.context);
+  h.dom.window.cc.notificationResolve = async () => { throw new Error('reply lost'); };
+  h.dom.window.cc.promptList = async () => { throw new Error('offline'); };
+  vm.runInContext(`indexDurableQuestionNotification(${JSON.stringify(durableFixture('uncertain'))});renderSlotChat(0);`, h.context);
+  openDesktopQuestions(h.dom);
+  h.dom.window.document.querySelector('.slot-chat-question-option').click();
+  h.dom.window.document.querySelector('.slot-chat-question-submit').click();
+  await flush(); await flush();
+  assert.equal(h.dom.window.document.querySelector('.slot-chat-question-submit').disabled, true);
+  assert.ok(h.dom.window.document.querySelector('.slot-chat-question-reconcile'));
 });

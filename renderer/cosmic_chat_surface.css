@@ -140,8 +140,8 @@
 /* ── Bubbles ───────────────────────────────────────────────────────── */
 
 [data-density="compact"] .cosmic {
-  --cosmic-type-body: 11.5px;
-  --cosmic-type-compact-body: 11.5px;
+  --cosmic-type-body: 12px;
+  --cosmic-type-compact-body: 12px;
   --cosmic-type-compose: 12px;
 }
 
@@ -149,8 +149,9 @@
    beveled panel in the cosmic palette. */
 .cosmic .slot-chat-user-bubble {
   font-family: var(--cosmic-font-mono);
-  font-size: var(--cosmic-type-compact-body);
-  background: var(--cosmic-panel);
+  font-size: 13px;
+  line-height: 20px;
+  background: color-mix(in srgb, var(--machine, var(--cosmic-green)) 10%, var(--cosmic-panel));
   color: var(--cosmic-text);
   border: 1px solid var(--cosmic-line);
   border-radius: 0;
@@ -166,8 +167,10 @@
 
 /* Assistant prose — Rajdhani display family; code/inline-code stay mono below. */
 .cosmic .slot-chat-assistant-card {
-  font-family: var(--cosmic-font-display);
+  font-family: var(--cosmic-font-display-medium);
   font-size: var(--cosmic-type-body);
+  font-weight: 500;
+  line-height: 22px;
   color: var(--cosmic-text);
 }
 
@@ -415,3 +418,57 @@
   color: var(--cosmic-muted);
   font-family: var(--cosmic-font-mono);
 }
+
+/* Mobile reading rhythm, with desktop density and native disclosure controls. */
+[data-density="compact"] .cosmic .slot-chat-assistant-card,
+[data-density="compact"] .cosmic .slot-chat-user-bubble { font-size: 12px; line-height: 18px; }
+.cosmic .slot-chat-row, .cosmic .slot-chat-assistant-card { min-width: 0; max-width: 100%; }
+.cosmic .slot-chat-disclosure { min-width: 0; width: 100%; border: 1px solid var(--cosmic-line); padding: 8px 10px; background: var(--cosmic-panel); font: 13px/20px var(--cosmic-font-mono); }
+.cosmic .slot-chat-disclosure summary, .cosmic .slot-chat-file-body summary { cursor: pointer; overflow-wrap: anywhere; }
+.cosmic .slot-chat-disclosure-label { display: block; color: var(--machine, var(--cosmic-green)); font-weight: 600; }
+.cosmic .slot-chat-disclosure-preview { white-space: pre-wrap; }
+.cosmic .slot-chat-disclosure-tail { display: block; color: var(--cosmic-muted); }
+.cosmic .slot-chat-disclosure[open] .slot-chat-disclosure-preview,
+.cosmic .slot-chat-disclosure[open] .slot-chat-disclosure-tail,
+.cosmic .slot-chat-file-body[open] summary pre { display: none; }
+.cosmic .slot-chat-file-body summary pre { max-height: 120px; overflow: auto; font: 12px/18px var(--cosmic-font-mono); }
+.cosmic .slot-chat-md-code { max-width: 100%; overflow-x: auto; white-space: pre; }
+.cosmic .slot-chat-answer-item + .slot-chat-answer-item { margin-top: 12px; }
+.cosmic .slot-chat-answer-note { margin: 4px 0 0; color: var(--cosmic-muted); }
+.cosmic .slot-chat-history-state { padding: 8px 0; color: var(--cosmic-muted); font: 12px/18px var(--cosmic-font-mono); }
+.cosmic .slot-chat-history-retry { margin-left: 8px; color: var(--machine); background: transparent; border: 1px solid currentColor; padding: 4px 8px; cursor: pointer; }
+.cosmic .slot-chat-question-open { font-family: var(--cosmic-font-mono); color: var(--machine); border-color: var(--machine); background: var(--cosmic-panel); }
+.desktop-question-portal.cosmic { font-family: var(--cosmic-font-display); color: var(--cosmic-text); }
+.desktop-question-portal.cosmic .desktop-question-portal__frame { display: flex; flex-direction: column; max-height: calc(100dvh - 32px); min-height: 0; padding: 20px; background: var(--cosmic-panel); border-color: var(--machine); }
+.desktop-question-portal.cosmic .desktop-question-portal__header { flex: 0 0 auto; margin-bottom: 16px; }
+.desktop-question-portal.cosmic .desktop-question-portal__body { display: flex; min-height: 0; max-height: calc(100dvh - 132px); overflow: hidden; font-family: var(--cosmic-font-display); }
+.desktop-question-portal.cosmic .desktop-question-portal__eyebrow { font-family: var(--cosmic-font-mono); color: var(--machine); }
+.desktop-question-portal.cosmic .desktop-question-portal__close { color: var(--cosmic-text); }
+.desktop-question-portal.cosmic .slot-chat-question { display: flex; flex-direction: column; min-height: 0; width: 100%; padding-top: 8px; }
+.desktop-question-portal.cosmic .slot-chat-question-card { display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 12px; }
+.desktop-question-portal.cosmic .slot-chat-question-fields { min-height: 0; overflow: auto; padding: 2px; }
+.desktop-question-portal.cosmic .slot-chat-question-prompt { font: 500 17px/24px var(--cosmic-font-display); overflow-wrap: anywhere; }
+.desktop-question-portal.cosmic .slot-chat-question-option,
+.desktop-question-portal.cosmic .slot-chat-question-custom { font: 13px/20px var(--cosmic-font-mono); white-space: normal; overflow-wrap: anywhere; }
+.desktop-question-portal.cosmic .slot-chat-question-custom { cursor: pointer; margin: 8px 0; padding: 8px 10px; background: var(--cosmic-panel); color: var(--cosmic-text); border: 1px solid var(--cosmic-line); }
+.desktop-question-portal.cosmic .slot-chat-question-option.is-selected,
+.desktop-question-portal.cosmic .slot-chat-question-custom.is-selected { border-color: var(--machine); background: color-mix(in srgb, var(--machine) 12%, var(--cosmic-panel)); }
+.desktop-question-portal.cosmic .slot-chat-question-freetext,
+.desktop-question-portal.cosmic .slot-chat-question-note { font: 13px/20px var(--cosmic-font-mono); max-width: 100%; box-sizing: border-box; }
+.desktop-question-portal.cosmic .slot-chat-question-actions { flex: 0 0 auto; flex-wrap: wrap; background: var(--cosmic-panel); }
+.desktop-question-portal.cosmic .slot-chat-question-submit { color: var(--cosmic-text); border-color: var(--machine); background: color-mix(in srgb, var(--machine) 15%, var(--cosmic-panel)); }
+.desktop-question-portal.cosmic .slot-chat-question-pager { flex: 0 0 auto; gap: 8px; }
+.desktop-question-portal.cosmic .desktop-question-dots { flex-wrap: wrap; justify-content: center; }
+.desktop-question-portal.cosmic .desktop-question-dot { width: 24px; height: 24px; font: 11px var(--cosmic-font-mono); color: var(--cosmic-text); background: var(--cosmic-panel); border: 1px solid var(--cosmic-line); }
+.desktop-question-portal.cosmic .desktop-question-dot.is-active { border-color: var(--machine); }
+.desktop-question-portal.cosmic .desktop-question-dot.is-answered { background: color-mix(in srgb, var(--machine) 25%, var(--cosmic-panel)); }
+.desktop-question-portal.cosmic .slot-chat-question-constraint { flex: 0 0 auto; color: var(--cosmic-muted); font: 12px/18px var(--cosmic-font-mono); }
+.cosmic summary:focus-visible, .desktop-question-portal.cosmic button:focus-visible,
+.desktop-question-portal.cosmic textarea:focus-visible { outline: 2px solid var(--machine); outline-offset: 2px; }
+
+.desktop-question-portal.cosmic .slot-chat-question { border: 0; background: transparent; margin: 0; padding: 0; }
+.desktop-question-portal.cosmic .slot-chat-question-page,
+.desktop-question-portal.cosmic .slot-chat-question-reconcile { font: 12px/18px var(--cosmic-font-mono); background: var(--cosmic-panel); color: var(--cosmic-text); border: 1px solid var(--cosmic-line); border-radius: 6px; padding: 6px 9px; cursor: pointer; }
+.desktop-question-portal.cosmic .slot-chat-question-reconcile { flex: 0 0 auto; border-color: var(--machine); }
+
+.desktop-question-portal.cosmic .slot-chat-question-option:hover:not(:disabled) { border-color: var(--machine); }

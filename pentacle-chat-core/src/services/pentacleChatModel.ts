@@ -89,6 +89,8 @@ export type PentacleUnifiedFeedItem = {
   chatTitle: string;
   accent: string;
   timestampLabel: string;
+  /** Original event time for interleaving authoritative answer projections. */
+  timestamp?: string;
   text: string;
   kind: string;
   event: PentacleEvent;
@@ -693,6 +695,7 @@ function sameTranscriptItem(a: PentacleTranscriptItem, b: PentacleTranscriptItem
   return (
     a.id === b.id &&
     a.timestampLabel === b.timestampLabel &&
+    a.timestamp === b.timestamp &&
     a.label === b.label &&
     a.tone === b.tone &&
     a.provider === b.provider &&
@@ -1700,6 +1703,7 @@ function buildSessionTranscriptRows(
     const nextItem: PentacleTranscriptItem = {
       id: event.optimistic_id || (Number.isFinite(authoritativeSeq) ? String(authoritativeSeq) : String(event.daemon_seq)),
       timestampLabel,
+      timestamp: event.timestamp,
       label: item.label,
       tone: item.tone,
       provider: String(event.provider || ''),
@@ -1900,6 +1904,7 @@ function buildSessionTranscriptRows(
     const fallbackItem = reuseTranscriptItem(previousItems, {
       id: `fallback:${streamId}`,
       timestampLabel,
+      timestamp: session.last_event_at,
       label: fallbackInterpretation.label,
       tone: fallbackInterpretation.tone,
       provider: String(session.provider || ''),

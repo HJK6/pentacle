@@ -9,26 +9,35 @@
 // merges the ring into its own buffer and re-emits a snapshot payload that
 // re-enters applyChatStreamPayload, repopulating `state.chatStream.events`.
 
-function ensureChatEventsLoaded(streamState, streamId, cc, logger = console) {
-  // Idempotent per stream until disconnect clears the set.
+function ensureChatEventsLoaded(streamState, streamId, cc, logger = console, options = {}) {
   const id = String(streamId || '');
-  if (!id) return false;
-  if (!streamState) return false;
-  if (!streamState.eventsLoadedFor) return false;
-  if (streamState.eventsLoadedFor.has(id)) return false;
-  if (!streamState.connected) return false;
+  if (!id || !streamState?.eventsLoadedFor || !streamState.connected) return false;
   if (!cc || typeof cc.requestStreamEvents !== 'function') return false;
-
+  const loads = streamState.historyLoads || (streamState.historyLoads = {});
+  if (streamState.eventsLoadedFor.has(id)) return false;
+  if (loads[id]?.status === 'error' && !options.retry) return false;
+  const request = { status: 'loading', error: '' };
+  loads[id] = request;
   streamState.eventsLoadedFor.add(id);
-  cc.requestStreamEvents({ streamId: id }).then((reply) => {
+  const complete = (reply) => {
+    // Disconnect/retry replaces this identity. An older result cannot finish a new request.
+    if (!streamState.connected || streamState.historyLoads?.[id] !== request) return;
     if (!reply || reply.ok === false) {
+      request.status = 'error';
+      request.error = String(reply?.error || 'History request failed');
       streamState.eventsLoadedFor.delete(id);
-      logger.warn?.('[ChatStream] requestStreamEvents failed:', id, reply?.error);
+      logger.warn?.('[ChatStream] requestStreamEvents failed:', id, request.error);
+    } else {
+      request.status = 'loaded';
     }
-  }).catch((err) => {
-    streamState.eventsLoadedFor.delete(id);
-    logger.warn?.('[ChatStream] requestStreamEvents threw:', id, err?.message || err);
-  });
+    options.onChange?.(id);
+  };
+  try {
+    Promise.resolve(cc.requestStreamEvents({ streamId: id }))
+      .then(complete, error => complete({ ok: false, error: error?.message || error }));
+  } catch (error) {
+    complete({ ok: false, error: error?.message || error });
+  }
   return true;
 }
 
@@ -45,6 +54,7 @@ function refetchEventsForActiveChatSlots(args) {
     streamHostForHostId,
     findStreamSession,
     logger = console,
+    onChange,
   } = args || {};
   if (!streamState) return 0;
   let triggered = 0;
@@ -57,7 +67,7 @@ function refetchEventsForActiveChatSlots(args) {
       ? findStreamSession(streamState, session, host)
       : null;
     const streamId = streamSession?.stream_id;
-    if (streamId && ensureChatEventsLoaded(streamState, streamId, cc, logger)) {
+    if (streamId && ensureChatEventsLoaded(streamState, streamId, cc, logger, { onChange })) {
       triggered += 1;
     }
   }

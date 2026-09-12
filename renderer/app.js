@@ -41,9 +41,7 @@ const {
   refetchEventsForActiveChatSlots: _refetchEventsForActiveChatSlots,
 } = require('./chat_events_lazy');
 const {
-  answerHasContent,
-  answerHasSelection,
-  buildAnswersForQuestion,
+  answerConstraint,
   questionItems,
   renderQuestionOptionB,
 } = require('./question_option_b');
@@ -559,12 +557,14 @@ function isOpenDurableQuestionNotification(notification) {
 function indexDurableQuestionNotification(notification) {
   const id = durableQuestionNotificationId(notification);
   if (!id) return false;
-  if (isOpenDurableQuestionNotification(notification) && durableQuestionStreamId(notification)) {
-    state.durableQuestionNotificationsById[id] = notification;
-  } else if (state.durableQuestionNotificationsById[id]) {
-    delete state.durableQuestionNotificationsById[id];
-  } else {
-    return false;
+  const previous = state.durableQuestionNotificationsById[id];
+  const merged = { ...previous, ...notification, question: { ...previous?.question, ...notification.question } };
+  if (merged.producer !== 'agent_question.v1' || !durableQuestionStreamId(merged)) return false;
+  // A stale open inventory cannot resurrect an already resolved identity.
+  if (previous && !isOpenDurableQuestionNotification(previous) && isOpenDurableQuestionNotification(merged)) return false;
+  state.durableQuestionNotificationsById[id] = merged;
+  if (!isOpenDurableQuestionNotification(merged)) {
+    for (const uncertain of Object.values(state.questionUncertainIdsByStream || {})) uncertain.delete(id);
   }
   return true;
 }
@@ -573,8 +573,13 @@ function getOpenQuestionsForStream(streamId) {
   const wanted = String(streamId || '').trim();
   if (!wanted) return [];
   return Object.values(state.durableQuestionNotificationsById || {})
-    .filter((notification) => durableQuestionSurfacesInStream(notification, wanted))
-    .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+    .filter(notification => isOpenDurableQuestionNotification(notification) && durableQuestionSurfacesInStream(notification, wanted))
+    .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')) || durableQuestionNotificationId(a).localeCompare(durableQuestionNotificationId(b)));
+}
+
+function resolvedQuestionsForStream(streamId) {
+  return Object.values(state.durableQuestionNotificationsById || {})
+    .filter(notification => !isOpenDurableQuestionNotification(notification) && durableQuestionSurfacesInStream(notification, streamId));
 }
 
 // unreadReportCountForStream — number of report assets in this stream the
@@ -624,9 +629,11 @@ function notificationFromAgentQuestion(question, surfacedToStreamId = '') {
     title: envelope.title || 'Question',
     body: envelope.body || '',
     created_at: question.created_at || envelope.created_at || '',
+    resolved_at: question.resolved_at || question.answered_at || question.answer?.at || '',
     answer_to_stream_id: producerStreamId,
     surfaced_to_stream_id: String(surfacedToStreamId || '').trim() || undefined,
     question: {
+      ...envelope,
       question_id: question.question_id,
       producer_stream_id: producerStreamId,
       response_mode: envelope.response_mode || 'single_choice',
@@ -652,6 +659,9 @@ function applyPromptListQuestions(reply, streamId) {
     returnedIds.add(durableQuestionNotificationId(notification));
     indexDurableQuestionNotification(notification);
   }
+  for (const uncertain of Object.values(state.questionUncertainIdsByStream || {})) {
+    for (const id of returnedIds) uncertain.delete(id);
+  }
   if (scopedStreamIds.size > 0) {
     for (const [notificationId, notification] of Object.entries(state.durableQuestionNotificationsById || {})) {
       if (returnedIds.has(notificationId)) continue;
@@ -668,7 +678,7 @@ function ensureDurableQuestionsHydrated(streamId) {
   if (!wanted || !window.cc || typeof window.cc.promptList !== 'function') return;
   if (state.durableQuestionHydrationByStream[wanted]) return;
   state.durableQuestionHydrationByStream[wanted] = 'loading';
-  window.cc.promptList({ producer_stream_id: wanted, open: true })
+  window.cc.promptList({ producer_stream_id: wanted, open: false })
     .then((reply) => {
       applyPromptListQuestions(reply, wanted);
       state.durableQuestionHydrationByStream[wanted] = 'done';
@@ -687,6 +697,9 @@ function durableQuestionOptionBModel(notification) {
   }
   const allowCustom = question.allow_custom === true || question.allowCustom === true;
   return {
+    ...question,
+    free_text: question.response_mode === 'free_text' || allowCustom,
+    _unavailable: Array.isArray(question.questions) && question.questions.length > 0,
     question_key: question.question_id || durableQuestionNotificationId(notification),
     header: notification?.title || 'Question',
     prompt: notification?.body || '',
@@ -703,19 +716,23 @@ function durableQuestionOptionBModel(notification) {
   };
 }
 
-function durableQuestionSignature(notification) {
-  const question = notification?.question || {};
-  const optionSig = (Array.isArray(question.options) ? question.options : [])
-    .map((opt) => `${opt?.label || ''}:${JSON.stringify(opt?.value)}:${opt?.description || ''}`)
-    .join('|');
-  return [
-    durableQuestionNotificationId(notification),
-    question.question_id || '',
-    question.response_mode || '',
-    question.allow_custom === true || question.allowCustom === true ? 'custom' : '',
-    question.state || '',
-    optionSig,
-  ].join('::');
+function questionModelSignature(model) {
+  // Hydration metadata (answer/state/timestamps) does not change an open form.
+  // Only its identity and answerable content can invalidate a draft.
+  return JSON.stringify([
+    model.header || '', model.prompt || '', !!model.multiSelect, !!model.customText, model.free_text !== false,
+    !!model._unavailable,
+    (model.options || []).map(option => [option.index, option.label || '', option.value ?? null, option.description || '', !!option.meta]),
+    ...['min_select', 'min_selected', 'minSelections', 'min', 'max_select', 'max_selected', 'maxSelections', 'max'].map(key => model[key] ?? null),
+  ]);
+}
+
+async function reconcileQuestionAnswers(streamId) {
+  if (!window.cc?.promptList) throw new Error('Question status is unavailable.');
+  const reply = await window.cc.promptList({ producer_stream_id: streamId, open: false });
+  if (!reply || reply.ok === false || !Array.isArray(reply.questions)) throw new Error(reply?.error || 'Question status could not be checked.');
+  applyPromptListQuestions(reply, streamId);
+  scheduleDurableQuestionSlotRenders();
 }
 
 function durableQuestionActionKind(notification) {
@@ -725,21 +742,10 @@ function durableQuestionActionKind(notification) {
   return notification?.question?.response_mode === 'ack' ? 'ack' : 'yes_no';
 }
 
-function questionPageCount(question) {
-  if (window.PentacleChatCore?.questionPageCount) return window.PentacleChatCore.questionPageCount(question);
-  if (question && Array.isArray(question.questions) && question.questions.length) return question.questions.length;
-  return question ? 1 : 0;
-}
-
 function clampQuestionPageIndex(index, count) {
   if (window.PentacleChatCore?.clampQuestionPageIndex) return window.PentacleChatCore.clampQuestionPageIndex(index, count);
   if (count <= 0) return 0;
   return Math.min(Math.max(Number.isFinite(Number(index)) ? Math.trunc(Number(index)) : 0, 0), count - 1);
-}
-
-function questionPageQuestion(question, index) {
-  if (window.PentacleChatCore?.questionPageQuestion) return window.PentacleChatCore.questionPageQuestion(question, index);
-  return question;
 }
 
 function captureQuestionFocus(questionEl) {
@@ -753,6 +759,7 @@ function captureQuestionFocus(questionEl) {
       ? 'slot-chat-question-note'
       : 'slot-chat-question-freetext',
     questionIndex: active.dataset.questionIndex || '',
+    questionKey: active.dataset.questionKey || '',
     selectionStart: active.selectionStart,
     selectionEnd: active.selectionEnd,
   };
@@ -766,7 +773,8 @@ function cssAttrValue(value) {
 
 function restoreQuestionFocus(questionEl, focus) {
   if (!questionEl || !focus) return;
-  const selector = `.${focus.className}[data-question-index="${cssAttrValue(focus.questionIndex)}"]`;
+  const identity = focus.questionKey ? `data-question-key="${cssAttrValue(focus.questionKey)}"` : `data-question-index="${cssAttrValue(focus.questionIndex)}"`;
+  const selector = `.${focus.className}[${identity}]`;
   const target = questionEl.querySelector(selector);
   if (!target || typeof target.focus !== 'function') return;
   target.focus({ preventScroll: true });
@@ -783,7 +791,7 @@ function desktopQuestionPortal(streamId, questionEl) {
   if (!portal) {
     portal = document.createElement('section');
     portal.id = portalId;
-    portal.className = 'desktop-question-portal';
+    portal.className = 'desktop-question-portal cosmic';
     portal.setAttribute('role', 'dialog');
     portal.setAttribute('aria-modal', 'true');
     portal.innerHTML = '<div class="desktop-question-portal__frame"><header class="desktop-question-portal__header"><span class="desktop-question-portal__eyebrow">QUESTIONS</span><button type="button" class="desktop-question-portal__close">Cancel</button></header><div class="desktop-question-portal__body"></div></div>';
@@ -937,8 +945,14 @@ function scheduleSidebarRerender() {
   else setTimeout(run, 0);
 }
 
-function ensureChatEventsLoaded(streamId) {
-  return _ensureChatEventsLoaded(state.chatStream, streamId, window?.cc);
+function onChatHistoryChanged(streamId) {
+  for (let slot = 0; slot < state.slots.length; slot++) {
+    if (state.slotChatBoundStream[slot] === streamId) scheduleSlotChatRender(slot);
+  }
+}
+
+function ensureChatEventsLoaded(streamId, retry = false) {
+  return _ensureChatEventsLoaded(state.chatStream, streamId, window?.cc, console, { retry, onChange: onChatHistoryChanged });
 }
 
 function refetchEventsForActiveChatSlots() {
@@ -950,6 +964,7 @@ function refetchEventsForActiveChatSlots() {
     cc: window?.cc,
     streamHostForHostId,
     findStreamSession: chatUi.findStreamSessionForDesktopSession,
+    onChange: onChatHistoryChanged,
   });
 }
 
@@ -1708,6 +1723,7 @@ function applyChatStreamState(data) {
   // chat panes need an RPC backfill on reconnect.
   if (!state.chatStream.connected) {
     state.chatStream.eventsLoadedFor.clear();
+    state.chatStream.historyLoads = {};
   } else if (!wasConnected) {
     refetchEventsForActiveChatSlots();
     refetchAssetSnapshotsForActiveSlots();
@@ -2656,7 +2672,12 @@ function jumpToLatestChat(slot) {
 
 function applySlotChatListRender(slot, refs, render) {
   if (!refs?.listEl || !render) return;
-  refs.listEl.innerHTML = render.html;
+  if (window.PentacleChatView?.replaceTranscriptHtml) window.PentacleChatView.replaceTranscriptHtml(refs.listEl, render.html);
+  else refs.listEl.innerHTML = render.html;
+  refs.listEl.querySelector('.slot-chat-history-retry')?.addEventListener('click', () => {
+    ensureChatEventsLoaded(render.paintedStreamId, true);
+    renderSlotChat(slot);
+  });
   refs.listEl.dataset.streamId = render.paintedStreamId || '';
   state.slotChatLastListHtml[slot] = render.cacheKey;
   // Explicit retry belongs to the transcript surface: it keeps the failed or
@@ -2953,11 +2974,21 @@ function renderSlotChat(slot) {
   // Shared-core transcript render (desktop_chat_ui_mobile_parity): render the
   // transcript timeline HTML via window.PentacleChatView from the store-derived
   // `detail`. This is the ONLY transcript render path.
-  const transcriptHtml = (detail && window.PentacleChatView
+  const renderedTranscript = (detail && window.PentacleChatView
     ? window.PentacleChatView.renderTranscriptTimelineHtml(detail, chrome, {
       showTurnDuration,
+      resolvedQuestions: resolvedQuestionsForStream(streamId),
     })
-    : '') || `<div class="slot-chat-empty">${state.chatStream.connected ? 'No recent chat activity.' : 'Chat stream offline.'}</div>`;
+    : '') || '';
+  const history = state.chatStream.historyLoads?.[streamId];
+  const historyMessage = !state.chatStream.connected ? 'Reconnecting…'
+    : history?.status === 'error' ? 'Messages could not be loaded.'
+      : history?.status !== 'loaded' ? (renderedTranscript ? 'Syncing messages…' : 'Loading messages…') : '';
+  const historyRetry = state.chatStream.connected && history?.status === 'error'
+    ? '<button type="button" class="slot-chat-history-retry">Retry</button>' : '';
+  const transcriptHtml = renderedTranscript
+    ? `${historyMessage ? `<div class="slot-chat-history-state" role="status">${historyMessage}${historyRetry}</div>` : ''}${renderedTranscript}`
+    : `<div class="slot-chat-empty" role="status">${historyMessage || 'No messages yet.'}${historyRetry}</div>`;
 
   // Cosmic theme (workstream D): arcane header ornaments for the ACTIVE machine —
   // the ArcaneRingFrame-wrapped MachineSigil, the Cinzel epithet, and the
@@ -3006,7 +3037,7 @@ function renderSlotChat(slot) {
         </div>
       </div>
       ${transcriptHtml}`
-    : `<div class="slot-chat-empty">${state.chatStream.connected ? 'Waiting for websocket session detail.' : 'Chat stream offline.'}</div>`;
+    : `<div class="slot-chat-empty">${state.chatStream.connected ? 'Loading chat…' : 'Reconnecting…'}</div>`;
 
   // Bug1 (chat_ui_hardening_batch3): tag the rendered list with the stream whose
   // transcript was actually painted (empty/leaked => ''), so a DOM check can
@@ -3123,318 +3154,186 @@ function renderSlotChat(slot) {
     syncWorkingTimer();
   }
 
-  // Agent-asked question card (claude AskUserQuestion selector) and durable
-  // agent_question.v1 cards. Pane questions still settle through
-  // question.dismiss; durable questions resolve by notification id.
+  // One ordered flow covers pane children followed by durable notifications.
+  // Draft and settlement identities are source identities, never page positions.
   if (refs.questionEl) {
-    const question = streamId && window.PentacleChatStore
-      && typeof window.PentacleChatStore.getQuestion === 'function'
-      ? window.PentacleChatStore.getQuestion(streamId)
-      : null;
-    const isMultiQuestion = !!(question && question.multi && Array.isArray(question.questions) && question.questions.length);
-    const hasSingleQuestion = !!(question && Array.isArray(question.options) && question.options.length);
-    const hasPaneQuestion = !!(question && (isMultiQuestion || hasSingleQuestion));
+    const question = streamId ? window.PentacleChatStore?.getQuestion?.(streamId) : null;
     if (streamId) ensureDurableQuestionsHydrated(streamId);
-    const durableQuestions = streamId ? getOpenQuestionsForStream(streamId) : [];
-    if (hasPaneQuestion || durableQuestions.length) {
-      state.desktopQuestionOverlayOpen = state.desktopQuestionOverlayOpen || {};
-      if (!state.desktopQuestionOverlayOpen[streamId]) {
-        refs.questionEl.innerHTML = '';
-        refs.questionEl.style.display = '';
-        const open = document.createElement('button');
-        open.type = 'button';
-        open.className = 'slot-chat-question-open';
-        const unanswered = (hasPaneQuestion ? questionPageCount(question) : durableQuestions.length);
-        open.textContent = `${unanswered} unanswered`;
-        open.addEventListener('click', () => {
-          state.desktopQuestionOverlayOpen[streamId] = true;
-          renderSlotChat(slot);
-        });
-        refs.questionEl.appendChild(open);
-      } else {
-      const focusToRestore = captureQuestionFocus(refs.questionEl);
-      const pageCount = hasPaneQuestion ? questionPageCount(question) : durableQuestions.length;
-      const pageIdentity = hasPaneQuestion
-        ? `${question.question_key || ''}:${question.header || ''}:${question.prompt || ''}:${questionPageCount(question)}`
-        : durableQuestions.map((item) => durableQuestionNotificationId(item)).join('|');
-      const pageKey = hasPaneQuestion ? `${streamId}:pane:${pageIdentity}` : `${streamId}:durable:${pageIdentity}`;
-      const activePageIndex = clampQuestionPageIndex(state.questionPageIndexByStream[pageKey] || 0, pageCount);
-      state.questionPageIndexByStream[pageKey] = activePageIndex;
-      const pagerLabel = pageCount > 1 ? `${activePageIndex + 1}/${pageCount}` : '';
-      const renderPager = () => {
-        if (!pagerLabel) return;
-        const pager = document.createElement('div');
-        pager.className = 'slot-chat-question-pager';
-        const prev = document.createElement('button');
-        prev.type = 'button';
-        prev.className = 'slot-chat-question-page';
-        prev.textContent = 'Prev';
-        prev.disabled = activePageIndex <= 0;
-        prev.addEventListener('click', () => {
-          state.questionPageIndexByStream[pageKey] = clampQuestionPageIndex(activePageIndex - 1, pageCount);
-          renderSlotChat(slot);
-        });
-        const dots = document.createElement('div');
-        dots.className = 'desktop-question-dots';
-        for (let index = 0; index < pageCount; index += 1) {
-          const dot = document.createElement('button');
-          dot.type = 'button';
-          dot.className = 'desktop-question-dot';
-          dot.classList.toggle('is-active', index === activePageIndex);
-          const draftKey = hasPaneQuestion
-            ? `${streamId}:pane:${index}`
-            : `${streamId}:durable:${durableQuestionNotificationId(durableQuestions[index])}`;
-          const draft = state.questionDrafts?.[draftKey];
-          const answered = Object.values(draft?.answers || {}).some(answerHasContent);
-          dot.classList.toggle('is-answered', answered);
-          dot.setAttribute('aria-label', `Question ${index + 1}`);
-          dot.addEventListener('click', () => {
-            state.questionPageIndexByStream[pageKey] = index;
-            renderSlotChat(slot);
-          });
-          dots.appendChild(dot);
-        }
-        const next = document.createElement('button');
-        next.type = 'button';
-        next.className = 'slot-chat-question-page';
-        next.textContent = 'Next';
-        next.disabled = activePageIndex >= pageCount - 1;
-        next.addEventListener('click', () => {
-          state.questionPageIndexByStream[pageKey] = clampQuestionPageIndex(activePageIndex + 1, pageCount);
-          renderSlotChat(slot);
-        });
-        pager.appendChild(prev);
-        pager.appendChild(dots);
-        pager.appendChild(next);
-        refs.questionEl.appendChild(pager);
-      };
-      refs.questionEl.innerHTML = '';
-      refs.questionEl.style.display = '';
-      state.answeredQuestionSig = state.answeredQuestionSig || {};
-      renderPager();
-
-      if (hasPaneQuestion) {
-        const activeQuestion = questionPageQuestion(question, activePageIndex);
-        const paneContainer = document.createElement('div');
-        paneContainer.className = 'slot-chat-question-card';
-        refs.questionEl.appendChild(paneContainer);
-
-        // Once the user picks an option, keep the card disabled until the daemon
-        // clears or changes the question — otherwise a ~1Hz re-render (same
-        // pending question) would rebuild enabled buttons and a stray second click
-        // could land a digit on the next selector. Keyed by a question signature
-        // so a genuinely new question re-enables.
-        const activeIsMultiQuestion = !!(activeQuestion && activeQuestion.multi && Array.isArray(activeQuestion.questions) && activeQuestion.questions.length);
-        const questionSig = activeIsMultiQuestion
-          ? `${activeQuestion.questions.map((q, pos) => {
-              const qIndex = Number.isFinite(Number(q.index)) ? Number(q.index) : pos;
-              const options = Array.isArray(q.options) ? q.options.map((o) => `${o.index}:${o.label}`).join(',') : '';
-              return `${qIndex}:${q.header || ''}:${q.prompt || ''}:${options}:${q.free_text ? 'free' : ''}`;
-            }).join('|')}|scan:${activeQuestion.scan_incomplete ? '1' : '0'}`
-          : `${activeQuestion.header || ''}|${activeQuestion.prompt || ''}|${activeQuestion.options.map((o) => `${o.index}:${o.label}`).join(',')}|ms:${activeQuestion.multiSelect ? '1' : '0'}`;
-        const draftStreamId = `${streamId}:pane:${activePageIndex}`;
-        if (state.answeredQuestionSig[draftStreamId] && state.answeredQuestionSig[draftStreamId] !== questionSig) {
-          delete state.answeredQuestionSig[draftStreamId]; // a different question — re-enable
-        }
-        const alreadyAnswered = state.answeredQuestionSig[draftStreamId] === questionSig;
-
-        const settleQuestion = async (text) => {
-          const questionKey = question.question_key;
-          if (!questionKey) {
-            setSlotSendError(slot, 'Question is missing a daemon question key.');
-            throw new Error('missing question_key');
-          }
-          if (!window.cc || typeof window.cc.chatDismissQuestion !== 'function') {
-            setSlotSendError(slot, 'Question dismiss is unavailable.');
-            throw new Error('question dismiss unavailable');
-          }
-          const result = await window.cc.chatDismissQuestion(session.hostId, session.name, {
-            questionKey,
-            text,
-          });
-          if (result?.ok) {
-            setSlotSendError(slot, '');
-            if (state.questionDrafts) delete state.questionDrafts[draftStreamId];
-            return;
-          }
-          const errorCode = result?.error_code || '';
-          const preserveDismissedText = (message) => {
-            state.slotDrafts[slot] = text;
-            state.slotDraftTouched[slot] = true;
-            if (refs.inputEl) refs.inputEl.value = text;
-            setSlotSendError(slot, message);
-            refs.questionEl.innerHTML = '';
-            refs.questionEl.style.display = 'none';
-            if (state.questionDrafts) delete state.questionDrafts[draftStreamId];
-            updateSendControls(slot);
-          };
-          if (errorCode === 'stale_question') {
-            if (typeof text === 'string' && text.trim()) {
-              preserveDismissedText('');
-            } else {
-              setSlotSendError(slot, '');
-              refs.questionEl.innerHTML = '';
-              refs.questionEl.style.display = 'none';
-              if (state.questionDrafts) delete state.questionDrafts[draftStreamId];
-            }
-            return;
-          }
-          if (errorCode === 'text_send_failed' && typeof text === 'string' && text.trim()) {
-            preserveDismissedText(result?.error || 'Question dismissed, but answer text was not sent. Review the composer and send it normally.');
-            return;
-          }
-          setSlotSendError(slot, result?.error || 'Question dismiss failed.');
-          throw new Error(result?.error || 'question dismiss failed');
-        };
-        renderQuestionOptionB({
-          container: paneContainer,
-          doc: document,
-          question: activeQuestion,
-          streamId: draftStreamId,
-          questionSig,
-          alreadyAnswered,
-          drafts: state.questionDrafts,
-          answeredSig: state.answeredQuestionSig,
-          buildAnswerText: window.PentacleChatCore?.buildPentacleQuestionAnswerText,
-          onSubmit: (text) => settleQuestion(text),
-          onCancel: () => settleQuestion(undefined),
-        });
-      } else if (streamId) {
-        for (const key of Object.keys(state.answeredQuestionSig || {})) {
-          if (key.startsWith(`${streamId}:pane:`)) delete state.answeredQuestionSig[key];
-        }
-        for (const key of Object.keys(state.questionDrafts || {})) {
-          if (key.startsWith(`${streamId}:pane:`)) delete state.questionDrafts[key];
-        }
-      }
-
-      for (const notification of durableQuestions.slice(activePageIndex, activePageIndex + 1)) {
-        const notificationId = durableQuestionNotificationId(notification);
-        const draftStreamId = `${streamId}:durable:${notificationId}`;
-        const questionSig = durableQuestionSignature(notification);
-        if (state.answeredQuestionSig[draftStreamId] && state.answeredQuestionSig[draftStreamId] !== questionSig) {
-          delete state.answeredQuestionSig[draftStreamId];
-        }
-        const alreadyAnswered = state.answeredQuestionSig[draftStreamId] === questionSig;
-        const durableContainer = document.createElement('div');
-        durableContainer.className = 'slot-chat-question-card';
-        durableContainer.dataset.notificationId = notificationId;
-        refs.questionEl.appendChild(durableContainer);
-        const resolveDurableQuestion = async (_text, detail) => {
-          const answer = Array.isArray(detail?.answers) ? detail.answers[0] : null;
-          const selections = Array.isArray(answer?.selectedOptionValues)
-            ? answer.selectedOptionValues
-            : [];
-          const text = typeof answer?.text === 'string' ? answer.text.trim() : '';
-          const customText = typeof answer?.customText === 'string' ? answer.customText.trim() : '';
-          if (!notificationId || (!selections.length && !text && !customText)) {
-            setSlotSendError(slot, 'Question answer is missing.');
-            throw new Error('durable question answer missing');
-          }
-          if (!window.cc || typeof window.cc.notificationResolve !== 'function') {
-            setSlotSendError(slot, 'Question answer is unavailable.');
-            throw new Error('notification resolve unavailable');
-          }
-          const options = { submit: true };
-          if (selections.length) options.selections = selections;
-          if (text) options.text = text;
-          if (customText) options.custom_text = customText;
-          if (typeof answer?.note === 'string' && answer.note.trim()) options.note = answer.note;
-          const result = await window.cc.notificationResolve(
-            notificationId,
-            durableQuestionActionKind(notification),
-            options
-          );
-          if (result?.ok) {
-            setSlotSendError(slot, '');
-            if (state.questionDrafts) delete state.questionDrafts[draftStreamId];
-            if (result.notification) {
-              indexDurableQuestionNotification(result.notification);
-            } else {
-              delete state.durableQuestionNotificationsById[notificationId];
-            }
-            scheduleDurableQuestionSlotRenders();
-            return;
-          }
-          setSlotSendError(slot, result?.error || 'Question answer failed.');
-          throw new Error(result?.error || 'notification resolve failed');
-        };
-        const cancelDurableQuestion = async () => {
-          if (!notificationId) {
-            setSlotSendError(slot, 'Question cancel is unavailable.');
-            throw new Error('durable question id missing');
-          }
-          if (!window.cc || typeof window.cc.notificationResolve !== 'function') {
-            setSlotSendError(slot, 'Question cancel is unavailable.');
-            throw new Error('notification resolve unavailable');
-          }
-          const result = await window.cc.notificationResolve(notificationId, 'resolved', {});
-          if (result?.ok) {
-            setSlotSendError(slot, '');
-            if (state.questionDrafts) delete state.questionDrafts[draftStreamId];
-            if (result.notification) {
-              indexDurableQuestionNotification(result.notification);
-            } else {
-              delete state.durableQuestionNotificationsById[notificationId];
-            }
-            scheduleDurableQuestionSlotRenders();
-            return;
-          }
-          setSlotSendError(slot, result?.error || 'Question cancel failed.');
-          throw new Error(result?.error || 'notification resolve failed');
-        };
-        renderQuestionOptionB({
-          container: durableContainer,
-          doc: document,
-          question: durableQuestionOptionBModel(notification),
-          streamId: draftStreamId,
-          questionSig,
-          alreadyAnswered,
-          drafts: state.questionDrafts,
-          answeredSig: state.answeredQuestionSig,
-          buildAnswerText: window.PentacleChatCore?.buildPentacleQuestionAnswerText,
-          onSubmit: resolveDurableQuestion,
-          onCancel: cancelDurableQuestion,
-          allowFreeText: notification.question?.response_mode === 'free_text'
-            || notification.question?.allow_custom === true
-            || notification.question?.allowCustom === true,
-          submitRequiresSelection: notification.question?.response_mode !== 'free_text'
-            && notification.question?.allow_custom !== true
-            && notification.question?.allowCustom !== true,
-          showCancel: true,
-        });
-      }
-      restoreQuestionFocus(refs.questionEl, focusToRestore);
-      state.desktopQuestionPortalHomes = state.desktopQuestionPortalHomes || {};
-      if (!state.desktopQuestionPortalHomes[streamId]) {
-        state.desktopQuestionPortalHomes[streamId] = {
-          parent: refs.questionEl.parentElement,
-          next: refs.questionEl.nextSibling,
-        };
-      }
-      const portal = desktopQuestionPortal(streamId, refs.questionEl);
-      portal.querySelector('.desktop-question-portal__close')?.addEventListener('click', () => {
-        state.desktopQuestionOverlayOpen[streamId] = false;
-        closeDesktopQuestionPortal(streamId, refs.questionEl);
-        renderSlotChat(slot);
-      }, { once: true });
-      }
-    } else {
-      state.desktopQuestionOverlayOpen = state.desktopQuestionOverlayOpen || {};
+    const paneItems = question ? questionItems(question) : [];
+    const paneEntries = paneItems.map((item, index) => ({
+      source: 'pane', key: `${streamId}:pane:${question.question_key}:${item.question_id || item.id || item.index || index}`,
+      model: item,
+    }));
+    const entries = [...paneEntries, ...getOpenQuestionsForStream(streamId).map(notification => ({
+      source: 'durable', key: `${streamId}:durable:${durableQuestionNotificationId(notification)}:${notification.question?.question_id || ''}`,
+      model: durableQuestionOptionBModel(notification), notification,
+    }))];
+    state.answeredQuestionSig = state.answeredQuestionSig || {};
+    state.questionSubmissionPending = state.questionSubmissionPending || {};
+    state.desktopQuestionOverlayOpen = state.desktopQuestionOverlayOpen || {};
+    const draftKey = `${streamId}:flow`;
+    const draft = state.questionDrafts[draftKey] || (state.questionDrafts[draftKey] = { sig: 'flow', answers: {} });
+    const validKeys = new Set(entries.map(entry => entry.key));
+    for (const key of Object.keys(draft.answers)) if (!validKeys.has(key)) delete draft.answers[key];
+    for (const entry of entries) {
+      entry.signature = questionModelSignature(entry.model);
+      entry.locked = state.answeredQuestionSig[entry.key] === entry.signature;
+      if (draft.answers[entry.key]?._signature !== entry.signature) draft.answers[entry.key] = { _signature: entry.signature };
+    }
+    const incomplete = entry => !entry.locked && !!answerConstraint(entry.model, draft.answers[entry.key]);
+    const unsettled = entries.filter(entry => !entry.locked);
+    const closeQuestions = () => {
+      state.desktopQuestionOverlayOpen[streamId] = false;
+      closeDesktopQuestionPortal(streamId, refs.questionEl);
+      renderSlotChat(slot);
+      refs.questionEl.querySelector('.slot-chat-question-open')?.focus();
+    };
+    if (!unsettled.length) {
       state.desktopQuestionOverlayOpen[streamId] = false;
       closeDesktopQuestionPortal(streamId, refs.questionEl);
       refs.questionEl.innerHTML = '';
       refs.questionEl.style.display = 'none';
-      if (streamId && state.answeredQuestionSig) {
-        for (const key of Object.keys(state.answeredQuestionSig)) {
-          if (key === streamId || key.startsWith(`${streamId}:`)) delete state.answeredQuestionSig[key];
-        }
+    } else if (!state.desktopQuestionOverlayOpen[streamId]) {
+      refs.questionEl.innerHTML = '';
+      refs.questionEl.style.display = '';
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'slot-chat-question-open';
+      open.textContent = `${entries.filter(incomplete).length || unsettled.length} unanswered`;
+      open.addEventListener('click', () => { state.desktopQuestionOverlayOpen[streamId] = true; renderSlotChat(slot); });
+      refs.questionEl.appendChild(open);
+    } else {
+      const focus = captureQuestionFocus(refs.questionEl);
+      const activeKey = state.questionPageIndexByStream[draftKey];
+      const activeIndex = Math.max(0, entries.findIndex(entry => entry.key === activeKey));
+      const navigate = index => {
+        state.questionPageIndexByStream[draftKey] = entries[clampQuestionPageIndex(index, entries.length)].key;
+        renderSlotChat(slot);
+      };
+      refs.questionEl.innerHTML = '';
+      refs.questionEl.style.display = '';
+      const dots = [];
+      if (entries.length > 1) {
+        const pager = document.createElement('div');
+        pager.className = 'slot-chat-question-pager';
+        const dotGroup = document.createElement('div');
+        dotGroup.className = 'desktop-question-dots';
+        const pageButton = (label, index, disabled) => {
+          const button = document.createElement('button');
+          button.type = 'button'; button.className = 'slot-chat-question-page'; button.textContent = label;
+          button.disabled = disabled || !!state.questionSubmissionPending[streamId];
+          button.addEventListener('click', () => navigate(index));
+          return button;
+        };
+        pager.appendChild(pageButton('Prev', activeIndex - 1, activeIndex === 0));
+        entries.forEach((entry, index) => {
+          const dot = pageButton(String(index + 1), index, false);
+          dot.className = `desktop-question-dot${index === activeIndex ? ' is-active' : ''}`;
+          dot.setAttribute('aria-label', `Question ${index + 1}`);
+          dot.classList.toggle('is-answered', !incomplete(entry));
+          dots.push(dot); dotGroup.appendChild(dot);
+        });
+        pager.appendChild(dotGroup);
+        pager.appendChild(pageButton('Next', activeIndex + 1, activeIndex === entries.length - 1));
+        refs.questionEl.appendChild(pager);
       }
-      if (streamId && state.questionDrafts) {
-        for (const key of Object.keys(state.questionDrafts)) {
-          if (key === streamId || key.startsWith(`${streamId}:`)) delete state.questionDrafts[key];
+      const container = document.createElement('div');
+      container.className = 'slot-chat-question-card';
+      if (entries[activeIndex].notification) container.dataset.notificationId = durableQuestionNotificationId(entries[activeIndex].notification);
+      refs.questionEl.appendChild(container);
+      const flowQuestion = { multi: true, questions: entries.map((entry, index) => ({
+        ...entry.model, index, _draftKey: entry.key, _signature: entry.signature, _locked: entry.locked,
+      })) };
+      const lock = entry => { state.answeredQuestionSig[entry.key] = entry.signature; entry.locked = true; };
+      const needsReconcile = () => (state.questionUncertainIdsByStream?.[streamId]?.size || 0) > 0;
+      const submit = async (_text, detail) => {
+        if (state.questionSubmissionPending[streamId] || needsReconcile()) return;
+        let resolvingNotificationId = '';
+        state.questionSubmissionPending[streamId] = true;
+        try {
+          if (paneEntries.some(entry => !entry.locked)) {
+            if (!question.question_key || !window.cc?.chatDismissQuestion) throw new Error('Question dismiss is unavailable.');
+            const answers = detail.answers.slice(0, paneEntries.length).map(answer => answer.customText ? { ...answer, text: answer.customText } : answer);
+            const text = window.PentacleChatCore.buildPentacleQuestionAnswerText({ question, answers });
+            const result = await window.cc.chatDismissQuestion(session.hostId, session.name, { questionKey: question.question_key, text });
+            if (!result?.ok && !['stale_question', 'text_send_failed'].includes(result?.error_code)) throw new Error(result?.error || 'Question dismiss failed.');
+            paneEntries.forEach(lock);
+            if (!result.ok && text.trim()) {
+              state.slotDrafts[slot] = text; state.slotDraftTouched[slot] = true;
+              if (refs.inputEl) refs.inputEl.value = text;
+              setSlotSendError(slot, result.error_code === 'text_send_failed' ? result.error || 'Answer was not sent. Review the composer and send it normally.' : '');
+              updateSendControls(slot);
+            } else setSlotSendError(slot, '');
+          }
+          for (let index = paneEntries.length; index < entries.length; index++) {
+            const entry = entries[index];
+            if (entry.locked) continue;
+            const answer = detail.answers[index];
+            const options = { submit: true };
+            if (answer.customText?.trim()) options.custom_text = answer.customText.trim();
+            else if (answer.text?.trim()) options.text = answer.text.trim();
+            else options.selections = answer.selectedOptionValues || [];
+            if (!options.custom_text && answer.note?.trim()) options.note = answer.note;
+            const notificationId = durableQuestionNotificationId(entry.notification);
+            if (!window.cc?.notificationResolve) throw new Error('Question answer is unavailable.');
+            resolvingNotificationId = notificationId;
+            const result = await window.cc.notificationResolve(notificationId, durableQuestionActionKind(entry.notification), options);
+            if (!result?.ok) throw new Error(result?.error || 'Question answer failed.');
+            resolvingNotificationId = '';
+            lock(entry);
+            indexDurableQuestionNotification({ ...entry.notification, state: 'answered', resolved_at: new Date().toISOString(), ...result.notification, question: { ...entry.notification.question, state: 'answered', answer: options, ...result.notification?.question } });
+          }
+        } catch (error) {
+          // A lost reply can follow a committed resolution. Reconcile the durable
+          // inventory before exposing retry; successful source identities stay locked.
+          if (resolvingNotificationId) {
+            state.questionUncertainIdsByStream = state.questionUncertainIdsByStream || {};
+            const uncertain = state.questionUncertainIdsByStream[streamId] || (state.questionUncertainIdsByStream[streamId] = new Set());
+            uncertain.add(resolvingNotificationId);
+            try { await reconcileQuestionAnswers(streamId); } catch (_) { /* Explicit check or reconnect retries reconciliation. */ }
+          }
+          setSlotSendError(slot, error.message || 'Question answer failed.');
+          throw error;
+        } finally {
+          state.questionSubmissionPending[streamId] = false;
+          scheduleSlotChatRender(slot);
         }
+      };
+      renderQuestionOptionB({
+        container, doc: document, question: flowQuestion, streamId: draftKey, questionSig: 'flow',
+        alreadyAnswered: !!state.questionSubmissionPending[streamId] || needsReconcile(), visibleItemIndex: activeIndex,
+        drafts: state.questionDrafts, answeredSig: state.answeredQuestionSig,
+        buildAnswerText: () => '', onSubmit: submit, onCancel: closeQuestions, showCancel: false,
+        onDraftChange: () => dots.forEach((dot, index) => dot.classList.toggle('is-answered', !incomplete(entries[index]))),
+      });
+      if (needsReconcile()) {
+        const check = document.createElement('button');
+        check.type = 'button'; check.className = 'slot-chat-question-reconcile'; check.textContent = 'Check answer status';
+        check.disabled = !state.chatStream.connected;
+        check.addEventListener('click', async () => {
+          check.disabled = true;
+          try { await reconcileQuestionAnswers(streamId); }
+          catch (error) { setSlotSendError(slot, error.message); }
+          finally { renderSlotChat(slot); }
+        });
+        refs.questionEl.appendChild(check);
       }
+      restoreQuestionFocus(refs.questionEl, focus);
+      state.desktopQuestionPortalHomes = state.desktopQuestionPortalHomes || {};
+      if (!state.desktopQuestionPortalHomes[streamId]) state.desktopQuestionPortalHomes[streamId] = { parent: refs.questionEl.parentElement, next: refs.questionEl.nextSibling };
+      const portal = desktopQuestionPortal(streamId, refs.questionEl);
+      portal.style.setProperty('--machine', chrome.accent);
+      portal.querySelector('.desktop-question-portal__close').onclick = closeQuestions;
+      if (!portal.contains(document.activeElement)) portal.querySelector('.desktop-question-portal__close').focus({ preventScroll: true });
+      portal.onkeydown = event => {
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeQuestions(); }
+        if (event.key === 'Tab') {
+          const controls = [...portal.querySelectorAll('button:not(:disabled), textarea:not(:disabled), input:not(:disabled)')].filter(el => !el.hidden && el.getClientRects().length);
+          const first = controls[0], last = controls[controls.length - 1];
+          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+        }
+      };
     }
   }
 
@@ -3736,6 +3635,15 @@ async function sendComposerQuestionAnswer(slot, streamId, text, inputEl, attachm
   if (!question || !question.question_key) return false;
   const session = state.slots[slot];
   if (!session || state.botSlots[slot]) return false;
+  if (questionItems(question).length > 1 || getOpenQuestionsForStream(streamId).length) {
+    state.slotDrafts[slot] = text;
+    state.slotDraftTouched[slot] = true;
+    state.desktopQuestionOverlayOpen = state.desktopQuestionOverlayOpen || {};
+    state.desktopQuestionOverlayOpen[streamId] = true;
+    setSlotSendError(slot, 'Answer every page in Questions before sending the group.');
+    renderSlotChat(slot);
+    return true;
+  }
   if (!text) {
     setSlotSendError(slot, attachmentCount > 0
       ? 'Answer the open question before sending attachments.'

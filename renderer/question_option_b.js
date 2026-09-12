@@ -10,6 +10,7 @@ function questionItems(question) {
     }));
   }
   return [{
+    ...question,
     index: 0,
     _draftIndex: 0,
     _displayIndex: 1,
@@ -18,7 +19,7 @@ function questionItems(question) {
     options: Array.isArray(question?.options) ? question.options : [],
     multiSelect: !!question?.multiSelect,
     customText: !!question?.customText,
-    free_text: true,
+    free_text: question?.free_text !== false,
   }];
 }
 
@@ -66,7 +67,7 @@ function answerHasSelection(answer) {
 
 function buildAnswersForQuestion(question, draft) {
   return questionItems(question).map((item) => {
-    const raw = draft.answers[item._draftIndex] || {};
+    const raw = draft.answers[item._draftKey ?? item._draftIndex] || {};
     const answer = {};
     if (item.multiSelect) {
       const selected = Array.isArray(raw.optionIndices)
@@ -91,10 +92,26 @@ function buildAnswersForQuestion(question, draft) {
   });
 }
 
-function hasAnyAnswer(draft, { submitRequiresSelection = false } = {}) {
-  return Object.values(draft.answers || {}).some((answer) => (
-    submitRequiresSelection ? answerHasSelection(answer) : answerHasContent(answer)
-  ));
+function answerConstraint(item, answer, { submitRequiresSelection = false } = {}) {
+  if (item._locked) return '';
+  if (item._unavailable) return 'Question unavailable';
+  if (!submitRequiresSelection && item.free_text !== false && answer?.text?.trim()) return '';
+  const selected = item.multiSelect ? answer?.optionIndices || [] : answer?.optionIndex ? [answer.optionIndex] : [];
+  if (!selected.length || selected.some(index => !selectableOptions(item).some(opt => Number(opt.index) === Number(index)))) return 'Choose an answer';
+  const number = (...values) => values.filter(value => value !== undefined && value !== null && value !== '')
+    .map(Number).find(value => Number.isFinite(value) && value >= 0);
+  if (item.multiSelect) {
+    const min = number(item.min_select, item.min_selected, item.minSelections, item.min);
+    const max = number(item.max_select, item.max_selected, item.maxSelections, item.max);
+    if (min !== undefined && selected.length < min) return `Select at least ${min} options`;
+    if (max !== undefined && selected.length > max) return `Select at most ${max} options`;
+  }
+  return '';
+}
+
+function allAnswersValid(question, draft, options = {}) {
+  const items = questionItems(question);
+  return items.length > 0 && items.every(item => !answerConstraint(item, draft.answers[item._draftKey ?? item._draftIndex], options));
 }
 
 function setAllControlsDisabled(container, disabled) {
@@ -124,6 +141,8 @@ function renderQuestionOptionB(opts) {
     canPageNext = false,
     onPagePrev,
     onPageNext,
+    visibleItemIndex,
+    onDraftChange,
   } = opts || {};
   if (!container || !doc || !question) return;
   if (typeof buildAnswerText !== 'function') {
@@ -131,13 +150,25 @@ function renderQuestionOptionB(opts) {
   }
 
   const draft = ensureDraft(drafts, streamId, questionSig);
-  const items = questionItems(question);
-  const stackEl = items.length > 1 ? doc.createElement('div') : container;
+  const allItems = questionItems(question);
+  for (const item of allItems) {
+    const key = item._draftKey ?? item._draftIndex;
+    if (item._signature && draft.answers[key]?._signature !== item._signature) draft.answers[key] = { _signature: item._signature };
+  }
+  const items = Number.isInteger(visibleItemIndex) ? allItems.slice(visibleItemIndex, visibleItemIndex + 1) : allItems;
+  const valid = () => allAnswersValid(question, draft, { submitRequiresSelection });
+  const fields = doc.createElement('div');
+  fields.className = 'slot-chat-question-fields';
+  container.appendChild(fields);
+  const stackEl = items.length > 1 ? doc.createElement('div') : fields;
   if (items.length > 1) stackEl.className = 'slot-chat-question-stack';
 
   const refreshSubmit = () => {
     const submit = container.querySelector('.slot-chat-question-submit');
-    if (submit) submit.disabled = alreadyAnswered || !hasAnyAnswer(draft, { submitRequiresSelection });
+    if (submit) submit.disabled = alreadyAnswered || !valid();
+    const error = container.querySelector('.slot-chat-question-constraint');
+    if (error) error.textContent = items.map(item => answerConstraint(item, draft.answers[item._draftKey ?? item._draftIndex], { submitRequiresSelection })).filter(text => text && text !== 'Choose an answer').join(' · ');
+    onDraftChange?.(draft);
   };
   const refreshNote = (card, answer) => {
     const note = card.querySelector('.slot-chat-question-note');
@@ -146,13 +177,13 @@ function renderQuestionOptionB(opts) {
   };
 
   for (const item of items) {
-    const card = items.length > 1 ? doc.createElement('div') : container;
+    const card = items.length > 1 ? doc.createElement('div') : fields;
     if (items.length > 1) {
       card.className = 'slot-chat-question-card';
       card.dataset.questionIndex = String(item._draftIndex);
     }
-    const current = draft.answers[item._draftIndex] || {};
-    draft.answers[item._draftIndex] = current;
+    const current = draft.answers[item._draftKey ?? item._draftIndex] || {};
+    draft.answers[item._draftKey ?? item._draftIndex] = current;
 
     const promptEl = doc.createElement('div');
     promptEl.className = 'slot-chat-question-prompt';
@@ -174,7 +205,7 @@ function renderQuestionOptionB(opts) {
         : Number(current.optionIndex) === index;
       if (isSelected) btn.classList.add('is-selected');
       if (item.multiSelect) btn.setAttribute('aria-checked', isSelected ? 'true' : 'false');
-      btn.disabled = alreadyAnswered;
+      btn.disabled = alreadyAnswered || !!item._locked || !!item._unavailable;
       const labelEl = doc.createElement('span');
       labelEl.className = 'slot-chat-question-option-label';
       labelEl.textContent = opt.label || String(index);
@@ -187,8 +218,10 @@ function renderQuestionOptionB(opts) {
       }
       btn.addEventListener('click', () => {
         current.text = '';
+        current.customActive = false;
+        card.querySelector('.slot-chat-question-custom')?.classList.remove('is-selected');
         const free = card.querySelector('.slot-chat-question-freetext');
-        if (free) free.value = '';
+        if (free) { free.value = ''; if (item.customText) free.hidden = true; }
         if (item.multiSelect) {
           if (!Array.isArray(current.optionIndices)) current.optionIndices = [];
           const at = current.optionIndices.indexOf(index);
@@ -211,18 +244,26 @@ function renderQuestionOptionB(opts) {
     }
     card.appendChild(optionsEl);
 
-    if (allowFreeText) {
+    if (allowFreeText && item.free_text !== false) {
       const freeText = doc.createElement('textarea');
       freeText.className = 'slot-chat-question-freetext';
       freeText.dataset.questionIndex = String(item._draftIndex);
+      freeText.dataset.questionKey = String(item._draftKey || '');
       freeText.rows = 2;
       freeText.placeholder = 'Type an answer';
       if (item.customText) freeText.placeholder = 'Type a custom answer';
-      freeText.disabled = alreadyAnswered;
+      freeText.disabled = alreadyAnswered || !!item._locked || !!item._unavailable;
       freeText.value = current.text || '';
+      freeText.hidden = !!item.customText && !current.customActive && !current.text;
       freeText.addEventListener('input', () => {
         current.text = freeText.value;
-        if (!item.customText) {
+        {
+          current.customActive = !!item.customText;
+          freeText.hidden = false;
+          delete current.note;
+          const note = card.querySelector('.slot-chat-question-note');
+          if (note) note.value = '';
+          card.querySelector('.slot-chat-question-custom')?.classList.add('is-selected');
           delete current.optionIndex;
           current.optionIndices = [];
           card.querySelectorAll('.slot-chat-question-option').forEach((btn) => {
@@ -233,15 +274,30 @@ function renderQuestionOptionB(opts) {
         refreshNote(card, current);
         refreshSubmit();
       });
+      if (item.customText && selectableOptions(item).length) {
+        const custom = doc.createElement('button');
+        custom.type = 'button';
+        custom.className = `slot-chat-question-custom${current.customActive || current.text ? ' is-selected' : ''}`;
+        custom.textContent = 'Custom answer';
+        custom.disabled = freeText.disabled;
+        custom.addEventListener('click', () => {
+          current.customActive = true;
+          freeText.hidden = false;
+          freeText.dispatchEvent(new doc.defaultView.Event('input'));
+          freeText.focus();
+        });
+        card.appendChild(custom);
+      }
       card.appendChild(freeText);
     }
 
     const note = doc.createElement('textarea');
     note.className = 'slot-chat-question-note';
     note.dataset.questionIndex = String(item._draftIndex);
+    note.dataset.questionKey = String(item._draftKey || '');
     note.rows = 2;
     note.placeholder = 'Add a note';
-    note.disabled = alreadyAnswered;
+    note.disabled = alreadyAnswered || !!item._locked || !!item._unavailable;
     note.value = current.note || '';
     note.hidden = !answerHasSelection(current);
     note.addEventListener('input', () => {
@@ -252,8 +308,12 @@ function renderQuestionOptionB(opts) {
 
     if (items.length > 1) stackEl.appendChild(card);
   }
-  if (items.length > 1) container.appendChild(stackEl);
+  if (items.length > 1) fields.appendChild(stackEl);
 
+  const constraint = doc.createElement('div');
+  constraint.className = 'slot-chat-question-constraint';
+  constraint.setAttribute('role', 'status');
+  container.appendChild(constraint);
   const actionsEl = doc.createElement('div');
   actionsEl.className = 'slot-chat-question-actions';
   if (pagerLabel) {
@@ -286,8 +346,8 @@ function renderQuestionOptionB(opts) {
   const submitBtn = doc.createElement('button');
   submitBtn.type = 'button';
   submitBtn.className = 'slot-chat-question-submit';
-  submitBtn.textContent = 'Submit';
-  submitBtn.disabled = alreadyAnswered || !hasAnyAnswer(draft, { submitRequiresSelection });
+  submitBtn.textContent = 'Send answers';
+  submitBtn.disabled = alreadyAnswered || !valid();
   const cancelBtn = doc.createElement('button');
   cancelBtn.type = 'button';
   cancelBtn.className = 'slot-chat-question-cancel';
@@ -296,9 +356,10 @@ function renderQuestionOptionB(opts) {
   actionsEl.appendChild(submitBtn);
   if (showCancel) actionsEl.appendChild(cancelBtn);
   container.appendChild(actionsEl);
+  refreshSubmit();
 
   submitBtn.addEventListener('click', async () => {
-    if (!hasAnyAnswer(draft, { submitRequiresSelection })) return;
+    if (alreadyAnswered || !valid()) return;
     const answers = buildAnswersForQuestion(question, draft);
     const text = buildAnswerText({ question, answers });
     if (streamId) answeredSig[streamId] = questionSig;
@@ -328,6 +389,8 @@ function renderQuestionOptionB(opts) {
 }
 
 module.exports = {
+  answerConstraint,
+  allAnswersValid,
   answerHasContent,
   answerHasSelection,
   buildAnswersForQuestion,
