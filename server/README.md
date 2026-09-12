@@ -44,7 +44,8 @@ works as-is.
 |---|---|---|
 | `--profile <name>` | see below | `configs/<name>.local.js`, else `configs/<name>.js`; an argument containing a path separator or ending in `.js` is used verbatim |
 | `--port <n>` | `7795` | `0` picks a free port (the startup line prints the real one) |
-| `--bind <addr>` | `127.0.0.1` | the interface to listen on — read the warning below before changing it |
+| `--bind <addr>` | `127.0.0.1` | the interface to listen on — read § Security below before changing it |
+| `--token-file <path>` | none | required for any non-loopback `--bind`; enables cookie auth (§ Security) |
 
 With no `--profile`, the host does **not** look for `configs/<machine>.js`: it
 follows `config-loader`'s ordinary precedence — `PENTACLE_CONFIG` if it is set in
@@ -66,9 +67,12 @@ reaches a browser.
 | `/` | `renderer/dist/web/web.html` with the computed config injected as `window.__PENTACLE_CONFIG__` |
 | `/api/config` | the same computed config as JSON — byte-identical to what `window.cc.getConfig()` returns |
 | `/api/health` | `{ ok, connections }` |
+| `/login` | GET the token form, POST the token to mint the auth cookie — present only when auth is on |
 | everything else | a file under `renderer/dist/web/`; paths cannot escape it |
 
-`GET /` answers `503` with a build hint when the bundle is missing.
+`GET /` answers `503` with a build hint when the bundle is missing. When auth is
+on, an unauthenticated GET navigation is `302`-redirected to `/login` and an
+unauthenticated `/api/*` call is `401`; `/login` is the only open surface.
 
 ## Websocket protocol (`/cc`)
 
@@ -111,6 +115,11 @@ adapter's `destroyed` hook, the same signal a closing window gives, so a reload
 cannot leak attachments; the tmux session itself is untouched. Daemon frames
 (`chat-stream:frame`) are broadcast to every connection.
 
+Each connection is capped at 8 concurrent ptys (the renderer uses four slots;
+the headroom covers reconnect churn), so one connection cannot exhaust a shared
+host by opening unbounded terminals. The (N+1)th `pty:create` on a connection is
+refused; re-creating an already-owned slot is a replacement, not a new one.
+
 ### What never reaches the host
 
 `main/cc_handlers.js` carries three lists, each with a per-channel reason:
@@ -119,32 +128,61 @@ cannot leak attachments; the tmux session itself is untouched. Daemon frames
   `clipboard:write-text`, `open-external`, `app:reload`. The clipboard is the
   one that matters — routing it here would read the *host's* clipboard, not the
   viewer's — so the host refuses them rather than serving them.
-- **`WEB_UNSUPPORTED`** — no browser equivalent: `context-menu`,
-  `meeting:open`, `meeting:close`.
+- **`WEB_UNSUPPORTED`** — no *host-side* equivalent, so the host refuses them,
+  but the web layer answers each in the browser (§ Native-method browser
+  behaviours): `context-menu` → an HTML menu, `meeting:open` → a toast,
+  `meeting:close` → a no-op.
 - **`UNIMPLEMENTED`** — declared by `preload.js` but served by no main-process
   handler on either transport (the two chat-popout channels and six dashboard
   channels). These are pre-existing desktop gaps, listed so the parity test
-  fails if the set grows.
+  fails if the set grows. The chat-popout pair is deferred to a web-mode popout
+  follow-up spec; the dashboards have no provider in the public desktop.
 
-## Security posture — read before changing `--bind`
+### Native-method browser behaviours
 
-There is **no authentication of any kind**. Any client that can open a socket to
-the port gets the operator's full `window.cc`: every terminal, every daemon RPC,
-every file the handlers can reach.
+Channels the desktop serves through Electron (a native window, menu, or a host
+file write) have no host equivalent for a browser viewer, so `renderer/web_cc.js`
+answers them locally — the host still refuses `WEB_UNSUPPORTED` as a safety net:
 
-The *default* bind is `127.0.0.1`, not a property of the host — `--bind` accepts
-any address, and `--bind 0.0.0.0` publishes that unauthenticated surface to
-every machine that can route to this one. Do not use a non-loopback bind until
-token authentication and deployment-level access control exist.
+- **`context-menu`** → an HTML menu (Open in slot 1–4 / Rename / Delete) that
+  fires the same `assign-slot` / `action` events `app.js` already listens for.
+  (The public desktop registers no `context-menu` handler at all, so this is
+  net-new function rather than parity with a native menu.)
+- **`meeting:open` / `mic:start-server`** → a "not available in web mode" toast,
+  shown only when the mic feature is on.
+- **`pty:save-image`** → the pasted image is handed to the viewer as a browser
+  download rather than written into the *host's* tmpdir.
+- **`open-external`** → `window.open` (a `WEB_LOCAL` channel; unchanged).
+
+## Security — auth and `--bind`
+
+A **loopback** bind (`127.0.0.1`, `localhost`, `::1`) is single-user and needs
+no token: any client that can reach the port gets the operator's full
+`window.cc`. This is the default and is fine on a machine you control.
+
+A **routable** bind (anything else — `0.0.0.0`, a tailnet IP) **refuses to
+start** without `--token-file <path>`; there is no way to publish the surface
+unauthenticated. With a token:
+
+- the browser posts the token once at `/login`; the reply sets an `HttpOnly`,
+  `SameSite=Strict` cookie carrying `sha256(token)` (never the token itself);
+- every page, `/api/*` call and `/cc` websocket upgrade is gated on that cookie
+  with a constant-time compare;
+- passing `--token-file` on a loopback bind opts that instance into auth too.
+
+The cookie has **no `Secure` attribute**: the host speaks plain HTTP and relies
+on the tailnet (or an equivalent private transport) as the encryption boundary.
+HTTPS is a named follow-up. Auth gates *who* connects; it does not partition
+*what* a connected operator can do — every authenticated connection is equally
+the operator, and daemon `chat-stream:frame` traffic is broadcast to all of
+them by design. Terminal slots and their pty output are still isolated per
+connection (§ Push routing), so two connections never see each other's
+terminals.
 
 ## Not implemented here
 
-Authentication, cross-user authorization, a tailnet bind, and profile-switching
-UX. Note what this does *not* mean: terminal slots and their pty output are
-already isolated per websocket connection (see § Push routing), so two tabs
-cannot see each other's terminals. What is missing is any notion of *who* is
-connected — every connection is equally the operator. Daemon `chat-stream:frame`
-traffic is broadcast to all connections by design.
+Cross-user authorization (every authenticated connection is the operator),
+HTTPS, and profile-switching UX.
 
 ## Build
 
@@ -161,7 +199,9 @@ to `module.exports` — and `app.js` is bundled behind shims for `path` and
 | File | Covers |
 |---|---|
 | `test/ws_bridge.test.js` | dispatch, error propagation, malformed frames, pty routing and ownership |
-| `test/web_server.test.js` | the real host: HTTP surface, a refused native channel, a live local tmux attach over the wire |
-| `test/web_cc.test.js` | the browser shim: method parity with `preload.js`, queueing, reject-on-drop, reconnect |
+| `test/ws_bridge_multiclient.test.js` | two sockets over the real handler table: slot isolation, broadcast, disconnect cleanup, per-connection cap |
+| `test/web_server.test.js` | the real host: HTTP surface, a refused native channel, a live local tmux attach, and two concurrent connections keeping their tmux sessions isolated |
+| `test/web_auth.test.js` | the bind guard (routable bind refuses without a token), loopback-needs-none, `/login`, and cookie-gated `/api` + `/cc` |
+| `test/web_cc.test.js` | the browser shim: method parity with `preload.js`, queueing, reject-on-drop, reconnect, and the native-method shims (toast, save-image download, context menu) |
 | `test/web_bundle.test.js` | no Electron/Node requires survive; the page ships everything it references |
-| `test/e2e/web_smoke.js` | headless Chrome against a real daemon — run by hand: `node test/e2e/web_smoke.js --profile test/e2e/configs/web_mode_local_smoke.js` |
+| `test/e2e/web_smoke.js` | headless Chrome against a real daemon, incl. a second browser connection isolated from the first — run by hand: `node test/e2e/web_smoke.js --profile test/e2e/configs/web_mode_local_smoke.js` |

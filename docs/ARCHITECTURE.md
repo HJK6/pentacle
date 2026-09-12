@@ -76,7 +76,9 @@ supplies a stand-in for `event.sender`. That is what gives the web host correct
 isolation for free: `main/terminal_adapter.js` already keys its slots by
 `event.sender.id` and pushes output through `event.sender.send`, so one tab's
 terminals and output cannot reach another's, and closing a socket fires the same
-`destroyed` hook a closing window does.
+`destroyed` hook a closing window does. Each connection is capped at a fixed
+number of ptys so one connection cannot exhaust a shared host, and daemon
+`chat-stream:frame` traffic is broadcast to every connection.
 
 `preload.js` is the source of truth for the surface, and
 `test/cc_handlers_parity.test.js` pins every one of its methods to a handler or
@@ -86,14 +88,18 @@ cannot drift.
 Three kinds of channel never reach the host. `WEB_LOCAL` ones the browser
 answers itself — the clipboard above all, since a round trip would read the
 *host's* clipboard rather than the viewer's. `WEB_UNSUPPORTED` ones have no
-browser equivalent. `UNIMPLEMENTED` ones are declared by `preload.js` but served
-by no main-process handler on either transport.
+*host-side* equivalent, so the host refuses them while the web layer answers
+each in the browser (an HTML context menu that fires the same
+`assign-slot`/`action` events, a meeting/mic toast, a save-image download).
+`UNIMPLEMENTED` ones are declared by `preload.js` but served by no main-process
+handler on either transport.
 
-The host has no authentication: any client that can open a socket to the port
-gets the operator's full `window.cc`. It *defaults* to `127.0.0.1`, but `--bind`
-accepts any address, so exposing it beyond loopback publishes that unauthenticated
-surface — don't, until token auth and deployment access control exist. Flags, the
-wire protocol and the routing rules are in
+A loopback bind is single-user and open: any client that can reach the port gets
+the operator's full `window.cc`. A routable `--bind` refuses to start without a
+`--token-file`; with one, the browser authenticates once at `/login` for an
+`HttpOnly` cookie that gates every page, api call and websocket upgrade. Auth
+gates *who* connects, not *what* a connected operator may do. Flags, the wire
+protocol, the security posture and the routing rules are in
 [`server/README.md`](../server/README.md).
 
 ## Configuration ownership
