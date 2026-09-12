@@ -11,6 +11,7 @@ const chatUi = require('./chat_ui_state');
 const assetRender = require('./asset_render');
 const { showToast } = require('./toast');
 const { decideUseChatClose } = require('./delete_session_gate');
+const { configuredAssistantRole, isConfiguredAssistant } = require('./assistant_role');
 const { applyVersionedConnectionState } = require('./chat_stream_connection_state');
 const { resolveMicUrl } = require('../main/mic-url');
 const { createSpawnCatalogLoader } = require('./spawn_catalog_loader');
@@ -153,6 +154,14 @@ function saveAppearanceSetting(key, value) {
 
 function showTurnDurationEnabled() {
   return CONFIG.features.showTurnDuration === true;
+}
+
+function assistantRole() {
+  return configuredAssistantRole(CONFIG.features);
+}
+
+function isProtectedAssistantSession(session) {
+  return isConfiguredAssistant(session, assistantRole());
 }
 
 const ACTIVITY_SPINNER_PERIOD_MS = 1050;
@@ -1942,6 +1951,26 @@ function updateSlotPendingPeerBadge(slot, count) {
 function chatSessionStateForNameHost(sessionName, hostId) {
   if (!sessionName) return null;
   return chatSessionStateForSession({ name: sessionName, hostId });
+}
+
+function sessionStateForNameHost(sessionName, hostId) {
+  return state.sessions.find((session) => session.name === sessionName && session.hostId === hostId) || null;
+}
+
+function isProtectedAssistantNameHost(sessionName, hostId) {
+  return isProtectedAssistantSession(chatSessionStateForNameHost(sessionName, hostId))
+    || isProtectedAssistantSession(sessionStateForNameHost(sessionName, hostId));
+}
+
+function syncSlotAssistantControls(slot) {
+  const header = document.getElementById(`header-${slot}`);
+  const trash = header?.querySelector('.cell-trash');
+  if (!trash) return;
+  const session = state.slots[slot];
+  const protectedAssistant = !!session && isProtectedAssistantNameHost(session.name, session.hostId);
+  trash.hidden = protectedAssistant;
+  trash.disabled = protectedAssistant;
+  trash.setAttribute('aria-hidden', protectedAssistant ? 'true' : 'false');
 }
 
 function isCodexHelperPromptText(text) {
@@ -4098,6 +4127,7 @@ function renderSidebar() {
     return {
       session: s,
       streamId,
+      isPinned: isProtectedAssistantSession(s),
       isWorking: !!s.working,
       lastEventAt: s.last_event_at || null,
       openQuestionCount: streamId ? getOpenQuestionsForStream(streamId).length : 0,
@@ -4111,6 +4141,7 @@ function renderSidebar() {
     : `${active.length} sessions | ${needsAnswerCount} need answer | ${workingCount} working`;
 
   renderSourceFilterBar(all);
+  for (let slot = 0; slot < 4; slot++) syncSlotAssistantControls(slot);
 
   function renderSessionItem(row) {
     const s = row.session;
@@ -4119,6 +4150,7 @@ function renderSidebar() {
     const isActive = slotIdx >= 0;
     const activity = s.working ? 'working' : 'idle';
     const displayName = s.display_name || s.name;
+    const protectedAssistant = isProtectedAssistantSession(s);
     const suppressDetail = activity === 'working' || activity === 'waiting' || activity === 'sending';
     const preview = suppressDetail ? '' : chatUi.sanitizeSidebarDetail(s.preview);
     const activityBadge = activity === 'working'
@@ -4167,7 +4199,7 @@ function renderSidebar() {
       ? `<div class="s-status-summary">${compactStatusHtml}</div>`
       : '';
 
-    return `<div class="session-item ${isActive ? 'active' : ''}"
+    return `<div class="session-item ${protectedAssistant ? 'assistant-protected ' : ''}${isActive ? 'active' : ''}"
                  role="button" tabindex="0"
                  aria-label="${esc(ariaBits.join(', '))}"
                  data-name="${esc(s.name)}"
@@ -4210,6 +4242,7 @@ function renderSidebar() {
     html += renderSessionItem(row);
   }
   list.innerHTML = html;
+  list.querySelectorAll('.session-item.assistant-protected .s-trash-btn').forEach((button) => button.remove());
   setupSidebarCollapsibles(list);
   syncActivitySpinnerPhase(document);
   syncWorkingTimer();
@@ -4239,6 +4272,7 @@ function renderSidebar() {
       e.preventDefault();
       const name = el.dataset.name;
       const hostId = el.dataset.host || defaultHostId;
+      if (isProtectedAssistantNameHost(name, hostId)) return;
       window.cc.showContextMenu(name, el.dataset.display, hostId);
     });
   });
@@ -4433,6 +4467,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
     }
   }
   updateSlotProviderTag(slot);
+  syncSlotAssistantControls(slot);
 
   // Create terminal
   const refs = chatUiEnabled() ? ensureSlotChatSurface(slot) : null;
@@ -4637,6 +4672,12 @@ function detachSlot(slot) {
   header.querySelector('.cell-source-tag')?.remove();
   header.querySelector('.cell-provider-tag')?.remove();
   header.querySelector('.cell-pending-peer-badge')?.remove();
+  const trashButton = header.querySelector('.cell-trash');
+  if (trashButton) {
+    trashButton.hidden = false;
+    trashButton.disabled = false;
+    trashButton.setAttribute('aria-hidden', 'false');
+  }
   clearSlotAssetDismissals(slot);
   header.querySelector('.slot-asset-tabs')?.remove();
   document.getElementById(`cell-${slot}`).classList.remove('occupied');
@@ -4877,6 +4918,10 @@ window.cc.onAction((action, sessionName, extra) => {
 async function deleteSession(name, hostId) {
   const apiHostId = IS_CLIENT ? 'remote' : 'local';
   hostId = hostId || apiHostId;
+  if (isProtectedAssistantNameHost(name, hostId)) {
+    showToast('This configured assistant cannot be deleted', { type: 'error' });
+    return;
+  }
   window.PentacleHarness?.emit?.('session:delete', { host: hostId, data: { sessionName: name } });
   const streamSession = chatSessionStateForNameHost(name, hostId);
   const useChatClose = decideUseChatClose(state, streamSession);
@@ -5801,7 +5846,7 @@ document.querySelectorAll('.cell-trash').forEach(btn => {
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     const slot = parseInt(btn.dataset.slot);
-    if (state.slots[slot] && !state.botSlots[slot]) {
+    if (state.slots[slot] && !state.botSlots[slot] && !isProtectedAssistantNameHost(state.slots[slot].name, state.slots[slot].hostId)) {
       deleteSession(state.slots[slot].name, state.slots[slot].hostId);
     }
   });

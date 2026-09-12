@@ -99,12 +99,13 @@ test('projection maps daemon fields including visibility', () => {
   const [row] = projectChatStreamSessionsToDesktop([{
     stream_id: 'hosta:claude-hosta-1', host: 'hosta', session_name: 'claude-hosta-1',
     display_name: 'hosta claude', last_text: 'last line', attached: true,
-    provider: 'claude', visibility: 'default', agent_id: 'uuid-1',
+    provider: 'claude', visibility: 'default', agent_id: 'uuid-1', role: 'persistent-assistant',
   }], () => 'remote');
   assert.equal(row.name, 'claude-hosta-1');
   assert.equal(row.hostId, 'remote');
   assert.equal(row.preview, 'last line');
   assert.equal(row.visibility, 'default');
+  assert.equal(row.role, 'persistent-assistant');
 });
 
 test('projected rows without visibility fail closed', () => {
@@ -122,4 +123,3 @@ test('projection skips invalid entries and tolerates empty input', () => {
   assert.equal(out.length, 1);
   assert.equal(out[0].name, 'codex-hosta-1');
 });
-

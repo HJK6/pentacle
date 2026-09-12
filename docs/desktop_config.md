@@ -86,6 +86,7 @@ provider models and effort. See [daemon setup](../services/chat-stream-v2/README
 | `features.mic` | Boolean; false | Microphone panel and voice controls; requires a running mic server. Reload after changing. |
 | `features.sourceTags` | Boolean; false | Host tags on sessions. Reload after changing. |
 | `features.showTurnDuration` | Boolean; false | Timing annotations in Chat; changes live. |
+| `features.assistantRole` | String; absent or empty | Private opt-in for a daemon session with exactly this existing `role`. That row pins first and cannot be deleted in desktop. Public examples leave it off; do not commit a private role value. |
 | `features.rawTmux` | Boolean; example false | Retained compatibility flag; currently unused. |
 | `mic` | Object; absent | Optional microphone settings below. |
 | `micServerUrl` | String; `http://127.0.0.1:7780` | Mic HTTP endpoint unless useStreamHost is enabled. |

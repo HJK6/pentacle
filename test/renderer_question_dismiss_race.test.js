@@ -76,12 +76,15 @@ test('desktop portal dots jump between questions and mark the active question', 
   assert.match(portalQuestion.textContent, /First choice|Second choice/);
 });
 
-function installRenderer({ dismissResult, questionOverride } = {}) {
+function installRenderer({ dismissResult, questionOverride, assistantRole = '' } = {}) {
   const html = fs.readFileSync(path.join(root, 'renderer', 'index.html'), 'utf8');
   const dom = new JSDOM(html, { url: 'http://pentacle.test/renderer/index.html' });
   const dismissCalls = [];
   const notificationResolveCalls = [];
   const sendCalls = [];
+  const closeCalls = [];
+  const killCalls = [];
+  const contextMenuCalls = [];
   const config = {
     appName: 'Pentacle',
     terminal: {},
@@ -96,6 +99,7 @@ function installRenderer({ dismissResult, questionOverride } = {}) {
       mic: false,
       sourceTags: false,
       showTurnDuration: false,
+      ...(assistantRole ? { assistantRole } : {}),
     },
   };
   const question = {
@@ -168,6 +172,9 @@ function installRenderer({ dismissResult, questionOverride } = {}) {
     onAction() {},
     onChatStreamFrame() {},
     showContextMenu() {},
+    chatClose: async (...args) => { closeCalls.push(args); return { ok: true }; },
+    chatKill: async (...args) => { killCalls.push(args); return { ok: true }; },
+    killTmuxSession: async (...args) => { killCalls.push(args); return { ok: true }; },
   };
   dom.window.HOST = {
     hostname: 'example.local',
@@ -215,7 +222,8 @@ function installRenderer({ dismissResult, questionOverride } = {}) {
   vm.runInContext(fs.readFileSync(path.join(root, 'renderer', 'app.js'), 'utf8'), context, {
     filename: 'renderer/app.js',
   });
-  return { context, dismissCalls, notificationResolveCalls, sendCalls, dom };
+  dom.window.cc.showContextMenu = (...args) => contextMenuCalls.push(args);
+  return { context, dismissCalls, notificationResolveCalls, sendCalls, closeCalls, killCalls, contextMenuCalls, dom };
 }
 
 function mountRaceSlot(context) {
@@ -240,6 +248,37 @@ function mountRaceSlot(context) {
     renderSlotChat(0);
   `, context);
 }
+
+test('configured assistant role removes UI deletion routes and blocks direct close', async () => {
+  const { context, dom, closeCalls, killCalls, contextMenuCalls } = installRenderer({ assistantRole: 'persistent-assistant' });
+  await flush();
+  await flush();
+  vm.runInContext(`
+    state.chatStream.connected = true;
+    state.chatStream.sessions = [{
+      stream_id: 'hostc:assistant', host: 'hostc', session_name: 'assistant',
+      name: 'assistant', role: 'persistent-assistant', visibility: 'default', working: false,
+    }];
+    state.sessions = [{
+      name: 'assistant', hostId: 'local', display_name: 'Unrelated title',
+      role: 'persistent-assistant', visibility: 'default', working: false,
+    }];
+    state.slots[0] = { name: 'assistant', displayName: 'Unrelated title', hostId: 'local' };
+    renderSidebar();
+  `, context);
+
+  const sidebarRow = dom.window.document.querySelector('.session-item.assistant-protected');
+  assert.ok(sidebarRow);
+  assert.equal(sidebarRow.querySelector('.s-trash-btn'), null);
+  sidebarRow.dispatchEvent(new dom.window.MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  assert.equal(contextMenuCalls.length, 0);
+  assert.equal(dom.window.document.querySelector('#header-0 .cell-trash').hidden, true);
+  assert.equal(dom.window.document.querySelector('#header-0 .cell-trash').disabled, true);
+
+  await vm.runInContext("deleteSession('assistant', 'local')", context);
+  assert.deepEqual(closeCalls, []);
+  assert.deepEqual(killCalls, []);
+});
 
 test('stale_question with answer text moves the draft into the normal composer', async () => {
   const { context, dismissCalls, dom } = installRenderer();
@@ -701,4 +740,3 @@ test('durable ack question renders Acknowledge and submits its option value', as
   assert.equal(notificationResolveCalls[0].actionKind, 'ack');
   assert.deepEqual(notificationResolveCalls[0].options.selections, ['acknowledged']);
 });
-

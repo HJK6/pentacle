@@ -56,6 +56,10 @@ function parseEventTime(value) {
 // valid last_event_at descending (missing/invalid = oldest), then stream_id
 // ascending as the deterministic tiebreak.
 function compareAttentionRows(a, b) {
+  const pinnedA = a?.isPinned === true;
+  const pinnedB = b?.isPinned === true;
+  if (pinnedA !== pinnedB) return pinnedA ? -1 : 1;
+
   const tierA = attentionTier(a);
   const tierB = attentionTier(b);
   if (tierA !== tierB) return tierA - tierB;

@@ -77,6 +77,17 @@ test('orders by tier first: question over working over ordinary', () => {
   assert.deepEqual(ordered.map((r) => r.attentionTier), [0, 1, 2]);
 });
 
+test('a configured pinned row sorts ahead of every attention tier without changing its badges', () => {
+  const ordered = orderSidebarRows([
+    row({ streamId: 'question', openQuestionCount: 1 }),
+    row({ streamId: 'assistant', isPinned: true, unreadReportCount: 2 }),
+    row({ streamId: 'working', isWorking: true }),
+  ]);
+  assert.deepEqual(ordered.map((r) => r.streamId), ['assistant', 'question', 'working']);
+  assert.equal(ordered[0].attentionTier, ATTENTION_TIER.ORDINARY);
+  assert.equal(ordered[0].primaryAction, PRIMARY_ACTION.REPORT);
+});
+
 test('within a tier, newer last_event_at sorts first', () => {
   const ordered = orderSidebarRows([
     row({ streamId: 'a', lastEventAt: '2026-07-29T01:00:00Z' }),
@@ -153,4 +164,3 @@ test('handles empty and non-array input safely', () => {
   assert.deepEqual(orderSidebarRows(null), []);
   assert.deepEqual(orderSidebarRows(undefined), []);
 });
-

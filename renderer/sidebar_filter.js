@@ -79,6 +79,7 @@ function projectChatStreamSessionsToDesktop(streamSessions, hostIdResolver) {
       stream_id: s.stream_id || null,
       visibility: s.visibility,
       provider: s.provider || null,
+      role: s.role || null,
       working: !!s.working,
       working_label: s.working_label || '',
       last_event_at: s.last_event_at || null,
