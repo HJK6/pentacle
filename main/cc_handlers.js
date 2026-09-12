@@ -43,11 +43,16 @@ const WEB_LOCAL = {
   'app:reload': { mode: 'send', reason: 'location.reload()' },
 };
 
-// Channels with no browser equivalent at all.
+// Channels with no host-side browser equivalent: the host still refuses them
+// (a safety net if anything reaches this transport), but the *web layer*
+// (renderer/web_cc.js) now answers each with a browser behavior — the reason
+// records what that is. `context-menu` renders an HTML menu that fires the same
+// assign-slot/action events; `meeting:open` toasts. They stay listed here so the
+// parity test keeps pinning main.js's native registrations.
 const WEB_UNSUPPORTED = {
-  'context-menu': { mode: 'send', reason: 'native Menu popup' },
-  'meeting:open': { mode: 'send', reason: 'native window' },
-  'meeting:close': { mode: 'send', reason: 'native window' },
+  'context-menu': { mode: 'send', reason: 'native Menu popup — web: HTML context menu (web_cc.js) firing assign-slot/action' },
+  'meeting:open': { mode: 'send', reason: 'native window — web: "not available in web mode" toast' },
+  'meeting:close': { mode: 'send', reason: 'native window — web: no-op' },
 };
 
 // Main → renderer push channels. Electron sends them through
@@ -69,9 +74,15 @@ const PUSH_EVENTS = [
 // registered" in Electron today. They are listed so the parity test pins the
 // set: a new dangling method fails the build, and implementing one here is what
 // removes it from this list.
+//
+// Lane 2 disposition (parity pass): the two chat-popout channels are deferred to
+// a web-mode popout follow-up spec (browser popout would be window.open of a
+// served route, matching the desktop BrowserWindow) — annotate, do not implement
+// here. The six dashboard channels have no provider in the public desktop, so
+// there is nothing to shim; they stay annotated until a provider exists.
 const UNIMPLEMENTED = {
-  'chat-stream:chat-pop-out': 'main/chat_popout_ipc_bridge.js exists but is never registered',
-  'chat-stream:chat-dock': 'main/chat_popout_ipc_bridge.js exists but is never registered',
+  'chat-stream:chat-pop-out': 'no handler on either transport; web popout (window.open) deferred to the web-mode popout follow-up spec',
+  'chat-stream:chat-dock': 'no handler on either transport; paired with chat-pop-out, deferred to the web-mode popout follow-up spec',
   'dashboard:pipeline-stats': 'no dashboard provider in the public desktop',
   'dashboard:business-stats': 'no dashboard provider in the public desktop',
   'dashboard:pentacle-mobile-testing-stats': 'no dashboard provider in the public desktop',

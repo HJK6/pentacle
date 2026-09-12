@@ -113,6 +113,17 @@ function createTransport({ url, logger = console } = {}) {
     },
     /** Replaces any previous handler, mirroring preload's removeAllListeners. */
     on(event, handler) { listeners.set(event, handler); },
+    /**
+     * Deliver an event to the local listener as if the host had pushed it. The
+     * web context menu uses this to fire `assign-slot`/`action` — on the desktop
+     * the native menu emits those from the main process; in the browser the menu
+     * is local, so it drives the very same listeners `app.js` registered.
+     */
+    emit(event, ...args) {
+      const handler = listeners.get(event);
+      if (!handler) return;
+      try { handler(...args); } catch (e) { logger.warn(`[web] ${event} handler threw:`, e); }
+    },
     close() { closed = true; try { socket && socket.close(); } catch {} },
   };
 }
@@ -146,10 +157,110 @@ function browserClipboard() {
   };
 }
 
-function buildCc(transport, { clipboard, chatPopoutContext, reload = () => window.location.reload() }) {
+// ── Native-method browser behaviours ─────────────────────────────────────────
+// The desktop serves these through Electron (a native window, menu, or a host
+// file write). None has a host equivalent for a browser viewer, so the web
+// layer answers them here rather than round-tripping to a channel the host
+// refuses or that would act on the host. main/cc_handlers.js keeps them in its
+// WEB_UNSUPPORTED / served tables (the parity test's invariant); only the shim
+// behaviour changes.
+
+// Last position a context menu was requested at, captured in installWebCc so the
+// menu can open under the pointer. Defaults keep it usable in tests with no DOM.
+const contextMenuPointer = { x: 0, y: 0 };
+
+function showWebToast(message, { document: doc = (typeof document !== 'undefined' ? document : null) } = {}) {
+  if (!doc || !doc.body) return false;
+  const el = doc.createElement('div');
+  el.textContent = message;
+  el.setAttribute('role', 'status');
+  el.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483647;'
+    + 'background:#181b22;color:#e6e6e6;padding:10px 16px;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.4);'
+    + 'font:14px system-ui,sans-serif;max-width:80vw';
+  doc.body.appendChild(el);
+  setTimeout(() => { try { el.remove(); } catch (_) {} }, 3200);
+  return true;
+}
+
+// The viewer's browser, not the host's disk: hand the pasted image to the viewer
+// as a download instead of writing it into the host's tmpdir (what pty:save-image
+// does on the desktop).
+function browserDownloadImage(base64Data, { document: doc = (typeof document !== 'undefined' ? document : null) } = {}) {
+  if (!doc || !doc.body) return { ok: false, error: 'no document' };
+  try {
+    const a = doc.createElement('a');
+    a.href = `data:image/png;base64,${String(base64Data || '')}`;
+    a.download = `pentacle-paste-${Date.now()}.png`;
+    doc.body.appendChild(a);
+    a.click();
+    a.remove();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+// The menu model, independent of the DOM so it can be tested directly. Mirrors
+// the actions app.js already listens for: onAssignSlot(slot, session, host) and
+// onAction('rename'|'trash', session, extra). The renderer uses four slots.
+function webContextMenuItems(sessionName, displayName, hostId, emit) {
+  const items = [];
+  for (let slot = 0; slot < 4; slot += 1) {
+    items.push({ label: `Open in slot ${slot + 1}`, onSelect: () => emit('assign-slot', slot, sessionName, hostId) });
+  }
+  items.push({ separator: true });
+  items.push({ label: 'Rename', onSelect: () => emit('action', 'rename', sessionName, { displayName, hostId }) });
+  items.push({ label: 'Delete', onSelect: () => emit('action', 'trash', sessionName, hostId) });
+  return items;
+}
+
+function renderWebContextMenu(items, { document: doc = (typeof document !== 'undefined' ? document : null), x = 0, y = 0 } = {}) {
+  if (!doc || !doc.body) return null;
+  // Only one menu at a time.
+  const existing = doc.getElementById('web-context-menu');
+  if (existing) existing.remove();
+
+  const menu = doc.createElement('div');
+  menu.id = 'web-context-menu';
+  menu.setAttribute('role', 'menu');
+  menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;z-index:2147483647;min-width:170px;`
+    + 'background:#181b22;color:#e6e6e6;border:1px solid #333;border-radius:8px;padding:4px;'
+    + 'box-shadow:0 6px 30px rgba(0,0,0,.45);font:14px system-ui,sans-serif';
+
+  const close = () => { try { menu.remove(); } catch (_) {} doc.removeEventListener('pointerdown', onAway, true); };
+  const onAway = (e) => { if (!menu.contains(e.target)) close(); };
+
+  for (const item of items) {
+    if (item.separator) {
+      const hr = doc.createElement('div');
+      hr.style.cssText = 'height:1px;background:#333;margin:4px 2px';
+      menu.appendChild(hr);
+      continue;
+    }
+    const row = doc.createElement('div');
+    row.textContent = item.label;
+    row.setAttribute('role', 'menuitem');
+    row.style.cssText = 'padding:7px 12px;border-radius:6px;cursor:pointer';
+    row.addEventListener('mouseenter', () => { row.style.background = '#2a2f3a'; });
+    row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
+    row.addEventListener('click', () => { close(); try { item.onSelect(); } catch (_) {} });
+    menu.appendChild(row);
+  }
+  doc.body.appendChild(menu);
+  // Dismiss on an outside click / next contextmenu.
+  setTimeout(() => doc.addEventListener('pointerdown', onAway, true), 0);
+  return menu;
+}
+
+function buildCc(transport, { clipboard, chatPopoutContext, reload = () => window.location.reload(), config = {} }) {
   const call = transport.call.bind(transport);
   const fire = transport.fire.bind(transport);
   const on = transport.on.bind(transport);
+  const emit = transport.emit ? transport.emit.bind(transport) : () => {};
+  // Meeting/mic are surfaced only where the desktop would surface them — behind
+  // the mic feature flag — so a build without it stays silent.
+  const micFeature = !!(config && config.features && config.features.mic);
+  const notInWeb = (label) => { if (micFeature) showWebToast(`${label} is not available in web mode`); };
 
   return {
     // PTY operations — hostId threads through so each slot knows which tmux
@@ -169,19 +280,23 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
     onPtyData: (callback) => on('pty:data', (slot, data) => callback(slot, data)),
     onPtyExit: (callback) => on('pty:exit', (slot, exitCode) => callback(slot, exitCode)),
 
-    startMicServer: () => call('mic:start-server'),
+    // No mic service for a browser viewer; inform them instead of probing the host.
+    startMicServer: () => { notInWeb('The microphone'); return Promise.resolve({ ok: false, error: 'unavailable in web mode' }); },
     // The viewer's clipboard, not the host's — see WEB_LOCAL.
     writeClipboard: (text) => clipboard.writeText(String(text ?? '')),
     readClipboard: () => clipboard.readText(),
 
-    // No native meeting window in a browser; the host refuses these.
-    openMeeting: () => fire('meeting:open'),
-    closeMeeting: () => fire('meeting:close'),
+    // No native meeting window in a browser; toast on open, no-op on close (the
+    // host still refuses meeting:* as a safety net if anything else calls them).
+    openMeeting: () => { notInWeb('The meeting window'); return undefined; },
+    closeMeeting: () => undefined,
     reloadApp: () => { reload(); return undefined; },
 
     killTmuxSession: (hostId, sessionName) => call('tmux:kill-session', hostId, sessionName),
     setWindowTitle: (hostId, sessionName, title, source) => call('tmux:set-window-title', hostId, sessionName, title, source || 'manual'),
-    saveImage: (base64Data) => call('pty:save-image', base64Data),
+    // The pasted image goes to the viewer's browser as a download, not to the
+    // host's tmpdir (what pty:save-image does on the desktop).
+    saveImage: (base64Data) => Promise.resolve(browserDownloadImage(base64Data)),
 
     getConfig: () => call('get-config'),
     // In a browser the OS browser IS the browser; opening a tab beats a round
@@ -269,8 +384,13 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
     getChatStreamState: () => call('chat-stream:get-state'),
     listUiReviewArtifacts: () => call('ui-review:list-artifacts'),
 
-    // Native context menu — refused by the host; the browser keeps its own.
-    showContextMenu: (sessionName, displayName, hostId) => fire('context-menu', sessionName, displayName, hostId || 'local'),
+    // The desktop pops a native menu; the browser renders an HTML one that
+    // fires the same assign-slot / action events into app.js's listeners.
+    showContextMenu: (sessionName, displayName, hostId) => {
+      const items = webContextMenuItems(sessionName, displayName, hostId || 'local', emit);
+      renderWebContextMenu(items, { x: contextMenuPointer.x, y: contextMenuPointer.y });
+      return undefined;
+    },
 
     onAssignSlot: (callback) => on('assign-slot', (slot, sessionName, hostId) => callback(slot, sessionName, hostId || 'local')),
     onAction: (callback) => on('action', (action, sessionName, extra) => callback(action, sessionName, extra)),
@@ -306,9 +426,18 @@ function installWebCc({
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const transport = createTransport({ url: `${scheme}//${location.host}/cc`, logger });
   window.HOST = buildHost(config);
+  // Capture where a context menu is requested (capture phase, so it runs before
+  // app.js's own contextmenu handler calls showContextMenu).
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('contextmenu', (e) => {
+      contextMenuPointer.x = e.clientX;
+      contextMenuPointer.y = e.clientY;
+    }, true);
+  }
   window.cc = buildCc(transport, {
     clipboard,
     chatPopoutContext: chatPopoutContextFromSearch(location.search),
+    config,
   });
   return transport;
 }
@@ -320,4 +449,8 @@ module.exports = {
   buildHost,
   browserClipboard,
   chatPopoutContextFromSearch,
+  showWebToast,
+  browserDownloadImage,
+  webContextMenuItems,
+  renderWebContextMenu,
 };

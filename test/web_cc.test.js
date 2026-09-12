@@ -4,7 +4,45 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const { buildCc, buildHost, createTransport, browserClipboard, chatPopoutContextFromSearch } = require('../renderer/web_cc');
+const {
+  buildCc, buildHost, createTransport, browserClipboard, chatPopoutContextFromSearch,
+  showWebToast, browserDownloadImage, webContextMenuItems, renderWebContextMenu,
+} = require('../renderer/web_cc');
+
+// ── a minimal DOM, enough for the toast / download / context-menu shims ──────
+function makeEl(tag) {
+  return {
+    tag, style: {}, children: [], _listeners: {}, id: '', textContent: '', href: '', download: '', parent: null,
+    setAttribute(k, v) { this['_' + k] = v; },
+    appendChild(c) { c.parent = this; this.children.push(c); return c; },
+    remove() { const p = this.parent; if (!p) return; const i = p.children.indexOf(this); if (i >= 0) p.children.splice(i, 1); this.parent = null; },
+    addEventListener(n, fn) { (this._listeners[n] || (this._listeners[n] = [])).push(fn); },
+    removeEventListener() {},
+    click() { for (const fn of this._listeners.click || []) fn(); },
+    contains(node) { return node === this || this.children.some((c) => c.contains && c.contains(node)); },
+  };
+}
+function fakeDocument() {
+  const doc = {
+    body: makeEl('body'),
+    created: [],
+    createElement(tag) { const el = makeEl(tag); this.created.push(el); return el; },
+    getElementById(id) {
+      const walk = (el) => { if (el.id === id) return el; for (const c of el.children) { const r = walk(c); if (r) return r; } return null; };
+      return walk(this.body);
+    },
+    addEventListener() {}, removeEventListener() {},
+  };
+  return doc;
+}
+function fakeTransportWithEmit() {
+  const t = fakeTransport();
+  const listeners = new Map();
+  t.emit = (event, ...args) => { const h = listeners.get(event); if (h) h(...args); };
+  t.on = (event, handler) => { listeners.set(event, handler); };
+  t.listeners = listeners;
+  return t;
+}
 
 function preloadCcKeys() {
   const ipcRenderer = { invoke: () => Promise.resolve(), send() {}, on() {}, removeAllListeners() {} };
@@ -282,4 +320,111 @@ test('the transport reconnects after a drop', (t) => {
   t.mock.timers.tick(5000);
 
   assert.equal(fake.instances.length, 2, 'a dropped socket is replaced');
+});
+
+// ── native-method browser shims (lane 2) ─────────────────────────────────────
+
+test('showWebToast renders into the DOM and is a no-op without one', () => {
+  const doc = fakeDocument();
+  assert.equal(showWebToast('hi there', { document: doc }), true);
+  assert.equal(doc.body.children.length, 1);
+  assert.equal(doc.body.children[0].textContent, 'hi there');
+  assert.equal(showWebToast('x', { document: null }), false, 'no DOM → no throw, no toast');
+});
+
+test('saveImage hands the paste to the viewer as a download, never over the wire', async () => {
+  const doc = fakeDocument();
+  const res = browserDownloadImage('QUJD', { document: doc });
+  assert.deepEqual(res, { ok: true });
+  const anchor = doc.created.find((el) => el.tag === 'a');
+  assert.equal(anchor.href, 'data:image/png;base64,QUJD');
+  assert.match(anchor.download, /^pentacle-paste-\d+\.png$/);
+  assert.equal(browserDownloadImage('QUJD', { document: null }).ok, false, 'no DOM → a clean failure, not a throw');
+
+  // Through buildCc: it returns a promise (invoke shape) and never touches the wire.
+  const realDoc = global.document;
+  global.document = fakeDocument();
+  try {
+    const transport = fakeTransport();
+    const cc = buildCc(transport, { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });
+    assert.ok(cc.saveImage('QUJD') instanceof Promise);
+    assert.deepEqual(await cc.saveImage('QUJD'), { ok: true });
+    assert.deepEqual(transport.calls, [], 'saveImage must not round-trip to the host');
+    assert.deepEqual(transport.fires, []);
+  } finally { global.document = realDoc; }
+});
+
+test('meeting and mic surface a toast only when the mic feature is on, and never hit the wire', async () => {
+  const realDoc = global.document;
+  global.document = fakeDocument();
+  try {
+    const transport = fakeTransport();
+    const withMic = buildCc(transport, { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {}, config: { features: { mic: true } } });
+    assert.equal(withMic.openMeeting(), undefined, 'openMeeting keeps its send-mode shape');
+    assert.deepEqual(await withMic.startMicServer(), { ok: false, error: 'unavailable in web mode' });
+    assert.deepEqual(transport.fires, [], 'meeting/mic never reach the host');
+    assert.deepEqual(transport.calls, []);
+    assert.ok(global.document.body.children.length >= 1, 'a toast was shown when the mic feature is on');
+
+    // Feature off: silent, no toast.
+    global.document = fakeDocument();
+    const noMic = buildCc(fakeTransport(), { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {}, config: { features: { mic: false } } });
+    noMic.openMeeting();
+    await noMic.startMicServer();
+    assert.equal(global.document.body.children.length, 0, 'no toast when the feature is off');
+  } finally { global.document = realDoc; }
+});
+
+test('the web context menu fires the same assign-slot / action events as the desktop', () => {
+  const fired = [];
+  const emit = (event, ...args) => fired.push([event, ...args]);
+  const items = webContextMenuItems('sessX', 'Display X', 'amaterasu', emit);
+
+  // Four slots, then rename + delete.
+  const slots = items.filter((i) => /^Open in slot/.test(i.label || ''));
+  assert.equal(slots.length, 4, 'one entry per renderer slot');
+  slots[2].onSelect();
+  items.find((i) => i.label === 'Rename').onSelect();
+  items.find((i) => i.label === 'Delete').onSelect();
+
+  assert.deepEqual(fired, [
+    ['assign-slot', 2, 'sessX', 'amaterasu'],
+    ['action', 'rename', 'sessX', { displayName: 'Display X', hostId: 'amaterasu' }],
+    ['action', 'trash', 'sessX', 'amaterasu'],
+  ]);
+});
+
+test('showContextMenu renders a menu whose clicks drive the registered listeners', () => {
+  const realDoc = global.document;
+  const doc = fakeDocument();
+  global.document = doc;
+  try {
+    const transport = fakeTransportWithEmit();
+    const cc = buildCc(transport, { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });
+    // app.js registers these; the menu must reach them.
+    const assigned = [];
+    const actions = [];
+    cc.onAssignSlot((slot, session, host) => assigned.push([slot, session, host]));
+    cc.onAction((action, session, extra) => actions.push([action, session, extra]));
+
+    assert.equal(cc.showContextMenu('sessX', 'Display X', 'local'), undefined, 'send-mode shape');
+    assert.deepEqual(transport.fires, [], 'the menu is local — nothing goes to the host');
+
+    const menu = doc.getElementById('web-context-menu');
+    assert.ok(menu, 'a menu was rendered');
+    const row = (label) => menu.children.find((c) => c.textContent === label);
+    row('Open in slot 1').click();
+    row('Rename').click();
+    assert.deepEqual(assigned, [[0, 'sessX', 'local']]);
+    assert.deepEqual(actions, [['rename', 'sessX', { displayName: 'Display X', hostId: 'local' }]]);
+  } finally { global.document = realDoc; }
+});
+
+test('renderWebContextMenu keeps only one menu open at a time', () => {
+  const doc = fakeDocument();
+  const noop = () => {};
+  renderWebContextMenu([{ label: 'A', onSelect: noop }], { document: doc });
+  renderWebContextMenu([{ label: 'B', onSelect: noop }], { document: doc });
+  const menus = doc.body.children.filter((c) => c.id === 'web-context-menu');
+  assert.equal(menus.length, 1, 'a second open replaces the first');
 });
