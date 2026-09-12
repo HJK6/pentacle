@@ -265,6 +265,9 @@ test('configured assistant role removes UI mutation routes and blocks direct clo
     state.sessions = [{
       name: 'assistant', hostId: 'local', display_name: 'Unrelated title',
       role: 'persistent-assistant', visibility: 'default', working: false,
+    }, {
+      name: 'Ordinary collision', hostId: 'local', display_name: 'Ordinary collision',
+      role: 'worker', visibility: 'default', working: false,
     }];
     state.slots[0] = { name: 'assistant', displayName: 'Unrelated title', hostId: 'local' };
     renderSidebar();
@@ -280,6 +283,8 @@ test('configured assistant role removes UI mutation routes and blocks direct clo
   assert.equal(dom.window.document.querySelector('#header-0 .cell-trash').disabled, true);
   assert.equal(dom.window.document.querySelector('#header-0 .cell-edit').hidden, true);
   assert.equal(dom.window.document.querySelector('#header-0 .cell-edit').disabled, true);
+  vm.runInContext("state.chatStream.sessions[0].display_name = 'Ordinary collision'", context);
+  assert.equal(vm.runInContext("isProtectedAssistantNameHost('Ordinary collision', 'local')", context), false);
 
   vm.runInContext("showRenameModal('assistant', 'Unrelated title', 'local')", context);
   assert.equal(dom.window.document.querySelector('#modal-overlay').style.display, 'none');

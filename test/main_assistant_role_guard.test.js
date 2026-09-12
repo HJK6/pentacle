@@ -18,7 +18,7 @@ test('main rename guard is default-off and requires the exact configured role', 
   assert.equal(configuredAssistantRole({ features: {} }), '');
   assert.equal(isProtectedAssistantRename({ features: {} }, snapshot, 'local', 'assistant-pane'), false);
   assert.equal(isProtectedAssistantRename(config, snapshot, 'local', 'assistant-pane'), true);
-  assert.equal(isProtectedAssistantRename(config, snapshot, 'local', 'Different title'), true);
+  assert.equal(isProtectedAssistantRename(config, snapshot, 'local', 'Different title'), false);
   assert.equal(isProtectedAssistantRename(config, { sessions: [{ ...snapshot.sessions[0], role: 'worker' }] }, 'local', 'assistant-pane'), false);
   assert.equal(isProtectedAssistantRename(config, snapshot, 'other-host', 'assistant-pane'), false);
   assert.equal(isProtectedAssistantRename({ features: { assistantRole: 'assistant' }, localHostId: 'daemon-host' }, snapshot, 'local', 'assistant-pane'), true);

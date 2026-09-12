@@ -12,7 +12,7 @@ function streamHostForHostId(config = {}, hostId) {
 }
 
 function sessionIdentifiers(session = {}) {
-  return [session.stream_id, session.session_name, session.name, session.display_name, session.title]
+  return [session.stream_id, session.session_name, session.session_id, session.name]
     .filter((value) => typeof value === 'string' && value.trim());
 }
 

@@ -1957,8 +1957,18 @@ function sessionStateForNameHost(sessionName, hostId) {
   return state.sessions.find((session) => session.name === sessionName && session.hostId === hostId) || null;
 }
 
+function canonicalChatSessionStateForNameHost(sessionName, hostId) {
+  if (!sessionName) return null;
+  const streamHost = streamHostForHostId(hostId);
+  return (state.chatStream.sessions || []).find((session) => {
+    if (session?.host !== streamHost) return false;
+    return [session.stream_id, session.session_name, session.session_id, session.name]
+      .some((identifier) => identifier === sessionName);
+  }) || null;
+}
+
 function isProtectedAssistantNameHost(sessionName, hostId) {
-  return isProtectedAssistantSession(chatSessionStateForNameHost(sessionName, hostId))
+  return isProtectedAssistantSession(canonicalChatSessionStateForNameHost(sessionName, hostId))
     || isProtectedAssistantSession(sessionStateForNameHost(sessionName, hostId));
 }
 
