@@ -6229,7 +6229,7 @@ function showMicConflict(result) {
 
 // ── Voice Record per Slot (uses mic server copy ability) ──────
 
-const voiceState = { activeSlot: null, mode: null, pollTimer: null, prevCopied: '' };
+const voiceState = { activeSlot: null, mode: null, pollTimer: null, capture: null, busy: false };
 
 function setVoiceButtonRecording(slot, recording) {
   const btn = document.querySelector(`.cell-voice[data-slot="${slot}"]`);
@@ -6261,7 +6261,40 @@ async function startRemoteSlotVoiceSession(slot) {
   startRemoteClipboardPoller((text) => sendProgrammaticInput(slot, text));
 }
 
+async function deliverVoiceCapture(capture, text) {
+  if (!capture || capture.delivered) return;
+  capture.delivered = true; // claim before awaiting: polling and stop share one completion
+  const clean = String(text || '').trim();
+  if (!clean) return;
+  let ok = false;
+  try {
+    if (capture.streamId && window.PentacleChatStore) {
+      ok = await window.PentacleChatStore.sendTurn(capture.streamId, clean);
+    } else {
+      const result = await window.cc.chatSend(capture.hostId, capture.sessionName, clean);
+      ok = !!result?.ok;
+    }
+  } catch (error) {
+    console.error('Voice send failed:', error);
+  }
+  if (ok) voiceState.unsentText = '';
+  if (!ok) {
+    // Keep the recognized words available even if the original chat closed.
+    voiceState.unsentText = clean;
+    showToast('Voice message could not be sent. Transcript retained in the microphone panel.', { type: 'error' });
+    const preview = document.getElementById('mic-transcript-preview');
+    if (preview) preview.textContent = clean;
+  }
+}
+
 async function toggleVoiceRecord(slot) {
+  if (voiceState.busy) return;
+  voiceState.busy = true;
+  try { await toggleVoiceRecordInner(slot); }
+  finally { voiceState.busy = false; }
+}
+
+async function toggleVoiceRecordInner(slot) {
   if (!state.terminals[slot]) return;
 
   const btn = document.querySelector(`.cell-voice[data-slot="${slot}"]`);
@@ -6287,20 +6320,28 @@ async function toggleVoiceRecord(slot) {
   // its await resumes). Otherwise the manual-stop response and the poller
   // both see the new on_last_copied and paste it twice.
   if (voiceState.activeSlot === slot) {
+    const capture = voiceState.capture;
     stopVoicePoll(slot);
     const r = await micApi('POST', '/copy/stop');
-    if (r && r.copied && r.copied.trim() && r.copied !== voiceState.prevCopied) {
-      voiceState.prevCopied = r.copied;
-      await sendProgrammaticInput(slot, r.copied.trim());
-    }
+    if (r?.ok) await deliverVoiceCapture(capture, r.copied);
+    else showToast('Could not finish voice transcription. Check the microphone panel.', { type: 'error' });
     return;
   }
 
   // If recording another slot, stop that first
   if (voiceState.activeSlot !== null) {
-    await micApi('POST', '/copy/stop');
+    const previous = voiceState.capture;
     stopVoicePoll(voiceState.activeSlot);
+    const stopped = await micApi('POST', '/copy/stop');
+    if (!stopped?.ok) return;
+    await deliverVoiceCapture(previous, stopped.copied);
   }
+  const target = chatControlTargetForSlot(slot);
+  if (!target || target.error) return;
+  const capture = {
+    slot, streamId: target.streamSession?.stream_id,
+    hostId: target.hostId, sessionName: target.sessionName, delivered: false,
+  };
 
   // Mic must be in "on" mode — auto-enable if off
   let status = await micApi('GET', '/status');
@@ -6328,9 +6369,6 @@ async function toggleVoiceRecord(slot) {
     setTimeout(fetchMicStatus, 100);
   }
 
-  // Remember current on_last_copied so we don't paste stale text
-  voiceState.prevCopied = status.on_last_copied || '';
-
   // Start copy ability via mic server
   const r = await micApi('POST', '/copy/start');
   if (!r || !r.ok) {
@@ -6340,6 +6378,7 @@ async function toggleVoiceRecord(slot) {
 
   voiceState.activeSlot = slot;
   voiceState.mode = 'always_on';
+  voiceState.capture = capture;
   if (btn) btn.classList.add('recording');
 
   // Poll mic status — when capture ends (user said "over" / "end copy"),
@@ -6348,15 +6387,11 @@ async function toggleVoiceRecord(slot) {
   // so we don't double-paste.
   voiceState.pollTimer = setInterval(async () => {
     const s = await micApi('GET', '/status');
-    if (voiceState.activeSlot !== slot) return; // manual stop or another slot took over
+    if (voiceState.capture !== capture) return; // stopped, or a newer recording took over
     if (!s) return;
     if (s.on_listener_state !== 'CAPTURING') {
-      const copied = s.on_last_copied;
-      if (copied && copied.trim() && copied !== voiceState.prevCopied && state.terminals[slot]) {
-        voiceState.prevCopied = copied;
-        await sendProgrammaticInput(slot, copied.trim());
-      }
       stopVoicePoll(slot);
+      await deliverVoiceCapture(capture, s.on_last_copied);
     }
   }, 500);
 }
@@ -6370,6 +6405,7 @@ function stopVoicePoll(slot) {
   if (btn) btn.classList.remove('recording');
   voiceState.activeSlot = null;
   voiceState.mode = null;
+  voiceState.capture = null;
 }
 
 // Wire up voice buttons
@@ -6457,7 +6493,7 @@ function updateMicUI(data) {
   if (isCopy) {
     dot.classList.add('active-clipboard');
     info.innerHTML = '<span style="color:var(--green)">Clipboard capture active</span>';
-    preview.innerHTML = '';
+    preview.textContent = voiceState.unsentText || '';
   } else if (isMeeting) {
     dot.classList.add('active-meeting');
     const mins = Math.floor(data.duration / 60);
@@ -6470,10 +6506,10 @@ function updateMicUI(data) {
     }
   } else if (!isOn) {
     info.textContent = 'Mic off';
-    preview.innerHTML = '';
+    preview.textContent = voiceState.unsentText || '';
   } else if (!renderAlwaysOnUi) {
     info.textContent = 'Mic ready';
-    preview.innerHTML = '';
+    preview.textContent = voiceState.unsentText || '';
   } else {
     // Always-on mode
     const listenerState = data.on_listener_state || 'LISTENING';
@@ -6481,7 +6517,7 @@ function updateMicUI(data) {
     if (listenerState === 'AWAKE') {
       dot.classList.add('active-awake');
       info.innerHTML = '<span style="color:#00ff66">Listening for command...</span>';
-      if (!data.on_last_copied) preview.innerHTML = '';
+      if (!data.on_last_copied) preview.textContent = voiceState.unsentText || '';
     } else if (listenerState === 'CAPTURING') {
       dot.classList.add('active-capturing');
       info.innerHTML = '<span style="color:#00ff66">Copying...</span>';
@@ -6508,10 +6544,10 @@ function updateMicUI(data) {
       dot.classList.add('active-on');
       if (data.on_last_copied) {
         info.innerHTML = '<span style="color:var(--green)">[Copied]</span>';
-        preview.innerHTML = '';
+        preview.textContent = voiceState.unsentText || '';
       } else {
         info.textContent = `Say "${CONFIG.wakeWord}" to wake`;
-        preview.innerHTML = '';
+        preview.textContent = voiceState.unsentText || '';
       }
     }
   }

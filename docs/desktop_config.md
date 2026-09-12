@@ -220,3 +220,9 @@ local timezone. A probe that cannot reach its CLI exits non-zero, recording
 `provider_error` for that row while the other provider's fresh value and this
 row's prior value are retained. A silent/hung probe is bounded by the
 collector's 75s per-probe subprocess timeout (same `provider_error` result).
+
+## Per-chat voice messages
+
+With the compatible mic service configured, the per-chat mic button captures a message until a standalone `over` utterance or a second button click. Manual stop requires a service that drains pending audio/transcription before returning `/copy/stop`. The service must clear `on_last_copied` on every `/copy/start`; `/status` supplies the completed text when `on_listener_state` leaves `CAPTURING`.
+
+Each recording has its own completion guard. Identical consecutive messages are valid and send separately. The destination is the conversation selected when capture starts, even if the visible slot changes while transcription finishes. Agent replies remain text.
