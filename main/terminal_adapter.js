@@ -5,8 +5,12 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const run = promisify(execFile);
 
-function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = run, platform = process.platform } = {}) {
+function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = run, platform = process.platform, maxPtysPerConnection = null } = {}) {
   const slots = new Map();
+  // Per-connection pty ceiling. Desktop passes nothing (one BrowserWindow, one
+  // sender → no cap); the web host sets a finite value so a single browser
+  // connection cannot exhaust the host by opening unbounded terminals.
+  const perConnectionCap = Number.isInteger(maxPtysPerConnection) && maxPtysPerConnection > 0 ? maxPtysPerConnection : Infinity;
   const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
   function target(host, args) {
     const local = config.chatStream?.localHost || 'local';
@@ -35,8 +39,23 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
   }
   function key(event, slot) { return `${event.sender.id}:${slot}`; }
   function close(event, slot) { const id = key(event, slot); const record = slots.get(id); slots.delete(id); record?.process?.kill(); }
+  // Live pty slots owned by this connection (this event.sender), used to enforce
+  // the per-connection cap. Keyed by `${sender.id}:${slot}`, so the prefix picks
+  // out exactly one connection's slots.
+  function connectionSlotCount(event) {
+    let count = 0;
+    const prefix = `${event.sender.id}:`;
+    for (const id of slots.keys()) if (id.startsWith(prefix)) count += 1;
+    return count;
+  }
   ipcMain.handle('pty:create', async (event, slot, sessionName, host = 'local', cols = 80, rows = 24) => {
     if (!sessionName || !Number.isInteger(slot)) throw new Error('A session name and numeric slot are required');
+    // Re-creating an existing slot is a replacement (no net increase); only a
+    // genuinely new slot is capped, and the cap is checked before close() so a
+    // rejected create never tears down a live terminal.
+    if (!slots.has(key(event, slot)) && connectionSlotCount(event) >= perConnectionCap) {
+      throw new Error(`This connection has reached its terminal limit (${perConnectionCap})`);
+    }
     close(event, slot);
     const record = { process: null, sessionName, host, paneId: null, copyMode: true };
     slots.set(key(event, slot), record);

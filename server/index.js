@@ -27,6 +27,10 @@ const chatStreamClient = require(path.join(ROOT, 'main', 'chat_stream_client'));
 const DEFAULT_PORT = 7795;
 const DEFAULT_BIND = '127.0.0.1';
 const WEB_DIST = path.join(ROOT, 'renderer', 'dist', 'web');
+// Per-browser-connection terminal ceiling. The renderer uses four slots; the
+// headroom covers reconnect churn while still bounding what one connection can
+// allocate on a shared (e.g. tailnet-hosted) instance.
+const MAX_PTYS_PER_CONNECTION = 8;
 
 const CONTENT_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -135,7 +139,8 @@ async function main(argv = process.argv.slice(2)) {
   }
 
   // The same handler set main.js registers on ipcMain, collected into a table.
-  const ccHandlers = createCcHandlers({ CONFIG, chatStreamClient, configError, configWarnings });
+  const ccHandlers = createCcHandlers({ CONFIG, chatStreamClient, configError, configWarnings,
+    terminalOptions: { maxPtysPerConnection: MAX_PTYS_PER_CONNECTION } });
   const collector = createCollector();
   const stopTerminals = ccHandlers.register(collector);
   const bridge = createWsBridge({ table: collector.table });
