@@ -901,3 +901,27 @@ test('mobile parity: a lost durable reply blocks resubmission until status is re
   assert.equal(h.dom.window.document.querySelector('.slot-chat-question-submit').disabled, true);
   assert.ok(h.dom.window.document.querySelector('.slot-chat-question-reconcile'));
 });
+
+
+test('mobile parity: deferred bottom follow respects scrolling after a view render', async () => {
+  const { context, dom } = installRenderer();
+  await flush(); await flush(); mountRaceSlot(context);
+  const frames = [];
+  context.requestAnimationFrame = fn => { frames.push(fn); return frames.length; };
+  const scroll = dom.window.document.querySelector('.slot-chat-scroll');
+  Object.defineProperty(scroll, 'scrollHeight', { configurable: true, value: 1000 });
+  Object.defineProperty(scroll, 'clientHeight', { configurable: true, value: 200 });
+  scroll.scrollTop = 800;
+  vm.runInContext('renderSlotChat(0)', context);
+  assert.ok(frames.length > 0, 'near-bottom render schedules following');
+  scroll.scrollTop = 100; // Reading earlier history before the next animation frame.
+  frames.splice(0).forEach(fn => fn());
+  assert.equal(scroll.scrollTop, 100, 'a stale render must not overwrite the reading position');
+  scroll.scrollTop = 800;
+  vm.runInContext('scrollSlotChatToBottom(state.slotChatRefs[0])', context);
+  frames.splice(0).forEach(fn => fn());
+  assert.equal(scroll.scrollTop, 1000, 'following still works when the reader did not move');
+  await flush(); await flush();
+  frames.splice(0).forEach(fn => fn());
+  dom.window.close();
+});

@@ -2573,7 +2573,11 @@ function maybeApplyDeferredSlotChatRenders() {
 
 function scrollSlotChatToBottom(refs) {
   if (!refs?.scrollEl) return;
+  const scheduledScrollTop = refs.scrollEl.scrollTop;
   requestAnimationFrame(() => {
+    // A view refresh may queue this before the reader scrolls or loads history.
+    // Preserve that newer position instead of applying the stale bottom follow.
+    if (Math.abs(refs.scrollEl.scrollTop - scheduledScrollTop) > 1) return;
     refs.scrollEl.scrollTop = refs.scrollEl.scrollHeight;
   });
 }
@@ -3361,11 +3365,7 @@ function renderSlotChat(slot) {
   refs.inputEl?.classList.toggle('is-remote-pending', !!remotePending && !state.slotDraftTouched[slot]);
   refs.inputEl?.setAttribute('placeholder', composerValue ? '' : 'Type a message');
 
-  if (refs.scrollEl && shouldStick) {
-    requestAnimationFrame(() => {
-      refs.scrollEl.scrollTop = refs.scrollEl.scrollHeight;
-    });
-  }
+  if (refs.scrollEl && shouldStick) scrollSlotChatToBottom(refs);
 
   // Session Status card view + header glyph (spec_pentacle__status_card_ui_desktop).
   // Applied LAST so the normal render has already set every body element's
