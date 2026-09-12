@@ -46,9 +46,30 @@ shared daemon. A chat *send-turn* round trip is intentionally not a CDP scenario
 browser send path is covered by `test/web_cc.test.js` and daemon send/ingest by
 the `chat-stream-v2` python tests.
 
+The **slot-column-split** scenario also drives the actual divider, checks both
+tracks, reload persistence, mouse/touch reset and measured width limits.
+
 Run locally: `npm run build:web && node test/e2e/web_gate.js` (needs a system
 Chrome, `tmux`, and a Python with the daemon's `websockets`). `--profile <config.js>`
 runs the scenarios against an external daemon for a by-hand check.
+
+For focused full-renderer slot-layout acceptance, build the web bundle and run:
+
+```bash
+npm run build:web
+node test/e2e/grid_split_gate.js web /tmp/pentacle-split-web
+node test/e2e/grid_split_gate.js desktop /tmp/pentacle-split-desktop
+```
+
+This uses the same CDP client and scratch-daemon seeder. It launches the actual
+Electron entry point or served browser bundle with an isolated profile, creates
+four uniquely named local tmux fixtures, and checks their native PTY dimensions
+after drag, maximize/restore and view changes. It also checks narrow widths,
+header-control access and desktop process-restart persistence. It never restarts
+an existing desktop. The `finally` path removes its owned sessions and processes;
+cleanup failures fail the result. JSON, screenshots and logs go to the output
+directory. Set `PENTACLE_PYTHON` or `PENTACLE_CHROME` for a local interpreter or
+browser path; macOS uses the standard Google Chrome application path by default.
 
 ## Evidence contract
 

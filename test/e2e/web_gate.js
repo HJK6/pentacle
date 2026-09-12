@@ -147,11 +147,11 @@ function writeProfile(scratch, daemonPort) {
   return file;
 }
 
-async function startDaemon(args, scratch, runtime) {
+async function startDaemon(args, scratch, runtime, fixtures = [FIXTURE]) {
   const db = path.join(scratch, 'sessions.db');
   // Seed BEFORE boot: the daemon rebuilds its inventory purely from this DB.
-  const seed = execFileSync(args.python, [SEEDER, '--db', db, '--host', FIXTURE.host, '--session', FIXTURE.sessionName],
-    { encoding: 'utf8', cwd: ROOT });
+  const seed = fixtures.map(fixture => execFileSync(args.python, [SEEDER, '--db', db, '--host', fixture.host, '--session', fixture.sessionName],
+    { encoding: 'utf8', cwd: ROOT })).join('');
   const daemonLog = fs.openSync(path.join(scratch, 'daemon.log'), 'a');
 
   // Retry on a lost port race (another process grabs the freePort() port before
@@ -278,4 +278,4 @@ if (require.main === module) {
   run(parseArgs(process.argv.slice(2))).then((code) => process.exit(code));
 }
 
-module.exports = { run, parseArgs, FIXTURE };
+module.exports = { run, parseArgs, FIXTURE, startDaemon, writeProfile, freePort, onceExit };
