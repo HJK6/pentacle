@@ -97,8 +97,9 @@ provider models and effort. See [daemon setup](../services/chat-stream-v2/README
 | `machineStats` | Object; absent, ignored | Accepted compatibility key for old overlays. No fields in this object configure public desktop stats. |
 
 Microphone controls require an independently installed, running compatible HTTP
-service. This checkout does not yet include a runnable microphone server
-entrypoint; keep `features.mic: false` unless you already operate that endpoint.
+service implementing the [mic-server contract](../mic-server/README.md). The
+public repository does not ship a microphone server; keep `features.mic: false`
+unless you operate that endpoint yourself.
 Set its URL (or useStreamHost), verify its `/status` response, then enable mic. The request caller follows localHostId → hostMap.local →
 chatStream.localHost → local; it never guesses from your OS hostname.
 

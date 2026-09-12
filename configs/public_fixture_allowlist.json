@@ -2,7 +2,6 @@
   "version": 1,
   "fixtures": {
     ".github/ci/hermetic_machines.json": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
-    "mic-server/test/test_mic_server_coordination.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "pentacle-chat-core/tests/agentQuestionChatRender.test.ts": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "pentacle-chat-core/tests/chatListSelector.test.ts": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "pentacle-chat-core/tests/questionAnswerFormat.test.ts": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",

@@ -1,4 +1,4 @@
-# Optional local microphone service
+# Optional local microphone service (contract)
 
 This directory documents a privacy-minimized, loopback-only microphone adapter.
 It is optional and is disabled unless explicitly enabled by the local
@@ -14,16 +14,13 @@ configuration.
 
 ## Run
 
-```bash
-cd mic-server
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python mic_server.py
-```
-
-The default listener is `127.0.0.1:7780`. A client may set
-`micServerUrl = "http://127.0.0.1:7780"` in its local configuration. No
-non-loopback bind is supported by the public example.
+This repository ships the contract and the helper modules (`audio_device.py`,
+`clipboard.py`), not a server entrypoint. Run a service that implements the
+API below, bound to `127.0.0.1:7780` (the client default), and point the
+desktop or web host at it with `micServerUrl` (see
+[desktop configuration](../docs/desktop_config.md)). Keep `features.mic`
+disabled until that service answers `GET /status`. No non-loopback bind is
+supported by the public contract.
 
 ## Minimal API
 
