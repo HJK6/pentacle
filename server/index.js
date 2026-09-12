@@ -16,6 +16,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const crypto = require('node:crypto');
 const { WebSocketServer } = require('ws');
 
 const ROOT = path.join(__dirname, '..');
@@ -51,12 +52,13 @@ const CONTENT_TYPES = {
 };
 
 function parseArgs(argv) {
-  const args = { port: DEFAULT_PORT, bind: DEFAULT_BIND, profile: null };
+  const args = { port: DEFAULT_PORT, bind: DEFAULT_BIND, profile: null, tokenFile: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--profile') args.profile = argv[++i];
     else if (a === '--port') args.port = Number(argv[++i]);
     else if (a === '--bind') args.bind = argv[++i];
+    else if (a === '--token-file') args.tokenFile = argv[++i];
     else if (a === '--help' || a === '-h') args.help = true;
     else throw new Error(`unknown argument: ${a}`);
   }
@@ -64,6 +66,104 @@ function parseArgs(argv) {
     throw new Error(`invalid --port: ${args.port}`);
   }
   return args;
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+// A loopback bind is single-user and needs no token, exactly as lane 1 shipped.
+// Any routable bind MUST present a token file, or the host refuses to start, so
+// a tailnet-hosted instance can never come up wide open. The browser posts the
+// token once at /login; the reply sets an HttpOnly, SameSite=Strict cookie
+// carrying sha256(token) (never the token itself), and every page, api call and
+// websocket upgrade is gated on that cookie. No `Secure` attribute: the tailnet
+// is the transport boundary and HTTPS is a named follow-up (see server/README).
+
+function isLoopbackBind(bind) {
+  if (!bind) return true;
+  const b = String(bind).toLowerCase();
+  return b === 'localhost' || b === '::1' || b === '::ffff:127.0.0.1' || /^127(\.\d{1,3}){3}$/.test(b);
+}
+
+function readTokenFile(tokenFile) {
+  let raw;
+  try {
+    raw = fs.readFileSync(tokenFile, 'utf8');
+  } catch (e) {
+    throw new Error(`cannot read --token-file ${tokenFile}: ${e.code || e.message}`);
+  }
+  const token = raw.trim();
+  if (!token) throw new Error(`--token-file ${tokenFile} is empty`);
+  return token;
+}
+
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
+
+function parseCookies(header) {
+  const out = {};
+  if (!header) return out;
+  for (const part of String(header).split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const name = part.slice(0, eq).trim();
+    if (name) out[name] = part.slice(eq + 1).trim();
+  }
+  return out;
+}
+
+const COOKIE_NAME = 'pentacle_web';
+
+function createAuth(token) {
+  const cookieValue = crypto.createHash('sha256').update(token).digest('hex');
+  return {
+    isAuthed(req) {
+      const cookie = parseCookies(req.headers && req.headers.cookie)[COOKIE_NAME];
+      return !!cookie && safeEqual(cookie, cookieValue);
+    },
+    checkToken(candidate) { return safeEqual(candidate, token); },
+    setCookieHeader() {
+      return `${COOKIE_NAME}=${cookieValue}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800`;
+    },
+  };
+}
+
+function loginPage(error = '') {
+  const banner = error ? `<p class="err">${error}</p>` : '';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pentacle — sign in</title>
+<style>body{font:15px/1.4 system-ui,sans-serif;background:#0f1115;color:#e6e6e6;display:grid;place-items:center;min-height:100vh;margin:0}
+form{background:#181b22;padding:28px;border-radius:12px;box-shadow:0 6px 30px rgba(0,0,0,.4);width:min(340px,90vw)}
+h1{font-size:18px;margin:0 0 14px}input{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #333;background:#0f1115;color:#e6e6e6;font-size:15px}
+button{margin-top:12px;width:100%;padding:10px;border:0;border-radius:8px;background:#3b82f6;color:#fff;font-size:15px;cursor:pointer}
+.err{color:#f87171;margin:0 0 12px}</style></head>
+<body><form method="POST" action="/login"><h1>Pentacle web host</h1>${banner}
+<input type="password" name="token" placeholder="Access token" autofocus autocomplete="current-password">
+<button type="submit">Sign in</button></form></body></html>`;
+}
+
+function handleLogin(req, res, auth) {
+  if (req.method === 'GET') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(loginPage());
+    return;
+  }
+  if (req.method !== 'POST') { res.writeHead(405).end('method not allowed'); return; }
+  let body = '';
+  req.on('data', (chunk) => {
+    body += chunk;
+    if (body.length > 4096) { req.destroy(); }  // a token is short; cap the body
+  });
+  req.on('end', () => {
+    const token = new URLSearchParams(body).get('token') || '';
+    if (auth.checkToken(token)) {
+      res.writeHead(302, { 'set-cookie': auth.setCookieHeader(), location: '/', 'cache-control': 'no-store' }).end();
+    } else {
+      res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(loginPage('Incorrect token.'));
+    }
+  });
 }
 
 // Mirrors config-loader's candidate order for a named profile: a machine-local
@@ -118,8 +218,20 @@ function serveStatic(res, urlPath, configJson) {
 async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
-    console.log('usage: node server --profile <name> [--port 7795] [--bind 127.0.0.1]');
+    console.log('usage: node server --profile <name> [--port 7795] [--bind 127.0.0.1] [--token-file <path>]');
     return 0;
+  }
+
+  // Bind guard, before anything is allocated: a routable bind without a token
+  // is a refusal, not a warning. Loopback stays open (single-user); a token on
+  // loopback opts that instance into auth anyway.
+  const requireAuth = !isLoopbackBind(args.bind);
+  let auth = null;
+  if (requireAuth || args.tokenFile) {
+    if (requireAuth && !args.tokenFile) {
+      throw new Error(`refusing to bind routable address ${args.bind} without --token-file (a loopback bind needs no token)`);
+    }
+    auth = createAuth(readTokenFile(args.tokenFile));
   }
 
   const profilePath = resolveProfilePath(args.profile);
@@ -154,6 +266,20 @@ async function main(argv = process.argv.slice(2)) {
   const configJson = ccHandlers.publicConfig();
   const server = http.createServer((req, res) => {
     const urlPath = new URL(req.url, 'http://localhost').pathname;
+    // When auth is on, /login is the only unauthenticated surface; a GET
+    // navigation for anything else is redirected there and every api call gets
+    // a 401. Loopback (auth === null) is served exactly as before.
+    if (auth) {
+      if (urlPath === '/login') { handleLogin(req, res, auth); return; }
+      if (!auth.isAuthed(req)) {
+        if (req.method === 'GET' && !urlPath.startsWith('/api/')) {
+          res.writeHead(302, { location: '/login', 'cache-control': 'no-store' }).end();
+        } else {
+          res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' }).end('authentication required');
+        }
+        return;
+      }
+    }
     if (urlPath === '/api/config') {
       res.writeHead(200, { 'content-type': CONTENT_TYPES['.json'], 'cache-control': 'no-cache' })
         .end(JSON.stringify(ccHandlers.publicConfig()));
@@ -167,7 +293,15 @@ async function main(argv = process.argv.slice(2)) {
     serveStatic(res, urlPath, configJson);
   });
 
-  const wss = new WebSocketServer({ server, path: '/cc' });
+  const wss = new WebSocketServer({
+    server,
+    path: '/cc',
+    // The upgrade carries the browser's cookies; reject an unauthenticated one
+    // before it becomes a socket. Loopback (auth === null) accepts every upgrade.
+    verifyClient: auth
+      ? (info, done) => (auth.isAuthed(info.req) ? done(true) : done(false, 401, 'authentication required'))
+      : undefined,
+  });
   wss.on('connection', (socket) => {
     bridge.addSocket(socket);
     socket.on('message', (raw) => { bridge.handleMessage(socket, raw.toString()); });
@@ -184,6 +318,7 @@ async function main(argv = process.argv.slice(2)) {
   console.log(`[web] config ${configPath || '(fallback)'}`);
   console.log(`[web] serving ${WEB_DIST}`);
   console.log(`[web] listening on http://${args.bind}:${actual.port}  (ws ${actual.port}/cc)`);
+  console.log(`[web] auth ${auth ? 'ENABLED (token cookie required)' : 'disabled (loopback, single-user)'}`);
 
   // One close for everything the host owns, so a caller (tests, a harness) can
   // shut it down without leaking timers or terminal attachments.
@@ -206,7 +341,7 @@ async function main(argv = process.argv.slice(2)) {
   return { server, wss, bridge, handlers: collector.table, close, port: actual.port, url: `http://${args.bind}:${actual.port}` };
 }
 
-module.exports = { main, parseArgs, resolveProfilePath, serveStatic, WEB_DIST };
+module.exports = { main, parseArgs, resolveProfilePath, serveStatic, WEB_DIST, isLoopbackBind, createAuth, COOKIE_NAME };
 
 if (require.main === module) {
   main().catch((e) => {
