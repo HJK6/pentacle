@@ -221,6 +221,19 @@ dashboard registry and boards, the prebuilt chat-core and cosmic bundles) stay
 to `module.exports` — and `app.js` is bundled behind shims for `path` and
 `../config-loader`.
 
+## Closed chat slots
+
+When a previously known managed chat disappears from a connected daemon inventory
+for 1.5 seconds, its slot returns to the empty state. Its local question portal,
+unsent draft and attachment previews are cleared, and its local terminal attachment
+is released. This does not send a remote close, interrupt or question response.
+Other open slots and their drafts remain intact.
+
+Reconnects and temporary inventory gaps cancel cleanup. Offline or hidden sessions
+that remain in inventory stay attached. Session and slot generations prevent an old
+timer from clearing a replacement chat; legacy rows without generation identity are
+retained conservatively.
+
 ## Tests
 
 | File | Covers |
@@ -232,4 +245,10 @@ to `module.exports` — and `app.js` is bundled behind shims for `path` and
 | `test/terminal_peer_host.test.js` | terminal host resolution for a `peers[]` profile entry (SSH target), plus local/remote and the unknown-host refusal |
 | `test/web_cc.test.js` | the browser shim: method parity with `preload.js`, queueing, reject-on-drop, reconnect, and the native-method shims (toast, save-image download, context menu) |
 | `test/web_bundle.test.js` | no Electron/Node requires survive; the page ships everything it references |
+| `test/closed_chat_slots.test.js` | retirement deadline, connection authority, generation replacement and slot isolation |
 | `test/e2e/web_gate.js` | the deterministic web-mode E2E gate: seeds a loopback daemon and drives the served page in headless Chrome over CDP (`node test/e2e/web_gate.js`; `--profile <config.js>` runs against an external daemon by hand). Scenario functions live in `test/e2e/lib/web_scenarios.js`. Run by the `Public checks` workflow. |
+
+The hermetic web gate also creates two isolated durable questions, self-closes one
+seeded chat, and checks slot/portal retirement with survivor preservation. Fixture
+self-tokens stay in private scratch files and are removed with the isolated daemon.
+The destructive fixture scenario is skipped for external `--profile` runs.

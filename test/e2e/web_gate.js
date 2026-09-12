@@ -7,8 +7,8 @@
 //   node test/e2e/web_gate.js --profile <config.js>   # by-hand, external daemon
 //
 // The deterministic predeploy gate for web mode. With no --profile it is fully
-// hermetic: it seeds a scratch chat-stream-v2 sessions DB (one visible session
-// + a transcript), boots a loopback daemon against that DB, serves the web
+// hermetic: it seeds a scratch chat-stream-v2 sessions DB (two visible sessions
+// + transcripts), boots a loopback daemon against that DB, serves the web
 // bundle from server/, drives it in real headless Chrome over CDP, and runs the
 // named scenario functions from lib/web_scenarios.js. Every terminal action
 // touches only a local `ptest-web-*` tmux session; nothing is spawned, closed,
@@ -18,6 +18,7 @@
 
 const fs = require('fs');
 const net = require('net');
+const { randomBytes } = require('crypto');
 const os = require('os');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
@@ -130,7 +131,7 @@ class Report {
 function writeProfile(scratch, daemonPort) {
   const config = {
     appName: 'Pentacle',
-    features: { mic: false },
+    features: { mic: false, chatUi: true, inputBar: true },
     tmux: 'tmux',
     hosts: { local: { kind: 'local' } },
     agents: {},
@@ -147,11 +148,18 @@ function writeProfile(scratch, daemonPort) {
   return file;
 }
 
-async function startDaemon(args, scratch, runtime, fixtures = [FIXTURE]) {
+async function startDaemon(args, scratch, runtime, fixtures = [FIXTURE, { host: 'local', sessionName: 'web-gate-survivor', streamId: 'local:web-gate-survivor' }]) {
   const db = path.join(scratch, 'sessions.db');
   // Seed BEFORE boot: the daemon rebuilds its inventory purely from this DB.
-  const seed = fixtures.map(fixture => execFileSync(args.python, [SEEDER, '--db', db, '--host', fixture.host, '--session', fixture.sessionName],
-    { encoding: 'utf8', cwd: ROOT })).join('');
+  runtime.fixtureTokens = {};
+  const seed = fixtures.map(fixture => {
+    const token = randomBytes(32).toString('hex');
+    const tokenFile = path.join(scratch, `${fixture.sessionName}.token`);
+    fs.writeFileSync(tokenFile, token, { mode: 0o600 });
+    runtime.fixtureTokens[fixture.streamId] = token;
+    return execFileSync(args.python, [SEEDER, '--db', db, '--host', fixture.host,
+      '--session', fixture.sessionName, '--token-file', tokenFile], { encoding: 'utf8', cwd: ROOT });
+  }).join('');
   const daemonLog = fs.openSync(path.join(scratch, 'daemon.log'), 'a');
 
   // Retry on a lost port race (another process grabs the freePort() port before
@@ -214,6 +222,7 @@ async function run(args) {
     let profile = args.profile;
     if (!profile) {
       daemon = await startDaemon(args, scratch, runtime);
+      runtime.fixtureDaemonPort = daemon.port;
       profile = writeProfile(scratch, daemon.port);
       report.note(`seeded loopback daemon on 127.0.0.1:${daemon.port} (${daemon.seed})`);
     } else {

@@ -1,4 +1,5 @@
 'use strict';
+const { closedChatSlot } = require('./closed_chat_scenario');
 const { runGridSplit } = require('./grid_split_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
@@ -182,6 +183,7 @@ const SCENARIOS = [
   ['slot-attach-type-resize-kill', slotAttachTypeResizeKill],
   ['chat-transcript-paint', chatTranscriptPaint],
   ['slot-column-split', runGridSplit],
+  ['closed-chat-slot', closedChatSlot],
 ];
 
 module.exports = {
