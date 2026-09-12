@@ -148,6 +148,23 @@ def load_spawn_config() -> dict[str, Any]:
         raise _config_error(f"cannot load spawn defaults: {exc}") from exc
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise _config_error("unsupported spawn defaults schema")
+    # Deployment-owned per-host limits live beside the shipped policy in
+    # ``spawn_defaults.local.json`` (never shipped); only ``host_overrides`` is
+    # merged, so the shared file stays identical across checkouts.
+    local_path = SPAWN_DEFAULTS_PATH.with_name("spawn_defaults.local.json")
+    if local_path.exists():
+        try:
+            local = json.loads(local_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise _config_error(f"cannot load local spawn defaults: {exc}") from exc
+        if (
+            not isinstance(local, dict)
+            or local.get("schema_version") != 1
+            or set(local) - {"schema_version", "host_overrides"}
+            or not isinstance(local.get("host_overrides", {}), dict)
+        ):
+            raise _config_error("unsupported local spawn defaults")
+        raw["host_overrides"] = {**raw.get("host_overrides", {}), **local.get("host_overrides", {})}
     providers = raw.get("providers")
     if not isinstance(providers, dict):
         raise _config_error("spawn defaults providers must be an object")

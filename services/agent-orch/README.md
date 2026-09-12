@@ -64,7 +64,9 @@ per-session audit trail; use list fields to detect fleet-wide routing drift.
 
 Spawn defaults are deployment data in
 `services/_shared/spawn_defaults.json`: provider baselines and optional
-per-host overrides are resolved by both the CLI and daemon. `spawn_catalog_get` returns
+per-host overrides are resolved by both the CLI and daemon; a deployment adds
+its own `host_overrides` in `services/_shared/spawn_defaults.local.json` next to it
+(`{"schema_version": 1, "host_overrides": {...}}`, merged over the shipped file, not published). `spawn_catalog_get` returns
 the active policy read-back; handoff policy is colocated in that file but enforced by the
 handoff guard.
 

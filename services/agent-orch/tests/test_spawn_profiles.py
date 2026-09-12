@@ -134,6 +134,26 @@ def test_codex_partial_explicit_overrides_are_pinned_for_both_profiles() -> None
             )
 
 
+def test_local_spawn_defaults_overlay_supplies_host_overrides(monkeypatch, tmp_path) -> None:
+    """Deployment-owned per-host limits come from spawn_defaults.local.json beside the shipped file."""
+    config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
+    config["host_overrides"] = {}
+    config_path = tmp_path / "spawn_defaults.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    (tmp_path / "spawn_defaults.local.json").write_text(
+        json.dumps({"schema_version": 1, "host_overrides": {"hostc": {"max_concurrent_boots": 5}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", config_path)
+    spawn_profiles.load_spawn_config.cache_clear()
+    try:
+        assert spawn_profiles.boot_limits("hostc")[0] == 5
+        assert spawn_profiles.boot_limits("hosta")[0] == config["max_concurrent_boots"]
+        assert catalog()["spawn_defaults"]["host_overrides"] == {"hostc": {"max_concurrent_boots": 5}}
+    finally:
+        spawn_profiles.load_spawn_config.cache_clear()
+
+
 def test_host_override_and_policy_readback_share_one_config(monkeypatch, tmp_path) -> None:
     config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
     config["host_overrides"] = {"hostc": {"codex": {"model": "gpt-5.6-terra"}}}
