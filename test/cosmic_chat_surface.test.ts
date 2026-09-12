@@ -130,7 +130,7 @@ test('user bubble resolves to the JetBrains Mono family inside .cosmic', () => {
   assert.match(layer.getPropertyValue('--cosmic-font-mono'), /JetBrainsMono/);
 
   // Assistant prose uses the Rajdhani display family; code panel stays mono.
-  assert.equal(win.getComputedStyle(win.document.getElementById('assistant')!).fontFamily, 'var(--cosmic-font-display)');
+  assert.equal(win.getComputedStyle(win.document.getElementById('assistant')!).fontFamily, 'var(--cosmic-font-display-medium)');
   assert.equal(win.getComputedStyle(win.document.getElementById('code')!).fontFamily, 'var(--cosmic-font-mono)');
 });
 
