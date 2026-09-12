@@ -2336,13 +2336,15 @@ function filterCurrentTailRegression(
   };
 }
 
+// Image-only user messages are durable content even when their caption is empty.
+// Keep the same exception in snapshot ingestion below; ordinary noise stays filtered.
 function normalizeFetchedIncomingEvents(rawEvents: PentacleEvent[] | undefined): PentacleEvent[] {
   if (!Array.isArray(rawEvents)) return [];
   return rawEvents.map(normalizeEvent).filter((event) => (
     event.kind !== 'DRAFT' &&
     event.kind !== 'WORKING' &&
     !isHelperSuggestionEvent(event) &&
-    (isClaudeJsonlEvent(event) || !isTransientTranscriptNoise(event.text))
+    (isClaudeJsonlEvent(event) || (event.kind === 'USER' && (event.attachments?.length ?? 0) > 0) || !isTransientTranscriptNoise(event.text))
   ));
 }
 
@@ -2543,7 +2545,7 @@ export function applyPentacleSnapshotMessage(
       event.kind !== 'DRAFT' &&
       event.kind !== 'WORKING' &&
       !isHelperSuggestionEvent(event) &&
-      (isClaudeJsonlEvent(event) || !isTransientTranscriptNoise(event.text))
+      (isClaudeJsonlEvent(event) || (event.kind === 'USER' && (event.attachments?.length ?? 0) > 0) || !isTransientTranscriptNoise(event.text))
     )), limit).map(freezeEventInDev)
     : state.events.filter((event) => survivingStreamIds.has(event.stream_id));
   const drafts: Record<string, PentacleEvent> = {};

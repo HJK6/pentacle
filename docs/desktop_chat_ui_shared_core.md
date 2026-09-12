@@ -55,7 +55,8 @@ box diagrams preserve whitespace. The shared outer parser's blank-paragraph
 split inside fenced code remains a known limitation in both clients.
 
 Images precede captions; image-only messages have no empty bubble or text-copy
-button. Recognized Option-B answer text displays question labels, answers and
+button. History fetches and snapshots retain user attachments even when their
+caption is empty. Recognized Option-B answer text displays question labels, answers and
 notes while copying the original message. Hidden events and composer drafts
 remain outside the transcript.
 

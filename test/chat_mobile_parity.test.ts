@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { interpretPentacleEvent, initialPentacleStreamState, sendOptimisticMessage, applyPentacleEvent, selectSessionDetail } from 'pentacle-chat-core';
+import { interpretPentacleEvent, initialPentacleStreamState, sendOptimisticMessage, applyPentacleEvent, applyFetchedStreamEvents, applyPentacleSnapshotMessage, selectSessionDetail } from 'pentacle-chat-core';
 import { renderTranscriptItemHtml, renderTranscriptTimelineHtml, renderStreamTranscript } from '../renderer/src/shared_transcript_view';
 
 function row(overrides: Record<string, unknown> = {}) {
@@ -177,4 +177,23 @@ test('file body disclosure and copy preserve indentation and trailing whitespace
   const doc = rendered(row({ text: 'Edited example.js (2 lines)\n' + body }));
   assert.equal(doc.querySelector('details pre code')?.textContent, body);
   assert.equal(doc.querySelector('details .slot-chat-code-copy')?.getAttribute('data-copy-text'), body);
+});
+
+
+test('attachment-only user messages survive fetched history and snapshots without admitting empty noise', () => {
+  const streamId = 'local:photo-history';
+  const session = { stream_id: streamId, host: 'local', provider: 'codex', session_id: 'photo-history', session_name: 'photo-history', online: true, last_text: '', last_kind: 'USER', last_event_at: '2026-09-12T00:00:00Z' };
+  const photo = { daemon_seq: 1, host: 'local', provider: 'codex', stream_id: streamId, session_id: 'photo-history', session_name: 'photo-history', timestamp: session.last_event_at, kind: 'USER', text: '', attachments: [{ key: 'a'.repeat(64), mime: 'image/png', width: 1, height: 1 }] };
+  const noise = ['ASSIST', 'DRAFT', 'WORKING'].map((kind, i) => ({ ...photo, kind, daemon_seq: i + 2, attachments: [] }));
+  const initial = { ...initialPentacleStreamState, connected: true, sessions: [session] } as never;
+  const fetched = applyFetchedStreamEvents(initial, [photo, ...noise] as never, { requestedStreamId: streamId });
+  const snapshot = applyPentacleSnapshotMessage(initial, { sessions: [session], events: [photo, ...noise] } as never);
+  for (const state of [fetched, snapshot]) {
+    const detail = selectSessionDetail(state, streamId, { visibleCount: 'all' });
+    assert.equal(detail?.transcriptItems.length, 1);
+    assert.equal(detail?.transcriptItems[0].attachments?.[0]?.key, photo.attachments[0].key);
+    const doc = new JSDOM(renderTranscriptTimelineHtml(detail)).window.document;
+    assert.equal(doc.querySelectorAll('.slot-chat-media-button').length, 1);
+    assert.equal(doc.querySelectorAll('.slot-chat-user-bubble, .slot-chat-message-copy').length, 0);
+  }
 });
