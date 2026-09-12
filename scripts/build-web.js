@@ -92,6 +92,16 @@ function copyExternalScripts() {
   }
 }
 
+// Icons referenced from <link rel="icon"> / apple-touch-icon are copied next to the page.
+function copyIcons(html) {
+  for (const m of html.matchAll(/<link[^>]+rel="(?:icon|apple-touch-icon)"[^>]+href="([^"]+)"/g)) {
+    const from = path.resolve(RENDERER, m[1]);
+    const to = path.join(OUT, m[1]);
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.copyFileSync(from, to);
+  }
+}
+
 function copyStyles(html) {
   for (const href of styleSources(html)) {
     const local = EXTERNAL_CSS[href] || href;
@@ -157,6 +167,7 @@ async function build({ minify = false } = {}) {
   fs.writeFileSync(path.join(OUT, 'web.html'), buildHtml(html));
   copyExternalScripts();
   copyStyles(html);
+  copyIcons(html);
 
   // Fonts and images referenced from the copied stylesheets by relative URL.
   for (const dir of ['fonts', 'assets', 'img']) {
