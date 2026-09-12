@@ -51,6 +51,7 @@
     "services/chat-stream-v2/tests/test_agents_thread_contract.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "services/chat-stream-v2/tests/test_asset_byid_scope.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "services/chat-stream-v2/tests/test_asset_list_scope.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
+    "services/chat-stream-v2/tests/test_assistant_role.py": "Synthetic hosts and session identities exercise protected assistant role admission, handoff and recovery.",
     "services/chat-stream-v2/tests/test_attribution_qa_repair.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "services/chat-stream-v2/tests/test_awaiter_resolution.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "services/chat-stream-v2/tests/test_backfill_loop_responsiveness.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
