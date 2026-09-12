@@ -319,6 +319,59 @@ test('the test-mode override never reclassifies a pentacle-private lookalike (an
   }
 });
 
+// ── destination-aware roots: private destination admits the public root ─────
+function priv(remote, extra = {}) {
+  return { PENTACLE_PREPUSH_TEST_MODE: '1', PENTACLE_ALLOWED_PRIVATE_REMOTES: remote, ...extra };
+}
+// A sandbox with a private bare remote named `origin` (seeded main) plus a
+// merged branch whose second root is the "public line" root P.
+function privateSandbox() {
+  const sb = sandbox({ seedMain: false });
+  const privateRemote = path.join(sb.dir, 'private.git');
+  execFileSync('git', ['init', '--bare', '-b', 'main', privateRemote], { stdio: 'ignore' });
+  git(sb.work, ['remote', 'add', 'origin', privateRemote]);
+  git(sb.work, [...ID, 'push', 'origin', 'main:refs/heads/main']);
+  git(sb.work, ['fetch', 'origin', 'main']);
+  git(sb.work, [...ID, 'checkout', '-b', 'sync', 'main']);
+  makeForeignBranch(sb.work, 'publicline');
+  const publicRoot = git(sb.work, ['rev-parse', 'HEAD']).trim();
+  git(sb.work, [...ID, 'checkout', 'sync']);
+  git(sb.work, [...ID, 'merge', '--allow-unrelated-histories', '--no-edit', 'publicline']);
+  return { ...sb, privateRemote, publicRoot };
+}
+test('private destination ACCEPTS a merge that brings in the public root (merge-back by design)', () => {
+  const sb = privateSandbox();
+  const r = tryGit(sb.work, withHook(['push', 'origin', 'sync:refs/heads/sync']), priv(sb.privateRemote, { PENTACLE_PUBLIC_ROOTS: sb.publicRoot }));
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /private repo/);
+});
+test('private destination still REJECTS a root that is neither its own nor the public root', () => {
+  const sb = privateSandbox();
+  const other = '0123456789abcdef0123456789abcdef01234567';
+  const r = tryGit(sb.work, withHook(['push', 'origin', 'sync:refs/heads/sync']), priv(sb.privateRemote, { PENTACLE_PUBLIC_ROOTS: other }));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /not a root of origin\/main/);
+});
+test('the public root allowance never applies to a PUBLIC destination', () => {
+  const sb = sandbox();
+  git(sb.work, [...ID, 'checkout', '-b', 'merged', 'main']);
+  makeForeignBranch(sb.work, 'foreign');
+  const foreignRoot = git(sb.work, ['rev-parse', 'HEAD']).trim();
+  git(sb.work, [...ID, 'checkout', 'merged']);
+  git(sb.work, [...ID, 'merge', '--allow-unrelated-histories', '--no-edit', 'foreign']);
+  const r = tryGit(sb.work, withHook(['push', 'public', 'merged:refs/heads/merged']), pub(sb.remote, { PENTACLE_PUBLIC_ROOTS: foreignRoot }));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /foreign history/);
+});
+test('URL classification recognizes the private repo and the override never reclassifies the public repo', () => {
+  for (const url of ['git@github.com:HJK6/pentacle-private.git', 'https://github.com/hjk6/PENTACLE-PRIVATE']) {
+    assert.match(runHookDirect('origin', url).stderr, /\(private repo/, `expected private: ${url}`);
+  }
+  const r = runHookDirect('origin', 'git@github.com:HJK6/pentacle.git', { env: { PENTACLE_PREPUSH_TEST_MODE: '1', PENTACLE_ALLOWED_PRIVATE_REMOTES: 'git@github.com:HJK6/pentacle.git' } });
+  assert.match(r.stderr, /\(public repo/);
+  assert.doesNotMatch(r.stderr, /\(private repo/);
+});
+
 // ── portability ──────────────────────────────────────────────────────────────
 test('the hook is POSIX sh (shebang + `sh -n` clean)', () => {
   const src = fs.readFileSync(hookPath, 'utf8');

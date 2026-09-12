@@ -130,6 +130,7 @@ git push --dry-run public HEAD:refs/heads/tmp-foreign-probe
 | Bare `git push <remote>` (no refspec) or a matching-branch push | **REJECTED** (name what you push) |
 | `git push <remote> my-branch` (same-name branch) | **Allowed** — maps to the same name; this check does *not* force `src:refs/heads/dst`, so a wrong *branch name* is out of scope (content is still checked below) |
 | A tip that reaches a root commit which is not a root of the remote's `main` — a foreign orphan branch, **or a merge that pulls another repository's history into a clean branch** | **REJECTED** (foreign ancestry) |
+| Destination is the private line `github.com/HJK6/pentacle-private` (any remote name) | Same root-set check, but the public repo's root is additionally **allowed** — the private `main` merges public `main` back by design; any other new root is still **REJECTED** |
 | Public destination whose `main` cannot be resolved (no ref, fetch fails) | **REJECTED** (fail closed) |
 | Non-public destination with no resolvable `main` | Allowed with a note (nothing to compare) |
 | Any of the above run with `git push --no-verify` | **Not protected** (bypass by design) |

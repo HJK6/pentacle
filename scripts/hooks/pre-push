@@ -20,6 +20,10 @@
 #   (c) Foreign ancestry — every root commit reachable from a pushed tip must
 #       also be a root of the remote's `main`. A foreign orphan branch, OR a merge
 #       that pulls another repository's history into a clean branch, is REFUSED.
+#       Destination-aware: on the PRIVATE repo (github.com/HJK6/pentacle-private)
+#       the public repo's root (PUBLIC_ROOTS) is additionally admitted, because
+#       the private line merges public `main` back by design; any other new root
+#       is still refused. On the PUBLIC repo nothing but its own root is allowed.
 #
 # FAIL CLOSED. A push to the public repo is REFUSED (never a silent exit 0) when
 # the hook cannot fully verify: no/blank/malformed push records, a tip sha that
@@ -69,7 +73,8 @@ trap cleanup EXIT INT TERM
 # ── URL classification (case-insensitive owner/repo; not pentacle-private) ────
 # Reduce a URL to host + path, then match github.com/HJK6/pentacle exactly
 # (case-insensitive) via shell globs — no external tools.
-is_github_pentacle_url() {
+# Echo "host path" for a URL (scheme/userinfo/port stripped, .git dropped).
+github_repo_path() {
   u="$1"
   [ -n "$u" ] || return 1
   case "$u" in *://*) u="${u#*://}" ;; esac      # drop scheme
@@ -87,11 +92,24 @@ is_github_pentacle_url() {
   host="${host%%:*}"
   path="${path#/}"; path="${path%/}"; path="${path%.git}"; path="${path%/}"
   case "$host" in
-    [Gg][Ii][Tt][Hh][Uu][Bb].[Cc][Oo][Mm]) : ;;
+    [Gg][Ii][Tt][Hh][Uu][Bb].[Cc][Oo][Mm]) printf '%s\n' "$path" ;;
     *) return 1 ;;
   esac
-  case "$path" in
+}
+is_github_pentacle_url() {
+  p="$(github_repo_path "$1")" || return 1
+  case "$p" in
     [Hh][Jj][Kk]6/[Pp][Ee][Nn][Tt][Aa][Cc][Ll][Ee]) return 0 ;;   # exact, case-insensitive
+    *) return 1 ;;
+  esac
+}
+# The private development line (github.com/HJK6/pentacle-private). Its `main`
+# carries the public repo's root as a second ancestry since the 2026-09-12
+# merge-back, so a push there may legitimately reach PUBLIC_ROOTS.
+is_github_pentacle_private_url() {
+  p="$(github_repo_path "$1")" || return 1
+  case "$p" in
+    [Hh][Jj][Kk]6/[Pp][Ee][Nn][Tt][Aa][Cc][Ll][Ee]-[Pp][Rr][Ii][Vv][Aa][Tt][Ee]) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -115,8 +133,33 @@ elif [ "${PENTACLE_PREPUSH_TEST_MODE:-}" = 1 ] && [ -n "${PENTACLE_ALLOWED_PUBLI
   esac
 fi
 
+# Root commits of the public repo ("Initial public release"); admitted on a
+# PRIVATE destination only. Overridable solely in test mode (sandbox remotes).
+PUBLIC_ROOTS="3a008e5da4918e899fe082955177f76e3ebef437"
+is_private=0
+if [ "$is_public" -ne 1 ]; then
+  if is_github_pentacle_private_url "$remote_url"; then
+    is_private=1
+  elif [ "${PENTACLE_PREPUSH_TEST_MODE:-}" = 1 ] && [ -n "${PENTACLE_ALLOWED_PRIVATE_REMOTES:-}" ]; then
+    can_u="${remote_url%/}"; can_u="${can_u%.git}"
+    for _extra in ${PENTACLE_ALLOWED_PRIVATE_REMOTES}; do
+      _e="${_extra%/}"; _e="${_e%.git}"
+      if [ "$can_u" = "$_e" ]; then
+        is_private=1
+        warn "WARNING: treating '${remote_url}' as the private repo via PENTACLE_PREPUSH_TEST_MODE (test override)."
+        break
+      fi
+    done
+  fi
+fi
+if [ "${PENTACLE_PREPUSH_TEST_MODE:-}" = 1 ] && [ -n "${PENTACLE_PUBLIC_ROOTS:-}" ]; then
+  PUBLIC_ROOTS="${PENTACLE_PUBLIC_ROOTS}"
+fi
+
 if [ "$is_public" -eq 1 ]; then
   warn "pushing to '${remote_name}' -> ${remote_url} (public repo — public rules apply)"
+elif [ "$is_private" -eq 1 ]; then
+  warn "pushing to '${remote_name}' -> ${remote_url} (private repo — the public root is admitted for merge-back)"
 else
   warn "pushing to '${remote_name}' -> ${remote_url}"
 fi
@@ -252,6 +295,9 @@ if [ -n "$remote_main" ]; then
     else
       warn "note: could not enumerate ${remote_name}/main's roots; skipping the shared-history check."
     fi
+  elif [ "$is_private" -eq 1 ]; then
+    main_roots="$main_roots
+$PUBLIC_ROOTS"
   fi
 fi
 
@@ -303,7 +349,11 @@ while read -r lref lsha rref rsha extra; do
     [ "$found" -eq 0 ] && { extra_root="$r"; break; }
   done
   if [ -n "$extra_root" ]; then
-    warn "REFUSED: ${lref} reaches a root commit ($(printf '%.12s' "$extra_root")) that is not a root of ${remote_name}/main."
+    if [ "$is_private" -eq 1 ]; then
+      warn "REFUSED: ${lref} reaches a root commit ($(printf '%.12s' "$extra_root")) that is not a root of ${remote_name}/main nor the public root."
+    else
+      warn "REFUSED: ${lref} reaches a root commit ($(printf '%.12s' "$extra_root")) that is not a root of ${remote_name}/main."
+    fi
     warn "         this is foreign history — an unrelated repository's line, or a merge that pulls one in."
     fail=1
   fi
