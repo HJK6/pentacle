@@ -161,12 +161,12 @@ type AssistantBlock =
 function parseAssistantBlocks(text: string): AssistantBlock[] {
   return String(text || '')
     .split(/\n{2,}/)
-    .map((chunk) => chunk.trim())
-    .filter(Boolean)
+    .map((chunk) => chunk.trimStart())
+    .filter((chunk) => chunk.trim().length > 0)
     .map((chunk): AssistantBlock => {
       const lines = chunk.split('\n');
       const first = lines[0] || '';
-      const rest = lines.slice(1).join('\n').trim();
+      const rest = lines.slice(1).join('\n');
       if (/^(Edited|Created|Added|Updated|Deleted) /.test(first)) {
         const action = first.split(' ')[0];
         const match = first.match(/^\w+\s+(.+?)\s+\((.+)\)$/);
@@ -185,7 +185,7 @@ function parseAssistantBlocks(text: string): AssistantBlock[] {
           output: summarizeCommandOutput(rest.replace(/^└\s*/gm, '').trim()),
         };
       }
-      return { type: 'text', text: chunk };
+      return { type: 'text', text: chunk.trim() };
     });
 }
 
@@ -420,13 +420,13 @@ function disclosureKey(item: PentacleTranscriptItem, options: TranscriptRenderOp
   return escapeHtml(JSON.stringify([options.streamId || '', item.id, block]));
 }
 
-function renderDisclosure(item: PentacleTranscriptItem, options: TranscriptRenderOptions, label: string): string {
+function renderDisclosure(item: PentacleTranscriptItem, options: TranscriptRenderOptions, label: string, expandedLabel: string): string {
   const disclosure = item.disclosure;
   const preview = disclosure?.previewText || item.text;
   const body = disclosure?.expandedText ?? item.text;
   const heading = `<span class="slot-chat-disclosure-label">${escapeHtml(label)}</span><span class="slot-chat-disclosure-preview">${escapeHtml(preview)}</span>${disclosure?.previewTail ? `<span class="slot-chat-disclosure-tail">${escapeHtml(disclosure.previewTail)}</span>` : ''}`;
   return disclosure?.expandable
-    ? `<details class="slot-chat-disclosure" data-disclosure-key="${disclosureKey(item, options)}"><summary>${heading}</summary>${renderCodeBody(body)}</details>`
+    ? `<details class="slot-chat-disclosure" data-disclosure-key="${disclosureKey(item, options)}"><summary aria-label="${escapeHtml(expandedLabel)}">${heading}</summary>${renderCodeBody(body)}</details>`
     : `<div class="slot-chat-disclosure">${heading}${renderCopyButton(body, 'Copy message', 'slot-chat-message-copy')}</div>`;
 }
 
@@ -466,27 +466,26 @@ function renderTranscriptItemBodyHtml(
       ? sendState : item.receiptCaption || (item.queuedWhileWorking && (sendState === 'queued' || sendState === 'sending') ? 'queued' : sendState);
     const status = receipt ? renderUserSendStatus(receipt, item.optimisticId) : '';
     const attachments = renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments);
-    return `<article class="slot-chat-row is-user${rowClass}" data-copy-kind="message">${attachments}${item.text.trim() ? `<div class="slot-chat-user-bubble">${renderAnswerBody(item.text)}</div>${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}` : ''}${status}</article>`;
+    return `<article class="slot-chat-row is-user${rowClass}" aria-label="User message" data-copy-kind="message">${attachments}${item.text.trim() ? `<div class="slot-chat-user-bubble">${renderAnswerBody(item.text)}</div>${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}` : ''}${status}</article>`;
   }
-  if (rule === 'terminal:divider') {
+  if (rule === 'terminal:divider' || rule === 'activity:turn-summary') {
     if (!shouldShowTurnDuration(options)) return '';
-    return `<div class="slot-chat-terminal-divider"><span></span><b>${escapeHtml(item.text)}</b><span></span></div>`;
+    return `<div class="slot-chat-terminal-divider${rule === 'activity:turn-summary' ? ' slot-chat-activity' : ''}" role="separator"><span></span><b>${escapeHtml(item.text)}</b><span></span></div>`;
   }
   if (rule === 'system:compacted') {
-    return `<div class="slot-chat-compacted"><span>↘</span>${escapeHtml(item.text)}</div>`;
+    return `<article class="slot-chat-compacted" aria-label="Compacted transcript"><span>↘</span>${escapeHtml(item.text)}</article>`;
   }
   if (rule === 'bubble:agent' || item.tone === 'agent') {
-    return `<article class="slot-chat-row is-agent">${renderDisclosure(item, options, `Subagent${item.label ? ` · ${item.label}` : ''}`)}</article>`;
+    return `<article class="slot-chat-row is-agent" aria-label="${escapeHtml(`Subagent${item.label ? ` · ${item.label}` : ''}`)}">${renderDisclosure(item, options, `Subagent${item.label ? ` · ${item.label}` : ''}`, `Show full ${item.label || 'subagent'} output`)}</article>`;
   }
   if (item.tone === 'tool' && item.disclosure?.mode === 'collapsed-preview') {
-    return `<article class="slot-chat-row is-tool">${renderDisclosure(item, options, 'Tool result')}</article>`;
+    return `<article class="slot-chat-row is-tool" aria-label="Tool result">${renderDisclosure(item, options, 'Tool result', 'Show full tool result')}</article>`;
   }
-  if (rule === 'activity:code-block') return `<article class="slot-chat-row">${renderCodeBody(item.text)}</article>`;
-  if (rule === 'activity:tool-batch') return `<article class="slot-chat-row"><div class="slot-chat-activity"><span class="slot-chat-activity-dot"></span><span>${escapeHtml(item.text)}</span></div></article>`;
+  if (rule === 'activity:code-block') return `<article class="slot-chat-row" aria-label="Code block">${renderCodeBody(item.text)}</article>`;
+  if (rule === 'activity:tool-batch') return `<article class="slot-chat-row" aria-label="Tool activity"><div class="slot-chat-activity"><span class="slot-chat-activity-dot"></span><span>${escapeHtml(item.text)}</span></div></article>`;
   if (rule.startsWith('activity:')) {
-    if (rule === 'activity:turn-summary' && !shouldShowTurnDuration(options)) return '';
     const activity = splitActivityText(item.text);
-    return `<article class="slot-chat-row"><div class="slot-chat-activity" style="--machine:${escapeHtml(chrome.accent)};--machine-surface:${escapeHtml(chrome.surface)};--machine-border:${escapeHtml(chrome.border)};">
+    return `<article class="slot-chat-row" aria-label="${escapeHtml(activity.title)}"><div class="slot-chat-activity" style="--machine:${escapeHtml(chrome.accent)};--machine-surface:${escapeHtml(chrome.surface)};--machine-border:${escapeHtml(chrome.border)};">
       <span class="slot-chat-activity-dot"></span>
       <div class="slot-chat-activity-body">
         <b>${escapeHtml(activity.title)}</b>
@@ -499,7 +498,7 @@ function renderTranscriptItemBodyHtml(
   return `<article class="slot-chat-row" data-copy-kind="message"><div class="slot-chat-assistant-card">
     ${blocks.map((block, index) => {
       if (block.type === 'edit') {
-        return `<div class="slot-chat-file-card" style="--machine:${escapeHtml(chrome.accent)};--machine-surface:${escapeHtml(chrome.surface)};--machine-border:${escapeHtml(chrome.border)};"><b>${escapeHtml(block.action)} ${escapeHtml(block.title)}</b>${block.meta ? `<p>${escapeHtml(block.meta)}</p>` : ''}${block.body ? `<details class="slot-chat-file-body" data-disclosure-key="${disclosureKey(item, options, String(index))}"><summary><span>File details</span><pre>${escapeHtml(block.body.split('\n').slice(0, 6).join('\n'))}</pre></summary>${renderCodeBody(block.body)}</details>` : ''}</div>`;
+        return `<article class="slot-chat-file-card" aria-label="File ${escapeHtml(block.action)} ${escapeHtml(block.title)}" style="--machine:${escapeHtml(chrome.accent)};--machine-surface:${escapeHtml(chrome.surface)};--machine-border:${escapeHtml(chrome.border)};"><b>${escapeHtml(block.action)} ${escapeHtml(block.title)}</b>${block.meta ? `<p>${escapeHtml(block.meta)}</p>` : ''}${block.body ? `<details class="slot-chat-file-body" data-disclosure-key="${disclosureKey(item, options, String(index))}"><summary aria-label="Show file body"><span>File details</span><pre>${escapeHtml(block.body.split('\n').slice(0, 6).join('\n'))}</pre></summary>${renderCodeBody(block.body)}</details>` : ''}</article>`;
       }
       if (block.type === 'command') {
         return `<div class="slot-chat-command-card" style="--machine:${escapeHtml(chrome.accent)};--machine-surface:${escapeHtml(chrome.surface)};--machine-border:${escapeHtml(chrome.border)};"><b>${escapeHtml(block.command)}</b>${block.output ? `<pre>${escapeHtml(block.output)}</pre>` : ''}</div>`;
