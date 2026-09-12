@@ -72,10 +72,12 @@ loopback daemon with no credential registry needs neither. Example against a
 tailnet daemon:
 
 ```bash
+# --token-path is the daemon credential; --token-file is the web login (the
+# routable --bind requires it). Both stay server-side.
 node server --profile daffodil \
-  --token-path ~/.config/pentacle-stream/token \   # daemon credential
+  --token-path ~/.config/pentacle-stream/token \
   --bind 100.80.28.24 --port 7796 \
-  --token-file ~/.config/pentacle-web/daffodil.token   # web login (routable bind)
+  --token-file ~/.config/pentacle-web/daffodil.token
 ```
 
 ## HTTP
