@@ -92,6 +92,6 @@ test('main schedule IPC handlers forward arguments to chatStreamClient', async (
     ['get', 'sched-4'],
   ]);
 
-  const mainJs = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-  assert.match(mainJs, /registerScheduleIpcHandlers\(ipcMain, chatStreamClient, normalizeChatStreamError\)/);
+  const source = fs.readFileSync(path.join(__dirname, '..', 'main', 'cc_handlers.js'), 'utf8');
+  assert.match(source, /registerScheduleIpcHandlers\(target, chatStreamClient, normalizeChatStreamError\)/);
 });

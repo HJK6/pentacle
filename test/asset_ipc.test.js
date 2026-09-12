@@ -150,6 +150,8 @@ test('main asset IPC handlers forward arguments to chatStreamClient', async () =
     ['dock', { asset_id: 'a1' }],
   ]);
 
-  const mainJs = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-  assert.match(mainJs, /registerAssetIpcHandlers\(ipcMain, chatStreamClient, normalizeChatStreamError, assetPopouts\)/);
+  // The bridges are registered from the shared cc handler module, against
+  // whichever target the transport supplies (ipcMain, or the ws collector).
+  const source = fs.readFileSync(path.join(__dirname, '..', 'main', 'cc_handlers.js'), 'utf8');
+  assert.match(source, /registerAssetIpcHandlers\(target, chatStreamClient, normalizeChatStreamError, assetPopouts\)/);
 });

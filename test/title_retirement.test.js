@@ -23,7 +23,7 @@ function functionBody(source, name) {
 }
 
 test('desktop transcript summarizer entry points are retired', () => {
-  const main = readRepoFile('main.js');
+  const main = readRepoFile('main.js') + readRepoFile('main/cc_handlers.js');
   const renderer = readRepoFile('renderer/app.js');
   const preload = readRepoFile('preload.js');
 
@@ -35,8 +35,8 @@ test('desktop transcript summarizer entry points are retired', () => {
 });
 
 test('session creation no longer writes the New Chat tmux title', () => {
-  const main = readRepoFile('main.js');
-  const body = main.slice(main.indexOf("ipcMain.handle('chat-stream:spawn'"), main.indexOf("ipcMain.handle('chat-stream:send'"));
+  const main = readRepoFile('main/cc_handlers.js');
+  const body = main.slice(main.indexOf("target.handle('chat-stream:spawn'"), main.indexOf("target.handle('chat-stream:send'"));
 
   assert.doesNotMatch(body, /renameTmuxWindow/);
   assert.doesNotMatch(body, /New Chat/);
@@ -44,8 +44,8 @@ test('session creation no longer writes the New Chat tmux title', () => {
 });
 
 test('desktop chat manual rename sends the manual source flag', () => {
-  const main = readRepoFile('main.js');
-  const renameHandler = main.slice(main.indexOf("ipcMain.handle('chat-stream:rename'"));
+  const main = readRepoFile('main/cc_handlers.js');
+  const renameHandler = main.slice(main.indexOf("target.handle('chat-stream:rename'"));
 
   assert.match(renameHandler, /renameSession\(\{/);
   assert.match(renameHandler, /source:\s*'manual'/);

@@ -8,8 +8,6 @@
  */
 const { app, BrowserWindow, ipcMain, shell, clipboard } = require('electron');
 const path = require('node:path');
-const os = require('node:os');
-const fs = require('node:fs');
 const { loadConfig } = require('./config-loader');
 
 const FALLBACK_CONFIG = {
@@ -33,33 +31,17 @@ try {
 app.setName(CONFIG.appName || 'Pentacle');
 
 const windows = new Set();
-const telemetry = [];
 const chatStreamClient = require('./main/chat_stream_client');
-const { registerAssetIpcHandlers } = require('./main/asset_ipc_bridge');
-const { registerScheduleIpcHandlers } = require('./main/schedule_ipc_bridge');
-const { probeMicServer } = require('./main/mic-url');
-const { registerNotificationIpcHandlers } = require('./main/notification_ipc_bridge');
 const { createAssetPopoutManager } = require('./main/asset_popout_windows');
-const { isProtectedAssistantRename } = require('./main/assistant_role_guard');
+const { createCcHandlers, safeString, resultError } = require('./main/cc_handlers');
 const assetPopouts = createAssetPopoutManager({ BrowserWindow, appRoot: __dirname, getMainWindow: () => [...windows][0] });
-function safeString(value, fallback = '') { return String(value ?? '').trim() || fallback; }
-function nowIso() { return new Date().toISOString(); }
-function normalizeChatStreamError(error) { return String(error?.error || error?.message || error || 'Daemon unavailable'); }
-function resultError(message) { return { ok: false, error: normalizeChatStreamError(message) }; }
-function protectedAssistantRenameError(host, sessionName) {
-  return isProtectedAssistantRename(CONFIG, chatStreamClient.snapshot(), host, sessionName)
-    ? resultError('This configured assistant cannot be renamed')
-    : null;
-}
-function publicConfig() {
-  const { token, tokenPath, ...chatStream } = CONFIG.chatStream || {};
-  return { ...CONFIG, chatStream, hostIds: CONFIG.chatStream?.hosts || ['local'], platform: process.platform,
-    hostname: os.hostname(), isClient: Boolean(CONFIG.remote), configError: configError?.message || null, configWarnings };
-}
-async function command(action) {
-  try { return { ok: true, ...await action() }; }
-  catch (error) { return { ...resultError(error), code: error?.code, remediation: error?.remediation }; }
-}
+
+// The portable half of the window.cc surface lives in main/cc_handlers.js so the
+// headless web host (server/) serves exactly the same handlers. Only the
+// Electron-native channels are registered here, and they are listed in that
+// module's WEB_LOCAL / WEB_UNSUPPORTED so the websocket dispatcher can refuse
+// them with a reason.
+const ccHandlers = createCcHandlers({ CONFIG, chatStreamClient, assetPopouts, configError, configWarnings });
 
 async function openPublicUrl(value) {
   try {
@@ -75,92 +57,17 @@ async function openPublicUrl(value) {
 function registerIpc() {
   require('./main/clipboard_ipc_bridge').registerClipboardIpc(ipcMain, clipboard);
   ipcMain.handle('open-external', (_event, url) => openPublicUrl(url));
-  ipcMain.handle('get-config', () => publicConfig());
-
-  ipcMain.handle('chat-stream:get-state', () => chatStreamClient.snapshot());
-  ipcMain.handle('chat-stream:spawn-catalog', () => command(async () => ({ catalog: await chatStreamClient.getSpawnCatalog() })));
-  ipcMain.handle('chat-stream:spawn', async (_event, request, legacyHostId) => {
-    const input = request && typeof request === 'object' ? request : { provider: request, host: legacyHostId };
-    const spawnProfile = input.spawnProfile || input.spawn_profile;
-    if (spawnProfile === 'desktop_manual' && (!input.model || !input.effort)) return resultError('A model and effort are required');
-    return command(async () => {
-      const response = await chatStreamClient.spawnSession({ ...input, host: input.hostId || input.host || 'local', spawnProfile });
-      if (response?.state === 'queued') return { ...response, streamId: response.stream_id };
-      const session = response.session || response;
-      return { ...response, session, streamId: response.stream_id || session?.stream_id,
-        requested: session?.requested_launch_tuple, resolved: session?.resolved_launch_tuple,
-        actualLaunch: session?.actual_launch_tuple };
-    });
-  });
-  ipcMain.handle('chat-stream:send', (_event, host, sessionName, text, requestId, optimisticId, attachments) =>
-    command(async () => {
-      const receipt = await chatStreamClient.sendMessage({ host, sessionName, text, requestId, optimisticId, attachments });
-      return { ...receipt, ok: receipt.delivery === 'landed' || receipt.action_committed === true,
-        ...(receipt.delivery === 'not_landed' && !receipt.action_committed ? { error: receipt.reason || 'Message was not delivered' } : {}) };
-    }));
-  ipcMain.handle('chat-stream:request-stream-events', (_event, args) => command(() => chatStreamClient.requestStreamEvents(args)));
-  ipcMain.handle('chat-stream:interrupt', (_event, host, sessionName) => command(() => chatStreamClient.interruptMessage({ host, sessionName })));
-  ipcMain.handle('chat-stream:dismiss-question', (_event, host, sessionName, payload = {}) =>
-    command(() => chatStreamClient.dismissQuestion({ host, sessionName, questionKey: payload.questionKey || payload.question_key, text: payload.text })));
-  ipcMain.handle('chat-stream:rename', (_event, host, sessionName, displayName) => {
-    const protectedError = protectedAssistantRenameError(host, sessionName);
-    return protectedError || command(() => chatStreamClient.renameSession({ host, sessionName, displayName, source: 'manual' }));
-  });
-  ipcMain.handle('chat-stream:close', (_event, host, sessionName, options) => command(() => chatStreamClient.closeSession({ ...options, host, sessionName })));
-  ipcMain.handle('chat-stream:kill', (_event, args) => command(() => chatStreamClient.killSessionRpc(args)));
-  ipcMain.handle('chat-stream:upload-blob', (_event, payload) => command(() => chatStreamClient.uploadBlob({ ...payload,
-    data: typeof payload?.data === 'string' ? Buffer.from(payload.data, 'base64') : payload?.data })));
-  ipcMain.handle('chat-stream:fetch-blob', (_event, blobSha) => command(() => chatStreamClient.fetchBlob({ blobSha })));
-  registerAssetIpcHandlers(ipcMain, chatStreamClient, normalizeChatStreamError, assetPopouts);
-  registerScheduleIpcHandlers(ipcMain, chatStreamClient, normalizeChatStreamError);
-  registerNotificationIpcHandlers(ipcMain, chatStreamClient, normalizeChatStreamError);
-  ipcMain.handle('tmux:kill-session', (_event, host, sessionName) => command(() => chatStreamClient.killSessionRpc({ host, sessionName })));
-  ipcMain.handle('tmux:set-window-title', (_event, host, sessionName, displayName) => {
-    const protectedError = protectedAssistantRenameError(host, sessionName);
-    return protectedError || command(() => chatStreamClient.renameSession({ host, sessionName, displayName, source: 'manual' }));
-  });
-  if (process.env.PENTACLE_HARNESS === '1') ipcMain.handle('harness:force-reconnect', () => { chatStreamClient.forceReconnect('harness'); return { ok: true }; });
-
-  const stopTerminals = require('./main/terminal_adapter').registerTerminalIpc(ipcMain, CONFIG, chatStreamClient);
-  app.on('before-quit', stopTerminals);
-  ipcMain.handle('pty:save-image', (_event, base64Data) => {
-    try {
-      const value = Buffer.from(safeString(base64Data), 'base64');
-      const filePath = path.join(os.tmpdir(), 'desktop-paste-' + Date.now() + '.png');
-      fs.writeFileSync(filePath, value);
-      return { ok: true, path: filePath };
-    } catch {
-      return resultError('could not save image');
-    }
-  });
-
-  ipcMain.handle('dashboard:list', () => ({ ok: true, boards: [] }));
-  ipcMain.handle('ui-review:list-artifacts', () => []);
-  ipcMain.handle('specs:list', (_event, filter) => command(() => chatStreamClient.specsList(filter)));
-  ipcMain.handle('specs:get', (_event, id) => command(() => chatStreamClient.specsGet(id)));
-  ipcMain.handle('specs:drive', (_event, id, options, caller) => command(() => chatStreamClient.specsDrive(id, options, caller)));
-  ipcMain.handle('specs:capabilities', () => command(() => chatStreamClient.specsCapabilities()));
-
-  // Microphone service ownership stays external to the public desktop.
-  ipcMain.handle('mic:start-server', () => probeMicServer(CONFIG));
   ipcMain.on('meeting:open', () => {});
   ipcMain.on('meeting:close', () => {});
-
-  ipcMain.on('perf-telemetry:record', (_event, value) => {
-    if (telemetry.length >= 1000) telemetry.shift();
-    telemetry.push({ at: nowIso(), event: safeString(value && value.event, 'unknown') });
-  });
-  ipcMain.handle('perf-telemetry:state', () => ({
-    enabled: false,
-    log_path: null,
-    buffered_events: telemetry.length,
-  }));
 
   // Reload the requesting window from the main process. A renderer-initiated
   // location.reload() emits will-navigate, which the guard in createMainWindow
   // cancels; a main-process reload does not, so this is how the Settings
   // "Reload now" button applies changes.
   ipcMain.on('app:reload', (event) => event.sender.reload());
+
+  const stopTerminals = ccHandlers.register(ipcMain);
+  app.on('before-quit', stopTerminals);
 }
 
 async function createMainWindow() {

@@ -5,10 +5,14 @@ const path = require('node:path');
 
 const root = path.join(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
+// The main-process cc surface is split: native channels in main.js, the portable
+// handlers in main/cc_handlers.js (shared with the headless web host). Guards
+// below assert against both as one surface.
+const readMain = () => read('main.js') + read('main/cc_handlers.js');
 
 test('desktop spawn V2 crosses preload, main, and client with an explicit tuple', () => {
   const preload = read('preload.js');
-  const main = read('main.js');
+  const main = readMain();
   const client = read('main/chat_stream_client.js');
   assert.match(preload, /chatSpawnV2: \(options\)/);
   assert.match(preload, /chatSpawnCatalog/);
@@ -21,7 +25,7 @@ test('desktop spawn V2 crosses preload, main, and client with an explicit tuple'
 
 test('queued spawn state uses the uniform .ok contract without await IPC', () => {
   const preload = read('preload.js');
-  const main = read('main.js');
+  const main = readMain();
   const client = read('main/chat_stream_client.js');
   assert.match(main, /response\?\.state === 'queued'/);
   assert.match(main, /streamId: response\.stream_id/);
@@ -32,7 +36,7 @@ test('queued spawn state uses the uniform .ok contract without await IPC', () =>
 });
 
 test('main returns tuple readback and structured spawn errors', () => {
-  const main = read('main.js');
+  const main = readMain();
   assert.match(main, /requested: session\?\.requested_launch_tuple/);
   assert.match(main, /resolved: session\?\.resolved_launch_tuple/);
   assert.match(main, /actualLaunch: session\?\.actual_launch_tuple/);
