@@ -44,3 +44,47 @@ The sidebar orders rows by open question, working state, recent activity, and st
 ## Public adapter contract
 
 The shared core may be supplied by a package or by a small reviewed adapter. The desktop entrypoint should depend only on the published reducer, selector, and question-formatting interfaces. A fixture adapter may implement the same functions with synthetic sessions so the renderer can be developed without a private submodule or remote service.
+
+## Mobile parity in desktop and web
+
+Both hosts use `renderer/src/shared_transcript_view.ts`. Tool output and subagent
+messages honor the core disclosure preview and expose the full escaped body
+through keyboard-accessible expansion. Expansion follows the stream and row
+identity across refreshes. File actions retain their body, and code activity and
+box diagrams preserve whitespace. The shared outer parser's blank-paragraph
+split inside fenced code remains a known limitation in both clients.
+
+Images precede captions; image-only messages have no empty bubble or text-copy
+button. Recognized Option-B answer text displays question labels, answers and
+notes while copying the original message. Hidden events and composer drafts
+remain outside the transcript.
+
+Delivery captions consume the core receipt; failure and cancellation override a
+stale caption. The renderer never infers Sent from elapsed time or an RPC result.
+Normal assistant text uses Rajdhani at 14.5px/22px and user text uses JetBrains
+Mono at 13px/20px. Desktop compact density remains available at 12px/18px.
+
+## Question completion and recovery
+
+The question overlay lists pane children in their original order followed by
+open durable notifications in creation/id order. Each page retains its draft by
+source identity. Selection bounds apply, custom text replaces selected options
+and their note, and Send answers requires every unlocked page to be valid.
+Cancel and Escape close the overlay locally. Composer text cannot bypass a
+multi-page or mixed-source group.
+
+A complete pane group produces one `question.dismiss` call containing all child
+answers. Each durable notification uses the existing `notification.resolve`
+bridge. Successful identities remain locked during partial failures. If a
+resolution reply is lost, Check answer status reconciles `prompt.list` before
+resubmission; reconnect also retries that reconciliation. Existing stale-pane
+and text-send-failure recovery retains the serialized answer in the composer.
+
+Desktop supports the public v2 single question per durable notification and
+multiple simultaneous notifications. Nested durable child-question protocols
+are not assumed. Unsupported entries cannot silently settle a parent.
+
+Resolved durable answers hydrate through `prompt.list` with `open:false`, so an
+answer is visible even without a transcript echo. The view inserts it by immutable
+resolution time, and a core answer row with the same notification identity takes
+precedence. Consumption timestamps do not move old answers later in the chat.

@@ -166,3 +166,35 @@ test('Disconnect-clear + reconnect-refire flow: events fetched twice across a re
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(cc.calls.length, 2);
 });
+
+test('a late disconnected request cannot replace the new history result', async () => {
+  const state = makeStreamState();
+  const replies = [];
+  const cc = { requestStreamEvents: () => new Promise(resolve => replies.push(resolve)) };
+  const changes = [];
+  ensureChatEventsLoaded(state, 'a', cc, silentLogger, { onChange: id => changes.push(id) });
+  state.connected = false; state.eventsLoadedFor.clear(); state.historyLoads = {};
+  state.connected = true;
+  ensureChatEventsLoaded(state, 'a', cc, silentLogger, { onChange: id => changes.push(id) });
+  replies[1]({ ok: true, count: 0 });
+  await new Promise(resolve => setImmediate(resolve));
+  replies[0]({ ok: false, error: 'old request' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.historyLoads.a.status, 'loaded');
+  assert.deepEqual(changes, ['a']);
+  assert.equal(state.eventsLoadedFor.has('a'), true);
+});
+
+test('failed history waits for explicit retry and zero-row success triggers a render', async () => {
+  const state = makeStreamState(); const cc = makeCc((_args, n) => n ? { ok: true, count: 0 } : { ok: false, error: 'offline' });
+  const changes = [];
+  const options = { onChange: id => changes.push(id) };
+  ensureChatEventsLoaded(state, 'a', cc, silentLogger, options);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ensureChatEventsLoaded(state, 'a', cc, silentLogger, options), false);
+  assert.equal(cc.calls.length, 1);
+  assert.equal(ensureChatEventsLoaded(state, 'a', cc, silentLogger, { ...options, retry: true }), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.historyLoads.a.status, 'loaded');
+  assert.deepEqual(changes, ['a', 'a']);
+});

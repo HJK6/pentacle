@@ -386,7 +386,13 @@ for (const fixture of FIXTURES) {
         chrome: CHROME,
         ...renderOptions,
       });
-      assertRowDom(container, family, fixture.name);
+      if (interpreted.tone === 'tool' && interpreted.disclosure?.mode === 'collapsed-preview') {
+        assert.ok(container.querySelector('.slot-chat-disclosure'), `${fixture.name}: core tool disclosure is rendered`);
+        if (interpreted.disclosure.expandable) {
+          assert.ok(container.querySelector('details summary'), 'expandable core output has an accessible summary');
+          assert.equal(container.querySelector('details pre code')?.textContent, interpreted.disclosure.expandedText);
+        }
+      } else assertRowDom(container, family, fixture.name);
       if (fixture.name.includes('image attachment')) {
         assert.ok(container.querySelector('.slot-chat-media-button[data-attachment-key]'), 'attachment media bubble rendered');
       }

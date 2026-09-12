@@ -181,7 +181,7 @@ test('structured submit exposes option values and can require a selection withou
   assert.equal(submitted.answers[0].note, 'context');
 });
 
-test('custom text choice submit can stand alone or accompany selections', async () => {
+test('custom text choice submit stands alone and replaces selections', async () => {
   const doc = freshDoc();
   const submissions = [];
   const question = {
@@ -225,7 +225,7 @@ test('custom text choice submit can stand alone or accompany selections', async 
   free2.dispatchEvent(new doc2.defaultView.Event('input', { bubbles: true }));
   container2.querySelector('.slot-chat-question-submit').click();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(submissions[1].answers[0].selectedOptionValues, ['alpha']);
+  assert.equal(submissions[1].answers[0].selectedOptionValues, undefined);
   assert.equal(submissions[1].answers[0].customText, 'custom with selection');
 });
 
@@ -318,3 +318,28 @@ test('pager controls render and call page handlers', () => {
   assert.equal(next, 1);
 });
 
+
+test('mobile parity: custom answers replace selections and selection bounds gate submission', () => {
+  const doc = freshDoc();
+  const drafts = {};
+  const question = { ...multiSelectQuestion(), customText: true, min_select: 2, max_select: 2 };
+  const container = renderInto(doc, { question, drafts });
+  container.querySelector('[data-option="1"]').click();
+  assert.equal(container.querySelector('.slot-chat-question-submit').disabled, true, 'minimum is enforced');
+  container.querySelector('[data-option="2"]').click();
+  assert.equal(container.querySelector('.slot-chat-question-submit').disabled, false);
+  const free = container.querySelector('.slot-chat-question-freetext');
+  free.value = 'My custom choice';
+  free.dispatchEvent(new doc.defaultView.Event('input'));
+  assert.equal(container.querySelectorAll('.slot-chat-question-option.is-selected').length, 0, 'custom is exclusive');
+  const { buildAnswersForQuestion } = rendererRequire('./question_option_b');
+  const answers = buildAnswersForQuestion(question, drafts['hostc:claude-hostc-1']);
+  assert.equal(answers[0].customText, 'My custom choice');
+  assert.equal(answers[0].selectedOptionValues, undefined);
+});
+
+test('mobile parity: free_text false does not expose a custom answer control', () => {
+  const doc = freshDoc();
+  const container = renderInto(doc, { question: { ...singleQuestion(), free_text: false } });
+  assert.equal(container.querySelector('.slot-chat-question-freetext'), null);
+});
