@@ -117,6 +117,38 @@ test('refetchEventsForActiveChatSlots fires ensureChatEventsLoaded only for chat
   assert.deepEqual(cc.calls[0], { streamId: 'stream-a' });
 });
 
+test('clearing eventsLoadedFor lets refetchEventsForActiveChatSlots re-backfill an already-loaded stream (the /cc-reconnect recovery)', () => {
+  // Models restoreSlotsAfterReconnect: a summary resync snapshot wiped the open
+  // transcript, but the stream is still in eventsLoadedFor (a socket-only drop
+  // never fired the disconnect branch that clears it), so a plain refetch is a
+  // no-op. Clearing the trackers first must let the backfill re-fire.
+  const streamState = makeStreamState();
+  const cc = makeCc();
+  const args = {
+    slots: [{ name: 'a', hostId: 'local' }],
+    slotViewModes: { 0: 'chat' },
+    botSlots: {},
+    streamState,
+    cc,
+    streamHostForHostId: () => 'hostb',
+    findStreamSession: () => ({ stream_id: 'stream-a' }),
+    logger: silentLogger,
+  };
+  // First load marks the stream loaded.
+  assert.equal(refetchEventsForActiveChatSlots(args), 1);
+  assert.equal(cc.calls.length, 1);
+  // Without clearing, a second refetch is a no-op (already loaded) — this is the
+  // stuck state the wiped-but-connected slot would sit in.
+  assert.equal(refetchEventsForActiveChatSlots(args), 0);
+  assert.equal(cc.calls.length, 1);
+  // The reconnect restore clears the trackers, so the backfill re-fires.
+  streamState.eventsLoadedFor.clear();
+  streamState.historyLoads = {};
+  assert.equal(refetchEventsForActiveChatSlots(args), 1);
+  assert.equal(cc.calls.length, 2);
+  assert.deepEqual(cc.calls[1], { streamId: 'stream-a' });
+});
+
 test('refetchEventsForActiveChatSlots respects disconnect — no RPCs fire when streamState.connected is false', () => {
   const streamState = makeStreamState({ connected: false });
   const cc = makeCc();

@@ -208,6 +208,7 @@ async function run(args) {
     try { if (session) session.close(); } catch {}
     try { if (chrome && !args.keep) chrome.kill('SIGTERM'); } catch {}
     try { if (runtime.tmuxSession) tmux(['kill-session', '-t', `=${runtime.tmuxSession}`], { stdio: 'ignore' }); } catch {}
+    try { if (runtime.freezeTmux) tmux(['kill-session', '-t', `=${runtime.freezeTmux}`], { stdio: 'ignore' }); } catch {}
     try { if (host) await host.close(); } catch {}
     // A restarted host runs as a subprocess (see restartHost); kill it too.
     try { if (runtime.hostProc) runtime.hostProc.kill('SIGTERM'); } catch {}

@@ -1,4 +1,7 @@
 'use strict';
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { closedChatSlot } = require('./closed_chat_scenario');
 const { runGridSplit } = require('./grid_split_scenario');
 
@@ -243,6 +246,159 @@ async function hostRestartRestoresInput(ctx) {
   report.ok('the reconnected socket re-syncs the daemon inventory', invOk === true);
 }
 
+// A browser<->host /cc websocket reconnect (the HOST stays up) must restore the
+// WHOLE slot without a close/reopen: the terminal PTY attachment re-binds and an
+// open chat transcript reloads. Regression guard for
+// spec_pentacle__web_chat_view_stale_freeze_2026_09.
+//
+// The failing journey (operator report 2026-09-12): a chat/terminal slot left
+// open freezes — terminal output stops and input dies (and a chat transcript
+// blanks) — while the host stays up (NOT the degraded/host-restart path). The
+// browser's /cc socket had dropped (a backgrounded tab's suspended socket) and
+// reconnected; on reconnect the host had already torn down this connection's
+// PTY attachments (ws_bridge removeSocket -> sender.destroy) and the renderer
+// never re-attached, and the resync snapshot can wipe an open transcript. Only
+// close/reopen recovered it. The fix re-attaches terminals and re-backfills chat
+// on the web onReconnect. Distinct from host-restart-restores-input, where the
+// host process itself restarts; here the host and daemon stay up and only the
+// browser socket cycles.
+async function slotSurvivesCcReconnect(ctx) {
+  const { session, report, cdp, timeoutMs, tmux, runtime, fixture } = ctx;
+  if (!fixture) { report.note('no fixture: skipping slot-survives-cc-reconnect (observational run)'); return; }
+  const sid = fixture.streamId;               // local:web-gate-1
+  const sessionName = fixture.sessionName || 'web-gate-1';
+  const marker = (tag) => path.join(os.tmpdir(), `pentacle-gate-${process.pid}-${tag}-${Date.now().toString(36)}`);
+  const preFile = marker('pre');
+  const postFile = marker('post');
+  let slot = -1;
+
+  try {
+    // Capture the /cc WebSocket so the test can drop it while the host stays up,
+    // then reload so the hook is active for the real socket.
+    await session.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+      (() => { const N = window.WebSocket;
+        window.WebSocket = function(u, p){ const w = p===undefined ? new N(u) : new N(u, p);
+          try { if (String(u).endsWith('/cc')) window.__ccSocket = w; } catch(e){} return w; };
+        window.WebSocket.prototype = N.prototype;
+        window.WebSocket.CONNECTING=N.CONNECTING; window.WebSocket.OPEN=N.OPEN; window.WebSocket.CLOSING=N.CLOSING; window.WebSocket.CLOSED=N.CLOSED;
+      })();` });
+    await session.send('Page.reload', {});
+    await waitForValue(session, cdp, 'typeof window.focusStreamId === "function" && !!document.getElementById("session-list")',
+      (v) => v === true, { timeoutMs, label: 'app ready after reload' });
+    await waitForValue(session, cdp, 'window.cc.getChatStreamState().then((s)=>s.connected===true)', (v) => v === true,
+      { timeoutMs, label: 'connected after reload' });
+    await waitForValue(session, cdp, `window.cc.getChatStreamState().then(s => (s.sessions||[]).some(x => x.stream_id === ${JSON.stringify(sid)}))`,
+      (v) => v === true, { timeoutMs, label: 'fixture in inventory' });
+    await waitForValue(session, cdp, '!!window.__ccSocket', Boolean, { timeoutMs, label: '/cc socket captured' });
+
+    // A real tmux session the fixture's terminal can attach to (createPty maps the
+    // chat-stream session_name -> the local tmux session of the same name). A plain
+    // shell runs a typed command.
+    runtime.freezeTmux = sessionName;
+    try { tmux(['kill-session', '-t', `=${sessionName}`], { stdio: 'ignore' }); } catch {}
+    tmux(['new-session', '-d', '-s', sessionName, 'sh']);
+
+    const clients = () => tmux(['list-clients', '-t', `=${sessionName}`, '-F', 'x']).split('\n').filter(Boolean).length;
+    // Deterministic input-liveness probe independent of pane rendering: type a
+    // command that touches a unique host file, then check the file exists. If the
+    // slot's PTY attachment is live the shell runs it; if the host has no
+    // attachment for this (reconnected) socket the write is dropped and no file
+    // appears.
+    const typeTouch = (s, file) => session.eval(`window.cc.writePty(${s}, ${JSON.stringify('touch ' + file + '\r')}), true`);
+    const fileAppears = (file) => pollUntil(() => fs.existsSync(file), Boolean, timeoutMs, `host file ${path.basename(file)} created via typed input`).catch(() => false);
+
+    // Attach the fixture to a slot through the app (defaults to the terminal view).
+    await session.eval(`window.focusStreamId(${JSON.stringify(sid)})`);
+    slot = await waitForValue(session, cdp,
+      `(() => { for (let i=0;i<4;i++){ const c=document.getElementById('cell-'+i); if (c && c.querySelector('.xterm')) return i; } return -1; })()`,
+      (v) => typeof v === 'number' && v >= 0, { timeoutMs, label: 'terminal attached to a slot' });
+    const attachedClients = await pollUntil(clients, (n) => n >= 1, timeoutMs, 'host attached a tmux client');
+    report.ok('a slot terminal attaches through the app', attachedClients >= 1, { slot, clients: attachedClients });
+
+    // Baseline: typed input reaches the shell before the drop.
+    await typeTouch(slot, preFile);
+    report.ok('the slot terminal accepts input before the drop', (await fileAppears(preFile)) === true, { preFile });
+
+    // Switch the SAME slot to its chat view and backfill the transcript, so the one
+    // reconnect exercises both halves of the slot (a real slot has both a terminal
+    // and a chat).
+    await waitForValue(session, cdp, `!!document.querySelector('#header-${slot} [data-mode="chat"]')`, Boolean, { timeoutMs, label: 'chat toggle present' });
+    await session.eval(`document.querySelector('#header-${slot} [data-mode="chat"]').click()`);
+    await session.eval(`window.cc.requestStreamEvents({ streamId: ${JSON.stringify(sid)}, limit: 20 })`, { awaitPromise: true });
+    const chatText = () => session.eval(`(document.querySelector('#cell-${slot} .slot-chat-list')?.innerText||'')`);
+    // The composer's Send target: enabled (not disabled) means chatControlTargetForSlot
+    // resolved the stream's session detail — i.e. the composer is usable, not the
+    // "Waiting for websocket session detail." degraded state. Non-side-effecting read.
+    const sendEnabled = () => session.eval(`(() => { const b = document.querySelector('#cell-${slot} .slot-chat-compose-send'); return !!b && b.disabled === false; })()`);
+    await waitForValue(session, cdp, `(document.querySelector('#cell-${slot} .slot-chat-list')?.innerText||'').includes('fixture assistant reply')`,
+      Boolean, { timeoutMs, label: 'chat transcript painted before the drop' });
+    const sendBefore = await sendEnabled();
+    report.ok('the slot chat transcript paints and the composer is usable before the drop', sendBefore === true, { sendBefore });
+
+    // Model Bart's PRODUCTION summary daemon on the reconnect re-pull: the hello
+    // snapshot carries no events (events_mode:'summary') AND the open stream is
+    // momentarily ABSENT from the resync session inventory (a filtered/nested/remote
+    // session, or a post-daemon-reconnect inventory gap). That is the exact shape
+    // that evicts the open transcript. The gate's local daemon otherwise keeps its
+    // ring + inventory populated, so shim just the get-state re-pull. Save the
+    // original on a holder so cleanup can restore it deterministically.
+    await session.eval(`(() => {
+      window.__origGetChatStreamState = window.cc.getChatStreamState.bind(window.cc);
+      window.cc.getChatStreamState = () => window.__origGetChatStreamState().then(s => ({
+        ...s, events: [], sessions: (s.sessions||[]).filter(x => x.stream_id !== ${JSON.stringify(sid)}),
+      }));
+      return true;
+    })()`);
+
+    // Drop ONLY the browser<->host socket. The host and daemon stay up; the
+    // transport reconnects and fires onReconnect.
+    await session.eval('(() => { try { window.__ccSocket && window.__ccSocket.close(); } catch(e){} return true; })()');
+    await waitForValue(session, cdp, '(() => { const s = window.__ccSocket; return !!s && s.readyState === 1; })()',
+      (v) => v === true, { timeoutMs, label: '/cc socket reconnected' });
+
+    // CHAT half — THE FIX: onReconnect carries the open slot's session forward into
+    // the resync snapshot, so the reducer never evicts the transcript OR the
+    // composer's session detail. Before the fix the summary snapshot drops the
+    // stream and the transcript blanks to "Loading chat…" with a disabled send
+    // (RED). Assert the transcript is still shown AND the composer stays usable
+    // WITHOUT a close/reopen.
+    await cdp.sleep(2500);
+    const afterText = await chatText();
+    report.ok('a /cc reconnect keeps the open chat transcript (no blank / close-reopen)',
+      String(afterText).includes('fixture assistant reply') && !String(afterText).includes('Loading chat'),
+      { sample: String(afterText).replace(/\s+/g, ' ').trim().slice(0, 90) });
+    const sendAfter = await sendEnabled();
+    report.ok('a /cc reconnect keeps the chat composer usable (session detail preserved)', sendAfter === true, { sendAfter });
+
+    // TERMINAL half — THE FIX: onReconnect re-attaches the slot terminal. Before the
+    // fix the host never re-attaches (client count stays 0) — the frozen terminal
+    // the operator reported; after the fix the tmux client re-appears.
+    const reattachedClients = await pollUntil(clients, (n) => n >= 1, timeoutMs, 'terminal re-attached after /cc reconnect');
+    report.ok('a /cc reconnect re-attaches the slot terminal without close/reopen', reattachedClients >= 1, { clients: reattachedClients });
+
+    // And typed input flows again over the reattached PTY (dead before the fix).
+    await typeTouch(slot, postFile);
+    report.ok('the reattached terminal accepts input after a /cc reconnect', (await fileAppears(postFile)) === true, { postFile });
+  } finally {
+    // Always run cleanup, even if an assertion above threw: restore the shimmed
+    // get-state, detach the slot's client, remove the tmux session + marker files,
+    // then reload so later scenarios start from a clean slot. A failed cleanup
+    // reload is terminal (it can contaminate later scenarios), not a soft note.
+    try { await session.eval('(() => { if (window.__origGetChatStreamState) { window.cc.getChatStreamState = window.__origGetChatStreamState; delete window.__origGetChatStreamState; } return true; })()'); } catch {}
+    if (slot >= 0) { try { await session.eval(`window.cc.killPty(${slot})`, { awaitPromise: true }); } catch {} }
+    try { tmux(['kill-session', '-t', `=${sessionName}`], { stdio: 'ignore' }); } catch {}
+    try { fs.rmSync(preFile, { force: true }); fs.rmSync(postFile, { force: true }); } catch {}
+    runtime.freezeTmux = null;
+    let cleanupOk = true;
+    try {
+      await session.send('Page.reload', {});
+      await waitForValue(session, cdp, '!!(window.cc && window.HOST)', (v) => v === true, { timeoutMs, label: 'app ready after cleanup reload' });
+      await waitForValue(session, cdp, 'window.cc.getChatStreamState().then((s)=>s.connected===true)', (v) => v === true, { timeoutMs, label: 'reconnected after cleanup reload' });
+    } catch (e) { cleanupOk = false; report.note('cleanup reload failed: ' + (e && e.message)); }
+    report.ok('slot-survives-cc-reconnect cleanup restored a clean page for later scenarios', cleanupOk === true);
+  }
+}
+
 // The ordered gate: names map to functions; web_gate runs them in this order.
 // These four are fully deterministic against the seeded loopback daemon.
 //
@@ -260,6 +416,9 @@ const SCENARIOS = [
   ['sidebar-from-inventory', sidebarFromInventory],
   ['slot-attach-type-resize-kill', slotAttachTypeResizeKill],
   ['chat-transcript-paint', chatTranscriptPaint],
+  // Runs before closed-chat-slot (which retires the seeded fixture) and reloads
+  // the page at both ends, so it neither depends on nor disturbs its neighbours.
+  ['slot-survives-cc-reconnect', slotSurvivesCcReconnect],
   ['slot-column-split', runGridSplit],
   ['closed-chat-slot', closedChatSlot],
   // Host-restart walk runs LAST: it tears the host process (and briefly the
@@ -274,6 +433,7 @@ module.exports = {
   sidebarFromInventory,
   slotAttachTypeResizeKill,
   chatTranscriptPaint,
+  slotSurvivesCcReconnect,
   hostRestartRestoresInput,
   SCENARIOS,
 };

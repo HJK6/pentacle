@@ -42,6 +42,7 @@ const {
   ensureChatEventsLoaded: _ensureChatEventsLoaded,
   refetchEventsForActiveChatSlots: _refetchEventsForActiveChatSlots,
 } = require('./chat_events_lazy');
+const { reattachTerminalSlotsAfterReconnect, preserveOpenSlotSessionsInSnapshot } = require('./slot_reconnect');
 const {
   answerConstraint,
   questionItems,
@@ -4782,14 +4783,68 @@ window.cc.onChatStreamFrame((frame) => {
 // otherwise be rejected as stale by applyVersionedConnectionState.
 window.cc.onReconnect?.(() => {
   state.chatStream.stateVersion = -1;
-  window.cc.getChatStreamState().then((snapshot) => {
+  window.cc.getChatStreamState().then((rawSnapshot) => {
+    // Carry forward an open chat slot's session if this (summary) resync
+    // snapshot dropped it, so the store reducer does not evict the open
+    // transcript / disable its composer (see preserveOpenSlotSessionsInSnapshot).
+    // Captured from the store BEFORE we apply anything.
+    const snapshot = preserveOpenSlotSessionsInSnapshot(rawSnapshot, {
+      slots: state.slots,
+      botSlots: state.botSlots,
+      slotViewModes: state.slotViewModes,
+      boundStreams: state.slotChatBoundStream,
+      currentSessions: window.PentacleChatStore?.getState?.()?.sessions
+        || state.chatStream.sessions,
+    });
     applyChatStreamState(snapshot);
     if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'limits')) {
       renderLimits(snapshot.limits, snapshot.limits_health ?? null);
     }
     window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...(snapshot || {}) });
+    restoreSlotsAfterReconnect();
   }).catch(() => { /* the next reconnect retries the re-sync */ });
 });
+
+// Restore the whole slot after a /cc socket reconnect (host stays up). The
+// browser socket drop tore down this connection's server-side PTY attachments
+// AND the re-pulled resync snapshot can wipe an open transcript (a summary
+// snapshot drops events for streams absent from its inventory). This never runs
+// on the !wasConnected reconnect edge in applyChatStreamState, because a
+// browser-only socket drop leaves `connected` latched true — so restore here:
+//   1. re-attach every slot's terminal PTY (frozen output + dead input), and
+//   2. clear the per-stream backfill trackers and re-fetch open chat slots so a
+//      wiped transcript reloads and the composer re-enables.
+// Mirrors the recovery the operator gets by closing/reopening the slot. Desktop
+// never enters this path (preload onReconnect is a no-op).
+function restoreSlotsAfterReconnect() {
+  reattachTerminalSlotsAfterReconnect({
+    slots: state.slots,
+    botSlots: state.botSlots,
+    terminals: state.terminals,
+    cc: window.cc,
+  });
+  // A socket-only drop never fired the disconnect branch that clears these, so
+  // ensureChatEventsLoaded would treat every stream as already-loaded and skip
+  // the re-fetch. Clear them so the backfill re-runs.
+  state.chatStream.eventsLoadedFor.clear();
+  state.chatStream.historyLoads = {};
+  // Re-backfill each open chat slot by the stream it is actually PAINTING
+  // (slotChatBoundStream), not by re-resolving it from inventory: the resync
+  // snapshot can momentarily drop the session from inventory (the very
+  // condition that wiped the transcript), so an inventory-resolved refetch
+  // would find nothing. The bound stream id survives the wipe, so the transcript
+  // reloads even while the session is briefly absent; the composer re-enables
+  // when the session returns on the next inventory frame.
+  for (let slot = 0; slot < 4; slot += 1) {
+    if (!state.slots[slot] || state.botSlots[slot] || state.slotViewModes[slot] !== 'chat') continue;
+    const boundStreamId = state.slotChatBoundStream[slot];
+    if (boundStreamId) ensureChatEventsLoaded(boundStreamId, true);
+    scheduleSlotChatRender(slot);
+  }
+  // Belt-and-suspenders for any chat slot that resolves via inventory but has
+  // not painted a bound stream yet (idempotent with the loop above).
+  refetchEventsForActiveChatSlots();
+}
 
 window.cc.onAssetDock?.((payload) => {
   dockAssetFromPayload(payload);

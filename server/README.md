@@ -160,6 +160,46 @@ desktop behaviour is unchanged. Regression coverage:
 `web_gate.js`'s host/daemon restart primitives) and the
 `test/chat_stream_connection_state.test.js` version-reset cases.
 
+#### Restoring the whole slot on a reconnect (not just the input)
+
+The same `/cc` re-open also drops WITHOUT restarting the host — a backgrounded
+tab's suspended socket resuming, or a transient loopback blip. The host stays up,
+so `connected` never flips and the sibling's `!wasConnected` recovery edge never
+fires — yet two things still break for the open slot until a manual close/reopen:
+
+- **Terminal.** Closing a socket destroys that connection's per-tab `event.sender`
+  (`ws_bridge.js removeSocket` → `sender.destroy`), which tears down its PTY
+  attachments in `terminal_adapter.js`. The reconnected socket is a fresh sender
+  with no attachments, so the xterm feed freezes and `pty:write` goes nowhere.
+- **Chat.** The `onReconnect` re-pull applies `get-state` as a `{type:'snapshot'}`.
+  Under `events_mode:'summary'` that snapshot carries no events, and the reducer's
+  empty-snapshot guard preserves events only for streams present in the snapshot's
+  `sessions`; a stream momentarily absent from the resync inventory (a filtered /
+  nested / remote session, or a post-daemon-reconnect inventory gap) has its
+  transcript **and its composer session detail** dropped — the blank "Loading
+  chat…" + disabled send, unrecoverable until close/reopen.
+
+So `renderer/app.js`'s `onReconnect` does two things via `renderer/slot_reconnect.js`:
+
+1. **Preserve open chat transcripts** — before pushing the re-pulled snapshot to
+   the store, `preserveOpenSlotSessionsInSnapshot` carries forward the session
+   summary (from the pre-reconnect store) for every open chat slot whose bound
+   stream the snapshot dropped. That keeps the stream a *surviving* stream, so the
+   reducer never evicts its transcript and the composer keeps its session detail.
+   Scoped to open slots, so a genuinely-closed session is never resurrected.
+2. **Re-attach terminals** — `reattachTerminalSlotsAfterReconnect` re-issues
+   `createPty` for every attached slot's terminal; the persistent `onPtyData`/
+   `onData` transport wiring means the pane just re-binds to the new socket (no
+   xterm rebuild, no view-mode change). It also clears the per-stream lazy-load
+   trackers and re-runs the chat backfill so any new events land.
+
+This is the recovery the operator otherwise got by closing/reopening the slot,
+done automatically. Desktop never runs it (its `onReconnect` is the no-op).
+Regression coverage: `test/e2e/lib/web_scenarios.js` (`slot-survives-cc-reconnect`,
+covering the terminal re-attach AND the chat transcript through a summary snapshot
+that omits the open stream), `test/slot_reconnect.test.js`, and the
+clear-then-refetch case in `test/chat_events_lazy.test.js`.
+
 Each connection is capped at 8 concurrent ptys (the renderer uses four slots;
 the headroom covers reconnect churn), so one connection cannot exhaust a shared
 host by opening unbounded terminals. The (N+1)th `pty:create` on a connection is
