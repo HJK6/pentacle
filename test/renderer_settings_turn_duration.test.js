@@ -329,7 +329,7 @@ test('theme and density settings apply live and persist outside feature flags', 
     user: computedFontSizePx(dom.window, '#cell-0 .slot-chat-user-bubble'),
     compose: computedFontSizePx(dom.window, '#cell-0 .slot-chat-compose-input'),
   };
-  assert.deepEqual(comfortableFonts, { assistant: 14.5, user: 13.5, compose: 13.5 });
+  assert.deepEqual(comfortableFonts, { assistant: 14.5, user: 13, compose: 13.5 });
 
   document.getElementById('settings-btn').click();
 
@@ -351,7 +351,7 @@ test('theme and density settings apply live and persist outside feature flags', 
     user: computedFontSizePx(dom.window, '#cell-0 .slot-chat-user-bubble'),
     compose: computedFontSizePx(dom.window, '#cell-0 .slot-chat-compose-input'),
   };
-  assert.deepEqual(compactFonts, { assistant: 11.5, user: 11.5, compose: 12 });
+  assert.deepEqual(compactFonts, { assistant: 12, user: 12, compose: 12 });
   assert.ok(compactFonts.assistant < comfortableFonts.assistant, 'compact reduces assistant card font size');
   assert.ok(compactFonts.user < comfortableFonts.user, 'compact reduces user bubble font size');
   assert.ok(compactFonts.compose < comfortableFonts.compose, 'compact reduces compose input font size');

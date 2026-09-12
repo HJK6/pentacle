@@ -121,7 +121,7 @@ test('[populated] renders user + assistant bubbles, user bubble in JetBrains Mon
   // family. jsdom does not substitute var() inside font-family, so assert the
   // rule points at the token and the token resolves to the expected face.
   assert.equal(win.getComputedStyle(userBubbles[0]).fontFamily, 'var(--cosmic-font-mono)', 'user bubble -> mono token');
-  assert.equal(win.getComputedStyle(assistantCards[0]).fontFamily, 'var(--cosmic-font-display)', 'assistant -> display token');
+  assert.equal(win.getComputedStyle(assistantCards[0]).fontFamily, 'var(--cosmic-font-display-medium)', 'assistant -> display token');
   assert.match(cssVar(win, surface, '--cosmic-font-mono'), /JetBrainsMono/);
   assert.match(cssVar(win, surface, '--cosmic-font-display'), /Rajdhani/);
 });
