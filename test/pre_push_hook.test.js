@@ -388,6 +388,28 @@ test('a dot-segment public URL under remote name `origin` still gets PUBLIC rule
   assert.match(r.stderr, /\(public repo/);
   assert.match(r.stderr, /REFUSED/);
 });
+for (const url of [
+  'https://github.com/HJK6/pentacle.git/../pentacle.git',
+  'https://github.com/HJK6/pentacle-private/../pentacle-private.git',
+  'https://github.com/HJK6/other',
+  'https://github.com/HJK6/other@not-github.example/repo',
+]) {
+  test(`ambiguous or other GitHub destination gets public safeguards: ${url}`, (t) => {
+    const sb = sandbox();
+    t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+    makeForeignBranch(sb.work, 'private-root');
+    const tip = git(sb.work, ['rev-parse', 'HEAD']).trim();
+    const r = runHookDirect('origin', url, {
+      stdin: `refs/heads/private-root ${tip} refs/heads/private-root ${'0'.repeat(40)}\n`,
+      env: { GIT_CONFIG_PARAMETERS: "'http.proxy=http://127.0.0.1:1'", GIT_SSH_COMMAND: 'false' },
+    });
+    assert.notEqual(r.status, 0, r.stderr);
+    assert.match(r.stderr, /github\.com destination — public safeguards/);
+    assert.match(r.stderr, /REFUSED/);
+    assert.doesNotMatch(r.stderr, /\(private repo/);
+  });
+}
+
 test('a private destination whose main cannot be resolved is REJECTED (fail closed)', () => {
   const sb = sandbox();
   makeForeignBranch(sb.work, 'foreign');

@@ -6,13 +6,14 @@
 #
 #     git config core.hooksPath scripts/hooks
 #
-# It is bypassable **by design** with `git push --no-verify` — it stops
-# accidents, not a determined adversary. What it protects (and does not):
+# A refusal is a finding to resolve before retrying. What it protects:
 #
 #   (a) Destination — a remote *named* `public` whose URL is not the public
 #       repository (github.com/HJK6/pentacle, any URL spelling, case-insensitive
 #       owner/repo) is REFUSED, and the public-repo rules below apply whenever the
 #       destination URL resolves to that repo under ANY remote name or a raw URL.
+#       Other/ambiguous github.com paths also receive public safeguards; only
+#       the exact private repository receives the merge-back root allowance.
 #       The resolved URL is always printed.
 #   (b) Explicit refspec — a bare `git push <remote>` (no refspec) or a
 #       matching-branch push (`:` or `+:`) is REFUSED. A same-name branch refspec
@@ -70,29 +71,37 @@ mkdir -p "$TMPD" 2>/dev/null || TMPD=""
 cleanup() { [ -n "$TMPD" ] && rm -rf "$TMPD" 2>/dev/null; }
 trap cleanup EXIT INT TERM
 
-# ── URL classification (case-insensitive owner/repo; not pentacle-private) ────
-# Reduce a URL to host + path, then match github.com/HJK6/pentacle exactly
-# (case-insensitive) via shell globs — no external tools.
-# Echo "host path" for a URL (scheme/userinfo/port stripped, .git dropped).
+# ── URL identity and destination policy ────────────────────────────────────
+# Parse authority separately from path: an @ in the path is not userinfo.
+# Host classification must survive an ambiguous repository path.
 github_repo_path() {
   u="$1"
   [ -n "$u" ] || return 1
-  case "$u" in *://*) u="${u#*://}" ;; esac      # drop scheme
-  u="${u##*@}"                                     # drop userinfo
-  before="${u%%/*}"
-  case "$before" in
-    *:*)
-      hostport="${u%%:*}"; aftercolon="${u#*:}"
-      case "$aftercolon" in
-        [0-9]*/*|[0-9]*) host="$hostport"; path="${u#*/}" ;;   # host:port/path
-        *)               host="$hostport"; path="$aftercolon" ;; # scp host:path
-      esac ;;
-    *) host="${u%%/*}"; path="${u#*/}" ;;
+  case "$u" in
+    *://*)
+      u="${u#*://}"
+      authority="${u%%/*}"
+      case "$u" in */*) path="${u#*/}" ;; *) path='' ;; esac
+      authority="${authority##*@}"
+      host="${authority%%:*}"
+      ;;
+    *)
+      authority="${u%%:*}"
+      host="${authority##*@}"
+      path="${u#*:}"
+      ;;
   esac
-  host="${host%%:*}"
-  # Canonicalize the path the way GitHub resolves it: collapse duplicate
+  case "$host" in
+    [Gg][Ii][Tt][Hh][Uu][Bb].[Cc][Oo][Mm]) : ;;
+    *) return 1 ;;
+  esac
+  # Policy uses the authority alone, before any path rejection.
+  [ "${2:-}" = host ] && return 0
+  # Recognize repository identity by removing only duplicate
   # separators and "." segments, drop trailing separators, then the .git
   # suffix — repeated until stable, so "HJK6/pentacle.git/./" is HJK6/pentacle.
+  # These removals never change segment text or collapse parent segments;
+  # an ambiguous path cannot acquire exact-private identity.
   prev=''
   while [ "$path" != "$prev" ]; do
     prev="$path"
@@ -129,34 +138,38 @@ is_github_pentacle_private_url() {
 }
 
 is_public=0
-if is_github_pentacle_url "$remote_url"; then
-  is_public=1
-elif [ "${PENTACLE_PREPUSH_TEST_MODE:-}" = 1 ] && [ -n "${PENTACLE_ALLOWED_PUBLIC_REMOTES:-}" ]; then
+is_public_exact=0
+is_private=0
+is_github=0
+# Root commits of the public repo; admitted on a PRIVATE destination only.
+PUBLIC_ROOTS="3a008e5da4918e899fe082955177f76e3ebef437"
+if github_repo_path "$remote_url" host; then
+  is_github=1
+  if is_github_pentacle_private_url "$remote_url"; then
+    is_private=1
+  else
+    # Every other GitHub destination receives the full fail-closed safeguards.
+    is_public=1
+    if is_github_pentacle_url "$remote_url"; then is_public_exact=1; fi
+  fi
+elif [ "${PENTACLE_PREPUSH_TEST_MODE:-}" = 1 ]; then
+  # Non-GitHub sandbox/mirror overrides retain their existing behavior.
   can_u="${remote_url%/}"; can_u="${can_u%.git}"
   case "$can_u" in
-    *[Pp][Ee][Nn][Tt][Aa][Cc][Ll][Ee]-[Pp][Rr][Ii][Vv][Aa][Tt][Ee]*) : ;;  # never the private repo
+    *[Pp][Ee][Nn][Tt][Aa][Cc][Ll][Ee]-[Pp][Rr][Ii][Vv][Aa][Tt][Ee]*) : ;;
     *)
-      for _extra in ${PENTACLE_ALLOWED_PUBLIC_REMOTES}; do
+      for _extra in ${PENTACLE_ALLOWED_PUBLIC_REMOTES:-}; do
         _e="${_extra%/}"; _e="${_e%.git}"
         if [ "$can_u" = "$_e" ]; then
           is_public=1
+          is_public_exact=1
           warn "WARNING: treating '${remote_url}' as the public repo via PENTACLE_PREPUSH_TEST_MODE (test/mirror override)."
           break
         fi
       done ;;
   esac
-fi
-
-# Root commits of the public repo ("Initial public release"); admitted on a
-# PRIVATE destination only. Overridable solely in test mode (sandbox remotes).
-PUBLIC_ROOTS="3a008e5da4918e899fe082955177f76e3ebef437"
-is_private=0
-if [ "$is_public" -ne 1 ]; then
-  if is_github_pentacle_private_url "$remote_url"; then
-    is_private=1
-  elif [ "${PENTACLE_PREPUSH_TEST_MODE:-}" = 1 ] && [ -n "${PENTACLE_ALLOWED_PRIVATE_REMOTES:-}" ]; then
-    can_u="${remote_url%/}"; can_u="${can_u%.git}"
-    for _extra in ${PENTACLE_ALLOWED_PRIVATE_REMOTES}; do
+  if [ "$is_public" -ne 1 ]; then
+    for _extra in ${PENTACLE_ALLOWED_PRIVATE_REMOTES:-}; do
       _e="${_extra%/}"; _e="${_e%.git}"
       if [ "$can_u" = "$_e" ]; then
         is_private=1
@@ -170,8 +183,10 @@ if [ "${PENTACLE_PREPUSH_TEST_MODE:-}" = 1 ] && [ -n "${PENTACLE_PUBLIC_ROOTS:-}
   PUBLIC_ROOTS="${PENTACLE_PUBLIC_ROOTS}"
 fi
 
-if [ "$is_public" -eq 1 ]; then
+if [ "$is_public_exact" -eq 1 ]; then
   warn "pushing to '${remote_name}' -> ${remote_url} (public repo — public rules apply)"
+elif [ "$is_github" -eq 1 ] && [ "$is_public" -eq 1 ]; then
+  warn "pushing to '${remote_name}' -> ${remote_url} (github.com destination — public safeguards apply, fail closed)"
 elif [ "$is_private" -eq 1 ]; then
   warn "pushing to '${remote_name}' -> ${remote_url} (private repo — the public root is admitted for merge-back)"
 else
@@ -179,7 +194,7 @@ else
 fi
 
 # ── (a) a remote *named* `public` must resolve to the public repo ────────────
-if [ "$remote_name" = "public" ] && [ "$is_public" -ne 1 ]; then
+if [ "$remote_name" = "public" ] && [ "$is_public_exact" -ne 1 ]; then
   warn "REFUSED: remote 'public' resolves to '${remote_url}', which is not the public HJK6/pentacle."
   fail=1
 fi
@@ -390,7 +405,7 @@ if [ "$records" -eq 0 ] && [ "$is_public" -eq 1 ]; then
 fi
 
 if [ "$fail" -ne 0 ]; then
-  warn "push blocked. If this is genuinely correct, re-run with 'git push --no-verify'."
+  warn "push blocked. Resolve the refusal before retrying."
   exit 1
 fi
 exit 0

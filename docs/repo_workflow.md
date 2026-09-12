@@ -34,8 +34,7 @@ merged back into the private line at the next publish.
 Install the pre-push guard once per clone with an absolute `core.hooksPath`
 ([developer onboarding § 8](developer_onboarding.md#8-pushing-safely)). It
 refuses pushes that carry foreign history, omit the refspec, or aim a remote
-named `public` at the wrong repository. It is bypassable by design
-(`--no-verify`); it stops mistakes, not intent.
+named `public` at the wrong repository. A refusal is a finding to resolve before retrying.
 
 ## Hosted instances follow `main`
 

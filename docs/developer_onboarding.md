@@ -121,19 +121,19 @@ git push --dry-run public HEAD:refs/heads/tmp-foreign-probe
 # expect: "pre-push: REFUSED: … foreign history …" and a non-zero exit
 ```
 
-`scripts/hooks/pre-push` then refuses accidental pushes. It is **bypassable by design** — `git push --no-verify` skips it — so it stops mistakes, not a determined push. Exactly what it protects:
+`scripts/hooks/pre-push` then refuses accidental pushes. A refusal is a finding to resolve before retrying. Exactly what it protects:
 
 | Situation | Result |
 |---|---|
 | Remote *named* `public` whose URL is not `github.com/HJK6/pentacle` | **REJECTED** (destination) |
 | Any push whose URL is `github.com/HJK6/pentacle` — under any remote name (`public`, `origin`) or a raw URL | Public rules applied (resolved URL printed) |
+| Other or ambiguous `github.com` destinations | Public safeguards applied, failing closed; only the exact private repository receives private-root privileges |
 | Bare `git push <remote>` (no refspec) or a matching-branch push | **REJECTED** (name what you push) |
 | `git push <remote> my-branch` (same-name branch) | **Allowed** — maps to the same name; this check does *not* force `src:refs/heads/dst`, so a wrong *branch name* is out of scope (content is still checked below) |
 | A tip that reaches a root commit which is not a root of the remote's `main` — a foreign orphan branch, **or a merge that pulls another repository's history into a clean branch** | **REJECTED** (foreign ancestry) |
 | Destination is the private line `github.com/HJK6/pentacle-private` (any remote name) | Same root-set check, but the public repo's root is additionally **allowed** — the private `main` merges public `main` back by design; any other new root is still **REJECTED** |
-| Public destination whose `main` cannot be resolved (no ref, fetch fails) | **REJECTED** (fail closed) |
-| Non-public destination with no resolvable `main` | Allowed with a note (nothing to compare) |
-| Any of the above run with `git push --no-verify` | **Not protected** (bypass by design) |
+| GitHub destination (including private) whose `main` cannot be resolved (no ref, fetch fails) | **REJECTED** (fail closed) |
+| Non-GitHub destination without private test/mirror classification and no resolvable `main` | Allowed with a note (nothing to compare) |
 
 The foreign-ancestry check is a root-set comparison, not a shared-ancestor test: a merge of unrelated history still shares a merge-base with `main`, so `git merge-base` is not enough. The explicit-refspec check reads the invoking `git push` from `/proc` (Linux) or `ps` (macOS/BSD); if that argv cannot be read at all, a push to the public repo fails closed.
 
