@@ -857,6 +857,9 @@ class WindowSchedule:
             except (ValueError, UnicodeDecodeError):
                 oracle_error = "invalid_prompt"
         spawn_msg = {
+            # The durable schedule was owner-authorized at admission; this
+            # internal identity is never accepted from a client payload.
+            "_auth_context": {"service_authenticated": True, "service_actor": "daemon:scheduler"},
             "type": "spawn", "request_id": dispatch["spawn_request_id"],
             "idempotency_key": dispatch["spawn_key"], "host": schedule["target_host"],
             "provider": schedule["resolved_provider"], "model": schedule["resolved_model"],

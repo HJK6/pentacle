@@ -1014,7 +1014,7 @@ class SpawnCtl:
         if "no_watch" in msg and not isinstance(msg["no_watch"], bool):
             raise VerbError("invalid_request", "no_watch must be boolean")
         admission: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-        task = asyncio.create_task(self._spawn_impl(msg, local_host, admission=admission))
+        task = asyncio.create_task(self._spawn_guarded(msg, local_host, admission=admission))
         self._background_spawns.add(task)
         def finish(done: asyncio.Task[Any]) -> None:
             self._finish_background_spawn(done, self._background_spawns)
@@ -1038,7 +1038,21 @@ class SpawnCtl:
             reply.update(await self._admitted_for_key(host, idempotency_key))
         return reply
 
-    async def admit_schedule(
+    async def _spawn_guarded(self, msg, local_host, *, admission=None):
+        policy = getattr(self.sessions, "assistant", None)
+        if policy is None:
+            return await self._spawn_impl(msg, local_host, admission=admission)
+        async with policy.spawn(msg, str(msg.get("host") or local_host).strip()):
+            return await self._spawn_impl(msg, local_host, admission=admission)
+
+    async def admit_schedule(self, msg, local_host, *, admission_name):
+        policy = getattr(self.sessions, "assistant", None)
+        if policy is None:
+            return await self._admit_schedule(msg, local_host, admission_name=admission_name)
+        async with policy.spawn(msg, str(msg.get("host") or local_host).strip()):
+            return await self._admit_schedule(msg, local_host, admission_name=admission_name)
+
+    async def _admit_schedule(
         self, msg: dict[str, Any], local_host: str, *, admission_name: str
     ) -> dict[str, Any]:
         """Run the read-only portion of immediate-spawn admission.
@@ -1334,6 +1348,12 @@ class SpawnCtl:
             "state": "requested" if self._prompt_requested(msg) else "not_requested"
         }
         try:
+            policy = getattr(self.sessions, "assistant", None)
+            if policy is not None and policy.protects(open_flds):
+                await policy.available(
+                    host, excluding=f"{host}:{name}",
+                    predecessor=str(msg.get("handoff_from_stream_id") or "") if msg.get("handoff") else "",
+                )
             if await tmux.has_session(name):
                 raise VerbError(
                     "stream_id_unavailable",
@@ -2584,7 +2604,7 @@ class SpawnCtl:
                 log.exception("handoff child reparent failed")
         src_host, src_name = handoff_from.split(":", 1)
         try:
-            await self.sessions.close(src_host, src_name, reason="handed_off")
+            await self.sessions.close(src_host, src_name, reason="handed_off", close_kind="handed_off")
         except VerbError as exc:
             log.info("handoff close of %s: %s", handoff_from, exc.code)
 

@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any
 
 import prockill
+from assistant_policy import AssistantPolicy
 from mirror import _extract_live_state, _provider_from_session_name
 from v2_runtime import iso_now
 
@@ -233,6 +234,7 @@ class Sessions:
                  alerts: Any = None, hosts: Any = None,
                  capture_timeout_s: float = DECISION_CAPTURE_TIMEOUT_S) -> None:
         self.store = store
+        self.assistant = AssistantPolicy(store, local_host)
         self.tmux = tmux
         # Local tmux can only ever speak for THIS host. Verbs that touch panes
         # must refuse a row belonging to another host rather than read local
@@ -922,7 +924,15 @@ class Sessions:
             "new_parent_stream_id": new_parent_stream_id,
         }
 
-    async def set_role(
+    async def set_role(self, host: str, session_name: str, role: str, *,
+                       auth_context: dict[str, Any] | None = None) -> dict[str, Any]:
+        # Serialize protected role grants with assistant spawn admission.
+        if self.assistant.role:
+            async with self.assistant.lock:
+                return await self._set_role(host, session_name, role, auth_context=auth_context)
+        return await self._set_role(host, session_name, role, auth_context=auth_context)
+
+    async def _set_role(
         self,
         host: str,
         session_name: str,
@@ -967,6 +977,8 @@ class Sessions:
             or auth.get("operator_principal")
             or ""
         ).strip()
+
+        await self.assistant.authorize_role(target, role, auth)
 
         if role == "nexus":
             operator_facing = operator or service
@@ -1134,6 +1146,18 @@ class Sessions:
         audit/readback even though the UI's open inventory drops the ghost.
         """
         async with self._lifecycle_lock(host, session_name):
+            current = await self.store.fetch_session(host, session_name)
+            if self.assistant.protects(current):
+                # The permanent row is the operator's recovery entry point.
+                # Preserve it with explicit death evidence; do not spawn here.
+                if self._row_generation(current) == expected_generation:
+                    updated = await self.store.update_session(
+                        host, session_name, expected_generation=current.get("created_at"),
+                        presumed_dead_at=presumed_dead_at,
+                    )
+                    if updated is not None:
+                        self._cache(updated, pane_status="pane_dead", working=False)
+                return None
             row = await self.store.mark_reconciled_dead(
                 host,
                 session_name,
@@ -1258,6 +1282,8 @@ class Sessions:
                 else None
             )
         async with self._lifecycle_lock(host, session_name):
+            row = await self.store.fetch_session(host, session_name)
+            self.assistant.guard_close(row, close_kind)
             return await self._close_locked(
                 host, session_name, reason,
                 expected_generation=expected_generation, close_kind=close_kind,
