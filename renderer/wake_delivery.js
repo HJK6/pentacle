@@ -41,6 +41,9 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
     if (!status?.wake?.enabled || status.mode !== 'on') return '';
     if (!enabled()) return 'Wake delivery is unavailable in this client.';
     if (status.local_actions?.enabled && status.local_actions?.last?.state === "speaking") return "Speaking a local reply…";
+    if (status.capture_origin === 'followup') return 'Recording your answer — say over.';
+    if (status.local_actions?.pending?.state === 'waiting') return 'Waiting for your answer — say over to finish.';
+    if (status.local_actions?.pending?.state === 'in_flight') return 'Processing your answer…';
     return status.wake.error || note || (held ? 'Wake message waiting for the current assistant.'
       : status.capture_origin === 'local_action' ? 'Recording local action — say over.'
         : status.capture_origin === 'wake' ? 'Recording for Bart — say over to send.'
@@ -64,7 +67,7 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
         return;
       }
       if (!held) {
-        const response = await api('POST', '/wake/claim', spawnAgent && getSpawnCatalog ? { actions_version: 1 } : {});
+        const response = await api('POST', '/wake/claim', spawnAgent && getSpawnCatalog ? { actions_version: 2 } : {});
         if (!valid()) return;
         if (!response || response.error || !Object.hasOwn(response, 'claim')) {
           note = 'Wake claim unconfirmed. Latest claim is available in the local mic service for review.';
@@ -106,7 +109,7 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
         let result;
         try { result = await spawnAgent(request); outcome = spawnOutcome(result); } catch { /* No new key or automatic retry. */ }
         note = outcome === 'spawned' ? 'Voice agent started.' : outcome === 'queued' ? 'Voice agent queued.' : 'Voice spawn unconfirmed; inspect Pentacle before repeating.';
-        const receipt = { stream_id: result?.streamId || result?.stream_id || result?.session?.stream_id || null, state: result?.state || 'unconfirmed', idempotency_key: request.idempotencyKey, host: request.host, model: request.model, effort: request.effort };
+        const receipt = { stream_id: result?.streamId || result?.stream_id || result?.session?.stream_id || null, state: result?.state || 'unconfirmed', idempotency_key: request.idempotencyKey, host: request.host, model: request.model, effort: request.effort, effort_source: capture.action.effort === '' ? 'provider_host_default' : 'explicit' };
         await api('POST', '/actions/outcome', { id: capture.id, generation: capture.generation, outcome, receipt });
         return;
       }

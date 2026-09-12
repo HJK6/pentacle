@@ -33,14 +33,14 @@ test('spawn keeps tuple, exact task, bounded objective and stable idempotency', 
 });
 test('unknown tuple/action fails without fallback', () => {
   const c = capture(); c.action.model = 'unknown'; assert.throws(() => prepareVoiceSpawn(c, catalog));
-  c.action.version = 2; assert.throws(() => prepareVoiceSpawn(c, catalog));
+  c.action.version = 3; assert.throws(() => prepareVoiceSpawn(c, catalog));
 });
 test('one local spawn without Bart session; no chat injection', async () => {
   const f = fixture();
   await Promise.all([f.helper.tick(f.status), f.helper.tick(f.status)]);
   await f.helper.tick(f.status);
   assert.equal(f.spawns.length, 1); assert.equal(f.sends.length, 0);
-  assert.deepEqual(f.requests[0], { actions_version: 1 });
+  assert.deepEqual(f.requests[0], { actions_version: 2 });
   assert.equal(f.outcomes[0].outcome, 'spawned');
 });
 test('Off while catalog resolves prevents action', async () => {
@@ -123,4 +123,45 @@ test('web shim and host bridge preserve voice prompt, tuple and idempotency with
     if (typeof stop === 'function') stop();
     client.sendCommand = original;
   }
+});
+
+test('omitted voice effort uses canonical provider and host defaults without replacing model', () => {
+  const input = capture(); input.action.effort = '';
+  const live = { ...catalog, spawn_defaults: { schema_version: 1,
+    providers: { codex: { model: 'gpt-5.6-luna', effort: 'high' } }, host_overrides: {} } };
+  assert.equal(prepareVoiceSpawn(input, live).effort, 'high');
+  assert.equal(prepareVoiceSpawn(input, live).model, input.action.model);
+  live.spawn_defaults.host_overrides[input.action.host] = { codex: { effort: 'medium' } };
+  live.models = { codex: { [input.action.model]: { efforts: ['high', 'medium'] } } };
+  assert.equal(prepareVoiceSpawn(input, live).effort, 'medium');
+  input.action.effort = 'high';
+  assert.equal(prepareVoiceSpawn(input, live).effort, 'high');
+  input.action.effort = '';
+  assert.throws(() => prepareVoiceSpawn(input, catalog));
+  live.spawn_defaults.host_overrides[input.action.host].codex.effort = 'unsupported';
+  assert.throws(() => prepareVoiceSpawn(input, live));
+});
+
+test('follow-up status tracks waiting, capture and inference without consuming a claim', () => {
+  const f = fixture(); f.status.wake.pending_count = 0;
+  f.status.local_actions.pending = { state: 'waiting' };
+  assert.match(f.helper.message(f.status), /Waiting for your answer/);
+  f.status.capture_origin = 'followup';
+  assert.match(f.helper.message(f.status), /Recording your answer/);
+  f.status.capture_origin = null; f.status.local_actions.pending.state = 'in_flight';
+  assert.match(f.helper.message(f.status), /Processing your answer/);
+  f.status.local_actions.pending = null;
+  assert.doesNotMatch(f.helper.message(f.status), /Waiting for your answer/);
+  assert.equal(f.requests.length, 0);
+});
+
+test('resolved default effort and provenance are returned in the actual outcome receipt', async () => {
+  const f = fixture(); f.claims[0].action.effort = '';
+  const live = { ...catalog, spawn_defaults: { providers: { codex: { effort: 'high' } } } };
+  f.helper = f.make({ getSpawnCatalog: async () => live });
+  await f.helper.tick(f.status);
+  assert.equal(f.outcomes[0].receipt.effort, 'high');
+  assert.equal(f.outcomes[0].receipt.effort_source, 'provider_host_default');
+  assert.equal(f.spawns[0].idempotencyKey, 'voice:a-unique-capture');
+  assert.equal(f.sends.length, 0);
 });

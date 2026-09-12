@@ -6,7 +6,7 @@ function prepareVoiceSpawn(capture, response) {
   const action = capture?.action;
   const catalog = response?.catalog || response;
   const allowed = new Set(['version', 'route', 'task', 'host', 'provider', 'model', 'effort']);
-  if (!action || action.version !== 1 || action.route !== 'spawn_agent'
+  if (!action || ![1, 2].includes(action.version) || action.route !== 'spawn_agent'
     || Object.keys(action).some(key => !allowed.has(key))
     || typeof capture.id !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(capture.id)
     || typeof action.task !== 'string' || !action.task.trim() || action.task.length > 4000
@@ -14,11 +14,16 @@ function prepareVoiceSpawn(capture, response) {
     throw new Error('Invalid local spawn action');
   }
   const model = catalog?.models?.[action.provider]?.[action.model];
-  if (!catalog?.catalog_version || !model?.efforts?.includes(action.effort)) {
+  const defaults = catalog?.spawn_defaults;
+  const effort = action.effort === ''
+    ? (defaults?.host_overrides?.[action.host]?.[action.provider]?.effort
+      ?? defaults?.providers?.[action.provider]?.effort)
+    : action.effort;
+  if (!catalog?.catalog_version || !model?.efforts?.includes(effort)) {
     throw new Error('Requested voice spawn configuration is unavailable');
   }
   return {
-    host: action.host, provider: action.provider, model: action.model, effort: action.effort,
+    host: action.host, provider: action.provider, model: action.model, effort,
     spawnProfile: 'desktop_manual', catalogVersion: catalog.catalog_version,
     resolutionSource: 'explicit_override',
     objective: Array.from(action.task.trim()).slice(0, 120).join(''),
