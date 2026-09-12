@@ -21,7 +21,7 @@ const ID = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com'];
 
 function childEnv(extra = {}) {
   const e = { ...process.env, ...extra };
-  for (const k of ['BASH_ENV', 'ENV', 'PENTACLE_PREPUSH_TEST_MODE', 'PENTACLE_ALLOWED_PUBLIC_REMOTES']) {
+  for (const k of ['BASH_ENV', 'ENV', 'PENTACLE_PREPUSH_TEST_MODE', 'PENTACLE_ALLOWED_PUBLIC_REMOTES', 'PENTACLE_ALLOWED_PRIVATE_REMOTES', 'PENTACLE_PUBLIC_ROOTS']) {
     if (!(k in extra)) delete e[k];
   }
   return e;
@@ -295,6 +295,10 @@ test('URL classification recognizes public forms (case-insensitive) and rejects 
     'git@GITHUB.COM:HJK6/pentacle',
     'https://github.com/hjk6/pentacle.git',      // lowercase owner/repo
     'https://github.com/HJK6/PENTACLE.git',      // uppercase repo
+    'https://github.com/HJK6/pentacle.git/./',    // dot segment + trailing slash (GitHub accepts it)
+    'https://github.com//HJK6//pentacle.git//',   // duplicate separators
+    'git@github.com:./HJK6/pentacle.git/.',       // leading and trailing dot segments
+    'https://github.com/HJK6/pentacle.git.git',   // double suffix
   ];
   for (const url of publicForms) {
     assert.match(runHookDirect('anyname', url).stderr, /\(public repo/, `expected public: ${url}`);
@@ -304,6 +308,7 @@ test('URL classification recognizes public forms (case-insensitive) and rejects 
     'git@github.com:HJK6/PENTACLE-PRIVATE.git',
     'https://github.com/HJK6/other',
     'git@example.com:HJK6/pentacle.git',
+    'https://github.com/HJK6/../HJK6/pentacle.git',  // parent segment: never guessed through
   ];
   for (const url of nonPublic) {
     const r = runHookDirect('public', url);
@@ -370,6 +375,42 @@ test('URL classification recognizes the private repo and the override never recl
   const r = runHookDirect('origin', 'git@github.com:HJK6/pentacle.git', { env: { PENTACLE_PREPUSH_TEST_MODE: '1', PENTACLE_ALLOWED_PRIVATE_REMOTES: 'git@github.com:HJK6/pentacle.git' } });
   assert.match(r.stderr, /\(public repo/);
   assert.doesNotMatch(r.stderr, /\(private repo/);
+});
+
+test('a dot-segment public URL under remote name `origin` still gets PUBLIC rules (private root REJECTED)', () => {
+  const sb = sandbox();
+  makeForeignBranch(sb.work, 'foreign');
+  const tip = git(sb.work, ['rev-parse', 'HEAD']).trim();
+  // Classification is by canonical URL, so the public branch must be refused even
+  // though the remote is named `origin` and the URL carries "/./".
+  const r = runHookDirect('origin', 'https://github.com/HJK6/pentacle.git/./', { stdin: `refs/heads/foreign ${tip} refs/heads/foreign ${'0'.repeat(40)}\n`, env: { GIT_SSH_COMMAND: 'false' } });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /\(public repo/);
+  assert.match(r.stderr, /REFUSED/);
+});
+test('a private destination whose main cannot be resolved is REJECTED (fail closed)', () => {
+  const sb = sandbox();
+  makeForeignBranch(sb.work, 'foreign');
+  const tip = git(sb.work, ['rev-parse', 'HEAD']).trim();
+  const r = runHookDirect('private-missing', 'git@github.com:HJK6/pentacle-private.git', { stdin: `refs/heads/foreign ${tip} refs/heads/foreign ${'0'.repeat(40)}\n`, env: { GIT_SSH_COMMAND: 'false' } });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /\(private repo/);
+  assert.match(r.stderr, /fail closed/);
+});
+test('outside test mode the private/root overrides are ignored (unknown root still REJECTED)', () => {
+  const sb = privateSandbox();
+  const r = tryGit(sb.work, withHook(['push', 'origin', 'sync:refs/heads/sync']), { PENTACLE_ALLOWED_PRIVATE_REMOTES: sb.privateRemote, PENTACLE_PUBLIC_ROOTS: sb.publicRoot });
+  assert.notEqual(r.status, 0);
+  assert.doesNotMatch(r.stderr, /\(private repo/);
+  assert.match(r.stderr, /not a root of origin\/main/);
+});
+test('the pinned default public root is the public repo root and is not read from the environment outside test mode', () => {
+  const src = fs.readFileSync(hookPath, 'utf8');
+  assert.match(src, /^PUBLIC_ROOTS="3a008e5da4918e899fe082955177f76e3ebef437"$/m);
+  const overrideLine = src.split('\n').find(l => l.includes('PUBLIC_ROOTS="${PENTACLE_PUBLIC_ROOTS}"'));
+  assert.ok(overrideLine, 'override line present');
+  const idx = src.indexOf(overrideLine);
+  assert.match(src.slice(Math.max(0, idx - 200), idx), /PENTACLE_PREPUSH_TEST_MODE:-\}" = 1/);
 });
 
 // ── portability ──────────────────────────────────────────────────────────────

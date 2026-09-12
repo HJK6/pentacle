@@ -90,7 +90,21 @@ github_repo_path() {
     *) host="${u%%/*}"; path="${u#*/}" ;;
   esac
   host="${host%%:*}"
-  path="${path#/}"; path="${path%/}"; path="${path%.git}"; path="${path%/}"
+  # Canonicalize the path the way GitHub resolves it: collapse duplicate
+  # separators and "." segments, drop trailing separators, then the .git
+  # suffix — repeated until stable, so "HJK6/pentacle.git/./" is HJK6/pentacle.
+  prev=''
+  while [ "$path" != "$prev" ]; do
+    prev="$path"
+    case "$path" in */./*) path="${path%%/./*}/${path#*/./}" ;; esac
+    case "$path" in *//*) path="${path%%//*}/${path#*//}" ;; esac
+    case "$path" in ./*) path="${path#./}" ;; esac
+    case "$path" in */.) path="${path%/.}" ;; esac
+    case "$path" in /*) path="${path#/}" ;; esac
+    case "$path" in */) path="${path%/}" ;; esac
+    case "$path" in *.git) path="${path%.git}" ;; esac
+  done
+  case "$path" in *..*) return 1 ;; esac            # never guess through parent segments
   case "$host" in
     [Gg][Ii][Tt][Hh][Uu][Bb].[Cc][Oo][Mm]) printf '%s\n' "$path" ;;
     *) return 1 ;;
@@ -292,6 +306,9 @@ if [ -n "$remote_main" ]; then
     if [ "$is_public" -eq 1 ]; then
       warn "REFUSED: could not enumerate the public repo main's root commits (fail closed)."
       fail=1
+    elif [ "$is_private" -eq 1 ]; then
+      warn "REFUSED: could not enumerate the private repo main's root commits (fail closed)."
+      fail=1
     else
       warn "note: could not enumerate ${remote_name}/main's roots; skipping the shared-history check."
     fi
@@ -299,6 +316,9 @@ if [ -n "$remote_main" ]; then
     main_roots="$main_roots
 $PUBLIC_ROOTS"
   fi
+elif [ "$is_private" -eq 1 ]; then
+  warn "REFUSED: cannot resolve the private repo's 'main' to verify shared history (fail closed)."
+  fail=1
 fi
 
 # ── (c) foreign-ancestry root-set check + record validation ──────────────────
@@ -336,7 +356,7 @@ while read -r lref lsha rref rsha extra; do
   [ -n "$main_roots" ] || continue           # non-public with no comparable main
   tip_roots="$(git rev-list --max-parents=0 "$lsha" 2>/dev/null)"
   if [ -z "$tip_roots" ]; then
-    if [ "$is_public" -eq 1 ]; then
+    if [ "$is_public" -eq 1 ] || [ "$is_private" -eq 1 ]; then
       warn "REFUSED: could not enumerate root commits of ${lref} (${lsha}) (fail closed)."
       fail=1
     fi
