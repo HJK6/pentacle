@@ -189,8 +189,9 @@ timestamps/error; `ok` has observation timestamps and no error. Failure keeps
 the last observation timestamps and supplies an attempted_at and error.
 
 For provider_error, the accepted codes are `usage_provider_error`,
-`claude_usage_provider_error`, and legacy `claude_subscription_unavailable`;
-message must be a nonblank string. Other supported failures retain fixed pairs:
+`claude_usage_provider_error`, `codex_usage_provider_error` (Codex row), and
+legacy `claude_subscription_unavailable`; message must be a nonblank string.
+Other supported failures retain fixed pairs:
 
 | Outcome | Code | Message |
 | --- | --- | --- |
@@ -205,3 +206,17 @@ A publisher must include limits_health in live updates and publish health-only
 changes even when retained numeric values are unchanged. Invalid state files
 must retain the last published pair. This allows startup, live failure,
 handshake buffering and healthy refresh to follow the same contract.
+
+The collector fills these rows by running one shared probe per provider under
+`scripts/`: `check_claude_usage.py` drives the Claude CLI `/usage` screen for
+the weekly Claude/Fable rows, and `check_codex_usage.py` drives `codex
+app-server` (stdio JSON-RPC `account/rateLimits/read`) for the weekly Codex
+row, selecting the window whose `windowDurationMins` is at least a week. The
+Claude probe binary comes from `PENTACLE_USAGE_CLAUDE_BIN` (the deploy sets it to
+the Claude shim); the Codex binary is found on `PATH` (the collector's launchd
+PATH includes the Codex install dir), so Codex adds no dedicated knob. Codex
+`resets_at_iso` is authoritative UTC while `resets_text` renders in the host's
+local timezone. A probe that cannot reach its CLI exits non-zero, recording
+`provider_error` for that row while the other provider's fresh value and this
+row's prior value are retained. A silent/hung probe is bounded by the
+collector's 75s per-probe subprocess timeout (same `provider_error` result).
