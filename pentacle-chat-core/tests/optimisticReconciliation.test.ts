@@ -150,6 +150,117 @@ test('latest direct-ID receipt caption matrix is deterministic', () => {
   }
 });
 
+test('issue #5: direct-ID committed-pending vs partial receipt caption matrix', () => {
+  // A busy claude send commits the paste but cannot confirm the pane receipt
+  // marker, so the daemon records the receipt in its committed-pending
+  // vocabulary — state not_landed/accepted, delivery not_landed/
+  // committed_pending_proof/proof_pending (confirmation pending, NOT a failure;
+  // comms.py _attempt_send_delivery). The durable USER echo still correlates
+  // back to the optimistic row (direct id match, finite correlatedDaemonSeq),
+  // and no daemon echo->landed upgrade exists, so those committed states must
+  // read Sent instead of sticking at Sending. A blank / whitespace / unknown /
+  // both-empty receipt is an unresolved partial and stays Sending; an explicit
+  // failure stays Failed. Regression for HJK6/pentacle issue #5 (narrowed per
+  // spec-QA: only the daemon's committed vocabulary, not any non-empty value).
+  const cases = [
+    { name: 'not_landed committed', raw: { receipt_state: 'not_landed', receipt_delivery: 'not_landed' }, expected: 'sent' },
+    { name: 'accepted committed_pending_proof', raw: { receipt_state: 'accepted', receipt_delivery: 'committed_pending_proof' }, expected: 'sent' },
+    { name: 'accepted proof_pending', raw: { receipt_state: 'accepted', receipt_delivery: 'proof_pending' }, expected: 'sent' },
+    { name: 'accepted state, no delivery field', raw: { receipt_state: 'accepted' }, expected: 'sent' },
+    { name: 'empty state, committed_pending_proof delivery', raw: { receipt_state: '', receipt_delivery: 'committed_pending_proof' }, expected: 'sent' },
+    { name: 'accepted state + proof_unavailable stays Failed', raw: { receipt_state: 'accepted', receipt_delivery: 'proof_unavailable' }, expected: 'failed' },
+    { name: 'whitespace state is partial', raw: { receipt_state: '   ' }, expected: 'sending' },
+    { name: 'unrecognized state is partial', raw: { receipt_state: 'weird_unknown' }, expected: 'sending' },
+    { name: 'both fields empty is partial', raw: { receipt_state: '', receipt_delivery: '' }, expected: 'sending' },
+  ] as const;
+  for (const [index, entry] of cases.entries()) {
+    const reconciled = reconcileOptimisticSendWithServerEvent(
+      createOptimistic(),
+      OPTIMISTIC_ID,
+      serverUserEvent({ optimistic_id: OPTIMISTIC_ID, raw: entry.raw }),
+    );
+    const row = selectSessionDetail(reconciled, STREAM_ID, { visibleCount: 300 + index })?.transcriptItems[0];
+    assert.equal(row?.receiptCaption, entry.expected, entry.name);
+  }
+});
+
+test('issue #5: committed-pending receipt settles Sent through the live applyPentacleEvent path', () => {
+  // Exercise the real live matcher/reducer path (not a direct reconcile call):
+  // a dispatched+acked send, then the daemon USER echo carrying its optimistic
+  // id and a not_landed receipt, applied via applyPentacleEvent.
+  const acked = markOptimisticAckedByRequestId(
+    markOptimisticDispatchedByRequestId(createOptimistic(), REQUEST_ID, CREATED_AT + 10),
+    REQUEST_ID,
+    CREATED_AT + 20,
+  );
+  const live = applyPentacleEvent(acked, serverUserEvent({
+    optimistic_id: OPTIMISTIC_ID,
+    raw: { receipt_state: 'not_landed', receipt_delivery: 'not_landed' },
+  }));
+  const row = selectSessionDetail(live, STREAM_ID, { visibleCount: 'all' })?.transcriptItems[0];
+  assert.equal(row?.optimisticId, OPTIMISTIC_ID);
+  assert.equal(row?.receiptCaption, 'sent');
+});
+
+test('issue #5: committed-pending receipt settles Sent through a snapshot replay', () => {
+  const acked = markOptimisticAckedByRequestId(
+    markOptimisticDispatchedByRequestId(createOptimistic(), REQUEST_ID, CREATED_AT + 10),
+    REQUEST_ID,
+    CREATED_AT + 20,
+  );
+  const replayed = applySnapshotWithOptimisticReconciliation(acked, {
+    sessions: [session()],
+    events: [serverUserEvent({
+      optimistic_id: OPTIMISTIC_ID,
+      raw: { receipt_state: 'not_landed', receipt_delivery: 'not_landed' },
+    })],
+  }, CREATED_AT + 1_000);
+  const row = selectSessionDetail(replayed, STREAM_ID, { visibleCount: 'all' })?.transcriptItems[0];
+  assert.equal(row?.receiptCaption, 'sent');
+});
+
+test('issue #5: a committed-pending echo on another stream never captions this send Sent', () => {
+  // Narrowed-authority guard: the caption resolves only a row the reducer bound
+  // to THIS send. A not_landed USER echo on a different stream must not settle
+  // this stream's still-uncorrelated optimistic row — it stays Sending.
+  const otherStream = 'host_c:codex:two';
+  const withOther = applyPentacleEvent(createOptimistic(), serverUserEvent({
+    stream_id: otherStream,
+    session_id: otherStream,
+    optimistic_id: 'optimistic_host_c_codex_two_9',
+    raw: { receipt_state: 'not_landed', receipt_delivery: 'not_landed' },
+  }));
+  const row = selectSessionDetail(withOther, STREAM_ID, { visibleCount: 'all' })?.transcriptItems[0];
+  assert.equal(row?.receiptCaption, 'sending');
+});
+
+test('issue #5: a committed-pending echo settles Sent independent of the send request_id (retry-safe)', () => {
+  // Direct-ID matching keys on optimistic_id, not request_id: a retry rotates
+  // request_id but retains optimistic_id, so the committed-pending echo still
+  // settles the single row to Sent. The caption logic is request_id-independent,
+  // so asserting the property directly (rather than a rotated dispatch that the
+  // reducer keys by request_id) is the faithful check.
+  const dispatched = markOptimisticDispatchedByRequestId(createOptimistic(), REQUEST_ID, CREATED_AT + 10);
+  const live = applyPentacleEvent(dispatched, serverUserEvent({
+    optimistic_id: OPTIMISTIC_ID,
+    raw: { receipt_state: 'accepted', receipt_delivery: 'committed_pending_proof' },
+  }));
+  const detail = selectSessionDetail(live, STREAM_ID, { visibleCount: 'all' });
+  assert.equal(detail?.transcriptItems.length, 1);
+  assert.equal(detail?.transcriptItems[0]?.receiptCaption, 'sent');
+});
+
+test('issue #5: a null correlatedDaemonSeq is not treated as correlated (strict numeric)', () => {
+  // Number(null) and Number('') both coerce to 0 (finite); the strict check must
+  // keep a null/blank sequence uncorrelated so the caption stays Sending.
+  const optimistic = createOptimistic();
+  const row = optimistic.events[0];
+  const withNullSeq = { ...row, correlatedDaemonSeq: null as unknown as number, receiptDirectMatch: true, raw: { receipt_state: 'not_landed' } };
+  const patched = { ...optimistic, events: [withNullSeq] };
+  const detail = selectSessionDetail(patched, STREAM_ID, { visibleCount: 'all' });
+  assert.equal(detail?.transcriptItems[0]?.receiptCaption, 'sending');
+});
+
 test('pre-echo failure remains Sending and a no-ID USER echo has no receipt caption', () => {
   const locallyFailed = markOptimisticFailedByRequestId(createOptimistic(), REQUEST_ID, 'send_error', CREATED_AT + 20);
   const failedRow = selectSessionDetail(locallyFailed, STREAM_ID, { visibleCount: 'all' })?.transcriptItems[0];

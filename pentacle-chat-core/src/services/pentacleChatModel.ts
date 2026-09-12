@@ -24,7 +24,7 @@ import {
   type PentacleDisclosurePresentation,
   type PentacleInterpretedEvent,
 } from './pentacleEventInterpreter';
-import { isSystemEndOfTurnEvent } from './pentacleStreamReducer';
+import { isSystemEndOfTurnEvent, serverUserEchoMatchesAttachmentWrapper } from './pentacleStreamReducer';
 import {
   eventsForStream,
   pentacleEventContentVersion,
@@ -282,19 +282,49 @@ function normalizedReceiptField(event: PentacleEvent, field: 'receipt_state' | '
   return String(event.raw?.[field] ?? '').trim().toLowerCase();
 }
 
+// The daemon's own "committed, awaiting landed proof" receipt vocabulary
+// (comms.py _attempt_send_delivery): an unconfirmed-but-committed send records
+// state 'not_landed'/'accepted' with delivery 'not_landed'/'committed_pending_proof',
+// and 'proof_pending' is the same committed-pending delivery class. These are NOT
+// failures ('proof_unavailable' is the only failure) — they mean the daemon
+// pasted and committed the send but could not confirm the pane marker. Any other
+// receipt value (blank, whitespace, or unrecognized) is an unresolved partial
+// receipt, never a committed signal.
+const COMMITTED_PENDING_RECEIPT_STATES = new Set(['not_landed', 'accepted']);
+const COMMITTED_PENDING_RECEIPT_DELIVERIES = new Set(['not_landed', 'committed_pending_proof', 'proof_pending']);
+
+// Strict: correlatedDaemonSeq must be an actual finite number. `Number(null)`
+// and `Number('')` both coerce to 0 (finite), so a bare Number()+isFinite check
+// would treat a null/blank sequence as correlated; require the number type.
+function hasCorrelatedDaemonSeq(event: PentacleEvent): boolean {
+  return typeof event.correlatedDaemonSeq === 'number' && Number.isFinite(event.correlatedDaemonSeq);
+}
+
 function isDirectMatchedUserEcho(event: PentacleEvent): boolean {
   return event.client_origin === true && Boolean(event.optimistic_id) &&
     event.receiptDirectMatch === true &&
-    Number.isFinite(Number(event.correlatedDaemonSeq));
+    hasCorrelatedDaemonSeq(event);
 }
 
 function receiptCaptionForLatestUserEvent(event: PentacleEvent): PentacleReceiptCaption | undefined {
   if (!event.client_origin || !event.optimistic_id) return undefined;
-  if (!Number.isFinite(Number(event.correlatedDaemonSeq))) return 'sending';
+  if (!hasCorrelatedDaemonSeq(event)) return 'sending';
   if (!isDirectMatchedUserEcho(event)) return undefined;
   if (normalizedReceiptField(event, 'receipt_state') === 'landed') return 'sent';
   if (normalizedReceiptField(event, 'receipt_delivery') === 'proof_unavailable') return 'failed';
   if (!hasReceiptField(event, 'receipt_state') && !hasReceiptField(event, 'receipt_delivery')) return 'sent';
+  // Issue #5: this row is already a direct-ID-correlated echo — the reducer bound
+  // this durable server USER echo to the optimistic row; that binding is the
+  // existing reconcile layer's, not strengthened here. Given that binding AND a
+  // daemon receipt in its own committed-pending vocabulary (above), the send was
+  // committed and re-emitted by the terminal, yet no daemon echo->landed upgrade
+  // exists — so without this it sticks at 'sending' forever. Resolve only those
+  // committed states to 'sent'; a blank/partial/unrecognized receipt is not a
+  // committed signal and stays 'sending'.
+  if (COMMITTED_PENDING_RECEIPT_STATES.has(normalizedReceiptField(event, 'receipt_state')) ||
+      COMMITTED_PENDING_RECEIPT_DELIVERIES.has(normalizedReceiptField(event, 'receipt_delivery'))) {
+    return 'sent';
+  }
   return 'sending';
 }
 
@@ -1812,12 +1842,25 @@ function buildSessionTranscriptRows(
     (includeTools || !isToolActionRow(fallbackSuffixInterpretation)) &&
     !fallbackSuffixAlreadyRendered,
   );
+  // An image send's session-summary fallback carries the daemon wrapper text,
+  // not the caption. The reducer already replaced the wrapper event with the
+  // reconciled caption row (client-origin, with attachments), so appending the
+  // wrapper-shaped fallback on top of it re-introduces the second bubble this
+  // fix removes. Treat the wrapper fallback as already represented when a
+  // rendered client-origin image row matches it by attachment key (+ caption).
+  const fallbackMatchesRenderedImageSend = String(fallbackKind || '').toUpperCase() === 'USER' &&
+    dedupedEvents.some((item) => (
+      item.event.client_origin === true &&
+      (item.event.attachments?.length ?? 0) > 0 &&
+      serverUserEchoMatchesAttachmentWrapper(item.event.attachments, item.text.trim(), fallbackText)
+    ));
   const shouldAppendFallback = Boolean(
     fallbackCompareText &&
     !fallbackMatchesReturnedToPrompt &&
     !fallbackInterpretation.hidden &&
     !isTransientTranscriptNoise(fallbackText) &&
     !fallbackMatchesHeldEvent &&
+    !fallbackMatchesRenderedImageSend &&
     // Never surface the session-summary fallback while the agent is WORKING.
     // session.last_text churns through transient states during a turn
     // ("Thinking" -> "Ran 1 shell command" -> "Worked for 4s · 8 msgs" -> a

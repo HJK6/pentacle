@@ -948,6 +948,8 @@ export function reconcileOptimisticSendWithServerEvent(
     serverEvent,
     state.optimisticSends?.[optimisticId]?.attachments,
     state.optimisticSends?.[optimisticId]?.queued_at,
+    undefined,
+    state.optimisticSends?.[optimisticId]?.text,
   );
   const withServerEvent = applyPentacleEvent(echoed, correlatedEvent);
   return pruneOptimisticSend(withServerEvent, optimisticId);
@@ -1005,6 +1007,35 @@ export function onReconnect(
 
 function isServerUserEcho(event: PentacleEvent) {
   return String(event.kind || '').toUpperCase() === 'USER' && event.client_origin !== true;
+}
+
+// The daemon rewrites an attachment send into an agent-facing wrapper line
+// before injecting it into the agent ("Look at the image file at
+// <attachment-root>/<sha>.<ext>, then respond to the user's message: <caption>",
+// or the caption-less "Image(s) at <path>" form). The transcript then re-emits
+// that wrapper as a server USER echo carrying no optimistic_id, so its text no
+// longer equals the operator's caption and the equality-based dedup misses it.
+// The wrapper path is built from the same blob sha the client sent as
+// ChatAttachment.key, so we correlate the echo to the send by requiring every
+// attachment key to appear in the wrapper text (and, when present, the caption).
+// sha256 keys make key-containment an unambiguous correlator.
+const ATTACHMENT_WRAPPER_MARKER = /(?:Look at the image files? at |Images? at )/;
+
+export function serverUserEchoMatchesAttachmentWrapper(
+  attachments: ChatAttachment[] | undefined,
+  caption: string,
+  eventText: string,
+): boolean {
+  const keys = (attachments ?? [])
+    .map((attachment) => String(attachment.key || '').toLowerCase())
+    .filter(Boolean);
+  if (keys.length === 0) return false;
+  const raw = String(eventText || '');
+  if (!ATTACHMENT_WRAPPER_MARKER.test(raw)) return false;
+  const haystack = raw.toLowerCase();
+  if (!keys.every((key) => haystack.includes(key))) return false;
+  const trimmedCaption = String(caption || '').trim();
+  return trimmedCaption ? raw.includes(trimmedCaption) : true;
 }
 
 function canUseTextFallbackStatus(status: OptimisticSendState['status']) {
@@ -1066,7 +1097,10 @@ function findUnambiguousOptimisticEchoMatch(
       send.turn_queued !== true &&
       canUseTextFallbackStatus(send.status) &&
       send.stream_id === event.stream_id &&
-      send.text === event.text
+      // An attachment send's echo is the daemon wrapper, not the caption; match
+      // it by its embedded attachment keys so it reconciles like a plain echo.
+      (send.text === event.text ||
+        serverUserEchoMatchesAttachmentWrapper(send.attachments, send.text, event.text))
     ));
   const windowMatches = sameTextCandidates.filter(([, send]) => (
     optimisticMatchesServerUser(send, event, windowMs)
@@ -1098,7 +1132,11 @@ function snapshotEventMatchesPriorCorrelatedOptimistic(prior: PentacleEvent, eve
   return (
     event.stream_id === prior.stream_id &&
     event.kind === prior.kind &&
-    event.text === prior.text &&
+    // A reconciled attachment row carries the caption as its text while the raw
+    // snapshot echo still carries the daemon wrapper, so match those by the
+    // wrapper's embedded keys; daemon_seq equality below keeps it unambiguous.
+    (event.text === prior.text ||
+      serverUserEchoMatchesAttachmentWrapper(prior.attachments, prior.text, event.text)) &&
     Number(event.daemon_seq) === priorDaemonSeq
   );
 }
@@ -1128,6 +1166,7 @@ function carryPriorCorrelatedOptimisticEvents(
         previousState.optimisticSends?.[prior.optimistic_id]?.attachments ?? prior.attachments,
         previousState.optimisticSends?.[prior.optimistic_id]?.queued_at ?? prior.queued_at,
         prior,
+        previousState.optimisticSends?.[prior.optimistic_id]?.text ?? prior.text,
       );
     }
   }
@@ -1237,6 +1276,7 @@ function reconciledOptimisticEvent(
   optimisticAttachments?: ChatAttachment[],
   queuedAt?: number,
   priorEvent?: PentacleEvent,
+  optimisticText?: string,
 ): PentacleEvent {
   const daemonSeq = Number(serverEvent.daemon_seq);
   const directMatch = serverEvent.optimistic_id === optimisticId;
@@ -1271,6 +1311,13 @@ function reconciledOptimisticEvent(
   return freezeEventInDev({
     ...serverEvent,
     raw,
+    // For an attachment send the server echo text is the agent-facing wrapper
+    // ("Look at the image file at …, then respond…"); keep the operator's
+    // caption as the rendered bubble text so only the operator-formatted message
+    // shows.
+    ...((optimisticAttachments?.length ?? 0) > 0 && optimisticText !== undefined
+      ? { text: optimisticText }
+      : {}),
     attachments: mergeOptimisticAttachmentRenderFields(serverEvent.attachments, optimisticAttachments),
     daemon_seq: Number.NaN,
     correlatedDaemonSeq: Number.isFinite(daemonSeq) ? daemonSeq : undefined,
@@ -1334,6 +1381,8 @@ export function applySnapshotWithOptimisticReconciliation(
         echo,
         send.attachments,
         send.queued_at,
+        undefined,
+        send.text,
       );
       snapshotEvents = nextEvents;
       matchedOptimisticIds.add(optimisticId);
@@ -1864,7 +1913,12 @@ export function applyPentacleEvent(
       const merged = sameOptimisticClientReplacement
         ? event
         : prior.client_origin === true && prior.optimistic_id && event.client_origin !== true
-          ? reconciledOptimisticEvent(prior.optimistic_id, event, prior.attachments, prior.queued_at, prior)
+          // Pass the prior row's text as the optimistic caption so a duplicate
+          // live replay of an attachment-wrapper echo (which re-enters this
+          // seq-correlated path after the send is pruned) keeps rendering the
+          // operator caption, not the daemon wrapper text — matching the live
+          // and snapshot reconcile paths and preventing a wrapper double-render.
+          ? reconciledOptimisticEvent(prior.optimistic_id, event, prior.attachments, prior.queued_at, prior, prior.text)
           : mergeProgressiveUpdate(prior, event);
       if (!merged || merged === prior) return state;
       const frozenMerged = freezeEventInDev(merged);
