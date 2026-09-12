@@ -102,6 +102,24 @@ gates *who* connects, not *what* a connected operator may do. Flags, the wire
 protocol, the security posture and the routing rules are in
 [`server/README.md`](../server/README.md).
 
+### Hosted profile instances
+
+Because the browser is a full client, a persistent web host lets a machine be a
+**browser-only client** — the primary way to run Pentacle without a local
+install: point a browser at a host another machine runs on its behalf, rather
+than running the Electron desktop locally. Each instance is `server/` started
+with a `--profile`, so one host can run several — each its own profile, port,
+`--bind`, and `--token-file`. A routable instance belongs behind a private
+network boundary, which is also the encryption boundary because the host speaks
+plain HTTP.
+
+Terminal attachment and the daemon credential come from that profile. A profile
+meant for browser clients uses the **public host shape** — `chatStream.hosts`
+(the roster the renderer reverse-maps daemon sessions onto) plus a top-level
+`hosts` map of SSH transports — rather than the desktop-only `remote`/`peers`
+fields, so the browser attaches terminals on every rostered host;
+[`configs/README.md`](../configs/README.md) covers it.
+
 ## Configuration ownership
 
 - The README owns desktop configuration precedence and feature flags.
