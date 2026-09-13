@@ -98,3 +98,10 @@ test('lost claim response never reconstructs or replays its text',async()=>{
   assert.equal(f.sends.length,0);
   assert.match(f.notes.join(' '),/unconfirmed/);
 });
+
+test('answer-ready text agrees with echo-tail readiness flag',()=>{
+  const f=fixture();f.status.local_actions={enabled:true,pending:{state:'waiting',ready:false}};
+  assert.equal(f.helper.message(f.status),'Getting ready for your answer…');
+  f.status.local_actions.pending.ready=true;
+  assert.equal(f.helper.message(f.status),'Ready for your answer — say over to finish.');
+});

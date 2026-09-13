@@ -6586,7 +6586,12 @@ function updateMicUI(data) {
     // Always-on mode
     const listenerState = data.on_listener_state || 'LISTENING';
 
-    if (listenerState === 'AWAKE') {
+    const answerReady = listenerState === 'LISTENING' && data.local_actions?.enabled
+      && data.local_actions?.pending?.state === 'waiting' && data.local_actions.pending.ready === true;
+    if (answerReady) {
+      dot.classList.add('active-capturing');
+      info.textContent = 'Ready for your answer — say over to finish.';
+    } else if (listenerState === 'AWAKE') {
       dot.classList.add('active-awake');
       info.innerHTML = '<span style="color:#00ff66">Listening for command...</span>';
       if (!data.on_last_copied) preview.textContent = voiceState.unsentText || '';

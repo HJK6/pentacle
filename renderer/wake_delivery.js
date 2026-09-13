@@ -42,7 +42,7 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
     if (!enabled()) return 'Wake delivery is unavailable in this client.';
     if (status.local_actions?.enabled && status.local_actions?.last?.state === "speaking") return "Speaking a local reply…";
     if (status.capture_origin === 'followup') return 'Recording your answer — say over.';
-    if (status.local_actions?.pending?.state === 'waiting') return 'Waiting for your answer — say over to finish.';
+    if (status.local_actions?.pending?.state === 'waiting') return status.local_actions.pending.ready === true ? 'Ready for your answer — say over to finish.' : 'Getting ready for your answer…';
     if (status.local_actions?.pending?.state === 'in_flight') return 'Processing your answer…';
     return status.wake.error || note || (held ? 'Wake message waiting for the current assistant.'
       : status.capture_origin === 'local_action' ? 'Recording local action — say over.'

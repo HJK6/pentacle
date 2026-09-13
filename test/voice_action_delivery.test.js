@@ -142,14 +142,14 @@ test('model-only protocol2 spawn opens an idle agent without inventing a task', 
 
 test('follow-up status tracks waiting, capture and inference without consuming a claim', () => {
   const f = fixture(); f.status.wake.pending_count = 0;
-  f.status.local_actions.pending = { state: 'waiting' };
-  assert.match(f.helper.message(f.status), /Waiting for your answer/);
+  f.status.local_actions.pending = { state: 'waiting', ready: true };
+  assert.match(f.helper.message(f.status), /Ready for your answer/);
   f.status.capture_origin = 'followup';
   assert.match(f.helper.message(f.status), /Recording your answer/);
   f.status.capture_origin = null; f.status.local_actions.pending.state = 'in_flight';
   assert.match(f.helper.message(f.status), /Processing your answer/);
   f.status.local_actions.pending = null;
-  assert.doesNotMatch(f.helper.message(f.status), /Waiting for your answer/);
+  assert.doesNotMatch(f.helper.message(f.status), /Ready for your answer/);
   assert.equal(f.requests.length, 0);
 });
 
