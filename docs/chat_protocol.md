@@ -99,4 +99,10 @@ close kind and deferred state; `--json` retains the complete record.
 
 Clients should treat snapshots as authoritative for the keys they contain and apply later events in sequence order. Unknown event types are safely ignored after logging a bounded diagnostic. A reconnect should create a new request correlation scope and reconcile optimistic UI rows from the snapshot before replaying only requests that the implementation marks retry-safe.
 
+## Per-session context tracking fields
+
+A session snapshot may carry four context-usage fields, projected by the server and rendered only when present: `context_tokens` (current context use), `model_context_window` (the provider-reported window), `context_updated_at` (the observation timestamp), and `context_level` (`none`, `advisory`, or `handoff`). Clients display the token count and window percentage whenever `context_tokens` is present, independent of `context_level`; the level only adds advisory/handoff styling.
+
+`context_level` is provider-aware. For a Claude session the server classifies the level from the model window against capped advisory/handoff thresholds (defaults 70% / 85%, capped at 400,000 / 600,000 tokens; overridable via `PENTACLE_CONTEXT_ADVISORY_ABS`/`PENTACLE_CONTEXT_ADVISORY_PCT` and `PENTACLE_CONTEXT_HANDOFF_ABS`/`PENTACLE_CONTEXT_HANDOFF_PCT`) and emits a one-and-done context notification at each crossing. For a Codex session the server reports `context_tokens` and `model_context_window` for display but `context_level` is always `none`: Codex compacts its context automatically, so it receives no routine context-threshold handoff or advisory notification and no handoff-level status-card pressure. This is a notification-and-display policy only; it does not affect deliberate `spawn --handoff`, scheduled handoff, or recovery handoff, which remain available to both providers and independent of `context_level`.
+
 This contract intentionally uses synthetic client, host, and stream examples. It does not describe a private fleet, managed endpoint, deployment channel, or credential location.
