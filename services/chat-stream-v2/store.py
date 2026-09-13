@@ -3938,6 +3938,44 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
             return True
         return await self.submit(op)
 
+    async def rebind_observer_pane(
+        self, stream_id: str, *, generation: str, pane_pid: str,
+        pane_started_at: str, expected: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Retarget a PROVEN binding's stale pane PID/start to the in-place
+        replacement process within the SAME generation, keeping every other
+        proven field (generation, executable, transcript). Returns the new
+        binding on success, else None.
+
+        The atomic CAS against ``expected`` is the only guarantee here: it fails
+        closed if the binding changed underneath (a concurrent rebind), if the
+        row is no longer open or on a different generation, if the durable row's
+        pane_pid is not already the replacement pane (so a rebind can only follow
+        the reconciler, never lead it), or if the binding has no proven transcript
+        anchor. Same-rollout identity is the caller's proof (see
+        ``Ingest._maybe_rebind_observer_pane``)."""
+        host, _, name = stream_id.partition(":")
+        def op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=? AND status='open'",
+                (host, name),
+            ).fetchone())
+            if not row or row.get("session_generation") != generation or str(row.get("pane_pid") or "") != pane_pid:
+                return None
+            binding = row.get("observer_binding")
+            if not isinstance(binding, dict) or binding != expected or binding.get("generation") != generation:
+                return None
+            if not isinstance(binding.get("transcript"), dict):
+                return None
+            if binding.get("pane_pid") == pane_pid and binding.get("pane_started_at") == pane_started_at:
+                return None
+            updated = {**binding, "pane_pid": pane_pid, "pane_started_at": pane_started_at}
+            conn.execute("UPDATE sessions SET observer_binding=? WHERE host=? AND session_name=?",
+                         (json.dumps(updated, separators=(",", ":")), host, name))
+            conn.commit()
+            return updated
+        return await self.submit(op)
+
     async def count_session_events(
         self,
         stream_id: str,
