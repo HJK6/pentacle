@@ -57,10 +57,13 @@ The public service may expose the following generic families:
 | `ping`, `hello` | connection and capability checks |
 | `list_sessions`, `inspect_stream` | read visible session state |
 | `spawn`, `send`, `close`, `rename` | session lifecycle and input |
+| `send_image` | attach an already-uploaded image to the caller's OWN conversation as an agent-authored transcript event |
 | `subscribe`, `unsubscribe` | event visibility controls |
 | `watch`, `wake` | optional local notifications |
 
 Each implementation must document the exact fields and error codes it registers. Unsupported legacy verbs return a typed error rather than silently changing behavior.
+
+Image attachments (both operator→agent and agent→operator) reuse one content-addressed blob path: the client uploads bytes with the chunked `upload_blob_init` / `upload_blob_chunk` verbs, then references the blob by its sha256 in an attachment descriptor `{key, mime, bytes, width?, height?}` (supported mime: `image/jpeg`, `image/png`; per-attachment and per-message size/count limits apply). `send_image` is the agent-authored form: the daemon authorizes the destination from the caller's verified stream token — a seat may attach only to its OWN conversation — confirms the referenced blob is present, and emits exactly one agent-authored transcript event carrying the attachment (no pane injection). It is idempotent by `request_id`, so a retry adds no second transcript row. Clients fetch the bytes for display through the existing blob-read path and render the same image bubble/viewer regardless of author. Agent-side usage: `agent-orch send-image` (see the agent-orch README "Send an image").
 
 ## Close on an offline host
 

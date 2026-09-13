@@ -105,6 +105,24 @@ Success response:
 
 System nudges route through the same delivery primitive as tells. `delivery_kind:"nudge"` uses backoff by `(target, kind, reason_key, state_epoch)`: first fire immediately, then 3 minutes, 15 minutes, and 60 minutes repeated at cap. Child-liveness nudges use the child's idle/spawn-inert episode as `state_epoch`; a stable watermark cannot suppress a due repeat. Their text includes a copy-paste park command. Parked targets suppress nudges completely. A working transition clears only the idle-nudge episode (cadence reset), never the park; park clears solely via an explicit `unpark` or a terminal report. A direct-parent inspect, tell, await, or park resets the no-action escalation count; after `PENTACLE_CHILD_LIVENESS_ESCALATE_CAP_FIRES` hourly-cap fires (default three) without one, the daemon emits one operator Updates warning. One-shot `delivery_kind:"reengage"` messages are event-id deduped separately and are not swallowed by nudge backoff.
 
+## Send an image
+
+Use `agent-orch send-image <path> [--caption "..."]` to attach a local PNG or JPEG to **your own** conversation so the operator sees the real image in Pentacle chat (desktop and mobile) and can open it in the image viewer. The image renders as your (the agent's) own message — the same media bubble and viewer the operator's own image attachments use.
+
+```bash
+agent-orch send-image ./chart.png --caption "Q3 conversions, up 18%"
+```
+
+The CLI reads the file, checks it is a PNG/JPEG no larger than 25 MiB, uploads it as a content-addressed blob (the same chunked `upload_blob_init`/`upload_blob_chunk` path the operator's attachments use), then posts a `send_image` RPC. The daemon authorizes the destination from your verified seat **stream token** — you can only ever attach to your own conversation, never another seat's — reuses the shared attachment validation (PNG/JPEG, up to 5 per message, 25 MiB each), confirms the blob is really present, and emits exactly one agent-authored transcript event carrying the attachment. There is no pane injection: the image is not fed back to any agent as a prompt.
+
+On success the CLI prints a JSON receipt:
+
+```json
+{ "ok": true, "stream_id": "bart:v2-…", "event_id": 4821, "blob_sha": "…", "receipt_id": "img-…", "content_kind": "image_and_text", "duplicate": false, "source_path": "./chart.png", "source_sha256": "…", "bytes": 20518 }
+```
+
+`event_id` is the durable transcript row (it survives reconnect/history replay as one row). The send is idempotent by `request_id`: a retry with the same request id returns `"duplicate": true` and adds no second row. Genuine error receipts (non-zero exit, `send_image.error` with an `error_code`) cover an unsupported type or oversize file (rejected client-side before upload, exit `2`), a blob that was never uploaded (`attachment_missing`), an invalid attachment (`attachment_invalid`), and calling from an unverified or foreign stream (`stream_ownership_unverified`, exit `66`). Exit codes: `0` delivered, `1` send error, `2` bad input, `66` not authorized. This is agent → operator only; the operator's own image sends use the existing desktop/mobile attachment composer, not this verb.
+
 ## Notifications
 
 Use `agent-orch notify` when an agent or automation needs to publish into the operator Updates feed without spawning or sending a prompt to another agent:
