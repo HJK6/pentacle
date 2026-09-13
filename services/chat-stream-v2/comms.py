@@ -1692,24 +1692,18 @@ class Comms:
                 "content_kind": content_kind, "attachment_count": len(attachments),
                 "duplicate": True,
             }
+        # The durable transcript row (persisted by append_session_event above,
+        # served back by request_stream_events / fetch_session_event_tail and
+        # surviving reconnect) IS the receipt: `event_id` is a retrievable,
+        # single-write record of delivery. We deliberately do NOT write a second
+        # v2_send_receipts row — that would be a separate transaction that could
+        # fail after the row is committed, forcing either a false success (ok with
+        # no retrievable receipt) or a broadcast without a receipt. Binding the
+        # success contract to the one durable event keeps it atomic and honest.
         await broadcast({"type": "chat.event", "event": {**event, "daemon_seq": seq}})
-        receipt_id = f"img-{request_id}"
-        try:
-            await self.store.append_send_receipt(
-                to_stream_id=stream_id, request_id=request_id, receipt_id=receipt_id,
-                state="landed", wire_text=caption, display_text=caption,
-                attachments=attachments, delivery="landed", submission_confirmed=True,
-                content_kind=content_kind, from_stream_id=stream_id,
-                actor_stream_id=stream_id, actor_trusted=True,
-            )
-        except Exception:  # noqa: BLE001 - the durable transcript row is the primary proof
-            log.warning(
-                "send_image receipt append failed sid=%s req=%s", stream_id, request_id,
-            )
-            receipt_id = ""
         return {
             "type": "send_image.ok", "ok": True, "stream_id": stream_id,
-            "event_id": seq, "blob_shas": blob_shas, "receipt_id": receipt_id,
+            "event_id": seq, "blob_shas": blob_shas,
             "content_kind": content_kind, "attachment_count": len(attachments),
             "duplicate": False,
         }

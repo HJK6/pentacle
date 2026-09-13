@@ -3602,13 +3602,14 @@ def send_image(args: argparse.Namespace) -> int:
         print(f"agent-orch send-image: {exc}", file=sys.stderr)
         return 1
     if response.get("type") == "send_image.ok":
+        # `event_id` is the durable transcript row — the retrievable delivery
+        # receipt (survives reconnect/history).
         print(json.dumps(
             {
                 "ok": True,
                 "stream_id": response.get("stream_id"),
                 "event_id": response.get("event_id"),
                 "blob_sha": blob_sha,
-                "receipt_id": response.get("receipt_id"),
                 "content_kind": response.get("content_kind"),
                 "duplicate": response.get("duplicate", False),
                 "source_path": str(path),
@@ -3618,15 +3619,22 @@ def send_image(args: argparse.Namespace) -> int:
             indent=2,
         ))
         return 0
+    error_code = response.get("error_code")
     print(json.dumps(
         {
             "ok": False,
             "type": response.get("type"),
-            "error_code": response.get("error_code"),
+            "error_code": error_code,
             "error": response.get("error"),
         },
         indent=2,
     ), file=sys.stderr)
+    # The daemon returns authorization failures as a typed send_image.error
+    # response (not a raised PermissionError), so map those codes to exit 66;
+    # everything else is a generic send error (exit 1). Bad local input already
+    # returned 2 before any RPC.
+    if error_code in {"stream_ownership_unverified", "authentication_required"}:
+        return 66
     return 1
 
 

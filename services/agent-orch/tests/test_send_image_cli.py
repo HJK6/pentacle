@@ -109,19 +109,29 @@ def test_happy_path_uploads_and_sends_expected_payload(tmp_path, monkeypatch, ca
     assert sha in out  # source sha256 printed as a receipt field
 
 
-def test_daemon_error_is_surfaced_nonzero(tmp_path, monkeypatch):
-    p = tmp_path / "x.png"
-    p.write_bytes(PNG)
-
+def _mock_transport(monkeypatch, *, error_code):
     async def fake_upload(config, data, *, timeout=30.0):
         return {"type": "upload_blob.ok", "blob_sha": hashlib.sha256(PNG).hexdigest()}
 
     async def fake_send_image(config, payload, *, timeout=30.0):
-        return {"type": "send_image.error", "error_code": "stream_ownership_unverified",
-                "error": "not your stream"}
+        return {"type": "send_image.error", "error_code": error_code, "error": "x"}
 
     monkeypatch.setattr(cli, "load_config", lambda: object())
     monkeypatch.setattr(cli, "upload_blob_once", fake_upload)
     monkeypatch.setattr(cli, "send_image_once", fake_send_image)
-    rc = cli.send_image(_args(p))
-    assert rc == 1
+
+
+def test_authorization_error_maps_to_exit_66(tmp_path, monkeypatch):
+    # The daemon returns an auth failure as a TYPED send_image.error response
+    # (not a raised PermissionError); the CLI must still map it to exit 66.
+    p = tmp_path / "x.png"
+    p.write_bytes(PNG)
+    _mock_transport(monkeypatch, error_code="stream_ownership_unverified")
+    assert cli.send_image(_args(p)) == 66
+
+
+def test_generic_send_error_maps_to_exit_1(tmp_path, monkeypatch):
+    p = tmp_path / "x.png"
+    p.write_bytes(PNG)
+    _mock_transport(monkeypatch, error_code="attachment_invalid")
+    assert cli.send_image(_args(p)) == 1
