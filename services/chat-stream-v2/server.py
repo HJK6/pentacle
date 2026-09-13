@@ -444,6 +444,7 @@ class Server:
             "close": self._on_close,
             "tell": self._on_tell,
             "send": self._on_send,
+            "send_image": self._on_send_image,
             "send.receipt.get": self._on_send_receipt_get,
             "ledger_get": self._on_ledger_get,
             "inbound_audit": self._on_inbound_audit,
@@ -1839,6 +1840,34 @@ class Server:
 
     async def _on_send(self, msg: dict[str, Any]) -> dict[str, Any]:
         return await self.comms.send(msg)
+
+    async def _on_send_image(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Attach an uploaded image to the caller's OWN conversation.
+
+        The destination is the seat bound to the verified stream token, never a
+        wire-supplied target, so a seat can only ever post to its own stream. An
+        operator connection (no seat token) and any unverified caller are refused
+        with a genuine ``stream_ownership_unverified`` receipt; the operator's own
+        image path is the existing ``send`` attachment flow, not this verb.
+        """
+        auth = msg.get("_auth_context") or {}
+        stream_id = str(auth.get("stream_id") or "").strip()
+        if not (auth.get("token_verified") and stream_id):
+            raise VerbError(
+                "stream_ownership_unverified",
+                "send_image requires a verified seat token bound to your own stream",
+            )
+        request_id = str(msg.get("request_id") or "").strip()
+        if not request_id:
+            raise VerbError("bad_request", "request_id is required")
+        return await self.comms.post_self_image(
+            stream_id=stream_id,
+            raw_attachments=msg.get("attachments"),
+            caption=str(msg.get("caption") or ""),
+            request_id=request_id,
+            broadcast=self.broadcast,
+            recent_limit=RECENT_LIMIT,
+        )
 
     async def _on_send_receipt_get(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Read the one highest-rowid durable receipt visible to this client."""

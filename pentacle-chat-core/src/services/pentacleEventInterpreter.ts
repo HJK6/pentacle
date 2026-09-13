@@ -661,6 +661,16 @@ export function interpretPentacleEvent(
     return interpreted(event, pending ? 'queued-draft' : 'draft', 'draft:composer', 'assistant', 'Draft', text, true, 'Draft state is rendered outside committed transcript rows.');
   }
 
+  // An agent-authored image rides as an ASSIST event carrying attachments (the
+  // `send_image` daemon path). Render it as the agent's own image bubble and
+  // never let the empty-caption furniture/noise heuristics below suppress it —
+  // the mirror of the operator USER-attachment exemption on the next guard.
+  if (kind === 'ASSIST' && event.attachments?.length) {
+    const provider = String(event.provider || '').toLowerCase();
+    const assistCase = classifyAssistantText(normalized, { provider });
+    return interpreted(event, assistCase, 'bubble:assistant', 'assistant', assistantLabel, collapsedText, false, 'Agent-authored image attachment.');
+  }
+
   if (isTerminalFurnitureText(text, kind) && !(kind === 'USER' && event.attachments?.length)) {
     return interpreted(event, 'transient-noise', 'hidden:noise', 'system', '', text, true, 'Terminal UI furniture is not durable conversation.');
   }

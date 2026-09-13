@@ -193,6 +193,42 @@ test('G1: server-keyed image attachments render a lazy blob placeholder', () => 
   assert.ok(container.textContent?.includes('Loading image'), 'placeholder label rendered before fetch');
 });
 
+function assistantItem(over: Record<string, unknown> = {}) {
+  return {
+    id: 'a1', timestampLabel: '', label: '', tone: 'assistant', provider: 'claude', source: '',
+    text: '', kind: 'ASSIST', isUser: false, eventCase: 'assistant-message',
+    displayRule: 'bubble:assistant',
+    ...over,
+  } as never;
+}
+
+test('G1b: agent-authored image renders an inline media bubble inside the assistant card', () => {
+  const html = renderTranscriptItemHtml(assistantItem({
+    text: 'here is the chart',
+    attachments: [{ key: 'c'.repeat(64), mime: 'image/png', width: 800, height: 600 }],
+  }), CHROME);
+  const { container } = newDom();
+  container.innerHTML = html;
+  assert.ok(container.querySelector('.slot-chat-assistant-card'), 'assistant card rendered');
+  const media = container.querySelector('.slot-chat-assistant-card .slot-chat-media-button') as HTMLElement;
+  assert.ok(media, 'media button rendered inside the assistant card');
+  assert.equal(media.dataset.attachmentKey, 'c'.repeat(64));
+  assert.equal(media.dataset.attachmentMime, 'image/png');
+});
+
+test('G1b: caption-less agent image still renders the assistant media bubble', () => {
+  const html = renderTranscriptItemHtml(assistantItem({
+    text: '',
+    attachments: [{ key: 'd'.repeat(64), mime: 'image/jpeg' }],
+  }), CHROME);
+  const { container } = newDom();
+  container.innerHTML = html;
+  assert.ok(
+    container.querySelector('.slot-chat-assistant-card .slot-chat-media-button'),
+    'media renders inside the assistant card even with an empty caption',
+  );
+});
+
 test('bubble:assistant renders an assistant card with escaped text', () => {
   const controller = controllerWithEvents([
     makeEvent({ daemon_seq: 11, kind: 'ASSIST', text: 'Here is a plan <b>bold</b>' }),

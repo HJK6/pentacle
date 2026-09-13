@@ -494,6 +494,11 @@ function renderTranscriptItemBodyHtml(
     </div></article>`;
   }
   // bubble:assistant (and any unmapped fallback) -> assistant card.
+  // An agent-authored image (the send_image path) rides as an assistant event
+  // carrying attachments: render the same media button+img the operator's own
+  // user-attachment bubble uses (line ~468) so the shared image viewer opens
+  // identically from either side.
+  const assistantAttachments = renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments);
   const blocks = parseAssistantBlocks(item.text);
   return `<article class="slot-chat-row" data-copy-kind="message"><div class="slot-chat-assistant-card">
     ${blocks.map((block, index) => {
@@ -504,7 +509,7 @@ function renderTranscriptItemBodyHtml(
         return `<div class="slot-chat-command-card" style="--machine:${escapeHtml(chrome.accent)};--machine-surface:${escapeHtml(chrome.surface)};--machine-border:${escapeHtml(chrome.border)};"><b>${escapeHtml(block.command)}</b>${block.output ? `<pre>${escapeHtml(block.output)}</pre>` : ''}</div>`;
       }
       return renderChatBody(block.text, options);
-    }).join('')}
+    }).join('')}${assistantAttachments}
   </div>${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}</article>`;
 }
 

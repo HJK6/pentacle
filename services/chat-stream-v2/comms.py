@@ -39,6 +39,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
 from claude_jsonl_norm import strip_peer_delivery_envelope
@@ -1609,3 +1610,106 @@ class Comms:
             materialized, request_id=request_id, receipt_id=receipt_id,
             qa_generation=commission["generation"] if commission is not None else None,
         )
+
+    async def post_self_image(
+        self,
+        *,
+        stream_id: str,
+        raw_attachments: Any,
+        caption: str,
+        request_id: str,
+        broadcast: Any,
+        recent_limit: int,
+    ) -> dict[str, Any]:
+        """Attach an already-uploaded image blob to the caller's OWN conversation
+        as an agent-authored (ASSIST) transcript event.
+
+        Reuses ``validate_send_attachments`` + the existing ``ChatAttachment``
+        shape + the blob store (``read_verified``, the same read the operator flow
+        and ``fetch_blob`` use) to prove each blob is really present and within
+        the byte limit. Emits exactly one ``chat.event`` on an assistant-authored
+        event with NO pane injection and NO cross-host materialization, so the
+        operator sees the real image as the agent's own message. Idempotent by
+        ``(stream_id, request_id)``: a retry collides on the durable identity
+        unique index and re-appends nothing, so history/reconnect shows exactly
+        one row. Genuine receipts: a durable ``v2_send_receipts`` row on the first
+        insert plus the returned ``event_id``/``duplicate`` state; validation and
+        blob failures raise :class:`VerbError` (surfaced as ``send_image.error``).
+
+        The caller (server handler) resolves ``stream_id`` from the verified seat
+        token, so a seat can only ever attach to its own conversation.
+        """
+        try:
+            attachments = validate_send_attachments(raw_attachments)
+        except AttachmentValidationError as exc:
+            raise VerbError("attachment_invalid", str(exc)) from exc
+
+        # Prove every referenced blob is actually present and within the limit;
+        # a path or a dangling ref is never treated as a delivered image.
+        blob_store = self.blob_store
+        if blob_store is None or not callable(getattr(blob_store, "read_verified", None)):
+            raise VerbError("attachment_fetch_failed", "blob store unavailable")
+        for attachment in attachments:
+            sha = str(attachment["key"])
+            try:
+                await blob_store.read_verified(sha, max_bytes=ATTACHMENT_MAX_BYTES)
+            except KeyError as exc:
+                raise VerbError("attachment_missing", f"blob {sha} was not uploaded") from exc
+            except ValueError as exc:
+                raise VerbError("attachment_invalid", str(exc)) from exc
+            except Exception as exc:  # noqa: BLE001 - stable public error surface
+                raise VerbError("attachment_fetch_failed", str(exc)) from exc
+
+        host, name = self.sessions.split(stream_id)
+        row = self.sessions.get(stream_id) or await self.store.fetch_session(host, name) or {}
+        caption = (caption or "").strip()
+        content_kind = "image_and_text" if caption else "attachment_only"
+        event = {
+            "stream_id": stream_id,
+            "host": host,
+            "session_name": name,
+            "session_id": str(row.get("session_id") or row.get("created_at") or ""),
+            "provider": str(row.get("provider") or ""),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "kind": "ASSIST",
+            "text": caption,
+            "attachments": attachments,
+            "attachment_count": len(attachments),
+            "content_kind": content_kind,
+            "raw": {"source": "agent_image", "request_id": request_id},
+        }
+        identity = f"send_image:{stream_id}:{request_id}"
+        seq = await self.store.append_session_event(
+            stream_id, event, identity=identity, limit=recent_limit,
+        )
+        blob_shas = [str(item["key"]) for item in attachments]
+        if seq is None:
+            # A durable replay of the same (stream, request_id): the one row
+            # already exists and was already broadcast on its first insert.
+            return {
+                "type": "send_image.ok", "ok": True, "stream_id": stream_id,
+                "event_id": None, "blob_shas": blob_shas,
+                "content_kind": content_kind, "attachment_count": len(attachments),
+                "duplicate": True,
+            }
+        await broadcast({"type": "chat.event", "event": {**event, "daemon_seq": seq}})
+        receipt_id = f"img-{request_id}"
+        try:
+            await self.store.append_send_receipt(
+                to_stream_id=stream_id, request_id=request_id, receipt_id=receipt_id,
+                state="landed", wire_text=caption, display_text=caption,
+                attachments=attachments, delivery="landed", submission_confirmed=True,
+                content_kind=content_kind, from_stream_id=stream_id,
+                actor_stream_id=stream_id, actor_trusted=True,
+            )
+        except Exception:  # noqa: BLE001 - the durable transcript row is the primary proof
+            log.warning(
+                "send_image receipt append failed sid=%s req=%s", stream_id, request_id,
+            )
+            receipt_id = ""
+        return {
+            "type": "send_image.ok", "ok": True, "stream_id": stream_id,
+            "event_id": seq, "blob_shas": blob_shas, "receipt_id": receipt_id,
+            "content_kind": content_kind, "attachment_count": len(attachments),
+            "duplicate": False,
+        }
