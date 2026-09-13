@@ -46,6 +46,7 @@ from boot_ready import (
     CODEX_RESET_BLOCKED,
     DRAFT_PREDICATES,
     SUBMIT_PREDICATES,
+    _last_claude_input_start,
     claude_prompt_in_active_draft,
     codex_prompt_in_active_draft,
     codex_reset_interstitial_visible,
@@ -1119,7 +1120,12 @@ class Comms:
                 else submitted(pane, body)
             ):
                 return True
-            if provider == "codex" and await self._submission_event_proven(
+            # Positive durable-event proof of native-queue/submission acceptance.
+            # For claude this matches the native queued-command USER event
+            # (claude_jsonl_norm subtype queued-command), the direct analogue of
+            # codex's native-queue proof — a genuinely-queued message becomes a
+            # confirmed landing rather than an inferred committed_pending_proof.
+            if provider in ("codex", "claude") and await self._submission_event_proven(
                 stream_id, body, watermark,
             ):
                 return True
@@ -1142,6 +1148,19 @@ class Comms:
         """Snapshot the highest durable event sequence visible before one paste."""
         tail = await self.store.fetch_session_event_tail(stream_id, limit=500)
         return max((self._daemon_seq(event) for event in tail), default=0)
+
+    @staticmethod
+    def _claude_commit_mode(pane: str, mode: str | None) -> str | None:
+        """Positive-evidence gate for treating a claude send that has left the
+        editable composer as committed to the native queue. A live claude composer
+        (a ``❯`` input caret) must be present; a stale/dead or non-provider pane has
+        no caret, so the paste was NOT committed and must classify not_landed
+        (reason ``no_claude_composer``) instead of a silent committed_pending_proof.
+        Origin: spec_pentacle__mobile_send_status_reconcile_2026_09 QA — absence of
+        an active draft alone is not proof of commit."""
+        if _last_claude_input_start(pane.splitlines()) is not None:
+            return mode
+        return mode or "no_claude_composer"
 
     @staticmethod
     def _daemon_seq(event: dict[str, Any]) -> int:
@@ -1321,7 +1340,7 @@ class Comms:
             return confirmed, 2, False, provider, pane_mode_reason or enter_mode_reason
 
         before = before if before is not None else await tmux.capture(name)
-        watermark = await self._submission_watermark(target) if provider == "codex" else 0
+        watermark = await self._submission_watermark(target) if provider in ("codex", "claude") else 0
         pane_mode_reason = await tmux.paste(name, plan.wire_text)
         confirmed = await self._submission_evidence(
             tmux, name, plan.wire_text, provider, baseline=before,
@@ -1332,17 +1351,20 @@ class Comms:
         if provider == "claude":
             pane = await tmux.capture(name)
             if not claude_prompt_in_active_draft(pane, plan.wire_text):
-                return False, 1, False, provider, pane_mode_reason
+                return False, 1, False, provider, self._claude_commit_mode(pane, pane_mode_reason)
             enter_mode_reason = await self._send_enter(tmux, name)
             confirmed = await self._submission_evidence(
                 tmux, name, plan.wire_text, provider, baseline=before,
+                stream_id=target, watermark=watermark,
             )
             if confirmed:
                 return True, 2, False, provider, None
             pane = await tmux.capture(name)
-            return False, 2, claude_prompt_in_active_draft(pane, plan.wire_text), provider, (
-                pane_mode_reason or enter_mode_reason
-            )
+            in_draft = claude_prompt_in_active_draft(pane, plan.wire_text)
+            mode = pane_mode_reason or enter_mode_reason
+            if not in_draft:
+                mode = self._claude_commit_mode(pane, mode)
+            return False, 2, in_draft, provider, mode
         if provider != "codex":
             enter_mode_reason = await self._send_enter(tmux, name)
             confirmed = await self._submission_evidence(
@@ -1516,7 +1538,18 @@ class Comms:
                 state="landed", delivery="landed", submission_confirmed=True,
                 attempts=attempts,
             )
-        if provider != "codex" or active_draft:
+        # A native-queue TUI (claude, codex — the SUBMIT_PREDICATES providers) queues
+        # mid-turn input natively: once the brief has left the active draft, it is
+        # committed to the target (submitted or queued), even if submission proof has
+        # not surfaced within the evidence window. It is a true not_landed only when
+        # the brief is still sitting in the active draft, the pane could not accept the
+        # input at all (pane_mode_reason set, e.g. an unclearable copy-mode), or the
+        # provider has no native-queue evidence. Classifying a genuinely-queued claude
+        # send as not_landed was the false "send failed" in
+        # spec_pentacle__mobile_send_status_reconcile_2026_09. (Codex reaches this point
+        # with pane_mode_reason unset — an unsafe pane raises earlier — so its
+        # classification is unchanged.)
+        if active_draft or pane_mode_reason is not None or provider not in SUBMIT_PREDICATES:
             return await self._send_result(
                 plan, request_id=request_id, receipt_id=receipt_id,
                 state="not_landed", delivery="not_landed", submission_confirmed=False,
