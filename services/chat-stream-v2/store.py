@@ -290,6 +290,44 @@ def _send_receipt_row(
     return result
 
 
+def _insert_send_receipt_row(
+    conn: sqlite3.Connection, *, to_stream_id: str, request_id: str, receipt_id: str,
+    state: str, optimistic_id: str | None, wire_digest: str, display_text: str,
+    content_kind: str, attachments_json: str, delivery: str, submission_confirmed: bool,
+    reason: str | None, attempts: int | None, created_at: str,
+    from_stream_id: str | None, actor_stream_id: str | None, actor_trusted: bool,
+) -> dict[str, Any]:
+    """Append one immutable send-receipt row and return its rowid-bearing projection.
+
+    The single authoritative INSERT shared by ``append_send_receipt`` and the
+    atomic ``claim_or_coalesce_send`` claim, so both write identical column shapes.
+    """
+    cur = conn.execute(
+        """INSERT INTO v2_send_receipts (
+            to_stream_id, request_id, receipt_id, state, optimistic_id,
+            wire_digest, display_text, content_kind, attachments_json,
+            delivery, submission_confirmed, reason, attempts, created_at,
+            from_stream_id, actor_stream_id, actor_trusted
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            to_stream_id, request_id, receipt_id, state, optimistic_id or None,
+            wire_digest, str(display_text or ""), str(content_kind),
+            attachments_json, str(delivery or state),
+            1 if submission_confirmed else 0, reason or None, attempts, created_at,
+            _safe_provenance_id(from_stream_id),
+            _safe_provenance_id(actor_stream_id),
+            1 if actor_trusted else 0,
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT rowid AS receipt_rowid, * FROM v2_send_receipts WHERE rowid=?",
+        (int(cur.lastrowid),),
+    ).fetchone()
+    assert row is not None
+    return _send_receipt_row(row, include_rowid=True)
+
+
 # v1's `sessions` DDL plus v2's nullable title. Existing databases receive the
 # same column through the additive startup seam below, with no row rewrite.
 SESSIONS_DDL = """
@@ -3612,36 +3650,22 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         )
         timestamp = created_at or iso_now()
 
+        # A peer send is pasted with a `[from …]` envelope but the normalizer
+        # stores only the header-stripped payload as the event text; hash the
+        # stripped basis so both the operator (unstamped) and peer (stamped→TELL)
+        # events correlate here.
+        wire_digest = _send_wire_digest(strip_peer_delivery_envelope(str(wire_text or "")))
+
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
-            cur = conn.execute(
-                """INSERT INTO v2_send_receipts (
-                    to_stream_id, request_id, receipt_id, state, optimistic_id,
-                    wire_digest, display_text, content_kind, attachments_json,
-                    delivery, submission_confirmed, reason, attempts, created_at,
-                    from_stream_id, actor_stream_id, actor_trusted
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    target, request, receipt, state, optimistic_id or None,
-                    # A peer send is pasted with a `[from …]` envelope but the
-                    # normalizer stores only the header-stripped payload as the
-                    # event text; hash the stripped basis so both the operator
-                    # (unstamped) and peer (stamped→TELL) events correlate here.
-                    _send_wire_digest(strip_peer_delivery_envelope(str(wire_text or ""))),
-                    str(display_text or ""), str(kind),
-                    encoded_attachments, str(delivery or state),
-                    1 if submission_confirmed else 0, reason or None, attempts, timestamp,
-                    _safe_provenance_id(from_stream_id),
-                    _safe_provenance_id(actor_stream_id),
-                    1 if actor_trusted else 0,
-                ),
+            return _insert_send_receipt_row(
+                conn, to_stream_id=target, request_id=request, receipt_id=receipt,
+                state=state, optimistic_id=optimistic_id, wire_digest=wire_digest,
+                display_text=display_text, content_kind=kind,
+                attachments_json=encoded_attachments, delivery=delivery,
+                submission_confirmed=submission_confirmed, reason=reason,
+                attempts=attempts, created_at=timestamp, from_stream_id=from_stream_id,
+                actor_stream_id=actor_stream_id, actor_trusted=actor_trusted,
             )
-            conn.commit()
-            row = conn.execute(
-                "SELECT rowid AS receipt_rowid, * FROM v2_send_receipts WHERE rowid=?",
-                (int(cur.lastrowid),),
-            ).fetchone()
-            assert row is not None
-            return _send_receipt_row(row, include_rowid=True)
 
         return await self.submit(_op)
 
@@ -3660,6 +3684,84 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                 (target, request),
             ).fetchone()
             return _send_receipt_row(row) if row is not None else None
+
+        return await self.submit(_op)
+
+    async def claim_or_coalesce_send(
+        self,
+        *,
+        to_stream_id: str,
+        request_id: str,
+        receipt_id: str,
+        wire_text: str,
+        display_text: str,
+        attachments: list[dict[str, Any]],
+        optimistic_id: str | None,
+        window_floor: str,
+        from_stream_id: str | None = None,
+        actor_stream_id: str | None = None,
+        actor_trusted: bool = False,
+        content_kind: str | None = None,
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically decide winner-vs-coalesced for one logical send, in ONE
+        serialized op so concurrent retries cannot both race past the check.
+
+        Returns ``{"coalesced": True, "winner": <existing receipt>}`` when a prior
+        NON-failed receipt already carries this send's delivery, else
+        ``{"coalesced": False, "receipt": <the freshly appended 'accepted' claim>}``.
+
+        A prior receipt matches when it shares this EXACT ``request_id`` (a
+        reconnect replay reuses it — collapse at any age) OR the client's logical
+        identity (same ``to_stream_id`` + ``actor_stream_id`` + ``optimistic_id`` +
+        ``wire_digest``) and was created at/after ``window_floor``. Failed
+        (``not_landed``) receipts never match, so a genuinely failed attempt stays
+        retryable; and an empty ``optimistic_id`` disables the logical-identity arm
+        (direct in-process callers keep today's request_id-only behavior).
+        """
+        target = str(to_stream_id or "").strip()
+        request = str(request_id or "").strip()
+        receipt = str(receipt_id or "").strip()
+        if not target or not request or not receipt:
+            raise ValueError("invalid_send_receipt_key")
+        opt = str(optimistic_id or "").strip()
+        actor = _safe_provenance_id(actor_stream_id)
+        wire_digest = _send_wire_digest(strip_peer_delivery_envelope(str(wire_text or "")))
+        normalized_attachments = [dict(item) for item in attachments if isinstance(item, dict)]
+        kind = content_kind or (
+            "image_and_text" if normalized_attachments and display_text else
+            "attachment_only" if normalized_attachments else "text"
+        )
+        encoded_attachments = json.dumps(
+            normalized_attachments, separators=(",", ":"), sort_keys=True,
+        )
+        timestamp = created_at or iso_now()
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            existing = conn.execute(
+                """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
+                   WHERE to_stream_id=?
+                     AND state != 'not_landed' AND delivery != 'not_landed'
+                     AND (
+                           request_id=?
+                        OR (? != '' AND optimistic_id=? AND wire_digest=?
+                            AND actor_stream_id IS ? AND created_at >= ?)
+                     )
+                   ORDER BY rowid DESC LIMIT 1""",
+                (target, request, opt, opt, wire_digest, actor, window_floor),
+            ).fetchone()
+            if existing is not None:
+                return {"coalesced": True, "winner": _send_receipt_row(existing, include_rowid=True)}
+            row = _insert_send_receipt_row(
+                conn, to_stream_id=target, request_id=request, receipt_id=receipt,
+                state="accepted", optimistic_id=opt or None, wire_digest=wire_digest,
+                display_text=display_text, content_kind=kind,
+                attachments_json=encoded_attachments, delivery="accepted",
+                submission_confirmed=False, reason=None, attempts=None,
+                created_at=timestamp, from_stream_id=from_stream_id,
+                actor_stream_id=actor_stream_id, actor_trusted=actor_trusted,
+            )
+            return {"coalesced": False, "receipt": row}
 
         return await self.submit(_op)
 

@@ -106,6 +106,19 @@ def _verified_operator_provenance(msg: dict[str, Any]) -> bool:
 #: the message left the draft.
 SUBMISSION_EVIDENCE_TIMEOUT_S = 4.0
 SUBMISSION_EVIDENCE_POLL_S = 0.25
+#: Recency horizon for collapsing a logical send's retries into one delivery.
+#: Sized to the desktop client's own optimistic-reconcile horizon
+#: (OPTIMISTIC_RECONCILE_WINDOW_MS = 60_000 in the packaged renderer): the span
+#: within which the client treats an optimistic send as the same in-flight
+#: delivery to reconcile against one server echo. Rotated-request_id retries and
+#: prompt reconnect replays of ONE logical send fall inside it; beyond it the
+#: client has settled the send, so a later identical-text message — including one
+#: after a client restart that reset its optimistic counter to _1 — is a NEW
+#: logical send and is delivered. The old client sends no client-generation token
+#: on the wire (only stream/text/request_id/optimistic_id; actor is the stable
+#: operator principal), so this recency bound is the only available discriminator
+#: between a retry and a post-restart identical send.
+SEND_DEDUPE_WINDOW_S = 60.0
 
 
 def watermark_fields(watermark: EventWatermark) -> dict[str, Any]:
@@ -1564,6 +1577,62 @@ class Comms:
             action_committed=True, confirmation_pending=True,
         )
 
+    @staticmethod
+    def _send_dedupe_window_floor() -> str:
+        """The lower ISO-UTC bound (inclusive) of the send-idempotency recency
+        window: receipts older than this no longer collapse a same-identity send,
+        so a post-restart identical message is delivered."""
+        floor = time.time() - SEND_DEDUPE_WINDOW_S
+        return datetime.fromtimestamp(floor, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    async def _coalesced_send_result(
+        self, plan: SendPlan, *, request_id: str, receipt_id: str, winner: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve a retry that coalesced onto an already-claimed logical send.
+
+        Appends THIS request_id's own correlated receipt mirroring the winner's
+        delivery (so a client polling this request_id reconciles from
+        retry-eligible to the winner's state) with a ``coalesced_replay:<winner>``
+        reason pointing at the replayed delivery, and returns a do-not-resubmit
+        result. No pane paste is issued — the physical delivery already happened
+        (or is in flight) under the winner's request_id.
+        """
+        winner_state = str(winner.get("state") or "accepted")
+        winner_delivery = str(winner.get("delivery") or winner_state)
+        winner_confirmed = bool(winner.get("submission_confirmed"))
+        winner_request_id = str(winner.get("request_id") or request_id)
+        winner_attempts = winner.get("attempts")
+        winner_attempts = winner_attempts if isinstance(winner_attempts, int) else None
+        await self._append_send_receipt(
+            plan, request_id=request_id, receipt_id=receipt_id,
+            state=winner_state, delivery=winner_delivery,
+            submission_confirmed=winner_confirmed,
+            reason=f"coalesced_replay:{winner_request_id}",
+            attempts=winner_attempts,
+        )
+        target = str(plan.route["final_target"])
+        host, name = self.sessions.split(target)
+        result: dict[str, Any] = {
+            "type": "send.result", "host": host, "session_name": name,
+            "msg_id": plan.message.get("msg_id"), "to_stream_id": target,
+            "original_target": plan.route["original_target"],
+            "forwarded": plan.route["forwarded"], "hops": plan.route["hops"],
+            "receipt_id": str(winner.get("receipt_id") or receipt_id),
+            "delivery": winner_delivery,
+            "submission_confirmed": winner_confirmed,
+            "coalesced": True,
+            "do_not_resubmit": True,
+            "reconcile": "send_receipt",
+            "reconcile_command": f"agent-orch send-receipt {target} {winner_request_id}",
+            "retry_guidance": (
+                "Duplicate of an in-flight or landed send (same logical message); "
+                "reconcile with the existing request_id. DO NOT RESUBMIT."
+            ),
+        }
+        if winner_confirmed and winner_attempts is not None:
+            result["attempt"] = winner_attempts
+        return result
+
     async def send(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Append acceptance before materialization, then append the known result."""
         # Wire clients mint this ID. The fallback preserves direct in-process
@@ -1590,14 +1659,30 @@ class Comms:
             msg_id=msg.get("msg_id", 0), existing_reviewer=True,
         )
         receipt_id = f"receipt-{uuid.uuid4()}"
-        await self._append_send_receipt(
-            plan,
+        # Atomic idempotency claim: collapse retries of ONE logical send (the
+        # client keeps optimistic_id stable and rotates only request_id) into a
+        # single physical delivery. The check + 'accepted' claim run in one
+        # serialized store op so two concurrent retries cannot both win. A
+        # coalesced retry appends its OWN correlated receipt (so its request_id
+        # still resolves) pointing at the winner's delivery, and never pastes.
+        from_stream_id, actor_stream_id, actor_trusted = self._send_provenance(plan.message)
+        claim = await self.store.claim_or_coalesce_send(
+            to_stream_id=target,
             request_id=request_id,
             receipt_id=receipt_id,
-            state="accepted",
-            delivery="accepted",
-            submission_confirmed=False,
+            wire_text=plan.wire_text,
+            display_text=plan.display_text,
+            attachments=plan.attachments,
+            optimistic_id=plan.optimistic_id,
+            window_floor=self._send_dedupe_window_floor(),
+            from_stream_id=from_stream_id,
+            actor_stream_id=actor_stream_id,
+            actor_trusted=actor_trusted,
         )
+        if claim.get("coalesced"):
+            return await self._coalesced_send_result(
+                plan, request_id=request_id, receipt_id=receipt_id, winner=claim["winner"],
+            )
         try:
             materialized = await self._materialize_send_plan(plan)
         except VerbError as exc:
