@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from test_send_semantics import FakeTmux, _new_comms, HOST, NAME, _run  # noqa: F401
-from store import iso_now
+from test_send_semantics import FakeTmux, FakeBlobStore, VALID, _new_comms, _open, HOST, NAME, _run  # noqa: F401
+from store import Store, iso_now
 
 
 STREAM = f"{HOST}:{NAME}"
@@ -178,6 +178,63 @@ def test_committed_pending_proof_prior_replays_not_resubmit(tmp_path: Path) -> N
             # The retry's own request_id still resolves, pointing at the replay.
             rec = await store.get_send_receipt(STREAM, "retry-after-pending")
             assert rec is not None and rec["reason"].startswith("coalesced_replay:")
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+def test_failed_preclaim_superseded_by_not_landed_allows_retry(tmp_path: Path) -> None:
+    """Store-level regression (QA cycle-1 finding): the claim appends an 'accepted'
+    row BEFORE materialization; when the send then fails and records a not_landed
+    receipt, a rotated retry of the same logical identity must NOT coalesce onto the
+    stale accepted preclaim — the latest outcome (not_landed) is authoritative."""
+    async def go() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            kw = dict(to_stream_id=STREAM, wire_text=BODY, display_text=BODY,
+                      attachments=[], optimistic_id="optimistic_fail_1",
+                      actor_stream_id="operator:op-1", actor_trusted=True,
+                      window_floor="2000-01-01T00:00:00Z")
+            c1 = await store.claim_or_coalesce_send(request_id="retry-1", receipt_id="rc1", **kw)
+            assert c1["coalesced"] is False, "first send must win the claim"
+            # Simulate materialize/submit failure: send() appends a not_landed row.
+            await store.append_send_receipt(
+                to_stream_id=STREAM, request_id="retry-1", receipt_id="rc1",
+                state="not_landed", wire_text=BODY, display_text=BODY, attachments=[],
+                delivery="not_landed", submission_confirmed=False,
+                optimistic_id="optimistic_fail_1", actor_stream_id="operator:op-1",
+                actor_trusted=True)
+            c2 = await store.claim_or_coalesce_send(request_id="retry-2", receipt_id="rc2", **kw)
+            assert c2["coalesced"] is False, "retry after a genuinely failed send must re-deliver"
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+def test_attachment_failure_then_recovery_retry_delivers(tmp_path: Path) -> None:
+    """End-to-end regression: an attachment send whose blob fetch fails records a
+    not_landed receipt (no paste); after the blob recovers, a rotated-request_id
+    retry of the same logical send must produce a fresh delivery, not coalesce."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        blobs = FakeBlobStore(error=ValueError("missing blob"))
+        comms, store, sessions = _new_comms(tmux, tmp_path, blob_store=blobs)
+        try:
+            await _open(comms, sessions)  # claude provider
+            base = {"stream_id": STREAM, "message": "caption", "attachments": [VALID],
+                    "optimistic_id": "optimistic_att_1", "_auth_context": AUTH}
+            r1 = await comms.send({**base, "request_id": "retry-att-1"})
+            assert r1["delivery"] == "not_landed"
+            assert tmux.pastes == [], "failed fetch must not paste"
+            # Blob becomes available; operator retries the same logical message.
+            blobs.error = None
+            r2 = await comms.send({**base, "request_id": "retry-att-2"})
+            assert not r2.get("coalesced"), "retry after failure must not coalesce"
+            assert r2["delivery"] == "landed"
+            assert len(tmux.pastes) == 1, "recovered retry must deliver exactly once"
         finally:
             store.stop()
 

@@ -3738,10 +3738,18 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         timestamp = created_at or iso_now()
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
-            existing = conn.execute(
+            # Select the NEWEST receipt for this send's identity regardless of
+            # state, so the latest outcome is authoritative: a later not_landed
+            # supersedes an earlier 'accepted' preclaim (the claim is appended
+            # before materialization/paste). Coalescing then requires that latest
+            # outcome to be a live/landed delivery, so a send that actually FAILED
+            # stays retryable (a rotated retry re-delivers instead of coalescing
+            # onto its own stale accepted claim). A prior attempt that truly landed
+            # would already have made THIS attempt coalesce and append a mirrored
+            # landed row, so 'newest is not_landed' reliably means not-yet-landed.
+            latest = conn.execute(
                 """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
                    WHERE to_stream_id=?
-                     AND state != 'not_landed' AND delivery != 'not_landed'
                      AND (
                            request_id=?
                         OR (? != '' AND optimistic_id=? AND wire_digest=?
@@ -3750,8 +3758,12 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                    ORDER BY rowid DESC LIMIT 1""",
                 (target, request, opt, opt, wire_digest, actor, window_floor),
             ).fetchone()
-            if existing is not None:
-                return {"coalesced": True, "winner": _send_receipt_row(existing, include_rowid=True)}
+            if (
+                latest is not None
+                and str(latest["state"]) != "not_landed"
+                and str(latest["delivery"]) != "not_landed"
+            ):
+                return {"coalesced": True, "winner": _send_receipt_row(latest, include_rowid=True)}
             row = _insert_send_receipt_row(
                 conn, to_stream_id=target, request_id=request, receipt_id=receipt,
                 state="accepted", optimistic_id=opt or None, wire_digest=wire_digest,
