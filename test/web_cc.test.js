@@ -425,7 +425,7 @@ test('saveImage hands the paste to the viewer as a download, never over the wire
   } finally { global.document = realDoc; }
 });
 
-test('meeting and mic surface a toast only when the mic feature is on, and never hit the wire', async () => {
+test('meeting stays local while enabled microphone recovery calls the host', async () => {
   const realDoc = global.document;
   global.document = fakeDocument();
   try {
@@ -433,20 +433,17 @@ test('meeting and mic surface a toast only when the mic feature is on, and never
     const withMic = buildCc(transport, { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {}, config: { features: { mic: true } } });
     assert.equal(withMic.openMeeting(), undefined, 'openMeeting keeps its send-mode shape');
     assert.equal(withMic.closeMeeting(), undefined, 'closeMeeting keeps its send-mode shape');
-    // startMicServer must resolve FALSY, or app.js's `if (ok)` proceeds as if the
-    // mic had started (a truthy object was the bug QA caught).
-    assert.equal(await withMic.startMicServer(), null, 'startMicServer resolves falsy so the mic reads as unavailable');
-    assert.deepEqual(transport.fires, [], 'meeting/mic never reach the host');
-    assert.deepEqual(transport.calls, []);
-    // open + close + mic each toast when the mic feature is on.
-    assert.equal(global.document.body.children.length, 3, 'open, close and mic each surface a toast');
+    assert.deepEqual(await withMic.startMicServer(), {method:'mic:start-server'});
+    assert.deepEqual(transport.fires, []);
+    assert.deepEqual(transport.calls, [{method:'mic:start-server',args:[]}]);
+    assert.equal(global.document.body.children.length, 2);
 
     // Feature off: silent, no toast, and mic still resolves falsy.
     global.document = fakeDocument();
     const noMic = buildCc(fakeTransport(), { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {}, config: { features: { mic: false } } });
     noMic.openMeeting();
     noMic.closeMeeting();
-    assert.equal(await noMic.startMicServer(), null, 'mic is still unavailable with the feature off');
+    assert.equal(await noMic.startMicServer(), false, 'mic is still unavailable with the feature off');
     assert.equal(global.document.body.children.length, 0, 'no toast when the feature is off');
   } finally { global.document = realDoc; }
 });

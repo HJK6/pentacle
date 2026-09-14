@@ -6491,6 +6491,8 @@ for (const btn of document.querySelectorAll('.cell-voice')) {
 let wakeDelivery = null;
 
 const micState = {
+  starting: false,
+  startError: null,
   mode: 'off',
   lastTranscriptIdx: 0,
   meetingWindowOpen: false,
@@ -6513,6 +6515,13 @@ function updateMicUI(data) {
 
   dot.className = 'mic-status-dot';
   btn.style.display = showAlways ? '' : 'none';
+  btn.disabled = !!micState.starting;
+  if (micState.starting) {
+    btn.textContent = 'Starting…';
+    info.textContent = 'Starting microphone…';
+    copyBtn.disabled = meetingBtn.disabled = true;
+    return;
+  }
 
   if (!data) {
     if (voiceState.mode === 'remote_slot') {
@@ -6520,7 +6529,7 @@ function updateMicUI(data) {
     } else {
       stopRemoteClipboardPoller();
     }
-    info.textContent = 'Mic server offline';
+    info.textContent = micState.startError || 'Mic server offline';
     btn.textContent = 'Start';
     btn.className = 'mic-btn mic-toggle mic-start';
     copyBtn.disabled = true;
@@ -6531,6 +6540,7 @@ function updateMicUI(data) {
     return;
   }
 
+  micState.startError = null;
   micState.mode = data.mode;
   window.PentacleHarness?.emit?.('mic:mode', { data: { mode: data.mode, meeting_active: !!data.meeting_active } });
   const mode = data.mode;
@@ -6696,18 +6706,20 @@ async function fetchMicStatus() {
 document.getElementById('mic-btn-toggle').addEventListener('click', async () => {
   if (!alwaysOnVisible()) return;
   if (micState.mode === 'offline') {
-    // Server is down — start it
-    const btn = document.getElementById('mic-btn-toggle');
-    const info = document.getElementById('mic-info');
-    btn.textContent = 'Starting...';
-    btn.className = 'mic-btn mic-toggle mic-start';
-    info.textContent = 'Starting mic server...';
-    const ok = await window.cc.startMicServer();
-    if (ok) {
-      setTimeout(fetchMicStatus, 500);
-    } else {
-      info.textContent = 'Failed to start mic server';
-      btn.textContent = 'Start';
+    if (micState.starting) return;
+    micState.starting = true;
+    micState.startError = null;
+    updateMicUI(null);
+    try {
+      const result = await window.cc.startMicServer();
+      if (!(result === true || result?.ok === true))
+        micState.startError = result?.error || 'Microphone could not start. Check its connection and retry.';
+    } catch (_) {
+      micState.startError = 'Lost connection while starting the microphone. Reconnect and retry.';
+    } finally {
+      micState.starting = false;
+      updateMicUI(null);
+      await fetchMicStatus();
     }
     return;
   }

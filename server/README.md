@@ -240,8 +240,18 @@ answers them locally — the host still refuses `WEB_UNSUPPORTED` as a safety ne
   fires the same `assign-slot` / `action` events `app.js` already listens for.
   (The public desktop registers no `context-menu` handler at all, so this is
   net-new function rather than parity with a native menu.)
-- **`meeting:open` / `mic:start-server`** → a "not available in web mode" toast,
-  shown only when the mic feature is on.
+- **`meeting:open`** → a "not available in web mode" toast when the mic feature is on.
+- **`mic:start-server`** → explicit local-service recovery when the host profile
+  enables `features.mic` and configures `mic.startCommand: {file, args}`. The
+  executable must be absolute; arguments are fixed by the host, never the browser.
+  The command is omitted from public configuration and runs without a shell.
+  Only matching WebSocket Origin/Host requests may start it; existing routable
+  web authentication still applies. `mic.useStreamHost` disables local recovery.
+  Concurrent starts share one execution with a 75-second timeout. The helper
+  must emit JSON `{"ok":true,"ready":true}` only after verifying service readiness;
+  exit success alone is insufficient. An already-running service must not be
+  restarted. The button stays disabled while starting and shows a retryable error
+  on failure. No automatic start occurs on page load; `autoSpawn:false` is preserved.
 - **`pty:save-image`** → the pasted image is handed to the viewer as a browser
   download rather than written into the *host's* tmpdir.
 - **`open-external`** → `window.open` (a `WEB_LOCAL` channel; unchanged).

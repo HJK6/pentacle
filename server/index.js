@@ -21,6 +21,7 @@ const { WebSocketServer } = require('ws');
 
 const ROOT = path.join(__dirname, '..');
 const { loadConfig } = require(path.join(ROOT, 'config-loader'));
+const { createMicStarter, micStartSameOrigin } = require('./mic_starter');
 const { createCcHandlers, createCollector } = require(path.join(ROOT, 'main', 'cc_handlers'));
 const { createWsBridge } = require('./ws_bridge');
 const chatStreamClient = require(path.join(ROOT, 'main', 'chat_stream_client'));
@@ -270,6 +271,7 @@ async function main(argv = process.argv.slice(2)) {
   }
 
   const ccHandlers = createCcHandlers({ CONFIG, chatStreamClient, configError, configWarnings,
+    startMicServer: createMicStarter(CONFIG),
     terminalOptions: { maxPtysPerConnection: MAX_PTYS_PER_CONNECTION } });
   const collector = createCollector();
   const stopTerminals = ccHandlers.register(collector);
@@ -320,8 +322,8 @@ async function main(argv = process.argv.slice(2)) {
       ? (info, done) => (auth.isAuthed(info.req) ? done(true) : done(false, 401, 'authentication required'))
       : undefined,
   });
-  wss.on('connection', (socket) => {
-    bridge.addSocket(socket);
+  wss.on('connection', (socket, req) => {
+    bridge.addSocket(socket, { micStartAllowed: micStartSameOrigin(req) });
     socket.on('message', (raw) => { bridge.handleMessage(socket, raw.toString()); });
     socket.on('close', () => bridge.removeSocket(socket));
     socket.on('error', () => bridge.removeSocket(socket));

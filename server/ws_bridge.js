@@ -62,9 +62,9 @@ function createWsBridge({ table, logger = console } = {}) {
   const bridge = {
     connections,
 
-    addSocket(socket) {
+    addSocket(socket, { micStartAllowed = false } = {}) {
       const sender = createSender(socket);
-      connections.set(socket, { sender, event: { sender } });
+      connections.set(socket, { sender, event: { sender }, micStartAllowed });
       return sender;
     },
 
@@ -111,6 +111,9 @@ function createWsBridge({ table, logger = console } = {}) {
       if (WEB_UNSUPPORTED[method]) {
         return refuse('web_unsupported', WEB_UNSUPPORTED[method], (reason) => `${method} is not available in web mode: ${reason}`);
       }
+
+      if (method === 'mic:start-server' && !connection.micStartAllowed)
+        return rawSend(socket, errorPayload(id, 'mic_origin_refused', 'Microphone recovery requires the web page on this origin.'));
 
       const entry = table[method];
       if (!entry) return rawSend(socket, errorPayload(id, 'unknown_method', `unknown method: ${method}`));
