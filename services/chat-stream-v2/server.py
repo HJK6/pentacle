@@ -721,6 +721,13 @@ class Server:
                     continue
                 self._enqueue(websocket, frame_type, encoded)
 
+        # A committed ingest batch can call broadcast repeatedly without any
+        # awaited operation suspending. Give the existing socket writers a turn
+        # before the next frame; otherwise a healthy reader's bounded queue can
+        # overflow solely because its writer never ran. A blocked writer still
+        # accumulates pressure and follows the unchanged overflow policy.
+        await asyncio.sleep(0)
+
     def _register_client(self, websocket: Any) -> None:
         self._clients.add(websocket)
         if websocket not in self._client_send_queues:

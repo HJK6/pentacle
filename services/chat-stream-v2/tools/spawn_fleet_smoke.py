@@ -12,6 +12,7 @@ import re
 import sys
 import tempfile
 import time
+import traceback
 import uuid
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
@@ -263,7 +264,9 @@ def run_cell(
     if isinstance(cell_error, CodexQuotaExhausted):
         raise cell_error
     if cell_error is not None:
-        raise teardown_error or cell_error
+        if teardown_error is not None:
+            raise teardown_error from cell_error
+        raise cell_error
     if teardown_error is not None:
         raise teardown_error
     if inject_stage == "teardown":
@@ -769,6 +772,7 @@ def run_matrix(
                     row = {
                         "host": host, "provider": provider, "prompt_mode": prompt_mode,
                         "stage": stage, "class": classification["class"],
+                        "detail": "".join(traceback.format_exception(exc)),
                         **({"reason": classification["reason"]} if classification.get("reason") else {}),
                     }
                     failures.append(row)
@@ -807,6 +811,7 @@ def run_matrix(
             row = {
                 "host": host, "provider": provider, "prompt_mode": prompt_mode,
                 "stage": _stage_from_error(exc), "class": classification["class"],
+                "detail": "".join(traceback.format_exception(exc)),
                 **({"reason": classification["reason"]} if classification.get("reason") else {}),
             }
             failures.append(row)
