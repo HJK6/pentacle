@@ -241,6 +241,48 @@ def test_attachment_failure_then_recovery_retry_delivers(tmp_path: Path) -> None
     _run(go())
 
 
+def test_KNOWN_LIMITATION_cold_restart_same_counter_same_body_coalesces(tmp_path: Path) -> None:
+    """KNOWN LIMITATION (documented, NOT a correctness assertion): a within-60s
+    cold-restart same-body collision is INDISTINGUISHABLE from a retry at the daemon
+    and therefore COALESCES (the second, genuinely-new message is suppressed).
+
+    Real old-client wire shape (packaged lineage 4ad7624a): the desktop optimistic
+    counter is an in-memory instance field that resets on cold restart
+    (renderer/src/chat_store_controller.ts:324 `private optimisticCounter = 0;`) and
+    nextOptimisticId emits a BARE `optimistic_<stream>_<counter>` with NO per-launch
+    token (:585-586), unlike mobile's `optimistic_..._launch-<id>_N`. The send wire
+    payload carries no client-generation/instance token either. So after a cold
+    restart the first message reuses `optimistic_<stream>_1`; if the operator retypes
+    the SAME body to the SAME target within the 60s dedupe window, the daemon sees an
+    identical (to_stream_id, actor, optimistic_id, wire_digest) and coalesces it.
+
+    This test asserts the CURRENT (limited) behavior on purpose — it is not a pass of
+    correct behavior. The fix is a CLIENT change (desktop per-launch token in
+    optimistic_id, mirroring mobile) shipped via the GUI packaged-refresh path; it is
+    tracked as REMAINING in spec_pentacle__desktop_committed_pending_retry_eligible_2026_09.
+    """
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open_claude(sessions)
+            # "process A" first (and only) message: optimistic counter == 1.
+            await comms.send({"stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
+                              "optimistic_id": "optimistic_bart_v2-d33b331d_1", "request_id": "send-A1"})
+            # "process B" after a cold restart within 60s: counter reset to 1, same body,
+            # same actor/target, fresh request_id, NO generation token on the wire.
+            await comms.send({"stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
+                              "optimistic_id": "optimistic_bart_v2-d33b331d_1", "request_id": "send-B1"})
+            # LIMITATION: the daemon cannot tell this from a retry, so it coalesces.
+            assert len(tmux.pastes) == 1, (
+                "documents the known within-60s cold-restart collision; if this ever "
+                "becomes 2 the client per-launch-token fix has landed — update this test")
+        finally:
+            store.stop()
+
+    _run(go())
+
+
 def test_mobile_launch_id_scheme_unaffected(tmp_path: Path) -> None:
     """Mobile/launch sends use send-<..> request_ids with distinct
     optimistic_<stream>_launch-<..>_N ids per logical message: each delivers."""
