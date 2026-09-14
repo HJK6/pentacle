@@ -57,10 +57,13 @@ The public service may expose the following generic families:
 | `ping`, `hello` | connection and capability checks |
 | `list_sessions`, `inspect_stream` | read visible session state |
 | `spawn`, `send`, `close`, `rename` | session lifecycle and input |
+| `send_image` | attach an already-uploaded image to the caller's OWN conversation as an agent-authored transcript event |
 | `subscribe`, `unsubscribe` | event visibility controls |
 | `watch`, `wake` | optional local notifications |
 
 Each implementation must document the exact fields and error codes it registers. Unsupported legacy verbs return a typed error rather than silently changing behavior.
+
+Image attachments (both operator→agent and agent→operator) reuse one content-addressed blob path: the client uploads bytes with the chunked `upload_blob_init` / `upload_blob_chunk` verbs, then references the blob by its sha256 in an attachment descriptor `{key, mime, bytes, width?, height?}` (supported mime: `image/jpeg`, `image/png`; per-attachment and per-message size/count limits apply). `send_image` is the agent-authored form: the daemon authorizes the destination from the caller's verified stream token — a seat may attach only to its OWN conversation — confirms the referenced blob is present, and emits exactly one agent-authored transcript event carrying the attachment (no pane injection). It is idempotent by `request_id`, so a retry adds no second transcript row. Clients fetch the bytes for display through the existing blob-read path and render the same image bubble/viewer regardless of author. Agent-side usage: `agent-orch send-image` (see the agent-orch README "Send an image").
 
 ## Close on an offline host
 
@@ -98,5 +101,11 @@ close kind and deferred state; `--json` retains the complete record.
 ## Event handling
 
 Clients should treat snapshots as authoritative for the keys they contain and apply later events in sequence order. Unknown event types are safely ignored after logging a bounded diagnostic. A reconnect should create a new request correlation scope and reconcile optimistic UI rows from the snapshot before replaying only requests that the implementation marks retry-safe.
+
+## Per-session context tracking fields
+
+A session snapshot may carry four context-usage fields, projected by the server and rendered only when present: `context_tokens` (current context use), `model_context_window` (the provider-reported window), `context_updated_at` (the observation timestamp), and `context_level` (`none`, `advisory`, or `handoff`). Clients display the token count and window percentage whenever `context_tokens` is present, independent of `context_level`; the level only adds advisory/handoff styling.
+
+`context_level` is provider-aware. For a Claude session the server classifies the level from the model window against capped advisory/handoff thresholds (defaults 70% / 85%, capped at 400,000 / 600,000 tokens; overridable via `PENTACLE_CONTEXT_ADVISORY_ABS`/`PENTACLE_CONTEXT_ADVISORY_PCT` and `PENTACLE_CONTEXT_HANDOFF_ABS`/`PENTACLE_CONTEXT_HANDOFF_PCT`) and emits a one-and-done context notification at each crossing. For a Codex session the server reports `context_tokens` and `model_context_window` for display but `context_level` is always `none`: Codex compacts its context automatically, so it receives no routine context-threshold handoff or advisory notification and no handoff-level status-card pressure. This is a notification-and-display policy only; it does not affect deliberate `spawn --handoff`, scheduled handoff, or recovery handoff, which remain available to both providers and independent of `context_level`.
 
 This contract intentionally uses synthetic client, host, and stream examples. It does not describe a private fleet, managed endpoint, deployment channel, or credential location.

@@ -302,10 +302,20 @@ def test_accepted_reports_coalesce_and_progress_rearms_blocker(tmp_path, termina
             await SessionReconciler(sessions, None, outbound=ledger.outbound)._surface(
                 await store.fetch_session("alpha", "worker"), {"episode_id": "death"}, "tmux_absent")
             rows = await store.submit(lambda c: [dict(r) for r in c.execute("SELECT * FROM v2_outbound_notices")])
-            assert len(rows) == 3  # two new errors, one terminal generation
+            # error-1 + error-2 (blocker notices) + the first end report + the
+            # distinct later `another-done` report. A distinct terminal REPORT
+            # now enqueues its own child_report_ready (coalesce end-fact fix), so
+            # the parent learns of the later report; the reconciler close/death
+            # notice stays suppressed by the one-end-fact-per-generation rule
+            # (no double-notify after a terminal report).
+            dedupe = {r["dedupe_key"] for r in rows}
+            assert dedupe == {
+                "report:error-1", "report:error-2", "report:done", "report:another-done",
+            }, dedupe
+            assert len(rows) == 4
             watches = await store.list_watch_wake("watch", "alpha:parent", parent["session_generation"])
             assert set(watches[0]["consumed"]) == {"blocker", "end"}
-            assert len(frames) == 3
+            assert len(frames) == 4
             assert first["report_id"] != done["report_id"]
         finally:
             store.stop()

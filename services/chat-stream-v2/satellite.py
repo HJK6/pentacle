@@ -68,6 +68,7 @@ from claude_jsonl_norm import normalize_claude_jsonl_records_grouped
 from codex_rollout_norm import codex_session_identity, normalize_codex_rollout_records_grouped
 from machine_stats import STATS_INTERVAL_S, WIRE_VERSION as STATS_WIRE_VERSION, sample_machine_stats
 from mirror import _provider_from_session_name
+from logging_config import configure_logging
 
 log = logging.getLogger("chat_streamd_v2.satellite")
 
@@ -1060,10 +1061,7 @@ class Satellite:
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(
-        level=os.environ.get("PENTACLE_SATELLITE_LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging(os.environ.get("PENTACLE_SATELLITE_LOG_LEVEL", "INFO"))
     cfg = SatelliteConfig.from_env()
     if not cfg.host:
         log.error("no host configured (set PENTACLE_SATELLITE_HOST)")

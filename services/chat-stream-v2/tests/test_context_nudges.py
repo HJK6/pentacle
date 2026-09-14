@@ -192,7 +192,11 @@ def test_out_of_order_ingestion_cannot_rearm_or_replace_telemetry():
     asyncio.run(run())
 
 
-def test_pending_codex_receipt_is_reconciled_without_input(monkeypatch):
+def test_codex_high_context_never_enters_the_nudge_or_receipt_path(monkeypatch):
+    # Codex compacts automatically, so a high-context codex seat is never
+    # nudged: even through real Comms with a scripted codex pane nothing is
+    # pasted and there is no pending receipt to reconcile. Tokens stay tracked
+    # for display. spec_pentacle__codex_context_handoff_policy_2026_09.
     import comms as comms_module
     from test_tell_immediate_delivery import ScriptedCodex
     monkeypatch.setattr(comms_module,'SUBMISSION_EVIDENCE_TIMEOUT_S',.01)
@@ -208,10 +212,11 @@ def test_pending_codex_receipt_is_reconciled_without_input(monkeypatch):
             pane=ScriptedCodex(submit_on_retry=False)
             h.spawnctl.tmux=pane
             result=await h.job.run_pass()
-            assert result.pending>=1
-            count=len(pane.pastes);assert count==2
-            await h.job.run_pass()
-            assert len(pane.pastes)==count
+            assert result.sent==0 and result.attempted==0 and result.pending==0
+            assert len(pane.pastes)==0
+            row=h.sessions.get(f'{HOST}:child')
+            assert row['context_tokens']==800_000 and row['context_level']=='none'
+            assert await store.nudge_state(f'{HOST}:child','context_handoff') is None
         finally: store.stop()
     asyncio.run(run())
 
@@ -227,8 +232,10 @@ def test_threshold_environment_overrides_and_codex_contract(monkeypatch):
     monkeypatch.setenv('PENTACLE_CONTEXT_ADVISORY_ABS','200000')
     monkeypatch.setenv('PENTACLE_CONTEXT_HANDOFF_ABS','300000')
     assert context_fields('claude',ContextReading(250_000,model='claude-fable-5-1'))[2]=='advisory'
-    for tokens,level in ((499_999,'none'),(500_000,'advisory'),(750_000,'handoff')):
-        assert context_fields('codex',ContextReading(tokens,model_context_window=1_000_000))[2]==level
+    # Codex compacts automatically: it reports real tokens+window for display but
+    # never an advisory/handoff level, at any usage and regardless of env caps.
+    for tokens in (499_999,500_000,750_000,999_999):
+        assert context_fields('codex',ContextReading(tokens,model_context_window=1_000_000))==(tokens,1_000_000,'none')
 
 
 def test_unconfirmed_claude_paste_is_not_counted_as_delivered(monkeypatch):
@@ -394,8 +401,50 @@ def test_close_prunes_ingestion_episodes_even_when_nudge_job_never_runs():
     asyncio.run(run())
 
 
-def test_codex_file_batch_compaction_rearms_delivered_episode(tmp_path, monkeypatch):
-    """A dip and rise in one FD read must survive until the next nudge sweep."""
+def test_codex_context_level_never_nudges_or_rotates():
+    """Codex compacts its context automatically, so it receives no routine
+    context-threshold pressure: context_fields reports the real tokens+window
+    (for display) but always level 'none', which suppresses the nudge and never
+    arms a nudge basis, while a Claude seat at the same pressure still fires and
+    seat-declared handoff_planned is untouched.
+    spec_pentacle__codex_context_handoff_policy_2026_09."""
+    # Unit: codex classification is always 'none' regardless of usage, and the
+    # real tokens/window are still reported so the context badge keeps showing.
+    for tokens in (500_000, 750_000, 990_000):
+        t, w, level = context_fields('codex', ContextReading(tokens, model_context_window=1_000_000))
+        assert (t, w) == (tokens, 1_000_000)
+        assert level == 'none'
+    # A Claude seat at comparable pressure still classifies handoff (unchanged).
+    assert context_fields('claude', ContextReading(900_000, model='claude-fable-5-1'))[2] == 'handoff'
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(store)
+            await store.update_session(HOST, 'child', provider='codex')
+            await h.sessions.refresh()
+            # Well past the retired 75% codex handoff line.
+            await _read(h, 900_000, time.time() - 10, provider='codex')
+            row = h.sessions.get(f'{HOST}:child')
+            assert row['context_tokens'] == 900_000        # tokens tracked for display
+            assert row['model_context_window'] == 1_000_000
+            assert row['context_level'] == 'none'          # no advisory/handoff level
+            # No nudge basis armed for either level.
+            assert await store.nudge_state(f'{HOST}:child', 'context_handoff') is None
+            assert await store.nudge_state(f'{HOST}:child', 'context_advisory') is None
+            # No nudge delivered, nothing attempted.
+            result = await h.job.run_pass()
+            assert result.sent == 0 and result.attempted == 0
+            assert not h.tmux.pasted
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_codex_file_batch_ingestion_tracks_tokens_without_nudging(tmp_path, monkeypatch):
+    """Codex rollout FD ingestion still updates displayed telemetry across a
+    compaction dip-and-rise, but arms no nudge basis and delivers no nudge:
+    codex compacts automatically. spec_pentacle__codex_context_handoff_policy_2026_09."""
     import json
     from ingest import Ingest, _close_stream
 
@@ -425,39 +474,28 @@ def test_codex_file_batch_compaction_rearms_delivered_episode(tmp_path, monkeypa
                          parent_stream_id=f'{HOST}:parent', user_event_count=0,
                          jsonl_path=str(rollout))
             await h.observe()
-            paste = h.tmux.paste
-
-            async def provider_paste(name, text):
-                await paste(name, text)
-                if name == 'child':
-                    # Provider counterpart: consumed input emits a real durable
-                    # USER event after Comms' pre-paste sequence watermark.
-                    await store.append_session_event(f'{HOST}:child', {
-                        'stream_id': f'{HOST}:child', 'provider': 'codex',
-                        'kind': 'USER', 'text': text, 'timestamp': _iso(time.time()),
-                    }, identity=f'provider-proof:{text}', limit=500)
-
-            monkeypatch.setattr(h.tmux, 'paste', provider_paste)
             ingest = Ingest(store, h.sessions, h.tmux, lambda _: asyncio.sleep(0),
                             local_host=HOST, recent_limit=20,
                             routing_integrity=RoutingIntegrity(store, h.sessions))
             assert await ingest.run_pass() == 0  # bookkeeping is not a chat event
-            assert (await h.job.run_pass()).sent == 2
-            first = json.loads((await store.nudge_state(f'{HOST}:child', 'context_handoff'))['basis'])
-            assert all(d['outcome'] == 'delivered' for d in first['deliveries'].values())
+            # Telemetry tracked for display; no level, no armed basis, no nudge.
+            row = h.sessions.get(f'{HOST}:child')
+            assert row['context_tokens'] == 800_000
+            assert row['model_context_window'] == 1_000_000
+            assert row['context_level'] == 'none'
+            assert await store.nudge_state(f'{HOST}:child', 'context_handoff') is None
+            assert await store.nudge_state(f'{HOST}:child', 'context_advisory') is None
+            assert (await h.job.run_pass()).sent == 0
+            # A dip and rise in one FD read updates the displayed tokens but still
+            # arms nothing and pastes nothing.
             with rollout.open('a') as stream:
                 stream.write(reading(100_000, now - 80) + reading(800_000, now - 70))
             assert await ingest.run_pass() == 0
-            second = json.loads((await store.nudge_state(f'{HOST}:child', 'context_handoff'))['basis'])
-            assert second['epoch'] != first['epoch']
-            assert second['crossing']['observed_at'] == _iso(now - 70)
-            assert (await h.job.run_pass()).sent == 2
-            second = json.loads((await store.nudge_state(f'{HOST}:child', 'context_handoff'))['basis'])
-            assert {d['tell_id'] for d in first['deliveries'].values()}.isdisjoint(
-                d['tell_id'] for d in second['deliveries'].values())
-            assert len(h.tmux.pasted) == 4
-            assert await ingest.run_pass() == 0
-            assert (await h.job.run_pass()).attempted == 0
+            row = h.sessions.get(f'{HOST}:child')
+            assert row['context_tokens'] == 800_000 and row['context_level'] == 'none'
+            assert await store.nudge_state(f'{HOST}:child', 'context_handoff') is None
+            assert (await h.job.run_pass()).sent == 0
+            assert len(h.tmux.pasted) == 0
         finally:
             if ingest is not None:
                 for state in ingest._streams.values():

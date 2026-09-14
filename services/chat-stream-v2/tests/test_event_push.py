@@ -974,9 +974,10 @@ def test_pin_drift_is_rate_limited_and_never_writes() -> None:
                 await put(key, value)
 
             store.put = traced_put  # type: ignore[method-assign]
-            await store.put("event_push.target_sha", TARGET_SHA)
+            await store.put("event_push.target_sha", f"  {TARGET_SHA}\n")
             writes.clear()
             assert await ep.check_pin_drift() is False
+            assert (await ep._version_verdict("hostc", TARGET_SHA))["status"] == "ok"
             await store.put("event_push.target_sha", SATELLITE_SHA)
             writes.clear()
             assert await ep.check_pin_drift() is True

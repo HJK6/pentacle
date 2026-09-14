@@ -310,3 +310,87 @@ def test_prompt_auth_eligibility_and_replay_use_only_disposable_stores(tmp_path)
                 await notify.stop()
             store.stop()
     asyncio.run(run())
+
+
+# --- Regression: distinct terminal reports from one child-generation ----------
+# A single child seat can legitimately file more than one terminal report to its
+# parent (e.g. bart:v2-8a5bf6ee filed done for msg 2026091362 then done for msg
+# 2026091348 on 2026-09-13). Each distinct report_id must produce its own
+# child_report_ready notice; the generation "end"-fact short-circuit in
+# store_watch_wake.coalesce_notice_conn used to swallow the second one so the
+# protected assistant never learned msg 2026091348 finished.
+
+
+async def _report_kind_notices(store: Store) -> list[dict]:
+    def _op(conn) -> list[dict]:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT notice_id, dedupe_key, recipient_stream_id, source_stream_id "
+                "FROM v2_outbound_notices WHERE kind='report' "
+                "ORDER BY created_at, notice_id"
+            ).fetchall()
+        ]
+
+    return await store.submit(_op)
+
+
+def test_distinct_terminal_reports_each_enqueue_child_report_ready() -> None:
+    async def run() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            sessions = await _lineage(store)
+            ledger = Ledger(store, sessions=sessions, outbound=_ReceiptQueue(store))
+            await ledger.report(_report("report/a"))
+            await ledger.report(_report("report/b"))
+            notices = await _report_kind_notices(store)
+            assert {n["dedupe_key"] for n in notices} == {
+                "report:report/a",
+                "report:report/b",
+            }, notices
+            assert all(n["recipient_stream_id"] == "hosta:parent" for n in notices)
+            assert all(n["source_stream_id"] == "hosta:child" for n in notices)
+
+            # The fix must NOT create a duplicate generation-level "end" fact for
+            # the second report (Nexus ruling): exactly one end fact, owned by
+            # the first report; the second notice is deliberately fact-less.
+            def _end_facts(conn):
+                return [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT source, notice_id FROM v2_watch_facts WHERE kind='end'"
+                    ).fetchall()
+                ]
+
+            facts = await store.submit(_end_facts)
+            assert len(facts) == 1, facts
+            assert facts[0]["source"] == "report/a"
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_same_terminal_report_replay_enqueues_one_child_report_ready() -> None:
+    async def run() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            sessions = await _lineage(store)
+            ledger = Ledger(store, sessions=sessions, outbound=_ReceiptQueue(store))
+            await ledger.report(_report("report/dup"))
+            await ledger.report(_report("report/dup"))  # idempotent same-payload replay
+            notices = await _report_kind_notices(store)
+            assert [n["dedupe_key"] for n in notices] == ["report:report/dup"], notices
+            # Replay adds neither a duplicate notice nor a second end fact.
+            n_end = await store.submit(
+                lambda c: c.execute(
+                    "SELECT COUNT(*) FROM v2_watch_facts WHERE kind='end'"
+                ).fetchone()[0]
+            )
+            assert n_end == 1
+        finally:
+            store.stop()
+
+    asyncio.run(run())

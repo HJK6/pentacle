@@ -106,3 +106,22 @@ The optional [QA dispatch reject counter](../../docs/qa-dispatch-counter.md) add
 `spec-issue adjudicate/diagnose/show` and explicit QA surface/cycle fields for
 immediate and scheduled reviews. Enforcement defaults off; the coordinated
 release owner activates it after upgrading callers.
+
+## Attachment send correlation
+
+A send claims its logical message before materializing attachments. Retries match
+the target, actor, optimistic ID, display text and canonical attachment metadata
+within the existing recency window; replaying a request ID remains request-scoped.
+Materialized file paths belong only to provider wire correlation. Before any paste,
+the daemon appends the final wire correlation to the same receipt history so an
+early provider USER event already carries the caption, attachments and optimistic
+ID. The newest receipt outcome remains authoritative, including a materialized
+`not_landed` result that permits retry. No prior receipt row is rewritten.
+
+When receipt projection replaces provider text, ingress stores a
+`provider_text_digest` on that same event before persistence. It hashes the
+original normalized provider text and contains no staged path. Both durable USER
+proof and the Comms event-proof reader use this shared digest; a caption match
+alone cannot confirm an image prompt. Ingress discards producer-supplied digests,
+and malformed proof metadata cannot fall back to caption equality. Existing
+stream, generation, event-kind and post-watermark proof fences still apply.

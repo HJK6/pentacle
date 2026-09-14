@@ -43,6 +43,7 @@ from ledger import (
     NudgeConfig,
     NudgeJob,
 )
+from logging_config import configure_logging
 from machine_stats import STATS_INTERVAL_S, sample_machine_stats
 from inventory import InventoryEmitter
 from mirror import Mirror, MirrorConfig
@@ -602,7 +603,7 @@ async def run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO))
+    configure_logging(getattr(logging, str(args.log_level).upper(), logging.INFO))
     return asyncio.run(run(args))
 
 

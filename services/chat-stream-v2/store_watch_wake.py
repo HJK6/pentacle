@@ -146,8 +146,21 @@ def coalesce_notice_conn(conn, notice, report=None):
         (owner, owner_gen, child, child_gen)).fetchall()
     prior = _fact_notice(conn, owner, owner_gen, child, child_gen, "end") if trigger == "end" else None
     if prior is not None:
-        # One terminal fact per generation: a later report id cannot replay
-        # that fact into subscriptions registered after it was announced.
+        # A prior terminal event already fired this generation's end
+        # subscriptions and owns the generation-level "end" fact. For a report
+        # notice, a DISTINCT later terminal report (different report_id; one
+        # seat can file terminal reports for more than one commission) still
+        # needs its own child_report_ready durably enqueued for the parent, or
+        # the parent never learns the later report landed (bug: msg 2026091348
+        # / d04e7964 on 2026-09-13). Same-report replay is already idempotent
+        # via the notice_id bound check above, so reaching here for a report is
+        # a genuinely new notice: enqueue it without re-firing subscriptions or
+        # adding a duplicate "end" fact (a fact-less report notice stays valid
+        # and deliverable — watch_notice_valid over zero facts is True).
+        # Reconciler close/death notices keep the one-per-generation suppression
+        # so a close after a terminal report does not double-notify the parent.
+        if notice.get("kind") == "report":
+            return _insert_outbound_notice_conn(conn, **notice)
         return prior
     result = _insert_outbound_notice_conn(conn, **notice)
     source = str((report or {}).get("report_id") or notice.get("episode_id") or notice["notice_id"])

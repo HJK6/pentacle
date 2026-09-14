@@ -121,6 +121,28 @@ test('renderStatusCard: context indicator renders without a card, with window pc
   assert.doesNotMatch(html, /is-goal/);
 });
 
+test('renderStatusCard: codex-style level none shows tokens without handoff pressure, seat handoff_planned still renders', () => {
+  // Codex reports real tokens+window but context_level "none" (it compacts
+  // automatically). The context badge still shows the token usage for display,
+  // but carries no is-ctx-handoff/-advisory pressure styling; the seat-declared
+  // "handoff planned" chip is independent of context_level and still renders.
+  // spec_pentacle__codex_context_handoff_policy_2026_09.
+  const html = chatUi.renderStatusCard(
+    {
+      context_tokens: 900000,
+      model_context_window: 1000000,
+      context_level: 'none',
+      status_card: { handoff_planned: true, updated_at: '2026-07-09T12:05:00Z' },
+    },
+    { nowMs: CARD_NOW_MS },
+  );
+  assert.match(html, /ctx 900k/);          // tokens still displayed
+  assert.match(html, /90%</);              // window % still visible
+  assert.doesNotMatch(html, /is-ctx-handoff/);   // no handoff-level pressure styling
+  assert.doesNotMatch(html, /is-ctx-advisory/);
+  assert.match(html, /is-handoff/);        // seat-declared handoff_planned chip unchanged
+});
+
 test('renderStatusCard: context indicator without level or window renders plain', () => {
   const html = chatUi.renderStatusCard({ context_tokens: 97000 }, { nowMs: CARD_NOW_MS });
   assert.match(html, /ctx 97k/);

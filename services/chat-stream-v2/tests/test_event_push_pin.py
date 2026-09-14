@@ -105,6 +105,8 @@ def test_stage_consumes_actual_smoke_exit_and_json_contract(tmp_path, monkeypatc
     from tools import spawn_fleet_smoke
 
     monkeypatch.setattr(event_push_pin, "SATELLITE_HOSTS", ("workstation",))
+    # This slice measures peer/smoke outcomes; the CLI suite exercises real evidence.
+    monkeypatch.setattr(event_push_pin, "_load_gate_evidence", lambda *_: {})
     monkeypatch.setattr(spawn_fleet_smoke, "run_matrix", lambda *a, **k: rows)
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
@@ -125,9 +127,9 @@ def test_stage_consumes_actual_smoke_exit_and_json_contract(tmp_path, monkeypatc
             store.stop()
         if not accepted:
             with pytest.raises(RuntimeError):
-                await event_push_pin._run(db, stage=TARGET, rollback=False)
+                await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / "gate.json")
             return
-        result = await event_push_pin._run(db, stage=TARGET, rollback=False)
+        result = await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / "gate.json")
         assert result["action"] == "stage" and result["readback"] == TARGET
         assert result["quota_exhausted"] == rows
 
@@ -140,6 +142,8 @@ def test_stage_fails_closed_with_last_stale_runtime_state(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(event_push_pin, "SATELLITE_HOSTS", ("workstation",))
+    # This slice measures peer/smoke outcomes; the CLI suite exercises real evidence.
+    monkeypatch.setattr(event_push_pin, "_load_gate_evidence", lambda *_: {})
     async def go() -> None:
         db = str(tmp_path / "sessions.db")
         store = Store(db)
@@ -160,7 +164,7 @@ def test_stage_fails_closed_with_last_stale_runtime_state(
 
         monkeypatch.setattr(event_push_pin, "SATELLITE_READBACK_DEADLINE_SECONDS", 0.01)
         with pytest.raises(RuntimeError) as raised:
-            await event_push_pin._run(db, stage=TARGET, rollback=False)
+            await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / "gate.json")
         message = str(raised.value)
         assert TARGET in message
         assert PREVIOUS in message

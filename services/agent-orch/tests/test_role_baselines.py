@@ -1,3 +1,4 @@
+"""Roles delegate shared rules; validate that chain against configured memory."""
 from __future__ import annotations
 
 import re
@@ -16,130 +17,82 @@ BASELINE_FILES = (
     "lead_baseline.md",
     "evaluator_baseline.md",
 )
+ORCHESTRATION_PATH = "docs/config/agent_orchestration.md"
 
 
-def _baseline_dir():
-    """Resolve the live memory-repo agents/ directory; skip if unavailable.
-
-    Production loader path. The test runs against the same path the running
-    agent-orch wrapper would auto-load from. CI environments without a
-    configured memory_repo_path skip cleanly.
-    """
-    config = load_config()
-    memory_root = resolve_memory_repo_path(config)
-    if memory_root is None:
+@pytest.fixture(scope="module")
+def instructions():
+    """Use the production loader's explicit memory root, with three fixed homes."""
+    root = resolve_memory_repo_path(load_config())
+    if root is None:
         pytest.skip("no memory_repo_path resolvable in this environment")
-    return memory_root / "agents"
+    # A configured but incomplete instruction tree is a failure, not a skip.
+    roles = {name: (root / "agents" / name).read_text(encoding="utf-8")
+             for name in BASELINE_FILES}
+    return roles, (root / "AGENTS.md").read_text(encoding="utf-8"), (
+        root / ORCHESTRATION_PATH
+    ).read_text(encoding="utf-8")
 
 
-def test_role_baselines_use_report_contract() -> None:
-    baseline_dir = _baseline_dir()
-    for filename in BASELINE_FILES:
-        text = (baseline_dir / filename).read_text(encoding="utf-8")
-        assert "agent-orch report --msg-id" in text, (
-            f"{filename} missing required `agent-orch report --msg-id` instruction"
-        )
+@pytest.mark.parametrize("filename", BASELINE_FILES)
+def test_role_baseline_delegates_to_shared_instructions(instructions, filename):
+    roles, _, _ = instructions
+    assert "(../AGENTS.md)" in roles[filename], f"{filename} lacks shared startup/communications link"
+    if filename == "doc_qa_baseline.md":
+        assert "(documentation_baseline.md)" in roles[filename]
 
 
-def test_role_baselines_do_not_reference_retired_completion_markers() -> None:
-    baseline_dir = _baseline_dir()
-    retired_literals = (
-        "DONE <msg_id>",
-        "<OUTBOX_V1",
-        "</OUTBOX_V1>",
-    )
-    for filename in BASELINE_FILES:
-        text = (baseline_dir / filename).read_text(encoding="utf-8")
-        for retired_literal in retired_literals:
-            assert retired_literal not in text, (
-                f"{filename} still references retired marker `{retired_literal}`"
-            )
-        assert re.search(r"end your reply with.*DONE", text, re.IGNORECASE | re.DOTALL) is None, (
-            f"{filename} still tells agents to end-reply with DONE"
-        )
+def test_shared_delegation_targets_canonical_sections(instructions):
+    _, shared, orchestration = instructions
+    # These explicit anchors bind the delegated rules without resolving arbitrary Markdown.
+    for anchor, heading in (
+        ("completion-reports", "Completion Reports"),
+        ("operator-questions", "Operator questions"),
+    ):
+        assert f"({ORCHESTRATION_PATH}#{anchor})" in shared
+        assert f"## {heading}" in orchestration
+    assert "## Communications" in shared
 
 
-def test_role_baselines_document_peer_comms_handoff_capabilities() -> None:
-    """Spec 2 Stage D: each baseline documents the new tell / --terminate / [from <stream>] primitives.
-
-    Capability-only documentation; no when-to-use prescriptions (workflow lives in
-    development_process.md, which is canonical for that scope).
-    """
-    baseline_dir = _baseline_dir()
-    required_substrings = ("agent-orch tell", "[from ")
-    for filename in BASELINE_FILES:
-        text = (baseline_dir / filename).read_text(encoding="utf-8")
-        for required in required_substrings:
-            assert required in text, (
-                f"{filename} missing required capability documentation `{required}`"
-            )
-        assert "agent-orch report" in text and "--terminate" in text, (
-            f"{filename} missing conditional `agent-orch report --terminate` capability"
-        )
+def test_effective_report_and_lifecycle_authority(instructions):
+    _, _, orchestration = instructions
+    for required in (
+        "agent-orch report --msg-id", '"summary"', '"findings"', '"next_action"',
+        "The parent owns worker lifecycle by default.",
+        "only then use `agent-orch report --terminate`",
+        "--self-close-on-completion",
+    ):
+        assert required in orchestration, f"canonical report contract missing {required!r}"
 
 
-def test_role_baselines_document_inspect_recover_capabilities() -> None:
-    """Spec sanitizer recovery Stage C: each baseline documents inspect/recover primitives."""
-    baseline_dir = _baseline_dir()
-    required_substrings = (
-        "agent-orch inspect",
-        "agent-orch recover",
-    )
-    for filename in BASELINE_FILES:
-        text = (baseline_dir / filename).read_text(encoding="utf-8")
-        for required in required_substrings:
-            assert required in text, (
-                f"{filename} missing required capability documentation `{required}`"
-            )
+def test_effective_peer_communications(instructions):
+    _, shared, orchestration = instructions
+    for required in ("agent-orch tell", "send <stream> <msg-id>", "START / GATE / BLOCKER / END"):
+        assert required in shared
+    for required in ("## Send vs Tell", "[from <stream_id>]", "child_report_ready"):
+        assert required in orchestration
 
 
-def test_role_baselines_document_self_terminate_natural_language_mapping() -> None:
-    """Each baseline must spell out the natural-language → command mapping for self-close.
-
-    The universal self-close is
-    `agent-orch close --operator-confirm $AGENT_ORCH_STREAM_ID` — the same
-    chat_streamd `close` RPC the Pentacle trash button uses, allowed for a caller
-    closing its own stream. `agent-orch stop` is now only a non-error no-op stub,
-    so the durable baseline contract is the positive self-close command.
-    """
-    baseline_dir = _baseline_dir()
-    required_substrings = (
-        # Natural-language phrase the agent is most likely to hear.
-        '"terminate yourself"',
-        # The universal self-close command (works for top-level AND workers).
-        "agent-orch close --operator-confirm",
-        # Closing one's own stream — the daemon allows caller==target self-close.
-        "$AGENT_ORCH_STREAM_ID",
-    )
-    for filename in BASELINE_FILES:
-        text = (baseline_dir / filename).read_text(encoding="utf-8")
-        for required in required_substrings:
-            assert required in text, (
-                f"{filename} missing self-terminate mapping substring `{required}`"
-            )
+def test_effective_inspect_before_recover(instructions):
+    _, shared, orchestration = instructions
+    assert "inspect an actual anomaly before recovery" in shared
+    waiting = orchestration.split("## Waiting for worker completion\n", 1)[1].split("\n## ", 1)[0]
+    for required in ("agent-orch inspect", "inspect once", "use `recover` only", "did not report"):
+        assert required in waiting
 
 
-def test_shared_agents_md_documents_self_terminate_natural_language_mapping() -> None:
-    """The memory-repo AGENTS.md must also carry the natural-language → command mapping.
+def test_effective_explicit_self_close_mapping(instructions):
+    _, _, orchestration = instructions
+    for required in (
+        "terminate yourself", "agent-orch close --operator-confirm $AGENT_ORCH_STREAM_ID",
+        "If a report is expected, file it first", "otherwise the parent closes the seat",
+    ):
+        assert required.lower() in orchestration.lower()
 
-    Role baselines only reach `--role`-injected sub-agents. Leaders (and any agent that
-    reads the shared AGENTS.md via @-include from its workspace AGENTS.md / CLAUDE.md)
-    need the mapping too, since they receive natural-language self-close prompts the
-    same way workers do. This test pins the mapping into AGENTS.md's Agent
-    Orchestration section so future edits don't drop the leader-facing coverage.
-    """
-    baseline_dir = _baseline_dir()
-    # AGENTS.md lives at the memory-repo root, one level above agents/.
-    agents_md = baseline_dir.parent / "AGENTS.md"
-    if not agents_md.exists():
-        pytest.skip(f"AGENTS.md not found at {agents_md} in this memory repo")
-    text = agents_md.read_text(encoding="utf-8")
-    required_substrings = (
-        '"terminate yourself"',
-        "agent-orch close --operator-confirm",
-        "$AGENT_ORCH_STREAM_ID",
-    )
-    for required in required_substrings:
-        assert required in text, (
-            f"AGENTS.md missing self-terminate mapping substring `{required}`"
-        )
+
+def test_role_baselines_do_not_reference_retired_completion_markers(instructions):
+    roles, _, _ = instructions
+    for filename, text in roles.items():
+        for marker in ("DONE <msg_id>", "<OUTBOX_V1", "</OUTBOX_V1>"):
+            assert marker not in text, f"{filename} still references retired marker {marker!r}"
+        assert re.search(r"end your reply with.*DONE", text, re.IGNORECASE | re.DOTALL) is None

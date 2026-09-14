@@ -341,8 +341,14 @@ class Ingest:
         binding = row.get("observer_binding")
         if isinstance(binding, dict):
             if await self._provider_root(row, name) is None:
-                _close_stream(st)
-                return 0
+                # An in-place provider replacement leaves the binding PID stale
+                # within the same generation; repair it against an independently
+                # proven same-rollout pane before giving up, then re-run the proof.
+                row = await self._maybe_rebind_observer_pane(row, name)
+                binding = row.get("observer_binding")
+                if await self._provider_root(row, name) is None:
+                    _close_stream(st)
+                    return 0
         if not st.activity_restored:
             restore = getattr(self.sessions, "restore_genuine_activity", None)
             if callable(restore):
@@ -709,6 +715,73 @@ class Ingest:
                 or not _provider_command_matches(record["command"], str(binding.get("executable") or ""))):
             return None
         return pid, record["start_id"]
+
+    async def _maybe_rebind_observer_pane(self, row: dict[str, Any], name: str) -> dict[str, Any]:
+        """Repair a stale observer binding after an in-place provider replacement
+        (`tmux respawn-pane -k` → `codex resume`): same tmux session, SAME
+        generation, SAME rollout, but a NEW pane process. The reconciler refreshes
+        `sessions.pane_pid`, yet `observer_binding.pane_pid` (minted at spawn, only
+        rewritten on a generation change) stays stale, so the strict
+        `_provider_root` proof rejects the still-open rollout every pass and server
+        history freezes silently.
+
+        Rebind ONLY when the replacement is independently proven — same generation,
+        the live tmux pane IS the new pid, a legitimate process (uid + executable),
+        and exactly one writable provider transcript that is the SAME rollout the
+        binding was already proven against (device+inode AND native session id).
+        Then CAS the binding's pane PID/start (nothing else). Returns the row with
+        the rebound binding on success, otherwise the row unchanged. This never
+        widens `_provider_root`; the caller re-runs that proof against the result."""
+        binding = row.get("observer_binding")
+        generation = row.get("session_generation")
+        if not isinstance(binding, dict) or binding.get("generation") != generation:
+            return row
+        transcript = binding.get("transcript")
+        if not isinstance(transcript, dict):
+            return row  # no proven rollout anchor → only the strict first-bind path may bind
+        pid = codex_source_pane_pid(row.get("pane_pid"))
+        if not pid or binding.get("pane_pid") == pid:
+            return row  # not a pane change (a reused/identical pid is the strict path's job)
+        if self.tmux is None or str(await self.tmux.pane_pid(name)) != pid:
+            return row  # the live pane must already BE the replacement process
+        record = await process_record(pid)
+        if (not record or record["uid"] != os.getuid()
+                or not _provider_command_matches(record["command"], str(binding.get("executable") or ""))):
+            return row
+        provider = str(row.get("provider") or _provider_from_session_name(name) or "claude")
+        fragment = "/.codex/sessions/" if provider == "codex" else "/.claude/"
+        candidates = [c for c in await _open_writable_transcripts(pid) if fragment in c[0]]
+        if len(candidates) != 1:
+            return row  # ambiguous (or no) writable transcript on the new pane
+        path, identity = candidates[0]
+        expected_id = transcript.get("file_id")
+        if not isinstance(expected_id, (list, tuple)) or list(identity) != list(expected_id):
+            return row  # a different rollout — never cross-bind another session
+        fd = await asyncio.to_thread(_open_descriptor, path)
+        if fd is None:
+            return row
+        try:
+            opened = await asyncio.to_thread(os.fstat, fd)
+            if (opened.st_dev, opened.st_ino) != identity:
+                return row  # replaced between lsof proof and open (TOCTOU)
+            native = await asyncio.to_thread(_native_session_identity_from_fd, fd, provider)
+        finally:
+            await asyncio.to_thread(os.close, fd)
+        if not native or native != transcript.get("session_id"):
+            return row  # same path/inode but a different session identity — refuse
+        rebound = await self.store.rebind_observer_pane(
+            row["stream_id"], generation=str(generation or ""), pane_pid=pid,
+            pane_started_at=record["start_id"], expected=binding,
+        )
+        if not rebound:
+            return row  # CAS lost to a concurrent binding change — retry next pass
+        self.sessions.apply_durable(row["stream_id"], observer_binding=rebound)
+        log.info("observer pane rebound sid=%s generation=%s pid=%s<-%s",
+                 row["stream_id"], generation, pid, binding.get("pane_pid"), extra={
+                     "subsystem": "ingest",
+                     "bug_ref": "bart_recovered_chat_visibility_2026_09",
+                 })
+        return {**row, "observer_binding": rebound}
 
     async def _discover_path(self, row: dict[str, Any], host: str, name: str, *, state: _StreamIngest | None = None) -> str:
         """Launch-recorded path, or a unique writable file of the proven root."""

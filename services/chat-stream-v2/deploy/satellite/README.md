@@ -99,7 +99,7 @@ the live row's `working` / `working_label` overlay through the existing
   reach mobile ahead of the backlog. `-1` replays the whole file.
 - `PENTACLE_SATELLITE_DISABLE=1` — kill switch: stay connected, push nothing.
 - `PENTACLE_SATELLITE_NO_AUTOUPDATE=1` — never git-checkout/exec-restart (stay on the running SHA;
-  coordinator still accepts pushes flagged-stale and alerts).
+  a configured exact pin rejects mismatched pushes and requests an update).
 - `PENTACLE_SATELLITE_INTERVAL_S`, `PENTACLE_SATELLITE_MAX_EVENTS`, `PENTACLE_SATELLITE_MAX_READ_BYTES`, `PENTACLE_SATELLITE_UPDATE_MIN_INTERVAL_S` — existing loop knobs.
 
 Working freshness does not add a knob: the local scan remains one pass and the
@@ -114,12 +114,27 @@ Only in a Nexus-authorized deploy window, after the new coordinator daemon has p
 its health readbacks, stage the exact deployed 40-character SHA and retain the
 JSON output as the durable readback:
 
+Before enforcement, verify that every participating satellite's configured checkout
+fetches the release repository, can resolve the accepted public release SHA, has
+the required dependencies, and either already runs the target or permits auto-update.
+If auto-update is disabled, install and restart the peer explicitly in the serialized
+window before staging the pin. Record each running SHA and PID,
+checkout state and rollback preimage. A moved checkout HEAD does not establish that
+its satellite process restarted. The target is the public release SHA used by the
+daemon and peers; a private integration SHA is not a satellite release.
+
 ```
 /opt/homebrew/opt/python@3.13/bin/python3.13 services/chat-stream-v2/tools/event_push_pin.py \
-  --db /path/to/sessions.db --stage <exact-40-character-deployed-sha>
+  --db /path/to/sessions.db --stage <exact-40-character-deployed-sha> \
+  --gate-evidence /path/to/public-release-merge-gate.json
 ```
 
-The command verifies the candidate gate tag, records the preceding pin, writes
+The command uses the deployer's canonical local merge-evidence validator: the
+artifact must name the exact public release SHA, clean source before and after,
+and passing unit and smoke tiers. Generate it on the actual public candidate;
+never relabel private-candidate evidence. Missing or invalid evidence refuses
+before the pin changes. Remote workflow tags are not used by the pin writer.
+The command records the preceding pin, writes
 the new target, and waits for fresh satellite SHA readbacks in the Store. It
 then runs the configured live spawn smoke matrix. A quota-only `UNTESTED`
 result is non-blocking and returns the affected hosts and reset information
@@ -138,10 +153,27 @@ with a readback before rolling coordinator back to its prior accepted SHA:
 
 ```
 /opt/homebrew/opt/python@3.13/bin/python3.13 services/chat-stream-v2/tools/event_push_pin.py \
-  --db /path/to/sessions.db --rollback
+  --db /path/to/sessions.db --rollback \
+  --gate-evidence /path/to/previous-public-release-merge-gate.json
 ```
 
 Then verify the satellites return to it. The optional observation field is
 non-durable and requires no migration.
+If the captured previous pin was absent, rollback restores the existing no-pin
+admission behavior. It does not direct satellites back to an earlier artifact;
+restore their separately captured running artifacts and restart them in the
+authorized window. Omit `--gate-evidence` only for an absent previous pin;
+nonempty rollback targets require canonical evidence for the captured previous SHA.
 Confirm `hello`, `list_sessions`, and `request_stream_events` still work and
 record the return to the known central-capture freshness behavior.
+
+## Diagnostic timestamps
+
+The daemon and satellite entrypoints format their existing stderr logging as
+`2026-09-14T19:00:00.123Z WARNING logger message`, using UTC regardless of the
+host timezone. Severity, logger names and exception tracebacks are retained.
+The daemon's `--log-level` and satellite's `PENTACLE_SATELLITE_LOG_LEVEL` continue
+to control severity; an embedding caller's existing handlers remain authoritative.
+No additional sink or message-content fields are introduced. After activation,
+read each process's configured stderr sink and bind a fresh timestamped record
+to its accepted artifact and PID. Historical records retain their original format.

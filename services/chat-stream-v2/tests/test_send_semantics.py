@@ -696,3 +696,131 @@ def test_unconfirmed_never_landed(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         assert tmux.enters == 1
     finally:
         store.stop()
+
+
+def test_claude_native_queue_is_committed_pending_not_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message natively queued into a BUSY claude seat — pasted, left the composer
+    (not in the active draft), not yet echoed into history within the evidence window
+    — is committed_pending_proof, never a hard not_landed. Claude queues mid-turn input
+    natively exactly like codex (boot_ready DRAFT/SUBMIT predicates + the design note at
+    boot_ready.py), so it must classify symmetrically with codex, not fail.
+
+    Regression for spec_pentacle__mobile_send_status_reconcile_2026_09 (bug_ref:
+    send-status-reconcile): the phone/Nexus 'send failed' on a genuinely-queued message.
+    Claude accepted the submission into its native queue before the user event
+    appeared; the receipt must preserve that pending commitment.
+    """
+    import comms
+
+    monkeypatch.setattr(comms, "SUBMISSION_EVIDENCE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(comms, "SUBMISSION_EVIDENCE_POLL_S", 0.001)
+
+    async def go() -> tuple[dict, FakeTmux, Store]:
+        # Busy claude pane: input caret present and EMPTY; the queued brief is neither in
+        # history (unsubmitted) nor in the draft box (it sits in claude's native queue).
+        tmux = FakeTmux(submit_on_paste=False, submit_on_retry=False)
+        tmux.screen = "✻ Compacting conversation…\n─────\n❯ \n  ⏵⏵ accept edits on"
+        comms_obj, store, sessions = _new_comms(tmux, tmp_path)
+        await sessions.open(HOST, NAME, provider="claude", bootstrap_state="ready")
+        result = await comms_obj.send({
+            "stream_id": f"{HOST}:{NAME}", "message": "brief for a busy claude seat",
+            "request_id": "send-claude-native-queue",
+        })
+        return result, tmux, store
+
+    result, tmux, store = _run(go())
+    try:
+        assert result["delivery"] == "committed_pending_proof"
+        assert result["submission_confirmed"] is False
+        assert result["action_status"] == "committed"
+        assert result["confirmation_status"] == "pending"
+        assert result["do_not_resubmit"] is True
+        # The pasted brief left the composer (native queue); no draft => no false not_landed.
+        assert tmux.pastes == ["brief for a busy claude seat"]
+        projected = asyncio.run(
+            store.get_send_receipt(f"{HOST}:{NAME}", "send-claude-native-queue")
+        )
+        assert projected is not None and projected["state"] == "accepted"
+    finally:
+        store.stop()
+
+
+def test_claude_active_draft_still_not_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard against over-broadening the queue fix: a claude brief left UNSUBMITTED in the
+    active draft box (genuinely not committed to the target) still classifies not_landed
+    with reason active_draft, so a truly-undelivered send still fails with retry.
+    spec_pentacle__mobile_send_status_reconcile_2026_09 (bug_ref: send-status-reconcile).
+    """
+    import comms
+
+    monkeypatch.setattr(comms, "SUBMISSION_EVIDENCE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(comms, "SUBMISSION_EVIDENCE_POLL_S", 0.001)
+
+    async def go() -> tuple[dict, FakeTmux, Store]:
+        tmux = FakeTmux(submit_on_paste=False, submit_on_retry=False)
+        tmux.screen = "✻ Working…\n─────\n❯ stuck in the draft box\n"
+        comms_obj, store, sessions = _new_comms(tmux, tmp_path)
+        await sessions.open(HOST, NAME, provider="claude", bootstrap_state="ready")
+        result = await comms_obj.send({
+            "stream_id": f"{HOST}:{NAME}", "message": "stuck in the draft box",
+            "request_id": "send-claude-active-draft",
+        })
+        return result, tmux, store
+
+    result, tmux, store = _run(go())
+    try:
+        assert result["delivery"] == "not_landed"
+        assert result["submission_confirmed"] is False
+        assert result["reason"] == "active_draft"
+        projected = asyncio.run(
+            store.get_send_receipt(f"{HOST}:{NAME}", "send-claude-active-draft")
+        )
+        assert projected is not None and projected["state"] == "not_landed"
+    finally:
+        store.stop()
+
+
+def test_claude_no_live_composer_is_not_landed_not_silently_committed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive-evidence gate: when the brief has left the composer but the pane is
+    NOT a live claude composer (no ❯ caret — a stale/dead or non-provider pane), the
+    send is a genuine non-delivery and must classify not_landed (reason
+    no_claude_composer), never a silent committed_pending_proof. Absence of an active
+    draft alone is not proof of commit.
+    spec_pentacle__mobile_send_status_reconcile_2026_09 (bug_ref: send-status-reconcile),
+    QA finding: false-positive commit branch.
+    """
+    import comms
+
+    monkeypatch.setattr(comms, "SUBMISSION_EVIDENCE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(comms, "SUBMISSION_EVIDENCE_POLL_S", 0.001)
+
+    async def go() -> tuple[dict, FakeTmux, Store]:
+        # No ❯ input caret: a dead/non-provider pane. paste "succeeds" against the
+        # pty but nothing is committed, and the post-paste capture has no draft.
+        tmux = FakeTmux(submit_on_paste=False, submit_on_retry=False)
+        tmux.screen = "bash-5.2$ some unrelated shell output\n(no claude tui here)"
+        comms_obj, store, sessions = _new_comms(tmux, tmp_path)
+        await sessions.open(HOST, NAME, provider="claude", bootstrap_state="ready")
+        result = await comms_obj.send({
+            "stream_id": f"{HOST}:{NAME}", "message": "brief into a dead pane",
+            "request_id": "send-claude-no-composer",
+        })
+        return result, tmux, store
+
+    result, tmux, store = _run(go())
+    try:
+        assert result["delivery"] == "not_landed"
+        assert result["submission_confirmed"] is False
+        assert result["reason"] == "no_claude_composer"
+        projected = asyncio.run(
+            store.get_send_receipt(f"{HOST}:{NAME}", "send-claude-no-composer")
+        )
+        assert projected is not None and projected["state"] == "not_landed"
+    finally:
+        store.stop()

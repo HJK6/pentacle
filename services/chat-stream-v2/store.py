@@ -65,7 +65,7 @@ from store_specs import (
     normalize_spec_ids,
 )
 from claude_jsonl_norm import strip_peer_delivery_envelope
-from submission_events import COMMITTED_PENDING_PROOF_STATUSES
+from submission_events import COMMITTED_PENDING_PROOF_STATUSES, provider_text_digest
 from v2_runtime import iso_now
 
 
@@ -288,6 +288,44 @@ def _send_receipt_row(
     if include_display_text:
         result["display_text"] = str(row["display_text"] or "")
     return result
+
+
+def _insert_send_receipt_row(
+    conn: sqlite3.Connection, *, to_stream_id: str, request_id: str, receipt_id: str,
+    state: str, optimistic_id: str | None, wire_digest: str, display_text: str,
+    content_kind: str, attachments_json: str, delivery: str, submission_confirmed: bool,
+    reason: str | None, attempts: int | None, created_at: str,
+    from_stream_id: str | None, actor_stream_id: str | None, actor_trusted: bool,
+) -> dict[str, Any]:
+    """Append one immutable send-receipt row and return its rowid-bearing projection.
+
+    The single authoritative INSERT shared by ``append_send_receipt`` and the
+    atomic ``claim_or_coalesce_send`` claim, so both write identical column shapes.
+    """
+    cur = conn.execute(
+        """INSERT INTO v2_send_receipts (
+            to_stream_id, request_id, receipt_id, state, optimistic_id,
+            wire_digest, display_text, content_kind, attachments_json,
+            delivery, submission_confirmed, reason, attempts, created_at,
+            from_stream_id, actor_stream_id, actor_trusted
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            to_stream_id, request_id, receipt_id, state, optimistic_id or None,
+            wire_digest, str(display_text or ""), str(content_kind),
+            attachments_json, str(delivery or state),
+            1 if submission_confirmed else 0, reason or None, attempts, created_at,
+            _safe_provenance_id(from_stream_id),
+            _safe_provenance_id(actor_stream_id),
+            1 if actor_trusted else 0,
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT rowid AS receipt_rowid, * FROM v2_send_receipts WHERE rowid=?",
+        (int(cur.lastrowid),),
+    ).fetchone()
+    assert row is not None
+    return _send_receipt_row(row, include_rowid=True)
 
 
 # v1's `sessions` DDL plus v2's nullable title. Existing databases receive the
@@ -3612,36 +3650,22 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         )
         timestamp = created_at or iso_now()
 
+        # A peer send is pasted with a `[from …]` envelope but the normalizer
+        # stores only the header-stripped payload as the event text; hash the
+        # stripped basis so both the operator (unstamped) and peer (stamped→TELL)
+        # events correlate here.
+        wire_digest = _send_wire_digest(strip_peer_delivery_envelope(str(wire_text or "")))
+
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
-            cur = conn.execute(
-                """INSERT INTO v2_send_receipts (
-                    to_stream_id, request_id, receipt_id, state, optimistic_id,
-                    wire_digest, display_text, content_kind, attachments_json,
-                    delivery, submission_confirmed, reason, attempts, created_at,
-                    from_stream_id, actor_stream_id, actor_trusted
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    target, request, receipt, state, optimistic_id or None,
-                    # A peer send is pasted with a `[from …]` envelope but the
-                    # normalizer stores only the header-stripped payload as the
-                    # event text; hash the stripped basis so both the operator
-                    # (unstamped) and peer (stamped→TELL) events correlate here.
-                    _send_wire_digest(strip_peer_delivery_envelope(str(wire_text or ""))),
-                    str(display_text or ""), str(kind),
-                    encoded_attachments, str(delivery or state),
-                    1 if submission_confirmed else 0, reason or None, attempts, timestamp,
-                    _safe_provenance_id(from_stream_id),
-                    _safe_provenance_id(actor_stream_id),
-                    1 if actor_trusted else 0,
-                ),
+            return _insert_send_receipt_row(
+                conn, to_stream_id=target, request_id=request, receipt_id=receipt,
+                state=state, optimistic_id=optimistic_id, wire_digest=wire_digest,
+                display_text=display_text, content_kind=kind,
+                attachments_json=encoded_attachments, delivery=delivery,
+                submission_confirmed=submission_confirmed, reason=reason,
+                attempts=attempts, created_at=timestamp, from_stream_id=from_stream_id,
+                actor_stream_id=actor_stream_id, actor_trusted=actor_trusted,
             )
-            conn.commit()
-            row = conn.execute(
-                "SELECT rowid AS receipt_rowid, * FROM v2_send_receipts WHERE rowid=?",
-                (int(cur.lastrowid),),
-            ).fetchone()
-            assert row is not None
-            return _send_receipt_row(row, include_rowid=True)
 
         return await self.submit(_op)
 
@@ -3663,6 +3687,100 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
 
         return await self.submit(_op)
 
+    async def claim_or_coalesce_send(
+        self,
+        *,
+        to_stream_id: str,
+        request_id: str,
+        receipt_id: str,
+        wire_text: str,
+        display_text: str,
+        attachments: list[dict[str, Any]],
+        optimistic_id: str | None,
+        window_floor: str,
+        from_stream_id: str | None = None,
+        actor_stream_id: str | None = None,
+        actor_trusted: bool = False,
+        content_kind: str | None = None,
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically decide winner-vs-coalesced for one logical send, in ONE
+        serialized op so concurrent retries cannot both race past the check.
+
+        Returns ``{"coalesced": True, "winner": <existing receipt>}`` when a prior
+        NON-failed receipt already carries this send's delivery, else
+        ``{"coalesced": False, "receipt": <the freshly appended 'accepted' claim>}``.
+
+        A prior receipt matches when it shares this EXACT ``request_id`` (a
+        reconnect replay reuses it — collapse at any age) OR the client's logical
+        identity (same ``to_stream_id`` + ``actor_stream_id`` + ``optimistic_id`` +
+        ``display_text`` + canonical ``attachments_json``) and was created
+        at/after ``window_floor``. The logical payload stays stable through
+        materialization; ``wire_digest`` separately correlates provider events.
+        Failed (``not_landed``) receipts never match, so a genuinely failed attempt stays
+        retryable; and an empty ``optimistic_id`` disables the logical-identity arm
+        (direct in-process callers keep today's request_id-only behavior).
+        """
+        target = str(to_stream_id or "").strip()
+        request = str(request_id or "").strip()
+        receipt = str(receipt_id or "").strip()
+        if not target or not request or not receipt:
+            raise ValueError("invalid_send_receipt_key")
+        opt = str(optimistic_id or "").strip()
+        actor = _safe_provenance_id(actor_stream_id)
+        wire_digest = _send_wire_digest(strip_peer_delivery_envelope(str(wire_text or "")))
+        normalized_attachments = [dict(item) for item in attachments if isinstance(item, dict)]
+        kind = content_kind or (
+            "image_and_text" if normalized_attachments and display_text else
+            "attachment_only" if normalized_attachments else "text"
+        )
+        encoded_attachments = json.dumps(
+            normalized_attachments, separators=(",", ":"), sort_keys=True,
+        )
+        timestamp = created_at or iso_now()
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            # Select the NEWEST receipt for this send's identity regardless of
+            # state, so the latest outcome is authoritative: a later not_landed
+            # supersedes an earlier 'accepted' preclaim (the claim is appended
+            # before materialization/paste). Coalescing then requires that latest
+            # outcome to be a live/landed delivery, so a send that actually FAILED
+            # stays retryable (a rotated retry re-delivers instead of coalescing
+            # onto its own stale accepted claim). A prior attempt that truly landed
+            # would already have made THIS attempt coalesce and append a mirrored
+            # landed row, so 'newest is not_landed' reliably means not-yet-landed.
+            latest = conn.execute(
+                """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
+                   WHERE to_stream_id=?
+                     AND (
+                           request_id=?
+                        OR (? != '' AND optimistic_id=? AND display_text=?
+                            AND attachments_json=?
+                            AND actor_stream_id IS ? AND created_at >= ?)
+                     )
+                   ORDER BY rowid DESC LIMIT 1""",
+                (target, request, opt, opt, str(display_text or ""),
+                 encoded_attachments, actor, window_floor),
+            ).fetchone()
+            if (
+                latest is not None
+                and str(latest["state"]) != "not_landed"
+                and str(latest["delivery"]) != "not_landed"
+            ):
+                return {"coalesced": True, "winner": _send_receipt_row(latest, include_rowid=True)}
+            row = _insert_send_receipt_row(
+                conn, to_stream_id=target, request_id=request, receipt_id=receipt,
+                state="accepted", optimistic_id=opt or None, wire_digest=wire_digest,
+                display_text=display_text, content_kind=kind,
+                attachments_json=encoded_attachments, delivery="accepted",
+                submission_confirmed=False, reason=None, attempts=None,
+                created_at=timestamp, from_stream_id=from_stream_id,
+                actor_stream_id=actor_stream_id, actor_trusted=actor_trusted,
+            )
+            return {"coalesced": False, "receipt": row}
+
+        return await self.submit(_op)
+
     async def stamp_event_with_send_receipt(self, event: dict[str, Any]) -> dict[str, Any]:
         """Stamp one existing USER or peer-TELL event from its send-receipt projection.
 
@@ -3673,6 +3791,8 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         the raw staged attachment path.
         """
         payload = dict(event)
+        # This proof field is owned by ingress, never trusted from a producer.
+        payload.pop("provider_text_digest", None)
         kind = str(payload.get("kind") or "")
         stream_id = str(payload.get("stream_id") or "").strip()
         text = str(payload.get("text") or "")
@@ -3758,6 +3878,8 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         # before this projection, so replacing that presentation text preserves
         # dedupe while preventing the path from entering public chat history.
         display_text = str(receipt.pop("display_text", ""))
+        if display_text != text:
+            payload["provider_text_digest"] = provider_text_digest(text)
         payload["text"] = display_text
         # A peer TELL renders from raw.peer_payload; restore the clean display
         # text there too so an attachment send's staged path never surfaces.
@@ -3936,6 +4058,44 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                          (json.dumps({**binding, "transcript": transcript}, separators=(",", ":")), host, name))
             conn.commit()
             return True
+        return await self.submit(op)
+
+    async def rebind_observer_pane(
+        self, stream_id: str, *, generation: str, pane_pid: str,
+        pane_started_at: str, expected: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Retarget a PROVEN binding's stale pane PID/start to the in-place
+        replacement process within the SAME generation, keeping every other
+        proven field (generation, executable, transcript). Returns the new
+        binding on success, else None.
+
+        The atomic CAS against ``expected`` is the only guarantee here: it fails
+        closed if the binding changed underneath (a concurrent rebind), if the
+        row is no longer open or on a different generation, if the durable row's
+        pane_pid is not already the replacement pane (so a rebind can only follow
+        the reconciler, never lead it), or if the binding has no proven transcript
+        anchor. Same-rollout identity is the caller's proof (see
+        ``Ingest._maybe_rebind_observer_pane``)."""
+        host, _, name = stream_id.partition(":")
+        def op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = _session_row(conn, conn.execute(
+                "SELECT * FROM sessions WHERE host=? AND session_name=? AND status='open'",
+                (host, name),
+            ).fetchone())
+            if not row or row.get("session_generation") != generation or str(row.get("pane_pid") or "") != pane_pid:
+                return None
+            binding = row.get("observer_binding")
+            if not isinstance(binding, dict) or binding != expected or binding.get("generation") != generation:
+                return None
+            if not isinstance(binding.get("transcript"), dict):
+                return None
+            if binding.get("pane_pid") == pane_pid and binding.get("pane_started_at") == pane_started_at:
+                return None
+            updated = {**binding, "pane_pid": pane_pid, "pane_started_at": pane_started_at}
+            conn.execute("UPDATE sessions SET observer_binding=? WHERE host=? AND session_name=?",
+                         (json.dumps(updated, separators=(",", ":")), host, name))
+            conn.commit()
+            return updated
         return await self.submit(op)
 
     async def count_session_events(

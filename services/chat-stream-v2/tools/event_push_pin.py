@@ -24,6 +24,7 @@ if str(SERVICE_DIR) not in sys.path:
 
 from store import Store  # noqa: E402
 from machines import configured_host_names  # noqa: E402
+from deploy.deploy import DeployError, _load_gate_evidence  # noqa: E402
 
 
 SATELLITE_HOSTS = configured_host_names("PENTACLE_SATELLITE_HOSTS", remote_only=True)
@@ -31,16 +32,10 @@ SATELLITE_READBACK_INTERVAL_SECONDS = 2
 SATELLITE_READBACK_DEADLINE_SECONDS = 90
 
 
-def _require_gate_passed_sha(candidate: str) -> None:
-    result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "tools" / "merge_gate.py"), "verify-tag", "--candidate", candidate],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or "candidate has no verified v2-gate tag")
+def _require_gate_evidence(path: Path | None, candidate: str) -> None:
+    if path is None:
+        raise ValueError("--gate-evidence is required for a nonempty release target")
+    _load_gate_evidence(path, candidate)
 
 
 def _smoke_quota_note(smoke: subprocess.CompletedProcess[str]) -> list[dict]:
@@ -69,16 +64,21 @@ def _smoke_quota_note(smoke: subprocess.CompletedProcess[str]) -> list[dict]:
     raise RuntimeError(f"post-deploy spawn smoke failed: {detail}")
 
 
-async def _run(db: str, *, stage: str | None, rollback: bool) -> dict[str, object]:
+async def _run(
+    db: str, *, stage: str | None, rollback: bool, gate_evidence: Path | None = None,
+) -> dict[str, object]:
     if not rollback and not SATELLITE_HOSTS:
         raise ValueError("no satellite hosts configured; refusing to change the target pin")
+    if not rollback:
+        assert stage is not None
+        _require_gate_evidence(gate_evidence, stage)
     store = Store(db)
     store.start()
     try:
         if rollback:
             previous = await store.get("event_push.target_sha.previous")
-            if previous is not None:
-                _require_gate_passed_sha(previous)
+            if previous:
+                _require_gate_evidence(gate_evidence, previous)
             restored = await store.rollback_event_push_target_sha()
             return {
                 "action": "rollback",
@@ -143,16 +143,18 @@ async def _run(db: str, *, stage: str | None, rollback: bool) -> dict[str, objec
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", required=True, help="path to the deployed v2 sessions.db")
+    parser.add_argument("--gate-evidence", type=Path,
+                        help="canonical local merge evidence for the exact stage or rollback SHA")
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--stage", metavar="SHA", help="exact deployed 40-character SHA")
     action.add_argument("--rollback", action="store_true", help="restore the captured preceding pin")
     args = parser.parse_args(argv)
-    if args.stage is not None:
-        try:
-            _require_gate_passed_sha(args.stage)
-        except RuntimeError as exc:
-            parser.error(str(exc))
-    print(json.dumps(asyncio.run(_run(args.db, stage=args.stage, rollback=args.rollback)), sort_keys=True))
+    try:
+        result = asyncio.run(_run(args.db, stage=args.stage, rollback=args.rollback,
+                                  gate_evidence=args.gate_evidence))
+    except (DeployError, ValueError) as exc:
+        parser.error(str(exc))
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 

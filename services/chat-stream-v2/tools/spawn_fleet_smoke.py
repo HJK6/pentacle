@@ -153,6 +153,9 @@ def run_cell(
         if catalog.get("type") != "spawn_catalog_get.ok":
             raise RuntimeError(str(catalog))
         model, effort = catalog["profiles"]["desktop_manual"][provider]
+        stage = "spawn"
+        if inject_stage == stage:
+            raise RuntimeError("forced failure")
         marker = f"PENTACLE_FLEET_SMOKE_{uuid.uuid4().hex}"
         # The legacy runtime fallback is allowed only for names derived from
         # this activation's idempotency UUID.  Keep this construction adjacent

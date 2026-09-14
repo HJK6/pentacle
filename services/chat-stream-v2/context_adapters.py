@@ -33,8 +33,6 @@ _CLAUDE_MODEL_WINDOWS = {
 }
 
 _DEFAULT_CLAUDE_WINDOW = 1_000_000
-_CODEX_ADVISORY_PCT = 0.50
-_CODEX_HANDOFF_PCT = 0.75
 
 
 @dataclass(frozen=True)
@@ -71,20 +69,23 @@ def _context_level(tokens: int, advisory: int, handoff: int) -> str:
 def context_fields(provider: str, reading: ContextReading) -> tuple[int, int, str]:
     """Translate one reading into the four persisted v2 context dimensions.
 
-    Thresholds deliberately match the public threshold configuration. Codex
-    uses its rollout-reported window at 50/75%; Claude uses its model window
-    and the capped 70/85% thresholds.
+    Codex compacts its own context automatically, so it receives no routine
+    context-threshold handoff/advisory pressure: its level is always "none"
+    (never advisory/handoff). The real tokens and window are still reported so
+    the context badge keeps displaying usage, but "none" suppresses the context
+    nudge (``ledger._context_fresh``), prevents arming a nudge basis
+    (``store.update_context``), and keeps the status card from showing
+    handoff-level pressure. Deliberate ``spawn --handoff``, scheduled and
+    recovery handoff are independent of this level. Claude is unchanged: it uses
+    its model window and the capped 70/85% thresholds.
+    See spec_pentacle__codex_context_handoff_policy_2026_09.
     """
     tokens = int(reading.tokens)
     if provider == "codex":
         window = int(reading.model_context_window or 0)
         if window <= 0:
             raise ValueError("Codex context reading lacks a positive window")
-        return tokens, window, _context_level(
-            tokens,
-            round(_CODEX_ADVISORY_PCT * window),
-            round(_CODEX_HANDOFF_PCT * window),
-        )
+        return tokens, window, "none"
     if provider == "claude":
         window = _claude_window(reading.model)
         advisory = min(

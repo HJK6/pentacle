@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import hashlib
 import re
 import time
 from typing import Any
@@ -44,6 +45,23 @@ def normalize_submission_text(text: object) -> str:
     cleaned = _ANSI_RE.sub("", str(text or "")).replace("\r", "\n").replace("\u00a0", " ")
     lines = [line.rstrip() for line in cleaned.split("\n")]
     return re.sub(r"\s+", " ", "\n".join(lines).strip()).strip()
+
+
+def provider_text_digest(text: object) -> str:
+    """Bind proof to normalized provider content without retaining staged paths."""
+    return hashlib.sha256(normalize_submission_text(text).encode("utf-8")).hexdigest()
+
+
+def submission_text_matches(event: dict[str, Any], expected_text: str) -> bool:
+    """Projected events prove original provider content, never caption equality."""
+    if "provider_text_digest" in event:
+        digest = event["provider_text_digest"]
+        return (
+            isinstance(digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+            and digest == provider_text_digest(expected_text)
+        )
+    return normalize_submission_text(event.get("text")) == normalize_submission_text(expected_text)
 
 
 @dataclass(frozen=True)
@@ -195,14 +213,13 @@ class DurableUserEventProof:
         )
         if state != "reachable":
             return EventProof("unreachable", stream_id, watermark.daemon_seq, reason=reason)
-        expected = normalize_submission_text(expected_text)
         for event in events:
             event_id = self._seq(event)
             if (
                 event_id > watermark.daemon_seq
                 and str(event.get("stream_id") or stream_id) == stream_id
                 and str(event.get("kind") or "") == "USER"
-                and normalize_submission_text(event.get("text")) == expected
+                and submission_text_matches(event, expected_text)
             ):
                 return EventProof(
                     "proven",

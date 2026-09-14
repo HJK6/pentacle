@@ -165,11 +165,6 @@ class EventPush:
         pinned = await self.store.get("event_push.target_sha")
         return pinned.strip() if pinned else None
 
-    async def _kv_target_sha(self) -> str | None:
-        """Read the durable pin for the reconciler drift check."""
-        pinned = await self.store.get("event_push.target_sha")
-        return pinned.strip() if pinned else None
-
     def set_daemon_sha(self, daemon_sha: str) -> None:
         """Record the one boot-time checkout SHA captured by ``main`` off-loop."""
         self.daemon_sha = daemon_sha.strip()
@@ -547,7 +542,7 @@ class EventPush:
         """Alert (never repair) when the durable pin differs from boot-time HEAD."""
         if _FULL_GIT_SHA.fullmatch(self.daemon_sha) is None:
             return False
-        pinned = await self._kv_target_sha()
+        pinned = await self._target_sha()
         if pinned == self.daemon_sha:
             return False
         self._maybe_alert("pin_drift", "daemon", pinned_sha=pinned, daemon_sha=self.daemon_sha)

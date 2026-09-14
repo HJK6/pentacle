@@ -70,6 +70,7 @@ from .wsclient import (
     stream_token_from_env,
     tell_once,
     upload_blob_once,
+    send_image_once,
     upload_prompt_blob_once,
 )
 
@@ -3513,6 +3514,130 @@ def _best_effort_record_report_rejection(status: str, msg_id: int | None) -> Non
         pass
 
 
+_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+)
+# Mirror the daemon's ATTACHMENT_MAX_BYTES (services/chat-stream-v2/comms.py) so
+# oversize is caught client-side before an upload, not after.
+SEND_IMAGE_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _detect_image_mime(data: bytes) -> str | None:
+    for signature, mime in _IMAGE_MAGIC:
+        if data.startswith(signature):
+            return mime
+    return None
+
+
+def send_image(args: argparse.Namespace) -> int:
+    """Attach a local PNG/JPEG to your OWN conversation so the operator sees the
+    real image in Pentacle chat (mobile + desktop), openable in the viewer.
+
+    Exit codes: 0 delivered, 1 send error, 2 bad input, 66 not authorized."""
+    from_stream_id = getattr(args, "from_stream_id", None) or env_stream_id()
+    if not from_stream_id:
+        print(
+            "agent-orch send-image: cannot determine your stream id; run inside a "
+            "seat (AGENT_ORCH_STREAM_ID) or pass --from-stream-id",
+            file=sys.stderr,
+        )
+        return 2
+    path = Path(args.path).expanduser()
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        print(f"agent-orch send-image: file not found: {path}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"agent-orch send-image: cannot read {path}: {exc}", file=sys.stderr)
+        return 2
+    if not data:
+        print("agent-orch send-image: file is empty", file=sys.stderr)
+        return 2
+    mime = _detect_image_mime(data)
+    if mime is None:
+        print(
+            "agent-orch send-image: unsupported image type (only PNG and JPEG are accepted)",
+            file=sys.stderr,
+        )
+        return 2
+    if len(data) > SEND_IMAGE_MAX_BYTES:
+        print(
+            f"agent-orch send-image: image is {len(data)} bytes; the limit is "
+            f"{SEND_IMAGE_MAX_BYTES} bytes",
+            file=sys.stderr,
+        )
+        return 2
+    source_sha = hashlib.sha256(data).hexdigest()
+    caption = (getattr(args, "caption", "") or "").strip()
+    timeout = float(args.timeout)
+    config = load_config()
+    try:
+        upload = asyncio.run(upload_blob_once(config, data, timeout=timeout))
+    except Exception as exc:  # noqa: BLE001 - surface a stable transport error
+        print(f"agent-orch send-image: blob upload failed: {exc}", file=sys.stderr)
+        return 1
+    if upload.get("type") != "upload_blob.ok":
+        print(
+            f"agent-orch send-image: blob upload failed: "
+            f"{upload.get('error_code') or upload.get('type')}",
+            file=sys.stderr,
+        )
+        return 1
+    blob_sha = str(upload.get("blob_sha") or source_sha)
+    payload: dict[str, object] = {
+        "type": "send_image",
+        "from_stream_id": from_stream_id,
+        "caller_stream_id": from_stream_id,
+        "attachments": [{"key": blob_sha, "mime": mime, "bytes": len(data)}],
+        "caption": caption,
+    }
+    try:
+        response = asyncio.run(send_image_once(config, payload, timeout=timeout))
+    except PermissionError as exc:
+        print(f"agent-orch send-image: not authorized: {exc}", file=sys.stderr)
+        return 66
+    except Exception as exc:  # noqa: BLE001 - stable transport error surface
+        print(f"agent-orch send-image: {exc}", file=sys.stderr)
+        return 1
+    if response.get("type") == "send_image.ok":
+        # `event_id` is the durable transcript row — the retrievable delivery
+        # receipt (survives reconnect/history).
+        print(json.dumps(
+            {
+                "ok": True,
+                "stream_id": response.get("stream_id"),
+                "event_id": response.get("event_id"),
+                "blob_sha": blob_sha,
+                "content_kind": response.get("content_kind"),
+                "duplicate": response.get("duplicate", False),
+                "source_path": str(path),
+                "source_sha256": source_sha,
+                "bytes": len(data),
+            },
+            indent=2,
+        ))
+        return 0
+    error_code = response.get("error_code")
+    print(json.dumps(
+        {
+            "ok": False,
+            "type": response.get("type"),
+            "error_code": error_code,
+            "error": response.get("error"),
+        },
+        indent=2,
+    ), file=sys.stderr)
+    # The daemon returns authorization failures as a typed send_image.error
+    # response (not a raised PermissionError), so map those codes to exit 66;
+    # everything else is a generic send error (exit 1). Bad local input already
+    # returned 2 before any RPC.
+    if error_code in {"stream_ownership_unverified", "authentication_required"}:
+        return 66
+    return 1
+
+
 def report(args: argparse.Namespace) -> int:
     if getattr(args, "terminate", False) and args.status == "progress":
         print("agent-orch report: validation failed: report: --terminate is incompatible with --status=progress", file=sys.stderr)
@@ -4466,6 +4591,22 @@ def build_parser() -> argparse.ArgumentParser:
     send_parser.add_argument("msg_id", type=int)
     send_parser.add_argument("prompt_text")
     send_parser.set_defaults(func=send)
+
+    send_image_parser = subparsers.add_parser(
+        "send-image",
+        description=(
+            "Attach a local PNG/JPEG to your OWN conversation so the operator sees "
+            "the real image in Pentacle chat (mobile + desktop) and can open it in "
+            "the image viewer. Authenticated by your seat's stream token; the image "
+            "posts as your (the agent's) own message. Prints the receipt "
+            "(event id, blob sha, source sha256)."
+        ),
+    )
+    send_image_parser.add_argument("path", help="Path to a local PNG or JPEG image (<=25 MiB).")
+    send_image_parser.add_argument("--caption", default="", help="Optional short caption shown with the image.")
+    send_image_parser.add_argument("--from-stream-id", dest="from_stream_id", help="Override the caller stream id (defaults to your seat env).")
+    send_image_parser.add_argument("--timeout", type=float, default=30.0)
+    send_image_parser.set_defaults(func=send_image)
 
     send_receipt_parser = subparsers.add_parser(
         "send-receipt", help="read one durable latest receipt for a sent request",

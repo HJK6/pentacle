@@ -39,6 +39,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
 from claude_jsonl_norm import strip_peer_delivery_envelope
@@ -46,6 +47,7 @@ from boot_ready import (
     CODEX_RESET_BLOCKED,
     DRAFT_PREDICATES,
     SUBMIT_PREDICATES,
+    _last_claude_input_start,
     claude_prompt_in_active_draft,
     codex_prompt_in_active_draft,
     codex_reset_interstitial_visible,
@@ -61,6 +63,7 @@ from submission_events import (
     EventProof,
     EventWatermark,
     PROOF_FAST_WAIT_S,
+    submission_text_matches,
 )
 from v2_runtime import iso_now
 
@@ -104,6 +107,19 @@ def _verified_operator_provenance(msg: dict[str, Any]) -> bool:
 #: the message left the draft.
 SUBMISSION_EVIDENCE_TIMEOUT_S = 4.0
 SUBMISSION_EVIDENCE_POLL_S = 0.25
+#: Recency horizon for collapsing a logical send's retries into one delivery.
+#: Sized to the desktop client's own optimistic-reconcile horizon
+#: (OPTIMISTIC_RECONCILE_WINDOW_MS = 60_000 in the packaged renderer): the span
+#: within which the client treats an optimistic send as the same in-flight
+#: delivery to reconcile against one server echo. Rotated-request_id retries and
+#: prompt reconnect replays of ONE logical send fall inside it; beyond it the
+#: client has settled the send, so a later identical-text message — including one
+#: after a client restart that reset its optimistic counter to _1 — is a NEW
+#: logical send and is delivered. The old client sends no client-generation token
+#: on the wire (only stream/text/request_id/optimistic_id; actor is the stable
+#: operator principal), so this recency bound is the only available discriminator
+#: between a retry and a post-restart identical send.
+SEND_DEDUPE_WINDOW_S = 60.0
 
 
 def watermark_fields(watermark: EventWatermark) -> dict[str, Any]:
@@ -1119,7 +1135,12 @@ class Comms:
                 else submitted(pane, body)
             ):
                 return True
-            if provider == "codex" and await self._submission_event_proven(
+            # Positive durable-event proof of native-queue/submission acceptance.
+            # For claude this matches the native queued-command USER event
+            # (claude_jsonl_norm subtype queued-command), the direct analogue of
+            # codex's native-queue proof — a genuinely-queued message becomes a
+            # confirmed landing rather than an inferred committed_pending_proof.
+            if provider in ("codex", "claude") and await self._submission_event_proven(
                 stream_id, body, watermark,
             ):
                 return True
@@ -1144,6 +1165,19 @@ class Comms:
         return max((self._daemon_seq(event) for event in tail), default=0)
 
     @staticmethod
+    def _claude_commit_mode(pane: str, mode: str | None) -> str | None:
+        """Positive-evidence gate for treating a claude send that has left the
+        editable composer as committed to the native queue. A live claude composer
+        (a ``❯`` input caret) must be present; a stale/dead or non-provider pane has
+        no caret, so the paste was NOT committed and must classify not_landed
+        (reason ``no_claude_composer``) instead of a silent committed_pending_proof.
+        Origin: spec_pentacle__mobile_send_status_reconcile_2026_09 QA — absence of
+        an active draft alone is not proof of commit."""
+        if _last_claude_input_start(pane.splitlines()) is not None:
+            return mode
+        return mode or "no_claude_composer"
+
+    @staticmethod
     def _daemon_seq(event: dict[str, Any]) -> int:
         try:
             return max(0, int(event.get("daemon_seq") or 0))
@@ -1156,6 +1190,8 @@ class Comms:
             return False
         if str(event.get("kind") or "") not in {"USER", "TELL"}:
             return False
+        if "provider_text_digest" in event:
+            return submission_text_matches(event, strip_peer_delivery_envelope(body))
         text = event.get("text")
         if not isinstance(text, str):
             return False
@@ -1321,7 +1357,7 @@ class Comms:
             return confirmed, 2, False, provider, pane_mode_reason or enter_mode_reason
 
         before = before if before is not None else await tmux.capture(name)
-        watermark = await self._submission_watermark(target) if provider == "codex" else 0
+        watermark = await self._submission_watermark(target) if provider in ("codex", "claude") else 0
         pane_mode_reason = await tmux.paste(name, plan.wire_text)
         confirmed = await self._submission_evidence(
             tmux, name, plan.wire_text, provider, baseline=before,
@@ -1332,17 +1368,20 @@ class Comms:
         if provider == "claude":
             pane = await tmux.capture(name)
             if not claude_prompt_in_active_draft(pane, plan.wire_text):
-                return False, 1, False, provider, pane_mode_reason
+                return False, 1, False, provider, self._claude_commit_mode(pane, pane_mode_reason)
             enter_mode_reason = await self._send_enter(tmux, name)
             confirmed = await self._submission_evidence(
                 tmux, name, plan.wire_text, provider, baseline=before,
+                stream_id=target, watermark=watermark,
             )
             if confirmed:
                 return True, 2, False, provider, None
             pane = await tmux.capture(name)
-            return False, 2, claude_prompt_in_active_draft(pane, plan.wire_text), provider, (
-                pane_mode_reason or enter_mode_reason
-            )
+            in_draft = claude_prompt_in_active_draft(pane, plan.wire_text)
+            mode = pane_mode_reason or enter_mode_reason
+            if not in_draft:
+                mode = self._claude_commit_mode(pane, mode)
+            return False, 2, in_draft, provider, mode
         if provider != "codex":
             enter_mode_reason = await self._send_enter(tmux, name)
             confirmed = await self._submission_evidence(
@@ -1516,7 +1555,18 @@ class Comms:
                 state="landed", delivery="landed", submission_confirmed=True,
                 attempts=attempts,
             )
-        if provider != "codex" or active_draft:
+        # A native-queue TUI (claude, codex — the SUBMIT_PREDICATES providers) queues
+        # mid-turn input natively: once the brief has left the active draft, it is
+        # committed to the target (submitted or queued), even if submission proof has
+        # not surfaced within the evidence window. It is a true not_landed only when
+        # the brief is still sitting in the active draft, the pane could not accept the
+        # input at all (pane_mode_reason set, e.g. an unclearable copy-mode), or the
+        # provider has no native-queue evidence. Classifying a genuinely-queued claude
+        # send as not_landed was the false "send failed" in
+        # spec_pentacle__mobile_send_status_reconcile_2026_09. (Codex reaches this point
+        # with pane_mode_reason unset — an unsafe pane raises earlier — so its
+        # classification is unchanged.)
+        if active_draft or pane_mode_reason is not None or provider not in SUBMIT_PREDICATES:
             return await self._send_result(
                 plan, request_id=request_id, receipt_id=receipt_id,
                 state="not_landed", delivery="not_landed", submission_confirmed=False,
@@ -1529,6 +1579,62 @@ class Comms:
             reason=reason, attempts=attempts,
             action_committed=True, confirmation_pending=True,
         )
+
+    @staticmethod
+    def _send_dedupe_window_floor() -> str:
+        """The lower ISO-UTC bound (inclusive) of the send-idempotency recency
+        window: receipts older than this no longer collapse a same-identity send,
+        so a post-restart identical message is delivered."""
+        floor = time.time() - SEND_DEDUPE_WINDOW_S
+        return datetime.fromtimestamp(floor, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    async def _coalesced_send_result(
+        self, plan: SendPlan, *, request_id: str, receipt_id: str, winner: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve a retry that coalesced onto an already-claimed logical send.
+
+        Appends THIS request_id's own correlated receipt mirroring the winner's
+        delivery (so a client polling this request_id reconciles from
+        retry-eligible to the winner's state) with a ``coalesced_replay:<winner>``
+        reason pointing at the replayed delivery, and returns a do-not-resubmit
+        result. No pane paste is issued — the physical delivery already happened
+        (or is in flight) under the winner's request_id.
+        """
+        winner_state = str(winner.get("state") or "accepted")
+        winner_delivery = str(winner.get("delivery") or winner_state)
+        winner_confirmed = bool(winner.get("submission_confirmed"))
+        winner_request_id = str(winner.get("request_id") or request_id)
+        winner_attempts = winner.get("attempts")
+        winner_attempts = winner_attempts if isinstance(winner_attempts, int) else None
+        await self._append_send_receipt(
+            plan, request_id=request_id, receipt_id=receipt_id,
+            state=winner_state, delivery=winner_delivery,
+            submission_confirmed=winner_confirmed,
+            reason=f"coalesced_replay:{winner_request_id}",
+            attempts=winner_attempts,
+        )
+        target = str(plan.route["final_target"])
+        host, name = self.sessions.split(target)
+        result: dict[str, Any] = {
+            "type": "send.result", "host": host, "session_name": name,
+            "msg_id": plan.message.get("msg_id"), "to_stream_id": target,
+            "original_target": plan.route["original_target"],
+            "forwarded": plan.route["forwarded"], "hops": plan.route["hops"],
+            "receipt_id": str(winner.get("receipt_id") or receipt_id),
+            "delivery": winner_delivery,
+            "submission_confirmed": winner_confirmed,
+            "coalesced": True,
+            "do_not_resubmit": True,
+            "reconcile": "send_receipt",
+            "reconcile_command": f"agent-orch send-receipt {target} {winner_request_id}",
+            "retry_guidance": (
+                "Duplicate of an in-flight or landed send (same logical message); "
+                "reconcile with the existing request_id. DO NOT RESUBMIT."
+            ),
+        }
+        if winner_confirmed and winner_attempts is not None:
+            result["attempt"] = winner_attempts
+        return result
 
     async def send(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Append acceptance before materialization, then append the known result."""
@@ -1556,14 +1662,30 @@ class Comms:
             msg_id=msg.get("msg_id", 0), existing_reviewer=True,
         )
         receipt_id = f"receipt-{uuid.uuid4()}"
-        await self._append_send_receipt(
-            plan,
+        # Atomic idempotency claim: collapse retries of ONE logical send (the
+        # client keeps optimistic_id stable and rotates only request_id) into a
+        # single physical delivery. The check + 'accepted' claim run in one
+        # serialized store op so two concurrent retries cannot both win. A
+        # coalesced retry appends its OWN correlated receipt (so its request_id
+        # still resolves) pointing at the winner's delivery, and never pastes.
+        from_stream_id, actor_stream_id, actor_trusted = self._send_provenance(plan.message)
+        claim = await self.store.claim_or_coalesce_send(
+            to_stream_id=target,
             request_id=request_id,
             receipt_id=receipt_id,
-            state="accepted",
-            delivery="accepted",
-            submission_confirmed=False,
+            wire_text=plan.wire_text,
+            display_text=plan.display_text,
+            attachments=plan.attachments,
+            optimistic_id=plan.optimistic_id,
+            window_floor=self._send_dedupe_window_floor(),
+            from_stream_id=from_stream_id,
+            actor_stream_id=actor_stream_id,
+            actor_trusted=actor_trusted,
         )
+        if claim.get("coalesced"):
+            return await self._coalesced_send_result(
+                plan, request_id=request_id, receipt_id=receipt_id, winner=claim["winner"],
+            )
         try:
             materialized = await self._materialize_send_plan(plan)
         except VerbError as exc:
@@ -1572,7 +1694,113 @@ class Comms:
                 state="not_landed", delivery="not_landed", submission_confirmed=False,
                 reason=str(exc.code),
             )
+        if materialized.wire_text != plan.wire_text:
+            # Provider ingestion can precede submission proof. Publish the final
+            # wire correlation before any paste so that first USER already has
+            # its caption, attachments and optimistic identity. Keep the original
+            # atomic claim and all outcomes as append-only receipt history.
+            await self._append_send_receipt(
+                materialized, request_id=request_id, receipt_id=receipt_id,
+                state="accepted", delivery="accepted", submission_confirmed=False,
+            )
         return await self._submit_send_plan(
             materialized, request_id=request_id, receipt_id=receipt_id,
             qa_generation=commission["generation"] if commission is not None else None,
         )
+
+    async def post_self_image(
+        self,
+        *,
+        stream_id: str,
+        raw_attachments: Any,
+        caption: str,
+        request_id: str,
+        broadcast: Any,
+        recent_limit: int,
+    ) -> dict[str, Any]:
+        """Attach an already-uploaded image blob to the caller's OWN conversation
+        as an agent-authored (ASSIST) transcript event.
+
+        Reuses ``validate_send_attachments`` + the existing ``ChatAttachment``
+        shape + the blob store (``read_verified``, the same read the operator flow
+        and ``fetch_blob`` use) to prove each blob is really present and within
+        the byte limit. Emits exactly one ``chat.event`` on an assistant-authored
+        event with NO pane injection and NO cross-host materialization, so the
+        operator sees the real image as the agent's own message. Idempotent by
+        ``(stream_id, request_id)``: a retry collides on the durable identity
+        unique index and re-appends nothing, so history/reconnect shows exactly
+        one row. Genuine receipts: a durable ``v2_send_receipts`` row on the first
+        insert plus the returned ``event_id``/``duplicate`` state; validation and
+        blob failures raise :class:`VerbError` (surfaced as ``send_image.error``).
+
+        The caller (server handler) resolves ``stream_id`` from the verified seat
+        token, so a seat can only ever attach to its own conversation.
+        """
+        try:
+            attachments = validate_send_attachments(raw_attachments)
+        except AttachmentValidationError as exc:
+            raise VerbError("attachment_invalid", str(exc)) from exc
+
+        # Prove every referenced blob is actually present and within the limit;
+        # a path or a dangling ref is never treated as a delivered image.
+        blob_store = self.blob_store
+        if blob_store is None or not callable(getattr(blob_store, "read_verified", None)):
+            raise VerbError("attachment_fetch_failed", "blob store unavailable")
+        for attachment in attachments:
+            sha = str(attachment["key"])
+            try:
+                await blob_store.read_verified(sha, max_bytes=ATTACHMENT_MAX_BYTES)
+            except KeyError as exc:
+                raise VerbError("attachment_missing", f"blob {sha} was not uploaded") from exc
+            except ValueError as exc:
+                raise VerbError("attachment_invalid", str(exc)) from exc
+            except Exception as exc:  # noqa: BLE001 - stable public error surface
+                raise VerbError("attachment_fetch_failed", str(exc)) from exc
+
+        host, name = self.sessions.split(stream_id)
+        row = self.sessions.get(stream_id) or await self.store.fetch_session(host, name) or {}
+        caption = (caption or "").strip()
+        content_kind = "image_and_text" if caption else "attachment_only"
+        event = {
+            "stream_id": stream_id,
+            "host": host,
+            "session_name": name,
+            "session_id": str(row.get("session_id") or row.get("created_at") or ""),
+            "provider": str(row.get("provider") or ""),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "kind": "ASSIST",
+            "text": caption,
+            "attachments": attachments,
+            "attachment_count": len(attachments),
+            "content_kind": content_kind,
+            "raw": {"source": "agent_image", "request_id": request_id},
+        }
+        identity = f"send_image:{stream_id}:{request_id}"
+        seq = await self.store.append_session_event(
+            stream_id, event, identity=identity, limit=recent_limit,
+        )
+        blob_shas = [str(item["key"]) for item in attachments]
+        if seq is None:
+            # A durable replay of the same (stream, request_id): the one row
+            # already exists and was already broadcast on its first insert.
+            return {
+                "type": "send_image.ok", "ok": True, "stream_id": stream_id,
+                "event_id": None, "blob_shas": blob_shas,
+                "content_kind": content_kind, "attachment_count": len(attachments),
+                "duplicate": True,
+            }
+        # The durable transcript row (persisted by append_session_event above,
+        # served back by request_stream_events / fetch_session_event_tail and
+        # surviving reconnect) IS the receipt: `event_id` is a retrievable,
+        # single-write record of delivery. We deliberately do NOT write a second
+        # v2_send_receipts row — that would be a separate transaction that could
+        # fail after the row is committed, forcing either a false success (ok with
+        # no retrievable receipt) or a broadcast without a receipt. Binding the
+        # success contract to the one durable event keeps it atomic and honest.
+        await broadcast({"type": "chat.event", "event": {**event, "daemon_seq": seq}})
+        return {
+            "type": "send_image.ok", "ok": True, "stream_id": stream_id,
+            "event_id": seq, "blob_shas": blob_shas,
+            "content_kind": content_kind, "attachment_count": len(attachments),
+            "duplicate": False,
+        }
