@@ -560,10 +560,13 @@ class Notify:
             return None
         producer = str(question.get("producer_stream_id") or "")
         row = self._sessions.get(producer)
-        if not isinstance(row, dict) or not row.get("session_generation"):
+        # The question owns its asking generation. Legacy questions snapshot the
+        # live generation before any awaited selection lookup can replace it.
+        generation = self._stored_generation(question) or (row or {}).get("session_generation")
+        if not generation:
             return None
         return {"schema": "v2_notification_answer_v1", "producer_stream_id": producer,
-                "producer_session_generation": row["session_generation"],
+                "producer_session_generation": generation,
                 "notification_id": question["notification_id"], "question_id": question["question_id"]}
 
     async def _owned_answer(self, record: dict) -> dict | None:
@@ -656,11 +659,14 @@ class Notify:
             await self._answer_delivered(row)
         elif row.get("terminal_at"):
             if row.get("terminal_reason") == "unconfirmed_after_bound":
-                proof = await self._comms.reconcile_notification_answer(
-                    str(row["tell_id"]), owner["producer_stream_id"], owner["producer_session_generation"])
-                if proof is not None and proof.get("reply", {}).get("delivery_status") == "delivered":
-                    await self._outbound.confirm_late_answer(row)
-                    return
+                # Match normal queue delivery: lifecycle ownership spans the
+                # current-generation event lookup and durable promotion.
+                async with self._answer_delivery_lock(row):
+                    proof = await self._comms.reconcile_notification_answer(
+                        str(row["tell_id"]), owner["producer_stream_id"], owner["producer_session_generation"])
+                    if proof is not None and proof.get("reply", {}).get("delivery_status") == "delivered":
+                        await self._outbound.confirm_late_answer(row)
+                        return
             if (record.get("resolution") or {}).get("delivery_status") != "unconfirmed":
                 await self._answer_terminal(row, str(row.get("terminal_reason") or "delivery_failed"),
                                             str(row.get("next_action") or "inspect the original answer"))
@@ -673,11 +679,15 @@ class Notify:
             await self._queue_answer(record)
         self._answer_recovery_after = str(records[-1]["notification_id"]) if len(records) == 200 else ""
 
-    async def _after_resolution(self, record: dict) -> dict | None:
+    async def _after_resolution(self, record: dict, *, request_id: str = "") -> dict | None:
         """Acknowledge saved state; the one durable queue owns all answer input."""
         answer = self._answer_payload(record)
         notification_id = str(record.get("notification_id") or "")
         if answer is not None and notification_id:
+            log.info("answer saved nid=%s request_id=%s saved_at=%s replayed=%s",
+                     notification_id, request_id, record.get("resolved_at"),
+                     bool(record.get("_resolution_replayed")),
+                     extra={"subsystem": "notify", "bug_ref": "notification_answer_disconnect_delivery_2026_09"})
             await self._db.call("answer_agent_question_for_notification", notification_id, answer)
             self._wake_await_waiters(notification_id, answer)
             await self._queue_answer(record)
@@ -914,7 +924,7 @@ class Notify:
             choice_text = text if (text is not None and text.strip()) else None
             question, client, already = await self._answer_choice(
                 question, value=None, selections=selections,
-                custom_text=choice_text, note=None, actor_provenance=provenance)
+                custom_text=choice_text, note=None, actor_provenance=provenance, request_id=request_id)
         else:
             if selections:
                 return self._prompt_error(request_id, "prompt_invalid", question_id=qid,
@@ -923,7 +933,7 @@ class Notify:
                 return self._prompt_error(request_id, "prompt_invalid", question_id=qid,
                                           message="text must be a non-empty string")
             question, client, already = await self._answer_free_text(
-                question, text=text, note=None, actor_provenance=provenance
+                question, text=text, note=None, actor_provenance=provenance, request_id=request_id
             )
         response = {"type": "prompt.answer.ok", "request_id": request_id, "ok": True, "question": question}
         if already:
@@ -998,7 +1008,7 @@ class Notify:
 
     # -- prompt answer/cancel helpers (lifted) ----------------------------
 
-    async def _answer_free_text(self, question, *, text, note, actor_provenance):
+    async def _answer_free_text(self, question, *, text, note, actor_provenance, request_id=""):
         qid = str(question.get("question_id") or "")
         nid = str(question.get("notification_id") or "")
         try:
@@ -1008,10 +1018,10 @@ class Notify:
         except NotificationTerminalState:
             return await self._db.call("get_agent_question", qid), None, True
         replayed = bool(record.get("_resolution_replayed"))
-        client = await self._after_resolution(record)
+        client = await self._after_resolution(record, request_id=request_id)
         return await self._db.call("get_agent_question", qid), client, replayed
 
-    async def _answer_choice(self, question, *, value, selections, custom_text, note, actor_provenance):
+    async def _answer_choice(self, question, *, value, selections, custom_text, note, actor_provenance, request_id=""):
         if value is not None and selections is not None:
             raise InvalidNotification("value cannot be combined with selections")
         if value is not None:
@@ -1038,6 +1048,7 @@ class Notify:
             raise InvalidNotification("selections must be option values for the question")
         qid = str(question.get("question_id") or "")
         nid = str(question.get("notification_id") or "")
+        owner = self._answer_owner(question)
         notification = await self._db.call("get_notification", nid)
         if notification is None:
             raise NotificationNotFound(nid)
@@ -1051,14 +1062,14 @@ class Notify:
             record = await self._db.call(
                 "resolve_notification", nid, action_kind=action_kind, by=actor_provenance["by"],
                 actor_provenance=actor_provenance, choice=choice,
-                v2_answer_delivery=self._answer_owner(question), selections=selections, custom_text=custom_text, note=note,
+                v2_answer_delivery=owner, selections=selections, custom_text=custom_text, note=note,
                 action_id=str(action.get("action_id") or "") if action and action.get("action_id") else None,
                 label=str(action.get("label") or "") if action and action.get("label") else None,
                 value=action.get("value") if action is not None and "value" in action else None)
         except NotificationTerminalState:
             return await self._db.call("get_agent_question", qid), None, True
         replayed = bool(record.get("_resolution_replayed"))
-        client = await self._after_resolution(record)
+        client = await self._after_resolution(record, request_id=request_id)
         return await self._db.call("get_agent_question", qid), client, replayed
 
     @staticmethod
@@ -1182,7 +1193,7 @@ class Notify:
             "resolve_open_dedup", producer=producer, dedup_key=dedup_key,
             by=provenance["by"], actor_provenance=provenance,
             expected_notification_id=str(existing["notification_id"]))
-        client_record = await self._after_resolution(record) if record else None
+        client_record = await self._after_resolution(record, request_id=request_id) if record else None
         return {"type": "notification.resolve_by_dedup.ok", "request_id": request_id,
                 "resolved": client_record is not None, "notification": client_record}
 
@@ -1232,6 +1243,7 @@ class Notify:
             return self._notif_error(request_id, "question_producer_gone",
                                      notification_id=nid,
                                      message="the asking session is gone; the question expired")
+        owner = self._answer_owner(question)
         action_kind = str(msg.get("action_kind") or "")
         # v2 supports the question-answering resolution kinds mobile sends (ack /
         # yes_no) plus generic `resolved`. spawn_worker/run_command resolutions
@@ -1299,7 +1311,6 @@ class Notify:
                 raise InvalidNotification("notification action_id not found")
 
         provenance = _actor_provenance(msg)
-        owner = self._answer_owner(question)
         if owner is not None:
             notification = await self._db.call("get_notification", nid)
             owner["_answer"] = self._answer_payload({**notification, "state": "resolved", "resolution": {
@@ -1312,9 +1323,7 @@ class Notify:
             v2_answer_delivery=owner, choice=choice, selections=selections,
             note=note, text=text, custom_text=custom_text, action_id=action_id)
         replayed = bool(record.get("_resolution_replayed"))
-        client_record = await self._after_resolution(
-            record
-        )
+        client_record = await self._after_resolution(record, request_id=request_id)
         response = {"type": "notification.resolve.ok", "request_id": request_id,
                     "notification": client_record, "replayed": replayed}
         return response

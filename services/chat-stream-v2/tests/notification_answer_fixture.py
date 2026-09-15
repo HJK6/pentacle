@@ -45,4 +45,3 @@ async def fixture(tmp_path):
     await notify.start()
     try: yield notify, queue, comms, provider, sessions, store
     finally: await notify.stop(); store.stop()
-

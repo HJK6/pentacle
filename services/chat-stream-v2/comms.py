@@ -619,7 +619,11 @@ class Comms:
     async def reconcile_notification_answer(
         self, tell_id: str, target: str, generation: str,
     ) -> dict[str, Any] | None:
-        """Read original-generation USER evidence only; this method cannot input."""
+        """Read original-generation USER evidence; caller holds lifecycle lock.
+
+        Queue dispatch and Notify's late recovery both keep that ownership
+        through lookup and promotion. This method cannot input.
+        """
         prior = await self.store.get_tell_delivery(tell_id)
         if prior is None:
             return None

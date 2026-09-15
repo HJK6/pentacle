@@ -665,10 +665,22 @@ class Server:
             return
         result = await self._dispatch(raw, websocket=websocket)
         await asyncio.sleep(0)
-        await self._send_direct(
+        sent = await self._send_direct(
             websocket, result,
             interleave_history=isinstance(request, dict) and request.get("type") == "request_stream_events",
         )
+        if isinstance(request, dict) and request.get("type") in {
+            "notification.resolve", "notification.resolve_by_dedup", "prompt.answer",
+        }:
+            for frame in result:
+                if isinstance(frame, dict):
+                    notification = frame.get("notification") or {}
+                    question = frame.get("question") or {}
+                    log.info("answer response send request_id=%s nid=%s type=%s socket_send=%s",
+                             frame.get("request_id"), notification.get("notification_id")
+                             or question.get("notification_id") or request.get("notification_id"),
+                             frame.get("type"), "completed" if sent else "failed",
+                             extra={"subsystem": "server", "bug_ref": "notification_answer_disconnect_delivery_2026_09"})
 
     async def broadcast(self, frame: dict[str, Any]) -> None:
         """Project a top-level frame for each connected client before enqueue."""
