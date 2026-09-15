@@ -56,6 +56,7 @@ from _shared.notifications_store import (
     TERMINAL_STATES,
 )
 from v2_runtime import env_number
+from outbound_notices import NOTICE_KIND_NOTIFICATION_ANSWER, NoticeDecision
 
 log = logging.getLogger("chat_streamd_v2.notify")
 
@@ -290,12 +291,19 @@ class Notify:
         recovery_stale_after_s: float | None = None,
         sessions: Any = None,
         notice_store: Any = None,
+        outbound: Any = None,
     ) -> None:
         self._db = _StoreThread(db_path)
         self._comms = comms
         self._broadcast = broadcast
         self._sessions = sessions
         self._notice_store = notice_store
+        self._outbound = outbound
+        self._answer_recovery_after = ""
+        if outbound is not None:
+            outbound.register_kind(NOTICE_KIND_NOTIFICATION_ANSWER, guard=self._answer_delivery_guard,
+                                   lock_factory=self._answer_delivery_lock,
+                                   on_delivered=self._answer_delivered, on_terminal=self._answer_terminal)
         configured_recovery_age = (
             DEFAULT_NOTIFICATION_RECOVERY_STALE_AFTER_S
             if recovery_stale_after_s is None
@@ -330,6 +338,7 @@ class Notify:
         reconciled = await self._reconcile_answered_question_deliveries()
         if reconciled:
             log.info("startup: consumed %s previously delivered agent-question answer(s)", reconciled)
+        await self._recover_owned_answers()
         self._ready.set()
         try:
             stale = await self.reconcile_open_questions_against_sessions()
@@ -357,6 +366,7 @@ class Notify:
         )
         if recovered:
             log.info("recovered %s stale notification resolution claim(s)", recovered)
+        await self._recover_owned_answers()
         return recovered
 
     async def _reconcile_answered_question_deliveries(self) -> int:
@@ -545,28 +555,134 @@ class Notify:
 
     # -- post-resolution fan-out ------------------------------------------
 
-    async def _after_resolution(
-        self, record: dict, *, v2_delivery_transaction: bool = False
-    ) -> dict | None:
-        """Persist the answer onto the question row, wake await waiters, deliver
-        the answer back to the asking agent, and broadcast the updated card.
+    def _answer_owner(self, question: dict | None) -> dict | None:
+        if question is None or self._sessions is None or self._outbound is None:
+            return None
+        producer = str(question.get("producer_stream_id") or "")
+        row = self._sessions.get(producer)
+        if not isinstance(row, dict) or not row.get("session_generation"):
+            return None
+        return {"schema": "v2_notification_answer_v1", "producer_stream_id": producer,
+                "producer_session_generation": row["session_generation"],
+                "notification_id": question["notification_id"], "question_id": question["question_id"]}
 
-        ``v2_delivery_transaction`` is set only by v2 resolution handlers.
-        Its successful tell is therefore a v2-owned delivery act, the only live
-        path allowed to consume a shared question row.  A caller observing a
-        foreign already-answered row still serializes/broadcasts it but cannot
-        initiate an answer tell or mutate that row.
-        """
+    async def _owned_answer(self, record: dict) -> dict | None:
+        resolution = record.get("resolution") or {}
+        owner = resolution.get("v2_answer_delivery")
+        if not isinstance(owner, dict) or owner.get("schema") != "v2_notification_answer_v1":
+            return None
+        question = await self._agent_question_for_notification(record)
+        if (question is None or owner.get("notification_id") != record.get("notification_id")
+                or owner.get("question_id") != question.get("question_id")
+                or owner.get("producer_stream_id") != question.get("producer_stream_id")
+                or owner.get("producer_stream_id") != record.get("answer_to_stream_id")
+                or not owner.get("producer_session_generation")
+                or owner.get("canonical_intent") != resolution.get("canonical_intent")):
+            return None
+        stored = self._stored_generation(question)
+        if stored and stored != owner["producer_session_generation"]:
+            return None
+        return owner
+
+    @staticmethod
+    def _notice_metadata(row: dict) -> dict:
+        metadata = row.get("metadata") or "{}"
+        return json.loads(metadata) if isinstance(metadata, str) else metadata
+
+    def _answer_delivery_lock(self, row: dict):
+        host, name = self._sessions.split(str(row["recipient_stream_id"]))
+        return self._sessions._lifecycle_lock(host, name)
+
+    async def _answer_delivery_guard(self, row: dict) -> NoticeDecision | None:
+        metadata = self._notice_metadata(row)
+        record = await self._db.call("get_notification", metadata["notification_id"])
+        owner = await self._owned_answer(record) if record else None
+        if owner != metadata:
+            return NoticeDecision.terminal("answer_ownership_invalid", "inspect the original answer")
+        prior = await self._comms.reconcile_notification_answer(
+            str(row["tell_id"]), owner["producer_stream_id"], owner["producer_session_generation"])
+        if prior is not None and prior.get("reply", {}).get("delivery_status") == "delivered":
+            return None
+        host, name = self._sessions.split(owner["producer_stream_id"])
+        current = await self._comms.store.fetch_session(host, name)
+        if (current is None or current.get("status") != "open"
+                or current.get("session_generation") != owner["producer_session_generation"]):
+            if prior is not None:
+                return NoticeDecision.retry("original_generation_unavailable",
+                                            "reconcile original-generation evidence; do not resend")
+            return NoticeDecision.terminal(
+                "question_producer_gone", "the asking generation is gone; create a new question if needed")
+        return None
+
+    async def _answer_delivered(self, row: dict) -> None:
+        nid = self._notice_metadata(row)["notification_id"]
+        record = await self._db.call("get_notification", nid)
+        if not record or await self._owned_answer(record) is None:
+            return
+        await self._db.call("consume_answered_agent_question_for_notification", nid)
+        await self._db.call("update_delivery_status", nid, status="delivered", reason="", next_action="")
+        log.info("answer delivery confirmed nid=%s", nid,
+                 extra={"subsystem": "notify", "bug_ref": "notification_answer_disconnect_delivery_2026_09"})
+        await self._broadcast_notification_by_id(nid)
+
+    async def _answer_terminal(self, row: dict, reason: str, next_action: str) -> None:
+        nid = self._notice_metadata(row)["notification_id"]
+        record = await self._db.call("get_notification", nid)
+        if not record or await self._owned_answer(record) is None:
+            return
+        prior = await self._comms.store.get_tell_delivery(str(row["tell_id"]))
+        await self._db.call("update_delivery_status", nid,
+                            status="unconfirmed" if prior is not None or reason == "unconfirmed_after_bound" else "failed",
+                            reason=reason, next_action=next_action)
+        log.info("answer delivery disposition nid=%s reason=%s", nid, reason,
+                 extra={"subsystem": "notify", "bug_ref": "notification_answer_disconnect_delivery_2026_09"})
+        await self._broadcast_notification_by_id(nid)
+
+    async def _queue_answer(self, record: dict) -> None:
+        if self._outbound is None:
+            return
+        owner = await self._owned_answer(record)
+        answer = self._answer_payload(record)
+        if owner is None or answer is None:
+            return
+        nid = str(record["notification_id"])
+        row = await self._outbound.enqueue(kind=NOTICE_KIND_NOTIFICATION_ANSWER,
+            dedupe_key=ANSWER_TELL_ID_PREFIX + nid, recipient_stream_id=owner["producer_stream_id"],
+            body=_answer_back_text(answer), tell_id=ANSWER_TELL_ID_PREFIX + nid, metadata=owner)
+        if row.get("created"):
+            log.info("saved answer queued nid=%s", nid,
+                     extra={"subsystem": "notify", "bug_ref": "notification_answer_disconnect_delivery_2026_09"})
+        if row.get("delivered_at"):
+            await self._answer_delivered(row)
+        elif row.get("terminal_at"):
+            if row.get("terminal_reason") == "unconfirmed_after_bound":
+                proof = await self._comms.reconcile_notification_answer(
+                    str(row["tell_id"]), owner["producer_stream_id"], owner["producer_session_generation"])
+                if proof is not None and proof.get("reply", {}).get("delivery_status") == "delivered":
+                    await self._outbound.confirm_late_answer(row)
+                    return
+            if (record.get("resolution") or {}).get("delivery_status") != "unconfirmed":
+                await self._answer_terminal(row, str(row.get("terminal_reason") or "delivery_failed"),
+                                            str(row.get("next_action") or "inspect the original answer"))
+
+    async def _recover_owned_answers(self) -> None:
+        if self._outbound is None:
+            return
+        records = await self._db.call("list_v2_answer_deliveries", after=self._answer_recovery_after)
+        for record in records:
+            await self._queue_answer(record)
+        self._answer_recovery_after = str(records[-1]["notification_id"]) if len(records) == 200 else ""
+
+    async def _after_resolution(self, record: dict) -> dict | None:
+        """Acknowledge saved state; the one durable queue owns all answer input."""
         answer = self._answer_payload(record)
         notification_id = str(record.get("notification_id") or "")
         if answer is not None and notification_id:
             await self._db.call("answer_agent_question_for_notification", notification_id, answer)
             self._wake_await_waiters(notification_id, answer)
-            if v2_delivery_transaction and await self._deliver_answer_back(record, answer):
-                await self._db.call(
-                    "consume_answered_agent_question_for_notification", notification_id
-                )
-        client_record = await self._serialize(record)
+            await self._queue_answer(record)
+        current = await self._db.call("get_notification", notification_id)
+        client_record = await self._serialize(current or record)
         if self._broadcast is not None:
             await self._broadcast({"type": "notification", "notification": client_record})
         return client_record
@@ -575,25 +691,6 @@ class Notify:
         for future in list(self._await_waiters.get(notification_id, set())):
             if not future.done():
                 future.set_result(answer)
-
-    async def _deliver_answer_back(self, record: dict, answer: dict) -> bool:
-        """v1 delivered the answer to the asking agent through its peer-queue
-        subsystem; v2 has one injection path, so the answer lands in the agent's
-        pane as a readable tell (comms supplies handoff-lineage routing +
-        idempotency). Best-effort: a closed/remote asker is never an error."""
-        answer_to = _nullable_text(record.get("answer_to_stream_id"))
-        if not answer_to or self._comms is None:
-            return False
-        try:
-            result = await self._comms.tell({
-                "tell_id": f"{ANSWER_TELL_ID_PREFIX}{answer['notification_id']}",
-                "stream_id": answer_to,
-                "message": _answer_back_text(answer),
-            })
-            return isinstance(result, dict) and result.get("delivery_status") == "delivered"
-        except Exception as exc:  # noqa: BLE001 - answer already durable + awaited
-            log.info("answer-back tell failed nid=%s: %s", answer.get("notification_id"), exc)
-            return False
 
     async def create_internal_notification(
         self,
@@ -907,11 +1004,11 @@ class Notify:
         try:
             record = await self._db.call("resolve_notification", nid, action_kind="resolved",
                                          by=actor_provenance["by"], actor_provenance=actor_provenance,
-                                         selections=[], text=text, note=note)
+                                         selections=[], text=text, note=note, v2_answer_delivery=self._answer_owner(question))
         except NotificationTerminalState:
             return await self._db.call("get_agent_question", qid), None, True
         replayed = bool(record.get("_resolution_replayed"))
-        client = await self._after_resolution(record, v2_delivery_transaction=not replayed)
+        client = await self._after_resolution(record)
         return await self._db.call("get_agent_question", qid), client, replayed
 
     async def _answer_choice(self, question, *, value, selections, custom_text, note, actor_provenance):
@@ -954,14 +1051,14 @@ class Notify:
             record = await self._db.call(
                 "resolve_notification", nid, action_kind=action_kind, by=actor_provenance["by"],
                 actor_provenance=actor_provenance, choice=choice,
-                selections=selections, custom_text=custom_text, note=note,
+                v2_answer_delivery=self._answer_owner(question), selections=selections, custom_text=custom_text, note=note,
                 action_id=str(action.get("action_id") or "") if action and action.get("action_id") else None,
                 label=str(action.get("label") or "") if action and action.get("label") else None,
                 value=action.get("value") if action is not None and "value" in action else None)
         except NotificationTerminalState:
             return await self._db.call("get_agent_question", qid), None, True
         replayed = bool(record.get("_resolution_replayed"))
-        client = await self._after_resolution(record, v2_delivery_transaction=not replayed)
+        client = await self._after_resolution(record)
         return await self._db.call("get_agent_question", qid), client, replayed
 
     @staticmethod
@@ -989,7 +1086,7 @@ class Notify:
             if q is not None and q.get("state") == "dismissed":
                 return q, None, True
             raise
-        client = await self._after_resolution(record, v2_delivery_transaction=True)
+        client = await self._after_resolution(record)
         return await self._db.call("get_agent_question", qid), client, False
 
     # -- notification.* dispatch (lifted) ---------------------------------
@@ -1085,13 +1182,7 @@ class Notify:
             "resolve_open_dedup", producer=producer, dedup_key=dedup_key,
             by=provenance["by"], actor_provenance=provenance,
             expected_notification_id=str(existing["notification_id"]))
-        client_record = await self._serialize(record) if record else None
-        if client_record is not None:
-            answer = self._answer_payload(record)
-            if answer is not None:
-                self._wake_await_waiters(str(record.get("notification_id") or ""), answer)
-            if self._broadcast is not None:
-                await self._broadcast({"type": "notification", "notification": client_record})
+        client_record = await self._after_resolution(record) if record else None
         return {"type": "notification.resolve_by_dedup.ok", "request_id": request_id,
                 "resolved": client_record is not None, "notification": client_record}
 
@@ -1208,13 +1299,21 @@ class Notify:
                 raise InvalidNotification("notification action_id not found")
 
         provenance = _actor_provenance(msg)
+        owner = self._answer_owner(question)
+        if owner is not None:
+            notification = await self._db.call("get_notification", nid)
+            owner["_answer"] = self._answer_payload({**notification, "state": "resolved", "resolution": {
+                "action_kind": action_kind or "resolved", "action_id": action_id,
+                "choice": choice, "selections": selections, "text": text,
+                "custom_text": custom_text, "note": note, **provenance}})
         record = await self._db.call(
             "resolve_notification", nid, action_kind=action_kind or "resolved",
-            by=provenance["by"], actor_provenance=provenance, choice=choice, selections=selections,
+            by=provenance["by"], actor_provenance=provenance,
+            v2_answer_delivery=owner, choice=choice, selections=selections,
             note=note, text=text, custom_text=custom_text, action_id=action_id)
         replayed = bool(record.get("_resolution_replayed"))
         client_record = await self._after_resolution(
-            record, v2_delivery_transaction=not replayed
+            record
         )
         response = {"type": "notification.resolve.ok", "request_id": request_id,
                     "notification": client_record, "replayed": replayed}

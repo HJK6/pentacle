@@ -511,6 +511,24 @@ class Comms:
         It never consults pane chrome and never sends a second paste.
         """
         tell_id = str(msg.get("tell_id") or "").strip()
+        generation = msg.get("_notification_answer_generation")
+        if generation:
+            # Only the owned answer queue requests this boundary. A durable
+            # pre-input row means input MAY have happened, never that it did.
+            target = str(msg.get("stream_id") or "")
+            prior = await self.reconcile_notification_answer(tell_id, target, str(generation))
+            if prior is not None:
+                marked = ensure_notice_marker(tell_id, str(msg.get("message") or ""))
+                self._assert_same_payload(tell_id, payload_digest(target, marked), prior)
+                return {**prior["reply"], "duplicate": True}
+            host, name = self.sessions.split(target)
+            current = await self.store.fetch_session(host, name)
+            if (current is None or current.get("status") != "open"
+                    or current.get("session_generation") != generation):
+                raise VerbError("unknown_session", "asking generation is gone")
+            # No intent row proves this code has not reached its paste boundary.
+            # A queue claim alone is not permission to call it an ambiguous send.
+            check_existing = False
         route, body = await self._route(msg)
         target = str(route["final_target"])
         host, name = self.sessions.split(target)
@@ -598,6 +616,33 @@ class Comms:
             "_durable_notice_proof": True,
         })
 
+    async def reconcile_notification_answer(
+        self, tell_id: str, target: str, generation: str,
+    ) -> dict[str, Any] | None:
+        """Read original-generation USER evidence only; this method cannot input."""
+        prior = await self.store.get_tell_delivery(tell_id)
+        if prior is None:
+            return None
+        delivery = prior.get("delivery") or {}
+        if (delivery.get("notification_answer_generation") != generation
+                or delivery.get("to_stream_id") != target):
+            raise self._conflict(tell_id)
+        if prior.get("reply", {}).get("delivery_status") == "delivered":
+            return prior
+        host, name = self.sessions.split(target)
+        current = await self.store.fetch_session(host, name)
+        if current is None or current.get("session_generation") != generation:
+            return prior
+        watermark = EventWatermark(target, int(delivery.get("proof_watermark") or 0),
+            str(delivery.get("proof_watermark_state") or "unreachable"),
+            str(delivery.get("proof_watermark_reason") or ""))
+        proof = await self.submission_proof.lookup(
+            target, expected_text=str(delivery.get("text") or ""), watermark=watermark)
+        if proof.proven:
+            return await self.store.promote_tell_delivery(
+                tell_id, str(prior["payload_digest"]), proof=proof.audit_fields()) or prior
+        return prior
+
     async def _deliver_tell(
         self, msg: dict[str, Any], tell_id: str, route: dict[str, Any], body: str, digest: str,
     ) -> dict[str, Any]:
@@ -606,6 +651,11 @@ class Comms:
         confirmed, attempts, provider, active_draft, proof, watermark = await self._attempt_delivery(
             msg, route, body,
         )
+        if msg.get("_notification_answer_generation"):
+            prior = await self.reconcile_notification_answer(
+                tell_id, str(route["final_target"]), str(msg["_notification_answer_generation"]))
+            if prior is not None:
+                return prior["reply"]
         durable_notice = msg.get("_durable_notice_proof") is True
         delivery_status = "delivered"
         reason = None
@@ -1022,16 +1072,46 @@ class Comms:
         host, name = self.sessions.split(target)
         row = self.sessions.get(target) or await self.store.fetch_session(host, name)
         provider = str((row or {}).get("provider") or "")
+        if msg.get("_notification_answer_generation") and provider not in SUBMIT_PREDICATES:
+            raise VerbError("bad_request", "answer delivery requires a supported USER-proof provider")
         tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
         confirmed, attempts, active_draft, proof, watermark = await self._inject_body(
             tmux, name, body, provider, bool(msg.get("urgent")), target,
             durable_proof=msg.get("_durable_notice_proof") is True,
+            before_paste=(
+                lambda watermark: self._prepare_answer_input(msg, route, body, watermark)
+            ) if msg.get("_notification_answer_generation") else None,
         )
         return confirmed, attempts, provider, active_draft, proof, watermark
 
+    async def _prepare_answer_input(
+        self, msg: dict, route: dict, body: str, watermark: EventWatermark,
+    ) -> None:
+        """Persist possible-input ownership before the single paste, never a sent claim."""
+        if watermark.state != "reachable":
+            raise VerbError("answer_proof_unavailable", "cannot establish a pre-input USER watermark")
+        tell_id = str(msg["tell_id"])
+        target = str(route["final_target"])
+        if target != str(route["original_target"]):
+            raise VerbError("unknown_session", "answer cannot follow a replacement producer")
+        reply = self._tell_reply(tell_id, route, submission_confirmed=False,
+            delivery_status="proof_unavailable", submission_attempts=0,
+            reason="input_outcome_unknown", confirmation_pending=True)
+        reply.update({"action_status": "indeterminate", "action_committed": False,
+                      "confirmation_pending": True, "do_not_resubmit": True,
+                      "reconcile": "tell_id_evidence_only", **watermark_fields(watermark)})
+        delivery = {"tell_id": tell_id, "to_stream_id": target, "text": body,
+                    "notification_answer_generation": msg["_notification_answer_generation"],
+                    "delivery_status": "proof_unavailable", "submission_confirmed": False,
+                    "submission_attempts": 0, "delivered_at": None,
+                    "request_payload_hash": payload_digest(target, body),
+                    **watermark_fields(watermark)}
+        await self.store.put_tell_delivery(tell_id,
+            {"payload_digest": payload_digest(target, body), "reply": reply, "delivery": delivery})
+
     async def _inject_body(
         self, tmux: Any, name: str, body: str, provider: str, urgent: bool, stream_id: str,
-        *, durable_proof: bool = False,
+        *, durable_proof: bool = False, before_paste: Any = None,
     ) -> tuple[bool, int, bool, EventProof, EventWatermark]:
         """Paste once, then perform only the bounded provider recovery."""
         # B6: `urgent` is SENDER-chosen — one Escape, then the message. The
@@ -1063,6 +1143,8 @@ class Comms:
         else:
             legacy_watermark = await self._submission_watermark(stream_id) if provider == "codex" else 0
             watermark = EventWatermark(stream_id, legacy_watermark, "reachable")
+        if before_paste is not None:
+            await before_paste(watermark)
         await tmux.paste(name, body)
         if durable_proof:
             proof = await self._durable_submission_evidence(
@@ -1729,8 +1811,8 @@ class Comms:
         operator sees the real image as the agent's own message. Idempotent by
         ``(stream_id, request_id)``: a retry collides on the durable identity
         unique index and re-appends nothing, so history/reconnect shows exactly
-        one row. Genuine receipts: a durable ``v2_send_receipts`` row on the first
-        insert plus the returned ``event_id``/``duplicate`` state; validation and
+        one row. The durable transcript row is the receipt, exposed through
+        ``event_id``/``duplicate``; no separate receipt row is written. Validation and
         blob failures raise :class:`VerbError` (surfaced as ``send_image.error``).
 
         The caller (server handler) resolves ``stream_id`` from the verified seat

@@ -120,10 +120,18 @@ The CLI reads the file, checks it is a PNG/JPEG no larger than 25 MiB, uploads i
 On success the CLI prints a JSON receipt:
 
 ```json
-{ "ok": true, "stream_id": "bart:v2-…", "event_id": 4821, "blob_sha": "…", "receipt_id": "img-…", "content_kind": "image_and_text", "duplicate": false, "source_path": "./chart.png", "source_sha256": "…", "bytes": 20518 }
+{ "ok": true, "stream_id": "bart:v2-…", "event_id": 4821, "blob_sha": "…", "content_kind": "image_and_text", "duplicate": false, "source_path": "./chart.png", "source_sha256": "…", "bytes": 20518 }
 ```
 
 `event_id` is the durable transcript row (it survives reconnect/history replay as one row). The send is idempotent by `request_id`: a retry with the same request id returns `"duplicate": true` and adds no second row. Genuine error receipts (non-zero exit, `send_image.error` with an `error_code`) cover an unsupported type or oversize file (rejected client-side before upload, exit `2`), a blob that was never uploaded (`attachment_missing`), an invalid attachment (`attachment_invalid`), and calling from an unverified or foreign stream (`stream_ownership_unverified`, exit `66`). Exit codes: `0` delivered, `1` send error, `2` bad input, `66` not authorized. This is agent → operator only; the operator's own image sends use the existing desktop/mobile attachment composer, not this verb.
+
+## Saved question answers
+
+A successful answer acknowledgment means the answer is saved. Delivery to the asking agent uses one durable notice identity and survives a client disconnect or daemon restart. A retry of the same answer reconciles that identity; a conflicting answer is rejected.
+
+The notification's `resolution.delivery_status` separates saving from delivery: `pending`/`queued`, `delivered`, `failed`, or `unconfirmed`. `delivered` requires a matching durable USER event from the original asking generation. `failed` means a proven rejection before input, such as an asking generation that is gone. After the retry budget ends without conclusive proof, `unconfirmed` carries `delivery_reason: "unconfirmed_after_bound"` and `delivery_next_action`; it does not claim that delivery failed. Never resend an ambiguous answer. Exact late proof can confirm the same intent.
+
+A dedup dismissal with no answer remains a dismissal: it creates no answer notice. Historical/shared answers without v2 delivery ownership are never replayed by recovery.
 
 ## Notifications
 

@@ -388,10 +388,8 @@ def test_selection_answer_derives_yes_no_choice_after_await_timeout(tmp_path: Pa
 
 def test_successful_answer_tell_consumes_the_answered_question(tmp_path: Path) -> None:
     async def scenario() -> None:
-        comms = _AnswerTellComms()
-        notify = Notify(str(tmp_path / "notifications.db"), comms=comms)
-        await notify.start()
-        try:
+        from notification_answer_fixture import fixture
+        async with fixture(tmp_path) as (notify, queue, comms, provider, sessions, store):
             question = await _seed_live_shaped_question(notify)
             resolved = await notify.notification(
                 {
@@ -408,12 +406,11 @@ def test_successful_answer_tell_consumes_the_answered_question(tmp_path: Path) -
             )
 
             assert resolved["type"] == "notification.resolve.ok"
+            await queue.drain_once(force=True)
             consumed = await notify._db.call("get_agent_question", question["question_id"])
             assert consumed["state"] == "consumed"
             assert consumed["answer"]["selections"] == ["approve"]
-            assert len(comms.tells) == 1
-        finally:
-            await notify.stop()
+            assert len(provider.pastes) == 1
 
     _run(scenario())
 
@@ -422,10 +419,8 @@ def test_replayed_unconfirmed_answer_tell_does_not_begin_a_new_delivery(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        comms = _RetryableAnswerTellComms()
-        notify = Notify(str(tmp_path / "retryable-answer.db"), comms=comms)
-        await notify.start()
-        try:
+        from notification_answer_fixture import fixture
+        async with fixture(tmp_path) as (notify, queue, comms, provider, sessions, store):
             question = await _seed_live_shaped_question(notify, question_id="q-retryable-answer")
             request = {
                 "type": "notification.resolve",
@@ -439,17 +434,22 @@ def test_replayed_unconfirmed_answer_tell_does_not_begin_a_new_delivery(
                 },
             }
             await notify.notification(request)
+            provider.pause_after = True
+            delivery = asyncio.create_task(queue.drain_once(force=True))
+            await asyncio.wait_for(provider.entered.wait(), 2)
+            delivery.cancel()
+            try:
+                await delivery
+            except asyncio.CancelledError:
+                pass
             unanswered_delivery = await notify._db.call("get_agent_question", question["question_id"])
             assert unanswered_delivery["state"] == "answered"
 
-            comms.delivery_status = "delivered"
             replayed = await notify.notification(request)
             still_answered = await notify._db.call("get_agent_question", question["question_id"])
             assert replayed["replayed"] is True
             assert still_answered == unanswered_delivery
-            assert len(comms.tells) == 1
-        finally:
-            await notify.stop()
+            assert len(provider.pastes) == 1
 
     _run(scenario())
 
@@ -607,10 +607,8 @@ def test_replayed_prompt_answers_do_not_begin_a_v2_delivery_transaction(
     """A public replay keeps its idempotent reply without re-delivering it."""
 
     async def scenario() -> None:
-        comms = _AnswerTellComms()
-        notify = Notify(str(tmp_path / "replayed-answer.db"), comms=comms)
-        await notify.start()
-        try:
+        from notification_answer_fixture import fixture
+        async with fixture(tmp_path) as (notify, queue, comms, provider, sessions, store):
             foreign_before, _ = await _seed_answered_external_question(
                 notify,
                 question_id="q-v1-agent-question-public-replay",
@@ -631,7 +629,7 @@ def test_replayed_prompt_answers_do_not_begin_a_v2_delivery_transaction(
             assert foreign_replay["type"] == "prompt.answer.ok"
             assert foreign_replay["already_answered"] is True
             assert foreign_after == foreign_before
-            assert comms.tells == []
+            assert provider.pastes == []
 
             question = await _seed_live_shaped_question(
                 notify, question_id="q-v2-consumed-public-replay"
@@ -645,11 +643,12 @@ def test_replayed_prompt_answers_do_not_begin_a_v2_delivery_transaction(
                     "_auth_context": {"operator_authenticated": True},
                 }
             )
+            await queue.drain_once(force=True)
             consumed_before = await notify._db.call(
                 "get_agent_question", question["question_id"]
             )
             assert consumed_before["state"] == "consumed"
-            assert len(comms.tells) == 1
+            assert len(provider.pastes) == 1
 
             consumed_replay = await notify.prompt(
                 {
@@ -666,9 +665,7 @@ def test_replayed_prompt_answers_do_not_begin_a_v2_delivery_transaction(
             assert consumed_replay["type"] == "prompt.answer.ok"
             assert consumed_replay["already_answered"] is True
             assert consumed_after == consumed_before
-            assert len(comms.tells) == 1
-        finally:
-            await notify.stop()
+            assert len(provider.pastes) == 1
 
     _run(scenario())
 

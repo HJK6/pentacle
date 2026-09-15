@@ -26,12 +26,14 @@ log = logging.getLogger("chat_streamd_v2.outbound_notices")
 NOTICE_KIND_REPORT = "report"
 NOTICE_KIND_RECONCILER = "reconciler"
 NOTICE_KIND_SPAWN_FAILURE = "spawn_failure"
+NOTICE_KIND_NOTIFICATION_ANSWER = "notification_answer"
 
 _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_REPORT,
     NOTICE_KIND_RECONCILER,
     NOTICE_KIND_SPAWN_FAILURE,
     "watch", "wake",
+    NOTICE_KIND_NOTIFICATION_ANSWER,
 })
 
 _TERMINAL_CODES = frozenset({
@@ -141,6 +143,7 @@ class OutboundNoticeQueue:
         self.owner = owner or f"outbound:{os.getpid()}:{uuid.uuid4().hex}"
         self._guards: dict[str, Guard] = {}
         self._terminal_callbacks: dict[str, TerminalCallback] = {}
+        self._delivered_callbacks: dict[str, Callable[[dict[str, Any]], Awaitable[None]]] = {}
         self._lock_factories: dict[str, LockFactory] = {}
 
     def register_kind(
@@ -150,6 +153,7 @@ class OutboundNoticeQueue:
         guard: Guard | None = None,
         on_terminal: TerminalCallback | None = None,
         lock_factory: LockFactory | None = None,
+        on_delivered: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         if guard is not None:
             self._guards[kind] = guard
@@ -157,6 +161,8 @@ class OutboundNoticeQueue:
             self._terminal_callbacks[kind] = on_terminal
         if lock_factory is not None:
             self._lock_factories[kind] = lock_factory
+        if on_delivered is not None:
+            self._delivered_callbacks[kind] = on_delivered
 
     async def enqueue(
         self,
@@ -204,6 +210,15 @@ class OutboundNoticeQueue:
         if row is None:
             return False
         return (await self._deliver_claimed(row, lock_held=lock_held)) == "delivered"
+
+    async def confirm_late_answer(self, row: dict[str, Any]) -> bool:
+        """The queue owns late completion as well as first-attempt completion."""
+        if not await self.store.complete_answer_notice_from_proof(str(row["notice_id"])):
+            return False
+        callback = self._delivered_callbacks.get(NOTICE_KIND_NOTIFICATION_ANSWER)
+        if callback is not None:
+            await callback(row)
+        return True
 
     async def drain_once(
         self,
@@ -271,6 +286,11 @@ class OutboundNoticeQueue:
                 # an in-flight provider turn.
                 "urgent": kind not in _NON_URGENT_KINDS,
             }
+            if kind == NOTICE_KIND_NOTIFICATION_ANSWER:
+                import json
+                metadata = row.get("metadata") or "{}"
+                metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+                message["_notification_answer_generation"] = metadata["producer_session_generation"]
             deliver_notice = getattr(self.comms, "deliver_outbound_notice", None)
             if callable(deliver_notice):
                 reply = await deliver_notice(
@@ -305,6 +325,9 @@ class OutboundNoticeQueue:
             )
 
         await self.store.complete_outbound_notice(str(row["notice_id"]), owner=self.owner)
+        callback = self._delivered_callbacks.get(kind)
+        if callback is not None:
+            await callback(row)
         return "delivered"
 
     async def _retry(
@@ -313,6 +336,10 @@ class OutboundNoticeQueue:
     ) -> str:
         attempts = max(1, int(row.get("attempts") or 1))
         if attempts >= self.config.max_attempts:
+            if str(row.get("kind")) == NOTICE_KIND_NOTIFICATION_ANSWER:
+                await self._terminal(row, "unconfirmed_after_bound",
+                                     "inspect the original producer transcript; reconcile this intent, do not resend")
+                return "terminal"
             if proof_pending and not (
                 authoritative_negative and await self._terminal_proof_negative(row)
             ):

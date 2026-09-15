@@ -281,6 +281,7 @@ async def run(args: argparse.Namespace) -> int:
     # dispatch table. Any v1 verb left unregistered answers `unsupported_in_v2`.
     notify = Notify(
         args.notifications_db,
+        outbound=outbound,
         comms=comms,
         broadcast=server.broadcast,
         sessions=sessions,

@@ -2561,7 +2561,9 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                 store_exchange.append(conn, delivery.get("exchange"))
                 conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?", (json.dumps(payload, separators=(",", ":")), tell_id))
             conn.execute(
-                "DELETE FROM v2_tell_deliveries WHERE NOT EXISTS (SELECT 1 FROM v2_child_exchange e WHERE e.kind='tell' AND e.ref_id=v2_tell_deliveries.tell_id) AND tell_id NOT IN"
+                "DELETE FROM v2_tell_deliveries WHERE NOT EXISTS (SELECT 1 FROM v2_child_exchange e WHERE e.kind='tell' AND e.ref_id=v2_tell_deliveries.tell_id) "
+                "AND NOT EXISTS (SELECT 1 FROM v2_outbound_notices n WHERE n.kind='notification_answer' AND n.tell_id=v2_tell_deliveries.tell_id) "
+                "AND tell_id NOT IN"
                 " (SELECT tell_id FROM v2_tell_deliveries ORDER BY created_at DESC LIMIT ?)",
                 (TELL_RETENTION,),
             )
@@ -2618,6 +2620,13 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                 reply["submission_confirmed"] = True
                 reply["delivery_ack_at"] = acknowledged_at
                 reply.pop("reason", None)
+                if delivery.get("notification_answer_generation"):
+                    reply.update(action_status="committed", action_committed=True,
+                                 confirmation_pending=False, confirmation_status="confirmed")
+                    # Exact USER proof establishes the one owned input. The
+                    # prepared row stays at zero while its outcome is unknown.
+                    reply["submission_attempts"] = 1
+                    delivery["submission_attempts"] = 1
                 delivery["delivery_status"] = "delivered"
                 delivery["submission_confirmed"] = True
                 delivery["delivered_at"] = acknowledged_at

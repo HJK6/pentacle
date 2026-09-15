@@ -270,15 +270,17 @@ def _welcome_frame(*, nonce: str, expires_at: float, runtime_sha: str = "") -> d
 
 
 def _is_send_frame(raw: Any) -> bool:
-    """Cheap pre-dispatch peek: is this raw wire frame a `send` verb? Used to
-    let an accepted send's injection outlive the submitting connection
+    """Cheap pre-dispatch peek for send and answer mutations. Used to
+    let accepted durable work outlive the submitting connection
     (spec_example_2026_01). Any
     parse failure falls through to the normal (connection-scoped) path."""
     try:
         msg = json.loads(raw)
     except (TypeError, ValueError):
         return False
-    return isinstance(msg, dict) and str(msg.get("type") or "") == "send"
+    return isinstance(msg, dict) and str(msg.get("type") or "") in {
+        "send", "notification.resolve", "notification.resolve_by_dedup", "prompt.answer",
+    }
 
 
 class Server:
@@ -591,7 +593,7 @@ class Server:
                 if is_hello:
                     hello_barrier = task
                 # spec_example_2026_01:
-                # an accepted send's injection must NOT be aborted when this
+                # an accepted send or answer must NOT be aborted when this
                 # submitter disconnects, so track send tasks at daemon level
                 # instead of in `inflight` (which the finally below cancels).
                 if _is_send_frame(raw):

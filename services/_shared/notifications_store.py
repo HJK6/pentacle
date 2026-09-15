@@ -1859,6 +1859,7 @@ class NotificationStore:
         custom_text: str | None = None,
         effective_spawn_spec: dict[str, Any] | None = None,
         actor_provenance: dict[str, Any] | None = None,
+        v2_answer_delivery: dict[str, Any] | None = None,
         now: str | None = None,
     ) -> dict:
         """Resolve an ``open`` notification via an operator/system action.
@@ -2001,6 +2002,16 @@ class NotificationStore:
                                 "choice": choice,
                             },
                         )
+            if (normalized_answer is None and isinstance(v2_answer_delivery, dict)
+                    and isinstance(v2_answer_delivery.get("_answer"), dict)):
+                question_row = self._conn.execute(
+                    f"SELECT {', '.join(AGENT_QUESTION_COLUMNS)} FROM agent_questions WHERE notification_id=?",
+                    (notification_id,),
+                ).fetchone()
+                if question_row is not None:
+                    question = _question_row_to_dict(question_row)
+                    normalized_answer = _normalize_agent_question_answer(question,
+                        {**v2_answer_delivery["_answer"], "at": ts, "by": by, **actor_provenance})
             canonical_selections = _canonical_selections(question, selections)
             if selections is not None:
                 resolution["selections"] = canonical_selections
@@ -2019,6 +2030,19 @@ class NotificationStore:
             resolution["canonical_intent"] = canonical_intent
             if normalized_answer is not None and row["answer_to_stream_id"]:
                 resolution["delivery_status"] = "pending"
+                if v2_answer_delivery is not None:
+                    # Internal daemon argument, never copied from a wire payload.
+                    # Persist ownership with the answer, before a second store
+                    # can enqueue delivery. Replays return before this point.
+                    owner = dict(v2_answer_delivery)
+                    owner.pop("_answer", None)
+                    if (question is None or owner.get("schema") != "v2_notification_answer_v1"
+                            or owner.get("producer_stream_id") != question.get("producer_stream_id")
+                            or owner.get("notification_id") != notification_id
+                            or not owner.get("producer_session_generation")):
+                        raise InvalidNotification("invalid v2 answer delivery ownership")
+                    owner["canonical_intent"] = canonical_intent
+                    resolution["v2_answer_delivery"] = owner
             resolution_json = json.dumps(resolution)
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -2370,9 +2394,11 @@ class NotificationStore:
         notification_id: str,
         *,
         status: str,
+        reason: str | None = None,
+        next_action: str | None = None,
         now: str | None = None,
     ) -> dict:
-        if status not in {"pending", "queued", "failed", "delivered"}:
+        if status not in {"pending", "queued", "failed", "delivered", "unconfirmed"}:
             raise InvalidNotification("invalid notification delivery status")
         ts = now or _iso_now()
         with self._lock:
@@ -2384,12 +2410,29 @@ class NotificationStore:
             resolution = dict(resolution)
             resolution["delivery_status"] = status
             resolution["delivery_updated_at"] = ts
+            if reason is not None:
+                resolution["delivery_reason"] = reason
+            if next_action is not None:
+                resolution["delivery_next_action"] = next_action
             self._conn.execute(
                 "UPDATE notifications SET resolution = ?, updated_at = ? WHERE notification_id = ?",
                 (json.dumps(resolution), ts, notification_id),
             )
             self._conn.commit()
             return self._get_locked(notification_id)
+
+    def list_v2_answer_deliveries(self, *, limit: int = 200, after: str = "") -> list[dict]:
+        """Page only explicitly owned answers; legacy/shared rows cannot qualify."""
+        with self._lock:
+            self._require_open()
+            rows = self._conn.execute(
+                "SELECT notification_id FROM notifications WHERE notification_id > ? "
+                "AND json_extract(resolution, '$.v2_answer_delivery.schema') = ? "
+                "AND json_extract(resolution, '$.delivery_status') IN ('pending','queued','unconfirmed') "
+                "ORDER BY notification_id LIMIT ?",
+                (after, "v2_notification_answer_v1", max(1, min(limit, 200))),
+            ).fetchall()
+            return [self._get_locked(row["notification_id"]) for row in rows]
 
     def finish_run_command(
         self,

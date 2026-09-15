@@ -719,6 +719,30 @@ class _RoutingStoreMixin:
 
         return await self.submit(_op)
 
+    async def complete_answer_notice_from_proof(self, notice_id: str) -> bool:
+        """Settle one bounded-unconfirmed answer from its same-intent USER proof."""
+        def _op(conn: sqlite3.Connection) -> bool:
+            with conn:
+                row = conn.execute("SELECT * FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)).fetchone()
+                if row is None or row["kind"] != "notification_answer" or row["terminal_reason"] != "unconfirmed_after_bound":
+                    return False
+                tell = conn.execute("SELECT reply FROM v2_tell_deliveries WHERE tell_id=?", (row["tell_id"],)).fetchone()
+                if tell is None:
+                    return False
+                envelope = json.loads(tell["reply"])
+                delivery, reply = envelope.get("delivery") or {}, envelope.get("reply") or {}
+                metadata = json.loads(row["metadata"])
+                if (reply.get("delivery_status") != "delivered" or delivery.get("delivery_status") != "delivered"
+                        or delivery.get("proof_state") != "proven" or not delivery.get("proof_event_id")
+                        or delivery.get("text") != row["body"]
+                        or delivery.get("to_stream_id") != row["recipient_stream_id"]
+                        or delivery.get("notification_answer_generation") != metadata.get("producer_session_generation")):
+                    return False
+                conn.execute("UPDATE v2_outbound_notices SET delivered_at=?, terminal_at=NULL, terminal_reason=NULL, "
+                             "last_error=NULL, next_action=NULL WHERE notice_id=?", (_routing_iso_now(), notice_id))
+                return True
+        return await self.submit(_op)
+
 def _routing_iso_now() -> str:
     """UTC stamp with sub-second precision for recurring observations."""
     now = time.time()
