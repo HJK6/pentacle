@@ -14,6 +14,9 @@
   "homepage": "https://github.com/HJK6/pentacle-chat-core#readme",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
+  "dependencies": {
+    "@noble/hashes": "^2.2.0"
+  },
   "scripts": {
     "test": "node --import tsx --test tests/*.test.ts && npm run typecheck:test",
     "typecheck": "tsc --noEmit",
