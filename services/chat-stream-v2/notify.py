@@ -83,6 +83,7 @@ DEFAULT_NOTIFICATION_LIST_LIMIT = 100
 ANSWER_BACK_MAX_CHARS = 800
 ANSWERED_QUESTION_RECOVERY_LIMIT = 100
 ANSWER_TELL_ID_PREFIX = "notification-answer-"
+FIXED_SYSTEM_PRODUCER_STREAM_ID = "altum-bot-cd"
 _AGENT_QUESTION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,120}$")
 #: D3 (daemon_updates_2026_09): ack is deleted from accepted modes. A question
 #: is a choice (single/multi) or pure free text; every mode admits free text via
@@ -1165,6 +1166,11 @@ class Notify:
             actions=msg.get("actions") if isinstance(msg.get("actions"), list) else None,
             ttl_seconds=msg.get("ttl_seconds"),
             answer_to_stream_id=_nullable_text(msg.get("answer_to_stream_id")) or None,
+            refuse_privileged_dedup_refresh=bool(
+                (msg.get("_auth_context") or {}).get("service_authenticated")
+                and (msg.get("_auth_context") or {}).get("service_actor")
+                == FIXED_SYSTEM_PRODUCER_STREAM_ID
+            ),
         )
         client_record = await self._serialize(record)
         if self._broadcast is not None:

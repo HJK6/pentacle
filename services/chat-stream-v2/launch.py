@@ -383,6 +383,8 @@ def _claude_command(
     machine: LocalMachine, tmux_session: str, session_id: str,
     stream_token_file: str,
     *, launch_model: str | None, launch_effort: str | None,
+    resume: bool = False,
+    resume_cwd: str | None = None,
 ) -> str:
     """The claude launch shell command (v1 session.py:1417). `launch_model`/
     `launch_effort` are the flags v1 passes ONLY when the client explicitly asked
@@ -391,15 +393,16 @@ def _claude_command(
     claude_bin = _resolve_local_executable(_shell_executable(machine.claude_bin))
     model_flag = f"--model {shlex.quote(launch_model)} " if launch_model else ""
     effort_flag = f"--effort {shlex.quote(launch_effort)} " if launch_effort else ""
+    identity_flag = "--resume" if resume else "--session-id"
     return (
-        f"cd {shlex.quote(machine.cwd)} && "
+        f"cd {shlex.quote(resume_cwd or machine.cwd)} && "
         f"{agent_orch_path_export(machine, provider_bin=claude_bin)}"
         f"{stream_env_assignments(machine, tmux_session, stream_token_file)} "
         f"exec {shlex.quote(claude_bin)} "
         f"--dangerously-skip-permissions "
         f"--permission-mode bypassPermissions "
         f"--disallowed-tools {CLAUDE_DISALLOWED_TOOLS} "
-        f"{model_flag}{effort_flag}--session-id {shlex.quote(session_id)}"
+        f"{model_flag}{effort_flag}{identity_flag} {shlex.quote(session_id)}"
     )
 
 
@@ -499,6 +502,9 @@ def build_launch(
     launch_model: str | None,
     launch_effort: str | None,
     initial_prompt_file: str | None = None,
+    resume_session_id: str | None = None,
+    resume_jsonl_path: str | None = None,
+    resume_cwd: str | None = None,
 ) -> LaunchPlan:
     """Turn a RESOLVED (provider, model, effort) tuple into the exact launch v1
     emits. `launch_model`/`launch_effort` are None for a profile-default spawn
@@ -508,12 +514,18 @@ def build_launch(
     stream_token = mint_stream_token()
     stream_token_file = stream_token_file_for(machine, tmux_session)
     if provider == "claude":
-        session_id = str(uuid.uuid4())
+        session_id = resume_session_id or str(uuid.uuid4())
         command = _claude_command(
             machine, tmux_session, session_id, stream_token_file,
             launch_model=launch_model, launch_effort=launch_effort,
+            resume=resume_session_id is not None,
+            resume_cwd=resume_cwd,
         )
-        jsonl_path = jsonl_path_for(machine, machine.cwd, session_id)
+        jsonl_path = (
+            resume_jsonl_path
+            if resume_session_id is not None and resume_jsonl_path
+            else jsonl_path_for(machine, machine.cwd, session_id)
+        )
         return LaunchPlan(
             command=command,
             session_id=session_id,
@@ -522,6 +534,8 @@ def build_launch(
             stream_token_file=stream_token_file,
         )
     if provider == "codex":
+        if resume_session_id is not None:
+            raise ValueError("resume_unsupported_provider: codex")
         command = _codex_command(
             machine, tmux_session, stream_token_file,
             launch_model=launch_model, launch_effort=launch_effort,

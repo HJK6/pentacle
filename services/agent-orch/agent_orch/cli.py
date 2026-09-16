@@ -1690,6 +1690,8 @@ def _notification_create_payload_from_args(
         "severity": severity,
         "actions": [],
     }
+    if caller_stream_id:
+        payload["from_stream_id"] = caller_stream_id
     if getattr(args, "message", None) is not None:
         message = str(args.message)
         payload["title"] = str(getattr(args, "title", None) or message)

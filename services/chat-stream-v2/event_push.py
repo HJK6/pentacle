@@ -385,12 +385,20 @@ class EventPush:
         # remains durable but has a None sequence and therefore never replays a
         # live frame.
         try:
+            inserted_events = [
+                {**entry["event"], "daemon_seq": seq}
+                for entry, seq in zip(entries, sequences)
+                if seq is not None
+            ]
+            projected = await self.store.project_session_events(inserted_events)
+            projected_index = 0
             for entry, seq in zip(entries, sequences):
                 if seq is not None:
                     await self.broadcast({
                         "type": "chat.event",
-                        "event": {**entry["event"], "daemon_seq": seq},
+                        "event": projected[projected_index],
                     })
+                    projected_index += 1
         except Exception as exc:  # noqa: BLE001 - never acknowledge a failed push
             log.warning("event.push broadcast failed host=%s: %s", host, exc)
             return err("ingest_failed")

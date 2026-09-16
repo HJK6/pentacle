@@ -230,7 +230,10 @@ async def append_ingested_event(
         except Exception as exc:  # noqa: BLE001 - ingest must keep accepting
             log.warning("routing-integrity Claude observation failed sid=%s: %s", stream_id, exc)
     if seq is not None:
-        await broadcast({"type": "chat.event", "event": {**corrected, "daemon_seq": seq}})
+        projected = await store.project_session_events([
+            {**corrected, "daemon_seq": seq},
+        ])
+        await broadcast({"type": "chat.event", "event": projected[0]})
     return seq
 
 
@@ -651,13 +654,21 @@ class Ingest:
                     except Exception as exc:  # noqa: BLE001 - existing best-effort observer
                         log.warning("routing-integrity local observation failed sid=%s: %s", sid, exc)
             try:
+                inserted = [
+                    {**entry["event"], "daemon_seq": seq}
+                    for entry, seq in zip(entries, sequences)
+                    if seq is not None
+                ]
+                projected = await self.store.project_session_events(inserted)
+                projected_index = 0
                 for entry, seq in zip(entries, sequences):
                     if seq is not None:
                         self.sessions.apply_genuine_activity_event(sid, entry["event"])
                         await self.broadcast({
                             "type": "chat.event",
-                            "event": {**entry["event"], "daemon_seq": seq},
+                            "event": projected[projected_index],
                         })
+                        projected_index += 1
                 if any(seq is not None for seq in sequences) and self.inventory_emitter is not None:
                     await self.inventory_emitter.emit_if_changed()
             except Exception as exc:  # noqa: BLE001 - never claim the failed batch

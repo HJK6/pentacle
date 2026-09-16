@@ -99,6 +99,65 @@ CREATION_PROBE_TIMEOUT_S = BOOT_READY_HARD_DEADLINE_S
 # deployment knob; the Enter retry remains bounded to one attempt.
 REMOTE_RECEIPT_TIMEOUT_FACTOR = 3.0
 
+RESUME_PRESERVED_FIELDS = (
+    "parent_stream_id", "handoff_from_stream_id", "role", "phase",
+    "visibility", "spec_id", "spec_ids", "spec_resolution",
+    "qualified_spec_ids", "spec_binding_provenance", "opened_by_host_id",
+    "self_close_on_completion", "no_watch", "title", "objective",
+    "objective_source", "harness_run_id", "claude_session_lineage",
+)
+
+_REMOTE_RESUME_PROBE = r"""
+import glob, json, os, sys
+projects_root, expected = sys.argv[1:3]
+root = os.path.realpath(projects_root)
+candidates = []
+for candidate in glob.glob(os.path.join(root, '*', expected + '.jsonl')):
+    path = os.path.realpath(candidate)
+    try:
+        inside = os.path.commonpath((root, path)) == root
+    except ValueError:
+        inside = False
+    if inside and os.path.isfile(path):
+        candidates.append(path)
+result = {'state': 'missing', 'path': '', 'cwd': ''}
+if len(candidates) > 1:
+    result['state'] = 'ambiguous'
+elif len(candidates) == 1:
+    path = candidates[0]
+    result.update({'state': 'foreign', 'path': path})
+    try:
+        identity_seen = False
+        identity_valid = True
+        resume_cwd = ''
+        with open(path, 'r', encoding='utf-8') as handle:
+            for _ in range(64):
+                line = handle.readline(1048577)
+                if not line or len(line) > 1048576:
+                    break
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                identity = str(record.get('sessionId') or record.get('session_id') or '')
+                if identity:
+                    identity_seen = True
+                    if identity != expected:
+                        identity_valid = False
+                        break
+                record_cwd = str(record.get('cwd') or '')
+                if not resume_cwd and identity == expected and os.path.isabs(record_cwd):
+                    resume_cwd = os.path.realpath(record_cwd)
+        if identity_seen and identity_valid and resume_cwd:
+            slug = resume_cwd.replace('/', '-').replace('_', '-').replace('.', '-')
+            bound_dir = os.path.realpath(os.path.join(root, slug))
+            if os.path.dirname(path) == bound_dir:
+                result.update({'state': 'ok', 'cwd': resume_cwd})
+    except OSError:
+        result['state'] = 'probe_failed'
+print(json.dumps(result, separators=(',', ':')))
+"""
+
 
 class BootReadyOutcome(NamedTuple):
     ready: bool
@@ -216,6 +275,10 @@ class SpawnCtl:
         #: delivered/failed outcome and cleans up any pane it created.
         self._background_spawns: set[asyncio.Task[Any]] = set()
         self._codex_boot_semaphores: dict[str, asyncio.Semaphore] = {}
+        # Serialize the complete admission lifecycle for one native Claude
+        # identity. Different idempotency keys must not race into two v2 rows
+        # that both run `claude --resume` against the same transcript.
+        self._resume_locks: dict[str, asyncio.Lock] = {}
         #: The existing SpawnCtl is the sole intent owner. This lock serializes
         #: startup, recurring, and test-triggered passes inside one daemon; the
         #: reservation owner CAS below fences an overlapping process.
@@ -472,6 +535,199 @@ class SpawnCtl:
             return self.hosts.tmux_for(host)
         return self.tmux
 
+    @staticmethod
+    def _canonical_resume_id(value: object) -> str:
+        raw = str(value or "").strip().lower()
+        try:
+            parsed = str(uuid.UUID(raw))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise VerbError(
+                "resume_invalid_session_id", "resume_session_id must be a canonical UUID",
+            ) from exc
+        if raw != parsed:
+            raise VerbError(
+                "resume_invalid_session_id", "resume_session_id must be a canonical UUID",
+            )
+        return parsed
+
+    @staticmethod
+    def _inspect_resume_transcript_local(
+        machine: "launch.LocalMachine", session_id: str,
+    ) -> dict[str, str]:
+        root = Path(machine.projects_root).resolve()
+        candidates: list[Path] = []
+        try:
+            for candidate in root.glob(f"*/{session_id}.jsonl"):
+                path = candidate.resolve()
+                try:
+                    path.relative_to(root)
+                except ValueError:
+                    continue
+                if path.is_file():
+                    candidates.append(path)
+        except OSError:
+            return {"path": "", "cwd": "", "state": "probe_failed"}
+        if not candidates:
+            return {"path": "", "cwd": "", "state": "missing"}
+        if len(candidates) > 1:
+            return {"path": "", "cwd": "", "state": "ambiguous"}
+        path = candidates[0]
+        result = {"path": str(path), "cwd": "", "state": "foreign"}
+        if not path.is_file():
+            return result
+        try:
+            identity_seen = False
+            resume_cwd = ""
+            with path.open("r", encoding="utf-8") as handle:
+                for _ in range(64):
+                    line = handle.readline(1_048_577)
+                    if not line:
+                        break
+                    if len(line) > 1_048_576:
+                        break
+                    try:
+                        record = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    identity = str(
+                        record.get("sessionId") or record.get("session_id") or ""
+                    )
+                    if identity:
+                        identity_seen = True
+                        if identity != session_id:
+                            return result
+                    record_cwd = str(record.get("cwd") or "")
+                    if not resume_cwd and identity == session_id and os.path.isabs(record_cwd):
+                        resume_cwd = os.path.realpath(record_cwd)
+            if identity_seen and resume_cwd:
+                bound_dir = Path(root / launch.slugify_cwd(resume_cwd)).resolve()
+                if path.parent == bound_dir:
+                    result.update({"state": "ok", "cwd": resume_cwd})
+        except OSError:
+            result["state"] = "probe_failed"
+        return result
+
+    async def _probe_resume_transcript(
+        self, host: str, machine: "launch.LocalMachine", session_id: str,
+    ) -> tuple[str, str]:
+        """Resolve and authenticate the transcript on the requested target host."""
+        local_host = str(getattr(self.hosts, "local_host", machine.name) or machine.name)
+        if self.hosts is None or host == local_host:
+            result = await asyncio.to_thread(
+                self._inspect_resume_transcript_local, machine, session_id,
+            )
+        else:
+            rc, output = await self.hosts.run_command(
+                host, "python3", "-c", _REMOTE_RESUME_PROBE,
+                machine.projects_root, session_id,
+                timeout=15.0,
+            )
+            if rc != 0:
+                raise VerbError(
+                    "resume_target_probe_failed",
+                    f"target-host transcript probe failed on {host}",
+                )
+            try:
+                result = json.loads(output.strip())
+            except (TypeError, ValueError) as exc:
+                raise VerbError(
+                    "resume_target_probe_failed",
+                    f"target-host transcript probe returned invalid evidence on {host}",
+                ) from exc
+        state = str(result.get("state") or "") if isinstance(result, dict) else ""
+        path = str(result.get("path") or "") if isinstance(result, dict) else ""
+        resume_cwd = str(result.get("cwd") or "") if isinstance(result, dict) else ""
+        if state == "missing":
+            raise VerbError(
+                "resume_transcript_not_found",
+                f"resume transcript does not exist on target host {host}",
+            )
+        if state == "foreign":
+            raise VerbError(
+                "resume_foreign_target",
+                "resume transcript identity does not match resume_session_id",
+            )
+        if state == "ambiguous":
+            raise VerbError(
+                "resume_foreign_target",
+                "multiple target-host transcripts claim resume_session_id",
+            )
+        if state != "ok" or not path or not resume_cwd:
+            raise VerbError(
+                "resume_target_probe_failed",
+                f"target-host transcript could not be authenticated on {host}",
+            )
+        return path, resume_cwd
+
+    async def _resolve_resume_target(
+        self, msg: dict[str, Any], host: str, tmux: "tmux_transport.Tmux",
+    ) -> tuple[str, str, str, dict[str, Any] | None]:
+        session_id = self._canonical_resume_id(msg.get("resume_session_id"))
+        if str(msg.get("provider") or "").strip() != "claude":
+            raise VerbError("resume_unsupported_provider", "only Claude sessions can resume")
+        if str(msg.get("command") or "").strip():
+            raise VerbError(
+                "resume_requires_native_launch",
+                "resume cannot override the supported native Claude launcher",
+            )
+        if any(
+            msg.get(field)
+            for field in ("handoff", "handoff_from_stream_id", "parent_stream_id")
+        ):
+            raise VerbError(
+                "resume_conflicts_with_lineage",
+                "resume cannot set parent or handoff lineage",
+            )
+        if str(msg.get("session_name") or "").strip():
+            raise VerbError(
+                "resume_conflicts_with_identity",
+                "resume resolves its lifecycle row; session_name cannot be supplied",
+            )
+
+        matches = await self.store.sessions_for_claude_session_id(session_id)
+        local_matches = [row for row in matches if str(row.get("host") or "") == host]
+        if any(str(row.get("host") or "") != host for row in matches):
+            raise VerbError(
+                "resume_target_host_mismatch",
+                "retained Claude session identity belongs to a different host",
+            )
+        if len(local_matches) > 1:
+            raise VerbError(
+                "resume_foreign_target",
+                "multiple retained rows claim the same Claude session identity",
+            )
+        prior = local_matches[0] if local_matches else None
+        if prior is not None and str(prior.get("provider") or "") != "claude":
+            raise VerbError(
+                "resume_foreign_target", "retained row is not a Claude lifecycle",
+            )
+        if prior is not None and str(prior.get("status") or "") == "open":
+            raise VerbError(
+                "resume_session_already_live", "Claude session is already open",
+            )
+
+        machine = self._launch_machine(host, "claude")
+        if machine is None:
+            raise VerbError(
+                "spawn_launch_unavailable", "no target-host Claude launch profile",
+            )
+        transcript_path, resume_cwd = await self._probe_resume_transcript(
+            host, machine, session_id,
+        )
+        # When retention no longer has the lifecycle row, derive one stable
+        # stream id from the full native identity. The ordinary durable
+        # stream-name reservation then collapses concurrent daemon processes as
+        # well as this instance's in-memory identity lock.
+        name = (
+            str(prior.get("session_name") or "")
+            if prior else f"v2-resume-{session_id}"
+        )
+        if prior is not None and await tmux.has_session(name):
+            raise VerbError(
+                "resume_session_already_live", "Claude session still has a live pane",
+            )
+        return name, transcript_path, resume_cwd, prior
+
     async def _brief_from_message(self, msg: dict[str, Any]) -> str:
         inline_keys = ("prompt", "brief", "initial_prompt")
         inline_present = any(key in msg and msg.get(key) is not None for key in inline_keys)
@@ -593,9 +849,10 @@ class SpawnCtl:
         host: str,
         name: str,
         provider: str,
+        transport: "tmux_transport.Tmux | None" = None,
     ) -> None:
         """Write the launch token before the pane exists, without argv data."""
-        tmux = tmux_transport._ACTIVE_LAUNCH_TMUX.get()
+        tmux = transport or tmux_transport._ACTIVE_LAUNCH_TMUX.get()
         if tmux is None:
             # Direct resolution tests intentionally exercise pure command
             # construction. A real spawn always sets this context first.
@@ -1045,14 +1302,46 @@ class SpawnCtl:
             reply.update(await self._admitted_for_key(host, idempotency_key))
         return reply
 
-    async def _spawn_guarded(self, msg, local_host, *, admission=None):
+    async def _spawn_guarded(
+        self,
+        msg: dict[str, Any],
+        local_host: str,
+        *,
+        admission: asyncio.Future[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         policy = getattr(self.sessions, "assistant", None)
         if policy is None:
-            return await self._spawn_impl(msg, local_host, admission=admission)
+            return await self._spawn_resume_guarded(msg, local_host, admission=admission)
         async with policy.spawn(msg, str(msg.get("host") or local_host).strip()):
+            return await self._spawn_resume_guarded(msg, local_host, admission=admission)
+
+    async def _spawn_resume_guarded(
+        self,
+        msg: dict[str, Any],
+        local_host: str,
+        *,
+        admission: asyncio.Future[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Serialize one native Claude identity through complete admission.
+
+        The ordinary stream-name reservation cannot protect a purged-row resume:
+        two requests could otherwise mint different v2 names for one transcript.
+        Holding this process-local lock until the first request has either opened
+        its row or released its failed reservation makes the second request
+        re-resolve against durable lifecycle state.
+        """
+        raw_resume = msg.get("resume_session_id")
+        if raw_resume is None:
+            return await self._spawn_impl(msg, local_host, admission=admission)
+        session_id = self._canonical_resume_id(raw_resume)
+        host = str(msg.get("host") or local_host).strip()
+        lock = self._resume_locks.setdefault(f"{host}:{session_id}", asyncio.Lock())
+        async with lock:
             return await self._spawn_impl(msg, local_host, admission=admission)
 
-    async def admit_schedule(self, msg, local_host, *, admission_name):
+    async def admit_schedule(
+        self, msg: dict[str, Any], local_host: str, *, admission_name: str
+    ) -> dict[str, Any]:
         policy = getattr(self.sessions, "assistant", None)
         if policy is None:
             return await self._admit_schedule(msg, local_host, admission_name=admission_name)
@@ -1228,9 +1517,13 @@ class SpawnCtl:
         admission: asyncio.Future[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         host = str(msg.get("host") or local_host).strip()
-        name = str(msg.get("session_name") or "").strip() or f"v2-{uuid.uuid4().hex[:8]}"
-        if f"{host}:{name}" in RESERVED_LIFECYCLE_ACTORS:
-            raise VerbError("reserved_actor", "daemon lifecycle actor ids cannot be registered")
+        raw_resume_session_id = msg.get("resume_session_id")
+        if raw_resume_session_id is None:
+            name = str(msg.get("session_name") or "").strip() or f"v2-{uuid.uuid4().hex[:8]}"
+            # Preserve the fresh-spawn rejection point: reserved actors fail
+            # before transport or controller state is consulted.
+            if f"{host}:{name}" in RESERVED_LIFECYCLE_ACTORS:
+                raise VerbError("reserved_actor", "daemon lifecycle actor ids cannot be registered")
         # Remote spawn is fenced BEFORE anything is reserved or created: an
         # offline peer fails fast (`host_offline`) via one bounded SSH probe, so
         # a dead host costs nothing and never stalls (spec item 2). Without a
@@ -1240,6 +1533,19 @@ class SpawnCtl:
                 raise VerbError("unsupported_host", "v2 spawn is localhost-only in this increment")
             await self.hosts.ensure_reachable(host, "spawn")
         tmux = self._tmux_for(host)
+        resume_session_id = (
+            self._canonical_resume_id(raw_resume_session_id)
+            if raw_resume_session_id is not None else None
+        )
+        resume_jsonl_path = ""
+        resume_cwd = ""
+        resume_prior_row: dict[str, Any] | None = None
+        if resume_session_id is not None:
+            name, resume_jsonl_path, resume_cwd, resume_prior_row = (
+                await self._resolve_resume_target(msg, host, tmux)
+            )
+        if f"{host}:{name}" in RESERVED_LIFECYCLE_ACTORS:
+            raise VerbError("reserved_actor", "daemon lifecycle actor ids cannot be registered")
         # Scheduled spawn/handoff (`--at`/`--delay`) is OUT of scope in v2. The CLI
         # sends those as `schedule.insert` (already `unsupported_in_v2` by dispatch
         # fall-through); reject any scheduling field on the spawn path too so the
@@ -1308,12 +1614,16 @@ class SpawnCtl:
         launch_msg = {
             **msg,
             **({"_native_initial_prompt_path": native_prompt_path} if native_prompt_path else {}),
+            **({"_resume_jsonl_path": resume_jsonl_path} if resume_jsonl_path else {}),
+            **({"_resume_cwd": resume_cwd} if resume_cwd else {}),
+            **({"_defer_launch_token_stage": True} if resume_session_id else {}),
         }
         launch_context = tmux_transport._ACTIVE_LAUNCH_TMUX.set(tmux)
         try:
             command, resolution, open_overrides = await self._resolve_launch(launch_msg, host, name)
         finally:
             tmux_transport._ACTIVE_LAUNCH_TMUX.reset(launch_context)
+        deferred_launch_plan = resolution.pop("_deferred_launch_plan", None)
 
         # Reserve the stream and its creation identity before any pane exists.
         nonce = uuid.uuid4().hex
@@ -1356,6 +1666,13 @@ class SpawnCtl:
         # The persisted open-row columns: v1's base fields, then the resolved
         # tuple overrides (provider + canonical model/effort + session identity).
         open_flds = {**tmux_transport.open_fields(msg), **spec_binding, **open_overrides}
+        if resume_prior_row is not None:
+            # A resume creates a new lifecycle generation but retains the prior
+            # conversation's descriptive identity. Never copy timestamps,
+            # process/boot evidence, status, token material, or generation.
+            for field in RESUME_PRESERVED_FIELDS:
+                if field in resume_prior_row:
+                    open_flds[field] = resume_prior_row[field]
         # Fence this spawn's lifecycle to a generation IT owns. Both boot-failure
         # cleanup closes below pass it as `expected_generation`, so a cleanup can
         # only ever close the row THIS spawn created — never a newer same-name
@@ -1389,6 +1706,14 @@ class SpawnCtl:
                     "stream_id_unavailable",
                     f"{host}:{name} already has a live tmux session with no open row; "
                     "v2 never kills a pane it did not create",
+                )
+            if isinstance(deferred_launch_plan, launch.LaunchPlan):
+                await self._stage_launch_token(
+                    deferred_launch_plan,
+                    host=host,
+                    name=name,
+                    provider="claude",
+                    transport=tmux,
                 )
             # Persist intent before creation so restart reconciliation can recover it.
             provider = str((resolution.get("resolved_launch_tuple") or {}).get("provider") or "")
@@ -2475,6 +2800,7 @@ class SpawnCtl:
         launch_effort = effort if (requested_effort is not None or handoff) else None
 
         session_id = jsonl_path = token_hash = ""
+        deferred_launch_plan: launch.LaunchPlan | None = None
         if explicit:
             # Tests may resolve a tuple AND pin the command (stub launch). Honor
             # the command but still stamp the resolved tuple fields.
@@ -2496,15 +2822,27 @@ class SpawnCtl:
                         str(msg.get("_native_initial_prompt_path") or "")
                         if provider == "codex" and not explicit else None
                     ),
+                    resume_session_id=(
+                        str(msg.get("resume_session_id") or "") or None
+                    ),
+                    resume_jsonl_path=(
+                        str(msg.get("_resume_jsonl_path") or "") or None
+                    ),
+                    resume_cwd=(
+                        str(msg.get("_resume_cwd") or "") or None
+                    ),
                 )
             except ValueError as exc:
                 raise VerbError("spawn_launch_unavailable", str(exc)) from exc
-            await self._stage_launch_token(
-                plan,
-                host=host,
-                name=name,
-                provider=provider,
-            )
+            if msg.get("_defer_launch_token_stage"):
+                deferred_launch_plan = plan
+            else:
+                await self._stage_launch_token(
+                    plan,
+                    host=host,
+                    name=name,
+                    provider=provider,
+                )
             token_hash = hashlib.sha256(plan.stream_token.encode("utf-8")).hexdigest()
             command, session_id, jsonl_path = plan.command, plan.session_id, plan.jsonl_path
 
@@ -2517,6 +2855,8 @@ class SpawnCtl:
             "resolved_launch_tuple": dict(tuple_fields),
             "actual_launch_tuple": dict(tuple_fields),
         }
+        if not explicit and deferred_launch_plan is not None:
+            resolution["_deferred_launch_plan"] = deferred_launch_plan
         if resolved.get("_handoff_model_change_warning"):
             resolution["handoff_model_change_warning"] = resolved["_handoff_model_change_warning"]
         overrides: dict[str, Any] = {

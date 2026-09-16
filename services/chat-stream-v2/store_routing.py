@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS v2_outbound_notices (
     next_action TEXT,
     delivered_at TEXT,
     terminal_at TEXT,
-    terminal_reason TEXT
+    terminal_reason TEXT,
+    proof_binding TEXT
 )
 """
 OUTBOUND_NOTICE_INDEX_DDL = (

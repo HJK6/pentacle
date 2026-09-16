@@ -1022,7 +1022,10 @@ def test_reserved_scheduler_actor_cannot_register_or_be_wire_trusted(
     store = Store(str(tmp_path / "reserved-actor.db"))
     store.start()
     server = Server(store=store, sessions=FakeSessions(), local_host="hosta")
-    monkeypatch.setenv("PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN", "tok")
+    token_file = tmp_path / "system-token"
+    token_file.write_text("tok")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE", str(token_file))
     websocket = object()
     try:
         context = run(server._auth_context(websocket, {
@@ -1030,7 +1033,8 @@ def test_reserved_scheduler_actor_cannot_register_or_be_wire_trusted(
             "from_stream_id": "daemon:scheduler",
             "stream_token": "tok",
         }))
-        assert context["service_authenticated"] is True
+        assert context["service_authenticated"] is False
+        assert context["service_attempted"] is True
         assert context["token_verified"] is False
     finally:
         store.stop()
@@ -1317,7 +1321,7 @@ def test_spawn_error_without_affirmative_admission_readback_is_indeterminate(tmp
         store.stop()
 
 
-def test_injective_receipts_exact_schema_handler_and_service_auth(tmp_path, monkeypatch) -> None:
+def test_injective_receipts_exact_schema_handler_and_wire_service_auth_refusal(tmp_path, monkeypatch) -> None:
     assert receipt_id("report/a", "phase") != receipt_id("report-a", "phase")
     assert receipt_id("request", "report/a") != receipt_id("request", "report-a")
     assert "=" in receipt_id("a", "x")
@@ -1346,14 +1350,18 @@ def test_injective_receipts_exact_schema_handler_and_service_auth(tmp_path, monk
         rejected = run(server._dispatch('{"type":"schedule.insert","request_id":"mutation-test"}'))[0]
         assert rejected["error_code"] == "unsupported_in_v2"
 
-        monkeypatch.setenv("PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN", "tok")
+        token_file = tmp_path / "system-token"
+        token_file.write_text("tok")
+        token_file.chmod(0o600)
+        monkeypatch.setenv("PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE", str(token_file))
         websocket = object()
         service_auth = run(server._auth_context(websocket, {"objective": "Exercise the existing spawn contract",
             "type": "schedule.insert", "from_stream_id": "hosta:scheduler",
             "stream_token": "tok",
         }))
-        assert service_auth["service_authenticated"] is True
-        assert service_auth["service_actor"] == "hosta:scheduler"
+        assert service_auth["service_authenticated"] is False
+        assert service_auth["service_attempted"] is True
+        assert service_auth["service_actor"] == ""
         assert service_auth["token_verified"] is False
     finally:
         store.stop()

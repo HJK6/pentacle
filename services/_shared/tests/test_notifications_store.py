@@ -910,6 +910,79 @@ def test_dedup_none_key_never_collapses(store):
     assert len(store.list_notifications()) == 2
 
 
+@pytest.mark.parametrize("authority_kind", ["actions", "answer_target", "question"])
+def test_restricted_dedup_refresh_atomically_refuses_authority_bearing_row(
+    store, authority_kind
+):
+    kwargs = {}
+    if authority_kind == "actions":
+        kwargs["actions"] = [{"kind": "ack"}]
+    elif authority_kind == "answer_target":
+        kwargs["answer_to_stream_id"] = "bart:v2-owner"
+    original = store.create_notification(
+        producer="altum-bot-cd",
+        title="original",
+        dedup_key="pipeline|unit-test|2026-09-15",
+        **kwargs,
+    )
+    if authority_kind == "question":
+        with store._lock:
+            store._conn.execute(
+                "INSERT INTO agent_questions "
+                "(question_id, schema_version, state, envelope, notification_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("q-bound", 1, "open", "{}", original["notification_id"]),
+            )
+            store._conn.commit()
+
+    with pytest.raises(InvalidNotification, match="privileged notification"):
+        store.create_notification(
+            producer="altum-bot-cd",
+            title="replacement",
+            dedup_key="pipeline|unit-test|2026-09-15",
+            actions=[],
+            refuse_privileged_dedup_refresh=True,
+        )
+
+    unchanged = store.get_notification(original["notification_id"])
+    assert unchanged["title"] == "original"
+    assert unchanged["actions"] == original["actions"]
+    assert unchanged["answer_to_stream_id"] == original["answer_to_stream_id"]
+    assert unchanged["firing_count"] == 1
+
+
+def test_restricted_dedup_refresh_allows_plain_row_and_normal_callers_unchanged(store):
+    original = store.create_notification(
+        producer="altum-bot-cd",
+        title="original",
+        dedup_key="pipeline|unit-test|2026-09-15",
+        actions=[],
+    )
+    refreshed = store.create_notification(
+        producer="altum-bot-cd",
+        title="plain replacement",
+        dedup_key="pipeline|unit-test|2026-09-15",
+        actions=[],
+        refuse_privileged_dedup_refresh=True,
+    )
+    assert refreshed["notification_id"] == original["notification_id"]
+    assert refreshed["title"] == "plain replacement"
+
+    actionable = store.create_notification(
+        producer="normal-caller",
+        title="actionable",
+        dedup_key="normal",
+        actions=[{"kind": "ack"}],
+    )
+    normal_refresh = store.create_notification(
+        producer="normal-caller",
+        title="normal refresh",
+        dedup_key="normal",
+    )
+    assert normal_refresh["notification_id"] == actionable["notification_id"]
+    assert normal_refresh["actions"] == []
+
+
 # ----------------------------------------------------------------------
 # Resolve
 # ----------------------------------------------------------------------

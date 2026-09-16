@@ -29,6 +29,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass
@@ -74,6 +75,19 @@ _TELEMETRY_LOG_SAFE_CHARS = frozenset(
 
 SYSTEM_PRODUCER_STREAM_TOKEN_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN"
 SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE"
+SYSTEM_PRODUCER_STREAM_ID_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_ID"
+FIXED_SYSTEM_PRODUCER_STREAM_ID = "altum-bot-cd"
+SYSTEM_NOTIFICATION_CREATE_FIELDS = frozenset({
+    "type", "request_id", "from_stream_id", "stream_token", "producer",
+    "title", "body", "severity", "dedup_key", "actions",
+})
+SYSTEM_NOTIFICATION_DEDUP_RE = re.compile(
+    r"^(?:pipeline\|[A-Za-z0-9][A-Za-z0-9_.-]{0,119}"
+    r"|census\|[A-Za-z0-9][A-Za-z0-9_.-]{0,119}"
+    r"\|[A-Za-z0-9][A-Za-z0-9_.-]{0,119}"
+    r"|infra-census\|[A-Za-z][-A-Za-z0-9]{0,127})"
+    r"\|([0-9]{4}-[0-9]{2}-[0-9]{2})$"
+)
 
 #: WS frame ceiling. Blob transport sends a 1 MiB *decoded* chunk, which is
 #: ~1.37 MiB once base64-wrapped in a JSON envelope — over the websockets 1 MiB
@@ -392,6 +406,9 @@ class Server:
         # one authenticated request to pivot the same socket to another stream.
         self._client_authenticated_streams: dict[Any, str] = {}
         self._client_token_hashes: dict[Any, str] = {}
+        # The sole non-seat service principal is connection-bound after its
+        # exact hello proof. It never enters the seat-token maps above.
+        self._client_system_producers: dict[Any, str] = {}
         #: Wire-provided client names are claims only. A UI principal enters this
         #: connection-local map only after an auth-v2 proof checks against the
         #: existing operator credential registry.
@@ -651,9 +668,10 @@ class Server:
                     isinstance(frame, dict) and frame.get("type") == "hello.error"
                     for frame in result
                 ):
-                    if (self._is_loopback_client(websocket)
+                    if (websocket not in self._client_system_producers and (
+                            self._is_loopback_client(websocket)
                             or self._operator_authenticated(websocket)
-                            or websocket in self._client_authenticated_streams):
+                            or websocket in self._client_authenticated_streams)):
                         self._activate_client(websocket)
                     result = [
                         self.hosts_stats_frame()
@@ -695,6 +713,8 @@ class Server:
             tuple[bool, frozenset[str] | None, frozenset[str], bool, str], list[Any],
         ] = {}
         for websocket in tuple(recipients):
+            if websocket in self._client_system_producers:
+                continue
             if not self._is_loopback_client(websocket) and not self._operator_authenticated(websocket):
                 auth = await self._auth_context(websocket, {})
                 if not auth.get("token_verified"):
@@ -770,6 +790,7 @@ class Server:
         self._host_stats_clients.discard(websocket)
         self._client_authenticated_streams.pop(websocket, None)
         self._client_token_hashes.pop(websocket, None)
+        self._client_system_producers.pop(websocket, None)
         self._operator_challenges.pop(websocket, None)
         self._connection_trust.pop(websocket, None)
         self._client_send_queues.pop(websocket, None)
@@ -998,6 +1019,25 @@ class Server:
         }
         if websocket is not None:
             dispatch_msg["_auth_context"] = await self._auth_context(websocket, msg)
+            service_auth = dispatch_msg["_auth_context"]
+            if service_auth.get("service_attempted"):
+                if not service_auth.get("service_authenticated"):
+                    return [self._auth_error_frame(
+                        verb, request_id, "system_producer_auth_required"
+                    )]
+                if verb == "hello":
+                    if not self._valid_system_producer_hello(msg):
+                        return [self._auth_error_frame(
+                            verb, request_id, "system_producer_auth_required"
+                        )]
+                elif verb != "notification.create":
+                    return [self._auth_error_frame(
+                        verb, request_id, "system_producer_forbidden"
+                    )]
+                elif not self._valid_system_notification_create(msg):
+                    return [self._auth_error_frame(
+                        verb, request_id, "system_producer_payload_invalid"
+                    )]
             if not self._is_loopback_client(websocket) and verb not in {
                 "ping", "hello", "enroll", "event.push", "host.stats",
             }:
@@ -1082,20 +1122,58 @@ class Server:
             "operator_trusted": bool(trust and trust.operator_trusted),
             "service_authenticated": False,
             "service_actor": "",
+            "service_attempted": False,
         }
+        bound_system_actor = self._client_system_producers.get(websocket)
+        if bound_system_actor is not None:
+            claim = str(msg.get("from_stream_id") or "").strip()
+            token_was_supplied = "stream_token" in msg
+            credentials_changed = bool(
+                (claim and claim != bound_system_actor)
+                or (token_was_supplied and not self._verify_system_producer_token(msg.get("stream_token")))
+            )
+            context.update({
+                "service_attempted": True,
+                "service_authenticated": not credentials_changed,
+                "service_actor": bound_system_actor if not credentials_changed else "",
+                "reason_code": TOKEN_REASON_WRONG_SEAT if credentials_changed else TOKEN_REASON_VERIFIED,
+            })
+            return context
+
         cached_hash = self._client_token_hashes.get(websocket)
+        claim = str(msg.get("from_stream_id") or "").strip()
+        producer = str(msg.get("producer") or "").strip()
+        token_matches = self._verify_system_producer_token(msg.get("stream_token"))
+        service_attempted = bool(
+            claim == FIXED_SYSTEM_PRODUCER_STREAM_ID
+            or producer == FIXED_SYSTEM_PRODUCER_STREAM_ID
+            or token_matches
+        )
+        if service_attempted:
+            configured_id = str(os.environ.get(SYSTEM_PRODUCER_STREAM_ID_ENV) or "").strip()
+            authenticated = bool(
+                configured_id == FIXED_SYSTEM_PRODUCER_STREAM_ID
+                and claim == configured_id
+                and token_matches
+                and msg.get("type") == "hello"
+                and self._valid_system_producer_hello(msg)
+            )
+            if authenticated:
+                # Bind only after the entire restricted hello is accepted.
+                self._client_system_producers[websocket] = configured_id
+            context.update({
+                "service_attempted": True,
+                "service_authenticated": authenticated,
+                "service_actor": configured_id if authenticated else "",
+                "reason_code": TOKEN_REASON_VERIFIED if authenticated else TOKEN_REASON_WRONG_SEAT,
+            })
+            return context
+
         if not self._token_auth_requested(msg) and not cached_hash:
             return context
 
         token = msg.get("stream_token")
         claim = str(msg.get("from_stream_id") or msg.get("actor_stream_id") or "").strip()
-        if claim and self._verify_system_producer_token(token):
-            context.update({
-                "service_authenticated": True,
-                "service_actor": claim,
-                "reason_code": TOKEN_REASON_VERIFIED,
-            })
-            return context
         # Keep wire-controlled values out of telemetry labels. The operation
         # label is intentionally a fixed vocabulary, even for malformed input.
         operation = "identity"
@@ -1167,14 +1245,59 @@ class Server:
 
     @staticmethod
     def _verify_system_producer_token(token: Any) -> bool:
-        expected = os.environ.get(SYSTEM_PRODUCER_STREAM_TOKEN_ENV)
+        # The fixed producer uses the configured file only; never fall back
+        # to an inline daemon token when that file is absent or unreadable.
+        expected = None
         token_file = os.environ.get(SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV)
-        if not expected and token_file:
+        if token_file:
             try:
                 expected = Path(token_file).expanduser().read_text(encoding="utf-8").strip()
             except OSError:
                 expected = None
         return bool(expected and isinstance(token, str) and hmac.compare_digest(expected, token))
+
+    @staticmethod
+    def _auth_error_frame(verb: str, request_id: Any, code: str) -> dict[str, Any]:
+        frame = {"type": f"{verb}.error", "error_code": code}
+        if request_id is not None:
+            frame["request_id"] = request_id
+        return frame
+
+    def _valid_system_producer_hello(self, msg: dict[str, Any]) -> bool:
+        subscribe = msg.get("subscribe")
+        return bool(
+            msg.get("from_stream_id") == FIXED_SYSTEM_PRODUCER_STREAM_ID
+            and self._verify_system_producer_token(msg.get("stream_token"))
+            and isinstance(subscribe, dict)
+            and subscribe.get("snapshot") is False
+            and subscribe.get("mode") == "rpc"
+        )
+
+    def _valid_system_notification_create(self, msg: dict[str, Any]) -> bool:
+        if not set(msg).issubset(SYSTEM_NOTIFICATION_CREATE_FIELDS):
+            return False
+        if (
+            msg.get("from_stream_id") != FIXED_SYSTEM_PRODUCER_STREAM_ID
+            or not self._verify_system_producer_token(msg.get("stream_token"))
+            or msg.get("producer") != FIXED_SYSTEM_PRODUCER_STREAM_ID
+            or not isinstance(msg.get("request_id"), str)
+            or not msg["request_id"]
+            or not isinstance(msg.get("title"), str)
+            or not msg["title"].strip()
+            or ("body" in msg and not isinstance(msg.get("body"), str))
+            or msg.get("severity") not in {"info", "warning", "critical"}
+            or ("actions" in msg and msg.get("actions") != [])
+            or not isinstance(msg.get("dedup_key"), str)
+        ):
+            return False
+        match = SYSTEM_NOTIFICATION_DEDUP_RE.fullmatch(msg["dedup_key"])
+        if match is None:
+            return False
+        try:
+            datetime.strptime(match.group(1), "%Y-%m-%d")
+        except ValueError:
+            return False
+        return True
 
     @staticmethod
     def _utc_now() -> str:

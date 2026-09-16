@@ -44,7 +44,13 @@ from store import (
     ReportProvenanceUnavailable,
     normalize_spec_ids,
 )
-from outbound_notices import OutboundNoticeQueue, NOTICE_KIND_REPORT, ensure_notice_marker
+from outbound_notices import (
+    NOTICE_KIND_REPORT,
+    NOTICE_KIND_STATUS_CARD,
+    NOTICE_KIND_STATUS_CARD_COMBINED,
+    OutboundNoticeQueue,
+    ensure_notice_marker,
+)
 
 SERVICES_ROOT = str(Path(__file__).resolve().parents[1])
 if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide schema, not a v2 copy
@@ -1464,13 +1470,76 @@ class NudgeJob:
     pane input stays on Comms; parentless context notices use Notify.
     """
 
-    def __init__(self, sessions: Any, comms: Any, store: Any, config: NudgeConfig | None = None, *, notify: Any = None) -> None:
+    def __init__(
+        self,
+        sessions: Any,
+        comms: Any,
+        store: Any,
+        config: NudgeConfig | None = None,
+        *,
+        notify: Any = None,
+        outbound: OutboundNoticeQueue | None = None,
+        broadcast: Any = None,
+    ) -> None:
         self.sessions = sessions
         self.comms = comms
         self.store = store
         self.config = config or NudgeConfig()
         self.notify = notify
+        self.outbound = outbound
+        self.broadcast = broadcast
         self._last_tell_epoch_token: dict[str, int] = {}
+        if self.outbound is not None:
+            self.outbound.register_kind(
+                NOTICE_KIND_STATUS_CARD,
+                on_delivered=self._status_notice_delivered,
+            )
+            self.outbound.register_kind(
+                NOTICE_KIND_STATUS_CARD_COMBINED,
+                on_delivered=self._status_notice_delivered,
+            )
+
+    async def _status_notice_delivered(self, row: dict[str, Any]) -> None:
+        if self.broadcast is None:
+            return
+        try:
+            binding = json.loads(row.get("proof_binding") or "")
+        except (TypeError, ValueError):
+            return
+        if not isinstance(binding, dict):
+            return
+        event = await self.store.fetch_projected_session_event(
+            str(binding.get("recipient_stream_id") or ""),
+            int(binding.get("proof_event_id") or 0),
+        )
+        if event is not None:
+            await self.broadcast({"type": "chat.event", "event": event})
+
+    @staticmethod
+    def _status_notice_dedupe_key(
+        sid: str,
+        kinds: tuple[str, ...],
+        row: dict[str, Any],
+        states: dict[tuple[str, str], dict[str, Any]],
+    ) -> str:
+        identity = [
+            sid,
+            str(row.get("session_generation") or ""),
+            list(kinds),
+            NudgeJob._card_basis(row),
+            [
+                [
+                    kind,
+                    (states.get((sid, kind)) or {}).get("last_nudged_at"),
+                    (states.get((sid, kind)) or {}).get("basis"),
+                ]
+                for kind in kinds
+            ],
+        ]
+        digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return f"nudge-status:{digest}"
 
     # -- eligibility (v1 candidate predicate, minus v1-only I/O machinery) --
 
@@ -1846,18 +1915,43 @@ class NudgeJob:
                 if combined
                 else (NUDGE_TITLE_TEXT if kinds[0] == NUDGE_KIND_TITLE else NUDGE_CARD_TEXT)
             )
-            tell_id = (
-                f"nudge:combined:{sid}:{self._tell_epoch(sid, now)}"
-                if combined
-                else f"nudge:{kinds[0]}:{sid}:{self._tell_epoch(sid, now)}"
-            )
             try:
-                await self.comms.tell({
-                    "tell_id": tell_id,
-                    "stream_id": sid,
-                    "message": text,
-                })
-                result.sent += 1
+                if NUDGE_KIND_CARD in kinds and self.outbound is not None:
+                    notice_kind = (
+                        NOTICE_KIND_STATUS_CARD_COMBINED
+                        if combined else NOTICE_KIND_STATUS_CARD
+                    )
+                    dedupe_key = self._status_notice_dedupe_key(
+                        sid, kinds, row, states,
+                    )
+                    prior = await self.store.outbound_notice_for_dedupe(dedupe_key)
+                    notice_id = (
+                        str(prior["notice_id"])
+                        if prior is not None
+                        else f"nudge:{notice_kind}:{uuid.uuid4().hex}"
+                    )
+                    stored = await self.outbound.enqueue(
+                        kind=notice_kind,
+                        dedupe_key=dedupe_key,
+                        recipient_stream_id=sid,
+                        tell_id=notice_id,
+                        body=text,
+                        metadata={"producer": "nudge_job"},
+                    )
+                    if stored.get("delivered_at"):
+                        result.sent += 1
+                    elif await self.outbound.deliver_now(notice_id):
+                        result.sent += 1
+                    else:
+                        result.pending += 1
+                else:
+                    tell_id = f"nudge:{kinds[0]}:{sid}:{self._tell_epoch(sid, now)}"
+                    await self.comms.tell({
+                        "tell_id": tell_id,
+                        "stream_id": sid,
+                        "message": text,
+                    })
+                    result.sent += 1
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - a dead pane is not a pass failure

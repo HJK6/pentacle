@@ -49,6 +49,7 @@ def test_notify_message_payload_defaults_producer_to_caller():
 
     assert payload == {
         "type": "notification.create",
+        "from_stream_id": "hostb:codex-a",
         "producer": "hostb:codex-a",
         "severity": "info",
         "actions": [],
@@ -188,5 +189,5 @@ def test_notify_payload_is_provider_agnostic():
     for payload in (claude_payload, codex_payload):
         payload.pop("producer")
         payload.pop("answer_to_stream_id")
+        payload.pop("from_stream_id")
     assert claude_payload == codex_payload
-
