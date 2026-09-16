@@ -20,7 +20,7 @@ GENERATION_ID = "4cb727e8487b45caa0e8ccb905667928"
 
 async def generate() -> dict:
     with tempfile.TemporaryDirectory(prefix="notification-answer-wire-") as directory:
-        fixture_context = fixture(Path(directory))
+        fixture_context = fixture(Path(directory), host="fixture-host")
         with patch("store.uuid.uuid4", return_value=uuid.UUID(GENERATION_ID)):
             values = await fixture_context.__aenter__()
         notify, queue, _comms, provider, sessions, store = values
@@ -35,7 +35,7 @@ async def generate() -> dict:
 
                 async def capture_before_proof(text: str) -> None:
                     await original_user(text)
-                    tail = await store.fetch_session_event_tail("hosta:v2-test", limit=500)
+                    tail = await store.fetch_session_event_tail("fixture-host:v2-test", limit=500)
                     before_proof.append(next(event for event in tail if event["text"] == text))
 
                 provider.user = capture_before_proof
@@ -45,7 +45,7 @@ async def generate() -> dict:
                     return_value=uuid.UUID(NOTIFICATION_ID),
                 ):
                     question = await _seed_live_shaped_question(
-                        notify, question_id="q-synthetic-trusted-answer",
+                        notify, producer_stream_id="fixture-host:v2-test", question_id="q-synthetic-trusted-answer",
                     )
                 await notify.notification({
                     "type": "notification.resolve",
@@ -107,7 +107,7 @@ async def generate() -> dict:
                     },
                     "notification_id": question["notification_id"],
                     "question_id": question["question_id"],
-                    "session_generation": sessions.get("hosta:v2-test")["session_generation"],
+                    "session_generation": sessions.get("fixture-host:v2-test")["session_generation"],
                     "notice": {
                         key: notice[key]
                         for key in ("notice_id", "kind", "recipient_stream_id", "tell_id", "body")

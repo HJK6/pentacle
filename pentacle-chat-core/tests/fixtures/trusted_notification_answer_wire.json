@@ -2,12 +2,12 @@
   "before_proof": {
     "event": {
       "daemon_seq": 1,
-      "host": "hosta",
+      "host": "fixture-host",
       "kind": "USER",
       "provider": "codex",
       "session_id": "4cb727e8487b45caa0e8ccb905667928",
       "session_name": "v2-test",
-      "stream_id": "hosta:v2-test",
+      "stream_id": "fixture-host:v2-test",
       "text": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
       "timestamp": "2026-09-16T05:03:01.000Z"
     },
@@ -16,7 +16,7 @@
   "correction": {
     "event": {
       "daemon_seq": 1,
-      "host": "hosta",
+      "host": "fixture-host",
       "kind": "USER",
       "provider": "codex",
       "raw": {
@@ -27,12 +27,12 @@
           "notice_id": "notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24",
           "schema_version": 1,
           "session_generation": "4cb727e8487b45caa0e8ccb905667928",
-          "stream_id": "hosta:v2-test"
+          "stream_id": "fixture-host:v2-test"
         }
       },
       "session_id": "4cb727e8487b45caa0e8ccb905667928",
       "session_name": "v2-test",
-      "stream_id": "hosta:v2-test",
+      "stream_id": "fixture-host:v2-test",
       "text": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
       "timestamp": "2026-09-16T05:03:01.000Z"
     },
@@ -41,7 +41,7 @@
   "explicit_user_copy": {
     "event": {
       "daemon_seq": 3,
-      "host": "hosta",
+      "host": "fixture-host",
       "kind": "USER",
       "provider": "codex",
       "raw": {
@@ -51,7 +51,7 @@
       "request_id": "synthetic-operator-copy",
       "session_id": "4cb727e8487b45caa0e8ccb905667928",
       "session_name": "v2-test",
-      "stream_id": "hosta:v2-test",
+      "stream_id": "fixture-host:v2-test",
       "text": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
       "timestamp": "2026-09-16T05:03:01.000Z"
     },
@@ -61,7 +61,7 @@
     "body": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
     "kind": "notification_answer",
     "notice_id": "notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24",
-    "recipient_stream_id": "hosta:v2-test",
+    "recipient_stream_id": "fixture-host:v2-test",
     "tell_id": "notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24"
   },
   "notification_id": "2bfc6d29-8c75-41ab-bc39-3dd80677bf24",
@@ -79,7 +79,7 @@
   "receiptless_identical_user": {
     "event": {
       "daemon_seq": 2,
-      "host": "hosta",
+      "host": "fixture-host",
       "kind": "USER",
       "provider": "codex",
       "raw": {
@@ -87,7 +87,7 @@
       },
       "session_id": "4cb727e8487b45caa0e8ccb905667928",
       "session_name": "v2-test",
-      "stream_id": "hosta:v2-test",
+      "stream_id": "fixture-host:v2-test",
       "text": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
       "timestamp": "2026-09-16T05:03:01.000Z"
     },
@@ -96,7 +96,7 @@
   "replay": {
     "event": {
       "daemon_seq": 1,
-      "host": "hosta",
+      "host": "fixture-host",
       "kind": "USER",
       "provider": "codex",
       "raw": {
@@ -107,12 +107,12 @@
           "notice_id": "notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24",
           "schema_version": 1,
           "session_generation": "4cb727e8487b45caa0e8ccb905667928",
-          "stream_id": "hosta:v2-test"
+          "stream_id": "fixture-host:v2-test"
         }
       },
       "session_id": "4cb727e8487b45caa0e8ccb905667928",
       "session_name": "v2-test",
-      "stream_id": "hosta:v2-test",
+      "stream_id": "fixture-host:v2-test",
       "text": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
       "timestamp": "2026-09-16T05:03:01.000Z"
     },

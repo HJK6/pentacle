@@ -17,7 +17,7 @@ def _run(coro):
 
 def test_answer_producer_projects_one_same_id_correction_after_fixed_proof(tmp_path) -> None:
     async def scenario() -> None:
-        async with fixture(tmp_path) as (notify, queue, _comms, provider, _sessions, store):
+        async with fixture(tmp_path, host="fixture-host") as (notify, queue, _comms, provider, _sessions, store):
             frames: list[dict] = []
 
             async def broadcast(frame: dict) -> None:
@@ -25,7 +25,7 @@ def test_answer_producer_projects_one_same_id_correction_after_fixed_proof(tmp_p
 
             notify._broadcast = broadcast
             question = await _seed_live_shaped_question(
-                notify, question_id="q-synthetic-trusted-answer",
+                notify, producer_stream_id="fixture-host:v2-test", question_id="q-synthetic-trusted-answer",
             )
             resolved = await notify.notification({
                 "type": "notification.resolve",
@@ -76,9 +76,9 @@ def test_answer_producer_projects_one_same_id_correction_after_fixed_proof(tmp_p
 
 def test_answer_projection_fails_open_for_user_binding_and_missing_fixed_pair(tmp_path) -> None:
     async def scenario() -> None:
-        async with fixture(tmp_path) as (notify, queue, _comms, _provider, _sessions, store):
+        async with fixture(tmp_path, host="fixture-host") as (notify, queue, _comms, _provider, _sessions, store):
             question = await _seed_live_shaped_question(
-                notify, question_id="q-synthetic-answer-controls",
+                notify, producer_stream_id="fixture-host:v2-test", question_id="q-synthetic-answer-controls",
             )
             await notify.notification({
                 "type": "notification.resolve",
@@ -137,9 +137,9 @@ def test_answer_projection_fails_open_for_user_binding_and_missing_fixed_pair(tm
 )
 def test_answer_projection_rejects_each_mismatched_fixed_tuple(tmp_path, mutation: str) -> None:
     async def scenario() -> None:
-        async with fixture(tmp_path) as (notify, queue, _comms, _provider, _sessions, store):
+        async with fixture(tmp_path, host="fixture-host") as (notify, queue, _comms, _provider, _sessions, store):
             question = await _seed_live_shaped_question(
-                notify, question_id=f"q-synthetic-{mutation}",
+                notify, producer_stream_id="fixture-host:v2-test", question_id=f"q-synthetic-{mutation}",
             )
             await notify.notification({
                 "type": "notification.resolve",
@@ -167,7 +167,7 @@ def test_answer_projection_rejects_each_mismatched_fixed_tuple(tmp_path, mutatio
                     envelope["reply"]["proof_event_id"] = event_id + 1
                     envelope["delivery"]["proof_event_id"] = event_id + 1
                 elif mutation == "wrong_stream":
-                    metadata["producer_stream_id"] = "hosta:other"
+                    metadata["producer_stream_id"] = "fixture-host:other"
                 elif mutation == "wrong_generation":
                     metadata["producer_session_generation"] = "replacement-generation"
                 elif mutation == "wrong_body":
@@ -209,9 +209,9 @@ def test_answer_proof_survives_retention_restart_and_generation_replacement(
     db_path = tmp_path / "sessions.db"
 
     async def first_process() -> tuple[str, int, str, dict]:
-        async with fixture(tmp_path) as (notify, queue, _comms, _provider, sessions, store):
+        async with fixture(tmp_path, host="fixture-host") as (notify, queue, _comms, _provider, sessions, store):
             question = await _seed_live_shaped_question(
-                notify, question_id="q-synthetic-retained-proof",
+                notify, producer_stream_id="fixture-host:v2-test", question_id="q-synthetic-retained-proof",
             )
             await notify.notification({
                 "type": "notification.resolve",
@@ -241,9 +241,9 @@ def test_answer_proof_survives_retention_restart_and_generation_replacement(
 
             original = sessions.get(notice["recipient_stream_id"])
             await sessions.mark_closed(
-                "hosta", "v2-test", expected_generation=original["session_generation"],
+                "fixture-host", "v2-test", expected_generation=original["session_generation"],
             )
-            await sessions.open("hosta", "v2-test", provider="codex", visibility="visible")
+            await sessions.open("fixture-host", "v2-test", provider="codex", visibility="visible")
             retained_after_reopen = (await store.project_session_events([retained]))[0]
             assert retained_after_reopen["raw"]["daemon_notice"]["event_id"] == event_id
             copied_id = await store.append_session_event(
