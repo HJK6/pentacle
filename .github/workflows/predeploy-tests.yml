@@ -1,196 +1,42 @@
----
-name: Predeploy Tests
-
-# Budget: the first hosted attempt at complete collection exceeded the former
-# nine-minute target and the file-grouped retry hit its 12-minute timeout. The
-# conservative relevant-PR ceiling is therefore <=20 Ubuntu minutes/run; at two updates per
-# 30 days that is <=40 minutes/month (<=200 at 5x headroom). Docs/memory-only
-# PRs only run the lightweight path decision.
-"on":
+name: Public checks
+on:
+  push:
   pull_request:
-  workflow_dispatch:
-
 permissions:
   contents: read
-
-# Keep one current run per PR. This is deliberately distinct from the
-# self-hosted host-tier group: a new PR push may cancel only its own Ubuntu run.
-concurrency:
-  group: predeploy-pr-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  hermetic:
-    # Configure this exact job context as the required main-branch check only
-    # after its first PR run is visible. The workflow itself is never skipped:
-    # only expensive steps are skipped for docs/memory-only changes.
-    name: PR Hermetic Gate
+  checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      PYTHONUNBUFFERED: "1"
-      PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
-      - name: Check out repository history for the path decision
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          fetch-depth: 0
-
-      - name: Decide whether the PR needs the hermetic tier
-        id: changes
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
-            echo "run_hermetic=true" >> "${GITHUB_OUTPUT}"
-            echo "manual dispatch runs the complete hermetic tier"
-            exit 0
-          fi
-
-          changed="${RUNNER_TEMP}/pentacle-changed-files.txt"
-          git diff --name-only \
-            "${{ github.event.pull_request.base.sha }}" \
-            "${{ github.event.pull_request.head.sha }}" > "${changed}"
-          sed -n '1,240p' "${changed}"
-
-          # Never skip the workflow at trigger level: GitHub would leave a
-          # required check pending. Only documentation/memory paths skip
-          # the expensive steps; every PR still receives this job's context.
-          if grep -Ev '^(docs/|memory/|work/|README(\\.md)?$|CHANGELOG(\\.md)?$)' "${changed}" >/dev/null; then
-            echo "run_hermetic=true" >> "${GITHUB_OUTPUT}"
-            echo "relevant source change: running hermetic tier"
-          else
-            echo "run_hermetic=false" >> "${GITHUB_OUTPUT}"
-            echo "docs/memory-only change: policy context remains successful"
-          fi
-
-      - name: Install tmux for mock-daemon isolation
-        if: ${{ steps.changes.outputs.run_hermetic == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes tmux zsh
-
-      - name: Set up pinned Python
-        if: ${{ steps.changes.outputs.run_hermetic == 'true' }}
-        uses: actions/setup-python@v5
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
         with:
-          # The chat-stream test corpus uses PEP 701 f-string syntax, which
-          # needs Python 3.12+. Keep this aligned with the locked wheel set.
-          python-version: "3.13"
-          cache: pip
-          cache-dependency-path: .github/ci/requirements-py313.lock
-
-      - name: Restore hermetic virtualenv
-        if: ${{ steps.changes.outputs.run_hermetic == 'true' }}
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/pentacle-ci-venv
-          key: hermetic-py-${{ runner.os }}-3.13-${{ hashFiles('.github/ci/requirements-py313.lock') }}
-
-      - name: Install pinned test dependencies
-        if: ${{ steps.changes.outputs.run_hermetic == 'true' }}
-        shell: bash
+          python-version: '3.13'
+      - run: sudo apt-get update && sudo apt-get install -y tmux lsof zsh
+      - run: npm ci
+      - run: npm run prestart
+      - run: npm test
+      - run: python3 scripts/test_check_public_residue.py
+      - run: python3 scripts/check_public_residue.py
+      - run: python -m pip install -r services/chat-stream-v2/requirements.txt -e services/agent-orch
+      - name: Install Chrome for the web E2E gate
         run: |
-          set -euo pipefail
-          ci_venv="${RUNNER_TEMP}/pentacle-ci-venv"
-          if [[ ! -x "${ci_venv}/bin/python" ]]; then
-            python3 -m venv "${ci_venv}"
-          fi
-          "${ci_venv}/bin/python" -m pip install --requirement .github/ci/requirements-py313.lock
-
-      - name: Create fail-closed provider guards
-        if: ${{ steps.changes.outputs.run_hermetic == 'true' }}
-        id: provider_guards
-        shell: bash
+          wget -q -O "${RUNNER_TEMP:-/tmp}/google-chrome-stable_current_amd64.deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y "${RUNNER_TEMP:-/tmp}/google-chrome-stable_current_amd64.deb"
+      - name: Source integrity after Chrome install
+        run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
+      - name: Web mode E2E gate
         run: |
-          set -euo pipefail
-          guard_dir="${RUNNER_TEMP}/pentacle-provider-guards"
-          install -d -m 755 "${guard_dir}"
-          for command in claude codex agent-orch; do
-            printf '%s\n' \
-              '#!/usr/bin/env bash' \
-              "echo \"CI provider guard: ${command} must not run\" >&2" \
-              'exit 97' > "${guard_dir}/${command}"
-            chmod 755 "${guard_dir}/${command}"
-          done
-          echo "path=${guard_dir}" >> "${GITHUB_OUTPUT}"
-
-      - name: Prove provider guards fail closed
-        if: ${{ steps.changes.outputs.run_hermetic == 'true' }}
-        shell: bash
+          npm run build:web
+          node test/e2e/web_gate.js
+      - name: Daemon and CLI checks
         run: |
-          set -euo pipefail
-          for command in claude codex agent-orch; do
-            set +e
-            "${{ steps.provider_guards.outputs.path }}/${command}" --version
-            status=$?
-            set -e
-            if [[ "${status}" -ne 97 ]]; then
-              echo "${command} guard did not fail closed (status=${status})" >&2
-              exit 1
-            fi
-          done
-
-      - name: Prepare provider-free deploy unit fixtures
-        if: ${{ steps.changes.outputs.run_hermetic == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # deploy.py's unit fixtures create throwaway git repos and model its
-          # explicit shared-parser existence check. chat_streamd also
-          # deliberately prepends this host-local path at import time, so
-          # install the checked-in API-compatible parser here rather than an
-          # empty existence-only file. These are inert test inputs only: the
-          # unit runners intercept every deploy subprocess.
-          git config --global user.name "Pentacle CI"
-          git config --global user.email "pentacle-ci@example.invalid"
-          shared_root="${HOME}/repos/triforce-shared"
-          install -d -m 755 "${shared_root}"
-          install -m 644 \
-            "${GITHUB_WORKSPACE}/.github/ci/hermetic_python/specs_parser.py" \
-            "${shared_root}/specs_parser.py"
-          # deploy.py resolves a release-venv executable before this fallback.
-          # Where a fixture has no vendored executable, make resolution land on
-          # the same exit-97 sentinel proved above—never a provider binary.
-          if [[ -e /usr/local/bin/agent-orch ]]; then
-            echo "unexpected agent-orch already present on hosted runner" >&2
-            exit 1
-          fi
-          sudo install -m 755 "${{ steps.provider_guards.outputs.path }}/agent-orch" /usr/local/bin/agent-orch
-
-      - name: Run unit and mock-daemon tiers
-        if: ${{ steps.changes.outputs.run_hermetic == 'true' }}
-        shell: bash
-        env:
-          PENTACLE_MACHINES_FILE: ${{ github.workspace }}/.github/ci/hermetic_machines.json
-        run: |
-          set -euo pipefail
-          export PATH="${{ steps.provider_guards.outputs.path }}:${PATH}"
-          export PYTHONPATH="${GITHUB_WORKSPACE}/.github/ci/hermetic_python:${GITHUB_WORKSPACE}/services:${GITHUB_WORKSPACE}/services/agent-orch${PYTHONPATH:+:${PYTHONPATH}}"
-          export PYTEST_ADDOPTS="-o cache_dir=${RUNNER_TEMP}/pentacle-pytest-cache"
-          ci_venv="${RUNNER_TEMP}/pentacle-ci-venv"
-
-          "${ci_venv}/bin/python" -m pytest services/agent-orch/tests -q -rs -n 2
-
-          # v2's merge tier is a provider-free unit/loopback smoke suite. Its
-          # full soak remains the deliberately heavy local deploy gate, not a
-          # GitHub-minute consumer. Force the canonical runner to use this
-          # pinned virtualenv rather than an ambient hosted Python.
-          gate_evidence_dir="$(mktemp -d /tmp/pv2.XXXXXX)"
-          env -u PYTHONPATH \
-            V2_PYTHON_BIN="${ci_venv}/bin/python" \
-            V2_GATE_EVIDENCE_DIR="${gate_evidence_dir}" \
-            "${ci_venv}/bin/python" services/chat-stream-v2/tools/run_gate.py merge
-
-
-      - name: Record CI budget outcome
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          if [[ "${{ steps.changes.outputs.run_hermetic }}" == "true" ]]; then
-            echo "budget_target=relevant PR <=20 Ubuntu minutes; inspect this run duration in Actions"
-          else
-            echo "budget_target=docs/memory-only PR uses only the required policy context"
-          fi
+          export PYTHONPATH="${GITHUB_WORKSPACE}/services:${GITHUB_WORKSPACE}/services/agent-orch"
+          python services/chat-stream-v2/tools/run_gate.py merge
+          python -m pytest services/agent-orch/tests
+      - name: Source integrity at gate end
+        run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
