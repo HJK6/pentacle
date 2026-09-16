@@ -164,3 +164,18 @@ test('public chat-core source stays platform-neutral', () => {
   assert.deepEqual(offenders, []);
 });
 
+test('desktop vendored core declares and packages its production hash imports', () => {
+  const corePackage = JSON.parse(fs.readFileSync(path.join(coreRoot, 'package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf8'));
+  assert.equal(corePackage.dependencies?.['@noble/hashes'], '^2.2.0');
+  assert.equal(lock.packages?.['pentacle-chat-core']?.dependencies?.['@noble/hashes'], '^2.2.0');
+  assert.equal(lock.packages?.['node_modules/@noble/hashes']?.dev, undefined);
+
+  for (const subpath of ['@noble/hashes/sha2.js', '@noble/hashes/utils.js']) {
+    const resolved = require.resolve(subpath, { paths: [coreRoot] });
+    assert.ok(
+      resolved.includes(`${path.sep}node_modules${path.sep}@noble${path.sep}hashes${path.sep}`),
+      `${subpath} resolves from the packaged production dependency`,
+    );
+  }
+});

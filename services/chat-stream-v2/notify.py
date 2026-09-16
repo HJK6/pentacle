@@ -628,6 +628,16 @@ class Notify:
         log.info("answer delivery confirmed nid=%s", nid,
                  extra={"subsystem": "notify", "bug_ref": "notification_answer_disconnect_delivery_2026_09"})
         await self._broadcast_notification_by_id(nid)
+        if self._broadcast is not None:
+            tell = await self._comms.store.get_tell_delivery(str(row["tell_id"]))
+            delivery = tell.get("delivery") if isinstance(tell, dict) else None
+            event_id = delivery.get("proof_event_id") if isinstance(delivery, dict) else None
+            if isinstance(event_id, int) and not isinstance(event_id, bool) and event_id > 0:
+                event = await self._comms.store.fetch_projected_session_event(
+                    str(row["recipient_stream_id"]), event_id,
+                )
+                if event is not None:
+                    await self._broadcast({"type": "chat.event", "event": event})
 
     async def _answer_terminal(self, row: dict, reason: str, next_action: str) -> None:
         nid = self._notice_metadata(row)["notification_id"]

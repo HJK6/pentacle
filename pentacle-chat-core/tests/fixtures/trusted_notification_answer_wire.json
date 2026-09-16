@@ -1,0 +1,123 @@
+{
+  "before_proof": {
+    "event": {
+      "daemon_seq": 1,
+      "host": "hosta",
+      "kind": "USER",
+      "provider": "codex",
+      "session_id": "4cb727e8487b45caa0e8ccb905667928",
+      "session_name": "v2-test",
+      "stream_id": "hosta:v2-test",
+      "text": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
+      "timestamp": "2026-09-16T05:03:01.000Z"
+    },
+    "type": "chat.event"
+  },
+  "correction": {
+    "event": {
+      "daemon_seq": 1,
+      "host": "hosta",
+      "kind": "USER",
+      "provider": "codex",
+      "raw": {
+        "daemon_notice": {
+          "body_sha256": "966b42e9de6c637349c8446af6128b83b80b338033501ec03bc34bbeb00648cb",
+          "event_id": 1,
+          "kind": "notification_answer",
+          "notice_id": "notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24",
+          "schema_version": 1,
+          "session_generation": "4cb727e8487b45caa0e8ccb905667928",
+          "stream_id": "hosta:v2-test"
+        }
+      },
+      "session_id": "4cb727e8487b45caa0e8ccb905667928",
+      "session_name": "v2-test",
+      "stream_id": "hosta:v2-test",
+      "text": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
+      "timestamp": "2026-09-16T05:03:01.000Z"
+    },
+    "type": "chat.event"
+  },
+  "explicit_user_copy": {
+    "event": {
+      "daemon_seq": 3,
+      "host": "hosta",
+      "kind": "USER",
+      "provider": "codex",
+      "raw": {
+        "request_id": "synthetic-operator-copy",
+        "source": "structured"
+      },
+      "request_id": "synthetic-operator-copy",
+      "session_id": "4cb727e8487b45caa0e8ccb905667928",
+      "session_name": "v2-test",
+      "stream_id": "hosta:v2-test",
+      "text": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
+      "timestamp": "2026-09-16T05:03:01.000Z"
+    },
+    "type": "chat.event"
+  },
+  "notice": {
+    "body": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
+    "kind": "notification_answer",
+    "notice_id": "notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24",
+    "recipient_stream_id": "hosta:v2-test",
+    "tell_id": "notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24"
+  },
+  "notification_id": "2bfc6d29-8c75-41ab-bc39-3dd80677bf24",
+  "proof": {
+    "proof_event_id": 1,
+    "proof_state": "proven",
+    "proof_watermark": 0
+  },
+  "provenance": {
+    "classification": "synthetic-known-data",
+    "generator": "services/chat-stream-v2/tests/generate_notification_answer_wire_fixture.py",
+    "path": "Notify.notification -> OutboundNoticeQueue -> Comms proof -> Store projector -> Notify broadcast"
+  },
+  "question_id": "q-synthetic-trusted-answer",
+  "receiptless_identical_user": {
+    "event": {
+      "daemon_seq": 2,
+      "host": "hosta",
+      "kind": "USER",
+      "provider": "codex",
+      "raw": {
+        "source": "structured"
+      },
+      "session_id": "4cb727e8487b45caa0e8ccb905667928",
+      "session_name": "v2-test",
+      "stream_id": "hosta:v2-test",
+      "text": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
+      "timestamp": "2026-09-16T05:03:01.000Z"
+    },
+    "type": "chat.event"
+  },
+  "replay": {
+    "event": {
+      "daemon_seq": 1,
+      "host": "hosta",
+      "kind": "USER",
+      "provider": "codex",
+      "raw": {
+        "daemon_notice": {
+          "body_sha256": "966b42e9de6c637349c8446af6128b83b80b338033501ec03bc34bbeb00648cb",
+          "event_id": 1,
+          "kind": "notification_answer",
+          "notice_id": "notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24",
+          "schema_version": 1,
+          "session_generation": "4cb727e8487b45caa0e8ccb905667928",
+          "stream_id": "hosta:v2-test"
+        }
+      },
+      "session_id": "4cb727e8487b45caa0e8ccb905667928",
+      "session_name": "v2-test",
+      "stream_id": "hosta:v2-test",
+      "text": "[pentacle-notice:notification-answer-2bfc6d29-8c75-41ab-bc39-3dd80677bf24]\n[notification.answer]\nnotification_id=2bfc6d29-8c75-41ab-bc39-3dd80677bf24\nanswer=approve\nchoice=True\nby=operator",
+      "timestamp": "2026-09-16T05:03:01.000Z"
+    },
+    "type": "chat.event"
+  },
+  "schema_version": 1,
+  "session_generation": "4cb727e8487b45caa0e8ccb905667928"
+}

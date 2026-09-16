@@ -28,8 +28,11 @@ class Provider:
             self.entered.set()
             await self.release.wait()
     async def user(self, text):
+        session = await self.store.fetch_session('hosta', 'v2-test')
         await self.store.append_session_event('hosta:v2-test',
-            {'stream_id':'hosta:v2-test','provider':'codex','kind':'USER','text':text},
+            {'stream_id':'hosta:v2-test','host':'hosta','provider':'codex',
+             'session_name':'v2-test','session_id':session['session_generation'],
+             'timestamp':'2026-09-16T05:03:01.000Z','kind':'USER','text':text},
             identity='native:'+str(len(self.pastes))+':'+text,limit=500)
     async def run(self, *args, **kwargs): return 0, ''
 

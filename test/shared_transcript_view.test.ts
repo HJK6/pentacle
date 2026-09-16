@@ -12,6 +12,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import answerWire from '../pentacle-chat-core/tests/fixtures/trusted_notification_answer_wire.json';
 
 import { ChatStoreController } from '../renderer/src/chat_store_controller';
 import {
@@ -289,6 +290,53 @@ test('agent-orch notification.answer renders as a compact desktop question row',
   assert.ok(container.textContent?.includes('Operator answered: hostc'), 'selected label rendered');
   assert.ok(container.textContent?.includes('Note: Use the orchestrator.'), 'note rendered');
   assert.equal(container.textContent?.includes('notification.answer'), false, 'raw JSON suppressed');
+});
+
+test('proven notification answer correction leaves one durable full answer card', () => {
+  const notificationId = answerWire.notification_id;
+  const before = answerWire.before_proof.event;
+  const correction = answerWire.correction.event;
+  const answerStream = correction.stream_id;
+  const controller = controllerWithEvents([before], {
+    stream_id: answerStream,
+    host: correction.host,
+    provider: correction.provider,
+    session_name: correction.session_name,
+  });
+  assert.equal(controller.selectSessionDetail(answerStream, { visibleCount: 'all' })?.transcriptItems.length, 1);
+
+  controller.applyFrame({
+    type: 'chat.event',
+    event: correction,
+  });
+  const { container } = newDom();
+  const detail = controller.selectSessionDetail(answerStream, { visibleCount: 'all' });
+  container.innerHTML = renderTranscriptTimelineHtml(detail, CHROME, {
+    resolvedQuestions: [{
+      notification_id: notificationId,
+      state: 'resolved',
+      resolved_at: '2026-05-25T12:00:01.000Z',
+      question: {
+        question_id: 'q-synthetic-answer',
+        state: 'answered',
+        options: [{ label: 'Approve release', value: 'approve' }],
+        answer: { selections: ['approve'], note: 'Keep the operator note.' },
+      },
+    }],
+  });
+
+  assert.equal(container.querySelectorAll('.slot-chat-activity').length, 1);
+  assert.match(container.textContent || '', /Operator answered: Approve release/);
+  assert.match(container.textContent || '', /Note: Keep the operator note\./);
+  assert.equal((container.textContent || '').includes('[pentacle-notice:'), false);
+
+  const copied = controllerWithEvents([answerWire.explicit_user_copy.event], {
+    stream_id: answerStream,
+    host: correction.host,
+    provider: correction.provider,
+    session_name: correction.session_name,
+  });
+  assert.equal(copied.selectSessionDetail(answerStream, { visibleCount: 'all' })?.transcriptItems.length, 1);
 });
 
 test('agent-orch prompt.ask.ok renders as a compact desktop ask confirmation', () => {
@@ -598,4 +646,3 @@ test('markdown preserves non-prose handling: tool label + tree log unchanged', (
   assert.ok(html.includes('slot-chat-loglist'), 'tree-char log list preserved');
   assert.ok(html.includes('<strong>bug</strong>'), 'prose markdown still rendered');
 });
-

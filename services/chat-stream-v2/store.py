@@ -79,6 +79,14 @@ _SEND_REQUEST_ID_RE = re.compile(r"send-[A-Za-z0-9_-]{1,123}\Z")
 _PROVENANCE_ID_MAX = 256
 SCHEMA_VERSION = 1
 _TRUSTED_STATUS_NOTICE_KINDS = frozenset({"status_card", "status_card_combined"})
+_TRUSTED_NOTIFICATION_ANSWER_METADATA_KEYS = frozenset({
+    "canonical_intent",
+    "notification_id",
+    "producer_session_generation",
+    "producer_stream_id",
+    "question_id",
+    "schema",
+})
 _TRUSTED_STATUS_BINDING_KEYS = frozenset({
     "body_sha256",
     "kind",
@@ -174,6 +182,103 @@ def _project_daemon_notice_events_conn(
                 or row["kind"] not in _TRUSTED_STATUS_NOTICE_KINDS
             ):
                 continue
+            key = (stream_id, event_id)
+            bindings[key] = binding if key not in bindings else None
+
+        answer_rows = conn.execute(
+            """SELECT n.notice_id, n.dedupe_key, n.recipient_stream_id,
+                      n.tell_id, n.body, n.metadata, t.reply AS tell_reply
+               FROM v2_outbound_notices n
+               JOIN v2_tell_deliveries t ON t.tell_id=n.tell_id
+               WHERE n.recipient_stream_id=? AND n.kind='notification_answer'
+                 AND n.delivered_at IS NOT NULL AND n.terminal_at IS NULL""",
+            (stream_id,),
+        ).fetchall()
+        for row in answer_rows:
+            try:
+                metadata = json.loads(row["metadata"])
+                tell_envelope = json.loads(row["tell_reply"])
+            except (TypeError, ValueError):
+                continue
+            reply = (
+                tell_envelope.get("reply")
+                if isinstance(tell_envelope, dict) else None
+            )
+            delivery = (
+                tell_envelope.get("delivery")
+                if isinstance(tell_envelope, dict) else None
+            )
+            notice_id = str(row["notice_id"] or "")
+            notification_id = (
+                str(metadata.get("notification_id") or "")
+                if isinstance(metadata, dict) else ""
+            )
+            generation = (
+                str(metadata.get("producer_session_generation") or "")
+                if isinstance(metadata, dict) else ""
+            )
+            event_id = delivery.get("proof_event_id") if isinstance(delivery, dict) else None
+            watermark = delivery.get("proof_watermark") if isinstance(delivery, dict) else None
+            expected_digest = hashlib.sha256(
+                f"{stream_id}\x00{str(row['body'] or '')}".encode()
+            ).hexdigest()
+            if (
+                not isinstance(metadata, dict)
+                or frozenset(metadata) != _TRUSTED_NOTIFICATION_ANSWER_METADATA_KEYS
+                or metadata.get("schema") != "v2_notification_answer_v1"
+                or not isinstance(metadata.get("canonical_intent"), dict)
+                or metadata.get("producer_stream_id") != stream_id
+                or not generation
+                or not notification_id
+                or not str(metadata.get("question_id") or "")
+                or notice_id != f"notification-answer-{notification_id}"
+                or row["dedupe_key"] != notice_id
+                or row["tell_id"] != notice_id
+                or not isinstance(reply, dict)
+                or not isinstance(delivery, dict)
+                or tell_envelope.get("payload_digest") != expected_digest
+                or delivery.get("request_payload_hash") != expected_digest
+                or reply.get("tell_id") != notice_id
+                or delivery.get("tell_id") != notice_id
+                or reply.get("to_stream_id") != stream_id
+                or delivery.get("to_stream_id") != stream_id
+                or delivery.get("text") != str(row["body"] or "")
+                or delivery.get("notification_answer_generation") != generation
+                or reply.get("delivery_status") != "delivered"
+                or delivery.get("delivery_status") != "delivered"
+                or reply.get("submission_confirmed") is not True
+                or delivery.get("submission_confirmed") is not True
+                or reply.get("confirmation_status") != "confirmed"
+                or reply.get("action_committed") is not True
+                or reply.get("confirmation_pending") is not False
+                or reply.get("proof_state") != "proven"
+                or delivery.get("proof_state") != "proven"
+                or not isinstance(event_id, int)
+                or isinstance(event_id, bool)
+                or event_id not in event_ids
+                or reply.get("proof_event_id") != event_id
+                or not isinstance(watermark, int)
+                or isinstance(watermark, bool)
+                or watermark < 0
+                or event_id <= watermark
+                or reply.get("proof_watermark") != watermark
+                or not str(row["body"] or "").startswith(
+                    f"[pentacle-notice:{notice_id}]\n[notification.answer]\n"
+                    f"notification_id={notification_id}\n"
+                )
+            ):
+                continue
+            binding = {
+                "body_sha256": hashlib.sha256(
+                    str(row["body"] or "").encode("utf-8")
+                ).hexdigest(),
+                "kind": "notification_answer",
+                "notice_id": notice_id,
+                "pre_input_watermark": watermark,
+                "proof_event_id": event_id,
+                "recipient_stream_id": stream_id,
+                "session_generation": generation,
+            }
             key = (stream_id, event_id)
             bindings[key] = binding if key not in bindings else None
 

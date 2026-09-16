@@ -1,4 +1,6 @@
 import type { PentacleEvent } from '../types/pentacle';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 
 export type PentacleEventCase =
   | 'user-message'
@@ -555,6 +557,82 @@ export function stripWorkingStatus(text: string) {
     .trim();
 }
 
+type TrustedNotificationAnswerProjection = {
+  schema_version: 1;
+  kind: 'notification_answer';
+  notice_id: string;
+  stream_id: string;
+  session_generation: string;
+  event_id: number;
+  body_sha256: string;
+};
+
+const TRUSTED_NOTIFICATION_ANSWER_KEYS = [
+  'body_sha256',
+  'event_id',
+  'kind',
+  'notice_id',
+  'schema_version',
+  'session_generation',
+  'stream_id',
+];
+
+function nonEmptyUserBinding(value: unknown) {
+  return typeof value === 'string'
+    ? value.trim().length > 0
+    : value !== null && value !== undefined && value !== false;
+}
+
+function hasExplicitUserSendBinding(event: PentacleEvent) {
+  const raw = event.raw || {};
+  const extended = event as PentacleEvent & {
+    request_id?: unknown;
+    receipt_id?: unknown;
+  };
+  return event.client_origin === true || raw.client_origin === true || [
+    event.optimistic_id,
+    extended.request_id,
+    extended.receipt_id,
+    raw.optimistic_id,
+    raw.request_id,
+    raw.receipt_id,
+  ].some(nonEmptyUserBinding);
+}
+
+function trustedNotificationAnswerProjection(
+  event: PentacleEvent,
+): TrustedNotificationAnswerProjection | null {
+  if (String(event.kind || '').toUpperCase() !== 'USER' || hasExplicitUserSendBinding(event)) {
+    return null;
+  }
+  const raw = objectValue(event.raw);
+  const candidate = objectValue(raw?.daemon_notice);
+  if (!candidate) return null;
+  if (Object.keys(candidate).sort().join('\u0000') !== TRUSTED_NOTIFICATION_ANSWER_KEYS.join('\u0000')) {
+    return null;
+  }
+  if (candidate.schema_version !== 1 || candidate.kind !== 'notification_answer') return null;
+  const noticeId = typeof candidate.notice_id === 'string' ? candidate.notice_id : '';
+  const streamId = typeof candidate.stream_id === 'string' ? candidate.stream_id : '';
+  const generation = typeof candidate.session_generation === 'string'
+    ? candidate.session_generation : '';
+  const bodySha256 = typeof candidate.body_sha256 === 'string' ? candidate.body_sha256 : '';
+  const eventId = candidate.event_id;
+  const daemonSeq = Number(event.daemon_seq);
+  const body = String(event.text || '');
+  if (
+    !noticeId || noticeId.length > 256 ||
+    streamId !== String(event.stream_id || '') ||
+    !generation ||
+    !Number.isInteger(eventId) || Number(eventId) <= 0 ||
+    !Number.isFinite(daemonSeq) || Number(eventId) !== daemonSeq ||
+    !/^[0-9a-f]{64}$/.test(bodySha256) ||
+    bytesToHex(sha256(utf8ToBytes(body))) !== bodySha256 ||
+    !body.startsWith('[pentacle-notice:' + noticeId + ']\n')
+  ) return null;
+  return candidate as TrustedNotificationAnswerProjection;
+}
+
 export function interpretPentacleEvent(
   event: PentacleEvent,
   assistantLabel = 'Agent',
@@ -565,6 +643,19 @@ export function interpretPentacleEvent(
   const source = String(event.raw?.source || '');
   const transport = String(event.raw?.transport || '');
   const userText = kind === 'USER' ? stripTerminalPromptPrefix(text) : text;
+
+  if (trustedNotificationAnswerProjection(event)) {
+    return interpreted(
+      event,
+      'working-status',
+      'hidden:status',
+      'system',
+      'Daemon',
+      text,
+      true,
+      'A server-projected immutable notification-answer proof is rendered outside conversation.',
+    );
+  }
 
   if (source === 'scrollback_fallback' && !options.revealScrollbackFallback) {
     return interpreted(event, 'transient-noise', 'hidden:noise', 'assistant', assistantLabel, text, true, 'Tagged scrollback fallback is hidden unless explicitly revealed.');
