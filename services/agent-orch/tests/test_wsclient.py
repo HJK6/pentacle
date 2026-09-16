@@ -1133,6 +1133,77 @@ def test_notification_create_once_sends_direct_rpc(monkeypatch, tmp_path):
     assert captured.get(timeout=2)["answer_to_stream_id"] == "hostc:codex-a"
 
 
+def test_system_notification_create_binds_file_token_identity_on_hello_and_create(
+    monkeypatch, tmp_path
+):
+    captured: Queue[dict] = Queue()
+    hellos: Queue[dict] = Queue()
+    token_file = tmp_path / "service-token"
+    token_file.write_text("file-service-secret\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("AGENT_ORCH_STREAM_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("AGENT_ORCH_STREAM_TOKEN", "legacy-env-must-not-win")
+
+    async def handler(ws):
+        hello = json.loads(await ws.recv())
+        hellos.put(hello)
+        await ws.send(json.dumps({"type": "ready", "snapshot": False}))
+        msg = json.loads(await ws.recv())
+        captured.put(msg)
+        await ws.send(json.dumps({
+            "type": "notification.create.ok",
+            "request_id": msg["request_id"],
+            "notification": {"notification_id": "notif-system"},
+        }))
+
+    payload = {
+        "type": "notification.create",
+        "from_stream_id": "altum-bot-cd",
+        "producer": "altum-bot-cd",
+        "title": "Pipeline failed",
+        "severity": "critical",
+        "dedup_key": "pipeline|unit-test|2026-09-15",
+        "actions": [],
+    }
+    with StubServer(handler) as server:
+        response = asyncio.run(notification_create_once(
+            Config(server.url, "legacy-config-token", "hostc", tmp_path),
+            payload,
+            timeout=2,
+        ))
+
+    assert response["type"] == "notification.create.ok"
+    hello = hellos.get(timeout=2)
+    create = captured.get(timeout=2)
+    assert hello["from_stream_id"] == "altum-bot-cd"
+    assert hello["stream_token"] == "file-service-secret"
+    assert hello["subscribe"]["snapshot"] is False
+    assert hello["subscribe"]["mode"] == "rpc"
+    assert create["from_stream_id"] == "altum-bot-cd"
+    assert create["stream_token"] == "file-service-secret"
+    assert create["stream_token"] != "legacy-config-token"
+
+
+def test_system_notification_identity_never_falls_back_to_legacy_token(monkeypatch, tmp_path):
+    monkeypatch.delenv("AGENT_ORCH_STREAM_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("AGENT_ORCH_STREAM_TOKEN", "legacy-env-token")
+    payload = {
+        "type": "notification.create",
+        "from_stream_id": "altum-bot-cd",
+    }
+
+    assert wsclient._attach_agent_identity(payload) == "altum-bot-cd"
+    assert "stream_token" not in payload
+    hello = wsclient._rpc_hello(
+        Config("ws://test", "legacy-config-token", "hostc", tmp_path),
+        from_stream_id="altum-bot-cd",
+        identity_token=None,
+        infer_identity_token=False,
+    )
+    assert hello["from_stream_id"] == "altum-bot-cd"
+    assert "stream_token" not in hello
+
+
 def test_asset_publish_once_sends_direct_rpc_with_session_identity(monkeypatch, tmp_path):
     captured: Queue[dict] = Queue()
     hellos: Queue[dict] = Queue()

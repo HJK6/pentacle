@@ -1883,7 +1883,10 @@ class Comms:
         # fail after the row is committed, forcing either a false success (ok with
         # no retrievable receipt) or a broadcast without a receipt. Binding the
         # success contract to the one durable event keeps it atomic and honest.
-        await broadcast({"type": "chat.event", "event": {**event, "daemon_seq": seq}})
+        projected = await self.store.project_session_events([
+            {**event, "daemon_seq": seq},
+        ])
+        await broadcast({"type": "chat.event", "event": projected[0]})
         return {
             "type": "send_image.ok", "ok": True, "stream_id": stream_id,
             "event_id": seq, "blob_shas": blob_shas,

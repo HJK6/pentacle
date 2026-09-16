@@ -78,6 +78,139 @@ _RECEIPT_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _SEND_REQUEST_ID_RE = re.compile(r"send-[A-Za-z0-9_-]{1,123}\Z")
 _PROVENANCE_ID_MAX = 256
 SCHEMA_VERSION = 1
+_TRUSTED_STATUS_NOTICE_KINDS = frozenset({"status_card", "status_card_combined"})
+_TRUSTED_STATUS_BINDING_KEYS = frozenset({
+    "body_sha256",
+    "kind",
+    "notice_id",
+    "pre_input_watermark",
+    "proof_event_id",
+    "recipient_stream_id",
+    "session_generation",
+})
+_CLIENT_USER_BINDING_KEYS = (
+    "client_origin", "optimistic_id", "request_id", "receipt_id",
+)
+
+
+def _nonempty_client_binding(event: dict[str, Any]) -> bool:
+    raw = event.get("raw")
+    raw = raw if isinstance(raw, dict) else {}
+    for key in _CLIENT_USER_BINDING_KEYS:
+        value = event.get(key)
+        raw_value = raw.get(key)
+        if value is True or raw_value is True:
+            return True
+        for candidate in (value, raw_value):
+            if candidate is not None and candidate is not False:
+                if not isinstance(candidate, str) or candidate.strip():
+                    return True
+    return False
+
+
+def _strip_reserved_daemon_notice(event: dict[str, Any]) -> dict[str, Any]:
+    projected = dict(event)
+    raw = projected.get("raw")
+    if isinstance(raw, dict) and "daemon_notice" in raw:
+        cleaned = dict(raw)
+        cleaned.pop("daemon_notice", None)
+        if cleaned:
+            projected["raw"] = cleaned
+        else:
+            projected.pop("raw", None)
+    return projected
+
+
+def _project_daemon_notice_events_conn(
+    conn: sqlite3.Connection,
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strip the reserved namespace, then attach only an exact fixed proof.
+
+    This is the one projection authority used by both durable reads and live
+    broadcasts. Provider-supplied daemon_notice raw data never survives the
+    first line of this function.
+    """
+    stripped = [_strip_reserved_daemon_notice(event) for event in events]
+    event_ids_by_stream: dict[str, set[int]] = {}
+    for event in stripped:
+        stream_id = str(event.get("stream_id") or "")
+        event_id = event.get("daemon_seq")
+        if (
+            stream_id
+            and isinstance(event_id, int)
+            and not isinstance(event_id, bool)
+            and event_id > 0
+        ):
+            event_ids_by_stream.setdefault(stream_id, set()).add(event_id)
+    if not event_ids_by_stream:
+        return stripped
+
+    bindings: dict[tuple[str, int], dict[str, Any] | None] = {}
+    for stream_id, event_ids in event_ids_by_stream.items():
+        rows = conn.execute(
+            """SELECT notice_id, kind, recipient_stream_id, body, proof_binding
+               FROM v2_outbound_notices
+               WHERE recipient_stream_id=? AND proof_binding IS NOT NULL
+                 AND kind IN ('status_card','status_card_combined')""",
+            (stream_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                binding = json.loads(row["proof_binding"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(binding, dict) or frozenset(binding) != _TRUSTED_STATUS_BINDING_KEYS:
+                continue
+            event_id = binding.get("proof_event_id")
+            if (
+                not isinstance(event_id, int)
+                or isinstance(event_id, bool)
+                or event_id not in event_ids
+                or binding.get("recipient_stream_id") != stream_id
+                or not str(binding.get("session_generation") or "")
+                or binding.get("notice_id") != row["notice_id"]
+                or binding.get("kind") != row["kind"]
+                or row["kind"] not in _TRUSTED_STATUS_NOTICE_KINDS
+            ):
+                continue
+            key = (stream_id, event_id)
+            bindings[key] = binding if key not in bindings else None
+
+    projected: list[dict[str, Any]] = []
+    for event in stripped:
+        stream_id = str(event.get("stream_id") or "")
+        event_id = event.get("daemon_seq")
+        binding = bindings.get((stream_id, event_id))
+        if (
+            not isinstance(binding, dict)
+            or str(event.get("kind") or "").upper() != "USER"
+            or _nonempty_client_binding(event)
+        ):
+            projected.append(event)
+            continue
+        body = str(event.get("text") or "")
+        body_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        notice_id = str(binding["notice_id"])
+        if (
+            body_sha256 != binding["body_sha256"]
+            or not body.startswith(f"[pentacle-notice:{notice_id}]\n")
+        ):
+            projected.append(event)
+            continue
+        raw = event.get("raw")
+        clean_raw = dict(raw) if isinstance(raw, dict) else {}
+        clean_raw["daemon_notice"] = {
+            "schema_version": 1,
+            "kind": binding["kind"],
+            "notice_id": notice_id,
+            "stream_id": stream_id,
+            "session_generation": binding["session_generation"],
+            "event_id": event_id,
+            "body_sha256": body_sha256,
+        }
+        projected.append({**event, "raw": clean_raw})
+    return projected
 
 
 class _EntryDropped:
@@ -1158,6 +1291,10 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
             conn.execute(ROUTING_INTEGRITY_DDL)
             conn.execute(ROUTING_INTEGRITY_AUDIT_DDL)
             conn.execute(OUTBOUND_NOTICE_DDL)
+            if "proof_binding" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_outbound_notices)")
+            }:
+                conn.execute("ALTER TABLE v2_outbound_notices ADD COLUMN proof_binding TEXT")
             conn.execute(OUTBOUND_NOTICE_INDEX_DDL)
             conn.execute(REPORTS_DDL)
             conn.execute(REPORTS_INDEX_DDL)
@@ -1941,6 +2078,27 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
             return _session_row(conn, conn.execute(
                 "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
             ).fetchone())
+
+        return await self.submit(_op)
+
+    async def sessions_for_claude_session_id(
+        self, claude_session_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return retained lifecycle rows bound to one native Claude identity.
+
+        Closed rows are intentionally included: resume reuses their stream name
+        and descriptive metadata when retention still has them. An empty result
+        is not an error because the provider transcript can outlive row
+        retention; the caller then uses the normal authorized spawn lifecycle.
+        """
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE claude_session_id=? "
+                "ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, "
+                "created_at DESC, host, session_name",
+                (claude_session_id,),
+            ).fetchall()
+            return [_session_row(conn, row) for row in rows]
 
         return await self.submit(_op)
 
@@ -3908,6 +4066,199 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
             payload["attachments"] = attachments
         return payload
 
+    async def outbound_notice_for_dedupe(self, dedupe_key: str) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT * FROM v2_outbound_notices WHERE dedupe_key=?",
+                (dedupe_key,),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+        return await self.submit(_op)
+
+    async def complete_trusted_status_notice(
+        self,
+        notice_id: str,
+        *,
+        owner: str,
+        proof: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Fix one immutable status origin binding and settle its queue row."""
+        proof_state = str(proof.get("proof_state") or "")
+        proof_event_id = proof.get("proof_event_id")
+        watermark = proof.get("proof_watermark")
+        if (
+            proof_state != "proven"
+            or not isinstance(proof_event_id, int)
+            or isinstance(proof_event_id, bool)
+            or not isinstance(watermark, int)
+            or isinstance(watermark, bool)
+            or watermark < 0
+            or proof_event_id <= watermark
+            or str(proof.get("to_stream_id") or "") == ""
+        ):
+            return None
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                notice = conn.execute(
+                    "SELECT * FROM v2_outbound_notices WHERE notice_id=?",
+                    (notice_id,),
+                ).fetchone()
+                if (
+                    notice is None
+                    or notice["kind"] not in _TRUSTED_STATUS_NOTICE_KINDS
+                    or notice["lease_owner"] != owner
+                    or notice["delivered_at"] is not None
+                    or notice["terminal_at"] is not None
+                ):
+                    conn.rollback()
+                    return None
+                stream_id = str(notice["recipient_stream_id"] or "")
+                if str(proof.get("to_stream_id") or "") != stream_id:
+                    conn.rollback()
+                    return None
+                host, separator, session_name = stream_id.partition(":")
+                if not separator or not host or not session_name:
+                    conn.rollback()
+                    return None
+                lifecycle = conn.execute(
+                    """SELECT s.created_at, g.generation
+                       FROM sessions s
+                       LEFT JOIN v2_session_generations g
+                         ON g.host=s.host AND g.session_name=s.session_name
+                       WHERE s.host=? AND s.session_name=? AND s.status='open'""",
+                    (host, session_name),
+                ).fetchone()
+                if lifecycle is None:
+                    conn.rollback()
+                    return None
+                tell_row = conn.execute(
+                    "SELECT reply FROM v2_tell_deliveries WHERE tell_id=?",
+                    (str(notice["tell_id"] or ""),),
+                ).fetchone()
+                try:
+                    tell_envelope = json.loads(tell_row["reply"]) if tell_row else None
+                except (TypeError, ValueError):
+                    tell_envelope = None
+                delivery = (
+                    tell_envelope.get("delivery")
+                    if isinstance(tell_envelope, dict) else None
+                )
+                expected_payload_digest = hashlib.sha256(
+                    f"{stream_id}\x00{str(notice['body'] or '')}".encode()
+                ).hexdigest()
+                if (
+                    not isinstance(delivery, dict)
+                    or tell_envelope.get("payload_digest") != expected_payload_digest
+                    or delivery.get("to_stream_id") != stream_id
+                    or delivery.get("text") != str(notice["body"] or "")
+                    or delivery.get("proof_watermark") != watermark
+                    or delivery.get("proof_event_id") != proof_event_id
+                ):
+                    conn.rollback()
+                    return None
+                generation = str(lifecycle["generation"] or "")
+                event_row = conn.execute(
+                    """SELECT event_json FROM session_event_tail
+                       WHERE stream_id=? AND session_created_at=? AND event_id=?""",
+                    (stream_id, str(lifecycle["created_at"] or ""), proof_event_id),
+                ).fetchone()
+                if event_row is None or not generation:
+                    conn.rollback()
+                    return None
+                try:
+                    event = json.loads(event_row["event_json"])
+                except (TypeError, ValueError):
+                    conn.rollback()
+                    return None
+                body = str(notice["body"] or "")
+                if (
+                    not isinstance(event, dict)
+                    or str(event.get("kind") or "").upper() != "USER"
+                    or str(event.get("stream_id") or stream_id) != stream_id
+                    or str(event.get("text") or "") != body
+                    or _nonempty_client_binding(event)
+                ):
+                    conn.rollback()
+                    return None
+                binding = {
+                    "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                    "kind": str(notice["kind"]),
+                    "notice_id": str(notice["notice_id"]),
+                    "pre_input_watermark": watermark,
+                    "proof_event_id": proof_event_id,
+                    "recipient_stream_id": stream_id,
+                    "session_generation": generation,
+                }
+                binding_json = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+                existing = notice["proof_binding"]
+                if existing is not None and existing != binding_json:
+                    conn.rollback()
+                    return None
+                stamp = _routing_iso_now()
+                cur = conn.execute(
+                    """UPDATE v2_outbound_notices
+                       SET proof_binding=?, delivered_at=?, last_error=NULL,
+                           next_action=NULL, lease_owner=NULL, lease_until=NULL
+                       WHERE notice_id=? AND lease_owner=?
+                         AND proof_binding IS NULL
+                         AND delivered_at IS NULL AND terminal_at IS NULL""",
+                    (binding_json, stamp, notice_id, owner),
+                )
+                if cur.rowcount != 1:
+                    conn.rollback()
+                    return None
+                stored = conn.execute(
+                    "SELECT * FROM v2_outbound_notices WHERE notice_id=?",
+                    (notice_id,),
+                ).fetchone()
+                conn.commit()
+                return dict(stored)
+            except BaseException:
+                conn.rollback()
+                raise
+
+        return await self.submit(_op)
+
+    async def project_session_events(
+        self, events: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not events:
+            return []
+        copies = [dict(event) for event in events]
+        return await self.submit(
+            lambda conn: _project_daemon_notice_events_conn(conn, copies)
+        )
+
+    async def fetch_projected_session_event(
+        self, stream_id: str, event_id: int,
+    ) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            host, separator, session_name = str(stream_id or "").partition(":")
+            if not separator or not host or not session_name:
+                return None
+            row = conn.execute(
+                """SELECT t.event_json FROM session_event_tail t
+                   JOIN sessions s ON s.host=? AND s.session_name=?
+                   WHERE t.stream_id=? AND t.session_created_at=s.created_at
+                     AND t.event_id=?""",
+                (host, session_name, stream_id, int(event_id)),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                event = json.loads(row["event_json"])
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(event, dict):
+                return None
+            event["daemon_seq"] = int(event_id)
+            return _project_daemon_notice_events_conn(conn, [event])[0]
+
+        return await self.submit(_op)
+
     async def append_session_event(
         self, stream_id: str, event: dict[str, Any], *, identity: str | None, limit: int,
     ) -> int | None:
@@ -4006,7 +4357,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                     # value here as on its live broadcast (append_session_event).
                     event["daemon_seq"] = int(row["event_id"])
                     newest_first.append(event)
-            return list(reversed(newest_first))
+            return list(reversed(_project_daemon_notice_events_conn(conn, newest_first)))
 
         return await self.submit(_op)
 

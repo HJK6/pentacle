@@ -945,6 +945,7 @@ class NotificationStore:
         answer_to_stream_id: str | None = None,
         notification_id: str | None = None,
         now: str | None = None,
+        refuse_privileged_dedup_refresh: bool = False,
     ) -> dict:
         """Create a new ``open`` notification, or refresh an open dedup row.
 
@@ -964,6 +965,11 @@ class NotificationStore:
         duplicate. The refresh always rewrites ``actions``, so omitting
         ``actions`` on a refresh resets the stored actions to ``[]``. Otherwise
         a new row is inserted.
+
+        ``refuse_privileged_dedup_refresh`` is an internal least-privilege
+        guard for non-actionable service producers. Under the same store lock
+        as the refresh, it refuses an existing row that has actions, an answer
+        target, or a linked question. Normal callers retain the legacy refresh.
 
         ``now`` (ISO string) is injectable for tests.
         """
@@ -994,11 +1000,27 @@ class NotificationStore:
             self._require_open()
             if dedup_key is not None:
                 existing = self._conn.execute(
-                    "SELECT notification_id, first_fired_at, firing_count, firing_history, last_resurfaced_at FROM notifications "
-                    "WHERE producer = ? AND dedup_key = ? AND state = ?",
+                    "SELECT notification_id, first_fired_at, firing_count, firing_history, "
+                    "last_resurfaced_at, actions, answer_to_stream_id, "
+                    "EXISTS(SELECT 1 FROM agent_questions q "
+                    "WHERE q.notification_id = notifications.notification_id) AS question_bound "
+                    "FROM notifications WHERE producer = ? AND dedup_key = ? AND state = ?",
                     (producer, dedup_key, STATE_OPEN),
                 ).fetchone()
                 if existing is not None:
+                    if refuse_privileged_dedup_refresh:
+                        try:
+                            existing_actions = json.loads(existing["actions"] or "[]")
+                        except (TypeError, ValueError):
+                            existing_actions = ["malformed"]
+                        if (
+                            existing_actions
+                            or existing["answer_to_stream_id"]
+                            or existing["question_bound"]
+                        ):
+                            raise InvalidNotification(
+                                "refusing privileged notification dedup refresh"
+                            )
                     existing_id = existing["notification_id"]
                     history, history_json = _append_firing_history(existing["firing_history"], ts)
                     first_fired_at = existing["first_fired_at"] or history[0]

@@ -27,6 +27,8 @@ NOTICE_KIND_REPORT = "report"
 NOTICE_KIND_RECONCILER = "reconciler"
 NOTICE_KIND_SPAWN_FAILURE = "spawn_failure"
 NOTICE_KIND_NOTIFICATION_ANSWER = "notification_answer"
+NOTICE_KIND_STATUS_CARD = "status_card"
+NOTICE_KIND_STATUS_CARD_COMBINED = "status_card_combined"
 
 _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_REPORT,
@@ -34,6 +36,8 @@ _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_SPAWN_FAILURE,
     "watch", "wake",
     NOTICE_KIND_NOTIFICATION_ANSWER,
+    NOTICE_KIND_STATUS_CARD,
+    NOTICE_KIND_STATUS_CARD_COMBINED,
 })
 
 _TERMINAL_CODES = frozenset({
@@ -324,7 +328,21 @@ class OutboundNoticeQueue:
                 authoritative_negative=authoritative_negative,
             )
 
-        await self.store.complete_outbound_notice(str(row["notice_id"]), owner=self.owner)
+        if kind in {NOTICE_KIND_STATUS_CARD, NOTICE_KIND_STATUS_CARD_COMBINED}:
+            completed = await self.store.complete_trusted_status_notice(
+                str(row["notice_id"]),
+                owner=self.owner,
+                proof=reply,
+            )
+            if completed is None:
+                return await self._retry(
+                    row,
+                    "status_notice_proof_binding_failed",
+                    "retry evidence-only proof binding for the existing tell id",
+                )
+            row = completed
+        else:
+            await self.store.complete_outbound_notice(str(row["notice_id"]), owner=self.owner)
         callback = self._delivered_callbacks.get(kind)
         if callback is not None:
             await callback(row)

@@ -156,22 +156,26 @@ def test_wire_hello_authentication_finishes_before_back_to_back_rpc(monkeypatch)
     asyncio.run(run())
 
 
-def test_system_producer_rpc_does_not_gain_inventory_subscription(monkeypatch):
-    monkeypatch.setenv("PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN", "synthetic-system-token")
+def test_fixed_system_producer_rpc_does_not_gain_inventory_or_admin_privilege(monkeypatch, tmp_path):
+    monkeypatch.setenv("PENTACLE_SYSTEM_PRODUCER_STREAM_ID", "altum-bot-cd")
+    token_file = tmp_path / "system-token"
+    token_file.write_text("synthetic-system-token")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE", str(token_file))
     async def run():
         daemon = Server()
         peer = Peer()
-        hello = {"type": "hello", "from_stream_id": "service:scheduler",
+        hello = {"type": "hello", "from_stream_id": "altum-bot-cd",
                  "stream_token": "synthetic-system-token", "subscribe": {"mode": "rpc", "snapshot": False}}
         frames = await daemon._dispatch(json.dumps(hello), websocket=peer)
         assert frames == [{"type": "ready", "snapshot": False, "events_mode": "full"}]
         assert peer not in daemon._clients
         hello["subscribe"] = {"all": True}
-        assert (await daemon._dispatch(json.dumps(hello), websocket=Peer()))[0]["error_code"] == "authentication_required"
+        assert (await daemon._dispatch(json.dumps(hello), websocket=Peer()))[0]["error_code"] == "system_producer_auth_required"
         async def admin(msg):
             assert msg["_auth_context"]["service_authenticated"]
             return {"type": "spawn_freeze.ok"}
         daemon.handlers["spawn_freeze"] = admin
-        request = {"type": "spawn_freeze", "from_stream_id": "service:scheduler", "stream_token": "synthetic-system-token"}
-        assert (await daemon._dispatch(json.dumps(request), websocket=peer))[0]["type"] == "spawn_freeze.ok"
+        request = {"type": "spawn_freeze", "from_stream_id": "altum-bot-cd", "stream_token": "synthetic-system-token"}
+        assert (await daemon._dispatch(json.dumps(request), websocket=peer))[0]["error_code"] == "system_producer_forbidden"
     asyncio.run(run())

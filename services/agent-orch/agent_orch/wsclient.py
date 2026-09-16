@@ -24,10 +24,31 @@ from .schema import validate_inbox
 logger = logging.getLogger(__name__)
 
 AGENT_ORCH_CAPABILITY_FLAGS = ["spec_id", "stream_token", "status"]
+FIXED_SYSTEM_NOTIFICATION_PRODUCER_ID = "altum-bot-cd"
 
 
 def _agent_orch_capabilities_payload() -> dict[str, Any]:
     return {"version": agent_orch_version(), "flags": list(AGENT_ORCH_CAPABILITY_FLAGS)}
+
+
+def _stream_token_from_file() -> str | None:
+    """Read only the user-owned mode-0600 token file, if configured."""
+    token_file = os.environ.get("AGENT_ORCH_STREAM_TOKEN_FILE")
+    if not token_file:
+        return None
+    try:
+        path = Path(token_file).expanduser()
+        stat_result = path.stat()
+        if (
+            not path.is_file()
+            or stat_result.st_uid != os.getuid()
+            or stat_result.st_mode & 0o077
+        ):
+            return None
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return None
+    return value or None
 
 
 def stream_token_from_env() -> str | None:
@@ -39,19 +60,7 @@ def stream_token_from_env() -> str | None:
     """
     token_file = os.environ.get("AGENT_ORCH_STREAM_TOKEN_FILE")
     if token_file:
-        try:
-            path = Path(token_file).expanduser()
-            stat_result = path.stat()
-            if (
-                not path.is_file()
-                or stat_result.st_uid != os.getuid()
-                or stat_result.st_mode & 0o077
-            ):
-                return None
-            value = path.read_text(encoding="utf-8").strip()
-        except (OSError, ValueError):
-            return None
-        return value or None
+        return _stream_token_from_file()
     token = os.environ.get("AGENT_ORCH_STREAM_TOKEN")
     return token if token else None
 
@@ -1429,22 +1438,36 @@ def _attach_agent_identity(payload: dict[str, Any]) -> str | None:
         return None
     payload["from_stream_id"] = stream_id
     if "stream_token" not in payload:
-        stream_token = _stream_token_from_env()
+        stream_token = (
+            _stream_token_from_file()
+            if stream_id == FIXED_SYSTEM_NOTIFICATION_PRODUCER_ID
+            else _stream_token_from_env()
+        )
         if stream_token:
             payload["stream_token"] = stream_token
     return stream_id
 
 
-def _rpc_hello(config: Config, from_stream_id: str | None = None, *, infer_from_env: bool = True) -> dict[str, Any]:
+def _rpc_hello(
+    config: Config,
+    from_stream_id: str | None = None,
+    *,
+    infer_from_env: bool = True,
+    identity_token: str | None = None,
+    infer_identity_token: bool = True,
+) -> dict[str, Any]:
     resolved_from_stream_id = _resolved_rpc_from_stream_id(from_stream_id) if infer_from_env else from_stream_id
-    stream_token = _stream_token_from_env()
+    stream_token = identity_token
+    if stream_token is None and infer_identity_token:
+        stream_token = _stream_token_from_env()
     hello = _hello(
         config,
         infer_internal_leader=False,
     )
-    if resolved_from_stream_id and stream_token:
+    if resolved_from_stream_id and (stream_token or not infer_identity_token):
         hello["from_stream_id"] = resolved_from_stream_id
-        hello["stream_token"] = stream_token
+        if stream_token:
+            hello["stream_token"] = stream_token
     hello["subscribe"] = {
         "snapshot": False,
         "mode": "rpc",
@@ -1490,7 +1513,14 @@ async def _connect_ready(config: Config, timeout: float, from_stream_id: str | N
         raise
 
 
-async def _connect_rpc_ready(config: Config, from_stream_id: str | None = None, *, infer_from_env: bool = True):
+async def _connect_rpc_ready(
+    config: Config,
+    from_stream_id: str | None = None,
+    *,
+    infer_from_env: bool = True,
+    identity_token: str | None = None,
+    infer_identity_token: bool = True,
+):
     keepalive = _websocket_keepalive_from_env()
     ws = await websockets.connect(
         config.ws_url,
@@ -1499,7 +1529,13 @@ async def _connect_rpc_ready(config: Config, from_stream_id: str | None = None, 
         ping_timeout=keepalive.ping_timeout,
         close_timeout=keepalive.close_timeout,
     )
-    await ws.send(json.dumps(_rpc_hello(config, from_stream_id=from_stream_id, infer_from_env=infer_from_env), separators=(",", ":")))
+    await ws.send(json.dumps(_rpc_hello(
+        config,
+        from_stream_id=from_stream_id,
+        infer_from_env=infer_from_env,
+        identity_token=identity_token,
+        infer_identity_token=infer_identity_token,
+    ), separators=(",", ":")))
     return ws
 
 
@@ -1712,12 +1748,15 @@ async def spawn_freeze_once(config: Config, payload: dict[str, Any], *, timeout:
 async def notification_create_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
-    from_stream_id = (
-        payload.get("answer_to_stream_id")
-        if isinstance(payload.get("answer_to_stream_id"), str)
-        else None
+    from_stream_id = _attach_agent_identity(payload)
+    service_identity = from_stream_id == FIXED_SYSTEM_NOTIFICATION_PRODUCER_ID
+    identity_token = payload.get("stream_token") if isinstance(payload.get("stream_token"), str) else None
+    ws = await _connect_rpc_ready(
+        config,
+        from_stream_id=from_stream_id,
+        identity_token=identity_token,
+        infer_identity_token=not service_identity,
     )
-    ws = await _connect_rpc_ready(config, from_stream_id=from_stream_id)
     try:
         request_id = payload.setdefault("request_id", f"notification-create-{uuid.uuid4()}")
         await ws.send(json.dumps(payload, separators=(",", ":")))

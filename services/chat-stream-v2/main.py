@@ -576,7 +576,15 @@ async def run(args: argparse.Namespace) -> int:
     if not args.disable_nudges:
         nudge_cfg = NudgeConfig.from_env()
         tasks.append(asyncio.create_task(
-            NudgeJob(sessions, comms, store, nudge_cfg, notify=notify).run_forever(), name="nudges"))
+            NudgeJob(
+                sessions,
+                comms,
+                store,
+                nudge_cfg,
+                notify=notify,
+                outbound=outbound,
+                broadcast=server.broadcast,
+            ).run_forever(), name="nudges"))
         log.info("nudges: every %.0fs, cap %d/pass, cooldown %.0fs",
                  nudge_cfg.interval_s, nudge_cfg.max_per_pass, nudge_cfg.cooldown_s)
     # Usage limits: watch the externally collected usage_state.json and publish
