@@ -905,7 +905,7 @@ class AssistantComposite:
             backend_stream_id = str(payload.get("backend_stream_id") or "").strip()
             backend_generation = str(payload.get("backend_generation") or "").strip()
             backend_kind = str(payload.get("backend_kind") or "").strip()
-            if backend_kind not in {"assistant_conversation", "assistant_authority"}:
+            if backend_kind not in {"lead", "assistant_conversation", "assistant_authority"}:
                 raise ValueError("assistant_lane_bind_invalid")
             current_generation = await self._target_generation(backend_stream_id)
             if not backend_generation or current_generation != backend_generation:
@@ -933,6 +933,7 @@ class AssistantComposite:
                     "operation": operation,
                     "lane_id": lane_id,
                     "duplicate": True,
+                    "lane": preflight["lane"],
                 }
             # Forward to the existing durable prompt/question store.  The
             # actor's verified auth context is retained by Server; no composite

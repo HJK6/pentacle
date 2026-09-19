@@ -315,13 +315,27 @@ class _RoutingIntegrityLifecycleGuard:
 def _assistant_actor_conn(conn, actor, generation):
     host, _, name = str(actor or "").partition(":")
     row = conn.execute(
-        "SELECT s.status,s.handoff_from_stream_id,g.generation FROM sessions s "
+        "SELECT s.status,s.handoff_from_stream_id,s.role,s.parent_stream_id,g.generation FROM sessions s "
         "JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
         "WHERE s.host=? AND s.session_name=?", (host, name),
     ).fetchone()
     if row is None or row["status"] != "open" or row["generation"] != generation:
         raise ValueError("assistant_actor_generation_unverified")
     return dict(row)
+
+
+def _assistant_lane_receipt_conn(conn, stream_id, lane_id):
+    """Current lane snapshot under the operation transaction, including replay.
+
+    This is readback for the next CAS, not the original operation's result
+    version. Replaying a receipt never reapplies its mutation.
+    """
+    row = conn.execute(
+        "SELECT lane_id,version,phase,bound_stream_id,bound_generation,bound_backend_kind,"
+        "pending_question_id,completion_report_id FROM v2_assistant_composite_lanes "
+        "WHERE stream_id=? AND lane_id=?", (stream_id, lane_id),
+    ).fetchone()
+    return dict(row) if row is not None else None
 
 
 def _assistant_dispatch_conn(conn, stream_id, dispatch_id, actor, generation):
@@ -473,6 +487,7 @@ class _RoutingStoreMixin:
                         raise ValueError("assistant_operation_idempotency_conflict")
                     out = dict(prior)
                     out.update({"committed": True, "duplicate": True})
+                    out["lane"] = _assistant_lane_receipt_conn(conn, stream_id, prior["lane_id"])
                     conn.commit()
                     return out
                 if actor_generation is not None:
@@ -1126,6 +1141,7 @@ class _RoutingStoreMixin:
                     if record["payload_digest"] != digest or record["operation"] != operation:
                         raise ValueError("assistant_operation_idempotency_conflict")
                     record["duplicate"] = True
+                    record["lane"] = _assistant_lane_receipt_conn(conn, stream_id, prior["lane_id"])
                     conn.commit()
                     return record
                 scoped_route = None
@@ -1214,7 +1230,12 @@ class _RoutingStoreMixin:
                         if not bound or not generation or not backend_kind:
                             raise ValueError("assistant_lane_bind_invalid")
                         if actor_generation is not None:
-                            _assistant_actor_conn(conn, bound, generation)
+                            backend = _assistant_actor_conn(conn, bound, generation)
+                            if backend_kind == "lead" and (
+                                backend["role"] != "lead"
+                                or backend["parent_stream_id"] != authority_stream_id
+                            ):
+                                raise ValueError("assistant_lane_bind_parentage_unverified")
                         conn.execute(
                             """UPDATE v2_assistant_composite_lanes
                                SET bound_stream_id=?,bound_generation=?,bound_backend_kind=?,
@@ -1405,6 +1426,7 @@ class _RoutingStoreMixin:
                 result = {
                     "operation_id": operation_id, "operation": operation, "lane_id": audit_lane_id,
                     "prior_phase": prior_phase, "next_phase": next_phase, "duplicate": False,
+                    "lane": _assistant_lane_receipt_conn(conn, stream_id, audit_lane_id),
                 }
                 conn.commit()
                 return result

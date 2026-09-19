@@ -220,6 +220,8 @@ def test_known_pre_effect_question_failure_retries_same_key():
             await composite.operation(request, actor_stream_id=LEAD)
             replay = await composite.operation(request, actor_stream_id=LEAD)
             assert replay['duplicate']
+            assert replay['lane']['version'] == 3
+            assert replay['lane']['pending_question_id'] == 'q'
             assert calls == ['q-op', 'q-op']
             row = await store.get_assistant_composite_lane(stream_id=STREAM, lane_id=lane)
             assert row['pending_question_id'] == 'q'
@@ -634,4 +636,67 @@ def test_explicit_reply_to_admitted_unbound_discussion_reaches_authority_without
                 await composite.accept_input(dict(message='next', msg_id='unavailable-authority',
                     reply_to_message_id=reply_id), operator_principal='operator:fixture')
             assert await store.get_assistant_composite_route(stream_id=STREAM, input_identity='unavailable-authority') is None
+    asyncio.run(run())
+
+
+def test_commissioned_lead_binding_and_current_receipt_replay():
+    async def run():
+        async with setup() as (store, composite, rows):
+            rows[LEAD] = await store.open_session(*LEAD.split(':', 1), provider='codex',
+                role='lead', parent_stream_id=ASTRA)
+            await _seed_dispatch(store, input_identity='bind-live', dispatch_id='bind-live',
+                target=ASTRA, generation=rows[ASTRA]['session_generation'])
+            admit = operation('lane.admit', 'live-admit', 'bind-live',
+                dict(mode='new', subject='work', request_message_id='bind-live'))
+            admitted = await composite.operation(admit, actor_stream_id=ASTRA)
+            lane = admitted['lane_id']
+            bind = operation('lane.bind', 'live-bind', 'bind-live', dict(backend_kind='lead',
+                backend_stream_id=LEAD, backend_generation=rows[LEAD]['session_generation']), lane, 1)
+            bound = await composite.operation(bind, actor_stream_id=ASTRA)
+            assert bound['lane']['version'] == 2
+            assert bound['lane']['bound_backend_kind'] == 'lead'
+            assert bound['lane']['bound_stream_id'] == LEAD
+            replay = await composite.operation(admit, actor_stream_id=ASTRA)
+            assert replay['duplicate'] is True
+            assert replay['lane'] == bound['lane']
+            replay_bind = await composite.operation(bind, actor_stream_id=ASTRA)
+            assert replay_bind['duplicate'] is True
+            assert replay_bind['lane'] == bound['lane']
+            # Same key cannot be altered to bind a different target.
+            bind['payload']['backend_stream_id'] = LUNA
+            bind['payload']['backend_generation'] = rows[LUNA]['session_generation']
+            with pytest.raises(ValueError, match='idempotency|parentage'):
+                await composite.operation(bind, actor_stream_id=ASTRA)
+    asyncio.run(run())
+
+
+def test_admission_receipt_exposes_transaction_current_lane():
+    async def run():
+        async with setup() as (store, composite, rows):
+            await _seed_dispatch(store, input_identity='receipt', dispatch_id='receipt',
+                target=ASTRA, generation=rows[ASTRA]['session_generation'])
+            result = await composite.operation(operation('lane.admit', 'receipt-admit', 'receipt',
+                dict(mode='new', subject='work', request_message_id='receipt')), actor_stream_id=ASTRA)
+            assert result['lane']['version'] == 1
+            assert result['lane']['phase'] == 'discussion'
+            assert result['lane']['bound_stream_id'] is None
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('role,parent', [('lead', LUNA), ('worker', ASTRA)])
+def test_lead_binding_requires_commissioned_role_and_parent(role, parent):
+    async def run():
+        async with setup() as (store, composite, rows):
+            rows[LEAD] = await store.open_session(*LEAD.split(':', 1), provider='codex',
+                role=role, parent_stream_id=parent)
+            await _seed_dispatch(store, input_identity='scope', dispatch_id='scope',
+                target=ASTRA, generation=rows[ASTRA]['session_generation'])
+            admitted = await composite.operation(operation('lane.admit', 'scope-admit', 'scope',
+                dict(mode='new', subject='work', request_message_id='scope')), actor_stream_id=ASTRA)
+            with pytest.raises(ValueError, match='assistant_lane_bind_parentage_unverified'):
+                await composite.operation(operation('lane.bind', 'scope-bind', 'scope',
+                    dict(backend_kind='lead', backend_stream_id=LEAD,
+                         backend_generation=rows[LEAD]['session_generation']), admitted['lane_id'], 1),
+                    actor_stream_id=ASTRA)
+            assert await store.get_assistant_composite_operation('scope-bind') is None
     asyncio.run(run())
