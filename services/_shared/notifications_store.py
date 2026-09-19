@@ -1737,13 +1737,20 @@ class NotificationStore:
         with self._lock:
             self._require_open()
             rows = self._conn.execute(
-                "SELECT notification_id, producer_session_generation "
+                "SELECT notification_id, producer_session_generation, envelope "
                 "FROM agent_questions "
                 "WHERE producer_stream_id = ? AND state = ? "
                 "AND notification_id IS NOT NULL",
                 (producer_stream_id, QUESTION_STATE_OPEN),
             ).fetchall()
             for row in rows:
+                # Composite questions belong to a durable lane; the issuer is
+                # historical provenance. The daemon validates its current lead
+                # on answer/cancel. Closing an issuer during managed handoff
+                # must not retire that lane's still-pending decision.
+                envelope = json.loads(row["envelope"])
+                if envelope.get("_assistant_composite_question_proxy") is True:
+                    continue
                 nid = str(row["notification_id"] or "")
                 if not nid:
                     continue

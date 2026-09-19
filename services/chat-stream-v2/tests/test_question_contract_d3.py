@@ -439,3 +439,78 @@ def test_startup_reconciles_open_questions_whose_asker_is_gone(tmp_path):
             await recovered.stop()
 
     _run(go())
+
+
+def test_composite_question_survives_real_producer_close_hook(tmp_path):
+    async def go():
+        rows = {'hosta:v2-lead': {'visibility': 'visible', 'status': 'open',
+                                 'session_generation': 'g1'}}
+        notify = _notify(tmp_path, sessions=_FakeSessions(rows))
+        await notify.start()
+        try:
+            ordinary = _ask('ordinary-close')
+            composite = _ask('composite-handoff')
+            composite['_auth_context']['assistant_composite_question_proxy'] = True
+            composite['envelope']['_assistant_composite_question_proxy'] = True
+            for ask in (ordinary, composite):
+                assert (await notify.prompt(ask))['type'] == 'prompt.ask.ok'
+            rows['hosta:v2-lead']['status'] = 'closed'
+            expired = await notify.expire_questions_for_closed_producer('hosta:v2-lead', generation='g1')
+            ordinary_row = await notify._db.call('get_agent_question', 'ordinary-close')
+            composite_row = await notify._db.call('get_agent_question', 'composite-handoff')
+            assert expired == [ordinary_row['notification_id']]
+            assert ordinary_row['state'] == 'expired'
+            assert composite_row['state'] == 'open'
+            assert (await notify._db.call('get_notification', composite_row['notification_id']))['state'] == 'open'
+            assert (await notify.prompt({'type': 'prompt.status', 'question_id': 'composite-handoff'}))['question']['state'] == 'open'
+            assert await notify.reconcile_open_questions_against_sessions() == 0
+        finally:
+            await notify.stop()
+    _run(go())
+
+
+def test_bound_proxy_can_retire_expired_question_without_reviving_it(tmp_path):
+    async def go():
+        rows = {'hosta:v2-lead': {'visibility': 'visible', 'status': 'open',
+                                 'session_generation': 'g1'}}
+        notify = _notify(tmp_path, sessions=_FakeSessions(rows))
+        await notify.start()
+        try:
+            ask = _ask('expired-composite')
+            ask['envelope']['ttl_seconds'] = 1
+            ask['_auth_context']['assistant_composite_question_proxy'] = True
+            ask['envelope']['_assistant_composite_question_proxy'] = True
+            assert (await notify.prompt(ask))['type'] == 'prompt.ask.ok'
+            row = await notify._db.call('get_agent_question', 'expired-composite')
+            # Reproduce an already-terminal persisted row from the old close hook.
+            assert row['notification_id'] in await notify._db.call('expire_due', now='2099-01-01T00:00:00Z')
+            cancel = {'type': 'prompt.cancel', 'question_id': 'expired-composite',
+                '_auth_context': {'token_verified': True, 'stream_id': 'hosta:v2-successor',
+                                  'assistant_composite_question_proxy': True}}
+            reply = await notify.prompt(cancel)
+            assert reply['type'] == 'prompt.cancel.ok', reply
+            assert reply['question']['state'] == 'expired'
+            assert reply['already_terminal'] is True
+            # A direct ordinary caller gains no proxy cancellation authority.
+            cancel['_auth_context'].pop('assistant_composite_question_proxy')
+            assert (await notify.prompt(cancel))['error_code'] == 'question_unauthorized'
+        finally:
+            await notify.stop()
+    _run(go())
+
+
+def test_ordinary_ask_cannot_forge_composite_lifetime_exemption(tmp_path):
+    async def go():
+        notify = _notify(tmp_path, sessions=_FakeSessions({'hosta:v2-lead': {
+            'visibility': 'visible', 'status': 'open', 'session_generation': 'g1'}}))
+        await notify.start()
+        try:
+            ask = _ask('forged-composite')
+            ask['envelope']['_assistant_composite_question_proxy'] = True
+            reply = await notify.prompt(ask)
+            assert reply['type'] == 'prompt.error'
+            assert reply['error_code'] == 'assistant_question_proxy_unverified'
+            assert await notify._db.call('get_agent_question', 'forged-composite') is None
+        finally:
+            await notify.stop()
+    _run(go())

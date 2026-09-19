@@ -811,6 +811,9 @@ class Notify:
             auth.get("assistant_composite_question_proxy") is True
             and envelope.get("_assistant_composite_question_proxy") is True
         )
+        if envelope.get("_assistant_composite_question_proxy") is True and not assistant_proxy:
+            return self._prompt_error(request_id, "assistant_question_proxy_unverified",
+                                      question_id=question_id)
         if not (
             auth.get("token_verified") is True
             and str(auth.get("stream_id") or "") == producer
@@ -995,6 +998,12 @@ class Notify:
             return self._prompt_error(request_id, "question_unauthorized", question_id=qid)
         state = str(question.get("state") or "")
         if state != "open":
+            if proxy_cancel and state == "expired":
+                # The lane-bound caller may clear a terminal pending pointer.
+                # Preserve expiry and all original question evidence; do not
+                # revive the question or manufacture an operator answer.
+                return {"type": "prompt.cancel.ok", "request_id": request_id, "ok": True,
+                        "question": question, "already_terminal": True}
             if state == "dismissed":
                 return {"type": "prompt.cancel.ok", "request_id": request_id, "ok": True,
                         "question": question, "already_cancelled": True}
