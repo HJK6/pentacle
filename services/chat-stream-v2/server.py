@@ -717,7 +717,7 @@ class Server:
         # projected frame. Render it once per subscription group instead of
         # rebuilding and JSON-encoding a fleet inventory for every socket.
         groups: dict[
-            tuple[bool, frozenset[str] | None, frozenset[str], bool, str], list[Any],
+            tuple[bool, frozenset[str] | None, frozenset[str], bool, str, bool], list[Any],
         ] = {}
         for websocket in tuple(recipients):
             if websocket in self._client_system_producers:
@@ -735,6 +735,9 @@ class Server:
                 # session.inventory for summary clients, so a summary and a full
                 # client must not share one rendered projection.
                 self._client_events_mode.get(websocket, "full"),
+                # Composite inventory and events differ by negotiated capability.
+                # Never reuse an unsupported client's projection for a capable one.
+                bool(self._client_assistant_composite_v1.get(websocket, False)),
             )
             groups.setdefault(key, []).append(websocket)
         for clients in groups.values():

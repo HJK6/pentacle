@@ -403,3 +403,54 @@ def test_hidden_lead_question_reuses_existing_store_and_reply_follows_current_la
             store.stop()
 
     asyncio.run(_go())
+
+
+def test_broadcast_keeps_composite_capability_groups_separate() -> None:
+    """A mixed live fleet must preserve each socket's snapshot visibility."""
+    class Socket:
+        remote_address = ("127.0.0.1", 12345)
+
+    async def _go(events_mode: str, capable_first: bool) -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            sessions = Sessions(store, tmux=None, local_host=COMPOSITE_HOST)
+            composite = AssistantComposite(store, config=AssistantCompositeConfig(
+                enabled=True, stream_id=COMPOSITE_STREAM, router_endpoint=ROUTER_ENDPOINT,
+            ))
+            await composite.ensure_projection()
+            await store.open_session(COMPOSITE_HOST, "ordinary", provider="codex")
+            await sessions.refresh()
+            server = Server(store=store, sessions=sessions, comms=_Comms(), local_host=COMPOSITE_HOST)
+            server.assistant_composite = composite
+            capable, plain = Socket(), Socket()
+            # Pin the first representative in both orders, instead of relying on set order.
+            server._clients = [capable, plain] if capable_first else [plain, capable]
+            received = {capable: [], plain: []}
+            server._enqueue = lambda socket, _kind, encoded: received[socket].append(json.loads(encoded))
+            for socket in (capable, plain):
+                frames = await server._dispatch(json.dumps({
+                    "type": "hello", "subscribe": {"include_subagents": True, "events_mode": events_mode},
+                    "capabilities": {"assistant_composite_v1": socket is capable},
+                }), websocket=socket)
+                snapshot = next(frame for frame in frames if frame["type"] == "snapshot")
+                assert any(row["stream_id"] == COMPOSITE_STREAM for row in snapshot["sessions"]) == (socket is capable)
+            await server.broadcast({"type": "session.inventory", "sessions": sessions.list_open()})
+            for socket in (capable, plain):
+                rows = received[socket][-1]["sessions"]
+                assert any(row["stream_id"] == COMPOSITE_STREAM for row in rows) == (socket is capable)
+                assert any(row["stream_id"] == f"{COMPOSITE_HOST}:ordinary" for row in rows)
+            for stream_id in (COMPOSITE_STREAM, f"{COMPOSITE_HOST}:ordinary"):
+                for messages in received.values():
+                    messages.clear()
+                await server.broadcast({"type": "chat.event", "event": {
+                    "stream_id": stream_id, "kind": "ASSIST_TEXT", "text": "fixture reply",
+                }})
+                assert len(received[capable]) == 1
+                assert len(received[plain]) == (0 if stream_id == COMPOSITE_STREAM else 1)
+        finally:
+            store.stop()
+
+    for events_mode in ("summary", "full"):
+        for capable_first in (False, True):
+            asyncio.run(_go(events_mode, capable_first))
