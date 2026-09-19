@@ -451,9 +451,18 @@ export class ChatStoreController {
     }
   }
 
-  private nextOptimisticId(streamId: string): string {
+  private nextOptimisticId(streamId: string, composite = false): string {
     const short = String(streamId || 'stream').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'stream';
     this.optimisticCounter += 1;
+    if (composite) {
+      // Composite input IDs are durable across tabs, clients and reloads.
+      // getRandomValues also works on the supported HTTP web hosts, where
+      // secure-context-only randomUUID may be unavailable. Retries reuse the
+      // stored optimistic ID and do not call this allocator again.
+      const nonce = Array.from(globalThis.crypto.getRandomValues(new Uint32Array(4)),
+        word => word.toString(16).padStart(8, '0')).join('');
+      return `optimistic_${short}_${nonce}`;
+    }
     return `optimistic_${short}_${this.optimisticCounter}`;
   }
 
@@ -522,7 +531,7 @@ export class ChatStoreController {
     const sendAttachments = Array.isArray(attachments) ? attachments.filter((item) => item && item.key && item.mime) : [];
     if (!streamId || (!sendText.trim() && sendAttachments.length === 0)) return '';
 
-    const optimisticId = this.nextOptimisticId(streamId);
+    const optimisticId = this.nextOptimisticId(streamId, composite);
     const requestId = this.nextRequestId('send');
     const now = Date.now();
     const generation = this.socketGeneration;

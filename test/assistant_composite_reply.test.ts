@@ -44,3 +44,27 @@ test('retry retains reply binding and stable input identity while rotating the R
   assert.equal(sends[1].optimisticId, sends[0].optimisticId);
   assert.notEqual(sends[1].requestId, sends[0].requestId);
 });
+
+test('independent and reloaded composite clients cannot reuse a durable input identity', async (t) => {
+  // A timestamp or process-local counter alone cannot separate concurrent tabs.
+  t.mock.method(Date, 'now', () => 1789840000000);
+  const first = store();
+  const second = store();
+  const reloaded = store();
+  const accepted = new Map<string, string>();
+  const conflicts: string[] = [];
+  for (const controller of [first, second, reloaded]) {
+    controller.setSendBridge(async args => {
+      if (accepted.has(args.optimisticId)) conflicts.push(args.optimisticId);
+      accepted.set(args.optimisticId, args.text);
+      return { ok: true };
+    });
+  }
+  const ids = [first.sendTurn(streamId, 'first approval'), second.sendTurn(streamId, 'independent input'),
+    reloaded.sendTurn(streamId, 'heading answer', [], { reply_to_question_id: 'question-1' })];
+  await new Promise(setImmediate);
+  assert.deepEqual(conflicts, []);
+  assert.equal(new Set(ids).size, 3);
+  assert.equal(accepted.size, 3);
+  for (const controller of [first, second, reloaded]) controller.dispose();
+});

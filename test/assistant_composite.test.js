@@ -167,6 +167,7 @@ async function wireRenderer(t, compositeMode = true) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../preload.js'), 'utf8'), preload);
   h.dom.window.cc.chatSendCorrelated = preload.window.cc.chatSendCorrelated;
   h.context.cc = h.dom.window.cc;
+  h.context.crypto = h.dom.window.crypto;
   const bundle = esbuild.buildSync({ entryPoints: [path.join(__dirname, '../renderer/src/chat_core_entry.ts')],
     bundle: true, format: 'iife', target: 'chrome134', write: false, logLevel: 'silent' }).outputFiles[0].text;
   vm.runInContext(bundle, h.context);
