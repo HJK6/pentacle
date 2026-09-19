@@ -359,6 +359,7 @@ def archive_events(
     tail_keep: int,
     batch_size: int,
     max_rows: int | None = None,
+    protected_stream_ids: set[str] | None = None,
 ) -> tuple[int, int]:
     """Move archivable event rows out. Requires temp.hot_streams loaded.
 
@@ -377,6 +378,7 @@ def archive_events(
     key = f'"{ev.row_key}"' if ev.row_key != "rowid" else "rowid"
     tbl = f'"{ev.table}"'
     remaining = max_rows
+    protected_stream_ids = protected_stream_ids or set()
 
     def move(where: str, params: list) -> int:
         nonlocal remaining
@@ -419,6 +421,12 @@ def archive_events(
             if remaining is not None and remaining <= 0:
                 break
             count = row[-1]
+            # The daemon-owned assistant composite is one durable, pane-less
+            # conversation.  Its open history is cursor-paged from the hot
+            # table, so do not tail-move it to an archive the live fetch path
+            # does not union.  Ordinary session retention is unchanged.
+            if str(row[0] or "") in protected_stream_ids:
+                continue
             if count <= tail_keep:
                 continue
             keys = list(row[:-1])
@@ -622,9 +630,16 @@ class RetentionJob:
                 # archive with them.
                 schema = Schema(conn)
                 _load_hot_table(conn, hot_stream_ids(conn, schema, cfg.statuses))
+                protected = {
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT host || ':' || session_name FROM sessions "
+                        "WHERE status='open' AND provider='composite'"
+                    )
+                }
                 return archive_events(
                     conn, EventSchema(conn), archive_path, cfg.tail_keep,
-                    cfg.batch_size, max_rows=limit,
+                    cfg.batch_size, max_rows=limit, protected_stream_ids=protected,
                 )
 
             ev_moved = await self._drain_pairs(budget, _events)

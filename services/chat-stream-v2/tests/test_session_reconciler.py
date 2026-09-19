@@ -178,6 +178,56 @@ def test_reboot_shaped_absent_tmux_closes_row_after_consecutive_evidence() -> No
     asyncio.run(run())
 
 
+def test_composite_projection_is_excluded_from_presence_reap_while_ordinary_dead_pane_closes() -> None:
+    """A synthetic chat has no tmux pane but preserves its stable event history."""
+
+    class GoneOrdinaryTmux(_FakeTmux):
+        def __init__(self) -> None:
+            super().__init__((0, "v2-live\t77\n"))
+            self.probed: list[str] = []
+
+        async def session_state(self, name: str) -> str:
+            self.probed.append(name)
+            return "gone"
+
+    async def run() -> None:
+        tmux = GoneOrdinaryTmux()
+        store = Store(":memory:")
+        store.start()
+        sessions = Sessions(store, tmux=None, local_host="hosta")
+        try:
+            await store.open_session("hostb", "v2-dead", pane_status="pane_alive")
+            composite = await store.ensure_assistant_composite_projection(stream_id="hostb:assistant")
+            await store.admit_assistant_composite_input(
+                stream_id="hostb:assistant", input_identity="optimistic-1", input_request_id="rpc-1",
+                body="keep this history", attachments=[{"blob_sha256": "retained"}],
+                reply_to_message_id=None, reply_to_question_id=None, actor_stream_id=None,
+            )
+            await sessions.refresh()
+            hosts = _FakeHosts(tmux, online=True)
+            presence = RemotePresence(sessions, hosts, config=PresenceConfig(list_timeout_s=0.1))
+            reconciler = SessionReconciler(
+                sessions, hosts, presence=presence,
+                config=ReconcileConfig(interval_s=60, threshold_checks=2),
+            )
+
+            await reconciler.reconcile_once()
+            second = await reconciler.reconcile_once()
+            ordinary = await store.fetch_session("hostb", "v2-dead")
+            stable = await store.fetch_session("hostb", "assistant")
+            assert second["closed"] == 1 and ordinary is not None and ordinary["status"] == "closed"
+            assert stable is not None and stable["status"] == "open"
+            assert stable["created_at"] == composite["created_at"]
+            assert stable["session_generation"] == composite["session_generation"]
+            assert [event["text"] for event in await store.fetch_session_event_tail("hostb:assistant", limit=10)] == ["keep this history"]
+            assert tmux.probed == ["v2-dead"], "never probe/reap the pane-less composite"
+            assert all(row["stream_id"] != "hostb:assistant" for row in presence.select_rows())
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
 def test_reconciler_tick_runs_pin_drift_hook_on_the_existing_cadence(monkeypatch) -> None:
     calls: list[str] = []
 

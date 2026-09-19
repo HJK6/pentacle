@@ -124,6 +124,7 @@ class ChatStreamClient {
     this._events = [];
     this._drafts = {};
     this._sessions = [];
+    this._capabilities = {};
     this._schedules = [];
     this._limits = nullLimits();
     this._limitsHealth = null;
@@ -185,6 +186,7 @@ class ChatStreamClient {
       events: this._events.slice(-500),
       drafts: { ...this._drafts },
       sessions: this._sessions.slice(),
+      capabilities: { ...this._capabilities },
       schedules: this._schedules.slice(),
       limits: validatedLimits(this._limits),
       limits_health: this._limitsHealth,
@@ -406,6 +408,7 @@ try {
     const payload = {
       type: 'hello',
       client: 'pentacle',
+      capabilities: { assistant_composite_v1: this._cfg?.features?.chatUi === true },
       build_sha: this._buildSha,
       subscribe: this._helloSubscribePayload(),
     };
@@ -594,12 +597,22 @@ try {
     return this.sendCommand({ type: 'spawn_catalog_get' }, 'spawn_catalog_get', { timeoutMs: this._spawnCatalogRpcTimeoutMs });
   }
 
-  sendMessage({ host, sessionName, text, requestId, optimisticId, attachments } = {}) {
+  sendMessage({ host, sessionName, streamId, text, requestId, optimisticId, attachments, replyToMessageId, replyToQuestionId } = {}) {
     // requestId (optional) flows through to sendCommand so a renderer-owned
     // optimistic send_id is used on the wire. Absent → legacy main-generated id.
-    const payload = { type: 'send', host, session_name: sessionName, text };
-    if (typeof optimisticId === 'string' && optimisticId) payload.optimistic_id = optimisticId;
+    const targetId = streamId || `${host}:${sessionName}`;
+    const session = this._sessions.find(item => item.stream_id === targetId);
+    const composite = session?.session_kind === 'assistant_composite';
+    if (composite && (typeof optimisticId !== 'string' || !optimisticId)) {
+      return Promise.reject(new Error('Composite input requires a stable message ID'));
+    }
+    const payload = composite
+      ? { type: 'send', stream_id: targetId, message: text, msg_id: optimisticId }
+      : { type: 'send', host, session_name: sessionName, text };
+    if (!composite && typeof optimisticId === 'string' && optimisticId) payload.optimistic_id = optimisticId;
     if (Array.isArray(attachments) && attachments.length > 0) payload.attachments = attachments;
+    if (typeof replyToMessageId === 'string' && replyToMessageId) payload.reply_to_message_id = replyToMessageId;
+    if (typeof replyToQuestionId === 'string' && replyToQuestionId) payload.reply_to_question_id = replyToQuestionId;
     this.noteInteraction();
     return this.sendCommand(
       payload,
@@ -1268,6 +1281,7 @@ try {
         this._events = Array.isArray(msg.events) ? msg.events.slice(-this._recentLimit) : [];
         this._drafts = msg.drafts || {};
         this._sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
+        this._capabilities = msg.capabilities && typeof msg.capabilities === 'object' ? { ...msg.capabilities } : {};
         this._replaceSchedules(msg.schedules);
         if (Object.prototype.hasOwnProperty.call(msg, 'limits')) {
           const limits = validatedLimits(msg.limits);

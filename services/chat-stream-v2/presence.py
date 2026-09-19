@@ -236,6 +236,8 @@ class RemotePresence:
         # after a successful half-open probe. Re-read the current breaker state
         # rather than letting delayed delivery overwrite newer truth.
         for row in self.sessions.list_open():
+            if str(row.get("provider") or "") == "composite":
+                continue
             if str(row.get("host") or "") != host:
                 continue
             self._apply_overlay(
@@ -254,7 +256,8 @@ class RemotePresence:
     def select_rows(self) -> list[dict[str, Any]]:
         rows = [
             row for row in self.sessions.list_open()
-            if row.get("host") == self.hosts.local_host or row.get("host") in self.hosts.peers
+            if str(row.get("provider") or "") != "composite"
+            and (row.get("host") == self.hosts.local_host or row.get("host") in self.hosts.peers)
         ]
         return self._bounded(rows)
 
@@ -548,7 +551,7 @@ class RemotePresence:
         active_keys = {
             str(row.get("stream_id") or ""): self._preview_key(row)
             for row in self.sessions.list_open()
-            if row.get("stream_id")
+            if row.get("stream_id") and str(row.get("provider") or "") != "composite"
         }
         self._prune_generation_state(active_keys)
         for key, cached in list(self._preview_cache.items()):
@@ -618,7 +621,7 @@ class RemotePresence:
         active_after = {
             str(row.get("stream_id") or ""): self._preview_key(row)
             for row in self.sessions.list_open()
-            if row.get("stream_id")
+            if row.get("stream_id") and str(row.get("provider") or "") != "composite"
         }
         applied = 0
         for result in results:
@@ -782,6 +785,8 @@ class RemotePresence:
         ttl = self.cfg.working_active_ttl_s
         targets: list[tuple[str, dict[str, Any]]] = []
         for row in self.sessions.list_open():
+            if str(row.get("provider") or "") == "composite":
+                continue
             sid = str(row.get("stream_id") or "")
             if not sid:
                 continue

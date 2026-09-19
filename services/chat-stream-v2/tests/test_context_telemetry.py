@@ -6,6 +6,7 @@ import asyncio
 import json
 
 from ingest import Ingest
+from context_adapters import ContextReading
 from routing_integrity import RoutingIntegrity
 from server import Server
 from sessions import Sessions
@@ -234,3 +235,50 @@ def test_fd_bound_codex_token_count_without_session_identity_stays_null(tmp_path
             store.stop()
 
     asyncio.run(run())
+
+
+def test_configured_assistant_backend_gets_narrow_codex_handoff_bounds(tmp_path) -> None:
+    """Only a current configured backend opts out of ordinary Codex suppression."""
+    async def run() -> None:
+        store = Store(str(tmp_path / "assistant-context.db"))
+        store.start()
+        sessions = Sessions(store, local_host=HOST)
+        configured = f"{HOST}:assistant-authority"
+        observer = RoutingIntegrity(
+            store, sessions,
+            assistant_backend_binding=lambda stream_id, generation: (
+                stream_id == configured and bool(generation)
+            ),
+        )
+        try:
+            await sessions.open(HOST, "assistant-authority", provider="codex", pane_status="pane_alive")
+            await sessions.open(HOST, "ordinary-codex", provider="codex", pane_status="pane_alive")
+            advisory = await observer.observe_context(
+                HOST, "assistant-authority", provider="codex",
+                reading=ContextReading(120_000, model_context_window=258_400),
+            )
+            ordinary = await observer.observe_context(
+                HOST, "ordinary-codex", provider="codex",
+                reading=ContextReading(240_000, model_context_window=258_400),
+            )
+            handoff = await observer.observe_context(
+                HOST, "assistant-authority", provider="codex",
+                reading=ContextReading(200_000, model_context_window=258_400),
+            )
+            assert advisory is not None and advisory["context_level"] == "advisory"
+            assert handoff is not None and handoff["context_level"] == "handoff"
+            assert ordinary is not None and ordinary["context_level"] == "none"
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_assistant_context_bounds_leave_room_in_smaller_model_windows() -> None:
+    from context_adapters import context_fields
+
+    for window, advisory, handoff in ((100_000, 70_000, 85_000), (160_000, 112_000, 136_000), (258_400, 120_000, 200_000)):
+        assert context_fields('codex', ContextReading(advisory - 1, model_context_window=window), assistant_backend=True)[2] == 'none'
+        assert context_fields('codex', ContextReading(advisory, model_context_window=window), assistant_backend=True)[2] == 'advisory'
+        assert context_fields('codex', ContextReading(handoff, model_context_window=window), assistant_backend=True)[2] == 'handoff'
+        assert context_fields('codex', ContextReading(window, model_context_window=window))[2] == 'none'

@@ -148,7 +148,10 @@ class SessionReconciler:
             "session_reap_exhausted": 0,
             "self_close_swept": 0,
         }
-        all_open_rows = await self.store.list_sessions("open")
+        all_open_rows = [
+            row for row in await self.store.list_sessions("open")
+            if str(row.get("provider") or "") != "composite"
+        ]
         local_rows = [
             row for row in all_open_rows
             if str(row.get("host") or "") == str(self.hosts.local_host)
@@ -1065,7 +1068,10 @@ class SessionReconciler:
 
     async def status(self, *, host: str | None = None) -> dict[str, Any]:
         """Return fleet counts/details without mutating sessions or panes."""
-        rows = await self.store.list_sessions(None)
+        rows = [
+            row for row in await self.store.list_sessions(None)
+            if str(row.get("provider") or "") != "composite"
+        ]
         if host:
             rows = [row for row in rows if str(row.get("host") or "") == host]
         counts = {

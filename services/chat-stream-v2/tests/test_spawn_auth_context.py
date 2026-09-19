@@ -1,9 +1,8 @@
 """SpawnCtl distinguishes hostc's auth-context failure from a slow Claude boot.
 
 The production-adjacent shell shim is covered by the durable marker test below.
-These tests retain the legacy capture-injection case as a strict expected failure:
-it proves only a parser and must never be mistaken for transport evidence. The
-private-tmux witness remains red until the lane-5 durable emitter exists.
+The capture-injection case asserts that pane text alone cannot establish a
+durable auth-context failure. The separate private-tmux test owns transport proof.
 """
 
 from __future__ import annotations
@@ -187,14 +186,10 @@ def test_private_tmux_real_shim_reaches_spawnctl_durable_recognition(
             pass
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="injected capture text cannot prove the auth-marker transport",
-)
-def test_auth_context_marker_is_public_error_receipt_and_durable_outcome(
+def test_captured_auth_marker_does_not_impersonate_durable_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Historic parser-only expectation; it must remain red without transport."""
+    """A capture-only marker cannot change the public/durable failure category."""
 
     async def _no_sleep(_delay: float) -> None:
         return None
@@ -222,13 +217,11 @@ def test_auth_context_marker_is_public_error_receipt_and_durable_outcome(
 
     reply, outcome, tmux = asyncio.run(_go())
     assert reply["type"] == "spawn.error"
-    assert reply["error_code"] == "provider_auth_context_unavailable"
-    receipt = reply["initial_prompt_delivery"]
-    assert receipt["failure_code"] == "provider_auth_context_unavailable"
+    assert reply["error_code"] == "boot_not_ready"
     assert outcome is not None and outcome["state"] == "failed"
-    assert outcome["reason"].startswith("provider_auth_context_unavailable:")
-    assert outcome["delivery_receipt"]["failure_code"] == "provider_auth_context_unavailable"
-    assert tmux.new_sessions == 1, "auth-context failure must not enter the boot retry set"
+    assert outcome["reason"].startswith("boot_not_ready:")
+    assert outcome["delivery_receipt"]["failure_code"] == "boot_not_ready"
+    assert tmux.new_sessions == spawnctl_mod.PROMPT_SPAWN_RETRY_ATTEMPTS
     assert tmux.pastes == 0
 
 

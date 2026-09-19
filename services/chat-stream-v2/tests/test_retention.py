@@ -571,3 +571,45 @@ def test_expired_schedule_receipt_is_pinned_while_target_row_exists(tmp_path: Pa
             "SELECT COUNT(*) FROM v2_operation_receipts "
             "WHERE target_id='sched-more-than-30d-out'"
         ).fetchone()[0] == 1
+
+
+def test_open_composite_keeps_full_history_and_attachment_refs_across_retention_restart(tmp_path: Path) -> None:
+    """The narrow hot-tail exemption is cursor-safe beyond the normal 2000 cap."""
+    path = tmp_path / "sessions.db"
+
+    async def _seed() -> None:
+        store = Store(str(path))
+        store.start()
+        try:
+            await store.ensure_assistant_composite_projection(stream_id="fixture-host-chat:assistant")
+            for index in range(2005):
+                await store.admit_assistant_composite_input(
+                    stream_id="fixture-host-chat:assistant", input_identity=f"optimistic-{index}",
+                    input_request_id=f"rpc-{index}", body=f"message-{index}",
+                    attachments=[{"blob_sha256": f"blob-{index}"}],
+                    reply_to_message_id=None, reply_to_question_id=None, actor_stream_id=None,
+                )
+        finally:
+            store.stop()
+
+    asyncio.run(_seed())
+    result = run_pass(path, RetentionConfig(
+        tail_keep=2000, batch_size=500, max_rows_per_pass=5000,
+        vacuum_min_bytes=10**18,
+    ))
+    assert result.events_tail_moved == 0
+
+    async def _verify() -> None:
+        store = Store(str(path))
+        store.start()
+        try:
+            rows = await store.fetch_session_event_page(
+                "fixture-host-chat:assistant", before_daemon_seq=None, limit=3000,
+            )
+            assert len(rows) == 2005
+            assert rows[0]["text"] == "message-0"
+            assert rows[-1]["raw"]["attachments"] == [{"blob_sha256": "blob-2004"}]
+        finally:
+            store.stop()
+
+    asyncio.run(_verify())

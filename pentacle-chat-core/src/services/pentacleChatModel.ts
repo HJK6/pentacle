@@ -4,6 +4,8 @@ import type {
   PentacleHostStatus,
   PentacleMachineStats,
   PentacleSendState,
+  PentacleAssistantPublishKind,
+  PentacleSessionCapabilities,
   PentacleSessionSummary,
   PentacleStreamState,
   OptimisticSendStatus,
@@ -65,6 +67,11 @@ export type PentacleChatListItem = {
   hostTitle: string;
   provider: string;
   sessionName: string;
+  sessionKind?: string | null;
+  sessionGeneration?: string | null;
+  role?: string | null;
+  visibility?: string | null;
+  capabilities?: PentacleSessionCapabilities | null;
   title: string;
   previewText: string;
   status: PentacleSessionStatus;
@@ -86,6 +93,11 @@ export type PentacleUnifiedFeedItem = {
   hostTitle: string;
   provider: string;
   sessionName: string;
+  sessionKind?: string | null;
+  sessionGeneration?: string | null;
+  role?: string | null;
+  visibility?: string | null;
+  capabilities?: PentacleSessionCapabilities | null;
   chatTitle: string;
   accent: string;
   timestampLabel: string;
@@ -111,6 +123,8 @@ export type PentacleOpenQuestionItem = {
 export type PentacleTranscriptItem = {
   id: string;
   timestampLabel: string;
+  /** Original event time retained for deterministic answer/history interleaving. */
+  timestamp?: string;
   label: string;
   tone: PentacleTranscriptTone;
   provider: string;
@@ -132,6 +146,11 @@ export type PentacleTranscriptItem = {
   eventKey?: string;
   optimisticId?: string;
   correlatedDaemonSeq?: number | null;
+  messageId?: string;
+  replyToMessageId?: string;
+  replyToQuestionId?: string;
+  laneId?: string;
+  publishKind?: PentacleAssistantPublishKind;
   // Present on `agent-question-answer` rows: the durable notification this row echoes, so a
   // client holding the same answer as a resolved-notification projection can render one of them
   // rather than both.
@@ -156,6 +175,11 @@ export type PentacleSessionDetail = {
   title: string;
   hostTitle: string;
   providerLabel: string;
+  sessionKind?: string | null;
+  sessionGeneration?: string | null;
+  role?: string | null;
+  visibility?: string | null;
+  capabilities?: PentacleSessionCapabilities | null;
   status: PentacleSessionStatus;
   statusLabel: string;
   summaryLabel: string;
@@ -241,6 +265,28 @@ function trimPreview(text: string, fallback: string) {
 function displayTitleForSession(session: PentacleSessionSummary) {
   const title = String(session.title || session.display_name || '').trim();
   return title || session.session_name;
+}
+
+/**
+ * The daemon's explicit session kind is the only composite identity signal.
+ * Provider, role, title and stream-name conventions are intentionally ignored.
+ */
+export function isPentacleAssistantCompositeSession(
+  session: Pick<PentacleSessionSummary, 'session_kind'> | null | undefined,
+) {
+  return session?.session_kind === 'assistant_composite';
+}
+
+function sameSessionCapabilities(
+  left: PentacleSessionCapabilities | null | undefined,
+  right: PentacleSessionCapabilities | null | undefined,
+) {
+  if (left === right) return true;
+  if (!left || !right) return left === right;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => left[key] === right[key]);
 }
 
 function formatClock(timestamp?: string) {
@@ -676,6 +722,11 @@ function sameChatListItem(a: PentacleChatListItem, b: PentacleChatListItem) {
     a.hostTitle === b.hostTitle &&
     a.provider === b.provider &&
     a.sessionName === b.sessionName &&
+    a.sessionKind === b.sessionKind &&
+    a.sessionGeneration === b.sessionGeneration &&
+    a.role === b.role &&
+    a.visibility === b.visibility &&
+    sameSessionCapabilities(a.capabilities, b.capabilities) &&
     a.title === b.title &&
     a.previewText === b.previewText &&
     a.status === b.status &&
@@ -706,6 +757,11 @@ function sameTranscriptItem(a: PentacleTranscriptItem, b: PentacleTranscriptItem
     a.eventKey === b.eventKey &&
     a.optimisticId === b.optimisticId &&
     a.correlatedDaemonSeq === b.correlatedDaemonSeq &&
+    a.messageId === b.messageId &&
+    a.replyToMessageId === b.replyToMessageId &&
+    a.replyToQuestionId === b.replyToQuestionId &&
+    a.laneId === b.laneId &&
+    a.publishKind === b.publishKind &&
     a.eventCase === b.eventCase &&
     a.displayRule === b.displayRule &&
     a.disclosure?.previewText === b.disclosure?.previewText &&
@@ -881,6 +937,11 @@ export function createChatListSelector(): PentacleChatListSelector {
           hostTitle: resolveHostTitle(host),
           provider: session.provider.toUpperCase(),
           sessionName: session.session_name,
+          sessionKind: session.session_kind ?? null,
+          sessionGeneration: session.session_generation ?? null,
+          role: session.role ?? null,
+          visibility: session.visibility ?? null,
+          capabilities: session.capabilities ?? null,
           title: displayTitleForSession(session),
           previewText: latestDisplayedSessionPreviewFromEvents(
             state,
@@ -1163,6 +1224,11 @@ export function selectUnifiedFeed(state: PentacleStreamState): PentacleUnifiedFe
         hostTitle: resolveHostTitle(host),
         provider: (session.provider || event.provider || '').toUpperCase(),
         sessionName: session.session_name || event.session_name,
+        sessionKind: session.session_kind ?? null,
+        sessionGeneration: session.session_generation ?? null,
+        role: session.role ?? null,
+        visibility: session.visibility ?? null,
+        capabilities: session.capabilities ?? null,
         chatTitle: displayTitleForSession(session),
         accent: hostAccent(host),
         timestampLabel: formatClock(event.timestamp),
@@ -1437,6 +1503,11 @@ function selectSessionDetailFromStreamEvents(
     title,
     hostTitle,
     providerLabel,
+    sessionKind: session.session_kind ?? null,
+    sessionGeneration: session.session_generation ?? null,
+    role: session.role ?? null,
+    visibility: session.visibility ?? null,
+    capabilities: session.capabilities ?? null,
     status,
     statusLabel,
     summaryLabel,
@@ -1455,6 +1526,11 @@ function selectSessionDetailFromStreamEvents(
     previousDetail.title === nextDetail.title &&
     previousDetail.hostTitle === nextDetail.hostTitle &&
     previousDetail.providerLabel === nextDetail.providerLabel &&
+    previousDetail.sessionKind === nextDetail.sessionKind &&
+    previousDetail.sessionGeneration === nextDetail.sessionGeneration &&
+    previousDetail.role === nextDetail.role &&
+    previousDetail.visibility === nextDetail.visibility &&
+    sameSessionCapabilities(previousDetail.capabilities, nextDetail.capabilities) &&
     previousDetail.status === nextDetail.status &&
     previousDetail.statusLabel === nextDetail.statusLabel &&
     previousDetail.summaryLabel === nextDetail.summaryLabel &&
@@ -1547,6 +1623,11 @@ function sessionDetailInputSignature(
       host: session.host,
       provider: session.provider,
       session_name: session.session_name,
+      session_kind: session.session_kind ?? null,
+      session_generation: session.session_generation ?? null,
+      role: session.role ?? null,
+      visibility: session.visibility ?? null,
+      capabilities: session.capabilities ?? null,
       display_name: session.display_name || '',
       title: session.title || '',
       last_event_at: session.last_event_at || '',
@@ -1717,6 +1798,17 @@ function buildSessionTranscriptRows(
       eventKey: renderEventKey(event.stream_id, authoritativeSeq, event.optimistic_id),
       optimisticId: event.optimistic_id,
       correlatedDaemonSeq: event.correlatedDaemonSeq,
+      ...(event.event_id || event.message_id
+        ? { messageId: event.message_id ?? event.event_id ?? undefined }
+        : {}),
+      ...(event.reply_to_message_id
+        ? { replyToMessageId: event.reply_to_message_id }
+        : {}),
+      ...(event.reply_to_question_id
+        ? { replyToQuestionId: event.reply_to_question_id }
+        : {}),
+      ...(event.lane_id ? { laneId: event.lane_id } : {}),
+      ...(event.publish_kind ? { publishKind: event.publish_kind } : {}),
       ...(item.notificationId ? { notificationId: item.notificationId } : {}),
     };
     if (event.attachments && event.attachments.length > 0) {

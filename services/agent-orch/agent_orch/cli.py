@@ -20,6 +20,7 @@ from . import prompt_protocol, triage
 from . import role_baseline, schema
 from .stream_id import discover_leader_stream_id_short, env_stream_id
 from .wsclient import (
+    assistant_once,
     asset_comment_resolve_once,
     asset_comments_list_once,
     asset_get_once,
@@ -1453,6 +1454,91 @@ def tell(args: argparse.Namespace) -> int:
     if error_code in {"peer_session_unknown_from", "peer_session_unknown_to", "peer_session_closed"}:
         return 3
     return 2
+
+
+def _assistant_call(args: argparse.Namespace, payload: dict[str, object]) -> int:
+    try:
+        response = asyncio.run(assistant_once(
+            load_config(), payload, timeout=float(getattr(args, "timeout", 30.0) or 30.0),
+        ))
+    except Exception as exc:
+        response, exit_code, message = _direct_rpc_transport_error(
+            str(payload.get("type") or "assistant"), None, exc,
+        )
+        _print_response(response)
+        print(f"agent-orch assistant: {message}", file=sys.stderr)
+        return exit_code
+    _print_response(response)
+    return 0 if str(response.get("type") or "").endswith(".ok") else 1
+
+
+def assistant_publish(args: argparse.Namespace) -> int:
+    attachment_ids: object = []
+    evidence_refs: object = []
+    if args.attachment_ids_json:
+        try:
+            attachment_ids = json.loads(args.attachment_ids_json)
+        except json.JSONDecodeError:
+            print("agent-orch assistant publish: --attachment-ids-json must be JSON", file=sys.stderr)
+            return 2
+    if args.evidence_refs_json:
+        try:
+            evidence_refs = json.loads(args.evidence_refs_json)
+        except json.JSONDecodeError:
+            print("agent-orch assistant publish: --evidence-refs-json must be JSON", file=sys.stderr)
+            return 2
+    if not isinstance(attachment_ids, list) or not isinstance(evidence_refs, list):
+        print("agent-orch assistant publish: ID/ref options must be arrays", file=sys.stderr)
+        return 2
+    payload: dict[str, object] = {
+        "type": "assistant.publish",
+        "request_id": args.request_id,
+        "composite_stream_id": args.composite_stream_id,
+        "dispatch_id": args.dispatch_id,
+        "reply_to_message_id": args.reply_to_message_id,
+        "reply_to_question_id": args.reply_to_question_id,
+        "publish_kind": args.publish_kind,
+        "message": args.message,
+        "attachment_ids": attachment_ids,
+        "evidence_refs": evidence_refs,
+    }
+    return _assistant_call(args, payload)
+
+
+def assistant_operation(args: argparse.Namespace) -> int:
+    try:
+        payload_value = json.loads(args.payload)
+    except json.JSONDecodeError:
+        print("agent-orch assistant operation: --payload must be a JSON object", file=sys.stderr)
+        return 2
+    if not isinstance(payload_value, dict):
+        print("agent-orch assistant operation: --payload must be a JSON object", file=sys.stderr)
+        return 2
+    payload: dict[str, object] = {
+        "type": "assistant.operation",
+        "request_id": args.request_id,
+        "composite_stream_id": args.composite_stream_id,
+        "dispatch_id": args.dispatch_id,
+        "operation": args.operation,
+        "payload": payload_value,
+    }
+    if args.lane_id:
+        payload["lane_id"] = args.lane_id
+    if args.expected_lane_version is not None:
+        payload["expected_lane_version"] = args.expected_lane_version
+    if args.evidence_refs_json:
+        try:
+            evidence_refs = json.loads(args.evidence_refs_json)
+        except json.JSONDecodeError:
+            print("agent-orch assistant operation: --evidence-refs-json must be JSON", file=sys.stderr)
+            return 2
+        payload["evidence_refs"] = evidence_refs
+    if args.reply_to_message_id:
+        payload["reply_to_message_id"] = args.reply_to_message_id
+    if args.operation == "route.resolve" and not args.reply_to_message_id:
+        print("agent-orch assistant operation: route.resolve requires --dispatch-id and --reply-to-message-id", file=sys.stderr)
+        return 2
+    return _assistant_call(args, payload)
 
 
 def _park_rpc(args: argparse.Namespace, *, command: str) -> int:
@@ -4646,6 +4732,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tell_parser.add_argument("--timeout", type=float, default=30.0)
     tell_parser.set_defaults(func=tell)
+
+    assistant_parser = subparsers.add_parser(
+        "assistant", help="typed backend publish/authority operations for an assistant composite",
+    )
+    assistant_sub = assistant_parser.add_subparsers(dest="assistant_command", required=True)
+    assistant_publish_parser = assistant_sub.add_parser(
+        "publish", help="publish backend prose to the daemon-owned composite stream",
+    )
+    assistant_publish_parser.add_argument("--request-id", required=True)
+    assistant_publish_parser.add_argument("--composite-stream-id", required=True)
+    assistant_publish_parser.add_argument("--dispatch-id", required=True)
+    assistant_publish_parser.add_argument("--reply-to-message-id", required=True)
+    assistant_publish_parser.add_argument("--reply-to-question-id")
+    assistant_publish_parser.add_argument(
+        "--publish-kind", choices=("prose", "question", "result", "status"), required=True,
+    )
+    assistant_publish_parser.add_argument("--attachment-ids-json")
+    assistant_publish_parser.add_argument("--evidence-refs-json")
+    assistant_publish_parser.add_argument("--timeout", type=float, default=30.0)
+    assistant_publish_parser.add_argument("--message", required=True)
+    assistant_publish_parser.set_defaults(func=assistant_publish)
+    assistant_operation_parser = assistant_sub.add_parser(
+        "operation", help="submit one fixed typed assistant authority operation",
+    )
+    assistant_operation_parser.add_argument(
+        "--operation", required=True,
+        choices=("lane.admit", "lane.bind", "lane.decision", "lane.close", "question.open", "question.cancel", "route.resolve"),
+    )
+    assistant_operation_parser.add_argument("--request-id", required=True)
+    assistant_operation_parser.add_argument("--composite-stream-id", required=True)
+    assistant_operation_parser.add_argument("--lane-id")
+    assistant_operation_parser.add_argument("--dispatch-id", required=True)
+    assistant_operation_parser.add_argument("--expected-lane-version", type=int)
+    assistant_operation_parser.add_argument("--evidence-refs-json")
+    assistant_operation_parser.add_argument("--reply-to-message-id")
+    assistant_operation_parser.add_argument("--payload", required=True)
+    assistant_operation_parser.add_argument("--timeout", type=float, default=30.0)
+    assistant_operation_parser.set_defaults(func=assistant_operation)
 
     park_parser = subparsers.add_parser("park")
     park_parser.add_argument("stream_id")

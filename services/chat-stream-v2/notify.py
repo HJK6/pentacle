@@ -109,6 +109,14 @@ def _nullable_text(value: object) -> str:
     return text
 
 
+def _is_assistant_composite_question(question: dict[str, Any] | None) -> bool:
+    """Whether this established question row is bound to a composite lane."""
+    if not isinstance(question, dict):
+        return False
+    envelope = question.get("envelope")
+    return isinstance(envelope, dict) and envelope.get("_assistant_composite_question_proxy") is True
+
+
 class QuestionFormatError(ValueError):
     """Admission-format rejection carrying the field, rule, limit/actual and a
     correction hint so the caller can fix the exact violation."""
@@ -557,6 +565,10 @@ class Notify:
     # -- post-resolution fan-out ------------------------------------------
 
     def _answer_owner(self, question: dict | None) -> dict | None:
+        # The accepted composite USER route is delivered to the current lane
+        # binding. Never queue a second answer tell to historical provenance.
+        if _is_assistant_composite_question(question):
+            return None
         if question is None or self._sessions is None or self._outbound is None:
             return None
         producer = str(question.get("producer_stream_id") or "")
@@ -795,6 +807,10 @@ class Notify:
         # whose owner is the producer. This rejects a forged payload identity and
         # an unverified/service-only producer rather than storing a NULL producer.
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        assistant_proxy = bool(
+            auth.get("assistant_composite_question_proxy") is True
+            and envelope.get("_assistant_composite_question_proxy") is True
+        )
         if not (
             auth.get("token_verified") is True
             and str(auth.get("stream_id") or "") == producer
@@ -821,7 +837,7 @@ class Notify:
             # (hidden, subagent, nested, or any future/unknown value) must ask
             # its parent rather than the operator.
             visibility = str(row.get("visibility") or "")
-            if visibility not in ("default", "visible"):
+            if visibility not in ("default", "visible") and not assistant_proxy:
                 parent = _nullable_text(row.get("parent_stream_id")) or None
                 message = (
                     "only an operator-visible seat may ask; ask your parent by a normal tell"
@@ -915,6 +931,13 @@ class Notify:
         question = await self._db.call("get_agent_question", qid)
         if question is None:
             return self._prompt_error(request_id, "question_not_found", question_id=qid)
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if (_is_assistant_composite_question(question)
+                and auth.get("assistant_composite_question_answer_proxy") is not True):
+            return self._prompt_error(
+                request_id, "assistant_question_reply_requires_chat", question_id=qid,
+                message="answer this assistant question through its composite chat reply",
+            )
         if not _question_mutation_authorized(msg, question, allow_verified_agent_relay=True):
             return self._prompt_error(request_id, "question_unauthorized", question_id=qid)
         # Recheck producer liveness/generation before answering so recovery cannot
@@ -961,7 +984,14 @@ class Notify:
         question = await self._db.call("get_agent_question", qid)
         if question is None:
             return self._prompt_error(request_id, "question_not_found", question_id=qid)
-        if not _question_mutation_authorized(msg, question):
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        proxy_cancel = bool(
+            _is_assistant_composite_question(question)
+            and auth.get("assistant_composite_question_proxy") is True
+            and auth.get("token_verified") is True
+            and _nullable_text(auth.get("stream_id"))
+        )
+        if not proxy_cancel and not _question_mutation_authorized(msg, question):
             return self._prompt_error(request_id, "question_unauthorized", question_id=qid)
         state = str(question.get("state") or "")
         if state != "open":
@@ -1242,6 +1272,11 @@ class Notify:
     async def _notif_resolve(self, msg: dict, request_id: str) -> dict:
         nid = str(msg.get("notification_id") or "")
         question = await self._db.call("get_agent_question_for_notification", nid)
+        if _is_assistant_composite_question(question):
+            return self._notif_error(
+                request_id, "assistant_question_reply_requires_chat", notification_id=nid,
+                message="answer this assistant question through its composite chat reply",
+            )
         # This is the mobile/desktop question-answer route. prompt.cancel and
         # notification.resolve_by_dedup retain the producer/operator-only rule.
         if question is not None and not _question_mutation_authorized(
@@ -1422,6 +1457,10 @@ class Notify:
         daemon always has a registry. A missing/NULL producer is left to the
         bounce-A clear, not treated as stale here.
         """
+        if _is_assistant_composite_question(question):
+            # The producer is historical provenance. Current-lane validation at
+            # composite reply admission prevents stale automatic consent.
+            return True
         if self._sessions is None:
             return True
         producer = _nullable_text(question.get("producer_stream_id"))

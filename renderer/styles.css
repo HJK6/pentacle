@@ -5608,3 +5608,28 @@ body.chat-stream-degraded button[data-cleanup-action] {
 .titlebar-machine.color-cyan { color: var(--cyan); }
 :is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag).color-cyan { color: #fff; background: var(--cyan); border-color: var(--cyan); }
 #limits-health { padding: 6px 10px; color: var(--yellow); font-size: 11px; overflow-wrap: anywhere; }
+.slot-chat-reply-preview:not([hidden]) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-left: 2px solid var(--machine-accent, #2dd4bf);
+  font-size: 12px;
+}
+.slot-chat-reply-preview span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slot-chat-reply-btn, .slot-chat-reply-preview button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  opacity: .7;
+}
+.slot-chat-reply-btn:hover, .slot-chat-reply-btn:focus-visible {
+  opacity: 1;
+}

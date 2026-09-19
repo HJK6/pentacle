@@ -53,6 +53,7 @@ class RoutingIntegrity:
         notify: Any = None,
         broadcast: Any = None,
         inventory_emitter: InventoryEmitter | None = None,
+        assistant_backend_binding: Any = None,
     ) -> None:
         self.store = store
         self.sessions = sessions
@@ -64,6 +65,9 @@ class RoutingIntegrity:
         self.inventory_emitter = inventory_emitter or (
             InventoryEmitter(sessions, broadcast) if callable(broadcast) else None
         )
+        # A callable keeps the exception tied to the configured composite
+        # backend IDs/generations, rather than changing Codex policy globally.
+        self.assistant_backend_binding = assistant_backend_binding
         self._claude_tuples: dict[str, tuple[str, tuple[str, str]]] = {}
 
     @asynccontextmanager
@@ -139,7 +143,14 @@ class RoutingIntegrity:
             if str(row.get("provider") or "").lower() != provider:
                 return None
             try:
-                tokens, window, level = context_fields(provider, reading)
+                bound = False
+                if callable(self.assistant_backend_binding):
+                    bound = bool(self.assistant_backend_binding(
+                        f"{host}:{session_name}", generation,
+                    ))
+                tokens, window, level = context_fields(
+                    provider, reading, assistant_backend=bound,
+                )
             except ValueError:
                 return None
             updated_at = str(observed_at or "").strip() or time.strftime(

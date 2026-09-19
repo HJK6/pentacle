@@ -29,6 +29,10 @@ NOTICE_KIND_SPAWN_FAILURE = "spawn_failure"
 NOTICE_KIND_NOTIFICATION_ANSWER = "notification_answer"
 NOTICE_KIND_STATUS_CARD = "status_card"
 NOTICE_KIND_STATUS_CARD_COMBINED = "status_card_combined"
+# A Bart composite terminal or decision gate is still delivered through this
+# established durable outbox.  It is a narrow authority wake, not a second
+# inbox or routing queue.
+NOTICE_KIND_ASSISTANT_COMPOSITE_AUTHORITY = "assistant_composite_authority"
 
 _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_REPORT,
@@ -38,6 +42,7 @@ _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_NOTIFICATION_ANSWER,
     NOTICE_KIND_STATUS_CARD,
     NOTICE_KIND_STATUS_CARD_COMBINED,
+    NOTICE_KIND_ASSISTANT_COMPOSITE_AUTHORITY,
 })
 
 _TERMINAL_CODES = frozenset({

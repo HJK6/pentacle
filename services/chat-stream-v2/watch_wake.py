@@ -107,7 +107,11 @@ class WatchWake:
             return {"type": f"{kind}.error", "ok": False, "error_code": str(exc), "request_id": message.get("request_id")}
 
     async def tick(self):
-        observations = {f"{r['host']}:{r['session_name']}": r for r in self.sessions.list_open()}
+        observations = {
+            f"{r['host']}:{r['session_name']}": r
+            for r in self.sessions.list_open()
+            if str(r.get("provider") or "") != "composite"
+        }
         await self.store.evaluate_watch_wake(observations, now=self.clock())
 
     @asynccontextmanager

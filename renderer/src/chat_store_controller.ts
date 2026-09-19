@@ -136,6 +136,8 @@ export type ChatSendBridge = (args: {
   requestId: string;
   optimisticId: string;
   attachments?: ChatAttachment[];
+  replyToMessageId?: string;
+  replyToQuestionId?: string;
 }) => Promise<{ ok?: boolean; error?: string } | undefined>;
 
 // B3 (chat_send_turn_lifecycle_batch2): how the controller asks main to
@@ -513,10 +515,12 @@ export class ChatStoreController {
    *      the visible running turn.
    * Returns the optimistic_id ('' only on empty/invalid input).
    */
-  sendTurn(streamId: string, text: string, attachments: ChatAttachment[] = []): string {
-    const trimmed = String(text || '').trim();
+  sendTurn(streamId: string, text: string, attachments: ChatAttachment[] = [], reply: { reply_to_message_id?: string; reply_to_question_id?: string } = {}): string {
+    const literal = String(text || '');
+    const composite = this.state.sessions.find(item => item.stream_id === streamId)?.session_kind === 'assistant_composite';
+    const sendText = composite ? literal : literal.trim();
     const sendAttachments = Array.isArray(attachments) ? attachments.filter((item) => item && item.key && item.mime) : [];
-    if (!streamId || (!trimmed && sendAttachments.length === 0)) return '';
+    if (!streamId || (!sendText.trim() && sendAttachments.length === 0)) return '';
 
     const optimisticId = this.nextOptimisticId(streamId);
     const requestId = this.nextRequestId('send');
@@ -526,13 +530,15 @@ export class ChatStoreController {
 
     this.setState(sendOptimisticMessage(this.state, {
       streamId,
-      text: trimmed,
+      text: sendText,
       optimisticId,
       requestId,
       createdAt: now,
       windowStartedAt: this.state.connected ? now : null,
       socketGeneration: generation,
       beginTurn,
+      replyToMessageId: reply.reply_to_message_id,
+      replyToQuestionId: reply.reply_to_question_id,
       ...(sendAttachments.length ? { attachments: sendAttachments } : {}),
     }));
 
@@ -545,7 +551,7 @@ export class ChatStoreController {
       request_id: requestId,
     });
 
-    this.dispatchOptimistic(streamId, optimisticId, requestId, trimmed, generation, sendAttachments);
+    this.dispatchOptimistic(streamId, optimisticId, requestId, sendText, generation, sendAttachments);
 
     return optimisticId;
   }
@@ -599,6 +605,8 @@ export class ChatStoreController {
         text,
         requestId,
         optimisticId,
+        replyToMessageId: this.state.optimisticSends?.[optimisticId]?.reply_to_message_id,
+        replyToQuestionId: this.state.optimisticSends?.[optimisticId]?.reply_to_question_id,
         ...(attachments.length ? { attachments } : {}),
       }))
       .then((result) => {

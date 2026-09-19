@@ -7,7 +7,9 @@ function offlineHostStatus(summary) {
 
 // Sidebar rows come only from chat_streamd and fail closed on visibility.
 function filterSidebarSessions(sessions) {
-  return (sessions || []).filter((session) => session?.visibility === 'default');
+  return (sessions || []).filter((session) => session?.session_kind !== 'assistant_backend'
+    && (session?.visibility === 'default'
+      || (session?.session_kind === 'assistant_composite' && session?.visibility === 'visible')));
 }
 
 // collectSourceFilterHostIds returns the unique hostIds of the visible-session
@@ -80,6 +82,8 @@ function projectChatStreamSessionsToDesktop(streamSessions, hostIdResolver) {
       visibility: s.visibility,
       provider: s.provider || null,
       role: s.role || null,
+      session_kind: s.session_kind,
+      capabilities: s.capabilities,
       working: !!s.working,
       working_label: s.working_label || '',
       last_event_at: s.last_event_at || null,

@@ -34,7 +34,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from sessions import TITLE_SOURCE_PLACEHOLDER, VerbError
 from store import (
@@ -473,14 +473,15 @@ class Ledger:
             cycle_disposition="non_consuming",
         )
 
-    async def report(self, msg: dict[str, Any]) -> dict[str, Any]:
+    async def report(self, msg: dict[str, Any], *,
+                     before_close: Callable[[dict[str, Any]], Awaitable[None]] | None = None) -> dict[str, Any]:
         """`report`, with `--terminate` semantics.
 
         B9 atomicity: the row is durable BEFORE any close processing runs, so a
         `report --terminate` whose close fails (or whose daemon dies mid-close)
         still leaves the report retrievable. The close can be retried; a lost
         report cannot be reconstructed."""
-        row = await self.ingest(msg)
+        row = await self.ingest(msg, announce=before_close is None)
         notice_delivery = row.pop("_notice_delivery", None)
         reply: dict[str, Any] = {
             "type": "report.ok",
@@ -507,6 +508,11 @@ class Ledger:
                 "code": "qa_attestation_unverified",
                 "reasons": list(validation.get("reasons") or []),
             }]
+        # Composite completion owns its atomic authority notice and must commit
+        # while the authenticated reporting generation is still open. Replaying
+        # a durable report also replays this idempotent hook after a crash.
+        if before_close is not None:
+            await before_close(reply)
         auto_close = await self._self_close_on_completion(row)
         close_requested = bool(msg.get("terminate") or msg.get("close_on_ingest") or auto_close)
         if close_requested:
@@ -628,7 +634,7 @@ class Ledger:
             "close_error": "operator_confirm_required_for_top_level_seat",
         }
 
-    async def ingest(self, msg: dict[str, Any]) -> dict[str, Any]:
+    async def ingest(self, msg: dict[str, Any], *, announce: bool = True) -> dict[str, Any]:
         """Validate, persist, announce, settle awaiters. Returns the stored row."""
         report_id = str(msg.get("report_id") or "").strip() or uuid.uuid4().hex
         envelope_violations = unknown_report_message_violations(msg)
@@ -762,6 +768,8 @@ class Ledger:
         }
         try:
             put_kwargs: dict[str, Any] = {}
+            if not announce:
+                put_kwargs["announce"] = False
             if validated.completion_kind == "implementation_ready":
                 put_kwargs["qa_attestation_mode"] = self.qa_attestation_mode
             row = await self.store.put_report(
@@ -813,7 +821,8 @@ class Ledger:
         if row["status"] in TERMINAL_REPORT_STATUSES:
             if inserted:
                 self._settle_waiters(row)
-            row["_notice_delivery"] = await self._announce_child_report_ready(row)
+            if announce:
+                row["_notice_delivery"] = await self._announce_child_report_ready(row)
         return row
 
     @staticmethod
@@ -1866,7 +1875,10 @@ class NudgeJob:
         """One reminder sweep. The forced-trigger seam tests call directly, so no
         test waits out a cadence."""
         now = time.time()
-        rows = self.sessions.list_open()
+        rows = [
+            row for row in self.sessions.list_open()
+            if str(row.get("provider") or "") != "composite"
+        ]
         open_ids = {str(r.get("stream_id") or "") for r in rows if r.get("stream_id")}
         states = await self.store.nudge_states(keep_stream_ids=open_ids)
 

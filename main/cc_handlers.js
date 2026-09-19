@@ -163,9 +163,9 @@ function createCcHandlers({
           actualLaunch: session?.actual_launch_tuple };
       });
     });
-    target.handle('chat-stream:send', (_event, host, sessionName, text, requestId, optimisticId, attachments) =>
+    target.handle('chat-stream:send', (_event, host, sessionName, text, requestId, optimisticId, attachments, reply = {}) =>
       command(async () => {
-        const receipt = await chatStreamClient.sendMessage({ host, sessionName, text, requestId, optimisticId, attachments });
+        const receipt = await chatStreamClient.sendMessage({ host, sessionName, streamId: reply?.stream_id, text, requestId, optimisticId, attachments, replyToMessageId: reply?.reply_to_message_id, replyToQuestionId: reply?.reply_to_question_id });
         return { ...receipt, ok: receipt.delivery === 'landed' || receipt.action_committed === true,
           ...(receipt.delivery === 'not_landed' && !receipt.action_committed ? { error: receipt.reason || 'Message was not delivered' } : {}) };
       }));

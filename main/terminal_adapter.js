@@ -4,6 +4,7 @@ const os = require('node:os');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const run = promisify(execFile);
+const { isCompositeTarget } = require('./assistant_role_guard');
 
 function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = run, platform = process.platform, maxPtysPerConnection = null } = {}) {
   const slots = new Map();
@@ -62,6 +63,9 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
   }
   ipcMain.handle('pty:create', async (event, slot, sessionName, host = 'local', cols = 80, rows = 24) => {
     if (!sessionName || !Number.isInteger(slot)) throw new Error('A session name and numeric slot are required');
+    if (isCompositeTarget(config, client.snapshot?.(), host, sessionName)) {
+      throw new Error('This chat-only assistant has no terminal');
+    }
     // Re-creating an existing slot is a replacement (no net increase); only a
     // genuinely new slot is capped, and the cap is checked before close() so a
     // rejected create never tears down a live terminal.

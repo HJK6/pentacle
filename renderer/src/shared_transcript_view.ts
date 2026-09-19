@@ -48,6 +48,7 @@ export type ViewChrome = {
 export type TranscriptRenderOptions = {
   showTurnDuration?: boolean;
   streamId?: string;
+  allowReplies?: boolean;
   resolvedQuestions?: readonly ResolvedQuestionRecord[];
 };
 
@@ -518,8 +519,13 @@ export function renderTranscriptItemHtml(
   chrome: ViewChrome = DEFAULT_CHROME,
   options: TranscriptRenderOptions = {},
 ): string {
-  const html = renderTranscriptItemBodyHtml(item, chrome, options);
+  let html = renderTranscriptItemBodyHtml(item, chrome, options);
   if (!item || !html) return '';
+  if (options.allowReplies && item.messageId && !item.pending
+    && (item.displayRule === 'bubble:user' || item.displayRule === 'bubble:assistant')) {
+    const reply = `<button type="button" class="slot-chat-reply-btn" data-reply-message-id="${escapeHtml(item.messageId)}"${item.replyToQuestionId ? ` data-reply-question-id="${escapeHtml(item.replyToQuestionId)}"` : ''} aria-label="Reply to message">Reply</button>`;
+    html = html.replace(/<\/article>$/, `${reply}</article>`);
+  }
   return html.replace(/^(<(?:article|div)\b[^>]*)(>)/, (_match, open, close) => `${open} data-transcript-key="${escapeHtml(JSON.stringify([options.streamId || '', item.id]))}"${close}`);
 }
 

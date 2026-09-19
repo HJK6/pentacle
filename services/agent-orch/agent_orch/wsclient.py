@@ -1669,6 +1669,17 @@ async def tell_once(config: Config, payload: dict[str, Any], *, timeout: float =
     return await _one_shot_rpc(config, payload, prefix="tell", timeout=timeout, from_stream_id=from_stream_id)
 
 
+async def assistant_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+    """Invoke the daemon's fixed assistant-composite verbs as this backend seat."""
+    from_stream_id = _attach_agent_identity(payload)
+    verb = str(payload.get("type") or "")
+    if verb not in {"assistant.publish", "assistant.operation"}:
+        raise ValueError("assistant_verb_invalid")
+    prefix = "assistant.publish" if verb == "assistant.publish" else "assistant.operation"
+    payload.setdefault("request_id", f"assistant-{uuid.uuid4()}")
+    return await _one_shot_rpc(config, payload, prefix=prefix, timeout=timeout, from_stream_id=from_stream_id)
+
+
 async def send_image_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     """Post an already-uploaded image attachment to the caller's own conversation.
 

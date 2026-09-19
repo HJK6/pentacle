@@ -14,6 +14,36 @@ export type PentacleEventKind =
   | 'DRAFT'
   | string;
 
+export type PentacleAssistantPublishKind =
+  | 'prose'
+  | 'question'
+  | 'result'
+  | 'status'
+  | 'decision'
+  | string;
+
+/**
+ * Daemon-declared session capabilities. Unknown additive capability keys are
+ * retained so older clients can project a newer inventory without inferring
+ * behavior from provider/name strings.
+ */
+export interface PentacleSessionCapabilities {
+  pane?: boolean;
+  terminal?: boolean;
+  assistant_composite_v1?: boolean;
+  reply_metadata_v1?: boolean;
+  [key: string]: boolean | undefined;
+}
+
+/** Additive acceptance metadata returned by the existing authenticated send. */
+export interface PentacleSendAcceptance {
+  message_id?: string | null;
+  routing_state?: string | null;
+  accepted_sequence?: number | null;
+  queue_sequence?: number | null;
+  action_committed?: boolean | null;
+}
+
 // Cross-lane attachment contract (spec
 // public protocol contract, ## Attachment model).
 // Both lanes code against this single shape: the mobile lane builds the `send`
@@ -55,7 +85,20 @@ export interface PentacleEvent {
   jsonl_resolution_for_record_uuid?: string;
   client_origin?: boolean;
   optimistic_id?: string;
+  request_id?: string;
+  receipt_id?: string;
   receiptDirectMatch?: boolean;
+  /** Stable daemon event/message identity used by Reply actions. */
+  event_id?: string | null;
+  message_id?: string | null;
+  reply_to_message_id?: string | null;
+  reply_to_question_id?: string | null;
+  lane_id?: string | null;
+  publish_kind?: PentacleAssistantPublishKind | null;
+  routing_state?: string | null;
+  accepted_sequence?: number | null;
+  queue_sequence?: number | null;
+  action_committed?: boolean | null;
   correlatedDaemonSeq?: number | null;
   pending?: boolean;
   created_at?: number;
@@ -150,6 +193,7 @@ export interface PentacleSessionSummary {
   // chat-row history affordance on role === "nexus"; the daemon passes it through unchanged.
   role?: string | null;
   objective?: string | null;
+  session_kind?: string | null;
   session_generation?: string;
   stream_id: string;
   host: string;
@@ -160,6 +204,7 @@ export interface PentacleSessionSummary {
   display_name?: string;
   title?: string;
   visibility?: string;
+  capabilities?: PentacleSessionCapabilities | null;
   last_event_at: string;
   last_text: string;
   last_text_provenance?: PentacleLastTextProvenance | null;
@@ -431,6 +476,13 @@ export interface OptimisticSendState {
   request_id: string;
   stream_id: string;
   text: string;
+  reply_to_message_id?: string;
+  reply_to_question_id?: string;
+  message_id?: string;
+  routing_state?: string;
+  accepted_sequence?: number;
+  queue_sequence?: number;
+  action_committed?: boolean;
   status: OptimisticSendStatus;
   created_at: number;
   dispatched_at?: number;

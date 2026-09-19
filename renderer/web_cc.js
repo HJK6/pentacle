@@ -339,7 +339,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
     chatSpawnV2: (options) => call('chat-stream:spawn', options || {}),
     chatSpawnCatalog: () => call('chat-stream:spawn-catalog'),
     chatSend: (hostId, sessionName, text) => call('chat-stream:send', hostId || 'local', sessionName, text),
-    chatSendCorrelated: (hostId, sessionName, text, requestId, optimisticId, attachments) => call('chat-stream:send', hostId || 'local', sessionName, text, requestId, optimisticId, attachments),
+    chatSendCorrelated: (hostId, sessionName, text, requestId, optimisticId, attachments, reply) => call('chat-stream:send', hostId || 'local', sessionName, text, requestId, optimisticId, attachments, reply),
     chatUploadBlob: (payload) => call('chat-stream:upload-blob', payload || {}),
     chatFetchBlob: (blobSha) => call('chat-stream:fetch-blob', blobSha),
     chatInterrupt: (hostId, sessionName) => call('chat-stream:interrupt', hostId || 'local', sessionName),

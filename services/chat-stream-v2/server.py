@@ -45,6 +45,7 @@ except ImportError:  # pragma: no cover
     from websockets.exceptions import ConnectionClosed  # type: ignore[no-redef]
 
 from _shared import operator_auth
+from comms import ATTACHMENT_MAX_BYTES, AttachmentValidationError, validate_send_attachments
 from ledger import TERMINAL_REPORT_STATUSES, StatusCardError, _claim_wire_fields
 from seat_token_telemetry import (
     SeatTokenTelemetry,
@@ -331,6 +332,9 @@ class Server:
             or SeatTokenTelemetry()
         )
         self.comms = comms
+        # Attached by main after the durable store is available.  Keeping it
+        # optional makes old deployments and focused unit servers unchanged.
+        self.assistant_composite: Any = None
         #: The peer probe pool. When present, `hello`/`snapshot` serves its live
         #: hosts dict (local entry + every peer's binary reachability); absent,
         #: the snapshot carries the local-only entry (unit tests).
@@ -384,6 +388,7 @@ class Server:
         self._client_opened_by_host_ids: dict[Any, frozenset[str] | None] = {}
         self._client_exclude_event_types: dict[Any, frozenset[str]] = {}
         self._client_events_mode: dict[Any, str] = {}
+        self._client_assistant_composite_v1: dict[Any, bool] = {}
         #: Per-client last-sent digest, keyed by coalescing key, of the most
         #: recent COALESCIBLE broadcast frame handed to that client. A frame
         #: byte-identical to the last one is suppressed (zero new visible state):
@@ -463,6 +468,8 @@ class Server:
             "close": self._on_close,
             "tell": self._on_tell,
             "send": self._on_send,
+            "assistant.publish": self._on_assistant_publish,
+            "assistant.operation": self._on_assistant_operation,
             "send_image": self._on_send_image,
             "send.receipt.get": self._on_send_receipt_get,
             "ledger_get": self._on_ledger_get,
@@ -785,6 +792,7 @@ class Server:
         self._client_opened_by_host_ids.pop(websocket, None)
         self._client_exclude_event_types.pop(websocket, None)
         self._client_events_mode.pop(websocket, None)
+        self._client_assistant_composite_v1.pop(websocket, None)
         self._client_last_sent_digest.pop(websocket, None)
         self._client_inflight_coalescible.pop(websocket, None)
         self._host_stats_clients.discard(websocket)
@@ -1183,6 +1191,7 @@ class Server:
         use_binding = "stream_token" not in msg and cached_hash is not None
         reason_code = None if use_binding else self._token_input_reason(token)
         owner: str | None = None
+        verified_generation: str | None = None
 
         if reason_code is None:
             if self.store is None:
@@ -1199,6 +1208,7 @@ class Server:
                         reason_code = TOKEN_REASON_EXPIRED
                     else:
                         owner = str(state.get("stream_id") or "").strip() or None
+                        verified_generation = state.get("session_generation")
                         reason_code = (
                             TOKEN_REASON_VERIFIED
                             if owner
@@ -1237,6 +1247,7 @@ class Server:
         context.update(
             {
                 "stream_id": owner or "",
+                "session_generation": verified_generation if reason_code == TOKEN_REASON_VERIFIED else None,
                 "token_verified": reason_code == TOKEN_REASON_VERIFIED,
                 "reason_code": reason_code or TOKEN_REASON_INTERNAL_ERROR,
             }
@@ -1442,9 +1453,16 @@ class Server:
         session: dict[str, Any] | None,
         include_subagents: bool,
         opened_by_host_ids: frozenset[str] | None,
+        include_assistant_composite: bool = False,
     ) -> bool:
         if session is None:
             return True
+        if (
+            str(session.get("provider") or "") == "composite"
+            and getattr(self.assistant_composite, "is_stream", lambda _value: False)(session.get("stream_id"))
+            and not include_assistant_composite
+        ):
+            return False
         visibility = str(session.get("visibility") or "default").lower()
         if not include_subagents and visibility in {"hidden", "nested", "subagent"}:
             return False
@@ -1457,22 +1475,45 @@ class Server:
         stream_id: str,
         include_subagents: bool,
         opened_by_host_ids: frozenset[str] | None,
+        include_assistant_composite: bool = False,
     ) -> bool:
         session = self.sessions.get(stream_id) if self.sessions is not None and stream_id else None
-        return self._session_is_visible_to_client(session, include_subagents, opened_by_host_ids)
+        return self._session_is_visible_to_client(
+            session, include_subagents, opened_by_host_ids, include_assistant_composite,
+        )
 
     def _filter_sessions_for_client(
         self,
         sessions: list[dict[str, Any]],
         include_subagents: bool,
         opened_by_host_ids: frozenset[str] | None,
+        include_assistant_composite: bool = False,
     ) -> list[dict[str, Any]]:
         return [
-            dict(session)
+            self._project_assistant_composite_session(session)
             for session in sessions
             if isinstance(session, dict)
-            and self._session_is_visible_to_client(session, include_subagents, opened_by_host_ids)
+            and self._session_is_visible_to_client(
+                session, include_subagents, opened_by_host_ids, include_assistant_composite,
+            )
         ]
+
+    def _project_assistant_composite_session(self, session: dict[str, Any]) -> dict[str, Any]:
+        composite = self.assistant_composite
+        if composite is not None and composite.is_stream(session.get("stream_id")):
+            return composite.project_session(session)
+        return dict(session)
+
+    @staticmethod
+    def _client_wants_assistant_composite(msg: dict[str, Any]) -> bool:
+        capabilities = msg.get("capabilities") if isinstance(msg.get("capabilities"), dict) else {}
+        subscribe = msg.get("subscribe") if isinstance(msg.get("subscribe"), dict) else {}
+        subscribed = subscribe.get("capabilities") if isinstance(subscribe.get("capabilities"), dict) else {}
+        return bool(capabilities.get("assistant_composite_v1") or subscribed.get("assistant_composite_v1"))
+
+    def _assistant_composite_capable_for_message(self, msg: dict[str, Any]) -> bool:
+        websocket = msg.get("_client_websocket")
+        return bool(websocket is not None and self._client_assistant_composite_v1.get(websocket, False))
 
     @staticmethod
     def _summary_snapshot_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1496,6 +1537,7 @@ class Server:
             "routing_integrity_event_id", "routing_integrity_updated_at", "agent_id", "preview", "attached",
             "created", "last_activity", "pane_pid", "pane_status", "capture_liveness", "close_pending",
             "close_intent_id", "close_requested_at", "session_generation", "turn_state",
+            "session_kind", "capabilities",
             "turn_state_since", "turn_state_sources", "host_status",
             "host_status_reason", "host_status_since",
             "bootstrap_state", "state", "agents", "objective", "objective_source",
@@ -1542,6 +1584,7 @@ class Server:
             sessions = payload.get("sessions") if isinstance(payload.get("sessions"), list) else []
             projected = self._filter_sessions_for_client(
                 sessions, include_subagents, opened_by_host_ids,
+                bool(self._client_assistant_composite_v1.get(websocket, False)),
             )
             # A summary-mode (mobile) client gets the SAME compact rows on the
             # broadcast path as it already gets in its hello snapshot — the
@@ -1556,12 +1599,14 @@ class Server:
             event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
             if not self._stream_is_visible_to_client(
                 str(event.get("stream_id") or ""), include_subagents, opened_by_host_ids,
+                bool(self._client_assistant_composite_v1.get(websocket, False)),
             ):
                 return None
         if frame_type in {"working.state", "completion.report", "session.died"}:
             stream_id = str(payload.get("stream_id") or payload.get("from_stream_id") or "")
             if stream_id and not self._stream_is_visible_to_client(
                 stream_id, include_subagents, opened_by_host_ids,
+                bool(self._client_assistant_composite_v1.get(websocket, False)),
             ):
                 return None
         return dict(payload)
@@ -1651,10 +1696,13 @@ class Server:
             self._client_opened_by_host_ids[websocket] = opened_by_host_ids
             self._client_exclude_event_types[websocket] = exclude_event_types
             self._client_events_mode[websocket] = events_mode
+            self._client_assistant_composite_v1[websocket] = self._client_wants_assistant_composite(msg)
         if not snapshot_requested:
             frames = [{
                 "type": "ready", "snapshot": False, "events_mode": events_mode,
             }]
+            if getattr(self.assistant_composite, "enabled", False):
+                frames[0]["capabilities"] = {"assistant_composite_v1": True}
             if str(subscribe.get("mode") or "").lower() != "rpc" and "hosts.stats" not in exclude_event_types:
                 frames.append(self.hosts_stats_frame())
             return frames
@@ -1669,6 +1717,7 @@ class Server:
         working_states = self._working_states_snapshot(int(time.time() * 1000))
         snapshot_sessions = self._filter_sessions_for_client(
             sessions, include_subagents, opened_by_host_ids,
+            self._assistant_composite_capable_for_message(msg),
         )
         # `agent-orch list` consumes this snapshot (summary mode), so the role
         # provenance projection must ride the snapshot rows, not only the
@@ -1696,7 +1745,10 @@ class Server:
             # A client must not infer this from a version stamp: it needs an
             # explicit wire guarantee before it can safely close a same-name
             # target after a reconnect. Old daemons simply omit this field.
-            "capabilities": {"close_expected_generation": True},
+            "capabilities": {
+                "close_expected_generation": True,
+                **({"assistant_composite_v1": True} if getattr(self.assistant_composite, "enabled", False) else {}),
+            },
             "sessions": snapshot_sessions,
             "notifications": (await self.notify.snapshot_notifications(
                 summary=(events_mode == "summary"),
@@ -1709,6 +1761,7 @@ class Server:
                 if "working.state" not in exclude_event_types
                 and self._stream_is_visible_to_client(
                     stream_id, include_subagents, opened_by_host_ids,
+                    self._assistant_composite_capable_for_message(msg),
                 )
             },
         }
@@ -1732,7 +1785,10 @@ class Server:
                 if self.limits and hasattr(self.limits, "health_snapshot")
                 else None
             )
-        frames: list[dict[str, Any]] = [{"type": "hello"}, snapshot]
+        hello: dict[str, Any] = {"type": "hello"}
+        if getattr(self.assistant_composite, "enabled", False):
+            hello["capabilities"] = {"assistant_composite_v1": True}
+        frames: list[dict[str, Any]] = [hello, snapshot]
         if "hosts.stats" not in exclude_event_types:
             frames.append(self.hosts_stats_frame())
         return frames
@@ -1772,6 +1828,7 @@ class Server:
         include_subagents, opened_by_host_ids, _excluded, _events_mode = self._subscription_for_message(msg)
         active = self._filter_sessions_for_client(
             self.sessions.list_open(), include_subagents, opened_by_host_ids,
+            self._assistant_composite_capable_for_message(msg),
         )
         sources = await self.store.all_role_sources() if self.store is not None else {}
         active = [
@@ -1980,10 +2037,190 @@ class Server:
         }
 
     async def _on_tell(self, msg: dict[str, Any]) -> dict[str, Any]:
+        host, name = await self.sessions.resolve(msg)
+        target_stream_id = f"{host}:{name}"
+        if getattr(self.assistant_composite, "is_stream", lambda _value: False)(target_stream_id):
+            raise VerbError("assistant_composite_no_pane", "assistant composite has no provider pane")
+        composite = self.assistant_composite
+        if composite is not None:
+            suppressed = await composite.suppress_routine_backend_ingress(
+                target_stream_id=target_stream_id, body=str(msg.get("text") or msg.get("message") or ""),
+                msg=msg, verb="tell",
+            )
+            if suppressed is not None:
+                return suppressed
         return await self.comms.tell(msg)
 
     async def _on_send(self, msg: dict[str, Any]) -> dict[str, Any]:
-        return await self.comms.send(msg)
+        host, name = await self.sessions.resolve(msg)
+        stream_id = f"{host}:{name}"
+        composite = self.assistant_composite
+        if composite is not None and composite.is_stream(stream_id):
+            auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+            if auth.get("operator_authenticated") is not True:
+                raise VerbError("assistant_send_unauthorized", "assistant composite send requires authenticated caller")
+            try:
+                attachments = await self._validate_assistant_input_attachments(msg.get("attachments"))
+                accepted = await composite.accept_input(
+                    {**msg, "attachments": attachments},
+                    operator_principal=str(auth.get("operator_principal") or "") or None,
+                )
+            except ValueError as exc:
+                raise VerbError(str(exc), str(exc)) from exc
+            return {
+                "type": "send.result",
+                "host": host,
+                "session_name": name,
+                "to_stream_id": stream_id,
+                "delivery": "accepted",
+                "submission_confirmed": True,
+                "action_committed": True,
+                "assistant_composite": accepted,
+            }
+        # Wire callers cannot suppress ordinary QA/progress admission with the
+        # private daemon-only backend marker.  Only main's composite dispatcher
+        # reaches ``Comms.send_assistant_backend`` directly.
+        direct_msg = dict(msg)
+        direct_msg.pop("_assistant_composite_backend_dispatch", None)
+        if composite is not None:
+            suppressed = await composite.suppress_routine_backend_ingress(
+                target_stream_id=stream_id, body=str(direct_msg.get("text") or direct_msg.get("message") or ""),
+                msg=direct_msg, verb="send",
+            )
+            if suppressed is not None:
+                return {
+                    "type": "send.result", "host": host, "session_name": name,
+                    "to_stream_id": stream_id, "delivery": "accepted",
+                    "submission_confirmed": True, "action_committed": True,
+                    "assistant_backend_ingress": "persisted_suppressed",
+                }
+        return await self.comms.send(direct_msg)
+
+    async def accept_assistant_operator_input(
+        self, msg: dict[str, Any], *, operator_principal: str,
+    ) -> dict[str, Any]:
+        """Server-only daemon intake; it cannot be reached by a seat token."""
+        composite = self.assistant_composite
+        if composite is None:
+            raise ValueError("assistant_composite_unavailable")
+        principal = str(operator_principal or "").strip()
+        if not principal:
+            raise ValueError("assistant_operator_principal_required")
+        attachments = await self._validate_assistant_input_attachments(msg.get("attachments"))
+        return await composite.accept_input(
+            {**msg, "attachments": attachments}, operator_principal=principal,
+        )
+
+    async def _validate_assistant_input_attachments(self, raw: object) -> list[dict[str, Any]]:
+        if raw is None or raw == []:
+            return []
+        try:
+            attachments = validate_send_attachments(raw)
+        except AttachmentValidationError as exc:
+            raise VerbError("attachment_invalid", str(exc)) from exc
+        blob_store = getattr(self.comms, "blob_store", None)
+        if blob_store is None or not callable(getattr(blob_store, "read_verified", None)):
+            raise VerbError("attachment_fetch_failed", "blob store unavailable")
+        for attachment in attachments:
+            try:
+                await blob_store.read_verified(str(attachment["key"]), max_bytes=ATTACHMENT_MAX_BYTES)
+            except KeyError as exc:
+                raise VerbError("attachment_missing", "attachment was not uploaded") from exc
+            except ValueError as exc:
+                raise VerbError("attachment_invalid", str(exc)) from exc
+            except Exception as exc:  # noqa: BLE001 - stable public surface
+                raise VerbError("attachment_fetch_failed", str(exc)) from exc
+        return attachments
+
+    async def _assistant_publication_attachments(self, attachment_ids, route):
+        """Use the existing authenticated, content-addressed blob boundary."""
+        blob_store = getattr(self.comms, "blob_store", None)
+        if blob_store is None or not callable(getattr(blob_store, "read_verified", None)):
+            raise ValueError("assistant_publish_attachment_validation_unavailable")
+        originals = {item["key"]: item for item in json.loads(route.get("attachments_json") or "[]")}
+        attachments = []
+        for key in attachment_ids:
+            try:
+                data = await blob_store.read_verified(key, max_bytes=ATTACHMENT_MAX_BYTES)
+            except (ValueError, KeyError) as exc:
+                raise ValueError("assistant_publish_attachment_unverified") from exc
+            # Input references retain their validated envelope. A generated blob
+            # without declared metadata is downloadable, never mislabeled as an image.
+            attachments.append(originals.get(key) or {"key": key, "mime": "application/octet-stream", "size": len(data)})
+        return attachments
+
+    async def _on_assistant_publish(self, msg: dict[str, Any]) -> dict[str, Any]:
+        composite = self.assistant_composite
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if composite is None or not auth.get("token_verified"):
+            raise VerbError("assistant_publish_unauthorized", "assistant.publish requires a verified backend stream token")
+        try:
+            return await composite.publish(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
+        except ValueError as exc:
+            raise VerbError(str(exc), str(exc)) from exc
+
+    async def _assistant_question_operation(self, operation: str, msg: dict[str, Any]) -> dict[str, Any]:
+        if self.notify is None:
+            raise ValueError("assistant_question_adapter_unavailable")
+        payload = dict(msg.get("payload") or {}) if isinstance(msg.get("payload"), dict) else {}
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        actor = str(auth.get("stream_id") or "").strip()
+        if not actor or auth.get("token_verified") is not True:
+            raise ValueError("assistant_question_actor_unverified")
+        if operation == "question.open":
+            envelope = payload.get("envelope")
+            if not isinstance(envelope, dict):
+                raise ValueError("assistant_question_envelope_required")
+            # The established question store retains issuer provenance.  This
+            # server-only marker permits a hidden composite lead to ask while
+            # keeping response delivery on the current lane binding.
+            payload["envelope"] = {
+                **envelope,
+                "producer_stream_id": actor,
+                "_assistant_composite_question_proxy": True,
+            }
+        prompt_type = "prompt.ask" if operation == "question.open" else "prompt.cancel"
+        return await self.notify.prompt({
+            **payload,
+            "type": prompt_type,
+            "request_id": str(msg.get("request_id") or ""),
+            "from_stream_id": actor,
+            "_auth_context": {**auth, "assistant_composite_question_proxy": True},
+        })
+
+    async def _assistant_question_answer(
+        self, question_id: str, body: str, source_msg: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve an existing question through a composite chat reply.
+
+        The same accepted USER route is subsequently dispatched to the lane's
+        current backend.  No answer tell is ever directed to the historical
+        question producer.
+        """
+        if self.notify is None:
+            return {"ok": False, "error_code": "assistant_question_adapter_unavailable"}
+        auth = source_msg.get("_auth_context") if isinstance(source_msg.get("_auth_context"), dict) else {}
+        if auth.get("operator_authenticated") is not True:
+            return {"ok": False, "error_code": "assistant_question_answer_unauthorized"}
+        request_id = str(source_msg.get("request_id") or source_msg.get("optimistic_id") or question_id)
+        reply = await self.notify.prompt({
+            "type": "prompt.answer",
+            "request_id": "assistant-question-answer:" + request_id,
+            "question_id": question_id,
+            "text": body,
+            "_auth_context": {**auth, "assistant_composite_question_answer_proxy": True},
+        })
+        return {"ok": bool(str(reply.get("type") or "").endswith(".ok")), "reply": reply}
+
+    async def _on_assistant_operation(self, msg: dict[str, Any]) -> dict[str, Any]:
+        composite = self.assistant_composite
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if composite is None or not auth.get("token_verified"):
+            raise VerbError("assistant_operation_unauthorized", "assistant.operation requires a verified backend stream token")
+        try:
+            return await composite.operation(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
+        except ValueError as exc:
+            raise VerbError(str(exc), str(exc)) from exc
 
     async def _on_send_image(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Attach an uploaded image to the caller's OWN conversation.
@@ -2020,7 +2257,10 @@ class Server:
         if not target or not request_id:
             raise VerbError("bad_request", "to_stream_id and request_id are required")
         include_subagents, opened_by_host_ids, _excluded, _events_mode = self._subscription_for_message(msg)
-        if not self._stream_is_visible_to_client(target, include_subagents, opened_by_host_ids):
+        if not self._stream_is_visible_to_client(
+            target, include_subagents, opened_by_host_ids,
+            self._assistant_composite_capable_for_message(msg),
+        ):
             raise VerbError("unknown_session", "Unknown or inactive session")
         receipt = await self.store.get_send_receipt(target, request_id)
         return {
@@ -2036,7 +2276,29 @@ class Server:
         return await self.ledger.inbound_audit(msg)
 
     async def _on_report(self, msg: dict[str, Any]) -> dict[str, Any]:
-        return await self.ledger.report(msg)
+        # Snapshot the authenticated generation before persistence can yield to
+        # a close/reopen. The current session is not a replacement credential.
+        auth = dict(msg.get("_auth_context") or {})
+        composite = self.assistant_composite
+        extras = msg.get("extras")
+        correlation = extras.get("assistant_composite") if isinstance(extras, dict) else None
+        if (composite is None or not composite.enabled or correlation is None
+                or msg.get("status") not in {"done", "error", "aborted"}):
+            return await self.ledger.report(msg)
+        if (not auth.get("token_verified") or not isinstance(correlation, dict)
+                or set(correlation) != {"stream_id", "lane_id", "dispatch_id"}
+                or correlation.get("stream_id") != composite.config.stream_id
+                or any(not isinstance(value, str) or not value.strip() for value in correlation.values())):
+            raise ValueError("assistant_terminal_report_correlation_invalid")
+        correlation = dict(correlation)
+        await composite._authenticated_generation(msg, str(auth.get("stream_id") or ""))
+        async def complete_before_close(reply):
+            completed = await composite.terminal_report({
+                **msg, **reply, **correlation, "actor_stream_id": str(auth.get("stream_id") or ""),
+            }, actor_generation=str(auth.get("session_generation") or ""))
+            if completed is None:
+                raise ValueError("assistant_terminal_report_scope_unverified")
+        return await self.ledger.report(msg, before_close=complete_before_close)
 
     async def _on_await_report(self, msg: dict[str, Any]) -> dict[str, Any]:
         return await self.ledger.await_report(msg)
@@ -2048,6 +2310,7 @@ class Server:
         include_subagents, opened_by_host_ids, _excluded, _events_mode = self._subscription_for_message(msg)
         if not self._stream_is_visible_to_client(
             stream_id, include_subagents, opened_by_host_ids,
+            self._assistant_composite_capable_for_message(msg),
         ):
             raise VerbError("unknown_session", "Unknown or inactive session")
         raw_limit = msg.get("limit")

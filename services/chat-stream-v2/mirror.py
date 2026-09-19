@@ -284,7 +284,11 @@ class Mirror:
         """One bounded observation pass. Returns the number of panes observed.
         Also the test-only forced trigger (called directly)."""
         cfg = self.config
-        rows = [r for r in self.sessions.list_open() if str(r.get("host") or "") == self.local_host]
+        rows = [
+            r for r in self.sessions.list_open()
+            if str(r.get("host") or "") == self.local_host
+            and str(r.get("provider") or "") != "composite"
+        ]
         open_ids = {r["stream_id"] for r in rows}
         # Forget observation state for streams no longer open. Membership follows
         # the O(open) REGISTRY, not a tmux re-enumeration — a lagging capture can

@@ -373,6 +373,9 @@ class Comms:
         #: before this map is touched; all baseline capture, paste, Enter-only
         #: recovery, and final evidence for a pane occur under this lock.
         self._pane_input_locks: dict[str, asyncio.Lock] = {}
+        # Bound by main only when a composite is configured. The callback is a
+        # narrow target filter; ordinary Comms users remain unchanged.
+        self.assistant_ingress_policy: Any = None
         # The observer seam is attached after bind-first construction. A single
         # queue/drain serializes buffered replays with live arrivals even while
         # an observer awaits broadcasts, so receipt order cannot invert.
@@ -481,6 +484,22 @@ class Comms:
                 raise value
             return {**value, "duplicate": True}
 
+        policy = self.assistant_ingress_policy
+        if callable(policy):
+            suppressed = await policy(
+                target_stream_id=str(route["final_target"]), body=body,
+                msg={**msg, "tell_id": tell_id}, verb="tell",
+            )
+            if isinstance(suppressed, dict):
+                reply = {**suppressed, "tell_id": tell_id}
+                ledger_row_id = await self.store.put_tell_delivery(tell_id, {
+                    "payload_digest": digest,
+                    "reply": reply,
+                    "delivery": {"tell_id": tell_id, "delivery_status": "delivered"},
+                })
+                reply["ledger_row_id"] = ledger_row_id
+                return reply
+
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._inflight[tell_id] = (digest, fut)
         outcome: tuple[str, Any] = ("error", VerbError("delivery_failed", "tell did not complete"))
@@ -531,6 +550,13 @@ class Comms:
             check_existing = False
         route, body = await self._route(msg)
         target = str(route["final_target"])
+        policy = self.assistant_ingress_policy
+        if callable(policy):
+            suppressed = await policy(
+                target_stream_id=target, body=body, msg={**msg, "tell_id": tell_id}, verb="notice",
+            )
+            if isinstance(suppressed, dict):
+                return {**suppressed, "tell_id": tell_id}
         host, name = self.sessions.split(target)
         tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
         marked_body = ensure_notice_marker(tell_id, body)
@@ -1742,11 +1768,17 @@ class Comms:
         target = str(plan.route["final_target"])
         target_host, target_name = self.sessions.split(target)
         target_row = await self.store.fetch_session(target_host, target_name) or {}
-        commission = await qa_dispatch.admit(
-            self.store, msg, row=target_row, reviewer=target,
-            generation=target_row.get("session_generation", ""),
-            msg_id=msg.get("msg_id", 0), existing_reviewer=True,
-        )
+        # A composite backend turn already has immutable route, dispatch and
+        # generation receipts.  It is never ordinary user QA/progress work.
+        # The private marker is introduced only by send_assistant_backend;
+        # Server strips it from all ordinary wire sends.
+        commission = None
+        if not bool(msg.get("_assistant_composite_backend_dispatch")):
+            commission = await qa_dispatch.admit(
+                self.store, msg, row=target_row, reviewer=target,
+                generation=target_row.get("session_generation", ""),
+                msg_id=msg.get("msg_id", 0), existing_reviewer=True,
+            )
         receipt_id = f"receipt-{uuid.uuid4()}"
         # Atomic idempotency claim: collapse retries of ONE logical send (the
         # client keeps optimistic_id stable and rotates only request_id) into a
@@ -1793,6 +1825,10 @@ class Comms:
             materialized, request_id=request_id, receipt_id=receipt_id,
             qa_generation=commission["generation"] if commission is not None else None,
         )
+
+    async def send_assistant_backend(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Reuse existing transport for daemon-owned composite backend work."""
+        return await self.send({**msg, "_assistant_composite_backend_dispatch": True})
 
     async def post_self_image(
         self,

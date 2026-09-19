@@ -131,6 +131,14 @@ function activeInFlightPin(state: PentacleStreamState, streamId: string) {
   return (state.workingByStream?.[streamId]?.phase ?? 'idle') !== 'idle';
 }
 
+function assistantCompositeStreamIds(state: PentacleStreamState) {
+  return new Set(
+    state.sessions
+      .filter((session) => session.session_kind === 'assistant_composite')
+      .map((session) => session.stream_id),
+  );
+}
+
 function effectivePins(
   state: PentacleStreamState,
   streamId: string,
@@ -412,10 +420,15 @@ function invalidateBucketCoverage(previous: PentacleEventBucket | undefined, eve
 function enforceRetention(
   buckets: Record<string, PentacleEventBucket>,
   maxCost: number,
+  exemptStreamIds?: ReadonlySet<string>,
 ) {
   let total = Object.values(buckets).reduce((sum, bucket) => sum + bucket.retainedCost, 0);
   const candidates = Object.entries(buckets)
-    .filter(([, bucket]) => bucket.retainedCost > 0 && !bucketPinned(bucket))
+    .filter(([streamId, bucket]) => (
+      bucket.retainedCost > 0 &&
+      !bucketPinned(bucket) &&
+      !exemptStreamIds?.has(streamId)
+    ))
     .sort(([leftId, left], [rightId, right]) => (
       left.lastAccessRevision - right.lastAccessRevision || leftId.localeCompare(rightId)
     ));
@@ -441,11 +454,19 @@ export function mutatePentacleEventBuckets(
   const state = normalizePentacleEventBuckets(input);
   const perStreamMax = retention.perStreamMaxEvents ?? PENTACLE_PER_STREAM_MAX_EVENTS;
   const maxCost = retention.totalEventCostMax ?? PENTACLE_TOTAL_EVENT_COST_MAX;
+  const unlimitedStreamIds = assistantCompositeStreamIds(state);
   const buckets = { ...(state.eventBucketsByStream ?? {}) };
   let revision = state.eventBucketMutationRevision ?? 0;
 
   const replace = (streamId: string, rows: readonly PentacleEvent[]) => {
-    revision = writeBucketEvents(state, buckets, streamId, rows, revision, perStreamMax);
+    revision = writeBucketEvents(
+      state,
+      buckets,
+      streamId,
+      rows,
+      revision,
+      unlimitedStreamIds.has(streamId) ? Number.MAX_SAFE_INTEGER : perStreamMax,
+    );
   };
 
   switch (mutation.type) {
@@ -589,7 +610,7 @@ export function mutatePentacleEventBuckets(
       buckets[streamId] = { ...bucket, pins };
     }
   }
-  const evicted = enforceRetention(buckets, maxCost);
+  const evicted = enforceRetention(buckets, maxCost, unlimitedStreamIds);
   revision += evicted.length;
   const preferred = mutation.type === 'snapshot-replace'
     ? mutation.events
@@ -629,13 +650,21 @@ export function appendLiveEventProjection(
   const state = normalizePentacleEventBuckets(input);
   const perStreamMax = retention.perStreamMaxEvents ?? PENTACLE_PER_STREAM_MAX_EVENTS;
   const maxCost = retention.totalEventCostMax ?? PENTACLE_TOTAL_EVENT_COST_MAX;
+  const unlimitedStreamIds = assistantCompositeStreamIds(state);
   const streamId = String(event.stream_id || '');
   const buckets = { ...(state.eventBucketsByStream ?? {}) };
   let revision = state.eventBucketMutationRevision ?? 0;
   const previousEvents = buckets[streamId]?.events ?? [];
-  revision = writeBucketEvents(state, buckets, streamId, [...previousEvents, event], revision, perStreamMax);
+  revision = writeBucketEvents(
+    state,
+    buckets,
+    streamId,
+    [...previousEvents, event],
+    revision,
+    unlimitedStreamIds.has(streamId) ? Number.MAX_SAFE_INTEGER : perStreamMax,
+  );
   const appendedStreamEvents = buckets[streamId]?.events ?? [];
-  const evicted = enforceRetention(buckets, maxCost);
+  const evicted = enforceRetention(buckets, maxCost, unlimitedStreamIds);
   revision += evicted.length;
   // Fast path only when the stream grew by exactly this one event (no per-stream
   // cap) and nothing was cost-evicted — then the flat list is the prior list
@@ -676,16 +705,24 @@ export function appendLiveEventsProjection(
   const state = normalizePentacleEventBuckets(input);
   const perStreamMax = retention.perStreamMaxEvents ?? PENTACLE_PER_STREAM_MAX_EVENTS;
   const maxCost = retention.totalEventCostMax ?? PENTACLE_TOTAL_EVENT_COST_MAX;
+  const unlimitedStreamIds = assistantCompositeStreamIds(state);
   const buckets = { ...(state.eventBucketsByStream ?? {}) };
   let revision = state.eventBucketMutationRevision ?? 0;
   let cappedStream = false;
   for (const [streamId, appended] of eventsByStream) {
     if (!streamId || !appended.length) continue;
     const previousEvents = buckets[streamId]?.events ?? [];
-    revision = writeBucketEvents(state, buckets, streamId, [...previousEvents, ...appended], revision, perStreamMax);
+    revision = writeBucketEvents(
+      state,
+      buckets,
+      streamId,
+      [...previousEvents, ...appended],
+      revision,
+      unlimitedStreamIds.has(streamId) ? Number.MAX_SAFE_INTEGER : perStreamMax,
+    );
     if ((buckets[streamId]?.events.length ?? 0) !== previousEvents.length + appended.length) cappedStream = true;
   }
-  const evicted = enforceRetention(buckets, maxCost);
+  const evicted = enforceRetention(buckets, maxCost, unlimitedStreamIds);
   revision += evicted.length;
   // Fast path only when no stream hit its per-stream cap and nothing was
   // cost-evicted — then the flat list is exactly the caller's append order.

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import comms as comms_module
 from comms import Comms
 from sessions import Sessions, VerbError
 from spawnctl import SpawnCtl
@@ -172,6 +173,40 @@ def test_claude_first_send_requires_bootstrap_ready(tmp_path: Path, bootstrap_st
                 assert receipt["delivery"] == "not_landed"
                 assert receipt["attempts"] == 0
                 assert receipt["reason"] == "bootstrap_not_ready"
+        finally:
+            store.stop()
+
+    _run(go())
+
+
+def test_composite_backend_send_reuses_transport_without_ordinary_qa_progress(tmp_path: Path, monkeypatch) -> None:
+    """Only the daemon-only wrapper suppresses ordinary QA admission."""
+
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        admitted: list[dict] = []
+
+        async def admit(*_args, **kwargs):
+            admitted.append(dict(kwargs))
+            return None
+
+        monkeypatch.setattr(comms_module.qa_dispatch, "admit", admit)
+        try:
+            await _open(comms, sessions)
+            backend = await comms.send_assistant_backend({
+                "stream_id": f"{HOST}:{NAME}", "text": "internal backend turn",
+                "request_id": "backend-1", "optimistic_id": "backend-1",
+            })
+            assert backend["submission_confirmed"] is True
+            assert admitted == []
+
+            direct = await comms.send({
+                "stream_id": f"{HOST}:{NAME}", "text": "ordinary direct turn",
+                "request_id": "direct-1", "optimistic_id": "direct-1",
+            })
+            assert direct["submission_confirmed"] is True
+            assert len(admitted) == 1
         finally:
             store.stop()
 

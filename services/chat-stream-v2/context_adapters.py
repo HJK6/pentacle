@@ -66,7 +66,12 @@ def _context_level(tokens: int, advisory: int, handoff: int) -> str:
     return "none"
 
 
-def context_fields(provider: str, reading: ContextReading) -> tuple[int, int, str]:
+def context_fields(
+    provider: str,
+    reading: ContextReading,
+    *,
+    assistant_backend: bool = False,
+) -> tuple[int, int, str]:
     """Translate one reading into the four persisted v2 context dimensions.
 
     Codex compacts its own context automatically, so it receives no routine
@@ -85,6 +90,17 @@ def context_fields(provider: str, reading: ContextReading) -> tuple[int, int, st
         window = int(reading.model_context_window or 0)
         if window <= 0:
             raise ValueError("Codex context reading lacks a positive window")
+        # Codex normally compacts itself and must not receive routine pressure.
+        # A configured pane-less assistant backend is the narrow exception: its
+        # managed handoff keeps lane/pending-question/child state durable, so
+        # operators need an advisory before the backend exhausts its working
+        # window.  No role alias or provider-wide change opts a session in.
+        if assistant_backend:
+            # Reuse the established 70/85% runway for smaller windows;
+            # the assistant absolute limits remain 120K/200K on larger ones.
+            advisory = min(120_000, round(0.70 * window))
+            handoff = min(200_000, round(0.85 * window))
+            return tokens, window, _context_level(tokens, advisory, handoff)
         return tokens, window, "none"
     if provider == "claude":
         window = _claude_window(reading.model)
@@ -158,4 +174,3 @@ def parse_codex_context_reading(record: object) -> ContextReading | None:
     ):
         return None
     return ContextReading(tokens=int(tokens), model_context_window=int(window))
-

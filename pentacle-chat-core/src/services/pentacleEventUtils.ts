@@ -84,7 +84,11 @@ export function dedupeRecentEvents<T extends StreamEventLike>(events: T[], limit
   return deduped;
 }
 
-export function dedupeRecentEventsByStream<T extends StreamEventLike>(events: T[], limitPerStream: number) {
+export function dedupeRecentEventsByStream<T extends StreamEventLike>(
+  events: T[],
+  limitPerStream: number,
+  unlimitedStreamIds?: ReadonlySet<string>,
+) {
   const seenSeqByStream = new Map<string, Set<number>>();
   const seenOptimisticIds = new Set<string>();
   const counts = new Map<string, number>();
@@ -94,7 +98,7 @@ export function dedupeRecentEventsByStream<T extends StreamEventLike>(events: T[
     const event = events[index];
     const streamId = String(event.stream_id || 'unknown');
     const currentCount = counts.get(streamId) || 0;
-    if (currentCount >= limitPerStream) {
+    if (!unlimitedStreamIds?.has(streamId) && currentCount >= limitPerStream) {
       continue;
     }
     if (event?.client_origin === true) {

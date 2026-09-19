@@ -407,9 +407,13 @@ test('plain preview guard preserves ordering, hidden, foreign, replay, progressi
   }), 'durable replay');
   assert.equal(__getInterpretMissCountForTests(), 2);
 
-  const progressiveStart = makeEvent(7, 'Deploying the exact immutable candidate to production');
+  const progressiveStart = makeEvent(7, 'Deploying the exact immutable candidate to production', {
+    jsonl_record_uuid: 'progressive-preview-record',
+  });
   const intervening = makeEvent(8, 'intervening newest row');
-  const progressiveLatest = makeEvent(9, 'Deploying the exact immutable candidate to production now');
+  const progressiveLatest = makeEvent(9, 'Deploying the exact immutable candidate to production now', {
+    jsonl_record_uuid: 'progressive-preview-record',
+  });
   assert.equal(preview([progressiveStart, intervening, progressiveLatest], {
     ...orderedSession,
     last_event_at: progressiveLatest.timestamp,

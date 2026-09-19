@@ -294,8 +294,11 @@ class Ingest:
         """One bounded ingest pass. Returns the number of events newly appended.
         Also the test-only forced trigger (called directly)."""
         cfg = self.config
-        rows = [r for r in self.sessions.list_open()
-                if str(r.get("host") or "") == self.local_host]
+        rows = [
+            r for r in self.sessions.list_open()
+            if str(r.get("host") or "") == self.local_host
+            and str(r.get("provider") or "") != "composite"
+        ]
         open_ids = {r["stream_id"] for r in rows}
         # Forget tail state for streams no longer open (membership follows the
         # O(open) registry, never a filesystem scan).

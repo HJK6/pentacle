@@ -29,7 +29,7 @@ function reattachTerminalSlotsAfterReconnect(args) {
     // Every attached, non-bot slot carries a live xterm (attachSession builds it
     // even under the chat/asset/status views), and its server-side attachment was
     // just destroyed with the old socket — so re-attach regardless of view mode.
-    if (!session || botSlots[slot] || !entry || !entry.term) continue;
+    if (!session || session.session_kind === 'assistant_composite' || botSlots[slot] || !entry || !entry.term) continue;
     const cols = entry.term.cols || 80;
     const rows = entry.term.rows || 24;
     try {

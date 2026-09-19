@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -29,6 +30,8 @@ import socket
 from pathlib import Path
 
 from alerts import Alerts
+from assistant_composite import AssistantComposite, AssistantCompositeConfig
+from assistant_router import AssistantRouterAdapter
 import launch
 from assets import DEFAULT_ASSETS_DB, Assets
 from blobs import DEFAULT_BLOB_ROOT, BlobStore
@@ -248,6 +251,116 @@ async def run(args: argparse.Namespace) -> int:
         spawnctl=spawnctl, comms=comms, local_host=args.local_host, binds=binds,
         hosts=hosts,
     )
+    assistant_config = AssistantCompositeConfig.from_env()
+    assistant_router = (
+        AssistantRouterAdapter(
+            assistant_config.router_endpoint,
+            timeout_s=assistant_config.router_timeout_s,
+            ssh_bin=args.ssh_bin,
+            action_path=assistant_config.router_action_path,
+        ) if assistant_config.enabled else None
+    )
+
+    async def _dispatch_assistant_route(route: dict[str, object]) -> dict[str, object]:
+        """Deliver one already-intended backend turn without blocking routing."""
+        target = str(route.get("route_target") or "")
+        host, separator, session_name = target.partition(":")
+        if not separator or not host or not session_name:
+            return {"delivery": "failed", "reason": "assistant_backend_target_invalid"}
+        try:
+            attachments = json.loads(str(route.get("attachments_json") or "[]"))
+        except (TypeError, ValueError):
+            return {"delivery": "failed", "reason": "assistant_attachments_corrupt"}
+        dispatch_id = str(route.get("dispatch_id") or "")
+        source_message_id = str(route.get("input_identity") or "")
+        body = str(route.get("body") or "")
+        route_payload: dict[str, object] = {}
+        try:
+            loaded = json.loads(str(route.get("route_json") or "{}"))
+            if isinstance(loaded, dict):
+                route_payload = loaded
+        except (TypeError, ValueError):
+            return {"delivery": "failed", "reason": "assistant_route_payload_corrupt"}
+        # The original body is preserved verbatim in this explicit envelope;
+        # dispatch/correlation values come from durable daemon state, never a
+        # model-generated reply id.  Attachments travel through the existing
+        # send materializer unchanged.
+        if str(route.get("routing_state") or "") == "fallback_dispatched":
+            routing_context = route_payload.get("routing_context")
+            context_block = "{}"
+            if isinstance(routing_context, dict):
+                context_block = json.dumps(routing_context, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            wire_body = (
+                "[assistant composite routing fallback]\n"
+                f"dispatch_id: {dispatch_id}\n"
+                f"reply_to_message_id: {source_message_id}\n"
+                "Return no visible prose. Submit exactly one validated assistant-router/v1 "
+                "classifier result with: agent-orch assistant operation --operation route.resolve "
+                f"--request-id resolve:{dispatch_id} --composite-stream-id {assistant_config.stream_id} "
+                f"--dispatch-id {dispatch_id} "
+                f"--reply-to-message-id {source_message_id} --payload <router-result-json>\n"
+                "Use only the supplied routing-context lane/unresolved IDs. If it does not establish "
+                "one current target, resolve clarify.\n"
+                "<assistant-routing-context>\n"
+                f"{context_block}\n"
+                "</assistant-routing-context>\n"
+                "<assistant-original-input>\n"
+                f"{body}\n"
+                "</assistant-original-input>"
+            )
+        else:
+            backend_context = route_payload.get("backend_context")
+            context_block = "{}"
+            if isinstance(backend_context, dict):
+                context_block = json.dumps(
+                    backend_context, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                )
+            wire_body = (
+                "[assistant composite dispatch]\n"
+                f"dispatch_id: {dispatch_id}\n"
+                f"reply_to_message_id: {source_message_id}\n"
+                f"router_disposition: {route_payload.get('disposition', '')}\n"
+                f"lane_id: {route_payload.get('lane_id', '')}\n"
+                "Publish visible prose only with: agent-orch assistant publish "
+                f"--request-id publish:{dispatch_id} --composite-stream-id {assistant_config.stream_id} "
+                f"--dispatch-id {dispatch_id} --reply-to-message-id {source_message_id} "
+                "--publish-kind prose --message <text>\n"
+                "For a bound lane's terminal report, use the existing agent-orch report --result "
+                "JSON with extras.assistant_composite containing exactly stream_id (the composite), "
+                "lane_id and dispatch_id from this task. Preserve the same report_id on retry. "
+                "When commissioning the bound lead, pass these IDs with the original input; "
+                "the lane binding delegates this dispatch without another operator message.\n"
+                "Treat dispatch/lane state only as bounded evidence; server-side receipts remain "
+                "authoritative for publication, operations and question consent.\n"
+                "<assistant-backend-context>\n"
+                f"{context_block}\n"
+                "</assistant-backend-context>\n"
+                "<assistant-original-input>\n"
+                f"{body}\n"
+                "</assistant-original-input>"
+            )
+        return await comms.send_assistant_backend({
+            "host": host,
+            "session_name": session_name,
+            "text": wire_body,
+            "attachments": attachments,
+            "request_id": dispatch_id,
+            "optimistic_id": dispatch_id,
+            "from_stream_id": assistant_config.stream_id,
+        })
+
+    assistant_composite = AssistantComposite(
+        store,
+        config=assistant_config,
+        router=assistant_router,
+        dispatch=_dispatch_assistant_route if assistant_config.enabled else None,
+        broadcast=server.broadcast,
+        question_operation=server._assistant_question_operation,
+        question_answer=server._assistant_question_answer,
+        publication_attachments=server._assistant_publication_attachments,
+    )
+    server.assistant_composite = assistant_composite
+    comms.assistant_ingress_policy = assistant_composite.suppress_routine_backend_ingress
     window_schedule = WindowSchedule(
         store, sessions, comms, spawnctl,
         local_host=args.local_host, broadcast=server.broadcast,
@@ -326,6 +439,12 @@ async def run(args: argparse.Namespace) -> int:
         notify=notify,
         broadcast=server.broadcast,
         inventory_emitter=inventory_emitter,
+        assistant_backend_binding=(
+            lambda stream_id, generation: assistant_config.enabled and bool(generation) and stream_id in {
+                assistant_config.astra_stream_id,
+                assistant_config.luna_stream_id,
+            }
+        ),
     )
     server.handlers.update(blobs.wire_handlers())
     # The blob store owns partial upload state; the server tears a closed
@@ -448,6 +567,15 @@ async def run(args: argparse.Namespace) -> int:
     else:
         window_schedule.mark_store_failed()
     await lifecycle.start()
+    if assistant_config.enabled:
+        projection = await assistant_composite.ensure_projection()
+        recovery = await assistant_composite.recover()
+        log.info(
+            "assistant composite projection ready stream=%s generation=%s recovery=%s",
+            projection.get("stream_id") if projection else "",
+            projection.get("session_generation") if projection else "",
+            recovery,
+        )
     # B10 re-adoption FIRST and uncontended: the inventory is rebuilt from the
     # persisted open rows before anything else competes for the loop, so a
     # restarted daemon serves `list_sessions` with its live sessions promptly.
@@ -602,6 +730,7 @@ async def run(args: argparse.Namespace) -> int:
         task.cancel()
     if tasks:
         await asyncio.wait(tasks, timeout=5)
+    await assistant_composite.stop()
     await server.close()
     await notify.stop()
     await assets.stop()

@@ -44,6 +44,13 @@ from store_qa import QaStoreMixin
 from store_exchange import ExchangeStoreMixin
 
 from store_routing import (
+    ASSISTANT_COMPOSITE_LANES_DDL,
+    ASSISTANT_COMPOSITE_OPERATIONS_DDL,
+    ASSISTANT_COMPOSITE_PUBLICATIONS_DDL,
+    ASSISTANT_COMPOSITE_QUESTION_BRIDGES_DDL,
+    ASSISTANT_COMPOSITE_ROUTES_DDL,
+    ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL,
+    ASSISTANT_COMPOSITE_TERMINAL_REPORTS_DDL,
     OUTBOUND_NOTICE_DDL,
     OUTBOUND_NOTICE_INDEX_DDL,
     ROUTING_INTEGRITY_AUDIT_DDL,
@@ -1401,6 +1408,75 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
             }:
                 conn.execute("ALTER TABLE v2_outbound_notices ADD COLUMN proof_binding TEXT")
             conn.execute(OUTBOUND_NOTICE_INDEX_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_ROUTES_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_LANES_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_OPERATIONS_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_TERMINAL_REPORTS_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_QUESTION_BRIDGES_DDL)
+            if "route_target_generation" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_routes)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_assistant_composite_routes "
+                    "ADD COLUMN route_target_generation TEXT"
+                )
+            if "summary" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_assistant_composite_lanes "
+                    "ADD COLUMN summary TEXT NOT NULL DEFAULT ''"
+                )
+            if "pending_question_id" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_assistant_composite_lanes "
+                    "ADD COLUMN pending_question_id TEXT"
+                )
+            if "version" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_assistant_composite_lanes "
+                    "ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+                )
+            if "bound_generation" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute("ALTER TABLE v2_assistant_composite_lanes ADD COLUMN bound_generation TEXT")
+            if "bound_backend_kind" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute("ALTER TABLE v2_assistant_composite_lanes ADD COLUMN bound_backend_kind TEXT")
+            if "question_bridge_operation_id" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_assistant_composite_lanes "
+                    "ADD COLUMN question_bridge_operation_id TEXT"
+                )
+            for column, ddl in (
+                ("canonical_payload_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("reply_to_question_id", "TEXT"),
+                ("publish_kind", "TEXT NOT NULL DEFAULT 'prose'"),
+                ("attachment_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("evidence_refs_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ):
+                if column not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_publications)")}:
+                    conn.execute(f"ALTER TABLE v2_assistant_composite_publications ADD COLUMN {column} {ddl}")
+            for column, ddl in (
+                ("stream_id", "TEXT NOT NULL DEFAULT ''"),
+                ("dispatch_id", "TEXT NOT NULL DEFAULT ''"),
+                ("reply_to_message_id", "TEXT"),
+                ("payload_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("evidence_refs_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("expected_lane_version", "INTEGER"),
+            ):
+                if column not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_operations)")}:
+                    conn.execute(f"ALTER TABLE v2_assistant_composite_operations ADD COLUMN {column} {ddl}")
             conn.execute(REPORTS_DDL)
             conn.execute(REPORTS_INDEX_DDL)
             conn.execute(AWAITERS_DDL)
@@ -3238,6 +3314,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         *,
         routing_snapshot: dict[str, Any] | None = None,
         qa_attestation_mode: str = "warn",
+        announce: bool = True,
     ) -> dict[str, Any]:
         """Persist one validated report and return the stored row.
 
@@ -3356,7 +3433,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                 _resolve_awaiters_for_report_conn(conn, stored)
             # D2 composes the accepted-report transaction; D1 append stays before this hook.
             with conn:
-                if inserted and stored is not None:
+                if inserted and stored is not None and announce:
                     stored["_watch_notice_created"] = report_watch_conn(conn, stored)
             conn.commit()
             if stored is not None:
@@ -3675,10 +3752,11 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
 
         def _op(conn: sqlite3.Connection) -> dict[str, str] | None:
             row = conn.execute(
-                """SELECT host, session_name, status, token_hash_version
-                   FROM sessions
-                   WHERE token_hash=?
-                   ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, rowid DESC
+                """SELECT s.host, s.session_name, s.status, s.token_hash_version, g.generation
+                   FROM sessions s
+                   LEFT JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name
+                   WHERE s.token_hash=?
+                   ORDER BY CASE WHEN s.status='open' THEN 0 ELSE 1 END, s.rowid DESC
                    LIMIT 1""",
                 (token_hash,),
             ).fetchone()
@@ -3688,6 +3766,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                 "stream_id": f"{row['host']}:{row['session_name']}",
                 "status": str(row["status"] or ""),
                 "token_hash_version": str(row["token_hash_version"] or ""),
+                "session_generation": str(row["generation"] or ""),
             }
 
         return await self.submit(_op)
