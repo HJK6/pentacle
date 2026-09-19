@@ -3088,3 +3088,36 @@ def test_await_starting_spawn_open_row_is_indeterminate(
     assert isinstance(receipt["delivery_failed_at"], str) and receipt["delivery_failed_at"].endswith("Z")
     if durable_receipt is not None:
         assert "await_spawn" in handler.kinds()
+
+
+@pytest.mark.parametrize("verb", ["assistant.publish", "assistant.operation"])
+def test_assistant_rpc_authenticates_hello_without_expanding_closed_command(monkeypatch, tmp_path, verb):
+    monkeypatch.setenv("AGENT_ORCH_STREAM_ID", "hosta:assistant-backend")
+    monkeypatch.setenv("AGENT_ORCH_STREAM_TOKEN", "backend-test-secret")
+    monkeypatch.delenv("AGENT_ORCH_STREAM_TOKEN_FILE", raising=False)
+    captured: Queue[dict] = Queue()
+    payload = {
+        "type": verb, "request_id": "stable-assistant-request",
+        "composite_stream_id": "hosta:assistant", "dispatch_id": "dispatch-1",
+        **({"reply_to_message_id": "input-1", "publish_kind": "prose", "message": "hello"}
+           if verb == "assistant.publish" else {"operation": "lane.admit", "payload": {"summary": "example"}}),
+    }
+    expected = dict(payload)
+
+    async def handler(ws):
+        captured.put(json.loads(await ws.recv()))
+        command = json.loads(await ws.recv())
+        captured.put(command)
+        await ws.send(json.dumps({"type": verb + ".ok", "request_id": command["request_id"]}))
+
+    with StubServer(handler) as server:
+        response = asyncio.run(wsclient.assistant_once(
+            Config(server.url, "operator-test-token", "hosta", tmp_path), payload, timeout=2,
+        ))
+    hello = captured.get(timeout=2)
+    command = captured.get(timeout=2)
+    assert response["type"] == verb + ".ok"
+    assert hello["from_stream_id"] == "hosta:assistant-backend"
+    assert hello["stream_token"] == "backend-test-secret"
+    assert command == expected
+    assert payload == expected

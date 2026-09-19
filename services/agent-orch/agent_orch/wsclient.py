@@ -1671,7 +1671,10 @@ async def tell_once(config: Config, payload: dict[str, Any], *, timeout: float =
 
 async def assistant_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     """Invoke the daemon's fixed assistant-composite verbs as this backend seat."""
-    from_stream_id = _attach_agent_identity(payload)
+    # The existing RPC hello authenticates the seat and token. Assistant
+    # commands have closed payload schemas, so transport identity belongs only
+    # in that hello, never as extra fields in the publication/operation body.
+    from_stream_id = _resolved_rpc_from_stream_id()
     verb = str(payload.get("type") or "")
     if verb not in {"assistant.publish", "assistant.operation"}:
         raise ValueError("assistant_verb_invalid")
