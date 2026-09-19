@@ -423,9 +423,11 @@ class AssistantComposite:
             lane = await self.store.get_assistant_composite_lane(
                 stream_id=self.config.stream_id, lane_id=str(prior_result["lane_id"]),
             )
-            target = str((lane or {}).get("bound_stream_id") or "")
-            if not lane or str(lane.get("phase") or "") not in {"discussion", "execution", "waiting"} or not target:
+            if not lane or str(lane.get("phase") or "") not in {"discussion", "execution", "waiting"}:
                 raise ValueError("assistant_explicit_reply_lane_not_current")
+            # Admission precedes lead binding. As with an inferred lane route,
+            # its current authority owns replies until a lead has been bound.
+            target = await self._target_for_decision({"disposition": "lane", "lane_id": lane["lane_id"]})
         else:
             target = str(prior.get("route_target") or "")
         if not target:

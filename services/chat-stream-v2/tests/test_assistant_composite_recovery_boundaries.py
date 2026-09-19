@@ -592,3 +592,46 @@ def test_real_server_report_preserves_authenticated_successor_generation(replace
                 assert (await server._on_report(msg))['durability_ack']
                 assert (await store.get_assistant_composite_lane(stream_id=STREAM, lane_id=lane))['phase'] == 'completed'
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('publication', [False, True])
+def test_explicit_reply_to_admitted_unbound_discussion_reaches_authority_without_inference(publication):
+    async def run():
+        routed = []
+        dispatched = []
+        class Router:
+            async def classify(self, payload):
+                routed.append(payload)
+                raise AssertionError('Explicit reply must bypass inference')
+        async def dispatch(route):
+            dispatched.append(route)
+            return {'delivery': 'landed'}
+        async with setup(router=Router(), dispatch=dispatch) as (store, composite, rows):
+            await _seed_dispatch(store, input_identity='proposal', dispatch_id='proposal-dispatch',
+                                 target=ASTRA, generation=rows[ASTRA]['session_generation'])
+            admitted = await composite.operation(operation('lane.admit', 'admit-proposal', 'proposal-dispatch', {
+                'mode': 'new', 'subject': 'Cedar checklist', 'request_message_id': 'proposal',
+            }), actor_stream_id=ASTRA)
+            await composite.publish(dict(request_id='proposal-publication', composite_stream_id=STREAM,
+                dispatch_id='proposal-dispatch', reply_to_message_id='proposal', publish_kind='prose',
+                message='Discussion proposal only', attachment_ids=[], evidence_refs=[]), actor_stream_id=ASTRA)
+            reply_id = 'publication:proposal-publication' if publication else 'proposal'
+            accepted = await composite.accept_input(dict(message='Revise the second item; still discussion only.',
+                msg_id='refine', reply_to_message_id=reply_id), operator_principal='operator:fixture')
+            await asyncio.gather(*tuple(composite._dispatch_tasks))
+            assert accepted['routing_state'] == 'resolved'
+            assert not routed
+            assert len(dispatched) == 1
+            assert dispatched[0]['route_target'] == ASTRA
+            assert dispatched[0]['route_target_generation'] == rows[ASTRA]['session_generation']
+            assert json.loads(dispatched[0]['route_json'])['lane_id'] == admitted['lane_id']
+            lane = await store.get_assistant_composite_lane(stream_id=STREAM, lane_id=admitted['lane_id'])
+            assert lane['phase'] == 'discussion' and lane['bound_stream_id'] is None
+            # A missing current authority must still fail before intake persistence.
+            await store.mark_closed(*ASTRA.split(':', 1), closed_at='2026-09-19T00:00:00Z',
+                pane_status='closed', expected_generation=rows[ASTRA]['session_generation'])
+            with pytest.raises(ValueError):
+                await composite.accept_input(dict(message='next', msg_id='unavailable-authority',
+                    reply_to_message_id=reply_id), operator_principal='operator:fixture')
+            assert await store.get_assistant_composite_route(stream_id=STREAM, input_identity='unavailable-authority') is None
+    asyncio.run(run())
