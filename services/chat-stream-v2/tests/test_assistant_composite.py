@@ -117,8 +117,8 @@ def test_routing_advances_without_waiting_for_backend_completion() -> None:
                 dispatch=lambda route: _blocking_dispatch(route, dispatched, released),
             )
             await composite.ensure_projection()
-            await composite.accept_input({"text": "first", "request_id": "1", "optimistic_id": "first"})
-            await composite.accept_input({"text": "second", "request_id": "2", "optimistic_id": "second"})
+            await composite.accept_input({"text": "first", "request_id": "1", "optimistic_id": "first"}, operator_principal="operator:fixture")
+            await composite.accept_input({"text": "second", "request_id": "2", "optimistic_id": "second"}, operator_principal="operator:fixture")
             for _ in range(30):
                 if len(dispatched) == 2:
                     break

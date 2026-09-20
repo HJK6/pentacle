@@ -184,7 +184,7 @@ def test_publication_replay_freezes_wire_payload_and_rejects_cross_route_reply()
             await composite.ensure_projection()
             composite._wake_worker = lambda: None  # type: ignore[method-assign]
             for identity in ("input-a", "input-b"):
-                await composite.accept_input({"text": identity, "optimistic_id": identity})
+                await composite.accept_input({"text": identity, "optimistic_id": identity}, operator_principal="operator:fixture")
                 route = await store.get_assistant_composite_route(stream_id=COMPOSITE_STREAM, input_identity=identity)
                 assert route is not None
                 await store.update_assistant_composite_route(

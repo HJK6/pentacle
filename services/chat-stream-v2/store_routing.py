@@ -338,7 +338,7 @@ def _assistant_lane_receipt_conn(conn, stream_id, lane_id):
     return dict(row) if row is not None else None
 
 
-def _assistant_dispatch_conn(conn, stream_id, dispatch_id, actor, generation):
+def _assistant_dispatch_conn(conn, stream_id, dispatch_id, actor, generation, *, authority=None):
     current = _assistant_actor_conn(conn, actor, generation)
     row = conn.execute(
         "SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND dispatch_id=?",
@@ -347,6 +347,13 @@ def _assistant_dispatch_conn(conn, stream_id, dispatch_id, actor, generation):
     if row is None:
         raise ValueError("assistant_dispatch_scope_unverified")
     route = dict(row)
+    # Configured authority is standing authority over genuine operator inputs;
+    # a router destination does not grant or revoke it. Callers opt in only for
+    # authority operations/publication, never lead questions or completion.
+    if authority and actor == authority:
+        if route["routing_state"] != "resolved" or not str(route["actor_stream_id"] or "").startswith("operator:"):
+            raise ValueError("assistant_authority_input_unverified")
+        return route
     target = route["route_target"]
     if actor == target:
         if route["route_target_generation"] != generation:
@@ -376,7 +383,7 @@ def _assistant_authority_context_conn(conn, stream_id, lane_id, authority):
         "JOIN v2_assistant_composite_routes r ON r.dispatch_id=o.dispatch_id AND r.stream_id=o.stream_id "
         "JOIN v2_assistant_composite_lanes l ON l.lane_id=o.lane_id AND l.stream_id=o.stream_id "
         "WHERE o.stream_id=? AND o.lane_id=? AND o.operation='lane.admit' "
-        "AND r.routing_state='resolved' AND (r.route_target=? OR r.route_target=?) "
+        "AND r.routing_state='resolved' AND (o.actor_stream_id=? OR o.actor_stream_id=?) "
         "ORDER BY o.created_at DESC LIMIT 1", (stream_id, lane_id, authority, previous),
     ).fetchone()
     if row is None:
@@ -400,7 +407,10 @@ def _assistant_route_lane_conn(conn, stream_id, route, lane_id):
 
 def _assistant_operation_scope_conn(conn, *, stream_id, dispatch_id, actor, generation,
                                     authority, operation, lane_id, payload, reply_id):
-    route = _assistant_dispatch_conn(conn, stream_id, dispatch_id, actor, generation)
+    route = _assistant_dispatch_conn(
+        conn, stream_id, dispatch_id, actor, generation,
+        authority=authority if operation in {"lane.admit", "lane.bind", "lane.decision", "lane.close"} else None,
+    )
     fallback = route["routing_state"] == "fallback_dispatched"
     if operation == "route.resolve":
         if not fallback or reply_id != route["input_identity"]:
@@ -900,9 +910,10 @@ class _RoutingStoreMixin:
 
     async def authorize_assistant_composite_dispatch(
         self, *, stream_id: str, dispatch_id: str, actor: str, generation: str,
+        authority_stream_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.submit(lambda conn: _assistant_dispatch_conn(
-            conn, stream_id, dispatch_id, actor, generation))
+            conn, stream_id, dispatch_id, actor, generation, authority=authority_stream_id))
 
     async def get_assistant_composite_route(
         self, *, stream_id: str, input_identity: str,
@@ -967,6 +978,7 @@ class _RoutingStoreMixin:
         event: dict[str, Any],
         actor_stream_id: str | None = None,
         actor_generation: str | None = None,
+        authority_stream_id: str | None = None,
     ) -> dict[str, Any]:
         """Append one assistant event and its idempotency receipt together."""
         if not publication_key or not dispatch_id:
@@ -999,7 +1011,10 @@ class _RoutingStoreMixin:
                     conn.commit()
                     return saved
                 if actor_generation is not None:
-                    route = _assistant_dispatch_conn(conn, stream_id, dispatch_id, actor_stream_id, actor_generation)
+                    route = _assistant_dispatch_conn(
+                        conn, stream_id, dispatch_id, actor_stream_id, actor_generation,
+                        authority=authority_stream_id if publish_kind != "question" else None,
+                    )
                     if route["routing_state"] != "resolved":
                         raise ValueError("assistant_publish_dispatch_state_invalid")
                     if reply_to_message_id != route["input_identity"]:

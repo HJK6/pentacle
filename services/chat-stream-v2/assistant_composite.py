@@ -759,7 +759,9 @@ class AssistantComposite:
         if kind not in {"prose", "question", "result", "status"}:
             raise ValueError("assistant_publish_kind_invalid")
         route = await self.store.find_assistant_composite_route_by_dispatch(dispatch_id)
-        if route is None or not await self._is_current_dispatch_actor(route, str(actor_stream_id or "")):
+        if route is None or not await self._is_current_dispatch_actor(
+            route, str(actor_stream_id or ""), allow_authority=kind != "question",
+        ):
             raise ValueError("assistant_publish_provenance_unverified")
         if route["routing_state"] != "resolved":
             raise ValueError("assistant_publish_dispatch_state_invalid")
@@ -816,6 +818,7 @@ class AssistantComposite:
             attachment_ids=attachment_ids, evidence_refs=evidence_refs,
             canonical_payload=canonical_payload, event=event,
             actor_stream_id=actor_stream_id, actor_generation=actor_generation,
+            authority_stream_id=self.config.astra_stream_id if kind != "question" else None,
         )
         if not stored.get("duplicate") and self.broadcast is not None:
             await self.broadcast({"type": "chat.event", "event": stored["event"]})
@@ -899,7 +902,10 @@ class AssistantComposite:
                 ).hexdigest()[:32]
         else:
             route = await self.store.find_assistant_composite_route_by_dispatch(dispatch_id)
-            if route is None or not await self._is_current_dispatch_actor(route, str(actor_stream_id or "")):
+            if route is None or not await self._is_current_dispatch_actor(
+                route, str(actor_stream_id or ""),
+                allow_authority=operation in {"lane.admit", "lane.bind", "lane.decision", "lane.close"},
+            ):
                 raise ValueError("assistant_operation_dispatch_unverified")
         if operation == "lane.bind":
             backend_stream_id = str(payload.get("backend_stream_id") or "").strip()
@@ -998,7 +1004,9 @@ class AssistantComposite:
             self._wake_worker()
         return {"type": "assistant.operation.ok", **result}
 
-    async def _is_current_dispatch_actor(self, route: dict[str, Any], actor: str) -> bool:
+    async def _is_current_dispatch_actor(
+        self, route: dict[str, Any], actor: str, *, allow_authority: bool = False,
+    ) -> bool:
         """Bind a response to the original dispatch and current seat lineage."""
         target = str(route.get("route_target") or "")
         expected_generation = str(route.get("route_target_generation") or "")
@@ -1013,7 +1021,8 @@ class AssistantComposite:
         try:
             await self.store.authorize_assistant_composite_dispatch(
                 stream_id=self.config.stream_id, dispatch_id=str(route.get("dispatch_id") or ""),
-                actor=actor, generation=str(current.get("session_generation") or ""))
+                actor=actor, generation=str(current.get("session_generation") or ""),
+                authority_stream_id=self.config.astra_stream_id if allow_authority else None)
             return True
         except ValueError:
             return False

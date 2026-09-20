@@ -27,3 +27,19 @@ Existing owner-authorized scheduled handoffs can provide a future continuation. 
 ## Validation
 
 `services/chat-stream-v2/tests/test_assistant_role.py` covers default-off behavior, ordinary close protection, role authority, concurrent activation, idempotent replay, pending intents, managed dead-session handoff, retained recovery entry, scheduled admission and forged managed-close fields. Existing role, handoff and scheduler suites cover their surrounding contracts. Run the daemon merge gate and each client's documented gate before activation. A live provider/installed-client readback remains distinct from deterministic fixture evidence.
+
+## Composite authority and routing
+
+For the optional `assistant_composite_v1` chat, the local classifier routes work
+admission, prioritization and cross-project coordination as `new_topic` to the
+configured authority backend. Delegated uncertainty about priorities does not
+require an intermediate conversation turn. Unresolved consent still requires
+clarification; routing itself never grants execution permission.
+
+The current configured authority may admit and publish against a resolved,
+authenticated operator input even when that input was initially routed to the
+conversation backend. This standing authority does not extend lead-only
+question or terminal-report permissions. Original input/dispatch correlation,
+current session generation, lane scope, expected versions and publication
+evidence remain required. Decision/terminal wakes use the authority admission
+receipt to recover context, independently of the original router destination.
