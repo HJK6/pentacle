@@ -63,3 +63,40 @@ inventory is not the global work inventory: an empty list does not prove no
 work, owner or progress. Status summaries need correlated current evidence;
 when it is insufficient, the conversation backend requests authority review
 and the authority publishes its own response.
+
+## Progress and decisions
+
+A currently bound lead can send a concise user-directed update through
+`assistant publish --publish-kind prose` using its original dispatch and input
+IDs. This commits a normal chat event; it does not wake either conversation or
+authority backend. The lead should identify the subject in its text. Raw tools
+and internal logs remain in the lead's own transcript. Use the conversation
+backend for requested synthesis, not as a mandatory relay for each update.
+
+For a blocker or question requiring judgment, the lead first sends the existing
+`lane.decision` operation with `transition=wait`, the current lane version and
+existing operator-basis IDs. An optional `reason` carries the decision needed,
+relevant evidence and recommended next action (nonempty, at most 1,024
+characters). It is stored in the immutable receipt and JSON-encoded into the
+single existing authority wake. It adds context, never consent. Identical
+replays do not wake again; changing the reason under the same key conflicts.
+
+The authority resolves what it can within the existing grant. When the operator
+must decide or act, it instructs the current lead to open the existing durable
+question in the composite chat. This ordering is a commission/baseline rule;
+it does not add a second approval store or change question authorization.
+The answer remains bound to the current lead, which continues within the grant.
+
+A lane already in `waiting` cannot transition to `waiting` again. Reconcile the
+same receipt for the same blocker; for a distinct decision while waiting, send
+one explicit correlated decision notice through the existing peer channel. Do
+not manufacture a start/wait cycle. Completion retains the existing one-time
+terminal report and authority acceptance path.
+
+Existing owners outside the composite keep their parentage and grants. A report
+from a parentless or differently parented owner does not automatically notify
+the authority that commissioned it by ordinary send. Such a commission must
+request one explicit completion notice with its durable report ID. Routine
+progress should remain in the owner's visible chat unless a supported
+composite publication binding exists. No duplicate owner or reparenting is
+needed solely for presentation.

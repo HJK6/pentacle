@@ -1149,6 +1149,10 @@ class _RoutingStoreMixin:
         }
         if operation not in allowed or not operation_id:
             raise ValueError("assistant_operation_invalid")
+        if operation == "lane.decision" and "reason" in payload:
+            reason = payload["reason"]
+            if not isinstance(reason, str) or not reason.strip() or len(reason) > 1024:
+                raise ValueError("assistant_decision_reason_invalid")
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         evidence_json = json.dumps(evidence_refs or [], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         receipt_json = json.dumps({
@@ -1448,6 +1452,8 @@ class _RoutingStoreMixin:
                 if operation == "lane.decision" and authority_wake_recipient and authority_wake_tell_id:
                     authority_context = _assistant_authority_context_conn(conn, stream_id, audit_lane_id, authority_wake_recipient)
                     transition = str(payload.get("transition") or "")
+                    reason_line = (f"reason={json.dumps(payload['reason'], ensure_ascii=True)}\n"
+                                   if "reason" in payload else "")
                     _insert_outbound_notice_conn(
                         conn,
                         notice_id=authority_wake_tell_id,
@@ -1460,6 +1466,7 @@ class _RoutingStoreMixin:
                             "[assistant composite authority decision]\n"
                             f"lane_id={audit_lane_id}\noperation_id={operation_id}\n"
                             f"transition={transition}\n"
+                            f"{reason_line}"
                             f"authority_context={json.dumps(authority_context, sort_keys=True)}\n"
                             "Inspect the committed lane decision and its operator basis. "
                             "Do not infer accepted closure."
@@ -1469,6 +1476,7 @@ class _RoutingStoreMixin:
                             "operation_id": operation_id,
                             "transition": transition,
                             "authority_context": authority_context,
+                            **({"reason": payload["reason"]} if "reason" in payload else {}),
                         },
                     )
                 conn.execute(

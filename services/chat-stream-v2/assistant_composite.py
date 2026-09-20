@@ -1135,7 +1135,7 @@ def _validate_operation_payload(
         "authority.request": ({"reason"}, set()),
         "lane.admit": ({"mode", "request_message_id"}, {"subject", "target_lane_id", "parent_lane_id", "split_group_id"}),
         "lane.bind": ({"backend_kind", "backend_stream_id", "backend_generation"}, set()),
-        "lane.decision": ({"decision_id", "transition", "from_phase", "to_phase", "operator_basis_message_ids"}, set()),
+        "lane.decision": ({"decision_id", "transition", "from_phase", "to_phase", "operator_basis_message_ids"}, {"reason"}),
         "lane.close": ({"completion_message_id", "completion_disposition"}, set()),
         # ``actions`` is the existing durable-question store's fixed companion
         # to its prompt envelope; it is not an alternate question protocol.
@@ -1146,6 +1146,10 @@ def _validate_operation_payload(
     required, optional = schemas.get(operation, (set(), set()))
     if not required or set(payload) - required - optional or not required <= set(payload):
         raise ValueError("assistant_operation_payload_invalid")
+    if operation == "lane.decision" and "reason" in payload:
+        reason = payload["reason"]
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 1024:
+            raise ValueError("assistant_decision_reason_invalid")
     if operation == "authority.request":
         reason = payload.get("reason")
         if lane_id is not None or not isinstance(reason, str) or not reason.strip() or len(reason) > 1024:
