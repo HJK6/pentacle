@@ -2093,8 +2093,8 @@ class Server:
             if suppressed is not None:
                 return {
                     "type": "send.result", "host": host, "session_name": name,
-                    "to_stream_id": stream_id, "delivery": "accepted",
-                    "submission_confirmed": True, "action_committed": True,
+                    "to_stream_id": stream_id, "delivery": "persisted",
+                    "submission_confirmed": False, "action_committed": True,
                     "assistant_backend_ingress": "persisted_suppressed",
                 }
         return await self.comms.send(direct_msg)

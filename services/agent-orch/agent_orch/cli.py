@@ -4758,7 +4758,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     assistant_operation_parser.add_argument(
         "--operation", required=True,
-        choices=("lane.admit", "lane.bind", "lane.decision", "lane.close", "question.open", "question.cancel", "route.resolve"),
+        choices=("lane.admit", "lane.bind", "lane.decision", "lane.close", "question.open", "question.cancel", "route.resolve", "authority.request"),
     )
     assistant_operation_parser.add_argument("--request-id", required=True)
     assistant_operation_parser.add_argument("--composite-stream-id", required=True)

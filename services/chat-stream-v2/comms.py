@@ -462,6 +462,7 @@ class Comms:
                     msg, tell_id, exc, verb="tell", receipt=False,
                 )
             raise
+        await self._validate_assistant_request_target(msg, route)
         # The idempotency digest hashes the ORIGINAL (unstamped) payload so a
         # tell_id retried across a daemon upgrade — where a prior row hashed the
         # bare body and this build would otherwise hash header+body — is still
@@ -495,7 +496,7 @@ class Comms:
                 ledger_row_id = await self.store.put_tell_delivery(tell_id, {
                     "payload_digest": digest,
                     "reply": reply,
-                    "delivery": {"tell_id": tell_id, "delivery_status": "delivered"},
+                    "delivery": {"tell_id": tell_id, "delivery_status": suppressed["delivery_status"]},
                 })
                 reply["ledger_row_id"] = ledger_row_id
                 return reply
@@ -505,6 +506,7 @@ class Comms:
         outcome: tuple[str, Any] = ("error", VerbError("delivery_failed", "tell did not complete"))
         try:
             async with self._pane_input_lock(str(route["final_target"])):
+                await self._validate_assistant_request_target(msg, route)
                 reply = await self._deliver_tell(msg, tell_id, route, wire, digest)
             outcome = ("ok", reply)
             return reply
@@ -550,6 +552,7 @@ class Comms:
             check_existing = False
         route, body = await self._route(msg)
         target = str(route["final_target"])
+        await self._validate_assistant_request_target(msg, route)
         policy = self.assistant_ingress_policy
         if callable(policy):
             suppressed = await policy(
@@ -1094,6 +1097,19 @@ class Comms:
                 )
             except Exception:  # noqa: BLE001 - preserve the typed rejection
                 log.exception("could not append blocked send receipt target=%s", target)
+    async def _validate_assistant_request_target(self, msg, route):
+        from outbound_notices import ASSISTANT_AUTHORITY_REQUEST_TOKEN
+        if msg.get("_assistant_authority_request_token") is not ASSISTANT_AUTHORITY_REQUEST_TOKEN:
+            return
+        target = str(route["final_target"])
+        host, name = self.sessions.split(target)
+        current = await self.store.fetch_session(host, name)
+        if (target != str(msg.get("stream_id") or "") or current is None
+                or current.get("status") != "open"
+                or not msg.get("_assistant_authority_request_generation")
+                or current.get("session_generation") != msg["_assistant_authority_request_generation"]):
+            raise VerbError("unknown_session", "bound assistant authority generation is gone")
+
     async def _attempt_delivery(
         self, msg: dict[str, Any], route: dict[str, Any], body: str,
     ) -> tuple[bool, int, str, bool, EventProof, EventWatermark]:
@@ -1110,7 +1126,9 @@ class Comms:
             durable_proof=msg.get("_durable_notice_proof") is True,
             before_paste=(
                 lambda watermark: self._prepare_answer_input(msg, route, body, watermark)
-            ) if msg.get("_notification_answer_generation") else None,
+            ) if msg.get("_notification_answer_generation") else (
+                lambda watermark: self._validate_assistant_request_target(msg, route)
+            ) if msg.get("_assistant_authority_request_generation") else None,
         )
         return confirmed, attempts, provider, active_draft, proof, watermark
 

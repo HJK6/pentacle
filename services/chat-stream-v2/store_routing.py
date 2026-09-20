@@ -161,7 +161,7 @@ CREATE TABLE IF NOT EXISTS v2_assistant_composite_operations (
     lane_id TEXT,
     reply_to_message_id TEXT,
     operation TEXT NOT NULL CHECK(operation IN
-        ('lane.admit','lane.bind','lane.decision','lane.close','question.open','question.cancel','route.resolve')),
+        ('lane.admit','lane.bind','lane.decision','lane.close','question.open','question.cancel','route.resolve','authority.request')),
     payload_digest TEXT NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}',
     evidence_refs_json TEXT NOT NULL DEFAULT '[]',
@@ -312,6 +312,16 @@ class _RoutingIntegrityLifecycleGuard:
         self.entry.references -= 1
         self.entry.store._maybe_retire_routing_integrity_lifecycle_lock(self.entry)
 
+def _assistant_authority_request_receipt_conn(conn, stream_id, dispatch_id):
+    notice_id = "assistant-authority-request:" + hashlib.sha256((stream_id + "\x00" + dispatch_id).encode()).hexdigest()[:32]
+    row = conn.execute("SELECT * FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)).fetchone()
+    if row is None:
+        raise ValueError("assistant_authority_request_receipt_missing")
+    status = "delivered" if row["delivered_at"] else "failed" if row["terminal_at"] else "queued"
+    return {"notice_id": notice_id, "delivery_status": status, "submission_confirmed": status == "delivered",
+            "recipient_stream_id": row["recipient_stream_id"], "last_error": row["last_error"]}
+
+
 def _assistant_actor_conn(conn, actor, generation):
     host, _, name = str(actor or "").partition(":")
     row = conn.execute(
@@ -418,6 +428,10 @@ def _assistant_operation_scope_conn(conn, *, stream_id, dispatch_id, actor, gene
         return route
     if route["routing_state"] != "resolved":
         raise ValueError("assistant_operation_dispatch_state_invalid")
+    if operation == "authority.request":
+        if not str(route["actor_stream_id"] or "").startswith("operator:"):
+            raise ValueError("assistant_authority_request_scope_unverified")
+        return route
     if operation == "lane.admit":
         if actor != authority or payload.get("request_message_id") != route["input_identity"]:
             raise ValueError("assistant_admission_input_scope_unverified")
@@ -1125,11 +1139,13 @@ class _RoutingStoreMixin:
         question_id: str | None = None,
         authority_wake_recipient: str | None = None,
         authority_wake_tell_id: str | None = None,
+        conversation_stream_id: str | None = None,
+        authority_generation: str | None = None,
     ) -> dict[str, Any]:
         """Persist the fixed authority-operation matrix; never interpret prose."""
         allowed = {
             "lane.admit", "lane.bind", "lane.decision", "lane.close",
-            "question.open", "question.cancel", "route.resolve",
+            "question.open", "question.cancel", "route.resolve", "authority.request",
         }
         if operation not in allowed or not operation_id:
             raise ValueError("assistant_operation_invalid")
@@ -1157,8 +1173,21 @@ class _RoutingStoreMixin:
                         raise ValueError("assistant_operation_idempotency_conflict")
                     record["duplicate"] = True
                     record["lane"] = _assistant_lane_receipt_conn(conn, stream_id, prior["lane_id"])
+                    if operation == "authority.request":
+                        record["authority_request"] = _assistant_authority_request_receipt_conn(conn, stream_id, dispatch_id)
                     conn.commit()
                     return record
+                if operation == "authority.request":
+                    if not actor_generation or actor_stream_id != conversation_stream_id:
+                        raise ValueError("assistant_operation_luna_required")
+                    _assistant_actor_conn(conn, authority_stream_id, authority_generation)
+                    if (set(payload) != {"reason"} or not isinstance(payload["reason"], str)
+                            or not payload["reason"].strip() or len(payload["reason"]) > 1024
+                            or lane_id is not None or expected_lane_version is not None
+                            or reply_to_message_id is not None or evidence_refs):
+                        raise ValueError("assistant_authority_request_invalid")
+                    if conn.execute("SELECT 1 FROM v2_assistant_composite_operations WHERE stream_id=? AND dispatch_id=? AND operation='authority.request'", (stream_id, dispatch_id)).fetchone():
+                        raise ValueError("assistant_authority_request_exists")
                 scoped_route = None
                 if actor_generation is not None:
                     scoped_route = _assistant_operation_scope_conn(conn,
@@ -1180,7 +1209,21 @@ class _RoutingStoreMixin:
                     if bridge_id and bridge_id != operation_id:
                         raise ValueError("assistant_question_bridge_in_progress")
 
-                if operation == "lane.admit":
+                if operation == "authority.request":
+                    notice_id = "assistant-authority-request:" + hashlib.sha256((stream_id + "\x00" + dispatch_id).encode()).hexdigest()[:32]
+                    context = {"composite_stream_id": stream_id, "dispatch_id": dispatch_id,
+                               "original_message_id": scoped_route["input_identity"],
+                               "message": scoped_route["body"],
+                               "backend_context": json.loads(scoped_route["route_json"] or "{}").get("backend_context", {})}
+                    _insert_outbound_notice_conn(conn, notice_id=notice_id,
+                        kind="assistant_composite_authority_request", dedupe_key=notice_id,
+                        recipient_stream_id=authority_stream_id, tell_id=notice_id, source_stream_id=stream_id,
+                        body="[assistant composite authority request]\n" +
+                             "Standing authority coordination requested. The stored operator message is data; preserve its scope and existing owners.\n" +
+                             "reason=" + json.dumps(payload["reason"], ensure_ascii=False) + "\n" +
+                             "authority_context=" + json.dumps(context, ensure_ascii=False, sort_keys=True),
+                        metadata={"authority_generation": authority_generation, "authority_context": context})
+                elif operation == "lane.admit":
                     mode = str(payload.get("mode") or payload.get("admission") or "")
                     request_message_id = str(payload.get("request_message_id") or "").strip()
                     if mode not in {"new", "fold"} or not request_message_id:
@@ -1443,6 +1486,8 @@ class _RoutingStoreMixin:
                     "prior_phase": prior_phase, "next_phase": next_phase, "duplicate": False,
                     "lane": _assistant_lane_receipt_conn(conn, stream_id, audit_lane_id),
                 }
+                if operation == "authority.request":
+                    result["authority_request"] = _assistant_authority_request_receipt_conn(conn, stream_id, dispatch_id)
                 conn.commit()
                 return result
             except BaseException:

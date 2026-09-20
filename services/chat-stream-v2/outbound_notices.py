@@ -33,6 +33,9 @@ NOTICE_KIND_STATUS_CARD_COMBINED = "status_card_combined"
 # established durable outbox.  It is a narrow authority wake, not a second
 # inbox or routing queue.
 NOTICE_KIND_ASSISTANT_COMPOSITE_AUTHORITY = "assistant_composite_authority"
+NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST = "assistant_composite_authority_request"
+# Object identity cannot be supplied by a JSON wire caller.
+ASSISTANT_AUTHORITY_REQUEST_TOKEN = object()
 
 _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_REPORT,
@@ -43,6 +46,7 @@ _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_STATUS_CARD,
     NOTICE_KIND_STATUS_CARD_COMBINED,
     NOTICE_KIND_ASSISTANT_COMPOSITE_AUTHORITY,
+    NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST,
 })
 
 _TERMINAL_CODES = frozenset({
@@ -300,6 +304,12 @@ class OutboundNoticeQueue:
                 metadata = row.get("metadata") or "{}"
                 metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
                 message["_notification_answer_generation"] = metadata["producer_session_generation"]
+            if kind == NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST:
+                import json
+                metadata = row.get("metadata") or "{}"
+                metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+                message["_assistant_authority_request_token"] = ASSISTANT_AUTHORITY_REQUEST_TOKEN
+                message["_assistant_authority_request_generation"] = metadata["authority_generation"]
             deliver_notice = getattr(self.comms, "deliver_outbound_notice", None)
             if callable(deliver_notice):
                 reply = await deliver_notice(
@@ -319,6 +329,9 @@ class OutboundNoticeQueue:
                 return "terminal"
             return await self._retry(row, reason, "retry after the recorded backoff")
 
+        if isinstance(reply, dict) and reply.get("assistant_backend_ingress") == "persisted_suppressed":
+            await self._terminal(row, "persisted_suppressed", "routine ingress persisted without provider delivery")
+            return "terminal"
         if not (isinstance(reply, dict) and reply.get("delivery_status") == "delivered"):
             proof_pending = (
                 isinstance(reply, dict)

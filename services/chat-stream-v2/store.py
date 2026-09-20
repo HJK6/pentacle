@@ -1477,6 +1477,22 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
             ):
                 if column not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_operations)")}:
                     conn.execute(f"ALTER TABLE v2_assistant_composite_operations ADD COLUMN {column} {ddl}")
+            operation_schema = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='v2_assistant_composite_operations'").fetchone()[0]
+            if "'authority.request'" not in operation_schema:
+                # SQLite cannot widen a CHECK in place. Preserve every existing
+                # receipt verbatim while replacing only this table's constraint.
+                conn.execute("SAVEPOINT assistant_operation_constraint")
+                try:
+                    columns = ",".join(r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_operations)"))
+                    conn.execute("ALTER TABLE v2_assistant_composite_operations RENAME TO v2_assistant_composite_operations_previous")
+                    conn.execute(ASSISTANT_COMPOSITE_OPERATIONS_DDL)
+                    conn.execute(f"INSERT INTO v2_assistant_composite_operations ({columns}) SELECT {columns} FROM v2_assistant_composite_operations_previous")
+                    conn.execute("DROP TABLE v2_assistant_composite_operations_previous")
+                    conn.execute("RELEASE assistant_operation_constraint")
+                except BaseException:
+                    conn.execute("ROLLBACK TO assistant_operation_constraint")
+                    conn.execute("RELEASE assistant_operation_constraint")
+                    raise
             conn.execute(REPORTS_DDL)
             conn.execute(REPORTS_INDEX_DDL)
             conn.execute(AWAITERS_DDL)

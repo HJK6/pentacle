@@ -172,6 +172,12 @@ class AssistantComposite:
         Explicit blocker/escalation/decision gates and terminal END/report
         notices remain actionable and therefore pass through unchanged.
         """
+        from outbound_notices import ASSISTANT_AUTHORITY_REQUEST_TOKEN
+        if msg.get("_assistant_authority_request_token") is ASSISTANT_AUTHORITY_REQUEST_TOKEN:
+            from sessions import VerbError
+            if not self.enabled or target_stream_id != self.config.astra_stream_id:
+                raise VerbError("unknown_session", "configured assistant authority changed")
+            return None
         if not self.is_backend_stream(target_stream_id):
             return None
         if msg.get("_assistant_composite_backend_dispatch") is True:
@@ -218,8 +224,8 @@ class AssistantComposite:
         )
         return {
             "type": f"{verb}.ok",
-            "delivery_status": "delivered",
-            "submission_confirmed": True,
+            "delivery_status": "persisted",
+            "submission_confirmed": False,
             "action_committed": True,
             "assistant_backend_ingress": "persisted_suppressed",
         }
@@ -966,7 +972,15 @@ class AssistantComposite:
                 question_id=question_id,
             )
             return {"type": "assistant.operation.ok", **audit, "question": question.get("question")}
+        authority_generation = None
+        if operation == "authority.request":
+            if evidence_refs:
+                raise ValueError("assistant_authority_request_invalid")
+            if prior_operation is None:
+                authority_generation = await self._target_generation(self.config.astra_stream_id)
         result = await self.store.apply_assistant_composite_operation(
+            conversation_stream_id=self.config.luna_stream_id,
+            authority_generation=authority_generation,
                 actor_generation=actor_generation, authority_stream_id=self.config.astra_stream_id,
             stream_id=self.config.stream_id, operation_id=operation_id, operation=operation,
             lane_id=lane_id, actor_stream_id=actor_stream_id, payload=payload,
@@ -1035,6 +1049,8 @@ class AssistantComposite:
             raise ValueError("assistant_operation_actor_unverified")
         await self._target_generation(actor)
         astra = self.config.astra_stream_id
+        if operation == "authority.request" and actor != self.config.luna_stream_id:
+            raise ValueError("assistant_operation_luna_required")
         if operation == "lane.admit" and actor != astra:
             raise ValueError("assistant_operation_astra_required")
         if operation in {"lane.bind", "lane.close"} and actor != astra:
@@ -1065,7 +1081,7 @@ class AssistantComposite:
                 raise ValueError("assistant_operation_bound_lead_required")
         if operation not in {
             "lane.admit", "lane.bind", "lane.decision", "lane.close",
-            "question.open", "question.cancel", "route.resolve",
+            "question.open", "question.cancel", "route.resolve", "authority.request",
         }:
             raise ValueError("assistant_operation_invalid")
 
@@ -1116,6 +1132,7 @@ def _validate_operation_payload(
 ) -> tuple[str | None, int | None]:
     """Frozen operation envelope/payload schemas; no alias-driven workflow."""
     schemas: dict[str, tuple[set[str], set[str]]] = {
+        "authority.request": ({"reason"}, set()),
         "lane.admit": ({"mode", "request_message_id"}, {"subject", "target_lane_id", "parent_lane_id", "split_group_id"}),
         "lane.bind": ({"backend_kind", "backend_stream_id", "backend_generation"}, set()),
         "lane.decision": ({"decision_id", "transition", "from_phase", "to_phase", "operator_basis_message_ids"}, set()),
@@ -1129,6 +1146,10 @@ def _validate_operation_payload(
     required, optional = schemas.get(operation, (set(), set()))
     if not required or set(payload) - required - optional or not required <= set(payload):
         raise ValueError("assistant_operation_payload_invalid")
+    if operation == "authority.request":
+        reason = payload.get("reason")
+        if lane_id is not None or not isinstance(reason, str) or not reason.strip() or len(reason) > 1024:
+            raise ValueError("assistant_authority_request_invalid")
     if operation == "lane.admit":
         mode = str(payload.get("mode") or "")
         if mode == "new":
@@ -1141,7 +1162,7 @@ def _validate_operation_payload(
                 raise ValueError("assistant_lane_admit_invalid")
         else:
             raise ValueError("assistant_lane_admit_invalid")
-    needs_version = operation not in {"lane.admit", "route.resolve"} or str(payload.get("mode") or "") == "fold"
+    needs_version = operation not in {"lane.admit", "route.resolve", "authority.request"} or str(payload.get("mode") or "") == "fold"
     if needs_version:
         if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1 or not lane_id:
             raise ValueError("assistant_operation_expected_version_required")

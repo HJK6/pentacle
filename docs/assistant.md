@@ -43,3 +43,23 @@ question or terminal-report permissions. Original input/dispatch correlation,
 current session generation, lane scope, expected versions and publication
 evidence remain required. Decision/terminal wakes use the authority admission
 receipt to recover context, independently of the original router destination.
+
+
+The configured conversation backend can request authority coordination with
+`agent-orch assistant operation --operation authority.request --request-id <stable-key> --composite-stream-id <composite> --dispatch-id <original-dispatch> --payload '{"reason":"Coordination needed"}'`.
+This operation accepts only a bounded reason on a resolved authenticated operator
+dispatch owned by the current conversation backend. It atomically records one
+existing-outbox notice per original dispatch, preserving literal input, IDs and
+bounded routing context. It does not change the route owner or grant authority.
+A different request key for the same dispatch conflicts; an identical replay
+returns the current original notice receipt. Queued is not delivered. A changed
+or unavailable configured authority generation leaves an inspectable failed
+notice instead of silently redirecting to a replacement.
+
+Routine hidden-backend ingress reports `persisted` and
+`submission_confirmed=false`; it is not provider delivery. A suppressed queued
+notice ends as persisted-only rather than retrying a wake. Composite lane
+inventory is not the global work inventory: an empty list does not prove no
+work, owner or progress. Status summaries need correlated current evidence;
+when it is insufficient, the conversation backend requests authority review
+and the authority publishes its own response.

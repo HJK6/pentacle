@@ -196,6 +196,9 @@ def test_configured_backend_suppresses_routine_ingress_but_forwards_explicit_esc
             assert routine["assistant_backend_ingress"] == "persisted_suppressed"
             assert sent["assistant_backend_ingress"] == "persisted_suppressed"
             assert notice is not None and notice["assistant_backend_ingress"] == "persisted_suppressed"
+            assert routine["delivery_status"] == notice["delivery_status"] == "persisted"
+            assert sent["delivery"] == "persisted"
+            assert not routine["submission_confirmed"] and not sent["submission_confirmed"] and not notice["submission_confirmed"]
             assert not comms.told and not comms.sent
             persisted = await store.fetch_session_event_tail(AUTHORITY_STREAM, limit=10)
             assert [event["raw"]["verb"] for event in persisted] == ["tell", "send", "notice"]

@@ -41,3 +41,21 @@ def test_assistant_operation_refuses_non_object_payload(capsys) -> None:
     ])
     assert args.func(args) == 2
     assert "JSON object" in capsys.readouterr().err
+
+
+def test_authority_request_uses_existing_closed_operation_transport(monkeypatch):
+    args = cli.build_parser().parse_args([
+        "assistant", "operation", "--operation", "authority.request", "--request-id", "request-once",
+        "--composite-stream-id", "fixture-host-chat:assistant", "--dispatch-id", "dispatch-1",
+        "--payload", '{"reason":"Needs authority coordination"}',
+    ])
+    captured = {}
+    async def fake_once(_config, payload, *, timeout):
+        captured.update(payload)
+        return {"type": "assistant.operation.ok"}
+    monkeypatch.setattr(cli, "assistant_once", fake_once)
+    monkeypatch.setattr(cli, "load_config", lambda: object())
+    assert args.func(args) == 0
+    assert captured["operation"] == "authority.request"
+    assert captured["payload"] == {"reason": "Needs authority coordination"}
+    assert captured["dispatch_id"] == "dispatch-1" and captured.get("lane_id") is None
