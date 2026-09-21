@@ -664,7 +664,9 @@ class Sessions:
                 })
             return dict(row)
 
-    def apply_durable(self, stream_id: str, **fields: Any) -> dict[str, Any] | None:
+    def apply_durable(
+        self, stream_id: str, *, expected_generation: str | None = None, **fields: Any,
+    ) -> dict[str, Any] | None:
         """Refresh durable fields that were written by an off-loop observer.
 
         The routing observer persists through ``Store`` and then uses this
@@ -672,7 +674,10 @@ class Sessions:
         """
         with self._inventory_context():
             row = self._inv.get(stream_id)
-            if row is None:
+            if row is None or (
+                expected_generation is not None
+                and row.get("session_generation") != expected_generation
+            ):
                 return None
             row.update(fields)
             return dict(row)

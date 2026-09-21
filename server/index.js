@@ -323,7 +323,7 @@ async function main(argv = process.argv.slice(2)) {
       : undefined,
   });
   wss.on('connection', (socket, req) => {
-    bridge.addSocket(socket, { micStartAllowed: micStartSameOrigin(req) });
+    bridge.addSocket(socket, { micStartAllowed: micStartSameOrigin(req), reloginAllowed: micStartSameOrigin(req) });
     socket.on('message', (raw) => { bridge.handleMessage(socket, raw.toString()); });
     socket.on('close', () => bridge.removeSocket(socket));
     socket.on('error', () => bridge.removeSocket(socket));
@@ -343,7 +343,7 @@ async function main(argv = process.argv.slice(2)) {
   // One close for everything the host owns, so a caller (tests, a harness) can
   // shut it down without leaking timers or terminal attachments.
   const close = async () => {
-    try { stopTerminals(); } catch {}
+    try { await stopTerminals(); } catch {}
     try { chatStreamClient.destroy(); } catch {}
     bridge.closeAll();
     for (const socket of wss.clients) { try { socket.terminate(); } catch {} }
@@ -353,7 +353,8 @@ async function main(argv = process.argv.slice(2)) {
 
   const shutdown = () => {
     close().finally(() => process.exit(0));
-    setTimeout(() => process.exit(0), 2000).unref();
+    // Give auth cancellation its bounded target-child cleanup interval.
+    setTimeout(() => process.exit(0), 5000).unref();
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

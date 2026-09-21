@@ -5635,3 +5635,11 @@ body.chat-stream-degraded button[data-cleanup-action] {
 }
 
 .slot-chat-assistant-activity { margin-top: 6px; font-size: 12px; color: var(--text-muted, #94a3b8); }
+.provider-relogin { border-top: 1px solid var(--border, #444); padding-top: 12px; margin-top: 12px; }
+.provider-relogin h4 { margin: 8px 0; }
+.provider-relogin p { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.provider-relogin label { display: block; font-size: 12px; margin: 8px 0; }
+.provider-relogin select, .provider-relogin textarea, .provider-relogin input[type="password"] { box-sizing: border-box; width: 100%; padding: 7px; }
+.provider-relogin textarea { height: 70px; resize: vertical; }
+.provider-relogin-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+.provider-relogin [hidden] { display: none !important; }

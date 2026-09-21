@@ -56,6 +56,14 @@ window.HOST = {
 };
 
 window.cc = {
+  reloginHosts: () => ipcRenderer.invoke('provider-relogin:hosts'),
+  reloginStart: (request) => ipcRenderer.invoke('provider-relogin:start', request),
+  reloginCode: (id, code) => ipcRenderer.invoke('provider-relogin:code', id, code),
+  reloginCancel: (id) => ipcRenderer.invoke('provider-relogin:cancel', id),
+  onReloginState: (callback) => {
+    ipcRenderer.removeAllListeners('provider-relogin:state');
+    ipcRenderer.on('provider-relogin:state', (_, value) => callback(value));
+  },
   // PTY operations — hostId threads through so each slot knows which tmux
   // server its session lives on. Defaults to 'local' for backcompat.
   createPty: (slot, sessionName, hostId, cols, rows) => ipcRenderer.invoke('pty:create', slot, sessionName, hostId || 'local', cols, rows),

@@ -7,6 +7,8 @@ version gate — each assertion fails if its behaviour is reverted.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 from pathlib import Path
@@ -1407,6 +1409,127 @@ def test_steady_state_inventory_omission_stays_open() -> None:
             assert after is not None
             assert after["status"] == "open"
             assert after["close_kind"] is None
+        finally:
+            store.stop()
+
+    _run(_go())
+
+
+def test_authenticated_usage_push_projects_snapshot_into_live_inventory() -> None:
+    """Accepted remote usage updates the same in-memory row reads serve."""
+    async def _go() -> None:
+        store = Store(":memory:"); store.start()
+        try:
+            stream_id = "amaterasu:v2-usage-projection"
+            session_name = "v2-usage-projection"
+            generation = "generation-a"
+            satellite_sha = "a" * 40
+            satellite_pid = 1234
+            host_secret = "amaterasu-host-secret"
+            source_digest = "b" * 64
+            proof_message = f"event.push.v1\0amaterasu\0{satellite_sha}\0{satellite_pid}"
+            source_host_proof = hmac.new(
+                host_secret.encode(), proof_message.encode(), hashlib.sha256,
+            ).hexdigest()
+            await_sessions = Sessions(store, local_host="bart")
+            await_sessions_row = await await_sessions.open(
+                "amaterasu", session_name, provider="codex", pane_pid="8123",
+                session_generation=generation,
+                observer_binding={
+                    "executable": "/usr/bin/codex",
+                    "pane_pid": "8123",
+                    "pane_started_at": "start-a",
+                },
+            )
+            assert await_sessions_row["stream_id"] == stream_id
+
+            broadcasts: list[dict] = []
+
+            async def broadcast(frame: dict) -> None:
+                broadcasts.append(frame)
+
+            class _Emitter:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                async def emit_if_changed(self) -> None:
+                    self.calls += 1
+
+            emitter = _Emitter()
+            ep = EventPush(
+                store,
+                broadcast,
+                _Alerts(),
+                recent_limit=20,
+                sessions=await_sessions,
+                inventory_emitter=emitter,
+                host_secrets={"amaterasu": host_secret},
+            )
+            ep._secret = lambda: _wrap("s3cret")  # type: ignore[assignment]
+
+            def frame(frame_generation: str) -> dict:
+                return {
+                    "type": "event.push",
+                    "request_id": f"usage-{frame_generation}",
+                    "push_secret": "s3cret",
+                    "satellite_sha": satellite_sha,
+                    "satellite_pid": satellite_pid,
+                    "wire_version": WIRE_VERSION,
+                    "host": "amaterasu",
+                    "source_host_proof": source_host_proof,
+                    "events": [],
+                    "usage": [{
+                        "stream_id": stream_id,
+                        "provider": "codex",
+                        "session_generation": frame_generation,
+                        "source_pane_pid": "8123",
+                        "native_session_id": "native-codex-redacted",
+                        "source_file_identity_digest": source_digest,
+                        "records": [{
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "token_count",
+                                "info": {"total_token_usage": {
+                                    "input_tokens": 100,
+                                    "cached_input_tokens": 40,
+                                    "output_tokens": 20,
+                                    "reasoning_output_tokens": 7,
+                                }},
+                            },
+                        }],
+                    }],
+                    "high_water": {},
+                }
+
+            initial = await_sessions.get(stream_id)
+            assert initial is not None
+            assert initial["usage"]["revision"] == 0
+
+            accepted = await ep.handle_push(frame(generation))
+            assert accepted["usage_recorded"] == 1
+            projected = await_sessions.get(stream_id)
+            assert projected is not None
+            assert projected["usage"]["collection_host"] == "amaterasu"
+            assert projected["usage"]["revision"] == 1
+            assert projected["usage"]["tokens"] == {
+                "input_total": 100, "cached_input": 40,
+                "output": 20, "reasoning": 7,
+            }
+            assert projected["usage"] == (await store.fetch_session(
+                "amaterasu", session_name,
+            ))["usage"]
+            assert emitter.calls == 1
+
+            before_mismatch = projected["usage"]
+            mismatched = await ep.handle_push(frame("generation-b"))
+            assert mismatched["usage_rejected"] == [{
+                "stream_id": stream_id, "reason": "generation_mismatch",
+            }]
+            unchanged = await_sessions.get(stream_id)
+            assert unchanged is not None
+            assert unchanged["usage"] == before_mismatch
+            assert emitter.calls == 1
+            assert broadcasts == []
         finally:
             store.stop()
 

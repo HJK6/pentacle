@@ -67,7 +67,13 @@ function registerIpc() {
   ipcMain.on('app:reload', (event) => event.sender.reload());
 
   const stopTerminals = ccHandlers.register(ipcMain);
-  app.on('before-quit', stopTerminals);
+  let quitting = false;
+  app.on('before-quit', (event) => {
+    if (quitting) return;
+    event.preventDefault();
+    quitting = true;
+    Promise.resolve().then(stopTerminals).then(() => app.quit(), () => app.quit());
+  });
 }
 
 async function createMainWindow() {

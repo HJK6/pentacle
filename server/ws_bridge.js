@@ -46,13 +46,16 @@ function createWsBridge({ table, logger = console } = {}) {
       id: `web-${nextSenderId++}`,
       send(channel, ...args) { if (!destroyed) rawSend(socket, { event: channel, args }); },
       isDestroyed() { return destroyed; },
-      once(name, fn) { listeners.set(name, fn); },
+      once(name, fn) {
+        if (!listeners.has(name)) listeners.set(name, []);
+        listeners.get(name).push(fn);
+      },
       destroy() {
         if (destroyed) return;
         destroyed = true;
-        const fn = listeners.get('destroyed');
+        const callbacks = listeners.get('destroyed') || [];
         listeners.clear();
-        if (fn) {
+        for (const fn of callbacks) {
           try { fn(); } catch (e) { logger.warn(`[web] destroyed handler threw: ${e.message}`); }
         }
       },
@@ -62,9 +65,9 @@ function createWsBridge({ table, logger = console } = {}) {
   const bridge = {
     connections,
 
-    addSocket(socket, { micStartAllowed = false } = {}) {
+    addSocket(socket, { micStartAllowed = false, reloginAllowed = false } = {}) {
       const sender = createSender(socket);
-      connections.set(socket, { sender, event: { sender }, micStartAllowed });
+      connections.set(socket, { sender, event: { sender }, micStartAllowed, reloginAllowed });
       return sender;
     },
 
@@ -114,6 +117,8 @@ function createWsBridge({ table, logger = console } = {}) {
 
       if (method === 'mic:start-server' && !connection.micStartAllowed)
         return rawSend(socket, errorPayload(id, 'mic_origin_refused', 'Microphone recovery requires the web page on this origin.'));
+      if (method.startsWith('provider-relogin:') && !connection.reloginAllowed)
+        return rawSend(socket, errorPayload(id, 'relogin_origin_refused', 'Provider sign-in requires the web page on this origin.'));
 
       const entry = table[method];
       if (!entry) return rawSend(socket, errorPayload(id, 'unknown_method', `unknown method: ${method}`));

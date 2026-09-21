@@ -98,6 +98,8 @@ function createTransport({ url, logger = console } = {}) {
     socket.addEventListener('close', () => {
       // A dropped socket can never answer; failing fast beats a hung promise.
       rejectAllPending('pentacle web host connection lost');
+      // Auth material never survives a connection loss or enters the replay queue.
+      try { listeners.get('provider-relogin:state')?.({ state: 'disconnected' }); } catch {}
       if (closed) return;
       const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** attempt++);
       setTimeout(connect, delay);
@@ -113,6 +115,10 @@ function createTransport({ url, logger = console } = {}) {
     call(method, ...args) {
       const id = nextId++;
       return new Promise((resolve, reject) => {
+        if (method.startsWith('provider-relogin:') && (!socket || socket.readyState !== WebSocket.OPEN)) {
+          reject(new Error('Provider sign-in connection is unavailable'));
+          return;
+        }
         pending.set(id, { resolve, reject });
         const frame = { id, method, args };
         if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
@@ -285,6 +291,11 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
   const notInWeb = (label) => { if (micFeature) showWebToast(`${label} is not available in web mode`); };
 
   return {
+    reloginHosts: () => call('provider-relogin:hosts'),
+    reloginStart: (request) => call('provider-relogin:start', request),
+    reloginCode: (id, code) => call('provider-relogin:code', id, code),
+    reloginCancel: (id) => call('provider-relogin:cancel', id),
+    onReloginState: (callback) => on('provider-relogin:state', callback),
     // PTY operations — hostId threads through so each slot knows which tmux
     // server its session lives on. Defaults to 'local' for backcompat.
     createPty: (slot, sessionName, hostId, cols, rows) => call('pty:create', slot, sessionName, hostId || 'local', cols, rows),

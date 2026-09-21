@@ -25,6 +25,7 @@ const { registerAssetIpcHandlers } = require('./asset_ipc_bridge');
 const { registerScheduleIpcHandlers } = require('./schedule_ipc_bridge');
 const { registerNotificationIpcHandlers } = require('./notification_ipc_bridge');
 const { registerTerminalIpc } = require('./terminal_adapter');
+const { registerProviderRelogin } = require('./provider_relogin');
 const { isProtectedAssistantRename } = require('./assistant_role_guard');
 const { probeMicServer } = require('./mic-url');
 
@@ -60,6 +61,7 @@ const WEB_UNSUPPORTED = {
 const PUSH_EVENTS = [
   'pty:data',
   'pty:exit',
+  'provider-relogin:state',
   'assign-slot',
   'action',
   'chat-stream:frame',
@@ -128,6 +130,7 @@ function createCcHandlers({
   configWarnings = [],
   harness = process.env.PENTACLE_HARNESS === '1',
   terminalOptions = undefined,
+  reloginOptions = undefined,
   startMicServer = null,
 }) {
   const telemetry = [];
@@ -195,6 +198,7 @@ function createCcHandlers({
     if (harness) target.handle('harness:force-reconnect', () => { chatStreamClient.forceReconnect('harness'); return { ok: true }; });
 
     const stopTerminals = registerTerminalIpc(target, CONFIG, chatStreamClient, terminalOptions);
+    const stopRelogin = registerProviderRelogin(target, CONFIG, reloginOptions);
 
     target.handle('pty:save-image', (_event, base64Data) => {
       try {
@@ -227,7 +231,10 @@ function createCcHandlers({
       buffered_events: telemetry.length,
     }));
 
-    return stopTerminals;
+    return async () => {
+      const authCleanup = stopRelogin();
+      try { stopTerminals(); } finally { await authCleanup; }
+    };
   }
 
   return { register, publicConfig, telemetry };

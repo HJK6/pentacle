@@ -595,9 +595,33 @@ class EventPush:
         usage_recorded = usage_replayed = 0
         usage_rejected: list[dict[str, str]] = []
         if "usage" in msg:
-            usage_recorded, usage_replayed, usage_rejected, _accepted_usage = await self._record_remote_usage(
+            usage_recorded, usage_replayed, usage_rejected, accepted_usage = await self._record_remote_usage(
                 msg.get("usage"), authenticated_host=authenticated_source_host,
             )
+            usage_projected = False
+            if self.sessions is not None:
+                for accepted in accepted_usage:
+                    snapshot = accepted.get("snapshot")
+                    stream_id = accepted.get("stream_id")
+                    if (
+                        not isinstance(snapshot, dict)
+                        or not isinstance(stream_id, str)
+                        or snapshot.get("stream_id") != stream_id
+                        or not isinstance(snapshot.get("session_generation"), str)
+                    ):
+                        continue
+                    if self.sessions.apply_durable(
+                        stream_id,
+                        expected_generation=snapshot["session_generation"],
+                        usage=snapshot,
+                    ) is not None:
+                        usage_projected = True
+            if usage_projected and self.inventory_emitter is not None:
+                try:
+                    await self.inventory_emitter.emit_if_changed()
+                except Exception as exc:  # noqa: BLE001 - never acknowledge a failed fanout
+                    log.warning("event.push usage inventory broadcast failed host=%s: %s", host, exc)
+                    return err("ingest_failed")
 
         # High-water marks: echo the per-file offsets this batch reached so the
         # satellite advances its in-memory offset ONLY after a durable accept.
