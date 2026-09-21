@@ -11,6 +11,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from provider_wrappers import normalize_provider_user_text
+
 
 def _to_text(content: Any) -> str:
     if isinstance(content, str):
@@ -280,8 +282,8 @@ def normalize_claude_jsonl_record(
     """Map one JSONL record to zero-or-more wire payloads.
 
     Returns payloads without `daemon_seq` — the daemon stamps that when
-    broadcasting. Output shape mirrors `claudeJsonlNormalize.ts` so the
-    cross-language fixtures agree on key structure.
+    broadcasting. This mapper is for source-authenticated Claude transcripts;
+    provider-wrapper display semantics share a fixture with chat-core.
     """
     if not isinstance(record, dict):
         return []
@@ -347,23 +349,30 @@ def normalize_claude_jsonl_record(
         return _stamp_jsonl_event_identity([make("SYSTEM", text, {"subtype": subtype})], record_uuid)
 
     if record_type == "user":
-        content = msg.get("content")
-        if isinstance(content, str):
+        def make_user(provider_content: str) -> dict:
+            content, wrapper = normalize_provider_user_text(
+                provider_content, provider="claude", authenticated=True,
+            )
             peer_tell = _parse_peer_tell(content)
             if peer_tell is not None:
-                return _stamp_jsonl_event_identity(
-                    [make("TELL", peer_tell["payload"], {
-                        "sender": peer_tell["sender"],
-                        "tell_id": peer_tell["tell_id"],
-                        "enqueued_at": peer_tell["enqueued_at"],
-                        "peer_payload": peer_tell["payload"],
-                    })],
-                    record_uuid,
-                )
-            classification = _classify_user_string(content)
-            if classification == "system":
-                return _stamp_jsonl_event_identity([make("SYSTEM", content, {"subtype": "synthetic-user"})], record_uuid)
-            return _stamp_jsonl_event_identity([make("USER", content)], record_uuid)
+                event = make("TELL", peer_tell["payload"], {
+                    "sender": peer_tell["sender"],
+                    "tell_id": peer_tell["tell_id"],
+                    "enqueued_at": peer_tell["enqueued_at"],
+                    "peer_payload": peer_tell["payload"],
+                })
+            elif _classify_user_string(content) == "system":
+                event = make("SYSTEM", content, {"subtype": "synthetic-user"})
+            else:
+                event = make("USER", content)
+            if wrapper is not None:
+                event["provider_wrapper"] = wrapper
+                event["raw"]["provider_content"] = provider_content
+            return event
+
+        content = msg.get("content")
+        if isinstance(content, str):
+            return _stamp_jsonl_event_identity([make_user(content)], record_uuid)
         events: list[dict] = []
         user_text: list[str] = []
         for block in _content_blocks(record):
@@ -380,20 +389,7 @@ def normalize_claude_jsonl_record(
                 if text:
                     user_text.append(text)
         if user_text:
-            joined = "\n".join(user_text)
-            peer_tell = _parse_peer_tell(joined)
-            if peer_tell is not None:
-                events.insert(0, make("TELL", peer_tell["payload"], {
-                    "sender": peer_tell["sender"],
-                    "tell_id": peer_tell["tell_id"],
-                    "enqueued_at": peer_tell["enqueued_at"],
-                    "peer_payload": peer_tell["payload"],
-                }))
-                return _stamp_jsonl_event_identity(events, record_uuid)
-            if _classify_user_string(joined) == "system":
-                events.insert(0, make("SYSTEM", joined, {"subtype": "synthetic-user"}))
-            else:
-                events.insert(0, make("USER", joined))
+            events.insert(0, make_user("\n".join(user_text)))
         return _stamp_jsonl_event_identity(events, record_uuid)
 
     if record_type == "attachment":

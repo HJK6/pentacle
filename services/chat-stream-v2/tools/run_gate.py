@@ -176,6 +176,8 @@ def _preflight(env: dict[str, str], log: Path) -> tuple[int, bool]:
 def _result(tier: str, *, code: int, passed: bool, reason: str | None = None, command: list[str] | None = None, timed_out: bool = False, preflight: int | None = None, junit: Path | None = None, log: Path | None = None, counts: dict[str, Any] | None = None, soak: dict[str, str] | None = None) -> dict[str, Any]:
     return {"tier": tier, "command": command or [], "returncode": code, "timed_out": timed_out, "preflight_returncode": preflight, "junit": str(junit) if junit else None, "log": str(log) if log else None, "counts": counts, "soak_parameters": soak, "passed": passed, "reason": reason}
 def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, manifest: Path) -> dict[str, Any]:
+    if "TMUX" in os.environ:
+        return _result(tier, code=2, passed=False, reason="ambient_tmux")
     junit, log = evidence / f"{tier}.junit.xml", evidence / f"{tier}.log"
     junit.unlink(missing_ok=True)
     env, soak = os.environ.copy(), None

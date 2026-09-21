@@ -52,6 +52,8 @@ python -m pytest services/agent-orch/tests
 python services/chat-stream-v2/tools/run_gate.py merge
 ```
 
+Run tests in a harness-owned tmux session on an explicit `tmux -L <test-socket>` namespace, with `env -u TMUX` before Python. The gate runner and preflight refuse an inherited `TMUX`; daemon fixtures clear it and use their own explicit socket. Never run bare `tmux kill-server` against ambient operator state.
+
 Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the real desktop smoke. Fixtures must use invented content and valid public wire identifiers.
 
 Committed history batches yield between broadcasts so existing socket writers can drain. Each client still has one writer and a 256-frame queue; a blocked writer remains subject to `1011 slow_consumer` isolation. Smoke failure records retain the full exception chain, including the original cell failure when teardown also fails. Preserve the smoke command's complete output when investigating a failed deployment; the deployment stamp contains only a shortened command detail.

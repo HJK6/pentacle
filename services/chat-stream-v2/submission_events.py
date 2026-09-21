@@ -53,7 +53,11 @@ def provider_text_digest(text: object) -> str:
 
 
 def submission_text_matches(event: dict[str, Any], expected_text: str) -> bool:
-    """Projected events prove original provider content, never caption equality."""
+    """Compare ingest display text; projected captions retain digest authority.
+
+    Provider envelopes are removed once at source-authenticated ingress, never
+    by this predicate from arbitrary submission/operator text.
+    """
     if "provider_text_digest" in event:
         digest = event["provider_text_digest"]
         return (

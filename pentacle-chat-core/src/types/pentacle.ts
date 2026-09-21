@@ -81,6 +81,8 @@ export interface PentacleEvent {
   kind: PentacleEventKind;
   text: string;
   raw?: Record<string, unknown>;
+  /** Grammar provenance at authenticated provider ingress; text is already unwrapped. */
+  provider_wrapper?: { kind: 'claude_pasted_content'; id: string; provenance: 'grammar' };
   jsonl_record_uuid?: string;
   jsonl_resolution_for_record_uuid?: string;
   client_origin?: boolean;

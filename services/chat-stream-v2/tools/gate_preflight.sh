@@ -2,6 +2,11 @@
 # gate_preflight.sh — fail fast on the host prerequisite for v2's multi-bind gate.
 set -euo pipefail
 
+if [[ "${TMUX+x}" == x ]]; then
+  echo "[v2-gate-preflight] FAIL: ambient_tmux: run with env -u TMUX on a harness-owned socket" >&2
+  exit 2
+fi
+
 LOOPBACK_ALIAS="127.0.0.2"
 SERVICE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMEDIATION="${SERVICE_DIR}/deploy/loopback-alias/README.md"

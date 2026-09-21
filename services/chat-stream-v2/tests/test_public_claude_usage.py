@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("isolated_tmux_env")
+
 spec = importlib.util.spec_from_file_location("public_claude_usage", Path(__file__).parents[3] / "scripts/check_claude_usage.py")
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)

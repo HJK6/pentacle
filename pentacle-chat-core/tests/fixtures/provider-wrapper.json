@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "captured_content_sha256": "338634ff46c8c295b5cf80bb80ca7d43ef9b38c2e93621b09d34c97ae0042dd4",
+  "record": {
+    "type": "user",
+    "message": {
+      "role": "user",
+      "content": "\n\n<pasted_content id=\"8769\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"8769\">\n"
+    },
+    "uuid": "e1992dc1-5bf7-405c-a204-0e6dc09e9ca1",
+    "timestamp": "2026-09-20T13:24:18.469Z",
+    "sessionId": "5ec3d886-7cda-4eee-84fc-2a615ab66c96",
+    "promptId": "3450eadd-45fa-4977-860e-0c67171e128f",
+    "origin": {
+      "kind": "human"
+    },
+    "promptSource": "typed",
+    "turnOrigin": "human",
+    "userType": "external",
+    "entrypoint": "cli",
+    "version": "2.1.278"
+  },
+  "display_text": "Reply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.",
+  "wrapper": {
+    "kind": "claude_pasted_content",
+    "id": "8769",
+    "provenance": "grammar"
+  },
+  "negative_texts": [
+    "<pasted_content id=\"8769\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"8769\">\n",
+    "\n\n<pasted_content id=\"8768\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"8769\">\n",
+    "\n\n<pasted_content id=\"8769\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content>\n",
+    "\n\n<pasted_content id=\"8769\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"8769\">\ntail",
+    "\n\n<pasted_content id='8769'>\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id='8769'>\n",
+    "\n\n<pasted_content id=\"abc\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"abc\">\n",
+    "\r\n\r\n<pasted_content id=\"8769\">\r\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\r\n</pasted_content id=\"8769\">\r\n",
+    "Please explain \n\n<pasted_content id=\"8769\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"8769\">\n"
+  ],
+  "normalization_cases": [
+    {
+      "text": "\u001b[31mhello\u001b[0m\r\n world   ",
+      "normalized": "hello world"
+    },
+    {
+      "text": "a\t b\n\n c",
+      "normalized": "a b c"
+    },
+    {
+      "text": "a\u001cb",
+      "normalized": "a b"
+    },
+    {
+      "text": "a﻿b",
+      "normalized": "a﻿b"
+    },
+    {
+      "text": "  ",
+      "normalized": ""
+    }
+  ]
+}

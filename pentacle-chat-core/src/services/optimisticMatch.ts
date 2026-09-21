@@ -1,4 +1,5 @@
 import type { OptimisticSendState, PentacleEvent } from '../types/pentacle';
+import { normalizeSubmissionText, providerDisplayText } from './providerWrapper';
 
 // Live reconcile window: a server USER echo arriving within this many ms of an
 // optimistic send's created_at reconciles it. Mirrors the mobile store's and
@@ -27,7 +28,7 @@ export function parseServerEventTimeStrict(event: PentacleEvent): number | null 
  *   - event.kind === 'USER' (case-insensitive)
  *   - NOT client_origin (i.e. a true server-origin echo, not our own visual row)
  *   - same stream_id
- *   - same text
+ *   - same display text under the daemon's submission normalization
  *   - |parseServerEventTimeStrict(event) - send.created_at| <= windowMs
  *
  * Status gating (queued/dispatched/acked/indeterminate/echoed) is the caller's
@@ -46,7 +47,7 @@ export function optimisticMatchesServerUser(
   if (serverEvent.stream_id !== send.stream_id) return false;
   if (serverEvent.optimistic_id) return serverEvent.optimistic_id === send.optimistic_id;
   if (serverEvent.message_id && send.message_id) return serverEvent.message_id === send.message_id;
-  if (serverEvent.text !== send.text) return false;
+  if (normalizeSubmissionText(providerDisplayText(serverEvent)) !== normalizeSubmissionText(send.text)) return false;
   const parsedTime = parseServerEventTimeStrict(serverEvent);
   return parsedTime !== null && Math.abs(parsedTime - send.created_at) <= windowMs;
 }

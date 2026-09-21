@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = [pytestmark, pytest.mark.usefixtures("isolated_tmux_env")]
+
 import launch  # noqa: E402
 import spawnctl as spawnctl_mod  # noqa: E402
 from hosts import Hosts  # noqa: E402

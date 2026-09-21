@@ -29,3 +29,19 @@ def _public_test_environment():
 
 def pytest_configure(config) -> None:
     del config
+
+
+@pytest.fixture()
+def isolated_tmux_env(tmp_path):
+    """Keep bare tmux calls and child daemons on one owned test socket."""
+    import subprocess
+    from tmux_isolation import isolate_tmux
+    # An independent context tears down after test-owned monkeypatch fixtures,
+    # so injected subprocess failures cannot replace the cleanup transport.
+    with pytest.MonkeyPatch.context() as isolation:
+        wrapper, socket = isolate_tmux(tmp_path, isolation)
+        try:
+            yield wrapper
+        finally:
+            subprocess.run([wrapper, "kill-server"], check=False, capture_output=True)
+            socket.unlink(missing_ok=True)
