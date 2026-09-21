@@ -4,7 +4,7 @@ import type { PentacleEvent } from '../types/pentacle';
 const PROVIDER_WRAPPERS = [{
   provider: 'claude',
   kind: 'claude_pasted_content' as const,
-  pattern: /^\n\n<pasted_content id="([0-9]+)">\n([\s\S]*)\n<\/pasted_content id="\1">\n$/,
+  pattern: /^\n\n<pasted_content id="([0-9a-f]+)">\n([\s\S]*)\n<\/pasted_content id="\1">\n$/,
 }];
 
 export function normalizeProviderUserText(text: string, provider: string, authenticated = false): {

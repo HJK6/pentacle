@@ -20,6 +20,26 @@ test('captured authenticated Claude wrapper reconciles optimistic echo', () => {
   assert.equal(optimisticMatchesServerUser(send, event, 60_000), true);
 });
 
+test('live failure capture reconciles legacy and tagged optimistic echo', () => {
+  for (const capture of fixture.additional_captures) {
+    const legacy = { ...event, text: capture.record.message.content };
+    const pending = { ...send, text: capture.display_text };
+    const projected = normalizeProviderUserText(legacy.text, 'claude', true);
+    assert.deepEqual(projected, { text: capture.display_text, provider_wrapper: capture.wrapper });
+    assert.equal(optimisticMatchesServerUser(pending, legacy, 60_000), true);
+    assert.equal(optimisticMatchesServerUser(pending, { ...legacy, ...projected }, 60_000), true);
+  }
+});
+
+test('lowercase hex identifier preserves length and leading zeroes', () => {
+  for (const id of fixture.positive_ids) {
+    const raw = event.text.replaceAll('8769', id);
+    assert.deepEqual(normalizeProviderUserText(raw, 'claude', true), {
+      text: fixture.display_text, provider_wrapper: { ...fixture.wrapper, id },
+    });
+  }
+});
+
 test('shared fixture has identical display, wrapper and whitespace semantics', () => {
   assert.equal(fixture.schema_version, 1);
   assert.deepEqual(normalizeProviderUserText(event.text, 'claude', true), {

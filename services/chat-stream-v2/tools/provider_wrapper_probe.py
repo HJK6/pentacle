@@ -37,7 +37,7 @@ def assert_wrapper_receipt(
     assert wrapper.get("kind") == "claude_pasted_content", "missing wrapper kind"
     assert wrapper.get("provenance") == "grammar", "missing grammar provenance"
     identifier = wrapper.get("id")
-    assert isinstance(identifier, str) and re.fullmatch(r"[0-9]+", identifier), "invalid wrapper ID"
+    assert isinstance(identifier, str) and re.fullmatch(r"[0-9a-f]+", identifier), "invalid wrapper ID"
     expected_raw = (
         f'\n\n<pasted_content id="{identifier}">\n{body}'
         f'\n</pasted_content id="{identifier}">\n'

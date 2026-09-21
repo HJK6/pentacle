@@ -12,7 +12,7 @@ import re
 
 PROVIDER_WRAPPERS = (
     ("claude", "claude_pasted_content", re.compile(
-        r'\n\n<pasted_content id="(?P<id>[0-9]+)">\n'
+        r'\n\n<pasted_content id="(?P<id>[0-9a-f]+)">\n'
         r'(?P<body>[\s\S]*)\n</pasted_content id="(?P=id)">\n'
     )),
 )

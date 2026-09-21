@@ -32,9 +32,15 @@
     "\n\n<pasted_content id=\"8769\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content>\n",
     "\n\n<pasted_content id=\"8769\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"8769\">\ntail",
     "\n\n<pasted_content id='8769'>\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id='8769'>\n",
-    "\n\n<pasted_content id=\"abc\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"abc\">\n",
+    "\n\n<pasted_content id=\"abg\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"abg\">\n",
     "\r\n\r\n<pasted_content id=\"8769\">\r\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\r\n</pasted_content id=\"8769\">\r\n",
-    "Please explain \n\n<pasted_content id=\"8769\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"8769\">\n"
+    "Please explain \n\n<pasted_content id=\"8769\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"8769\">\n",
+    "\n\n<pasted_content id=\"\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"\">\n",
+    "\n\n<pasted_content id=\"079C\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"079C\">\n",
+    "\n\n<pasted_content id=\"g\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"g\">\n",
+    "\n\n<pasted_content id=\"１２\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"１２\">\n",
+    "\n\n<pasted_content id=\"0x079c\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"0x079c\">\n",
+    "\n\n<pasted_content id=\"079c\">\nReply exactly PENTACLE_FLEET_SMOKE_551086dc72d74142bc0c15fdc22b5e29 and do nothing else.\n</pasted_content id=\"079d\">\n"
   ],
   "normalization_cases": [
     {
@@ -57,5 +63,41 @@
       "text": "  ",
       "normalized": ""
     }
+  ],
+  "additional_captures": [
+    {
+      "captured_content_sha256": "15458a4cee2550eac99ff13b21e18113f05d8c7f7664d65c836540a8396e6162",
+      "record": {
+        "promptId": "359e9fc9-2dfa-403f-a291-517a8ff27932",
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": "\n\n<pasted_content id=\"079c\">\nReply exactly PENTACLE_FLEET_SMOKE_551086dc72d74142bc0c15fdc22b5e29 and do nothing else.\n</pasted_content id=\"079c\">\n"
+        },
+        "uuid": "d570730e-5d21-4fac-8583-db193d12b4cd",
+        "timestamp": "2026-09-21T01:00:27.911Z",
+        "origin": {
+          "kind": "human"
+        },
+        "promptSource": "typed",
+        "turnOrigin": "human",
+        "userType": "external",
+        "entrypoint": "cli",
+        "sessionId": "0d726d21-8e33-40cb-b81e-f12e467664d1",
+        "version": "2.1.278"
+      },
+      "display_text": "Reply exactly PENTACLE_FLEET_SMOKE_551086dc72d74142bc0c15fdc22b5e29 and do nothing else.",
+      "wrapper": {
+        "kind": "claude_pasted_content",
+        "id": "079c",
+        "provenance": "grammar"
+      }
+    }
+  ],
+  "positive_ids": [
+    "0",
+    "f",
+    "00e0f5",
+    "0123456789abcdef"
   ]
 }

@@ -2,11 +2,14 @@
 
 `provider_wrappers.py` owns the exact provider wrapper table. The Claude JSONL
 normalizer opts in at the existing source-authenticated transcript boundary. It
-recognizes the whole string below (literal LF framing, paired ASCII decimal IDs):
+recognizes the whole string below (literal LF framing, paired nonempty lowercase ASCII hexadecimal IDs (`[0-9a-f]+`)):
 
 ```text
 \n\n<pasted_content id="123">\nBODY\n</pasted_content id="123">\n
 ```
+
+IDs must match exactly, preserve leading zeroes, and have no fixed length.
+Uppercase, non-hexadecimal and empty IDs are rejected.
 
 Only one outer layer is removed; BODY bytes are preserved. Similar or malformed
 text, other providers and callers without authenticated-source provenance are

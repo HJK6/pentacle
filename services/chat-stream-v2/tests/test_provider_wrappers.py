@@ -1,6 +1,7 @@
 """Captured provider paste replay through ingest, landing proof and receipt projection."""
 import asyncio
 import copy
+import hashlib
 import json
 from pathlib import Path
 
@@ -35,6 +36,32 @@ def test_wrapper_identifier_is_preserved_and_extra_final_newline_rejected():
     raw = FIXTURE['record']['message']['content'].replace('8769', '0008769')
     assert event_for(raw)['provider_wrapper']['id'] == '0008769'
     assert event_for(raw + '\n')['text'] == raw + '\n'
+
+
+@pytest.mark.parametrize('capture', FIXTURE['additional_captures'])
+@pytest.mark.parametrize('blocks', [False, True])
+def test_live_failure_capture_proves_submission_and_probe(capture, blocks):
+    raw = capture['record']['message']['content']
+    assert hashlib.sha256(raw.encode()).hexdigest() == capture['captured_content_sha256']
+    record = copy.deepcopy(capture['record'])
+    if blocks:
+        record['message']['content'] = [{'type': 'text', 'text': raw}]
+    event = normalize_claude_jsonl_records([record], host=HOST, session_name=NAME)[0]
+    assert event['text'] == capture['display_text']
+    assert event['provider_wrapper'] == capture['wrapper']
+    assert event['raw']['provider_content'] == raw
+    assert submission_text_matches(event, capture['display_text'])
+    assert Comms._tail_event_matches_submission(event, STREAM, capture['display_text'])
+    assert_wrapper_receipt({'submission_confirmed': True}, [{**event, 'daemon_seq': 10}],
+                           stream_id=STREAM, body=capture['display_text'], watermark=9)
+
+
+@pytest.mark.parametrize('identifier', FIXTURE['positive_ids'])
+def test_lowercase_hex_identifier_preserves_length_and_leading_zeroes(identifier):
+    raw = FIXTURE['record']['message']['content'].replace('8769', identifier)
+    event = event_for(raw)
+    assert event['text'] == FIXTURE['display_text']
+    assert event['provider_wrapper']['id'] == identifier
 
 
 def test_tool_result_and_assistant_content_are_not_unwrapped():
