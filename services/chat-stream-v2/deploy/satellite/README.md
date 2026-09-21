@@ -23,13 +23,16 @@ on BOTH ends and they match.
   PENTACLE_SATELLITE_HOST=workstation
   PENTACLE_SATELLITE_WS=ws://coordinator.example:7791
   PENTACLE_EVENT_PUSH_SECRET=<the same secret>
+  PENTACLE_EVENT_PUSH_HOST_SECRET=<this host's per-host HMAC secret>
   ```
 
 Replace `workstation` with this satellite's registered machine name and
 `coordinator.example` with the reachable daemon address before installation.
 
-Generate once with `openssl rand -hex 32` and share it across the fleet the same
-way other fleet secrets are provisioned.
+Generate the bearer once with `openssl rand -hex 32` and share it across the
+fleet. Generate a distinct host proof secret for each satellite and provision
+the matching coordinator key `event_push.host_secret.<host>`; the host proof
+secret must not be shared across hosts.
 
 ## 1. Dedicated checkout (do NOT use a dev worktree)
 
@@ -100,6 +103,8 @@ the live row's `working` / `working_label` overlay through the existing
 - `PENTACLE_SATELLITE_DISABLE=1` — kill switch: stay connected, push nothing.
 - `PENTACLE_SATELLITE_NO_AUTOUPDATE=1` — never git-checkout/exec-restart (stay on the running SHA;
   a configured exact pin rejects mismatched pushes and requests an update).
+- `PENTACLE_EVENT_PUSH_HOST_SECRET` — this satellite's per-host HMAC secret;
+  usage-bearing pushes sign `event.push.v1\0<host>\0<satellite-sha>\0<satellite-pid>`.
 - `PENTACLE_SATELLITE_INTERVAL_S`, `PENTACLE_SATELLITE_MAX_EVENTS`, `PENTACLE_SATELLITE_MAX_READ_BYTES`, `PENTACLE_SATELLITE_UPDATE_MIN_INTERVAL_S` — existing loop knobs.
 
 Working freshness does not add a knob: the local scan remains one pass and the

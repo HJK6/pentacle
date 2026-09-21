@@ -8,7 +8,7 @@
     launchctl unload  ~/Library/LaunchAgents/com.pentacle.satellite.plist 2>/dev/null || true
     launchctl load -w ~/Library/LaunchAgents/com.pentacle.satellite.plist
 
-  The shared push secret is NOT committed: the bash wrapper sources it from
+  The shared bearer and per-host proof secrets are NOT committed: the bash wrapper sources them from
   ~/.config/pentacle/satellite.env (see README). WorkingDirectory is a DEDICATED
   checkout (auto-update git-checkouts there); it must not be a dev worktree.
 -->

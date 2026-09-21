@@ -51,6 +51,8 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -152,6 +154,7 @@ class SatelliteConfig:
     bart_ws: str = DEFAULT_BART_WS
     host: str = ""                      # this machine's fleet name; MUST match registry host
     push_secret: str = ""
+    host_secret: str = ""               # per-host HMAC proof for usage/event.push
     checkout: str = ""                  # git checkout root for auto-update
     session_glob: str = "v2-*"          # tmux session-name filter (pentacle sessions)
     claude_projects_root: str = DEFAULT_CLAUDE_PROJECTS_ROOT
@@ -193,6 +196,7 @@ class SatelliteConfig:
             host=(e.get(ENV_PREFIX + "HOST") or socket.gethostname().split(".")[0]).strip().lower(),
             # The shared bearer secret is intentionally the same env name coordinator reads.
             push_secret=e.get("PENTACLE_EVENT_PUSH_SECRET") or "",
+            host_secret=e.get("PENTACLE_EVENT_PUSH_HOST_SECRET") or "",
             checkout=e.get(ENV_PREFIX + "CHECKOUT") or _repo_root(),
             session_glob=e.get(ENV_PREFIX + "SESSION_GLOB") or "v2-*",
             claude_projects_root=e.get(ENV_PREFIX + "CLAUDE_PROJECTS_ROOT") or DEFAULT_CLAUDE_PROJECTS_ROOT,
@@ -469,6 +473,10 @@ class Satellite:
         #: empty pass.
         self._discover_fail_since = 0.0
         self._discover_fail_logged_at = 0.0
+        self._usage_fences: dict[str, dict[str, str]] = {}
+        self._pending_usage: dict[str, dict[str, object]] = {}
+        self._pass_usage: dict[str, dict[str, object]] = {}
+        self._usage_path_streams: dict[str, set[str]] = {}
 
     def _read_sha(self) -> str:
         try:
@@ -629,6 +637,101 @@ class Satellite:
 
     # -- tail pass ------------------------------------------------------------
 
+    @staticmethod
+    def _source_file_identity_digest(path: str) -> str:
+        """Hash path plus stable file identity; never put the path on the wire."""
+        try:
+            stat = os.stat(path)
+            identity = f"{os.path.abspath(path)}\0{stat.st_dev}\0{stat.st_ino}"
+        except OSError:
+            identity = os.path.abspath(path)
+        return hashlib.sha256(identity.encode("utf-8", "surrogateescape")).hexdigest()
+
+    @staticmethod
+    def _sanitize_usage_records(provider: str, records: list[dict]) -> list[dict]:
+        """Keep only provider-native identity and token-count fields."""
+        sanitized: list[dict] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if provider == "codex":
+                if record.get("type") == "session_meta":
+                    payload = record.get("payload")
+                    identity = payload.get("id") if isinstance(payload, dict) else None
+                    if isinstance(identity, str) and identity:
+                        sanitized.append({"type": "session_meta", "payload": {"id": identity}})
+                elif record.get("type") == "event_msg":
+                    payload = record.get("payload")
+                    info = payload.get("info") if isinstance(payload, dict) else None
+                    usage = info.get("total_token_usage") if isinstance(info, dict) else None
+                    if (
+                        isinstance(payload, dict) and payload.get("type") == "token_count"
+                        and isinstance(usage, dict)
+                    ):
+                        allowed = {
+                            key: usage[key] for key in (
+                                "input_tokens", "cached_input_tokens",
+                                "output_tokens", "reasoning_output_tokens",
+                            ) if type(usage.get(key)) is int and usage[key] >= 0
+                        }
+                        if len(allowed) == 4:
+                            sanitized.append({
+                                "type": "event_msg",
+                                "payload": {"type": "token_count", "info": {"total_token_usage": allowed}},
+                            })
+            elif provider == "claude" and record.get("type") == "assistant":
+                message = record.get("message")
+                usage = message.get("usage") if isinstance(message, dict) else None
+                message_id = message.get("id") if isinstance(message, dict) else None
+                session_id = record.get("sessionId") or record.get("session_id")
+                if isinstance(usage, dict) and isinstance(message_id, str) and message_id and isinstance(session_id, str) and session_id:
+                    allowed = {
+                        key: usage[key] for key in (
+                            "input_tokens", "cache_read_input_tokens",
+                            "cache_creation_input_tokens", "output_tokens",
+                        ) if type(usage.get(key)) is int and usage[key] >= 0
+                    }
+                    if len(allowed) == 4:
+                        sanitized.append({
+                            "type": "assistant", "sessionId": session_id,
+                            "message": {"id": message_id, "usage": allowed},
+                        })
+        return sanitized
+
+    def _usage_candidate(
+        self, st: _StreamTail, provider: str, records: list[dict],
+        record_end_offsets: list[int], consumed_to: int,
+    ) -> dict[str, object] | None:
+        stream_id = f"{self.config.host}:{st.session_name}"
+        fences = getattr(self, "_usage_fences", {}).get(stream_id)
+        if not isinstance(fences, dict):
+            return None
+        source_pid = str(st.source_pane_pid or "").removeprefix("!")
+        if (
+            fences.get("provider") != provider
+            or fences.get("source_pane_pid") != source_pid
+            or not fences.get("session_generation")
+            or not st.provider_session_id
+            or not source_pid
+        ):
+            return None
+        included = [
+            record for record, end_offset in zip(records, record_end_offsets)
+            if end_offset <= consumed_to
+        ]
+        wire_records = self._sanitize_usage_records(provider, included)
+        if not wire_records:
+            return None
+        return {
+            "stream_id": stream_id,
+            "provider": provider,
+            "session_generation": str(fences["session_generation"]),
+            "source_pane_pid": source_pid,
+            "native_session_id": st.provider_session_id,
+            "source_file_identity_digest": self._source_file_identity_digest(st.path),
+            "records": wire_records,
+        }
+
     def _collect(
         self,
         discovered: dict[str, _DiscoveredPane | str] | None = None,
@@ -640,6 +743,12 @@ class Satellite:
         drains over successive passes instead of re-collecting the same prefix.
         `discovered` is injected in tests; production passes None to use local tmux."""
         cfg = self.config
+        if not hasattr(self, "_pending_usage"):
+            self._pending_usage = {}
+        if not hasattr(self, "_usage_fences"):
+            self._usage_fences = {}
+        self._pass_usage = {}
+        self._usage_path_streams = {}
         if discovered is None:
             discovered = self._discover()
         else:
@@ -715,6 +824,11 @@ class Satellite:
                 # Advance to the prefix pushed this pass (a capped stream advances
                 # PAST what it pushed rather than re-collecting it forever).
                 high_water[path] = pending
+                usage = getattr(self, "_pass_usage", {}).get(f"{self.config.host}:{name}")
+                if usage is not None:
+                    self._usage_path_streams.setdefault(path, set()).add(f"{self.config.host}:{name}")
+                    self._pending_usage.setdefault(f"{self.config.host}:{name}", usage)
+                    self._pending_usage[f"{self.config.host}:{name}"] = usage
         return events, high_water, capped
 
     def _collect_stream(self, st: _StreamTail, budget: int, out: list[dict]) -> tuple[int, bool]:
@@ -828,9 +942,23 @@ class Satellite:
         if not capped:
             # Whole span consumed, including any trailing non-record bytes.
             consumed_to = new_offset
+        candidate = self._usage_candidate(
+            st, provider, records, record_end_offsets, consumed_to,
+        )
+        if candidate is not None:
+            if not hasattr(self, "_pass_usage"):
+                self._pass_usage = {}
+            self._pass_usage[f"{self.config.host}:{st.session_name}"] = candidate
         return consumed_to, capped
 
     # -- push / ack -----------------------------------------------------------
+
+    def _source_host_proof(self, satellite_pid: int) -> str | None:
+        secret = str(getattr(self.config, "host_secret", "") or "")
+        if not secret or not self.config.host or not self.sha or not satellite_pid:
+            return None
+        message = f"event.push.v1\0{self.config.host}\0{self.sha}\0{satellite_pid}".encode("utf-8")
+        return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
     async def _send_host_stats(self, ws) -> dict | None:
         self._req += 1
@@ -840,7 +968,7 @@ class Satellite:
         except Exception as exc:  # noqa: BLE001 - retry on the next sample interval
             log.warning("machine stats sample failed: %s", exc)
             return None
-        await ws.send(json.dumps({
+        frame = {
             "type": "host.stats",
             "request_id": rid,
             "push_secret": self.config.push_secret,
@@ -849,7 +977,8 @@ class Satellite:
             "wire_version": STATS_WIRE_VERSION,
             "host": self.config.host,
             "stats": stats,
-        }))
+        }
+        await ws.send(json.dumps(frame))
         deadline = asyncio.get_running_loop().time() + self.config.ack_timeout_s
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
@@ -862,6 +991,13 @@ class Satellite:
             except (ValueError, TypeError):
                 continue
             if isinstance(msg, dict) and msg.get("request_id") == rid:
+                fences = msg.get("usage_fences")
+                if isinstance(fences, list):
+                    self._usage_fences = {
+                        str(item.get("stream_id")): dict(item)
+                        for item in fences
+                        if isinstance(item, dict) and item.get("stream_id")
+                    }
                 return msg
 
     async def _push(
@@ -896,6 +1032,12 @@ class Satellite:
         # Always send the field, including the empty acknowledgement, so the
         # daemon can distinguish an updated satellite from a legacy caller.
         frame["frozen_streams"] = frozen_streams
+        pending_usage = getattr(self, "_pending_usage", {})
+        if pending_usage:
+            frame["usage"] = [pending_usage[sid] for sid in sorted(pending_usage)]
+        proof = self._source_host_proof(os.getpid())
+        if proof is not None:
+            frame["source_host_proof"] = proof
         await ws.send(json.dumps(frame))
         # Read frames until our reply arrives; the daemon fans broadcasts (incl.
         # our own chat.event echoes) to every client — those are ignored here.
@@ -926,6 +1068,17 @@ class Satellite:
             return None
         if kind != "event.push.ok":
             return None
+        usage_was_acknowledged = "usage_recorded" in ack or "usage_replayed" in ack or "usage_rejected" in ack
+        usage_rejected_streams = {
+            str(item.get("stream_id") or "")
+            for item in (ack.get("usage_rejected") or ())
+            if isinstance(item, dict) and item.get("stream_id")
+        }
+        if usage_was_acknowledged:
+            pending_usage = getattr(self, "_pending_usage", {})
+            for stream_id in list(pending_usage):
+                if stream_id not in usage_rejected_streams:
+                    pending_usage.pop(stream_id, None)
         dropped_streams: set[str] = set()
         for item in ack.get("dropped") or ():
             if isinstance(item, dict):
@@ -949,7 +1102,12 @@ class Satellite:
                 log.info("tail resumed after daemon-confirmed row reopen stream=%s", stream_id)
         # Durable accept confirmed → advance each acked file's offset.
         for name, st in self._tails.items():
-            if f"{self.config.host}:{name}" not in dropped_streams and st.path in high_water:
+            stream_id = f"{self.config.host}:{name}"
+            if (
+                stream_id not in dropped_streams
+                and stream_id not in usage_rejected_streams
+                and st.path in high_water
+            ):
                 st.offset = high_water[st.path]
         version = ack.get("version") if isinstance(ack.get("version"), dict) else {}
         if version.get("status") == "update_required":

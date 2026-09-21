@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "pentacle.usage-accounting.stage1",
+  "schema_version": 1,
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "candidate_sha",
+    "base_sha",
+    "selector",
+    "overlay",
+    "runtime",
+    "pin",
+    "streams",
+    "receipts"
+  ],
+  "properties": {
+    "schema": {"const": "pentacle.usage-accounting.stage1"},
+    "schema_version": {"const": 1},
+    "candidate_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "selector": {
+      "type": "array",
+      "const": [
+        "services/chat-stream-v2/tests/test_usage_accounting.py",
+        "services/chat-stream-v2/tests/test_event_push.py",
+        "services/chat-stream-v2/tests/test_usage_telemetry.py"
+      ]
+    },
+    "overlay": {
+      "type": "object",
+      "required": ["test_sha256", "fixture_sha256", "manifest_schema_sha256"],
+      "properties": {
+        "test_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "fixture_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "manifest_schema_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["coordinator", "satellites"],
+      "properties": {
+        "coordinator": {
+          "type": "object",
+          "required": ["host", "pid", "checkout", "sha"],
+          "properties": {
+            "host": {"type": "string", "minLength": 1},
+            "pid": {"type": "integer", "exclusiveMinimum": 0},
+            "checkout": {"type": "string", "pattern": "^/"},
+            "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+          },
+          "additionalProperties": false
+        },
+        "satellites": {
+          "type": "object",
+          "required": ["amaterasu", "merlin"],
+          "additionalProperties": false,
+          "patternProperties": {},
+          "properties": {
+            "amaterasu": {"$ref": "#/$defs/satellite"},
+            "merlin": {"$ref": "#/$defs/satellite"}
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "pin": {
+      "type": "object",
+      "required": ["owner", "mutation_status", "target_sha", "previous_sha"],
+      "properties": {
+        "owner": {"const": "bart:v2-8f7ce031"},
+        "mutation_status": {"enum": ["deferred", "staged", "rolled_back"]},
+        "target_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+        "previous_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"}
+      },
+      "additionalProperties": false
+    },
+    "streams": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/stream"}
+    },
+    "receipts": {
+      "type": "object",
+      "required": ["red", "focused", "junit", "prechange_amaterasu", "prechange_bart"],
+      "properties": {
+        "red": {"$ref": "#/$defs/receipt"},
+        "focused": {"$ref": "#/$defs/receipt"},
+        "junit": {"$ref": "#/$defs/receipt"},
+        "prechange_amaterasu": {"$ref": "#/$defs/receipt"},
+        "prechange_bart": {"$ref": "#/$defs/receipt"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "receipt": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^/"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "satellite": {
+      "type": "object",
+      "required": ["checkout_sha", "pid", "event_push_runtime_sha", "observed_at"],
+      "properties": {
+        "checkout_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "pid": {"type": "integer", "exclusiveMinimum": 0},
+        "event_push_runtime_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "observed_at": {"type": "string", "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T.*Z$"}
+      },
+      "additionalProperties": false
+    },
+    "stream": {
+      "type": "object",
+      "required": [
+        "stream_id",
+        "authenticated_source_host",
+        "provider",
+        "session_generation",
+        "source_file_identity_digest",
+        "snapshot_digest",
+        "revision",
+        "request_ids",
+        "usage_recorded",
+        "usage_replayed",
+        "replay_zero_new_records"
+      ],
+      "properties": {
+        "stream_id": {"type": "string", "minLength": 1},
+        "authenticated_source_host": {"type": "string", "minLength": 1},
+        "provider": {"enum": ["codex", "claude"]},
+        "session_generation": {"type": "string", "minLength": 1},
+        "source_file_identity_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "snapshot_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "revision": {"type": "integer", "exclusiveMinimum": 0},
+        "request_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "usage_recorded": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+        "usage_replayed": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+        "replay_zero_new_records": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
