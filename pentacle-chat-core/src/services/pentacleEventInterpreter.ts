@@ -1,6 +1,16 @@
-import type { PentacleEvent } from '../types/pentacle';
+import type { PentacleEvent, PentacleMessageEnvelope } from '../types/pentacle';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
+
+/** Client policy authority for daemon-authenticated message-envelope tags. */
+export const PENTACLE_MESSAGE_ENVELOPE_RENDER_POLICIES = {
+  notice_marker: 'internal',
+  notification_answer: 'structured_card',
+  child_session_closed: 'structured_card',
+  child_inactivity_threshold: 'structured_card',
+  child_report_ready: 'structured_card',
+  claude_pasted_content: 'chat_prose',
+} as const;
 
 export type PentacleEventCase =
   | 'user-message'
@@ -415,20 +425,43 @@ function containsNotificationAnswerPayload(text: string) {
 }
 
 function parsePromptAskOkDisplay(text: string): AgentQuestionAskDisplay | null {
-  let payload = parseJsonObject(text);
+  const isDirectAsk = (candidate: Record<string, unknown> | null) => {
+    const question = objectValue(candidate?.question);
+    return candidate?.type === 'prompt.ask.ok' && candidate.ok !== false &&
+      Boolean(stringValue(question?.question_id));
+  };
+  const isWrappedAsk = (candidate: Record<string, unknown> | null) => {
+    const question = objectValue(candidate?.question);
+    return isDirectAsk(candidate) && candidate?.ok === true && Boolean(stringValue(question?.notification_id));
+  };
+  const direct = parseJsonObject(text);
+  let payload = isDirectAsk(direct) ? direct : null;
   if (!payload) {
     // A durable ask can succeed while CLI delivery diagnostics surround its JSON
-    // result. Accept one complete, validated result line; never extract brace
-    // fragments or choose between multiple successful asks in one tool result.
-    const results = String(text || '').split('\n').map(parseJsonObject).filter((row) => {
-      const question = objectValue(row?.question);
-      return row?.type === 'prompt.ask.ok' && row.ok === true &&
-        Boolean(stringValue(question?.question_id)) &&
-        Boolean(stringValue(question?.notification_id));
-    });
-    if (results.length === 1) payload = results[0];
+    // result. Accept one complete, validated executor result line and unwrap its
+    // JSON `output` exactly once. Never extract brace fragments or choose between
+    // multiple wrapper lines.
+    const lines = String(text || '').split('\n');
+    const directLines = lines.map(parseJsonObject).filter(isDirectAsk);
+    const hasFailedDiagnostic = /(?:^|\n)\s*exit code\s+(?!0\b)/i.test(String(text || ''));
+    const hasDurableAskDiagnostic = lines.some((line) => /^agent-orch prompt ask:/i.test(line.trim()));
+    if (directLines.length === 1 && (!hasFailedDiagnostic || hasDurableAskDiagnostic)) payload = directLines[0];
+    if (payload) return formatPromptAskPayload(payload);
+    const wrapperLines = lines.filter((line) => line.includes('"exit_code"') && line.includes('"output"'));
+    if (wrapperLines.length !== 1) return null;
+    const wrapper = parseJsonObject(wrapperLines[0]);
+    const result = objectValue(wrapper?.result);
+    const output = typeof wrapper?.output === 'string'
+      ? wrapper.output
+      : typeof result?.output === 'string' ? result.output : null;
+    const nested = output === null ? null : parseJsonObject(output);
+    if (wrapper?.exit_code === 0 && isWrappedAsk(nested)) payload = nested;
   }
-  if (payload?.type !== 'prompt.ask.ok') return null;
+  if (!payload) return null;
+  return formatPromptAskPayload(payload);
+}
+
+function formatPromptAskPayload(payload: Record<string, unknown>): AgentQuestionAskDisplay {
   const question = objectValue(payload.question);
   const notification = objectValue(payload.notification);
   const envelope = objectValue(question?.envelope);
@@ -447,6 +480,95 @@ function parsePromptAskOkDisplay(text: string): AgentQuestionAskDisplay | null {
     stringValue(envelope?.notification_id) ||
     stringValue(payload.notification_id);
   return { title, questionId, ...(notificationId ? { notificationId } : {}) };
+}
+
+function messageEnvelopeBody(text: string) {
+  const lines = String(text || '').split('\n');
+  return lines.length > 1 ? lines.slice(1).join('\n') : '';
+}
+
+function messageEnvelopeField(text: string, key: string) {
+  const prefix = `${key}=`;
+  return messageEnvelopeBody(text)
+    .split('\n')
+    .find((line) => line.startsWith(prefix))
+    ?.slice(prefix.length) || '';
+}
+
+function validMessageEnvelope(event: PentacleEvent): PentacleMessageEnvelope | null {
+  if (String(event.kind || '').toUpperCase() !== 'USER') return null;
+  const candidate = event.message_envelope;
+  if (
+    !candidate ||
+    typeof candidate !== 'object' ||
+    Array.isArray(candidate) ||
+    candidate.schema_version !== 1 ||
+    !stringValue(candidate.kind) ||
+    !stringValue(candidate.id)
+  ) {
+    return null;
+  }
+  return candidate;
+}
+
+function interpretTaggedMessageEnvelope(
+  event: PentacleEvent,
+): PentacleInterpretedEvent | null {
+  const envelope = validMessageEnvelope(event);
+  if (!envelope) return null;
+  const policy = PENTACLE_MESSAGE_ENVELOPE_RENDER_POLICIES[
+    envelope.kind as keyof typeof PENTACLE_MESSAGE_ENVELOPE_RENDER_POLICIES
+  ];
+  if (!policy) {
+    return interpreted(event, 'transient-noise', 'hidden:noise', 'system', '', '', true, 'Unknown message-envelope kinds fail closed.');
+  }
+  if (policy === 'internal') {
+    return interpreted(event, 'transient-noise', 'hidden:noise', 'system', '', '', true, 'Registered internal marker is persisted but never rendered as prose.');
+  }
+  if (policy === 'chat_prose') return null;
+  const text = String(event.text || '');
+  switch (envelope.kind) {
+    case 'notice_marker':
+      return interpreted(event, 'transient-noise', 'hidden:noise', 'system', '', '', true, 'Registered internal marker is persisted but never rendered as prose.');
+    case 'notification_answer': {
+      const choice = typeof envelope.choice === 'boolean' ? (envelope.choice ? 'Yes' : 'No') : '';
+      const display: AgentQuestionAnswerDisplay = {
+        answer: messageEnvelopeField(text, 'answer') ||
+          messageEnvelopeField(text, 'text') ||
+          messageEnvelopeField(text, 'custom_text') ||
+          messageEnvelopeField(text, 'choice') ||
+          stringValue(envelope.answer) ||
+          stringValue(envelope.text) ||
+          stringValue(envelope.custom_text) ||
+          choice,
+        notificationId: stringValue(envelope.notification_id) || messageEnvelopeField(text, 'notification_id'),
+      };
+      const answerRow = interpreted(event, 'agent-question-answer', 'activity:question', 'system', 'Question', formatNotificationAnswer(display), false, 'Daemon message-envelope tag selects the compact notification-answer row.');
+      return display.notificationId ? { ...answerRow, notificationId: display.notificationId } : answerRow;
+    }
+    case 'child_session_closed': {
+      const child = stringValue(envelope.child_stream_id) || messageEnvelopeField(text, 'child_stream_id') || 'unknown';
+      const body = messageEnvelopeBody(text) || `Child session ${child} closed.`;
+      return interpreted(event, 'daemon-notice', 'bubble:agent', 'agent', 'Daemon', body, false, 'Daemon message-envelope tag selects the compact lifecycle row.');
+    }
+    case 'child_inactivity_threshold': {
+      const child = stringValue(envelope.child_stream_id) || messageEnvelopeField(text, 'child_stream_id') || 'unknown';
+      const trigger = stringValue(envelope.trigger_at) || messageEnvelopeField(text, 'trigger_at') || 'an unknown time';
+      const body = messageEnvelopeBody(text) || `Child session ${child} reached an inactivity threshold at ${trigger}.`;
+      return interpreted(event, 'daemon-notice', 'bubble:agent', 'agent', 'Daemon', body, false, 'Daemon message-envelope tag selects the compact lifecycle row.');
+    }
+    case 'child_report_ready': {
+      const summary = messageEnvelopeField(text, 'summary') || stringValue(envelope.summary) || 'Child report ready.';
+      return interpreted(event, 'subagent-report', 'bubble:agent', 'agent', 'Subagent activity', summary, false, 'Daemon message-envelope tag selects the compact child-report row.');
+    }
+    case 'claude_pasted_content': return null;
+    default:
+      return interpreted(event, 'transient-noise', 'hidden:noise', 'system', '', '', true, 'Unknown message-envelope kinds fail closed.');
+  }
+}
+
+function hasNoticeMarkerPrefix(text: string) {
+  return String(text || '').startsWith('[pentacle-notice:');
 }
 
 function formatPromptAskOk(display: AgentQuestionAskDisplay) {
@@ -585,7 +707,7 @@ function nonEmptyUserBinding(value: unknown) {
     : value !== null && value !== undefined && value !== false;
 }
 
-function hasExplicitUserSendBinding(event: PentacleEvent) {
+export function hasExplicitUserSendBinding(event: PentacleEvent) {
   const raw = event.raw || {};
   return event.client_origin === true || raw.client_origin === true || [
     event.optimistic_id,
@@ -595,6 +717,65 @@ function hasExplicitUserSendBinding(event: PentacleEvent) {
     raw.request_id,
     raw.receipt_id,
   ].some(nonEmptyUserBinding);
+}
+
+export type TrustedDaemonNoticeProjection = {
+  schema_version: 1;
+  kind: 'status_card' | 'status_card_combined' | 'notification_answer';
+  notice_id: string;
+  stream_id: string;
+  session_generation: string;
+  event_id: number;
+  body_sha256: string;
+};
+
+const TRUSTED_DAEMON_NOTICE_KEYS = [
+  'body_sha256',
+  'event_id',
+  'kind',
+  'notice_id',
+  'schema_version',
+  'session_generation',
+  'stream_id',
+];
+
+export function trustedDaemonNoticeProjection(
+  event: PentacleEvent,
+): TrustedDaemonNoticeProjection | null {
+  if (String(event.kind || '').toUpperCase() !== 'USER' || hasExplicitUserSendBinding(event)) {
+    return null;
+  }
+  const raw = objectValue(event.raw);
+  const candidate = objectValue(raw?.daemon_notice);
+  if (!candidate) return null;
+  if (Object.keys(candidate).sort().join('\u0000') !== TRUSTED_DAEMON_NOTICE_KEYS.join('\u0000')) {
+    return null;
+  }
+  if (
+    candidate.schema_version !== 1 ||
+    (candidate.kind !== 'status_card' &&
+      candidate.kind !== 'status_card_combined' &&
+      candidate.kind !== 'notification_answer')
+  ) return null;
+  const noticeId = typeof candidate.notice_id === 'string' ? candidate.notice_id : '';
+  const streamId = typeof candidate.stream_id === 'string' ? candidate.stream_id : '';
+  const generation = typeof candidate.session_generation === 'string'
+    ? candidate.session_generation : '';
+  const bodySha256 = typeof candidate.body_sha256 === 'string' ? candidate.body_sha256 : '';
+  const eventId = candidate.event_id;
+  const daemonSeq = Number(event.daemon_seq);
+  const body = String(event.text || '');
+  if (
+    !noticeId || noticeId.length > 256 ||
+    streamId !== String(event.stream_id || '') ||
+    !generation ||
+    !Number.isInteger(eventId) || Number(eventId) <= 0 ||
+    !Number.isFinite(daemonSeq) || Number(eventId) !== daemonSeq ||
+    !/^[0-9a-f]{64}$/.test(bodySha256) ||
+    bytesToHex(sha256(utf8ToBytes(body))) !== bodySha256 ||
+    !body.startsWith('[pentacle-notice:' + noticeId + ']\n')
+  ) return null;
+  return candidate as TrustedDaemonNoticeProjection;
 }
 
 type LegacyActivityNotice = {
@@ -699,7 +880,17 @@ export function interpretPentacleEvent(
   const transport = String(event.raw?.transport || '');
   const userText = kind === 'USER' ? stripTerminalPromptPrefix(text) : text;
 
-  if (trustedNotificationAnswerProjection(event)) {
+  const hasEnvelopeField = kind === 'USER' && Object.prototype.hasOwnProperty.call(event, 'message_envelope');
+  const taggedEnvelope = hasEnvelopeField ? validMessageEnvelope(event) : null;
+  if (hasEnvelopeField && !taggedEnvelope) {
+    return interpreted(event, 'transient-noise', 'hidden:noise', 'system', '', '', true, 'Malformed message-envelope tags fail closed instead of reaching operator chat.');
+  }
+  if (taggedEnvelope) {
+    const taggedProjection = interpretTaggedMessageEnvelope(event);
+    if (taggedProjection) return taggedProjection;
+  }
+
+  if (!taggedEnvelope && trustedNotificationAnswerProjection(event)) {
     return interpreted(
       event,
       'working-status',
@@ -714,6 +905,23 @@ export function interpretPentacleEvent(
 
   if (source === 'scrollback_fallback' && !options.revealScrollbackFallback) {
     return interpreted(event, 'transient-noise', 'hidden:noise', 'assistant', assistantLabel, text, true, 'Tagged scrollback fallback is hidden unless explicitly revealed.');
+  }
+
+  if (kind === 'USER' && hasNoticeMarkerPrefix(text) && !hasExplicitUserSendBinding(event)) {
+    const legacyActivity = parseLegacyActivityNotice(text);
+    if (legacyActivity) {
+      return interpreted(
+        event,
+        legacyActivity.caseId,
+        'bubble:agent',
+        'agent',
+        legacyActivity.label,
+        legacyActivity.text,
+        false,
+        'Complete legacy daemon envelope rendered as compatibility activity; provenance is not authenticated.',
+      );
+    }
+    return interpreted(event, 'transient-noise', 'hidden:noise', 'system', '', '', true, 'Unregistered marker-prefixed USER text fails closed instead of reaching operator chat.');
   }
 
   if (kind === 'USER' && !hasExplicitUserSendBinding(event)) {

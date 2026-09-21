@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, Iterable
 import uuid
 
 from submission_events import COMMITTED_PENDING_PROOF_STATUSES, PROOF_TERMINAL_BOUND_S
+from message_envelopes import build_message_envelope, build_notice_body
 from v2_runtime import env_number
 
 log = logging.getLogger("chat_streamd_v2.outbound_notices")
@@ -82,14 +83,12 @@ def _epoch_from_iso(value: object) -> float | None:
 
 def notice_needle(tell_id: str) -> str:
     """Return the stable pane marker used to prove a prior paste landed."""
-    return f"[pentacle-notice:{tell_id}]"
+    return build_message_envelope("notice_marker", notice_id=tell_id)
 
 
 def ensure_notice_marker(tell_id: str, body: str) -> str:
     """Make the tell id observable in the recipient capture exactly once."""
-    marker = notice_needle(tell_id)
-    text = str(body or "")
-    return text if marker in text else f"{marker}\n{text}"
+    return build_notice_body(tell_id, body)
 
 
 @dataclass(frozen=True)

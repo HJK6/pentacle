@@ -56,6 +56,7 @@ from _shared.notifications_store import (
     TERMINAL_STATES,
 )
 from v2_runtime import env_number
+from message_envelopes import build_message_envelope
 from outbound_notices import NOTICE_KIND_NOTIFICATION_ANSWER, NoticeDecision
 
 log = logging.getLogger("chat_streamd_v2.notify")
@@ -672,9 +673,12 @@ class Notify:
         if owner is None or answer is None:
             return
         nid = str(record["notification_id"])
+        tell_id = ANSWER_TELL_ID_PREFIX + nid
         row = await self._outbound.enqueue(kind=NOTICE_KIND_NOTIFICATION_ANSWER,
-            dedupe_key=ANSWER_TELL_ID_PREFIX + nid, recipient_stream_id=owner["producer_stream_id"],
-            body=_answer_back_text(answer), tell_id=ANSWER_TELL_ID_PREFIX + nid, metadata=owner)
+            dedupe_key=tell_id, recipient_stream_id=owner["producer_stream_id"],
+            body=build_message_envelope(
+                "notification_answer", notice_id=tell_id, body=_answer_back_text(answer),
+            ), tell_id=tell_id, metadata=owner)
         if row.get("created"):
             log.info("saved answer queued nid=%s", nid,
                      extra={"subsystem": "notify", "bug_ref": "notification_answer_disconnect_delivery_2026_09"})

@@ -13,6 +13,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
+from message_envelopes import build_message_envelope, build_notice_body
 from store_routing import _insert_outbound_notice_conn
 
 
@@ -194,12 +195,26 @@ def report_watch_conn(conn, report):
         return False
     if report["status"] not in {"done", "aborted", "error"}:
         return False
-    from ledger import child_report_ready_text, child_report_ready_tell_id
-    from outbound_notices import ensure_notice_marker
+    from ledger import child_report_ready_tell_id
     nid = child_report_ready_tell_id(report["report_id"])
+    validation = report.get("qa_attestation_validation")
+    body = build_message_envelope(
+        "child_report_ready",
+        notice_id=nid,
+        report_id=report["report_id"],
+        ledger_row_id=report["ledger_row_id"],
+        child_stream_id=child,
+        msg_id=report["msg_id"],
+        status=report["status"],
+        summary=report.get("summary"),
+        qa_attestation_state=validation.get("state") if isinstance(validation, dict) else None,
+        qa_attestation_reasons=validation.get("reasons") if isinstance(validation, dict) else None,
+        effective_model=report.get("effective_model"),
+        effective_effort=report.get("effective_effort"),
+    )
     result = coalesce_notice_conn(conn, dict(notice_id=nid, tell_id=nid, kind="report",
         dedupe_key=f"report:{report['report_id']}", recipient_stream_id=owner, source_stream_id=child,
-        body=ensure_notice_marker(nid, child_report_ready_text(report)),
+        body=body,
         metadata={"report_id": report["report_id"], "ledger_row_id": report["ledger_row_id"],
                   "msg_id": report["msg_id"]}), report)
     return result.get("created", False)
@@ -273,11 +288,12 @@ def lifecycle_watch_conn(conn, now):
         if owner and target_valid and closed:
             data = json.loads(row["data"])
             if "end" in data["triggers"] and "end" not in data["consumed"]:
-                from outbound_notices import ensure_notice_marker
                 nid = _id("end", row["owner_generation"], row["child_generation"])
                 coalesce_notice_conn(conn, dict(notice_id=nid, tell_id=nid, kind="reconciler",
                     dedupe_key=nid, recipient_stream_id=row["owner"], source_stream_id=row["child"],
-                    episode_id=nid, body=ensure_notice_marker(nid, f"Child session {row['child']} closed.")))
+                    episode_id=nid, body=build_message_envelope(
+                        "child_session_closed", notice_id=nid, child_stream_id=row["child"],
+                    )))
         if not owner or not target_valid or closed:
             conn.execute("UPDATE v2_watch_wake SET state='cancelled' WHERE id=? AND state='active'", (row["id"],))
     # Check consumed work too: a fired wake still belongs to its old generation.
@@ -370,7 +386,6 @@ class _WatchWakeStoreMixin:
 
 
 def _evaluate_conn(conn, row, observation, now):
-    from outbound_notices import ensure_notice_marker
     data = json.loads(row["data"])
     due = []
     if row["kind"] == "wake":
@@ -426,11 +441,20 @@ def _evaluate_conn(conn, row, observation, now):
         prior = _fact_notice(conn, row["owner"], row["owner_generation"], row["child"], row["child_generation"], fact_kind, episode)
         if prior is None:
             kind = ("wake_urgent" if data.get("urgent") else "wake") if trigger == "wake" else "watch"
-            body = (f"Timed wake: {data.get('note') or 'resume your work'}." if trigger == "wake" else
-                    f"Child session {row['child']} reached an inactivity threshold at {_stamp(trigger_at)}.")
+            if trigger == "wake":
+                body = build_notice_body(
+                    nid, f"Timed wake: {data.get('note') or 'resume your work'}.",
+                )
+            else:
+                body = build_message_envelope(
+                    "child_inactivity_threshold",
+                    notice_id=nid,
+                    child_stream_id=row["child"],
+                    trigger_at=_stamp(trigger_at),
+                )
             _insert_outbound_notice_conn(conn, notice_id=nid, tell_id=nid, kind=kind, dedupe_key=nid,
                 recipient_stream_id=row["owner"], source_stream_id=row["child"], episode_id=episode,
-                body=ensure_notice_marker(nid, body), created_at=_stamp(time.time()),
+                body=body, created_at=_stamp(time.time()),
                 metadata={"trigger_at": trigger_at, "owner_generation": row["owner_generation"],
                           "child_generation": row["child_generation"]})
             _fact(conn, owner=row["owner"], owner_generation=row["owner_generation"], child=row["child"],

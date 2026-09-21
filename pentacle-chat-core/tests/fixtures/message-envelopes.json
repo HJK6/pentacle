@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "source_baseline": "aea8673509ba97b95841cf1d8a10e57e10fa998c",
+  "validation_baselines": {
+    "red": "aea8673509ba97b95841cf1d8a10e57e10fa998c",
+    "final": "31afd4d32df37e01b2810975f7d830e75d6c3c38"
+  },
+  "cases": [
+    {
+      "key": "notice-marker",
+      "kind": "notice_marker",
+      "wire_text": "[pentacle-notice:notice-fixture-1]",
+      "wire_sha256": "a2e0692ab80882bf0be8396e0e3b4992534c76c1fba0c8f3b6b12671da14e7d3",
+      "build_fields": {"notice_id": "notice-fixture-1"},
+      "expected_tag": {"kind": "notice_marker", "id": "notice-fixture-1"},
+      "render_policy": "internal",
+      "expected_display": "",
+      "negative_texts": [
+        "[pentacle-notice:notice-fixture-1]\noperator prose",
+        "prefix [pentacle-notice:notice-fixture-1]",
+        "[pentacle-notice:notice-fixture-1"
+      ]
+    },
+    {
+      "key": "notification-answer",
+      "kind": "notification_answer",
+      "wire_text": "[pentacle-notice:notification-answer-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=Done\nchoice=True\nby=operator",
+      "wire_sha256": "50748652cb4e6a42bab21c7dc2085d335ff5fa037515e0e9eb3e04bd5d949bca",
+      "build_fields": {
+        "notice_id": "notification-answer-fixture",
+        "body": "[notification.answer]\nnotification_id=notification-fixture\nanswer=Done\nchoice=True\nby=operator"
+      },
+      "expected_tag": {"kind": "notification_answer", "id": "notification-answer-fixture", "notification_id": "notification-fixture"},
+      "render_policy": "structured_card",
+      "expected_display": "Operator answered: Done",
+      "negative_texts": [
+        "[pentacle-notice:notification-answer-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=Done",
+        "[pentacle-notice:notification-answer-fixture]\n[notification.answer]\nnotification_id=other\nanswer=Done\nchoice=True\nby=operator",
+        "[pentacle-notice:notification-answer-fixture] prose"
+      ]
+    },
+    {
+      "key": "child-session-closed",
+      "kind": "child_session_closed",
+      "wire_text": "[pentacle-notice:d2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\nChild session host:child closed.",
+      "wire_sha256": "9e452ca465da27dfd3114874d6afc88c67b850e8062b15aa2761a9231fee3478",
+      "build_fields": {"notice_id": "d2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "child_stream_id": "host:child"},
+      "expected_tag": {"kind": "child_session_closed", "id": "d2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "child_stream_id": "host:child"},
+      "render_policy": "structured_card",
+      "expected_display": "Child session host:child closed.",
+      "negative_texts": [
+        "[pentacle-notice:d2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\nChild session host:child closed",
+        "[pentacle-notice:d2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\nChild session host:child closed. trailing",
+        "preamble\n[pentacle-notice:d2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\nChild session host:child closed."
+      ]
+    },
+    {
+      "key": "child-inactivity-threshold",
+      "kind": "child_inactivity_threshold",
+      "wire_text": "[pentacle-notice:d2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]\nChild session host:child reached an inactivity threshold at 2026-09-20T00:00:00Z.",
+      "wire_sha256": "e5f745e9b97c7764f9ea73973b4afaab3ce8ddd86a63736fee35d2a7436c5760",
+      "build_fields": {"notice_id": "d2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "child_stream_id": "host:child", "trigger_at": "2026-09-20T00:00:00Z"},
+      "expected_tag": {"kind": "child_inactivity_threshold", "id": "d2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "child_stream_id": "host:child", "trigger_at": "2026-09-20T00:00:00Z"},
+      "render_policy": "structured_card",
+      "expected_display": "Child session host:child reached an inactivity threshold at 2026-09-20T00:00:00Z.",
+      "negative_texts": [
+        "[pentacle-notice:d2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]\nChild session host:child reached an inactivity threshold at 2026-09-20T00:00:00Z",
+        "[pentacle-notice:d2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]\nChild session host:child reached an inactivity threshold at tomorrow.",
+        "[pentacle-notice:d2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]\nChild session host:child reached an inactivity threshold at 2026-09-20T00:00:00Z. trailing"
+      ]
+    },
+    {
+      "key": "child-report-ready",
+      "kind": "child_report_ready",
+      "wire_text": "[pentacle-notice:child-report-ready-v2-0705c6a38a6903bd8ae3e108d9d9374eef7c57b1edd2529dd3f254aecb79dc5b]\n[child_report_ready]\nreport_id=report-fixture\nledger_row_id=42\nchild_stream_id=host:child\nmsg_id=msg-fixture\nstatus=done\nsummary=Fixture report complete",
+      "wire_sha256": "99d888cba033cbb64c74264c697fb37d92fc3c9c3726bf815ce48a9beeaf18ad",
+      "build_fields": {"report_id": "report-fixture", "ledger_row_id": 42, "child_stream_id": "host:child", "msg_id": "msg-fixture", "status": "done", "summary": "Fixture report complete"},
+      "expected_tag": {"kind": "child_report_ready", "id": "child-report-ready-v2-0705c6a38a6903bd8ae3e108d9d9374eef7c57b1edd2529dd3f254aecb79dc5b", "report_id": "report-fixture", "ledger_row_id": 42, "child_stream_id": "host:child", "msg_id": "msg-fixture", "status": "done"},
+      "render_policy": "structured_card",
+      "expected_display": "Fixture report complete",
+      "negative_texts": [
+        "[pentacle-notice:child-report-ready-v2-0705c6a38a6903bd8ae3e108d9d9374eef7c57b1edd2529dd3f254aecb79dc5b]\n[child_report_ready]\nreport_id=other\nledger_row_id=42\nchild_stream_id=host:child\nmsg_id=msg-fixture\nstatus=done\nsummary=Fixture report complete",
+        "[pentacle-notice:child-report-ready-v2-0705c6a38a6903bd8ae3e108d9d9374eef7c57b1edd2529dd3f254aecb79dc5b]\n[child_report_ready]\nreport_id=report-fixture\nledger_row_id=42\nchild_stream_id=host:child\nmsg_id=msg-fixture\nstatus=running\nsummary=Fixture report complete",
+        "[pentacle-notice:child-report-ready-v2-0705c6a38a6903bd8ae3e108d9d9374eef7c57b1edd2529dd3f254aecb79dc5b]\n[child_report_ready]\nreport_id=report-fixture\nledger_row_id=42\nchild_stream_id=host:child\nmsg_id=msg-fixture\nstatus=done\nsummary=Fixture report complete\nextra=operator"
+      ]
+    },
+    {
+      "key": "claude-pasted-content",
+      "kind": "claude_pasted_content",
+      "wire_text": "\n\n<pasted_content id=\"8769\">\nFixture display\n</pasted_content id=\"8769\">\n",
+      "wire_sha256": "078a5d165f9b89cf03ed4869083c2b9eea5a4db534e718cc74ed857c2b591e9e",
+      "build_fields": {"id": "8769", "body": "Fixture display"},
+      "expected_tag": {"kind": "claude_pasted_content", "id": "8769", "provenance": "grammar"},
+      "render_policy": "chat_prose",
+      "expected_display": "Fixture display",
+      "negative_texts": [
+        "<pasted_content id=\"8769\">\nFixture display\n</pasted_content id=\"8769\">\n",
+        "\n\n<pasted_content id=\"8768\">\nFixture display\n</pasted_content id=\"8769\">\n",
+        "\n\n<pasted_content id=\"8769\">\nFixture display\n</pasted_content id=\"8769\">\ntail"
+      ]
+    }
+  ],
+  "auxiliary": {
+    "wrapped_prompt_ask_ok": {
+      "wire_text": "Script completed\nWall time 0.1 seconds\nOutput:\n\n{\"chunk_id\":\"fixture-chunk\",\"exit_code\":0,\"output\":\"{\\\"type\\\":\\\"prompt.ask.ok\\\",\\\"ok\\\":true,\\\"question\\\":{\\\"question_id\\\":\\\"q-fixture\\\",\\\"notification_id\\\":\\\"notification-fixture\\\"},\\\"notification\\\":{\\\"title\\\":\\\"Fixture question\\\",\\\"notification_id\\\":\\\"notification-fixture\\\"}}\"}",
+      "wire_sha256": "eab85970d6780b5eb3a9f555910831f08eb47e4d4b51d7c22cc4189433712de5",
+      "expected": {"title": "Fixture question", "question_id": "q-fixture", "notification_id": "notification-fixture"},
+      "negative_texts": [
+        "Script completed\nOutput:\n\n{\"chunk_id\":\"fixture-chunk\",\"exit_code\":1,\"output\":\"{\\\"type\\\":\\\"prompt.ask.ok\\\",\\\"ok\\\":true}\"}",
+        "{\"chunk_id\":\"fixture-chunk\",\"exit_code\":0,\"output\":\"not-json\"}",
+        "{\"chunk_id\":\"fixture-a\",\"exit_code\":0,\"output\":\"{\\\"type\\\":\\\"prompt.ask.ok\\\",\\\"ok\\\":true,\\\"question\\\":{\\\"question_id\\\":\\\"q-a\\\",\\\"notification_id\\\":\\\"n-a\\\"}}\"}\n{\"chunk_id\":\"fixture-b\\\",\"exit_code\":0,\"output\":\"{\\\"type\\\":\\\"prompt.ask.ok\\\",\\\"ok\\\":true,\\\"question\\\":{\\\"question_id\\\":\\\"q-b\\\",\\\"notification_id\\\":\\\"n-b\\\"}}\"}"
+      ]
+    }
+  }
+}

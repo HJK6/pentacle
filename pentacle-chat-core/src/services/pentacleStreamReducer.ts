@@ -8,7 +8,11 @@ import {
   replacePentacleEventProjection,
   selectPentacleDerivedEventIndex,
 } from './pentacleEventBuckets';
-import { optimisticMatchesServerUser, parseServerEventTimeStrict } from './optimisticMatch';
+import {
+  findMatchingCompositeQueuedOptimisticIds,
+  optimisticMatchesServerUser,
+  parseServerEventTimeStrict,
+} from './optimisticMatch';
 import { isCodexHelperSuggestion, isTerminalDividerText, isTransientTranscriptNoise } from './pentacleEventInterpreter';
 import { normalizePentacleHost } from './pentacleHosts';
 import { logTelemetry } from '../utils/telemetry';
@@ -1163,6 +1167,14 @@ function findUnambiguousOptimisticEchoMatch(
     return null;
   }
 
+  const compositeOptimisticIds = findMatchingCompositeQueuedOptimisticIds(
+    event,
+    availableOptimisticSends(optimisticSends, matchedOptimisticIds).map(([, send]) => send),
+  );
+  if (compositeOptimisticIds.length > 0) {
+    return compositeOptimisticIds.find((optimisticId) => !matchedOptimisticIds?.has(optimisticId)) ?? null;
+  }
+
   const sameTextCandidates = availableOptimisticSends(optimisticSends, matchedOptimisticIds)
     .filter(([, send]) => (
       send.turn_queued !== true &&
@@ -1195,6 +1207,26 @@ function findUnambiguousOptimisticEchoMatch(
     return collapsibleTwins[0][0];
   }
   return null;
+}
+
+function reconcileCompositeOptimisticEcho(
+  state: PentacleStreamState,
+  event: PentacleEvent,
+  optimisticIds: string[],
+): PentacleStreamState {
+  let next = state;
+  for (const optimisticId of optimisticIds) {
+    const send = next.optimisticSends?.[optimisticId];
+    if (!send) continue;
+    emitOptimisticOrphanResolvedIfNeeded(next, optimisticId, event, 'live');
+    next = reconcileOptimisticSendWithServerEvent(next, optimisticId, {
+      ...event,
+      // A composite daemon echo acknowledges every queued row, but each
+      // client row must retain its own paragraph text.
+      text: send.text,
+    });
+  }
+  return next;
 }
 
 function snapshotEventMatchesPriorCorrelatedOptimistic(prior: PentacleEvent, event: PentacleEvent) {
@@ -1454,7 +1486,44 @@ export function applySnapshotWithOptimisticReconciliation(
   const visualSends: OptimisticSendState[] = [];
 
   const matchedOptimisticIds = new Set<string>();
+  // carryPriorCorrelatedOptimisticEvents intentionally reuses an untouched
+  // snapshot array.  Own a mutable copy before expanding a composite echo;
+  // normal event projections are frozen in development and production.
+  snapshotEvents = snapshotEvents.slice();
+  for (let eventIndex = 0; eventIndex < snapshotEvents.length; eventIndex += 1) {
+    const echo = snapshotEvents[eventIndex];
+    const compositeOptimisticIds = findMatchingCompositeQueuedOptimisticIds(
+      echo,
+      Object.values(snapshotState.optimisticSends ?? {}),
+    );
+    if (compositeOptimisticIds.length === 0) continue;
+    const reconciledEvents: PentacleEvent[] = [];
+    for (const optimisticId of compositeOptimisticIds) {
+      const send = snapshotState.optimisticSends?.[optimisticId];
+      if (!send || matchedOptimisticIds.has(optimisticId)) continue;
+      emitOptimisticOrphanResolvedIfNeeded(snapshotState, optimisticId, echo, 'snapshot', now);
+      reconciledEvents.push(reconciledOptimisticEvent(
+        optimisticId,
+        {
+          ...echo,
+          // One composite server row acknowledges several sends; preserve
+          // each queued paragraph in the corresponding client row.
+          text: send.text,
+        },
+        send.attachments,
+        send.queued_at,
+        undefined,
+        send.text,
+      ));
+      matchedOptimisticIds.add(optimisticId);
+    }
+    if (reconciledEvents.length > 0) {
+      snapshotEvents.splice(eventIndex, 1, ...reconciledEvents);
+      eventIndex += reconciledEvents.length - 1;
+    }
+  }
   for (const [optimisticId, send] of Object.entries(snapshotState.optimisticSends ?? {})) {
+    if (matchedOptimisticIds.has(optimisticId)) continue;
     const echoIndex = snapshotEvents.findIndex((event) => (
       findUnambiguousOptimisticEchoMatch(
         snapshotState.optimisticSends,
@@ -1997,6 +2066,14 @@ export function applyPentacleEvent(
   const returnedPromptPrior = findPriorCorrelatedOptimisticForReturnedEvent(state.events, event);
   if (returnedPromptPrior) {
     return markPriorCorrelatedOptimisticReturnedToPrompt(state, returnedPromptPrior, Date.now());
+  }
+
+  const compositeOptimisticIds = findMatchingCompositeQueuedOptimisticIds(
+    event,
+    Object.values(state.optimisticSends ?? {}),
+  );
+  if (compositeOptimisticIds.length > 0) {
+    return reconcileCompositeOptimisticEcho(state, event, compositeOptimisticIds);
   }
 
   const optimisticEchoMatch = findUnambiguousOptimisticEchoMatch(

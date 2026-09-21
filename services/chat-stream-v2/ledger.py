@@ -49,8 +49,8 @@ from outbound_notices import (
     NOTICE_KIND_STATUS_CARD,
     NOTICE_KIND_STATUS_CARD_COMBINED,
     OutboundNoticeQueue,
-    ensure_notice_marker,
 )
+from message_envelopes import build_message_envelope, build_notice_body
 
 SERVICES_ROOT = str(Path(__file__).resolve().parents[1])
 if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide schema, not a v2 copy
@@ -878,7 +878,7 @@ class Ledger:
             legacy_text = legacy_audit.get("text")
             matching_text = legacy_text in {
                 body,
-                ensure_notice_marker(legacy_id, body),
+                build_notice_body(legacy_id, body),
             }
             if (
                 legacy_audit.get("tell_id") == legacy_id
@@ -894,12 +894,27 @@ class Ledger:
                 return legacy_receipt
 
         notice_id = child_report_ready_tell_id(row["report_id"])
+        validation = row.get("qa_attestation_validation")
+        envelope_body = build_message_envelope(
+            "child_report_ready",
+            notice_id=notice_id,
+            report_id=row["report_id"],
+            ledger_row_id=row["ledger_row_id"],
+            child_stream_id=row["from_stream_id"],
+            msg_id=row["msg_id"],
+            status=row["status"],
+            summary=row.get("summary"),
+            qa_attestation_state=validation.get("state") if isinstance(validation, dict) else None,
+            qa_attestation_reasons=validation.get("reasons") if isinstance(validation, dict) else None,
+            effective_model=row.get("effective_model"),
+            effective_effort=row.get("effective_effort"),
+        )
         notice_row = await self.outbound.enqueue(
             kind=NOTICE_KIND_REPORT,
             dedupe_key=f"report:{row['report_id']}",
             recipient_stream_id=parent,
             tell_id=notice_id,
-            body=body,
+            body=envelope_body,
             watch_fact=row,
             source_stream_id=str(row.get("from_stream_id") or ""),
             metadata={

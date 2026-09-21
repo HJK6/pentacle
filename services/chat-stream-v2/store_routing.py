@@ -1453,11 +1453,23 @@ class _RoutingStoreMixin:
                         fallback_payload = json.loads(str((existing_route or {})["route_json"] or "{}"))
                     except (TypeError, ValueError, KeyError):
                         fallback_payload = {}
+                    if not isinstance(fallback_payload, dict):
+                        fallback_payload = {}
                     # A route.resolve refines the deferred decision; it must
                     # not discard receipts and context persisted at the
                     # earlier router/fallback boundary.
                     persisted_route_payload = dict(fallback_payload)
                     persisted_route_payload.update(payload)
+                    # These fields are diagnostic/physical-boundary receipts,
+                    # not Luna's replacement routing decision.  Reapply them
+                    # after the decision merge so a same-named model key can
+                    # never erase the original failure evidence.
+                    for key in (
+                        "kind", "routing_context", "router_failure",
+                        "fallback_receipt", "router_decision_receipt_id",
+                    ):
+                        if key in fallback_payload:
+                            persisted_route_payload[key] = fallback_payload[key]
                     if isinstance(fallback_payload, dict) and isinstance(
                         fallback_payload.get("routing_context"), dict,
                     ):

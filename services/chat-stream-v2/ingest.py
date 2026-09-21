@@ -45,6 +45,7 @@ from typing import Any, Awaitable, Callable
 from claude_jsonl_norm import normalize_claude_jsonl_records
 from codex_rollout_norm import codex_session_identity, normalize_codex_rollout_record
 from context_adapters import parse_codex_context_reading
+from message_envelopes import annotate_message_envelope
 from prockill import process_tree, process_record
 from store import ENTRY_DROPPED
 from tmux_transport import TRANSCRIPT_DIRS, _exec
@@ -212,7 +213,9 @@ async def append_ingested_event(
     """Append one event under its raw identity, stamping durable receipt metadata."""
     stream_id = str(payload.get("stream_id") or "")
     raw_identity = _identity_key(payload)
-    corrected = await store.stamp_event_with_send_receipt(payload)
+    corrected = annotate_message_envelope(
+        await store.stamp_event_with_send_receipt(payload),
+    )
     if lifecycle is None:
         seq = await store.append_session_event(
             stream_id, corrected, identity=raw_identity, limit=recent_limit,
@@ -615,7 +618,9 @@ class Ingest:
                     admission_payload = {**payload, "source_pane_pid": source_pid}
                     if validate_event_payload(admission_payload, host) is not None:
                         return 0
-                    corrected = await self.store.stamp_event_with_send_receipt(payload)
+                    corrected = annotate_message_envelope(
+                        await self.store.stamp_event_with_send_receipt(payload),
+                    )
                     entries.append({
                         "stream_id": sid,
                         "event": corrected,

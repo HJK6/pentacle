@@ -14,8 +14,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 import re
+import time
+import traceback
 import uuid
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -43,6 +46,11 @@ _STRUCTURAL_CONTINUATION_RE = re.compile(
     r"|(?:(?:what(?:'s|\s+is)\s+)?(?:the\s+)?next\s+step(?:\s+there)?))\s*[?.!]*\s*$",
     re.IGNORECASE,
 )
+
+
+log = logging.getLogger("chat_streamd_v2.assistant_composite")
+_ROUTER_FAILURE_MESSAGE_MAX = 512
+_ROUTER_FAILURE_TRACEBACK_MAX = 4096
 
 
 def _env_bool(env: dict[str, str], key: str, default: bool = False) -> bool:
@@ -521,6 +529,7 @@ class AssistantComposite:
 
     async def _classify_one(self, route: dict[str, Any]) -> None:
         router_input: dict[str, Any] | None = None
+        started = time.monotonic()
         try:
             if self.router is None:
                 raise RuntimeError("assistant_router_unconfigured")
@@ -532,38 +541,41 @@ class AssistantComposite:
             if normalized["disposition"] != "defer":
                 target = await self._target_for_decision(normalized)
                 generation = await self._target_generation(target)
+            router_decision_receipt_id = "assistant-router-decision-" + hashlib.sha256(
+                json.dumps({
+                    "route_id": str(route.get("route_id") or ""),
+                    "router_input": router_input,
+                    "decision": normalized,
+                }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"),
+            ).hexdigest()[:32]
+            if normalized["disposition"] == "defer":
+                await self._update_route(
+                    str(route["route_id"]), routing_state="deferred",
+                    depends_on_message_id=normalized["depends_on_message_id"],
+                    route_payload={**normalized, "router_decision_receipt_id": router_decision_receipt_id},
+                )
+                return
+            dispatch_id = "assistant-dispatch-" + uuid.uuid4().hex
+            updated = await self._update_route(
+                str(route["route_id"]), routing_state="resolved", delivery_state="intent",
+                dispatch_id=dispatch_id, route_target=target, route_target_generation=generation,
+                route_payload={
+                    **normalized,
+                    "router_decision_receipt_id": router_decision_receipt_id,
+                    "backend_context": _backend_routing_context(router_input),
+                },
+            )
+            if updated is not None:
+                self._start_dispatch(updated)
         except Exception as exc:  # classification failure is not input loss
             await self._fallback_or_fail(
-                route, f"router_failed:{type(exc).__name__}", router_context=router_input,
+                route,
+                f"router_failed:{type(exc).__name__}",
+                router_context=router_input,
+                failure_record=_router_failure_record(
+                    exc, _route_elapsed_ms(route, started),
+                ),
             )
-            return
-
-        router_decision_receipt_id = "assistant-router-decision-" + hashlib.sha256(
-            json.dumps({
-                "route_id": str(route.get("route_id") or ""),
-                "router_input": router_input,
-                "decision": normalized,
-            }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"),
-        ).hexdigest()[:32]
-        if normalized["disposition"] == "defer":
-            await self._update_route(
-                str(route["route_id"]), routing_state="deferred",
-                depends_on_message_id=normalized["depends_on_message_id"],
-                route_payload={**normalized, "router_decision_receipt_id": router_decision_receipt_id},
-            )
-            return
-        dispatch_id = "assistant-dispatch-" + uuid.uuid4().hex
-        updated = await self._update_route(
-            str(route["route_id"]), routing_state="resolved", delivery_state="intent",
-            dispatch_id=dispatch_id, route_target=target, route_target_generation=generation,
-            route_payload={
-                **normalized,
-                "router_decision_receipt_id": router_decision_receipt_id,
-                "backend_context": _backend_routing_context(router_input),
-            },
-        )
-        if updated is not None:
-            self._start_dispatch(updated)
 
     async def _router_input(self, route: dict[str, Any]) -> dict[str, Any]:
         body = str(route.get("body") or "")
@@ -785,11 +797,31 @@ class AssistantComposite:
         return generation
 
     async def _fallback_or_fail(
-        self, route: dict[str, Any], error_code: str, *, router_context: dict[str, Any] | None = None,
+        self,
+        route: dict[str, Any],
+        error_code: str,
+        *,
+        router_context: dict[str, Any] | None = None,
+        failure_record: dict[str, Any] | None = None,
     ) -> None:
+        fallback_dispatch_id = "assistant-fallback-" + uuid.uuid4().hex
+        fallback_payload: dict[str, Any] = {
+            "kind": "luna_fallback_classifier",
+            "reason": error_code,
+            "routing_context": _fallback_routing_context(router_context),
+        }
+        if failure_record is not None:
+            fallback_payload["router_failure"] = dict(failure_record)
+            log.warning(
+                "assistant router fallback dispatch_id=%s exception_type=%s elapsed_ms=%s",
+                fallback_dispatch_id,
+                failure_record.get("exception_type", "Unknown"),
+                failure_record.get("elapsed_ms", 0),
+            )
         if not self.config.luna_stream_id:
             await self._update_route(
                 str(route["route_id"]), routing_state="routing_failed", error_code=error_code,
+                route_payload=fallback_payload,
             )
             return
         try:
@@ -797,16 +829,20 @@ class AssistantComposite:
         except ValueError:
             await self._update_route(
                 str(route["route_id"]), routing_state="routing_failed", error_code=error_code,
+                route_payload=fallback_payload,
             )
             return
-        dispatch_id = "assistant-fallback-" + uuid.uuid4().hex
+        fallback_payload["fallback_receipt"] = {
+            "receipt_id": "assistant-fallback-receipt-" + hashlib.sha256(
+                (str(route.get("route_id") or "") + "\x00" + fallback_dispatch_id).encode("utf-8"),
+            ).hexdigest()[:32],
+            "dispatch_id": fallback_dispatch_id,
+            "kind": "luna_fallback_classifier",
+        }
         updated = await self._update_route(
             str(route["route_id"]), routing_state="fallback_dispatched", delivery_state="intent",
-            dispatch_id=dispatch_id, route_target=self.config.luna_stream_id, route_target_generation=generation,
-            route_payload={
-                "kind": "luna_fallback_classifier", "reason": error_code,
-                "routing_context": _fallback_routing_context(router_context),
-            },
+            dispatch_id=fallback_dispatch_id, route_target=self.config.luna_stream_id,
+            route_target_generation=generation, route_payload=fallback_payload,
             error_code=error_code,
         )
         if updated is not None:
@@ -837,12 +873,17 @@ class AssistantComposite:
                 delivery_state="uncertain", error_code=f"dispatch_exception:{type(exc).__name__}",
             )
             return
-        delivery = str(result.get("delivery") or result.get("delivery_state") or "").lower()
-        if delivery == "landed":
+        delivery = str(
+            result.get("delivery")
+            or result.get("delivery_state")
+            or result.get("delivery_status")
+            or ""
+        ).lower()
+        if delivery in {"landed", "delivered"}:
             state = "landed"
-        elif delivery in {"committed_pending", "accepted"}:
+        elif delivery in {"committed_pending", "committed_pending_proof", "accepted"}:
             state = "committed_pending"
-        elif delivery in {"not_landed", "failed"}:
+        elif delivery in {"not_landed", "failed", "pasted_unsubmitted"}:
             state = "failed"
         else:
             state = "uncertain"
@@ -1239,6 +1280,37 @@ class AssistantComposite:
             await self.refresh_activity()
             return completed
         return None
+
+
+def _bounded_text(value: object, limit: int) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
+def _route_elapsed_ms(route: dict[str, Any], started: float) -> int:
+    """Measure from durable input admission, with a monotonic fallback."""
+    accepted = route.get("created_at")
+    if accepted:
+        try:
+            elapsed = int((datetime.now(timezone.utc) - datetime.fromisoformat(
+                str(accepted).replace("Z", "+00:00"),
+            )).total_seconds() * 1000)
+            if elapsed >= 0:
+                return elapsed
+        except (TypeError, ValueError):
+            pass
+    return max(0, int((time.monotonic() - started) * 1000))
+
+
+def _router_failure_record(exc: Exception, elapsed_ms: int) -> dict[str, Any]:
+    return {
+        "exception_type": type(exc).__name__,
+        "message": _bounded_text(str(exc), _ROUTER_FAILURE_MESSAGE_MAX),
+        "traceback": _bounded_text(traceback.format_exc(), _ROUTER_FAILURE_TRACEBACK_MAX),
+        "elapsed_ms": max(0, int(elapsed_ms)),
+    }
 
 
 def _optional_id(value: object) -> str | None:

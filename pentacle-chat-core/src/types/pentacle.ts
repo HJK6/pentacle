@@ -70,6 +70,14 @@ export interface ChatAttachment {
 // the same bound.
 export const MAX_CHAT_ATTACHMENTS = 5;
 
+/** Daemon-authenticated registry tag; clients render by kind, never by wire regex. */
+export interface PentacleMessageEnvelope {
+  kind: string;
+  id: string;
+  schema_version: 1;
+  [key: string]: unknown;
+}
+
 export interface PentacleEvent {
   daemon_seq: number;
   host: string;
@@ -81,6 +89,7 @@ export interface PentacleEvent {
   kind: PentacleEventKind;
   text: string;
   raw?: Record<string, unknown>;
+  message_envelope?: PentacleMessageEnvelope;
   /** Grammar provenance at authenticated provider ingress; text is already unwrapped. */
   provider_wrapper?: { kind: 'claude_pasted_content'; id: string; provenance: 'grammar' };
   jsonl_record_uuid?: string;

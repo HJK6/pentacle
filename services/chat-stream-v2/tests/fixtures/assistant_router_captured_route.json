@@ -1,0 +1,37 @@
+{
+  "body": "Continue the re-login buttons work.",
+  "input_identity": "live-short-reply-38bf3f9ce05344d4963557bc315868aa",
+  "route_json": {
+    "backend_context": {
+      "context_digest": "b16447aa07312821272f469fb73f232f471b47970add02ba28141186c70a79d4",
+      "message_id": "live-short-reply-38bf3f9ce05344d4963557bc315868aa",
+      "open_lanes": [
+        {
+          "backend_kind": "lead",
+          "lane_id": "assistant-lane-132b50c2c24496f6989e13ba",
+          "last_outbound_excerpt": "Is a provider terminal available for a supervised Claude and Codex re-login test?",
+          "last_outbound_truncated": true,
+          "pending_question_id": "relogin-provider-window-20260921",
+          "state": "waiting",
+          "summary": "Pentacle desktop/web provider re-login buttons — deferred feature.",
+          "version": 5
+        }
+      ],
+      "original_length": 35,
+      "recent_messages": [],
+      "unresolved_inputs": []
+    },
+    "depends_on_message_id": null,
+    "disposition": "lane",
+    "lane_id": "assistant-lane-132b50c2c24496f6989e13ba",
+    "reason": "Continuing the re-login buttons work as it is an open lane with a supplied lane_id.",
+    "schema_version": "assistant-router/v1"
+  },
+  "decision": {
+    "schema_version": "assistant-router/v1",
+    "disposition": "lane",
+    "lane_id": "assistant-lane-132b50c2c24496f6989e13ba",
+    "depends_on_message_id": null,
+    "reason": "Continuing the re-login buttons work as it is an open lane with a supplied lane_id."
+  }
+}

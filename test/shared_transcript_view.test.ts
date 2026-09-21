@@ -303,7 +303,12 @@ test('proven notification answer correction leaves one durable full answer card'
     provider: correction.provider,
     session_name: correction.session_name,
   });
-  assert.equal(controller.selectSessionDetail(answerStream, { visibleCount: 'all' })?.transcriptItems.length, 1);
+  // pentacle__message_envelope_format_registry_2026_09: untagged markers fail closed.
+  assert.equal(
+    controller.selectSessionDetail(answerStream, { visibleCount: 'all' })?.transcriptItems.length,
+    0,
+    'An untagged notification marker stays hidden before its proof arrives.',
+  );
 
   controller.applyFrame({
     type: 'chat.event',
