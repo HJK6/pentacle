@@ -1,4 +1,5 @@
 import type {
+  AssistantInputActivity,
   ChatAttachment,
   PentacleEvent,
   PentacleHostStatus,
@@ -147,6 +148,7 @@ export type PentacleTranscriptItem = {
   optimisticId?: string;
   correlatedDaemonSeq?: number | null;
   messageId?: string;
+  assistantActivity?: AssistantInputActivity;
   replyToMessageId?: string;
   replyToQuestionId?: string;
   laneId?: string;
@@ -758,6 +760,7 @@ function sameTranscriptItem(a: PentacleTranscriptItem, b: PentacleTranscriptItem
     a.optimisticId === b.optimisticId &&
     a.correlatedDaemonSeq === b.correlatedDaemonSeq &&
     a.messageId === b.messageId &&
+    JSON.stringify(a.assistantActivity) === JSON.stringify(b.assistantActivity) &&
     a.replyToMessageId === b.replyToMessageId &&
     a.replyToQuestionId === b.replyToQuestionId &&
     a.laneId === b.laneId &&
@@ -1652,6 +1655,7 @@ function sessionDetailInputSignature(
       }
       : null,
     optimisticSendSignature,
+    assistantActivity: state.workingStates?.[streamId]?.assistant_activity ?? session.assistant_activity,
   });
 }
 
@@ -1801,6 +1805,12 @@ function buildSessionTranscriptRows(
       ...(event.event_id || event.message_id
         ? { messageId: event.message_id ?? event.event_id ?? undefined }
         : {}),
+      ...((state.workingStates?.[streamId]?.assistant_activity?.inputs[event.message_id || event.optimistic_id || '']
+          ?? session.assistant_activity?.inputs[event.message_id || event.optimistic_id || '']
+          ?? event.raw?.assistant_activity)
+        ? { assistantActivity: (state.workingStates?.[streamId]?.assistant_activity?.inputs[event.message_id || event.optimistic_id || '']
+          ?? session.assistant_activity?.inputs[event.message_id || event.optimistic_id || '']
+          ?? event.raw?.assistant_activity) as AssistantInputActivity } : {}),
       ...(event.reply_to_message_id
         ? { replyToMessageId: event.reply_to_message_id }
         : {}),
@@ -2211,4 +2221,25 @@ function suppressToolRowsCoveredByBatch(items: PentacleInterpretedEvent[]) {
     const toolUseId = String(item.event.raw?.tool_use_id || '').trim();
     return !toolUseId || !coveredToolUseIds.has(toolUseId);
   });
+}
+
+
+/** User-facing response status; finishing an answer never asserts project completion. */
+export function formatAssistantActivity(activity: AssistantInputActivity, now = Date.now()): string {
+  const duration = (ms: number) => `${Math.max(0, Math.floor(ms / 1000))}s`;
+  const first = typeof activity.reply_latency_ms === 'number' ? `First reply ${duration(activity.reply_latency_ms)}` : '';
+  const elapsed = Math.max(0, now - Date.parse(activity.accepted_at));
+  switch (activity.response_state) {
+    case 'queued': case 'routing': case 'awaiting_reply':
+      return `Waiting for Bart${Number.isFinite(elapsed) ? ` · ${duration(elapsed)}` : ''}`;
+    case 'acknowledged': return `Follow-up pending${first ? ` · ${first}` : ''}`;
+    case 'answered': return `${first}${first ? ' · ' : ''}Answer complete${typeof activity.final_latency_ms === 'number' ? ` ${duration(activity.final_latency_ms)}` : ''}`;
+    case 'reply_received': return `${first || 'Reply received'} · Completion not recorded`;
+    case 'waiting_for_operator': return 'Waiting for you';
+    case 'waiting_for_dependency': return 'Waiting on an earlier reply';
+    case 'uncertain': return 'Delivery unconfirmed';
+    case 'failed': return 'Could not get a reply';
+    case 'cancelled': return 'Cancelled';
+    default: return '';
+  }
 }

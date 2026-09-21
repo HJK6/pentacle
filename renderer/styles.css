@@ -5633,3 +5633,5 @@ body.chat-stream-degraded button[data-cleanup-action] {
 .slot-chat-reply-btn:hover, .slot-chat-reply-btn:focus-visible {
   opacity: 1;
 }
+
+.slot-chat-assistant-activity { margin-top: 6px; font-size: 12px; color: var(--text-muted, #94a3b8); }

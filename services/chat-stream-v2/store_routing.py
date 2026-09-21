@@ -797,6 +797,10 @@ class _RoutingStoreMixin:
                        WHERE route_id=?""",
                     (owner, now + max(1.0, lease_seconds), stamp, route_id),
                 )
+                route_payload = json.loads(row["route_json"] or "{}")
+                route_payload.setdefault("timings", {}).setdefault("routing_started_at", stamp)
+                conn.execute("UPDATE v2_assistant_composite_routes SET route_json=? WHERE route_id=?",
+                             (json.dumps(route_payload, sort_keys=True), route_id))
                 claimed = dict(conn.execute(
                     "SELECT * FROM v2_assistant_composite_routes WHERE route_id=?", (route_id,),
                 ).fetchone())
@@ -886,6 +890,16 @@ class _RoutingStoreMixin:
                     conn.commit()
                     return None
                 existing = dict(row)
+                stamp = _routing_iso_now()
+                prior_payload = json.loads(row["route_json"] or "{}")
+                merged_payload = dict(route_payload) if route_payload is not None else prior_payload
+                timings = dict(prior_payload.get("timings", {}))
+                if routing_state in {"resolved", "fallback_dispatched", "deferred", "routing_failed"}:
+                    timings.setdefault("routed_at", stamp)
+                if delivery_state in {"landed", "failed", "uncertain", "committed_pending"}:
+                    timings.setdefault("delivery_recorded_at", stamp)
+                merged_payload["timings"] = timings
+                persisted_route_json = json.dumps(merged_payload, sort_keys=True, separators=(",", ":"))
                 conn.execute(
                     """UPDATE v2_assistant_composite_routes SET
                          routing_state=?, delivery_state=COALESCE(?,delivery_state),
@@ -895,8 +909,8 @@ class _RoutingStoreMixin:
                          error_code=?, lease_owner=NULL, lease_until=NULL, updated_at=?
                        WHERE route_id=?""",
                     (
-                        routing_state, delivery_state, dispatch_id, route_target, route_target_generation, route_json,
-                        depends_on_message_id, error_code, _routing_iso_now(), route_id,
+                        routing_state, delivery_state, dispatch_id, route_target, route_target_generation, persisted_route_json,
+                        depends_on_message_id, error_code, stamp, route_id,
                     ),
                 )
                 updated = dict(conn.execute(
@@ -957,6 +971,41 @@ class _RoutingStoreMixin:
                 (stream_id, exclude_route_id, effective_limit),
             ).fetchall()
             return [dict(row) for row in reversed(rows)]
+        return await self.submit(_op)
+
+    async def assistant_composite_activity(self, *, stream_id, input_ids=None):
+        from assistant_activity import project_input
+        if input_ids is not None and not input_ids:
+            return {}
+        def _op(conn):
+            params = [stream_id]
+            where = "r.stream_id=?"
+            if input_ids is not None:
+                ids = list(dict.fromkeys(input_ids))[:2000]
+                where += " AND r.input_identity IN (" + ",".join("?" for _ in ids) + ")"
+                params.extend(ids)
+            else:
+                # Recent history plus older outstanding response obligations.
+                # Completed history remains available through the input-ID path.
+                where += """ AND (r.route_id IN (SELECT route_id FROM v2_assistant_composite_routes WHERE stream_id=? ORDER BY created_at DESC LIMIT 2000)
+                    OR (r.routing_state!='routing_failed' AND COALESCE(r.delivery_state,'')!='failed' AND NOT EXISTS
+                        (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity))
+                    OR (EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity AND json_extract(p.canonical_payload_json,'$.response_state')='acknowledged')
+                        AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity AND (p.publish_kind='result' OR json_extract(p.canonical_payload_json,'$.response_state')='final'))))"""
+                params.append(stream_id)
+            rows = [dict(r) for r in conn.execute("SELECT r.input_identity,r.created_at,r.routing_state,r.delivery_state,r.dispatch_id,r.route_json,r.error_code FROM v2_assistant_composite_routes r WHERE " + where, params)]
+            result = {}
+            for row in rows:
+                pubs = [dict(p) for p in conn.execute("SELECT publication_key,created_at,canonical_payload_json,publish_kind FROM v2_assistant_composite_publications WHERE stream_id=? AND reply_to_message_id=? ORDER BY created_at,event_id", (stream_id, row["input_identity"]))]
+                lane_ids = {op[0] for op in conn.execute("SELECT lane_id FROM v2_assistant_composite_operations WHERE stream_id=? AND operation='lane.admit' AND json_extract(payload_json,'$.request_message_id')=?", (stream_id, row["input_identity"]))}
+                lane_ids.add(json.loads(row["route_json"] or "{}").get("lane_id"))
+                lanes = []
+                for lane_id in lane_ids - {None}:
+                    lane = conn.execute("SELECT lane_id,phase,pending_question_id FROM v2_assistant_composite_lanes WHERE stream_id=? AND lane_id=?", (stream_id, lane_id)).fetchone()
+                    if lane is not None:
+                        lanes.append(dict(lane))
+                result[row["input_identity"]] = project_input(row, pubs, sorted(lanes, key=lambda lane: lane["lane_id"]))
+            return result
         return await self.submit(_op)
 
     async def list_assistant_composite_admitted_lanes(self, *, stream_id: str, dispatch_id: str):

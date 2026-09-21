@@ -190,6 +190,7 @@ export interface PentacleLastTextProvenance {
 }
 
 export interface PentacleSessionSummary {
+  assistant_activity?: AssistantActivitySnapshot;
   agents?: ChildAgent[];
   // Daemon-projected session role (e.g. "nexus"). Mobile gates the Sub-agents roster and the
   // chat-row history affordance on role === "nexus"; the daemon passes it through unchanged.
@@ -418,7 +419,34 @@ export interface WorkingTaskSummary {
   open: number;
 }
 
+export type AssistantResponseState = 'queued' | 'routing' | 'awaiting_reply' | 'acknowledged' | 'answered' | 'reply_received' | 'waiting_for_operator' | 'waiting_for_dependency' | 'failed' | 'uncertain' | 'cancelled';
+
+export interface AssistantInputActivity {
+  message_id: string;
+  accepted_at: string;
+  first_visible_at: string | null;
+  final_visible_at: string | null;
+  reply_latency_ms: number | null;
+  final_latency_ms: number | null;
+  response_state: AssistantResponseState;
+  work_state: 'unknown' | 'discussion' | 'in_progress' | 'waiting' | 'outcome_reported' | 'closed' | 'cancelled';
+  error_code?: string | null;
+  dispatch_id?: string | null;
+  lane_ids?: string[];
+  publication_ids?: string[];
+}
+
+export interface AssistantActivitySnapshot {
+  version: 1;
+  pending_count: number;
+  waiting_for_operator_count: number;
+  oldest_pending_at: string | null;
+  inputs: Record<string, AssistantInputActivity>;
+  has_more: boolean;
+}
+
 export interface WorkingStateData {
+  assistant_activity?: AssistantActivitySnapshot;
   stream_id: string;
   timestamp: string;
   tokens_input: number;

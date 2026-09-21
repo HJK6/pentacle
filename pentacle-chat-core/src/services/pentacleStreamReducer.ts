@@ -1824,8 +1824,16 @@ export function applyPentacleWorkingState(
   ) {
     return state;
   }
+  const assistantActivity = workingState.assistant_activity;
   return {
     ...state,
+    sessions: assistantActivity ? state.sessions.map(session =>
+      session.stream_id === workingState.stream_id && session.session_kind === 'assistant_composite'
+        ? { ...session, assistant_activity: assistantActivity,
+            working: assistantActivity.pending_count > 0,
+            working_label: assistantActivity.pending_count > 0 ? 'Waiting for Bart'
+              : assistantActivity.waiting_for_operator_count > 0 ? 'Waiting for you' : undefined }
+        : session) : state.sessions,
     workingStates: {
       ...state.workingStates,
       [workingState.stream_id]: workingState,
@@ -1860,6 +1868,7 @@ function sameWorkingTaskSummary(a: WorkingTaskSummary, b: WorkingTaskSummary) {
 function sameWorkingStateData(a: WorkingStateData, b: WorkingStateData) {
   return (
     a.stream_id === b.stream_id &&
+    JSON.stringify(a.assistant_activity) === JSON.stringify(b.assistant_activity) &&
     a.timestamp === b.timestamp &&
     a.tokens_input === b.tokens_input &&
     a.tokens_output === b.tokens_output &&

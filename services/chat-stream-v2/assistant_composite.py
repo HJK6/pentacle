@@ -9,6 +9,7 @@ back here only through ``assistant.publish``.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -147,6 +148,8 @@ class AssistantComposite:
         self._worker_lock = asyncio.Lock()
         self._dispatch_tasks: set[asyncio.Task[None]] = set()
         self._owner = f"assistant-router-{uuid.uuid4().hex[:12]}"
+        self._activity_lock = asyncio.Lock()
+        self._activity = {"version": 1, "inputs": {}, "pending_count": 0, "waiting_for_operator_count": 0, "oldest_pending_at": None, "has_more": False}
 
     @property
     def enabled(self) -> bool:
@@ -238,6 +241,7 @@ class AssistantComposite:
         )
         # The shared sessions schema stays untouched; these public fields are
         # projected on the existing inventory/events transport.
+        await self.refresh_activity(broadcast=False)
         return self.project_session(row)
 
     async def recover(self) -> dict[str, int]:
@@ -255,12 +259,54 @@ class AssistantComposite:
         result = await self.store.recover_assistant_composite_routes(
             stream_id=self.config.stream_id,
         )
+        await self.refresh_activity()
         self._wake_worker()
+        return result
+
+    def activity_snapshot(self):
+        return deepcopy(self._activity)
+
+    def working_payload(self):
+        from assistant_activity import _elapsed
+        now = _now_iso()
+        return {"stream_id": self.config.stream_id, "timestamp": now,
+                "tokens_input": 0, "tokens_output": 0, "tokens_cache_read": 0, "tokens_cache_creation": 0,
+                "tokens_phase": "down" if self._activity["pending_count"] else "idle",
+                "shell_count_started": 0, "tasks": [],
+                "task_summary": {"total": 0, "done": 0, "in_progress": 0, "open": 0},
+                "elapsed_ms": _elapsed(self._activity["oldest_pending_at"], now) or 0,
+                "assistant_activity": self.activity_snapshot()}
+
+    async def refresh_activity(self, *, broadcast=True):
+        if not self.enabled:
+            return
+        from assistant_activity import summarize_activity
+        async with self._activity_lock:
+            inputs = await self.store.assistant_composite_activity(stream_id=self.config.stream_id)
+            next_activity = summarize_activity(inputs)
+            changed = next_activity != self._activity
+            self._activity = next_activity
+            if changed and broadcast and self.broadcast is not None:
+                await self.broadcast({"type": "working.state", **self.working_payload()})
+
+    async def enrich_events(self, events):
+        ids = [event.get("message_id") for event in events if event.get("kind") == "USER" and event.get("message_id")]
+        activity = await self.store.assistant_composite_activity(stream_id=self.config.stream_id, input_ids=ids)
+        return [{**event, "raw": {**(event.get("raw") or {}), "assistant_activity": activity[event["message_id"]]}}
+                if event.get("message_id") in activity else event for event in events]
+
+    async def _update_route(self, *args, **kwargs):
+        result = await self.store.update_assistant_composite_route(*args, **kwargs)
+        await self.refresh_activity()
         return result
 
     def project_session(self, row: dict[str, Any]) -> dict[str, Any]:
         projected = dict(row)
         projected.update({
+            "working": bool(self._activity["pending_count"]),
+            "working_label": ("Waiting for Bart" if self._activity["pending_count"] else
+                              "Waiting for you" if self._activity["waiting_for_operator_count"] else None),
+            "assistant_activity": self.activity_snapshot(),
             "session_kind": "assistant_composite",
             "session_generation": COMPOSITE_GENERATION,
             "provider": "composite",
@@ -314,8 +360,9 @@ class AssistantComposite:
             reply_to_question_id=_optional_id(msg.get("reply_to_question_id")),
             actor_stream_id=operator_principal,
         )
+        await self.refresh_activity()
         if not record.get("duplicate") and self.broadcast is not None:
-            await self.broadcast({"type": "chat.event", "event": record["event"]})
+            await self.broadcast({"type": "chat.event", "event": (await self.enrich_events([record["event"]]))[0]})
         if not record.get("duplicate"):
             if explicit_target is not None:
                 question_id = _optional_id(msg.get("reply_to_question_id"))
@@ -329,7 +376,7 @@ class AssistantComposite:
                         raise ValueError("assistant_question_answer_adapter_unavailable")
                     answered = await self.question_answer(question_id, body, msg)
                     if not bool(answered.get("ok")):
-                        updated = await self.store.update_assistant_composite_route(
+                        updated = await self._update_route(
                             str(record["route_id"]), routing_state="routing_failed",
                             error_code="assistant_question_answer_failed",
                         )
@@ -356,7 +403,7 @@ class AssistantComposite:
                 target, generation, reply_lane_id = explicit_target
                 dispatch_id = "assistant-reply-" + uuid.uuid4().hex
                 backend_context = _backend_routing_context(await self._router_input(record))
-                updated = await self.store.update_assistant_composite_route(
+                updated = await self._update_route(
                     str(record["route_id"]), routing_state="resolved", delivery_state="intent",
                     dispatch_id=dispatch_id, route_target=target, route_target_generation=generation,
                     route_payload={"schema_version": "assistant-router/v1", "disposition": "lane" if reply_lane_id else "conversation", "lane_id": reply_lane_id,
@@ -456,6 +503,7 @@ class AssistantComposite:
                     )
                     if route is None:
                         return
+                    await self.refresh_activity()
                     await self._classify_one(route)
         except RuntimeError as exc:
             # Daemon teardown owns cancellation/store closure.  A detached
@@ -498,14 +546,14 @@ class AssistantComposite:
             }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"),
         ).hexdigest()[:32]
         if normalized["disposition"] == "defer":
-            await self.store.update_assistant_composite_route(
+            await self._update_route(
                 str(route["route_id"]), routing_state="deferred",
                 depends_on_message_id=normalized["depends_on_message_id"],
                 route_payload={**normalized, "router_decision_receipt_id": router_decision_receipt_id},
             )
             return
         dispatch_id = "assistant-dispatch-" + uuid.uuid4().hex
-        updated = await self.store.update_assistant_composite_route(
+        updated = await self._update_route(
             str(route["route_id"]), routing_state="resolved", delivery_state="intent",
             dispatch_id=dispatch_id, route_target=target, route_target_generation=generation,
             route_payload={
@@ -740,19 +788,19 @@ class AssistantComposite:
         self, route: dict[str, Any], error_code: str, *, router_context: dict[str, Any] | None = None,
     ) -> None:
         if not self.config.luna_stream_id:
-            await self.store.update_assistant_composite_route(
+            await self._update_route(
                 str(route["route_id"]), routing_state="routing_failed", error_code=error_code,
             )
             return
         try:
             generation = await self._target_generation(self.config.luna_stream_id)
         except ValueError:
-            await self.store.update_assistant_composite_route(
+            await self._update_route(
                 str(route["route_id"]), routing_state="routing_failed", error_code=error_code,
             )
             return
         dispatch_id = "assistant-fallback-" + uuid.uuid4().hex
-        updated = await self.store.update_assistant_composite_route(
+        updated = await self._update_route(
             str(route["route_id"]), routing_state="fallback_dispatched", delivery_state="intent",
             dispatch_id=dispatch_id, route_target=self.config.luna_stream_id, route_target_generation=generation,
             route_payload={
@@ -774,7 +822,7 @@ class AssistantComposite:
         # downstream action but before a receipt stays uncertain, never blindly
         # reinjected or claimed exactly-once.
         if self.dispatch is None:
-            await self.store.update_assistant_composite_route(
+            await self._update_route(
                 str(route["route_id"]), routing_state=str(route["routing_state"]),
                 expected_dispatch_id=str(route["dispatch_id"]), expected_routing_state=str(route["routing_state"]),
                 delivery_state="uncertain", error_code="assistant_dispatch_unconfigured",
@@ -783,7 +831,7 @@ class AssistantComposite:
         try:
             result = await self.dispatch(dict(route))
         except Exception as exc:  # physical boundary is ambiguous
-            await self.store.update_assistant_composite_route(
+            await self._update_route(
                 str(route["route_id"]), routing_state=str(route["routing_state"]),
                 expected_dispatch_id=str(route["dispatch_id"]), expected_routing_state=str(route["routing_state"]),
                 delivery_state="uncertain", error_code=f"dispatch_exception:{type(exc).__name__}",
@@ -798,7 +846,7 @@ class AssistantComposite:
             state = "failed"
         else:
             state = "uncertain"
-        await self.store.update_assistant_composite_route(
+        await self._update_route(
             str(route["route_id"]), routing_state=str(route["routing_state"]),
             expected_dispatch_id=str(route["dispatch_id"]), expected_routing_state=str(route["routing_state"]),
             delivery_state=state, error_code=None if state != "uncertain" else "dispatch_receipt_ambiguous",
@@ -817,7 +865,7 @@ class AssistantComposite:
         publish_fields = {
             "type", "request_id", "composite_stream_id", "dispatch_id",
             "reply_to_message_id", "reply_to_question_id", "publish_kind", "message",
-            "attachment_ids", "evidence_refs",
+            "attachment_ids", "evidence_refs", "response_state",
         }
         if {str(key) for key in msg if not str(key).startswith("_")} - publish_fields:
             raise ValueError("assistant_publish_payload_invalid")
@@ -832,6 +880,11 @@ class AssistantComposite:
         kind = str(msg.get("publish_kind") or "")
         if kind not in {"prose", "question", "result", "status"}:
             raise ValueError("assistant_publish_kind_invalid")
+        response_state = msg.get("response_state")
+        if (response_state is not None and response_state not in {"acknowledged", "final"}
+                or response_state is not None and kind == "question"
+                or response_state == "acknowledged" and kind == "result"):
+            raise ValueError("assistant_publish_response_state_invalid")
         route = await self.store.find_assistant_composite_route_by_dispatch(dispatch_id)
         if route is None or not await self._is_current_dispatch_actor(
             route, str(actor_stream_id or ""), allow_authority=kind != "question",
@@ -863,6 +916,8 @@ class AssistantComposite:
             "attachment_ids": attachment_ids,
             "evidence_refs": evidence_refs,
         }
+        if response_state is not None:
+            canonical_payload["response_state"] = response_state
         event = {
             "stream_id": self.config.stream_id,
             "provider": "composite",
@@ -885,6 +940,8 @@ class AssistantComposite:
                 "evidence_refs": evidence_refs,
             },
         }
+        if response_state is not None:
+            event["raw"]["response_state"] = response_state
         stored = await self.store.record_assistant_composite_publication(
             stream_id=self.config.stream_id, publication_key=publication_key,
             dispatch_id=dispatch_id, reply_to_message_id=reply_to_message_id,
@@ -894,6 +951,7 @@ class AssistantComposite:
             actor_stream_id=actor_stream_id, actor_generation=actor_generation,
             authority_stream_id=self.config.astra_stream_id if kind != "question" else None,
         )
+        await self.refresh_activity()
         if not stored.get("duplicate") and self.broadcast is not None:
             await self.broadcast({"type": "chat.event", "event": stored["event"]})
         return {
@@ -1039,6 +1097,7 @@ class AssistantComposite:
                 expected_lane_version=expected_version, evidence_refs=evidence_refs,
                 question_id=question_id,
             )
+            await self.refresh_activity()
             return {"type": "assistant.operation.ok", **audit, "question": question.get("question")}
         authority_generation = None
         if operation == "authority.request":
@@ -1084,6 +1143,7 @@ class AssistantComposite:
                     raise RuntimeError("assistant_route_resolve_receipt_missing")
                 self._start_dispatch(route)
             self._wake_worker()
+        await self.refresh_activity()
         return {"type": "assistant.operation.ok", **result}
 
     async def _is_current_dispatch_actor(
@@ -1171,11 +1231,13 @@ class AssistantComposite:
             route = await self.store.find_assistant_composite_route_by_dispatch(dispatch_id)
             if route is None or not await self._is_current_dispatch_actor(route, source):
                 return None
-            return await self.store.complete_assistant_composite_lane(
+            completed = await self.store.complete_assistant_composite_lane(
                 stream_id=self.config.stream_id, lane_id=lane_id, dispatch_id=dispatch_id,
                 actor_stream_id=source, actor_generation=generation, report_id=report_id,
                 authority_wake_recipient=self.config.astra_stream_id or None,
             )
+            await self.refresh_activity()
+            return completed
         return None
 
 

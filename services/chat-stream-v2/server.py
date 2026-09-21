@@ -1540,7 +1540,7 @@ class Server:
             "routing_integrity_event_id", "routing_integrity_updated_at", "agent_id", "preview", "attached",
             "created", "last_activity", "pane_pid", "pane_status", "capture_liveness", "close_pending",
             "close_intent_id", "close_requested_at", "session_generation", "turn_state",
-            "session_kind", "capabilities",
+            "session_kind", "capabilities", "assistant_activity",
             "turn_state_since", "turn_state_sources", "host_status",
             "host_status_reason", "host_status_since",
             "bootstrap_state", "state", "agents", "objective", "objective_source",
@@ -1817,6 +1817,9 @@ class Server:
                     for stream_id, payload in values.items()
                     if isinstance(payload, dict)
                 })
+        composite = self.assistant_composite
+        if composite is not None and composite.enabled:
+            merged[composite.config.stream_id] = composite.working_payload()
         return merged
 
     # Session registry verbs. Every one is a thin adapter: parse the envelope,
@@ -1884,6 +1887,8 @@ class Server:
             await self.store.fetch_session_event_tail(stream_id, limit=event_tail)
             if event_tail else []
         )
+        if self.assistant_composite is not None and self.assistant_composite.is_stream(stream_id):
+            recent_events = await self.assistant_composite.enrich_events(recent_events)
         bootstrap_event = bool(recent_events) or bool(session.get("_bootstrap_event_seen"))
         if not bootstrap_event:
             bootstrap_event = bool(
@@ -2376,6 +2381,8 @@ class Server:
                 if not page:
                     break
 
+                if self.assistant_composite is not None and self.assistant_composite.is_stream(stream_id):
+                    page = await self.assistant_composite.enrich_events(page)
                 frames = await asyncio.to_thread(
                     _assemble_event_frames,
                     page,

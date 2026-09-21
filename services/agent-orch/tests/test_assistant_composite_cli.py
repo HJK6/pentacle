@@ -33,6 +33,28 @@ def test_assistant_publish_uses_typed_existing_socket_request(monkeypatch, capsy
     assert "assistant.publish.ok" in capsys.readouterr().out
 
 
+def test_assistant_publish_serializes_explicit_final_response_marker(monkeypatch, capsys) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "assistant", "publish", "--dispatch-id", "dispatch-1",
+        "--reply-to-message-id", "input-1", "--request-id", "pub-final",
+        "--composite-stream-id", "fixture-host-chat:assistant",
+        "--publish-kind", "result", "--response-state", "final", "--message", "done",
+    ])
+    captured = {}
+
+    async def fake_once(_config, payload, *, timeout):
+        captured.update(payload=payload, timeout=timeout)
+        return {"type": "assistant.publish.ok", "event_id": 10}
+
+    monkeypatch.setattr(cli, "assistant_once", fake_once)
+    monkeypatch.setattr(cli, "load_config", lambda: object())
+    assert args.func(args) == 0
+    assert captured["payload"]["publish_kind"] == "result"
+    assert captured["payload"]["response_state"] == "final"
+    assert "assistant.publish.ok" in capsys.readouterr().out
+
+
 def test_assistant_operation_refuses_non_object_payload(capsys) -> None:
     parser = cli.build_parser()
     args = parser.parse_args([

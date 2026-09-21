@@ -1502,6 +1502,8 @@ def assistant_publish(args: argparse.Namespace) -> int:
         "attachment_ids": attachment_ids,
         "evidence_refs": evidence_refs,
     }
+    if getattr(args, "response_state", None) is not None:
+        payload["response_state"] = args.response_state
     return _assistant_call(args, payload)
 
 
@@ -4748,6 +4750,7 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_publish_parser.add_argument(
         "--publish-kind", choices=("prose", "question", "result", "status"), required=True,
     )
+    assistant_publish_parser.add_argument("--response-state", choices=("acknowledged", "final"))
     assistant_publish_parser.add_argument("--attachment-ids-json")
     assistant_publish_parser.add_argument("--evidence-refs-json")
     assistant_publish_parser.add_argument("--timeout", type=float, default=30.0)

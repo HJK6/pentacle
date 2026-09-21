@@ -31,7 +31,7 @@ import type {
   MdInline,
   ChatAttachment,
 } from 'pentacle-chat-core';
-import { parseMarkdown, parsePentacleQuestionAnswerText, interpretPentacleEvent } from 'pentacle-chat-core';
+import { formatAssistantActivity, parseMarkdown, parsePentacleQuestionAnswerText, interpretPentacleEvent } from 'pentacle-chat-core';
 
 // Chrome colors are a DESKTOP concern (legacy `chat_ui_state.js#hostChrome`),
 // not part of the shared core's host theme. app.js already computes chrome via
@@ -466,8 +466,12 @@ function renderTranscriptItemBodyHtml(
     const receipt = sendState === 'cancelled' || sendState === 'failed' || sendState === 'indeterminate'
       ? sendState : item.receiptCaption || (item.queuedWhileWorking && (sendState === 'queued' || sendState === 'sending') ? 'queued' : sendState);
     const status = receipt ? renderUserSendStatus(receipt, item.optimisticId) : '';
+    const activity = item.assistantActivity;
+    const activityLabel = activity ? formatAssistantActivity(activity) : '';
+    const activityStatus = activityLabel ? `<div class="slot-chat-assistant-activity" role="status"${activity && ['queued', 'routing', 'awaiting_reply'].includes(activity.response_state) ? ` data-assistant-waiting-at="${escapeHtml(activity.accepted_at)}"` : ''}>${escapeHtml(activityLabel)}</div>` : '';
+
     const attachments = renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments);
-    return `<article class="slot-chat-row is-user${rowClass}" aria-label="User message" data-copy-kind="message">${attachments}${item.text.trim() ? `<div class="slot-chat-user-bubble">${renderAnswerBody(item.text)}</div>${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}` : ''}${status}</article>`;
+    return `<article class="slot-chat-row is-user${rowClass}" aria-label="User message" data-copy-kind="message">${attachments}${item.text.trim() ? `<div class="slot-chat-user-bubble">${renderAnswerBody(item.text)}</div>${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}` : ''}${status}${activityStatus}</article>`;
   }
   if (rule === 'terminal:divider' || rule === 'activity:turn-summary') {
     if (!shouldShowTurnDuration(options)) return '';

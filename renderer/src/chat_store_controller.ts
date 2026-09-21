@@ -253,6 +253,9 @@ export class ChatStoreController {
    * matches claude/codex's own reported time.
    */
   getWorkingElapsedMs(streamId: string, now: number = this.clock()): number | null {
+    const activity = this.state.workingStates?.[streamId]?.assistant_activity;
+    if (activity) return activity.oldest_pending_at && activity.pending_count > 0
+      ? Math.max(0, now - Date.parse(activity.oldest_pending_at)) : null;
     const anchor = this.workingElapsedAnchors[streamId];
     if (!anchor) return null;
     // Stale anchor (daemon went silent) → defer to the legacy fallback rather
@@ -347,6 +350,7 @@ export class ChatStoreController {
    * workingByStream[streamId]?.phase read in the composer.
    */
   getTurnPhase(streamId: string): 'idle' | 'pending' | 'working' {
+    if (this.state.sessions.some(session => session.stream_id === streamId && session.session_kind === 'assistant_composite')) return 'idle';
     return (this.state.workingByStream?.[streamId] as TurnState | undefined)?.phase ?? 'idle';
   }
 
@@ -406,6 +410,7 @@ export class ChatStoreController {
     if (typeof setTimeout !== 'function' || !streamId) return;
     const existing = this.staleTurnTimers[streamId];
     if (existing) clearTimeout(existing);
+    if (this.state.sessions.some(session => session.stream_id === streamId && session.session_kind === 'assistant_composite')) return;
     const turn = this.getTurnState(streamId);
     if (!ChatStoreController.isTurnStaleEligible(turn)) {
       delete this.staleTurnTimers[streamId];
@@ -434,6 +439,7 @@ export class ChatStoreController {
    * eligible AND still the same turn the timer was armed for (identity match).
    */
   private maybeSettleStaleTurn(streamId: string, armedId: string): void {
+    if (this.state.sessions.some(session => session.stream_id === streamId && session.session_kind === 'assistant_composite')) return;
     const turn = this.getTurnState(streamId);
     if (!ChatStoreController.isTurnStaleEligible(turn)) return;
     if (ChatStoreController.turnIdentity(turn) !== armedId) return;

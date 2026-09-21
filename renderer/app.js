@@ -3506,6 +3506,10 @@ function toggleSlotStatusCard(slot) {
 // `workingSince` here even if no render fired for it.
 function updateWorkingTimers() {
   const now = Date.now();
+  document.querySelectorAll('[data-assistant-waiting-at]').forEach(el => {
+    const started = Date.parse(el.dataset.assistantWaitingAt || '');
+    if (Number.isFinite(started)) el.textContent = `Waiting for Bart · ${Math.max(0, Math.floor((now - started) / 1000))}s`;
+  });
   for (const key of Object.keys(state.workingSince)) {
     const slot = Number(key);
     const isWorkingChatSlot =

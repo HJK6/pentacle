@@ -10,6 +10,8 @@
 # The shared push secret is NOT committed: it is read from
 # ~/.config/pentacle/satellite.env (see README). coordinator's daemon must carry the
 # SAME PENTACLE_EVENT_PUSH_SECRET or every push is refused `unauthorized`.
+# Usage-bearing pushes also require the host's private PENTACLE_EVENT_PUSH_HOST_SECRET;
+# provision its matching event_push.host_secret.<host> key on the coordinator.
 [Unit]
 Description=Pentacle chat_streamd v2 ingest satellite
 After=network-online.target

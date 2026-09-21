@@ -348,7 +348,8 @@ def test_question_publication_and_explicit_reply_retain_real_wire_ids():
     async def run():
         events = []
         async def broadcast(event):
-            events.append(event['event'])
+            if 'event' in event:
+                events.append(event['event'])
         async def adapter(_op, _msg):
             return {'type': 'prompt.ask.ok', 'question': {'question_id': 'question-id'}}
         async with setup(broadcast=broadcast, question_operation=adapter,

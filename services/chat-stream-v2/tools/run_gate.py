@@ -217,6 +217,51 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     elif code != 0:
         passed, reason = False, "pytest_failed"
     return _result(tier, code=code, passed=passed, reason=reason, command=command, timed_out=timed_out, preflight=preflight if tier in {"smoke", "soak"} else None, junit=junit, log=log, counts=counts, soak=soak)
+
+
+def _run_usage_manifest(manifest: Path, evidence: Path) -> dict[str, Any]:
+    """Validate the candidate-bound usage receipt as part of a merge gate."""
+    command = [
+        sys.executable,
+        str(SERVICE_DIR / "tools" / "usage_manifest.py"),
+        "validate",
+        "--manifest",
+        str(manifest.resolve()),
+    ]
+    log = evidence / "usage-manifest.log"
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        output = completed.stdout + completed.stderr
+        log.write_text(output, encoding="utf-8")
+        return _result(
+            "usage_manifest",
+            code=completed.returncode,
+            passed=completed.returncode == 0,
+            reason=None if completed.returncode == 0 else "usage_manifest_invalid",
+            command=command,
+            log=log,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = (exc.stdout or "") + (exc.stderr or "")
+        log.write_text(output, encoding="utf-8")
+        return _result(
+            "usage_manifest",
+            code=124,
+            passed=False,
+            reason="usage_manifest_timeout",
+            command=command,
+            timed_out=True,
+            log=log,
+        )
+
+
 def _write_evidence(gate: str, evidence: Path, output: Path | None, sha: str, before: str, after_sha: str, after: str, tiers: list[dict[str, Any]]) -> Path:
     data = {"schema": "pentacle.v2.gate-evidence.v1", "gate": gate, "sha": sha, "source": {"sha_before": sha, "sha_after": after_sha, "clean_before": not before, "clean_after": not after, "status_before": before, "status_after": after}, "generated_at": datetime.now(timezone.utc).isoformat(), "repo_root": str(REPO_ROOT), "service_dir": str(SERVICE_DIR), "tiers": tiers, "passed": all(bool(item["passed"]) for item in tiers)}
     path = output or evidence / f"v2-{gate}-evidence.json"
@@ -231,6 +276,11 @@ def main() -> int:
     parser.add_argument("--evidence-out", type=Path)
     parser.add_argument("--basetemp", type=Path, help="gate base temp directory and owner-manifest home")
     parser.add_argument("--timeout-seconds", type=float)
+    parser.add_argument(
+        "--usage-manifest",
+        type=Path,
+        help="candidate-bound usage manifest to validate as part of a merge gate",
+    )
     args = parser.parse_args()
     evidence = args.evidence_dir or Path(os.environ.get("V2_GATE_EVIDENCE_DIR") or tempfile.mkdtemp(prefix="pentacle-v2-gate-"))
     evidence.mkdir(parents=True, exist_ok=True)
@@ -252,6 +302,8 @@ def main() -> int:
         if before:
             results.append(_result("source_integrity", code=125, passed=False, reason="dirty_worktree", command=["git", "status", "--porcelain", "--untracked-files=all"]))
         else:
+            if args.gate == "merge" and args.usage_manifest is not None:
+                results.append(_run_usage_manifest(args.usage_manifest, evidence))
             for tier in tiers:
                 if _TERMINATION_REQUESTED:
                     break
