@@ -186,7 +186,12 @@ def test_route_resolve_creates_one_correlated_intent_and_detaches_dispatch() -> 
             await store.update_assistant_composite_route(
                 route["route_id"], routing_state="fallback_dispatched", delivery_state="committed_pending",
                 dispatch_id="assistant-fallback-1", route_target=CONVERSATION_STREAM,
-                route_target_generation=luna["session_generation"],
+                route_target_generation=luna["session_generation"], route_payload={
+                    "kind": "luna_fallback_classifier",
+                    "reason": "router_failed:ValueError",
+                    "routing_context": {"message_id": "deferred-1", "open_lanes": []},
+                    "router_decision_receipt_id": "assistant-router-decision-captured",
+                },
             )
             result = await composite.operation({
                 "operation": "route.resolve", "request_id": "resolve-1",
@@ -206,6 +211,14 @@ def test_route_resolve_creates_one_correlated_intent_and_detaches_dispatch() -> 
             assert len(dispatched) == 1
             assert dispatched[0]["route_target"] == CONVERSATION_STREAM
             assert dispatched[0]["delivery_state"] == "intent"
+            resolved_route = await store.get_assistant_composite_route(
+                stream_id=COMPOSITE_STREAM, input_identity="deferred-1",
+            )
+            assert resolved_route is not None
+            resolved_payload = json.loads(resolved_route["route_json"])
+            assert resolved_payload["router_decision_receipt_id"] == "assistant-router-decision-captured"
+            assert resolved_payload["kind"] == "luna_fallback_classifier"
+            assert resolved_payload["backend_context"] == {"message_id": "deferred-1", "open_lanes": []}
 
             replay = await composite.operation({
                 "operation": "route.resolve", "request_id": "resolve-1",

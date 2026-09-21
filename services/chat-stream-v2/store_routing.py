@@ -1404,7 +1404,11 @@ class _RoutingStoreMixin:
                         fallback_payload = json.loads(str((existing_route or {})["route_json"] or "{}"))
                     except (TypeError, ValueError, KeyError):
                         fallback_payload = {}
-                    persisted_route_payload = dict(payload)
+                    # A route.resolve refines the deferred decision; it must
+                    # not discard receipts and context persisted at the
+                    # earlier router/fallback boundary.
+                    persisted_route_payload = dict(fallback_payload)
+                    persisted_route_payload.update(payload)
                     if isinstance(fallback_payload, dict) and isinstance(
                         fallback_payload.get("routing_context"), dict,
                     ):
