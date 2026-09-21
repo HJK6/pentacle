@@ -301,6 +301,11 @@ def test_explicit_current_lane_reply_skips_router_and_uses_current_binding() -> 
             assert len(dispatched) == 1
             assert dispatched[0]["body"] == "yes, do that"
             assert dispatched[0]["route_target"] == AUTHORITY_STREAM
+            reply_route = await store.get_assistant_composite_route(
+                stream_id=COMPOSITE_STREAM, input_identity="reply",
+            )
+            assert reply_route is not None
+            assert "router_decision_receipt_id" not in json.loads(reply_route["route_json"])
             released.set()
             await asyncio.gather(*tuple(composite._dispatch_tasks))
         finally:
@@ -403,8 +408,8 @@ def test_local_multilane_unbound_consent_falls_back_once_with_context_then_luna_
     asyncio.run(_go())
 
 
-def test_local_lane_provenance_allows_explicit_subject_and_narrow_one_lane_continuation() -> None:
-    """Positive controls retain natural routing without treating lane IDs as evidence."""
+def test_local_lane_provenance_requires_explicit_subject_not_one_lane_continuation() -> None:
+    """A distinctive subject may prove a lane; sole-lane regex matching may not."""
 
     class Router:
         async def classify(self, route):
@@ -465,9 +470,9 @@ def test_local_lane_provenance_allows_explicit_subject_and_narrow_one_lane_conti
             continuation = await store.get_assistant_composite_route(
                 stream_id=COMPOSITE_STREAM, input_identity="one-lane-continuation",
             )
-            assert continuation is not None and continuation["routing_state"] == "resolved"
-            assert continuation["route_target"] == AUTHORITY_STREAM
-            assert all(item["routing_state"] != "fallback_dispatched" for item in dispatched)
+            assert continuation is not None and continuation["routing_state"] == "fallback_dispatched"
+            assert continuation["route_target"] == CONVERSATION_STREAM
+            assert dispatched[1]["route_target"] == CONVERSATION_STREAM
         finally:
             await composite.stop()
             store.stop()

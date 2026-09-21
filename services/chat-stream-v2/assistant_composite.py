@@ -490,11 +490,18 @@ class AssistantComposite:
             )
             return
 
+        router_decision_receipt_id = "assistant-router-decision-" + hashlib.sha256(
+            json.dumps({
+                "route_id": str(route.get("route_id") or ""),
+                "router_input": router_input,
+                "decision": normalized,
+            }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"),
+        ).hexdigest()[:32]
         if normalized["disposition"] == "defer":
             await self.store.update_assistant_composite_route(
                 str(route["route_id"]), routing_state="deferred",
                 depends_on_message_id=normalized["depends_on_message_id"],
-                route_payload=normalized,
+                route_payload={**normalized, "router_decision_receipt_id": router_decision_receipt_id},
             )
             return
         dispatch_id = "assistant-dispatch-" + uuid.uuid4().hex
@@ -503,6 +510,7 @@ class AssistantComposite:
             dispatch_id=dispatch_id, route_target=target, route_target_generation=generation,
             route_payload={
                 **normalized,
+                "router_decision_receipt_id": router_decision_receipt_id,
                 "backend_context": _backend_routing_context(router_input),
             },
         )
@@ -525,7 +533,11 @@ class AssistantComposite:
             }
             for item in unresolved_rows
         ]
-        event_rows = await self.store.fetch_session_event_tail(self.config.stream_id, limit=7)
+        # Keep the public chat tail small for prompt size, but retain enough of
+        # the durable tail to find the latest ASSIST_TEXT for every open lane.
+        # The event id stamped by ``fetch_session_event_tail`` is the
+        # authoritative ordering key; timestamps are display metadata only.
+        event_rows = await self.store.fetch_session_event_tail(self.config.stream_id, limit=128)
         recent_messages: list[dict[str, Any]] = []
         for event in event_rows:
             raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
@@ -542,6 +554,70 @@ class AssistantComposite:
         open_lanes = await self.store.list_assistant_composite_open_lanes(
             stream_id=self.config.stream_id, limit=16,
         )
+
+        last_outbound_by_lane: dict[str, dict[str, Any]] = {}
+        route_cache: dict[str, dict[str, Any] | None] = {}
+        allowed_publish_kinds = {"prose", "question", "result", "status"}
+        for event in event_rows:
+            if str(event.get("kind") or "") != "ASSIST_TEXT":
+                continue
+            raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+            publish_kind = str(event.get("publish_kind") or raw.get("publish_kind") or "")
+            if publish_kind not in allowed_publish_kinds:
+                continue
+            dispatch_id = str(raw.get("dispatch_id") or "").strip()
+            if not dispatch_id:
+                continue
+            if dispatch_id not in route_cache:
+                route_cache[dispatch_id] = await self.store.find_assistant_composite_route_by_dispatch(dispatch_id)
+            route_for_output = route_cache[dispatch_id]
+            if route_for_output is None:
+                continue
+            try:
+                decision = json.loads(str(route_for_output.get("route_json") or "{}"))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(decision, dict):
+                continue
+            lane_id = _optional_id(decision.get("lane_id"))
+            if not lane_id:
+                continue
+            try:
+                durable_id = int(event.get("daemon_seq"))
+            except (TypeError, ValueError):
+                continue
+            prior = last_outbound_by_lane.get(lane_id)
+            try:
+                prior_id = int(prior["daemon_seq"]) if prior is not None else -1
+            except (TypeError, ValueError):
+                prior_id = -1
+            if durable_id >= prior_id:
+                text = str(event.get("text") or "")
+                excerpt = text[:384]
+                last_outbound_by_lane[lane_id] = {
+                    "daemon_seq": durable_id,
+                    "excerpt": excerpt,
+                    "truncated": len(text) > len(excerpt),
+                }
+
+        lane_context: list[dict[str, Any]] = []
+        for item in open_lanes:
+            lane_id = _optional_id(item.get("lane_id"))
+            last_outbound = last_outbound_by_lane.get(lane_id or "")
+            lane_context.append({
+                "lane_id": item.get("lane_id"),
+                "state": item.get("phase"),
+                "version": item.get("version"),
+                "backend_kind": item.get("bound_backend_kind"),
+                "pending_question_id": item.get("pending_question_id"),
+                "summary": str(item.get("summary") or "")[:512],
+                "last_outbound_excerpt": (
+                    last_outbound["excerpt"] if last_outbound is not None else None
+                ),
+                "last_outbound_truncated": (
+                    bool(last_outbound["truncated"]) if last_outbound is not None else False
+                ),
+            })
         # The durable store remains authoritative; this contextual list is
         # intentionally only a routing hint and never replaces original input.
         return {
@@ -552,17 +628,7 @@ class AssistantComposite:
             "original_length": len(body),
             "recent_messages": recent_messages[-6:],
             "unresolved_inputs": unresolved,
-            "open_lanes": [
-                {
-                    "lane_id": item.get("lane_id"),
-                    "state": item.get("phase"),
-                    "version": item.get("version"),
-                    "backend_kind": item.get("bound_backend_kind"),
-                    "pending_question_id": item.get("pending_question_id"),
-                    "summary": str(item.get("summary") or "")[:512],
-                }
-                for item in open_lanes
-            ],
+            "open_lanes": lane_context,
         }
 
     async def _normalize_decision(
@@ -634,9 +700,11 @@ class AssistantComposite:
             other_tokens.update(_distinctive_summary_tokens(str(item.get("summary") or "")))
         if input_tokens & (target_tokens - other_tokens):
             return True
-        return len(open_lanes) == 1 and _STRUCTURAL_CONTINUATION_RE.fullmatch(
-            str(route.get("body") or ""),
-        ) is not None
+        # Structural continuation is retained above as provenance vocabulary,
+        # but it is never enough to select the sole remaining lane.  A
+        # non-explicit short reply must remain a router decision or fall back
+        # to Luna for correlation.
+        return False
 
     async def _target_for_decision(self, decision: dict[str, Any]) -> str:
         """Map frozen classifier dispositions to configured backend bindings."""

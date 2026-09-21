@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 import uuid
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
@@ -97,8 +98,26 @@ def probe_cell(host: str, mode: str, args, output: Path) -> dict:
                 evidence.update(watermark=watermark, tell_body=body)
                 receipt = capture_rpc({"type": "tell", "stream_id": stream, "message": body,
                                        "tell_id": uuid.uuid4().hex}, "tell")
-                replay = rpc({"type": "request_stream_events", "stream_id": stream, "limit": 500}, "request_stream_events")
-                evidence["events"] = replay["events"]
+                # General tell can confirm from the pane before transcript ingest.
+                # Keep this owned session alive until its exact USER is observable;
+                # never turn a pending receipt into a confirmed one or resend it.
+                assert receipt.get("submission_confirmed") is True, "tell submission not confirmed"
+                started = time.monotonic()
+                deadline = started + args.timeout
+                polls = 0
+                while True:
+                    replay = rpc({"type": "request_stream_events", "stream_id": stream, "limit": 500}, "request_stream_events")
+                    polls += 1
+                    evidence["events"] = replay["events"]
+                    now = time.monotonic()
+                    evidence["event_wait"] = {"polls": polls, "elapsed_ms": (now - started) * 1000,
+                                              "timeout_seconds": args.timeout}
+                    if any(event.get("stream_id") == stream and event.get("provider") == "claude"
+                           and event.get("kind") == "USER" and event.get("text") == body
+                           and int(event.get("daemon_seq", 0)) > watermark for event in replay["events"]):
+                        break
+                    assert now < deadline, "post-watermark USER ingest deadline exceeded"
+                    time.sleep(min(0.1, deadline - now))
                 evidence["wrapper_event"] = assert_wrapper_receipt(
                     receipt, replay["events"], stream_id=stream, body=body, watermark=watermark,
                 )
