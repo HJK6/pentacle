@@ -95,6 +95,17 @@ absent output is `null`/`false`. Transcript, manifest, report, fixture and
 diagnostic sinks are redacted fail-closed. Keep raw run artifacts outside the
 repository and do not put credentials or unredacted transcripts in fixtures.
 
+Lane publication excerpts never replace the current operator input's
+`body_excerpt`, `body_truncated` or `original_length`. On a nonzero router
+process exit, the durable `router_failure` retains `returncode`, `stdout` and
+`stderr` alongside the exception and elapsed time. Each stream captures only
+its first 2048 bytes, decoding UTF-8 with invalid/incomplete sequences dropped.
+Exit 2 with a bounded stderr JSON object whose `error` is
+`assistant_router_failed` records `assistant_router_script_failed`: the remote
+script reported an exception, including inference failures. Other exits record
+`assistant_router_transport_failed`, an unclassified process/SSH failure rather
+than proof of a network outage. Fallback resolution preserves this evidence.
+
 Committed history batches yield between broadcasts so existing socket writers can drain. Each client still has one writer and a 256-frame queue; a blocked writer remains subject to `1011 slow_consumer` isolation. Smoke failure records retain the full exception chain, including the original cell failure when teardown also fails. Preserve the smoke command's complete output when investigating a failed deployment; the deployment stamp contains only a shortened command detail.
 
 ## Context crossing notifications

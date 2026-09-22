@@ -17,6 +17,24 @@ from urllib.parse import urlparse
 
 from machines import load_machines, ssh_command
 _HOST_RE = re.compile(r"^[A-Za-z0-9_.-]{1,253}$")
+_PROCESS_DIAGNOSTIC_BYTES = 2048
+
+
+class AssistantRouterProcessError(RuntimeError):
+    """Bounded process evidence; a script error does not identify its root cause."""
+
+    def __init__(self, returncode: int, stdout: bytes, stderr: bytes) -> None:
+        self.returncode = returncode
+        self.stdout = stdout[:_PROCESS_DIAGNOSTIC_BYTES].decode("utf-8", errors="ignore")
+        self.stderr = stderr[:_PROCESS_DIAGNOSTIC_BYTES].decode("utf-8", errors="ignore")
+        script_error = False
+        if returncode == 2 and len(stderr) <= _PROCESS_DIAGNOSTIC_BYTES:
+            try:
+                error = json.loads(stderr)
+                script_error = isinstance(error, dict) and error.get("error") == "assistant_router_failed"
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                pass
+        super().__init__("assistant_router_script_failed" if script_error else "assistant_router_transport_failed")
 
 
 class AssistantRouterAdapter:
@@ -77,13 +95,13 @@ class AssistantRouterAdapter:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, _stderr = await asyncio.wait_for(process.communicate(payload), timeout=self.timeout_s)
+            stdout, stderr = await asyncio.wait_for(process.communicate(payload), timeout=self.timeout_s)
         except TimeoutError:
             process.kill()
             await process.wait()
             raise TimeoutError("assistant_router_timeout")
         if process.returncode != 0:
-            raise RuntimeError("assistant_router_transport_failed")
+            raise AssistantRouterProcessError(process.returncode, stdout, stderr)
         if len(stdout) > 64 * 1024:
             raise ValueError("assistant_router_response_oversize")
         try:

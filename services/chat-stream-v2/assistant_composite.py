@@ -22,6 +22,8 @@ import traceback
 import uuid
 from typing import Any, Awaitable, Callable, Protocol
 
+from assistant_router import AssistantRouterProcessError
+
 
 COMPOSITE_CAPABILITY = "assistant_composite_v1"
 COMPOSITE_GENERATION = "assistant-composite-v1"
@@ -653,11 +655,11 @@ class AssistantComposite:
                 prior_id = -1
             if durable_id >= prior_id:
                 text = str(event.get("text") or "")
-                excerpt = text[:384]
+                outbound_excerpt = text[:384]
                 last_outbound_by_lane[lane_id] = {
                     "daemon_seq": durable_id,
-                    "excerpt": excerpt,
-                    "truncated": len(text) > len(excerpt),
+                    "excerpt": outbound_excerpt,
+                    "truncated": len(text) > len(outbound_excerpt),
                 }
 
         lane_context: list[dict[str, Any]] = []
@@ -1305,12 +1307,15 @@ def _route_elapsed_ms(route: dict[str, Any], started: float) -> int:
 
 
 def _router_failure_record(exc: Exception, elapsed_ms: int) -> dict[str, Any]:
-    return {
+    record = {
         "exception_type": type(exc).__name__,
         "message": _bounded_text(str(exc), _ROUTER_FAILURE_MESSAGE_MAX),
         "traceback": _bounded_text(traceback.format_exc(), _ROUTER_FAILURE_TRACEBACK_MAX),
         "elapsed_ms": max(0, int(elapsed_ms)),
     }
+    if isinstance(exc, AssistantRouterProcessError):
+        record.update(returncode=exc.returncode, stdout=exc.stdout, stderr=exc.stderr)
+    return record
 
 
 def _optional_id(value: object) -> str | None:
