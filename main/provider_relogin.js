@@ -15,6 +15,14 @@ const PROVIDERS = {
     origins: ['https://claude.ai', 'https://console.anthropic.com', 'https://platform.claude.com'], browser: '/bin/echo' },
 };
 
+function terminalText(text) {
+  // ConPTY titles can contain drive paths which Node's VT stripper only
+  // partially removes. OSC payloads are metadata, never login output. Strip
+  // their complete bodies first, including an unfinished tail. Each call
+  // receives the accumulated raw buffer, so split terminators stay intact.
+  return stripVTControlCharacters(text.replace(/(?:\x1b\]|\x9d)[\s\S]*?(?:\x07|\x1b\\|\x9c|$)/g, ''));
+}
+
 function authorizationUrl(text, provider) {
   // Only complete output lines: a chunk boundary can split a query parameter.
   const lines = text.split('\n').slice(0, -1);
@@ -131,7 +139,7 @@ function registerProviderRelogin(target, config, {
       }
       record.buffer += data;
       if (record.stopping || phase !== 'login') return;
-      const text = stripVTControlCharacters(record.buffer);
+      const text = terminalText(record.buffer);
       const url = authorizationUrl(text, record.provider);
       if (url && url !== record.url) {
         record.url = url;
@@ -142,7 +150,7 @@ function registerProviderRelogin(target, config, {
       if (record.process !== proc || record.done) return;
       clearTimeout(record.timer);
       clearTimeout(record.cleanupTimer);
-      const text = stripVTControlCharacters(record.buffer);
+      const text = terminalText(record.buffer);
       const match = text.match(new RegExp(`(?:^|\\n)${marker}(\\d+)\\r?(?:\\n|$)`));
       const clean = Boolean(match) && !signal && Number(match[1]) === exitCode;
       record.process = null;

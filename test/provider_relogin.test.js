@@ -83,6 +83,48 @@ test('URL allowlist refuses spoofed domains, non-auth URLs and incomplete querie
     assert.equal(authorizationUrl(url+'\n','codex'),null);
   assert.equal(authorizationUrl(URLS.codex,'codex'),null);
 });
+for (const provider of ['claude', 'codex']) {
+  for (const terminator of [String.fromCharCode(7), String.fromCharCode(27, 92)]) {
+    test(`${provider}: ConPTY title before URL is discarded across chunks (${terminator.length})`, t => {
+      const h = harness(t); h.begin(provider);
+      const login = h.processes[0];
+      const esc = String.fromCharCode(27), slash = String.fromCharCode(92);
+      const title = esc + ']0;C:' + slash + 'Windows' + slash + 'ssh.exe';
+      login.data('Starting sign-in\r\n' + title);
+      assert.equal(h.states().includes('awaiting_browser'), false);
+      login.data(terminator.slice(0, 1));
+      login.data(terminator.slice(1) + esc + '[?25h' + URLS[provider].slice(0, 35));
+      assert.equal(h.states().includes('awaiting_browser'), false);
+      login.data(URLS[provider].slice(35) + '\r\n');
+      assert.equal(h.s.events.at(-1).value.url, URLS[provider]);
+      assert.equal(JSON.stringify(h.logs).includes('SENTINEL'), false);
+    });
+  }
+  test(`${provider}: OSC payload cannot supply a sign-in URL or success marker`, t => {
+    const h = harness(t); h.begin(provider);
+    const esc = String.fromCharCode(27), bel = String.fromCharCode(7);
+    h.processes[0].data(esc + ']0;untrusted\n' + URLS[provider] + '\n');
+    assert.equal(h.states().includes('awaiting_browser'), false);
+    h.processes[0].data(bel + 'ordinary output\n');
+    assert.equal(h.states().includes('awaiting_browser'), false);
+    h.processes[0].finish(esc + ']0;' + SUCCESS[provider] + bel);
+    assert.equal(h.states().at(-1), 'failed');
+    assert.equal(h.processes.length, 1);
+  });
+  test(`${provider}: title metadata cannot satisfy verification or target cleanup`, t => {
+    const h = harness(t); h.begin(provider);
+    const osc = String.fromCharCode(157), st = String.fromCharCode(156);
+    h.processes[0].finish(SUCCESS[provider]);
+    h.processes[1].finish(osc + '0;\n' + OK[provider] + '\n' + st);
+    assert.equal(h.states().at(-1), 'failed');
+    assert.equal(h.s.events.at(-1).value.reason, 'verification_failed');
+    h.begin(provider);
+    const login = h.processes[2];
+    login.finish(osc + '0;\n__PENTACLE_RELOGIN_' + login.nonce + ':0\n' + st, 0, false);
+    assert.equal(h.states().at(-1), 'cleanup_failed');
+    assert.equal(h.s.events.at(-1).value.reason, 'target_exit_unconfirmed');
+  });
+}
 test('explicit Start, provider and configured host are required; aliases share reservation',t=>{
   const h=harness(t);
   for(const req of [{},{provider:'codex',host:'local',id:'fixture_attempt_123',available:false},{provider:'__proto__',host:'local',id:'fixture_attempt_123',available:true}]) assert.equal(h.call('start',req).ok,false);
