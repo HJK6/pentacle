@@ -5183,6 +5183,9 @@ function modelLabel(model) {
     'claude-fable-5-1': 'Fable 5.1',
     'gpt-5.6-sol': '5.6 Sol',
     'gpt-6-astra': '6 Astra',
+    'gpt-6-sol': '6 Sol',
+    'gpt-6-luna': '6 Luna',
+    'gpt-5.6-luna': '5.6 Luna',
     'gpt-5.6-terra': '5.6 Terra',
   };
   return labels[model] ?? model;

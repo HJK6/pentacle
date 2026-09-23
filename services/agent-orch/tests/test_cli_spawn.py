@@ -328,7 +328,7 @@ def test_spawn_payload_omits_model_when_unset(monkeypatch, tmp_path: Path, capsy
 
     assert cli.spawn(_spawn_args(tmp_path)) == 0
     _printed_json(capsys)
-    assert captured["payload"]["model"] == "gpt-5.6-luna"
+    assert captured["payload"]["model"] == "gpt-6-luna"
     assert captured["payload"]["effort"] == "max"
     assert captured["payload"]["resolution_source"] == "profile_default"
 

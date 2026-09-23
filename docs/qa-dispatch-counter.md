@@ -15,7 +15,7 @@ Read the current cycle with:
 
 ```sh
 agent-orch spec-issue show --spec-id spec_pentacle__example --surface admission
-agent-orch spawn --provider codex --model gpt-5.6-sol --effort xhigh \
+agent-orch spawn --provider codex --model gpt-6-sol --effort xhigh \
   --role qa --objective 'Review admission' --spec-id spec_pentacle__example \
   --qa-spec-id spec_pentacle__example --qa-surface admission --qa-cycle 1
 agent-orch send HOST:QA_STREAM 7 'Review the repaired admission surface' \

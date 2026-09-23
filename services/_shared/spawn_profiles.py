@@ -21,11 +21,11 @@ HANDOFF_TUPLE_FIELDS = ("provider", "model", "effort", "role")
 PROFILES = {
     "agent_orch": {
         "claude": ("claude-opus-4-8", "high"),
-        "codex": ("gpt-5.6-sol", "high"),
+        "codex": ("gpt-6-sol", "high"),
     },
     "desktop_manual": {
         "claude": ("claude-opus-4-8", "high"),
-        "codex": ("gpt-5.6-sol", "high"),
+        "codex": ("gpt-6-sol", "high"),
     },
 }
 DEFAULT_MAX_CONCURRENT_BOOTS = 3
@@ -40,8 +40,10 @@ MODELS = {
     },
     "codex": {
         "gpt-5.6-terra": {"aliases": ("gpt-5.6-terra", "terra"), "efforts": ("low", "medium", "high", "xhigh", "max")},
-        "gpt-5.6-sol": {"aliases": ("gpt-5.6-sol", "sol"), "efforts": ("low", "medium", "high", "xhigh", "max")},
-        "gpt-5.6-luna": {"aliases": ("gpt-5.6-luna", "luna"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "gpt-5.6-sol": {"aliases": ("gpt-5.6-sol",), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "gpt-5.6-luna": {"aliases": ("gpt-5.6-luna",), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "gpt-6-sol": {"aliases": ("gpt-6-sol", "sol"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "gpt-6-luna": {"aliases": ("gpt-6-luna", "luna"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-6-astra": {"aliases": ("gpt-6-astra", "astra"), "efforts": ("low", "medium", "high", "xhigh", "max")},
     },
 }
