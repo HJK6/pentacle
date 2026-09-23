@@ -56,6 +56,12 @@ Run tests in a harness-owned tmux session on an explicit `tmux -L <test-socket>`
 
 Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the real desktop smoke. Fixtures must use invented content and valid public wire identifiers.
 
+### Scheduled spawn fleet smoke
+
+`tools/spawn_fleet_smoke.py --dry-run` resolves the full matrix without opening a WebSocket or spawning a session. The no-argument full run requires `PENTACLE_MACHINES_FILE` to point to the same file configured for the daemon. It rejects a missing file or `PENTACLE_MACHINES_JSON`, reads host names from that file, and omits `bart` and `daffodil` if present. An optional `PENTACLE_SMOKE_HOSTS` subset must contain only remaining configured hosts. The dry-run output names the source, selected hosts, excluded names present or absent, and every host/provider/prompt cell.
+
+The launchd template under `deploy/` runs every 12 hours and sets the machine-file path. A full run closes each spawned session, including after cell failure; a failed teardown is reported as a failure even if the provider is over quota. The explicit `<url> <host>` post-deploy canary remains a single Codex promptless cell.
+
 ### Router replay harness
 
 `tools/router_replay.py` measures the same `_router_input` builder and SSH
