@@ -3,8 +3,8 @@
 // The values are intentionally self-contained. Host labels are synthetic UI
 // tokens, not a machine inventory, and the module has no side effects.
 
-export type MachineSigilKind = 'djinni' | 'sun' | 'mage' | 'flower';
-export type MachineName = 'djinni' | 'sun' | 'mage' | 'flower';
+export type MachineSigilKind = 'djinni' | 'sun' | 'mage' | 'flower' | 'ibis';
+export type MachineName = 'djinni' | 'sun' | 'mage' | 'flower' | 'ibis';
 export type ProviderName = 'claude' | 'codex' | 'CLAUDE' | 'CODEX';
 export type WorkStatus = 'working' | 'idle' | 'WORKING' | 'IDLE';
 export type Severity = 'info' | 'warning' | 'critical' | 'INFO' | 'WARNING' | 'CRITICAL';
@@ -33,13 +33,14 @@ export const Fonts = {
 export const FONT_FAMILIES = Fonts;
 
 export const MACHINES = {
-  'djinni': { kind: 'djinni', accent: '#3dff66', epithet: 'the djinni' },
+  'djinni': { kind: 'djinni', accent: '#1fbf4a', epithet: 'the djinni' },
   'sun': { kind: 'sun', accent: '#ff2e3e', epithet: 'the flame' },
-  'mage': { kind: 'mage', accent: '#29d4ff', epithet: 'the mage' },
-  'flower': { kind: 'flower', accent: '#b14dff', epithet: 'the bloom' },
+  'mage': { kind: 'mage', accent: '#1f5bff', epithet: 'the mage' },
+  'flower': { kind: 'flower', accent: '#a377a1', epithet: 'the bloom' },
+  'ibis': { kind: 'ibis', accent: '#ffd60a', epithet: 'the scribe' },
 } as const satisfies Record<MachineName, { kind: MachineSigilKind; accent: string; epithet: string }>;
 
-export const MACHINE_ORDER = ['djinni', 'sun', 'mage', 'flower'] as const;
+export const MACHINE_ORDER = ['djinni', 'sun', 'mage', 'flower', 'ibis'] as const;
 
 export const STATUS = {
   working: '#3dff66',

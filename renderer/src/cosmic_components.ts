@@ -48,7 +48,7 @@ export const COSMIC_TOKENS = {
   severity: SEV,
 } as const;
 
-export type MachineSigilKind = 'djinni' | 'sun' | 'mage' | 'flower';
+export type MachineSigilKind = 'djinni' | 'sun' | 'mage' | 'flower' | 'ibis';
 export type ProviderKind = 'claude' | 'codex';
 export type WorkStatus = 'working' | 'idle';
 export type Severity = 'info' | 'warning' | 'critical';
@@ -68,6 +68,7 @@ export const KIND_ACCENT: Record<MachineSigilKind, string> = {
   sun: MACHINES['sun'].accent,
   mage: MACHINES['mage'].accent,
   flower: MACHINES['flower'].accent,
+  ibis: MACHINES['ibis'].accent,
 };
 
 // ---------------------------------------------------------------------------
@@ -199,6 +200,21 @@ export function machineSigil(kind: MachineSigilKind, opts: MachineSigilOpts = {}
         stroke: 'none',
       }),
     );
+    return root;
+  }
+
+  if (kind === 'ibis') {
+    g.appendChild(path('M52 5 A7.5 7.5 0 1 0 52 20 A9 9 0 0 1 52 5 Z', { fill: color, stroke: 'none' }));
+    g.appendChild(path('M19.5 12.5 C20.5 8 27.5 7.5 29 12.5 C29.8 15.5 28 17.5 25 18'));
+    g.appendChild(path('M19.5 12.5 C12 16 7.5 23 5 33'));
+    g.appendChild(path('M20.5 16.5 C14 20 9.5 26 5 33'));
+    g.appendChild(path('M22 18 C19 24 20.5 30 24.5 36'));
+    g.appendChild(path('M29 13.5 C31.5 20 27.5 25 29.5 31'));
+    g.appendChild(path('M24.5 36 C28 30 40 29 50 33 C55 35 59 39.5 61 44 C54 44.5 48 45 42 45 C33 45 26 42 24.5 36 Z'));
+    g.appendChild(path('M33 37 C41 35 49 37 56 41.5'));
+    g.appendChild(path('M38 45 L37 52 L38.5 58.5 M44 45 L45 52 L43.5 58.5'));
+    g.appendChild(path('M34.5 58.5 L40.5 58.5 M41.5 58.5 L47.5 58.5'));
+    g.appendChild(svg('circle', { cx: 24.2, cy: 12.6, r: 1.6, fill: color, stroke: 'none' }));
     return root;
   }
 

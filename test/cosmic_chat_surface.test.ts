@@ -165,7 +165,7 @@ test('the header tags render for claude + working/idle status', () => {
 
 test('MACHINES in the component lib is the single source of truth (cosmic_tokens.ts)', () => {
   assert.equal(MACHINES, TOKEN_MACHINES, 'component MACHINES is re-exported from cosmic_tokens');
-  assert.equal(MACHINES['mage'].accent, '#29d4ff');
+  assert.equal(MACHINES['mage'].accent, '#1f5bff');
   assert.equal(MACHINES['mage'].epithet, 'the mage');
 });
 

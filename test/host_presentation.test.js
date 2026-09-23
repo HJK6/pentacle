@@ -11,7 +11,7 @@ test('example-only hosts have labels, first-letter badges and stable indexed pal
   assert.equal(host.hostLabel(config, 'build-box'), 'Build-box');
   assert.equal(host.initial(' Workstation '), 'W');
   assert.equal(host.initial('🖥 desk'), '🖥');
-  assert.deepEqual(config.chatStream.hosts.map(id => host.hostColor(config, id)), [...host.PALETTE, host.PALETTE[0]]);
+  assert.deepEqual(config.chatStream.hosts.map(id => host.hostColor(config, id)), host.PALETTE);
 });
 
 test('local identity uses config precedence and exact mapping, never label substrings', () => {
@@ -37,7 +37,7 @@ test('explicit names and palette tokens override defaults for desktop or mapped 
   assert.equal(host.hostLabel(config, 'remote'), 'Alias');
   assert.equal(host.hostColor(config, 'remote'), 'red');
   config.hostColors.remote = 'invalid-token'; delete config.hostColors.server;
-  assert.equal(host.hostColor(config, 'remote'), 'royal-blue');
+  assert.equal(host.hostColor(config, 'remote'), 'red');
 });
 
 test('configuration banner handles empty, single and multiple warnings safely', () => {

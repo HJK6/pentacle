@@ -120,7 +120,7 @@ test('machineSigil returns a 64x64 <svg> with round-cap 2.4 stroke group', () =>
 test('machineSigil defaults color to the kind accent', () => {
   const g = machineSigil('mage').querySelector('g')!;
   assert.equal(g.getAttribute('stroke'), KIND_ACCENT.mage);
-  assert.equal(KIND_ACCENT.mage, '#29d4ff');
+  assert.equal(KIND_ACCENT.mage, '#1f5bff');
   // explicit override wins
   const g2 = machineSigil('mage', { color: '#abcdef' }).querySelector('g')!;
   assert.equal(g2.getAttribute('stroke'), '#abcdef');
@@ -293,9 +293,9 @@ test('bar clamps the fill width to 0..100', () => {
 });
 
 test('pill renders a tinted bordered label', () => {
-  const el = pill('SUMMON', { color: '#29d4ff' });
+  const el = pill('SUMMON', { color: '#1f5bff' });
   assert.equal(el.textContent, 'SUMMON');
-  assert.equal(el.style.borderColor, rgb('#29d4ff'));
+  assert.equal(el.style.borderColor, rgb('#1f5bff'));
 });
 
 // ---------------------------------------------------------------------------

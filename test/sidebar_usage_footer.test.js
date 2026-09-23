@@ -148,7 +148,7 @@ test('desktop reskin preserves bridge colors for filters, avatars, stats, and so
   }
   assert.match(css, /\.s-machine-avatar\.color-royal-blue \{ color: #fff; border-color: var\(--bridge-royal-blue\); background: var\(--bridge-royal-blue\); \}/);
   assert.doesNotMatch(css, /s-machine-avatar\.color-royal-blue[^{]*\{[^}]*color-mix/);
-  assert.deepEqual(require('../renderer/host_presentation').PALETTE, ['forest-green', 'royal-blue', 'red', 'orange']);
+  assert.deepEqual(require('../renderer/host_presentation').PALETTE, ['forest-green', 'red', 'royal-blue', 'mauve', 'yellow']);
   assert.match(app, /s-machine-avatar color-\$\{machineColor\}/);
   assert.doesNotMatch(app, /s-machine-label color-\$\{machineColor\}/);
   assert.match(app, /configuredHostIds\.length \? configuredHostIds : visibleHostIds/);
