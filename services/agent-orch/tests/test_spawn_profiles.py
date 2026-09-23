@@ -4,10 +4,11 @@ from _shared import spawn_profiles
 from _shared.spawn_profiles import SpawnProfileError, catalog, resolve_handoff, resolve_spawn, validate_v2
 
 
-def test_sonnet5_and_opus5_are_spawnable_across_all_efforts() -> None:
+def test_sonnet5_and_opus_generations_are_spawnable_across_all_efforts() -> None:
     for alias, canonical in (
         ("sonnet", "claude-sonnet-5"), ("claude-sonnet-5", "claude-sonnet-5"),
-        ("opus-5", "claude-opus-5"), ("claude-opus-5", "claude-opus-5"),
+        ("opus-5", "claude-opus-5-5"), ("opus-5.5", "claude-opus-5-5"),
+        ("claude-opus-5-5", "claude-opus-5-5"), ("claude-opus-5", "claude-opus-5"),
     ):
         for effort in ("low", "medium", "high", "xhigh", "max"):
             resolved = resolve_spawn(provider="claude", model=alias, effort=effort)
@@ -361,3 +362,19 @@ def test_codex_fallback_uses_gpt6_sol_high(monkeypatch, tmp_path) -> None:
         assert (request["model"], request["effort"]) == ("gpt-6-sol", "high")
     finally:
         spawn_profiles.load_spawn_config.cache_clear()
+
+
+def test_opus5_handoff_preserves_full_id_after_alias_moves() -> None:
+    inherited = resolve_handoff(
+        source_provider="claude", source_model="claude-opus-5",
+        source_effort="high", source_role="worker",
+    )
+    assert inherited.spawn["model"] == "claude-opus-5"
+    assert inherited.changed_fields == ()
+    overridden = resolve_handoff(
+        source_provider="claude", source_model="claude-opus-5",
+        source_effort="high", source_role="worker", model="opus-5",
+    )
+    assert overridden.spawn["model"] == "claude-opus-5-5"
+    assert "model" in overridden.changed_fields
+    assert "claude-opus-5" not in spawn_profiles.INTENTIONALLY_UNSPAWNABLE["claude"]

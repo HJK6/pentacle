@@ -240,6 +240,8 @@ When `--visibility` is omitted, `agent-orch spawn` materializes `"default"` for 
 
 `agent-orch spawn --handoff` creates a new top-level session for another leader, not a nested child. The CLI sends `handoff:true`, discovers the caller's stream id as `handoff_from_stream_id`, omits `parent_stream_id`, and defaults `visibility` to `"default"` unless the caller explicitly passes `--visibility`. `--handoff` is incompatible with `--parent`.
 
+For Claude spawns, `opus-5.5` and `opus-5` select `claude-opus-5-5`. The full ID `claude-opus-5` still selects Opus 5. The bare `opus` alias and omitted-Claude default remain Opus 4.8.
+
 The retiring row's observed `provider`, `effective_model`, and `effective_effort` are authoritative. Each omitted tuple flag inherits that value, including cross-provider handoffs; missing source/effective metadata fails closed and never falls back to fleet defaults or host overrides. Explicit aliases are canonicalized through the shared spawn catalog. A canonical tuple change proceeds and emits one `WARNING` naming the exact changed fields, prior tuple, and requested tuple. `--confirm-model-change` suppresses only that compatibility warning; it is never an approval or execution gate. Older CLI tuple metadata is accepted field-compatibly and is neither validated nor recorded as an override.
 
 Pass the compatibility flag only when the successor should suppress the local changed-tuple warning:
