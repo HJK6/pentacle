@@ -74,9 +74,89 @@ def test_pin_rejects_no_satellites_before_opening_store(monkeypatch):
 
 def test_smoke_rejects_empty_matrix_before_sessions(monkeypatch, tmp_path):
     from tools import spawn_fleet_smoke
-    monkeypatch.setattr(spawn_fleet_smoke, "HOSTS", ())
+    monkeypatch.setattr(spawn_fleet_smoke, "smoke_plan", lambda: {"hosts": (), "cells": ()})
     with pytest.raises(ValueError, match="host|cell"):
         spawn_fleet_smoke.run_matrix("ws://unused", tmp_path / "token", 1)
+
+
+def test_smoke_plan_uses_explicit_file_and_filters_retired_hosts(monkeypatch, tmp_path):
+    from tools import spawn_fleet_smoke
+    path = tmp_path / "machines.json"
+    path.write_text(json.dumps({"machines": [
+        {"name": "thoth", "ssh_target": None},
+        {"name": "bart", "ssh_target": "bart-ssh"},
+        {"name": "merlin", "ssh_target": "merlin-ssh"},
+        {"name": "amaterasu", "ssh_target": "amaterasu-ssh"},
+    ]}))
+    monkeypatch.setenv("PENTACLE_MACHINES_FILE", str(path))
+    monkeypatch.delenv("PENTACLE_MACHINES_JSON", raising=False)
+    monkeypatch.delenv("PENTACLE_SMOKE_HOSTS", raising=False)
+    plan = spawn_fleet_smoke.smoke_plan()
+    assert plan["source"] == str(path)
+    assert plan["hosts"] == ("thoth", "merlin", "amaterasu")
+    assert plan["excluded_absent"] == ("daffodil",)
+
+    monkeypatch.setenv("PENTACLE_SMOKE_HOSTS", "unknown")
+    with pytest.raises(ValueError, match="unknown|configured"):
+        spawn_fleet_smoke.smoke_plan()
+    monkeypatch.delenv("PENTACLE_SMOKE_HOSTS")
+    monkeypatch.setenv("PENTACLE_MACHINES_JSON", json.dumps(_fleet()))
+    with pytest.raises(ValueError, match="PENTACLE_MACHINES_JSON"):
+        spawn_fleet_smoke.smoke_plan()
+    monkeypatch.delenv("PENTACLE_MACHINES_JSON")
+    path.unlink()
+    with pytest.raises((ValueError, FileNotFoundError), match="machine|file|exist"):
+        spawn_fleet_smoke.smoke_plan()
+    monkeypatch.delenv("PENTACLE_MACHINES_FILE")
+    with pytest.raises(ValueError, match="PENTACLE_MACHINES_FILE"):
+        spawn_fleet_smoke.smoke_plan()
+
+
+def test_smoke_dry_run_never_enters_connection_or_matrix(monkeypatch, tmp_path, capsys):
+    from tools import spawn_fleet_smoke
+    path = tmp_path / "machines.json"
+    path.write_text(json.dumps({"machines": [
+        {"name": "thoth", "ssh_target": None},
+        {"name": "bart", "ssh_target": "bart-ssh"},
+        {"name": "merlin", "ssh_target": "merlin-ssh"},
+        {"name": "amaterasu", "ssh_target": "amaterasu-ssh"},
+    ]}))
+    monkeypatch.setenv("PENTACLE_MACHINES_FILE", str(path))
+    monkeypatch.delenv("PENTACLE_MACHINES_JSON", raising=False)
+    monkeypatch.delenv("PENTACLE_SMOKE_HOSTS", raising=False)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("dry run entered a live connection or matrix")
+    monkeypatch.setattr(spawn_fleet_smoke, "_operator_connection", forbidden)
+    monkeypatch.setattr(spawn_fleet_smoke, "run_matrix", forbidden)
+    assert spawn_fleet_smoke.main(["--dry-run"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["source"] == str(path)
+    assert result["hosts"] == ["thoth", "merlin", "amaterasu"]
+    assert len(result["cells"]) == 12
+
+
+def test_quota_cell_with_failed_teardown_reports_leak():
+    from tools import spawn_fleet_smoke
+    def rpc(payload, _expected):
+        if payload["type"] == "spawn_catalog_get":
+            return {"type": "spawn_catalog_get.ok", "profiles": {
+                "desktop_manual": {"codex": ("gpt-6-sol", "medium")}},
+                "catalog_version": "test"}
+        return {"stream_id": "thoth:v2-fleet-smoke-codex-example"}
+    def event_timeout(_stream_id, _marker):
+        raise TimeoutError("event timeout")
+    def close_failure(_stream_id):
+        raise RuntimeError("pane remained open")
+    with pytest.raises(RuntimeError, match="teardown: pane remained open"):
+        spawn_fleet_smoke.run_cell(
+            "thoth", "codex", "prompted", rpc=rpc,
+            wait_ready=lambda _stream_id: None,
+            wait_event=event_timeout,
+            verify_teardown=close_failure,
+            register_owned=lambda *_args: None,
+            close_owned=close_failure,
+            capture_pane=lambda *_args: "You've hit your usage limit. Try again at 11:00.",
+        )
 
 
 @pytest.mark.parametrize("hosts", ["hub", "unknown", "travel,hub"])

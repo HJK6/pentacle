@@ -11,7 +11,12 @@
     <string>cd __PENTACLE_RELEASE_CHECKOUT__ &amp;&amp; __PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/.venv/bin/python __PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/tools/spawn_fleet_smoke.py</string>
   </array>
   <key>StartInterval</key>
-  <integer>21600</integer>
+  <integer>43200</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PENTACLE_MACHINES_FILE</key>
+    <string>__PENTACLE_USER_HOME__/.config/pentacle-public/machines.json</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>__PENTACLE_USER_HOME__/.pentacle/spawn-fleet-smoke.log</string>
   <key>StandardErrorPath</key>

@@ -22,7 +22,7 @@ for _path in (SERVICE_DIR, SERVICES_DIR):
         sys.path.insert(0, str(_path))
 
 from boot_ready import codex_reset_interstitial_visible  # noqa: E402
-from machines import configured_host_names  # noqa: E402
+from machines import load_machines  # noqa: E402
 from client_contract_probe import (  # noqa: E402
     CONTROL_PLANE_P95_LIMIT_MS,
     CONVERGENCE_QUIET_LIMIT_MS,
@@ -47,7 +47,7 @@ from tools.live_window import (  # noqa: E402
 )
 
 
-HOSTS = configured_host_names("PENTACLE_SMOKE_HOSTS")
+EXCLUDED_HOSTS = frozenset({"bart", "daffodil"})
 PROVIDERS = ("claude", "codex")
 PROMPT_MODES = ("prompted", "promptless")
 ASSISTANT_KINDS = frozenset({"ASSIST", "ASSIST_TEXT"})
@@ -61,6 +61,41 @@ DEFAULT_TIMEOUT = 180.0
 # failing cell must not burn two full stage timeouts on the way out.
 TEARDOWN_TIMEOUT = 30.0
 EXIT_UNTESTED = 2
+
+
+def smoke_plan() -> dict[str, object]:
+    """Resolve the scheduled matrix from the daemon's explicit machine file."""
+    raw_path = os.environ.get("PENTACLE_MACHINES_FILE", "").strip()
+    if not raw_path:
+        raise ValueError("PENTACLE_MACHINES_FILE is required for the full fleet smoke")
+    if "PENTACLE_MACHINES_JSON" in os.environ:
+        raise ValueError("PENTACLE_MACHINES_JSON conflicts with the daemon machine file")
+    path = Path(raw_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"machine file does not exist: {path}")
+    path = path.resolve()
+    configured = tuple(machine.name for machine in load_machines({"PENTACLE_MACHINES_FILE": str(path)}))
+    available = tuple(host for host in configured if host not in EXCLUDED_HOSTS)
+    if not available:
+        raise ValueError("machine file contains no smoke execution hosts")
+    override = os.environ.get("PENTACLE_SMOKE_HOSTS")
+    if override is None:
+        hosts = available
+    else:
+        hosts = tuple(host.strip() for host in override.split(",") if host.strip())
+        if not hosts or len(hosts) != len(set(hosts)):
+            raise ValueError("PENTACLE_SMOKE_HOSTS must name unique configured execution hosts")
+        unknown = set(hosts) - set(available)
+        if unknown:
+            raise ValueError(f"PENTACLE_SMOKE_HOSTS names unknown or excluded hosts: {sorted(unknown)}")
+    return {
+        "source": str(path),
+        "hosts": hosts,
+        "excluded_present": tuple(sorted(EXCLUDED_HOSTS.intersection(configured))),
+        "excluded_absent": tuple(sorted(EXCLUDED_HOSTS.difference(configured))),
+        "cells": tuple((host, provider, mode) for host in hosts
+                       for provider in PROVIDERS for mode in PROMPT_MODES),
+    }
 
 # A Codex account over its usage limit renders a TUI banner in place of any
 # assistant turn ("■ You've hit your usage limit … try again at <t>."), so the
@@ -234,12 +269,8 @@ def run_cell(
         if cell_error is None:
             cell_error = RuntimeError(f"{stage}: {exc}")
 
-    # Teardown ALWAYS runs (success or failure), but its own failure must never
-    # mask a `quota_exhausted` verdict: an over-quota cell is exactly the case
-    # whose stuck pane can also make teardown hang, and reporting it as a
-    # `critical` teardown red would violate AC1 (a quota cell raises no daemon
-    # red). So a quota verdict wins; otherwise a teardown failure supersedes a
-    # stage red as before (the closed-row/live-pane leak is the worse fault).
+    # Teardown ALWAYS runs. A leak is a failure even when the cell also hit a
+    # provider quota limit: the quota classification cannot hide a live pane.
     teardown_error: Exception | None = None
     if stream_id:
         try:
@@ -261,14 +292,10 @@ def run_cell(
             else:
                 teardown_error = RuntimeError(f"teardown: {exc}")
 
-    if isinstance(cell_error, CodexQuotaExhausted):
-        raise cell_error
-    if cell_error is not None:
-        if teardown_error is not None:
-            raise teardown_error from cell_error
-        raise cell_error
     if teardown_error is not None:
-        raise teardown_error
+        raise teardown_error from cell_error
+    if cell_error is not None:
+        raise cell_error
     if inject_stage == "teardown":
         raise RuntimeError("teardown: forced failure")
     result = {"host": host, "provider": provider, "prompt_mode": prompt_mode, "stream_id": stream_id}
@@ -709,10 +736,7 @@ def run_matrix(
     allow_legacy_close: bool = False,
 ) -> list[dict[str, object]]:
     if cells is None:
-        cells = tuple(
-            (host, provider, prompt_mode)
-            for host in HOSTS for provider in PROVIDERS for prompt_mode in PROMPT_MODES
-        )
+        cells = smoke_plan()["cells"]
     if not cells:
         raise ValueError("no smoke host cells configured")
     failures: list[dict[str, str]] = []
@@ -841,11 +865,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--dry-run", action="store_true",
+        help="print the resolved full matrix without opening a connection or spawning",
+    )
+    parser.add_argument(
         "host", nargs="?", default=None,
         help="with URL, run only the post-deploy canary cell (<host>, codex, "
              "promptless); the full matrix runs only when NO arguments are given",
     )
     args = parser.parse_args(argv)
+    if args.dry_run and args.url is not None:
+        parser.error("--dry-run accepts no URL or HOST")
     if args.host is not None:
         # Both positionals present: single post-deploy canary cell.
         url, cells = args.url, ((args.host, "codex", "promptless"),)
@@ -854,7 +884,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("HOST is required alongside URL for the single canary cell; "
                      "pass no arguments to run the full matrix")
     else:
-        url, cells = DEFAULT_URL, None
+        plan = smoke_plan()
+        if args.dry_run:
+            print(json.dumps({
+                "source": plan["source"],
+                "hosts": plan["hosts"],
+                "excluded_present": plan["excluded_present"],
+                "excluded_absent": plan["excluded_absent"],
+                "cells": [{"host": host, "provider": provider, "prompt_mode": mode}
+                          for host, provider, mode in plan["cells"]],
+                "dry_run": True,
+            }, sort_keys=True))
+            return 0
+        url, cells = DEFAULT_URL, plan["cells"]
     evidence: list[dict[str, object]] = []
     results = run_matrix(
         url, DEFAULT_TOKEN_PATH, DEFAULT_TIMEOUT, cells, evidence=evidence,

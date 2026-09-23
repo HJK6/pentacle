@@ -117,3 +117,7 @@ def test_fleet_smoke_template_renders_the_activated_v2_checkout(tmp_path: Path) 
     assert f"cd {repo}" in command
     assert str(repo / "services/chat-stream-v2/.venv/bin/python") in command
     assert str(repo / "services/chat-stream-v2/tools/spawn_fleet_smoke.py") in command
+    assert rendered["StartInterval"] == 43200
+    assert rendered["EnvironmentVariables"]["PENTACLE_MACHINES_FILE"] == str(
+        Path.home() / ".config/pentacle-public/machines.json"
+    )
