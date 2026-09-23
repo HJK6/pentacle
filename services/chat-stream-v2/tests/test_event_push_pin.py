@@ -104,6 +104,11 @@ def test_stage_consumes_actual_smoke_exit_and_json_contract(tmp_path, monkeypatc
     import subprocess
     from tools import spawn_fleet_smoke
 
+    machine_file = tmp_path / "machines.json"
+    machine_file.write_text(json.dumps({"machines": [{"name": "workstation", "ssh_target": None}]}))
+    monkeypatch.setenv("PENTACLE_MACHINES_FILE", str(machine_file))
+    monkeypatch.delenv("PENTACLE_MACHINES_JSON", raising=False)
+    monkeypatch.delenv("PENTACLE_SMOKE_HOSTS", raising=False)
     monkeypatch.setattr(event_push_pin, "SATELLITE_HOSTS", ("workstation",))
     # This slice measures peer/smoke outcomes; the CLI suite exercises real evidence.
     monkeypatch.setattr(event_push_pin, "_load_gate_evidence", lambda *_: {})
