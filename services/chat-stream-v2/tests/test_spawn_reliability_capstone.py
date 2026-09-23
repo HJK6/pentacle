@@ -348,6 +348,14 @@ def test_disconnect_mid_spawn_rolls_back_in_background(monkeypatch: pytest.Monke
     monkeypatch.setattr(spawnctl_mod, "BOOT_READY_HARD_DEADLINE_S", 0.05)
     monkeypatch.setattr(tmux_transport, "POLL_INTERVAL_S", 0.01)
 
+    async def fixture_started_at(_self, pane_pid: str, *, host: str = "") -> str:
+        assert pane_pid == "1234" and host == HOST
+        return "fixture-process-start"
+
+    # The fake pane's PID has no host process. Keep its identity lookup synthetic
+    # so real `ps` latency cannot consume the background-cleanup deadline.
+    monkeypatch.setattr(SpawnCtl, "_pane_started_at", fixture_started_at)
+
     async def run() -> tuple[_CancelledSpawnTmux, dict | None, list[dict]]:
         store = Store(":memory:")
         store.start()
