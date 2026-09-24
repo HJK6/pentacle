@@ -657,6 +657,10 @@ class RpcClient:
         self._authenticated_sid: str | None = None
         self._stats = stats
         self._tag = tag
+        # Unique per connection: a client rebuilt after a daemon restart must
+        # never replay an earlier request_id, which the daemon also uses as the
+        # spawn idempotency key.
+        self._instance = uuid.uuid4().hex[:8]
         self._seq = 0
         self._spawn_cwd = spawn_cwd
 
@@ -686,7 +690,7 @@ class RpcClient:
             self._authenticated_sid = sid
             payload = {**payload, "from_stream_id": sid, "stream_token": token}
         self._seq += 1
-        rid = f"{self._tag}-{self._seq}"
+        rid = f"{self._tag}-{self._instance}-{self._seq}"
         payload = {**payload, "request_id": rid}
         start = time.monotonic()
         self._ws.send(json.dumps(payload))
