@@ -644,6 +644,19 @@ class LatencyStats:
 _FIXTURE_TOKEN_LOCK = threading.Lock()
 
 
+class FixtureTokenGrantError(AssertionError):
+    """The daemon refused `grant_token` for a fixture seat.
+
+    `error` is the daemon's code, e.g. `token_already_set` when an earlier
+    grant succeeded but its reply was lost (the token is bootstrap-once).
+    """
+
+    def __init__(self, stream_id: str, error: str | None) -> None:
+        super().__init__(f"fixture token grant failed for {stream_id}: {error}")
+        self.stream_id = stream_id
+        self.error = error
+
+
 class RpcClient:
     """One persistent WS connection. `call` sends a uniquely-tagged frame and
     reads until the correlated reply arrives, discarding any broadcast frames in
@@ -664,8 +677,9 @@ class RpcClient:
         self._seq = 0
         self._spawn_cwd = spawn_cwd
 
-    def call(self, payload: dict, *, timeout: float = 5.0, record: bool = True) -> dict:
-        if payload.get("type") == "close":
+    def call(self, payload: dict, *, timeout: float = 5.0, record: bool = True,
+             operator: bool = False) -> dict:
+        if payload.get("type") == "close" and not operator:
             if self._spawn_cwd is None:
                 raise AssertionError("soak close requires isolated fixture credentials")
             sid = payload["stream_id"]
@@ -676,7 +690,7 @@ class RpcClient:
                 if not path.exists():
                     granted = self.call({"type": "grant_token", "stream_id": sid}, record=False)
                     if granted.get("type") != "grant_token.ok":
-                        raise AssertionError(f"fixture token grant failed: {granted.get('error_code')}")
+                        raise FixtureTokenGrantError(sid, granted.get("error_code") or granted.get("error"))
                     path.parent.mkdir(parents=True, exist_ok=True)
                     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                     with os.fdopen(descriptor, "w") as secret:
@@ -710,6 +724,20 @@ class RpcClient:
             if record:
                 self._stats.record_error()
             raise
+
+    def operator_close(self, stream_id: str, *, reason: str, timeout: float = 20.0) -> dict:
+        """Close a fixture through the operator-authenticated path, with no seat token.
+
+        Uses a fresh connection so no seat identity bound to this client's
+        socket applies to the operator close.
+        """
+        self._ws.close()
+        self._ws = connect(self._url, open_timeout=BIND_DEADLINE_S, max_size=None)
+        self._authenticated_sid = None
+        return self.call(
+            {"type": "close", "stream_id": stream_id, "operator_confirm": True, "reason": reason},
+            timeout=timeout, operator=True,
+        )
 
     def close(self) -> None:
         try:
