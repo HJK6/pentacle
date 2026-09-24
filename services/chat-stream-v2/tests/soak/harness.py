@@ -677,9 +677,8 @@ class RpcClient:
         self._seq = 0
         self._spawn_cwd = spawn_cwd
 
-    def call(self, payload: dict, *, timeout: float = 5.0, record: bool = True,
-             operator: bool = False) -> dict:
-        if payload.get("type") == "close" and not operator:
+    def call(self, payload: dict, *, timeout: float = 5.0, record: bool = True) -> dict:
+        if payload.get("type") == "close":
             if self._spawn_cwd is None:
                 raise AssertionError("soak close requires isolated fixture credentials")
             sid = payload["stream_id"]
@@ -724,20 +723,6 @@ class RpcClient:
             if record:
                 self._stats.record_error()
             raise
-
-    def operator_close(self, stream_id: str, *, reason: str, timeout: float = 20.0) -> dict:
-        """Close a fixture through the operator-authenticated path, with no seat token.
-
-        Uses a fresh connection so no seat identity bound to this client's
-        socket applies to the operator close.
-        """
-        self._ws.close()
-        self._ws = connect(self._url, open_timeout=BIND_DEADLINE_S, max_size=None)
-        self._authenticated_sid = None
-        return self.call(
-            {"type": "close", "stream_id": stream_id, "operator_confirm": True, "reason": reason},
-            timeout=timeout, operator=True,
-        )
 
     def close(self) -> None:
         try:

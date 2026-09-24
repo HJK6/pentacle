@@ -89,33 +89,3 @@ def test_fixture_token_grant_error_carries_the_daemon_error_code(monkeypatch: An
     else:
         raise AssertionError("a refused grant must raise FixtureTokenGrantError")
     assert [frame["type"] for frame in sent] == ["grant_token"]
-
-
-def test_operator_close_uses_a_fresh_unbound_connection(monkeypatch: Any, tmp_path: Any) -> None:
-    sent: list[dict[str, Any]] = []
-    connections: list[_ScriptedWebSocket] = []
-    replies = {
-        "grant_token": {"type": "grant_token.ok", "stream_token": "seat-token"},
-        "close": {"type": "close.ok"},
-    }
-
-    def connect(url: str, **_: Any) -> _ScriptedWebSocket:
-        connections.append(_ScriptedWebSocket(sent, replies))
-        return connections[-1]
-
-    monkeypatch.setattr(harness, "connect", connect)
-    monkeypatch.setattr(harness, "_seat_token_path", lambda _cwd, sid: tmp_path / sid.replace(":", "_"))
-    client = RpcClient("ws://soak.test", LatencyStats(), "churn", spawn_cwd=tmp_path)
-    client.call({"type": "close", "stream_id": "soakhost:seat-a"}, record=False)
-    seat_connections = len(connections)
-
-    reply = client.operator_close("soakhost:seat-b", reason="lost grant reply")
-
-    assert reply["type"] == "close.ok"
-    assert len(connections) == seat_connections + 1
-    operator_frame = sent[-1]
-    assert operator_frame["type"] == "close"
-    assert operator_frame["stream_id"] == "soakhost:seat-b"
-    assert operator_frame["operator_confirm"] is True
-    assert operator_frame["reason"] == "lost grant reply"
-    assert "from_stream_id" not in operator_frame and "stream_token" not in operator_frame
