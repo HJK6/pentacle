@@ -51,6 +51,20 @@ def test_local_identity_uses_env_then_config(monkeypatch):
     assert machines.configured_local_host() == "coordinator"
 
 
+def test_collection_ignores_operator_machine_config():
+    """Tools resolve host identity at import; a remote-only operator config must not break collection."""
+    env = {key: value for key, value in os.environ.items()
+           if key not in {"PENTACLE_HOST_ID", "AGENT_ORCH_HOST_ID", "TMUX"}}
+    env["PENTACLE_MACHINES_JSON"] = json.dumps({"machines": [
+        {"name": "hub", "ssh_target": "hub-ssh"}, {"name": "travel", "ssh_target": "travel-ssh"}]})
+    service_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
+         "tests/test_orphan_reaper.py", "tests/test_d2_live_delivery.py"],
+        cwd=service_dir, env=env, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_marker_host_is_opt_in_and_uses_custom_identity(monkeypatch):
     env = dict(os.environ)
     env.pop("PENTACLE_AUTH_CONTEXT_MARKER_HOST", None)

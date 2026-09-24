@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,10 @@ for _path in reversed((SERVICE_DIR, TESTS_DIR, SERVICES_ROOT, AGENT_ORCH_DIR, TO
     _text = str(_path)
     if _text not in sys.path:
         sys.path.insert(0, _text)
+
+# Some tools resolve host identity at import. Pin an invented identity before
+# collection so results never depend on the operator's machine config.
+os.environ["PENTACLE_HOST_ID"] = "test-host"
 
 
 @pytest.fixture(scope="session", autouse=True)
