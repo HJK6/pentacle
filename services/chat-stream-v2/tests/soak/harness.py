@@ -644,6 +644,19 @@ class LatencyStats:
 _FIXTURE_TOKEN_LOCK = threading.Lock()
 
 
+class FixtureTokenGrantError(AssertionError):
+    """The daemon refused `grant_token` for a fixture seat.
+
+    `error` is the daemon's code, e.g. `token_already_set` when an earlier
+    grant succeeded but its reply was lost (the token is bootstrap-once).
+    """
+
+    def __init__(self, stream_id: str, error: str | None) -> None:
+        super().__init__(f"fixture token grant failed for {stream_id}: {error}")
+        self.stream_id = stream_id
+        self.error = error
+
+
 class RpcClient:
     """One persistent WS connection. `call` sends a uniquely-tagged frame and
     reads until the correlated reply arrives, discarding any broadcast frames in
@@ -676,7 +689,7 @@ class RpcClient:
                 if not path.exists():
                     granted = self.call({"type": "grant_token", "stream_id": sid}, record=False)
                     if granted.get("type") != "grant_token.ok":
-                        raise AssertionError(f"fixture token grant failed: {granted.get('error_code')}")
+                        raise FixtureTokenGrantError(sid, granted.get("error_code") or granted.get("error"))
                     path.parent.mkdir(parents=True, exist_ok=True)
                     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                     with os.fdopen(descriptor, "w") as secret:
