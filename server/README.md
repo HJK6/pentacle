@@ -47,6 +47,9 @@ works as-is.
 | `--bind <addr>` | `127.0.0.1` | the interface to listen on — read § Security below before changing it |
 | `--token-file <path>` | none | **web login** auth for *this* host; required for any non-loopback `--bind` (§ Security) |
 | `--token-path <path>` | none | the **chat-stream daemon** credential (§ Daemon credential) — distinct from `--token-file` |
+| `--auth <token\|tailscale>` | `token` | `tailscale` = Tailscale identity headers behind `tailscale serve` instead of a token (§ Security) |
+| `--allow-login <login>[,…]` | none | `--auth tailscale` only, repeatable: the exact `Tailscale-User-Login` values admitted |
+| `--origin <https origin>` | none | `--auth tailscale` only, required: the proxy's canonical origin, e.g. `https://host.tailnet.ts.net`; every `/cc` upgrade must carry exactly this `Origin` |
 
 With no `--profile`, the host does **not** look for `configs/<machine>.js`: it
 follows `config-loader`'s ordinary precedence — `PENTACLE_CONFIG` if it is set in
@@ -87,12 +90,14 @@ node server --profile daffodil \
 | `/` | `renderer/dist/web/web.html` with the computed config injected as `window.__PENTACLE_CONFIG__` |
 | `/api/config` | the same computed config as JSON — byte-identical to what `window.cc.getConfig()` returns |
 | `/api/health` | `{ ok, connections }` |
-| `/login` | GET the token form, POST the token to mint the auth cookie — present only when auth is on |
+| `/login` | GET the token form, POST the token to mint the auth cookie — present only in token auth; `404` under `--auth tailscale` |
 | everything else | a file under `renderer/dist/web/`; paths cannot escape it |
 
 `GET /` answers `503` with a build hint when the bundle is missing. When auth is
 on, an unauthenticated GET navigation is `302`-redirected to `/login` and an
-unauthenticated `/api/*` call is `401`; `/login` is the only open surface.
+unauthenticated `/api/*` call is `401`; `/login` is the only open surface. Under
+`--auth tailscale` there is no open surface: every unauthenticated request is
+`401` `{"error":"tailnet identity required"}`, navigations included.
 
 ## Websocket protocol (`/cc`)
 
@@ -245,8 +250,9 @@ answers them locally — the host still refuses `WEB_UNSUPPORTED` as a safety ne
   enables `features.mic` and configures `mic.startCommand: {file, args}`. The
   executable must be absolute; arguments are fixed by the host, never the browser.
   The command is omitted from public configuration and runs without a shell.
-  Only matching WebSocket Origin/Host requests may start it; existing routable
-  web authentication still applies. `mic.useStreamHost` disables local recovery.
+  Only matching WebSocket Origin/Host requests may start it (behind a loopback
+  TLS proxy the scheme comes from `X-Forwarded-Proto`, § Behind `tailscale serve`);
+  existing web authentication still applies. `provider-relogin:*` uses the same gate. `mic.useStreamHost` disables local recovery.
   Concurrent starts share one execution with a 75-second timeout. The helper
   must emit JSON `{"ok":true,"ready":true}` only after verifying service readiness;
   exit success alone is insufficient. An already-running service must not be
@@ -273,18 +279,65 @@ unauthenticated. With a token:
 - passing `--token-file` on a loopback bind opts that instance into auth too.
 
 The cookie has **no `Secure` attribute**: the host speaks plain HTTP and relies
-on the tailnet (or an equivalent private transport) as the encryption boundary.
-HTTPS is a named follow-up. Auth gates *who* connects; it does not partition
+on the tailnet (or an equivalent private transport) as the encryption boundary,
+or on a TLS-terminating proxy in front of a loopback bind (below). Auth gates *who* connects; it does not partition
 *what* a connected operator can do — every authenticated connection is equally
 the operator, and daemon `chat-stream:frame` traffic is broadcast to all of
 them by design. Terminal slots and their pty output are still isolated per
 connection (§ Push routing), so two connections never see each other's
 terminals.
 
+### Behind `tailscale serve`: identity auth (`--auth tailscale`)
+
+The recommended tailnet deployment is a loopback bind behind
+[`tailscale serve`](https://tailscale.com/kb/1312/serve), which terminates HTTPS
+with the tailnet certificate and gives every device one address:
+
+```bash
+tailscale serve --bg --https=443 http://127.0.0.1:7797
+node server --profile web --bind 127.0.0.1 --port 7797 \
+  --auth tailscale --allow-login you@example.com \
+  --origin https://<machine>.<tailnet>.ts.net
+```
+
+There is no token and no `/login`. The proxy connects over loopback and sets
+`Tailscale-User-Login`, `X-Forwarded-For`, `X-Forwarded-Proto` and
+`X-Forwarded-Host`, **replacing** any client-supplied values (verified with a
+header dump against Tailscale 1.102; it also preserves `Host`). A request is the
+operator iff **all** hold:
+
+- the socket peer is loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x`);
+- `Tailscale-User-Login` appears once and exactly equals an `--allow-login` value (case-sensitive);
+- `X-Forwarded-Proto` appears once and is `https`;
+- `X-Forwarded-For` appears once and is one Tailscale address (CGNAT `100.64/10` or `fd7a:115c:a1e0::/48`) — a list or a repeated header is refused.
+
+Anything else is `401`. A `/cc` upgrade must additionally carry exactly one
+`Origin` equal to `--origin`; a missing, `null` or different `Origin` is refused
+with `403 origin_refused` — there is no allowance for clients that omit it, so
+scripts send the canonical `Origin`. No cookie is ever set, and an old
+`pentacle_web` cookie is ignored. `--auth tailscale` refuses to start with a
+non-loopback `--bind`, with `--token-file`, or without `--origin` / `--allow-login`.
+
+Because the proxy reaches the host over plain HTTP, the same-origin gate on
+`mic:start-server` and `provider-relogin:*` takes the scheme from
+`X-Forwarded-Proto` when (and only when) the peer is loopback and the header is a
+single `http`/`https` value; `Host` is used as sent (serve preserves it). This
+applies in token mode too, so a token-mode host behind the same proxy also
+admits mic recovery and provider sign-in.
+
+**Trust boundary.** Identity headers are trustworthy only because nothing but the
+proxy can reach the loopback port: any local process that can connect to it can
+send any headers it likes. A host running this mode must ensure that no other
+local principal (a CI account, a sandboxed job, another user) can connect to the
+port — or to the proxy's HTTPS name, which would stamp the *machine's* own
+tailnet identity — for example with a per-user packet-filter rule. Token mode
+does not have this requirement; keep it for hosts where that guarantee is absent.
+
 ## Not implemented here
 
 Cross-user authorization (every authenticated connection is the operator),
-HTTPS, and profile-switching UX.
+native HTTPS in the host (use a TLS-terminating proxy, above), and
+profile-switching UX.
 
 ## Build
 
@@ -317,6 +370,7 @@ retained conservatively.
 | `test/ws_bridge_multiclient.test.js` | two sockets over the real handler table: slot isolation, broadcast, disconnect cleanup, per-connection cap |
 | `test/web_server.test.js` | the real host: HTTP surface, a refused native channel, a live local tmux attach, and two concurrent connections keeping their tmux sessions isolated |
 | `test/web_auth.test.js` | the bind guard (routable bind refuses without a token), loopback-needs-none, `/login`, cookie-gated `/api` + `/cc`, and the `--token-path` flag |
+| `test/web_auth_tailscale.test.js` | `--auth tailscale`: flags and startup refusals, the identity predicate (IPv4/IPv6 fixtures, one field varied per case, repeated headers, non-loopback peer), HTTP 401/404, `/cc` 401 vs `403 origin_refused`, and forwarded-proto same-origin admission for `mic:start-server` / `provider-relogin:*` through a stand-in handler table |
 | `test/terminal_peer_host.test.js` | terminal host resolution for a `peers[]` profile entry (SSH target), plus local/remote and the unknown-host refusal |
 | `test/web_cc.test.js` | the browser shim: method parity with `preload.js`, queueing, reject-on-drop, reconnect, and the native-method shims (toast, save-image download, context menu) |
 | `test/web_bundle.test.js` | no Electron/Node requires survive; the page ships everything it references |

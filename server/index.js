@@ -9,19 +9,21 @@
 //
 //   node server --profile <name> [--port 7795] [--bind 127.0.0.1]
 //
-// Loopback only by default. Auth, multi-user isolation and a tailnet bind are
-// deliberately out of scope; see server/README.md.
+// Loopback only by default. Auth is a token cookie, or Tailscale identity
+// headers behind `tailscale serve` (`--auth tailscale`); multi-user isolation is
+// out of scope. See server/README.md § Security.
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
+const net = require('node:net');
 const { WebSocketServer } = require('ws');
 
 const ROOT = path.join(__dirname, '..');
 const { loadConfig } = require(path.join(ROOT, 'config-loader'));
-const { createMicStarter, micStartSameOrigin } = require('./mic_starter');
+const { createMicStarter, micStartSameOrigin, isLoopbackPeer } = require('./mic_starter');
 const { createCcHandlers, createCollector } = require(path.join(ROOT, 'main', 'cc_handlers'));
 const { createWsBridge } = require('./ws_bridge');
 const chatStreamClient = require(path.join(ROOT, 'main', 'chat_stream_client'));
@@ -54,7 +56,8 @@ const CONTENT_TYPES = {
 };
 
 function parseArgs(argv) {
-  const args = { port: DEFAULT_PORT, bind: DEFAULT_BIND, profile: null, tokenFile: null, tokenPath: null };
+  const args = { port: DEFAULT_PORT, bind: DEFAULT_BIND, profile: null, tokenFile: null, tokenPath: null,
+    auth: 'token', allowLogins: [], origin: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--profile') args.profile = argv[++i];
@@ -62,6 +65,9 @@ function parseArgs(argv) {
     else if (a === '--bind') args.bind = argv[++i];
     else if (a === '--token-file') args.tokenFile = argv[++i];   // web login auth (this host)
     else if (a === '--token-path') args.tokenPath = argv[++i];   // chat-stream daemon credential
+    else if (a === '--auth') args.auth = argv[++i];
+    else if (a === '--allow-login') args.allowLogins.push(...String(argv[++i] ?? '').split(',').map((l) => l.trim()).filter(Boolean));
+    else if (a === '--origin') args.origin = argv[++i];
     else if (a === '--help' || a === '-h') args.help = true;
     else throw new Error(`unknown argument: ${a}`);
   }
@@ -72,6 +78,7 @@ function parseArgs(argv) {
   // node listens on; an empty/whitespace bind (a wildcard listener) is rejected.
   args.bind = String(args.bind ?? '').trim();
   if (!args.bind) throw new Error('invalid --bind: empty (a bind address is required; default is 127.0.0.1)');
+  if (args.auth !== 'token' && args.auth !== 'tailscale') throw new Error(`invalid --auth: ${args.auth} (token or tailscale)`);
   return args;
 }
 
@@ -82,7 +89,7 @@ function parseArgs(argv) {
 // token once at /login; the reply sets an HttpOnly, SameSite=Strict cookie
 // carrying sha256(token) (never the token itself), and every page, api call and
 // websocket upgrade is gated on that cookie. No `Secure` attribute: the tailnet
-// is the transport boundary and HTTPS is a named follow-up (see server/README).
+// is the transport boundary, or a TLS proxy fronts a loopback bind (see server/README).
 
 function isLoopbackBind(bind) {
   // Fail CLOSED: an empty/whitespace/unspecified bind makes node listen on the
@@ -136,6 +143,87 @@ function createAuth(token) {
     checkToken(candidate) { return safeEqual(candidate, token); },
     setCookieHeader() {
       return `${COOKIE_NAME}=${cookieValue}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800`;
+    },
+  };
+}
+
+// ── Tailscale identity auth ──────────────────────────────────────────────────
+// `--auth tailscale` runs behind `tailscale serve` on the same machine: the
+// proxy terminates HTTPS, connects over loopback, and REPLACES any
+// client-supplied Tailscale-User-Login / X-Forwarded-* with its own values. A
+// request is the operator iff it arrived on a loopback socket, names an
+// allow-listed login exactly, was forwarded from https, and was forwarded for
+// exactly one tailnet address. There is no login page and no cookie.
+//
+// Trust boundary: any local process can reach the loopback port and send any
+// headers, so this mode is only as strong as the host's guarantee that no
+// other local principal can connect to the port (see server/README § Security).
+
+const TAILNET_V4_BASE = 0x64400000;   // 100.64/10 (Tailscale CGNAT)
+const TAILNET_V4_MASK = 0xffc00000;
+const TAILNET_V6_PREFIX = [0xfd7a, 0x115c, 0xa1e0];  // fd7a:115c:a1e0::/48
+
+function expandIPv6(ip) {
+  const [head, tail] = ip.split('::');
+  const h = head ? head.split(':') : [];
+  const t = tail !== undefined ? (tail ? tail.split(':') : []) : [];
+  const groups = tail !== undefined ? [...h, ...Array(8 - h.length - t.length).fill('0'), ...t] : h;
+  return groups.map((g) => parseInt(g, 16));
+}
+
+function isTailnetAddress(ip) {
+  const a = String(ip ?? '');
+  if (net.isIPv4(a)) {
+    const n = a.split('.').reduce((acc, o) => ((acc << 8) | Number(o)) >>> 0, 0);
+    return ((n & TAILNET_V4_MASK) >>> 0) === TAILNET_V4_BASE;
+  }
+  if (net.isIPv6(a) && !a.includes('.')) {
+    const g = expandIPv6(a.toLowerCase());
+    return g.length === 8 && TAILNET_V6_PREFIX.every((v, i) => g[i] === v);
+  }
+  return false;
+}
+
+// Every value of a header as sent on the wire, so a repeated header is visible
+// rather than merged into one string.
+function headerValues(req, name) {
+  const raw = req.rawHeaders || [];
+  const out = [];
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    if (String(raw[i]).toLowerCase() === name) out.push(String(raw[i + 1]));
+  }
+  return out;
+}
+
+function singleHeader(req, name) {
+  const values = headerValues(req, name);
+  return values.length === 1 ? values[0].trim() : null;
+}
+
+function canonicalOrigin(origin) {
+  let u;
+  try { u = new URL(origin); } catch { throw new Error(`invalid --origin: ${origin} (an https origin is required)`); }
+  if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash || u.pathname !== '/' || u.origin !== String(origin).replace(/\/$/, '')) {
+    throw new Error(`invalid --origin: ${origin} (use the bare https origin, e.g. https://host.tailnet.ts.net)`);
+  }
+  return u.origin;
+}
+
+function createTailscaleAuth({ allowLogins, origin }) {
+  const allowed = new Set(allowLogins);
+  return {
+    mode: 'tailscale',
+    origin,
+    isAuthed(req) {
+      if (!isLoopbackPeer(req.socket && req.socket.remoteAddress)) return false;
+      const login = singleHeader(req, 'tailscale-user-login');
+      if (!login || !allowed.has(login)) return false;
+      if (singleHeader(req, 'x-forwarded-proto') !== 'https') return false;
+      return isTailnetAddress(singleHeader(req, 'x-forwarded-for'));
+    },
+    originAllowed(req) {
+      const values = headerValues(req, 'origin');
+      return values.length === 1 && values[0] === origin;
     },
   };
 }
@@ -228,7 +316,8 @@ function serveStatic(res, urlPath, configJson) {
 async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
-    console.log('usage: node server --profile <name> [--port 7795] [--bind 127.0.0.1] [--token-file <path>] [--token-path <path>]');
+    console.log('usage: node server --profile <name> [--port 7795] [--bind 127.0.0.1] [--token-file <path>] [--token-path <path>]\n'
+      + '       [--auth tailscale --allow-login <login>[,<login>…] --origin https://<host>.<tailnet>.ts.net]');
     return 0;
   }
 
@@ -237,7 +326,15 @@ async function main(argv = process.argv.slice(2)) {
   // loopback opts that instance into auth anyway.
   const requireAuth = !isLoopbackBind(args.bind);
   let auth = null;
-  if (requireAuth || args.tokenFile) {
+  if (args.auth === 'tailscale') {
+    if (requireAuth) throw new Error(`--auth tailscale requires a loopback --bind (got ${args.bind}); the proxy must be the only way in`);
+    if (args.tokenFile) throw new Error('--auth tailscale does not take --token-file (identity replaces the token)');
+    if (!args.origin) throw new Error('--auth tailscale requires --origin <https origin of the proxy>');
+    if (!args.allowLogins.length) throw new Error('--auth tailscale requires --allow-login <login>[,<login>…]');
+    auth = createTailscaleAuth({ allowLogins: args.allowLogins, origin: canonicalOrigin(args.origin) });
+  } else if (args.allowLogins.length || args.origin) {
+    throw new Error('--allow-login and --origin are only valid with --auth tailscale');
+  } else if (requireAuth || args.tokenFile) {
     if (requireAuth && !args.tokenFile) {
       throw new Error(`refusing to bind routable address ${args.bind} without --token-file (a loopback bind needs no token)`);
     }
@@ -289,7 +386,14 @@ async function main(argv = process.argv.slice(2)) {
     // When auth is on, /login is the only unauthenticated surface; a GET
     // navigation for anything else is redirected there and every api call gets
     // a 401. Loopback (auth === null) is served exactly as before.
-    if (auth) {
+    if (auth && auth.mode === 'tailscale') {
+      if (!auth.isAuthed(req)) {
+        res.writeHead(401, { 'content-type': CONTENT_TYPES['.json'], 'cache-control': 'no-store' })
+          .end(JSON.stringify({ error: 'tailnet identity required' }));
+        return;
+      }
+      if (urlPath === '/login') { res.writeHead(404).end('not found'); return; }
+    } else if (auth) {
       if (urlPath === '/login') { handleLogin(req, res, auth); return; }
       if (!auth.isAuthed(req)) {
         if (req.method === 'GET' && !urlPath.startsWith('/api/')) {
@@ -318,8 +422,14 @@ async function main(argv = process.argv.slice(2)) {
     path: '/cc',
     // The upgrade carries the browser's cookies; reject an unauthenticated one
     // before it becomes a socket. Loopback (auth === null) accepts every upgrade.
+    // Identity mode also pins the upgrade to the proxy's canonical Origin, so a
+    // page on any other origin cannot ride the operator's tailnet identity.
     verifyClient: auth
-      ? (info, done) => (auth.isAuthed(info.req) ? done(true) : done(false, 401, 'authentication required'))
+      ? (info, done) => {
+        if (!auth.isAuthed(info.req)) return done(false, 401, 'authentication required');
+        if (auth.mode === 'tailscale' && !auth.originAllowed(info.req)) return done(false, 403, 'origin_refused');
+        return done(true);
+      }
       : undefined,
   });
   wss.on('connection', (socket, req) => {
@@ -338,7 +448,9 @@ async function main(argv = process.argv.slice(2)) {
   console.log(`[web] config ${configPath || '(fallback)'}`);
   console.log(`[web] serving ${WEB_DIST}`);
   console.log(`[web] listening on http://${args.bind}:${actual.port}  (ws ${actual.port}/cc)`);
-  console.log(`[web] auth ${auth ? 'ENABLED (token cookie required)' : 'disabled (loopback, single-user)'}`);
+  console.log(`[web] auth ${!auth ? 'disabled (loopback, single-user)'
+    : auth.mode === 'tailscale' ? `ENABLED (tailscale identity) origin=${auth.origin} logins=${args.allowLogins.length}`
+      : 'ENABLED (token cookie required)'}`);
 
   // One close for everything the host owns, so a caller (tests, a harness) can
   // shut it down without leaking timers or terminal attachments.
@@ -362,7 +474,8 @@ async function main(argv = process.argv.slice(2)) {
   return { server, wss, bridge, handlers: collector.table, close, port: actual.port, url: `http://${args.bind}:${actual.port}` };
 }
 
-module.exports = { main, parseArgs, resolveProfilePath, serveStatic, WEB_DIST, isLoopbackBind, createAuth, COOKIE_NAME };
+module.exports = { main, parseArgs, resolveProfilePath, serveStatic, WEB_DIST, isLoopbackBind, createAuth, COOKIE_NAME,
+  createTailscaleAuth, isTailnetAddress };
 
 if (require.main === module) {
   main().catch((e) => {
