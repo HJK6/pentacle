@@ -97,7 +97,9 @@ handler on either transport.
 A loopback bind is single-user and open: any client that can reach the port gets
 the operator's full `window.cc`. A routable `--bind` refuses to start without a
 `--token-file`; with one, the browser authenticates once at `/login` for an
-`HttpOnly` cookie that gates every page, api call and websocket upgrade. Auth
+`HttpOnly` cookie that gates every page, api call and websocket upgrade. Behind
+`tailscale serve`, a loopback host can instead run `--auth tailscale`, admitting
+allow-listed `Tailscale-User-Login` identities with no token or login page. Auth
 gates *who* connects, not *what* a connected operator may do. Flags, the wire
 protocol, the security posture and the routing rules are in
 [`server/README.md`](../server/README.md).

@@ -30,11 +30,25 @@ function createMicStarter(config, deps = {}) {
     return pending;
   };
 }
+// A TLS-terminating proxy on this machine (e.g. `tailscale serve`) reaches the
+// host over plain loopback HTTP and names the browser's scheme in
+// X-Forwarded-Proto. That header is honored only from a loopback peer and only
+// as a single value; a browser cannot set it on a websocket upgrade.
+function isLoopbackPeer(address) {
+  const a = String(address || '');
+  return a === '::1' || /^(::ffff:)?127(\.\d{1,3}){3}$/.test(a);
+}
+function requestScheme(req) {
+  if (req.socket?.encrypted) return 'https';
+  const forwarded = req.headers?.['x-forwarded-proto'];
+  if (isLoopbackPeer(req.socket?.remoteAddress) && (forwarded === 'https' || forwarded === 'http')) return forwarded;
+  return 'http';
+}
 function micStartSameOrigin(req) {
   try {
     const origin = new URL(req.headers.origin);
-    const expected = new URL(`${req.socket?.encrypted ? 'https' : 'http'}://${req.headers.host}`);
+    const expected = new URL(`${requestScheme(req)}://${req.headers.host}`);
     return origin.origin === expected.origin && origin.pathname === '/' && !origin.search && !origin.hash && !origin.username && !origin.password;
   } catch { return false; }
 }
-module.exports = { createMicStarter, micStartSameOrigin };
+module.exports = { createMicStarter, micStartSameOrigin, isLoopbackPeer };
