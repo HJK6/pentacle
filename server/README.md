@@ -309,7 +309,7 @@ operator iff **all** hold:
 - the socket peer is loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x`);
 - `Tailscale-User-Login` appears once and exactly equals an `--allow-login` value (case-sensitive);
 - `X-Forwarded-Proto` appears once and is `https`;
-- `X-Forwarded-For` appears once and is one Tailscale address (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`) — a list or a repeated header is refused.
+- `X-Forwarded-For` appears once and is one Tailscale address (CGNAT `100.64/10` or `fd7a:115c:a1e0::/48`) — a list or a repeated header is refused.
 
 Anything else is `401`. A `/cc` upgrade must additionally carry exactly one
 `Origin` equal to `--origin`; a missing, `null` or different `Origin` is refused

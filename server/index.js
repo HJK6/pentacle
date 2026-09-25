@@ -159,7 +159,7 @@ function createAuth(token) {
 // headers, so this mode is only as strong as the host's guarantee that no
 // other local principal can connect to the port (see server/README § Security).
 
-const TAILNET_V4_BASE = 0x64400000;   // 100.64.0.0/10
+const TAILNET_V4_BASE = 0x64400000;   // 100.64/10 (Tailscale CGNAT)
 const TAILNET_V4_MASK = 0xffc00000;
 const TAILNET_V6_PREFIX = [0xfd7a, 0x115c, 0xa1e0];  // fd7a:115c:a1e0::/48
 

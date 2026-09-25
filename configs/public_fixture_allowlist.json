@@ -202,6 +202,7 @@
     "test/sidebar_usage_footer.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/spawn_catalog_reconnect.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/status_card_slot_render.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
-    "test/ui_review_artifacts.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures."
+    "test/ui_review_artifacts.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
+    "test/web_auth_tailscale.test.js": "Synthetic tailnet (CGNAT) addresses in web-host identity-auth boundary fixtures."
   }
 }

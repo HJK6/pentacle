@@ -25,7 +25,7 @@ const HOST = 'pentacle-host.example-tailnet.ts.net';
 const VALID_V4 = {
   'tailscale-user-login': LOGIN,
   'x-forwarded-proto': 'https',
-  'x-forwarded-for': '100.104.128.92',
+  'x-forwarded-for': '100.100.1.10',
 };
 const VALID_V6 = { ...VALID_V4, 'x-forwarded-for': 'fd7a:115c:a1e0::1234:5678' };
 
@@ -40,8 +40,8 @@ const IDENTITY_CASES = [
   ['proto missing', { 'x-forwarded-proto': undefined }],
   ['xff missing', { 'x-forwarded-for': undefined }],
   ['xff non-tailnet', { 'x-forwarded-for': '10.0.0.5' }],
-  ['xff list of two', { 'x-forwarded-for': '100.104.128.92, 100.70.128.35' }],
-  ['xff duplicate header', { 'x-forwarded-for': ['100.104.128.92', '100.104.128.92'] }],
+  ['xff list of two', { 'x-forwarded-for': '100.100.1.10, 100.100.1.11' }],
+  ['xff duplicate header', { 'x-forwarded-for': ['100.100.1.10', '100.100.1.10'] }],
 ];
 
 function vary(base, change) {
@@ -131,7 +131,7 @@ test('--auth tailscale startup refusals: routable bind, missing --origin, missin
   process.env.HOME = home;
   t.after(() => { if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome; fs.rmSync(dir, { recursive: true, force: true }); });
   const base = ['--profile', profile, '--port', '0', '--auth', 'tailscale'];
-  await assert.rejects(main([...base, '--bind', '100.85.55.92', '--allow-login', LOGIN, '--origin', ORIGIN]), /loopback/);
+  await assert.rejects(main([...base, '--bind', '100.100.1.12', '--allow-login', LOGIN, '--origin', ORIGIN]), /loopback/);
   await assert.rejects(main([...base, '--bind', '0.0.0.0', '--allow-login', LOGIN, '--origin', ORIGIN]), /loopback/);
   await assert.rejects(main([...base, '--bind', '127.0.0.1', '--allow-login', LOGIN]), /--origin/);
   await assert.rejects(main([...base, '--bind', '127.0.0.1', '--origin', ORIGIN]), /--allow-login/);
@@ -148,10 +148,10 @@ test('--auth tailscale startup refusals: routable bind, missing --origin, missin
 // ── identity predicate (unit) ───────────────────────────────────────────────
 
 test('isTailnetAddress accepts Tailscale CGNAT and IPv6 ranges only', () => {
-  for (const ip of ['100.64.0.1', '100.104.128.92', '100.127.255.254', 'fd7a:115c:a1e0::1', 'fd7a:115c:a1e0:ab12::99']) {
+  for (const ip of ['100.64.0.1', '100.100.1.10', '100.127.255.254', 'fd7a:115c:a1e0::1', 'fd7a:115c:a1e0:ab12::99']) {
     assert.equal(isTailnetAddress(ip), true, ip);
   }
-  for (const ip of ['100.63.255.255', '100.128.0.1', '10.0.0.5', '127.0.0.1', '::1', 'fd7a:115c:a1e1::1', '', 'nonsense', '100.104.128.92, 100.70.128.35']) {
+  for (const ip of ['100.63.255.255', '100.128.0.1', '10.0.0.5', '127.0.0.1', '::1', 'fd7a:115c:a1e1::1', '', 'nonsense', '100.100.1.10, 100.100.1.11']) {
     assert.equal(isTailnetAddress(ip), false, ip);
   }
 });
@@ -165,7 +165,7 @@ test('identity predicate: full valid fixtures pass; each single-field variation 
   for (const [name, change] of IDENTITY_CASES) {
     assert.equal(auth.isAuthed(fakeReq('127.0.0.1', vary(VALID_V4, change))), false, name);
   }
-  for (const peer of ['100.104.128.92', '192.168.1.5', undefined]) {
+  for (const peer of ['100.100.1.10', '192.168.1.5', undefined]) {
     assert.equal(auth.isAuthed(fakeReq(peer, VALID_V4)), false, `non-loopback peer ${peer}`);
   }
 });
@@ -227,7 +227,7 @@ test('micStartSameOrigin honors X-Forwarded-Proto from a loopback peer only', ()
   assert.equal(micStartSameOrigin(req('127.0.0.1', { 'x-forwarded-proto': 'https' })), true, 'loopback proxy with https');
   assert.equal(micStartSameOrigin(req('::ffff:127.0.0.1', { 'x-forwarded-proto': 'https' })), true);
   assert.equal(micStartSameOrigin(req('127.0.0.1', {})), false, 'no forwarded proto: plain http expected');
-  assert.equal(micStartSameOrigin(req('100.104.128.92', { 'x-forwarded-proto': 'https' })), false, 'forwarded proto from a non-loopback peer is ignored');
+  assert.equal(micStartSameOrigin(req('100.100.1.10', { 'x-forwarded-proto': 'https' })), false, 'forwarded proto from a non-loopback peer is ignored');
   assert.equal(micStartSameOrigin(req('127.0.0.1', { 'x-forwarded-proto': 'https', origin: 'https://evil.example' })), false, 'hostile Origin');
   assert.equal(micStartSameOrigin(req('127.0.0.1', { 'x-forwarded-proto': 'https, http' })), false, 'a forwarded-proto list is not trusted');
 });
