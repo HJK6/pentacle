@@ -134,6 +134,7 @@ function createCcHandlers({
   reloginOptions = undefined,
   startMicServer = null,
   micRequest = null,
+  buildId = null,
 }) {
   const telemetry = [];
 
@@ -141,7 +142,8 @@ function createCcHandlers({
     const { token, tokenPath, ...chatStream } = CONFIG.chatStream || {};
     const { startCommand, ...mic } = CONFIG.mic || {};
     return { ...CONFIG, mic, chatStream, hostIds: CONFIG.chatStream?.hosts || ['local'], platform: process.platform,
-      hostname: os.hostname(), isClient: Boolean(CONFIG.remote), configError: configError?.message || null, configWarnings };
+      hostname: os.hostname(), isClient: Boolean(CONFIG.remote), configError: configError?.message || null, configWarnings,
+      buildId };
   }
 
   function protectedAssistantRenameError(host, sessionName) {
@@ -152,6 +154,8 @@ function createCcHandlers({
 
   function register(target) {
     target.handle('get-config', () => publicConfig());
+    // The build id of the currently-running host (update-available refresh).
+    target.handle('get-build', () => ({ buildId }));
 
     target.handle('chat-stream:get-state', () => chatStreamClient.snapshot());
     target.handle('chat-stream:spawn-catalog', () => command(async () => ({ catalog: await chatStreamClient.getSpawnCatalog() })));

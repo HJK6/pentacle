@@ -334,6 +334,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
     saveImage: (base64Data) => Promise.resolve(browserDownloadImage(base64Data)),
 
     getConfig: () => call('get-config'),
+    getBuild: () => call('get-build'),
     // In a browser the OS browser IS the browser; opening a tab beats a round
     // trip to a channel the host refuses.
     openExternal: (url) => {

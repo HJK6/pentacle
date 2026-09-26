@@ -149,6 +149,24 @@ body {
 }
 .settings-btn:hover { color: var(--pc-text); background: var(--pc-chip-bg); }
 
+/* Update-available refresh icon beside Settings
+   (spec_pentacle__web_update_available_refresh_icon_2026_09). Hidden unless the
+   window's build differs from what Thoth now serves. */
+.web-refresh-btn {
+  -webkit-app-region: no-drag;
+  background: none;
+  border: none;
+  color: var(--yellow, #ffd60a);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.12s;
+}
+.web-refresh-btn[hidden] { display: none; }
+.web-refresh-btn:hover { background: var(--pc-chip-bg); }
+
 /* ── Main Layout ───────────────────────────────── */
 
 .main {
@@ -405,6 +423,14 @@ body {
   border: 1px solid var(--green);
   background: var(--green);
 }
+
+/* Machine sigil glyph inside the sidebar avatar and host-filter chips
+   (spec_pentacle__web_machine_sigil_icons_2026_09). The SVG is stroked in
+   currentColor so it reads white on the accent chip, mirroring the previous
+   letter glyph while showing the mobile MachineSigil shapes. */
+.machine-sigil { display: block; }
+.s-machine-avatar .machine-sigil,
+.source-filter-btn .machine-sigil { width: 15px; height: 15px; }
 .s-machine-avatar.color-red { color: #fff; border-color: var(--bridge-red); background: var(--bridge-red); }
 .s-machine-avatar.color-royal-blue { color: #fff; border-color: var(--bridge-royal-blue); background: var(--bridge-royal-blue); }
 .s-machine-avatar.color-forest-green { color: #fff; border-color: var(--bridge-forest-green); background: var(--bridge-forest-green); }
@@ -857,6 +883,22 @@ body.chat-stream-degraded button[data-cleanup-action] {
 .cell-label.has-session {
   color: var(--blue);
 }
+
+/* Copy-chat-id control: top-left of an occupied slot header, left of the title.
+   Hidden by default (empty slots show no icon); JS reveals it on attach. */
+.cell-copyid {
+  background: none;
+  border: none;
+  color: var(--fg-dim);
+  cursor: pointer;
+  padding: 2px;
+  align-items: center;
+  transition: color 0.1s;
+  flex-shrink: 0;
+}
+.cell-copyid:hover { color: var(--blue); }
+.cell-copyid.is-copied { color: var(--green); }
+.cell-copyid.is-copy-failed { color: var(--red); }
 
 .cell-actions {
   display: none;
