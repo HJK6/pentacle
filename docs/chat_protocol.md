@@ -120,3 +120,29 @@ A session snapshot may carry four context-usage fields, projected by the server 
 `context_level` is provider-aware. For a Claude session the server classifies the level from the model window against capped advisory/handoff thresholds (defaults 70% / 85%, capped at 400,000 / 600,000 tokens; overridable via `PENTACLE_CONTEXT_ADVISORY_ABS`/`PENTACLE_CONTEXT_ADVISORY_PCT` and `PENTACLE_CONTEXT_HANDOFF_ABS`/`PENTACLE_CONTEXT_HANDOFF_PCT`) and emits a one-and-done context notification at each crossing. For a Codex session the server reports `context_tokens` and `model_context_window` for display but `context_level` is always `none`: Codex compacts its context automatically, so it receives no routine context-threshold handoff or advisory notification and no handoff-level status-card pressure. This is a notification-and-display policy only; it does not affect deliberate `spawn --handoff`, scheduled handoff, or recovery handoff, which remain available to both providers and independent of `context_level`.
 
 This contract intentionally uses synthetic client, host, and stream examples. It does not describe a private fleet, managed endpoint, deployment channel, or credential location.
+
+## Mobile voice transcription
+
+The authenticated v2 command `transcribe_blob` takes `request_id`, `blob_sha`
+from the existing upload protocol and `mime` (`audio/mp4` or `audio/wav`). It
+reads the stored blob and calls the managed loopback mic backend's
+`POST /transcribe?prompt_profile=fleet`. The daemon never loads an ASR model.
+A disabled mic feature or unreachable backend returns `backend_unavailable`.
+
+Success: `transcribe_blob.ok {request_id, text, duration_s, model,
+vocabulary_version}`. Error: `transcribe_blob.error {request_id, error_code}`,
+where error_code is `bad_request` (missing identity, malformed SHA, or request identity rebound to another take), `blob_unknown`, `mime_unsupported`, `backend_unavailable`,
+`transcribe_failed` or `too_long`. Request identities bind the blob SHA and MIME for the ten-minute in-process
+cache window; rebinding an identity is rejected. Successful results are cached
+by blob SHA and concurrent calls for identical content are coalesced. Each
+request also retains its successful result for ten minutes from completion. Cache and
+identity bindings reset on daemon restart. An interrupted
+socket can replay the same transcription identity; explicit client retries
+must keep that identity. An empty transcript is not a text send.
+
+The subsequent ordinary `send` accepts optional
+`meta: {voice: {duration_s: number}}`. Metadata is stored in the send receipt's
+`meta_json`, attached to the USER echo/history event and preserved by receipt
+replay. It is additive: clients without voice UI can ignore it. The send
+contains the transcript as text, with no audio attachment; optimistic_id and
+request_id retain the ordinary send deduplication contract.
