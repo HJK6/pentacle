@@ -14,15 +14,21 @@ example values from behavior when a key is omitted.
 
 ## Hosts and identity
 
+Slot host labels and machine stats use the same theme-aware host colours as
+sidebar glyphs. Labels sit on a neutral dark chip or white light-theme chip for
+readable text; stats reuse the established machine sigils and accessible host
+names. The titlebar keeps Settings and update controls; host identity appears
+in the sidebar and slot labels.
+
 Sidebar avatars and host filters use the established sigil for each configured
 host colour. The symbol itself carries that colour on a neutral background;
 hover and selection keep the colour. Dark/light palettes adjust glyph luminance
 (including golden yellow on light surfaces) for at least 3:1 graphic contrast.
 Host names and accessible labels remain the identity, independent of colour.
 
-With `chatStream.hosts: ['local', 'workstation']`, the titlebar and filters show
-**Local / L** in forest green and **Workstation / W** in royal blue. No private
-host inventory is built into the renderer. Configure actual daemon identities
+With `chatStream.hosts: ['local', 'workstation']`, the sidebar and host filters
+identify both configured machines with their host labels and sigils; attached
+slots show the host label. No private host inventory is built into the renderer. Configure actual daemon identities
 and terminal transports when adding a host; a display label alone does not make
 a remote machine reachable.
 

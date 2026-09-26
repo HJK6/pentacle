@@ -413,11 +413,15 @@ async function slotSurvivesCcReconnect(ctx) {
 // unit tests and the daemon send/ingest by the service's own python tests; see
 // spec_pentacle__web_mode_e2e_gate_2026_09 § Findings.
 async function colouredHostGlyphs({ session, report }) {
-  const { hostGlyphContrast } = require('./host_glyph_contrast');
+  const { hostGlyphContrast, hostSurfaceContrast } = require('./host_glyph_contrast');
   const cells = await hostGlyphContrast(session);
   report.ok('host glyphs retain colour, labels and graphic contrast across themes/states',
     cells.length === 48 && cells.every(cell => cell.pass),
     { subsystem: 'host-presentation', bug_ref: 'web_mic_endpoint_coloured_glyphs_2026_09', cells });
+  const surfaces = await hostSurfaceContrast(session);
+  report.ok('host labels, stats glyphs and header controls remain readable and consistent',
+    surfaces.filter(cell => cell.type !== 'stats').length === 45 && surfaces.every(cell => cell.pass),
+    { subsystem: 'host-presentation', bug_ref: 'web_visual_consistency_2026_09', surfaces });
 }
 
 const SCENARIOS = [

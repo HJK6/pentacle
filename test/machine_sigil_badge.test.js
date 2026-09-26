@@ -85,3 +85,42 @@ test('degrades to the letter if machineSigil throws', () => {
   const markup = loadFn({ PentacleCosmic: { machineSigil() { throw new Error('boom'); } } });
   assert.equal(markup('merlin', 'Merlin'), 'M');
 });
+
+test('machine stats reuse configured sigils with accessible labels and retain data/state', () => {
+  const source = fs.readFileSync(require.resolve('../renderer/app.js'), 'utf8');
+  const start = source.indexOf('function renderHostsStats(');
+  const code = source.slice(start, source.indexOf('\n}', start) + 2);
+  const document = new JSDOM('<div id="machine-stats-section"></div><div id="machine-stats-footer"></div>').window.document;
+  const cosmic = cosmicStub();
+  const names = { thoth: 'Thoth', amaterasu: 'Amaterasu', merlin: 'Merlin' };
+  const colors = { thoth: 'yellow', amaterasu: 'red', merlin: 'royal-blue' };
+  const context = {
+    document, state: { chatStream: { hostsStats: {} } }, HOST_IDS: Object.keys(names),
+    streamHostForHostId: id => id === 'local' ? 'thoth' : id,
+    _streamHostToHostId: id => id, getSourceForSession: (_, id) => names[id],
+    getSourceColorForSession: (_, id) => colors[id], esc: s => String(s),
+    machineSigilMarkup: loadFn(cosmic), statUsagePct: (used, total) => used / total * 100,
+    machineStatsIsStale: stats => stats.stale, fmtStatLoad: String, fmtStatPct: n => n + '%',
+    fmtStatBytes: String, fmtStatUptime: String, usageBarClass: () => 'low',
+  };
+  vm.runInNewContext(code, context);
+  const stats = stale => ({ cpu_load_1m: 0.42, memory_used_bytes: 4, memory_total_bytes: 8,
+    disk_used_bytes: 64, disk_total_bytes: 256, uptime_seconds: 123, stale });
+  context.renderHostsStats({ merlin: stats(false), thoth: stats(false), amaterasu: stats(true) });
+  const cards = [...document.querySelectorAll('.machine-stat-card')];
+  assert.deepEqual(cards.map(e => e.dataset.machineStatsHost), ['thoth', 'amaterasu', 'merlin']);
+  assert.deepEqual(cosmic.calls.map(c => c.kind), ['ibis', 'sun', 'mage']);
+  for (const card of cards) {
+    const host = card.dataset.machineStatsHost;
+    const mark = card.querySelector('.machine-stat-mark');
+    assert.equal(mark.title, names[host]);
+    assert.equal(mark.getAttribute('aria-label'), names[host]);
+    assert.ok(mark.classList.contains('color-' + colors[host]));
+    assert.equal(mark.querySelector('svg').getAttribute('aria-hidden'), 'true');
+    assert.equal(card.querySelector('.machine-stat-name').textContent, names[host]);
+    assert.equal(card.querySelector('.machine-stat-state').textContent, host === 'amaterasu' ? 'Stale' : 'Live');
+    assert.match(card.textContent, /RAM50%/);
+    assert.match(card.textContent, /Storage25%/);
+    assert.match(card.textContent, /Load 1m0.42/);
+  }
+});

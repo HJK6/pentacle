@@ -23,16 +23,15 @@ test('sidebar limits and machine stats footers use explicit ids', () => {
   assert.doesNotMatch(app, /getElementById\('usage-footer'\)/);
 });
 
-test('titlebar keeps settings top-right and renders machine chip mount', () => {
+test('titlebar keeps settings and reload controls without duplicate branding', () => {
   const html = read('renderer/index.html');
   const app = read('renderer/app.js');
   const css = read('renderer/styles.css');
-
-  assert.match(html, /id="titlebar-machines"/);
+  assert.doesNotMatch(html, /id="titlebar-(?:text|machines)"/);
   assert.match(html, /<div class="titlebar-right">\s*<button class="settings-btn"/);
-  assert.match(app, /function renderTitlebarMachines\(\)/);
-  assert.match(app, /renderTitlebarMachines\(\)/);
-  assert.match(css, /\.titlebar-machine\.color-royal-blue/);
+  assert.match(html, /id="web-refresh-btn"/);
+  assert.doesNotMatch(app, /renderTitlebarMachines/);
+  assert.match(css, /\.titlebar-right[^}]*margin-left: auto/);
 });
 
 test('renderer repaints three label-percent-bar-reset cards without freshness presentation', () => {
@@ -133,7 +132,7 @@ test('limits panel has a single source: the daemon frame, no local IPC path', ()
   assert.match(app, /renderLimits\(\s*payload\.limits,\s*/);
 });
 
-test('host glyphs carry colour while stats and source tags preserve bridge colours', () => {
+test('host glyphs, stats and source tags share host colours while card borders retain bridge colours', () => {
   const css = read('renderer/styles.css');
   const app = read('renderer/app.js');
 
@@ -143,7 +142,7 @@ test('host glyphs carry colour while stats and source tags preserve bridge colou
   for (const klass of ['color-red', 'color-royal-blue', 'color-forest-green', 'color-orange']) {
     assert.match(css, new RegExp(`\\)\\.${klass}(?:,| \\{ --host-glyph:)`));
     assert.match(css, new RegExp(`machine-stat-card\\.${klass}`));
-    assert.match(css, new RegExp(`s-source-tag\\.${klass}`));
+
   }
   assert.doesNotMatch(css, /s-machine-avatar\.color-[^{]*\{[^}]*color: #fff/);
   assert.doesNotMatch(css, /s-machine-avatar\.color-royal-blue[^{]*\{[^}]*color-mix/);

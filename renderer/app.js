@@ -363,7 +363,6 @@ const CFG_READY = (async () => {
     // Clients default to creating remote sessions (the mac-mini). Users can
     // still toggle to local for WSL/macbook-local sessions.
     if (HOST_IDS.includes('remote')) newSessionLocation = 'remote';
-    renderTitlebarMachines();
     renderConfigWarnings();
     _perfRecord('renderer:cfg-ready-end');
     return cfg;
@@ -4076,18 +4075,6 @@ function renderConfigWarnings() {
   banner.hidden = warnings.length === 0;
 }
 
-function renderTitlebarMachines() {
-  const mount = document.getElementById('titlebar-machines');
-  if (!mount) return;
-  const ids = (Array.isArray(HOST_IDS) && HOST_IDS.length ? HOST_IDS : ['local'])
-    .filter((id) => id && getSourceForSession('', id));
-  mount.innerHTML = ids.map((id) => {
-    const name = getSourceForSession('', id) || id;
-    const color = getSourceColorForSession('', id);
-    return `<span class="titlebar-machine color-${color}" title="${esc(name)}">${esc(getSourceInitial(name))}</span>`;
-  }).join('');
-}
-
 function getSourceInitial(source) {
   return hostPresentation.initial(source);
 }
@@ -6464,7 +6451,7 @@ function renderHostsStats(hosts = state.chatStream.hostsStats) {
     const card = [];
     card.push('<div class="machine-stat-card color-' + esc(color) + '" data-machine-stats-host="' + esc(streamHost) + '">');
     card.push('<div class="machine-stat-head">');
-    card.push('<span class="machine-stat-mark">' + esc(getSourceInitial(label)) + '</span>');
+    card.push('<span class="machine-stat-mark color-' + esc(color) + '" title="' + esc(label) + '" aria-label="' + esc(label) + '">' + machineSigilMarkup(hostId, label) + '</span>');
     card.push('<span class="machine-stat-name">' + esc(label) + '</span>');
     card.push('<span class="machine-stat-state ' + (stale ? 'error' : 'ok') + '">' + (stale ? 'Stale' : 'Live') + '</span>');
     card.push('</div>');
@@ -7037,11 +7024,8 @@ document.getElementById('mic-btn-meeting').addEventListener('click', async () =>
 
 // Apply config — theme, app name, feature flags
 (function applyConfig() {
-  // Set titlebar text and document title
-  const titleEl = document.getElementById('titlebar-text');
-  if (titleEl) titleEl.textContent = CONFIG.appName.toUpperCase();
+  // Keep the browser/window title; machine identity lives in the sidebar.
   document.title = CONFIG.appName;
-  renderTitlebarMachines();
   renderConfigWarnings();
 
   applyAppearanceSettings();
