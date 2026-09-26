@@ -33,6 +33,9 @@ ephemeral port against that DB, serves the web bundle, drives the served page in
 real headless Chrome over CDP, runs the named scenario functions in
 `test/e2e/lib/web_scenarios.js`, and tears everything down (by default; `--keep`
 intentionally leaves the browser and the scratch directory for debugging).
+The fixture daemon uses its own operator credential registry and token, with the
+production challenge/proof verifier. Scratch paths are canonicalized so secure
+token reads also work on systems whose temporary directory has a symlink parent.
 Ephemeral ports and a
 seeded fixture make it deterministic; it exits non-zero on any scenario failure.
 
@@ -46,8 +49,17 @@ shared daemon. A chat *send-turn* round trip is intentionally not a CDP scenario
 browser send path is covered by `test/web_cc.test.js` and daemon send/ingest by
 the `chat-stream-v2` python tests.
 
-The **slot-column-split** scenario also drives the actual divider, checks both
-tracks, reload persistence, mouse/touch reset and measured width limits.
+The **question-free-text** scenario creates disposable durable questions in the
+isolated daemon and checks the complete adapter/card/submit path for free text
+and custom single/multi-choice answers, whitespace rejection, duplicate clicks,
+reconnect and answered-state reload. Free-text questions send `text` with the
+`resolved` action; choice custom answers send `custom_text`. A zero-choice card
+shows its labeled textarea immediately. Actual asking-seat delivery still needs
+a live fixture journey; this provider-free gate asserts durable resolution.
+
+The **slot-column-split** scenario drives both row dividers and checks independent
+30/70 and 65/35 widths, true reload persistence, legacy preference migration,
+row-specific mouse/touch/keyboard reset, cancellation and measured width limits.
 
 Run locally: `npm run build:web && node test/e2e/web_gate.js` (needs a system
 Chrome, `tmux`, and a Python with the daemon's `websockets`). `--profile <config.js>`

@@ -4,10 +4,12 @@ const assert = require('node:assert/strict');
 const geometry = `(() => {
   const grid = document.querySelector('.grid');
   const rect = el => { const r = el.getBoundingClientRect(); return { x:r.x,y:r.y,width:r.width,height:r.height }; };
-  const handle = grid.querySelector('.grid-col-resizer');
+  const handles = [...grid.querySelectorAll('.grid-col-resizer')];
+  const handle = handles[0];
+  const appearance=JSON.parse(localStorage.getItem('pentacle.settings.v1')||'{}').appearance||{};
   return { grid:rect(grid), cells:[0,1,2,3].map(i=>rect(document.getElementById('cell-'+i))),
-    handle:handle ? rect(handle):null, gap:parseFloat(getComputedStyle(grid).columnGap),
-    sidebar:rect(document.querySelector('.sidebar')), saved:JSON.parse(localStorage.getItem('pentacle.settings.v1')||'{}').appearance?.gridColSplit };
+    handles:handles.map(rect), handle:handle ? rect(handle):null, gap:parseFloat(getComputedStyle(grid).columnGap),
+    sidebar:rect(document.querySelector('.sidebar')), saved:appearance.gridColSplitTop ?? appearance.gridColSplit ?? .5, savedBottom:appearance.gridColSplitBottom ?? appearance.gridColSplit ?? .5, appearance };
 })()`;
 
 async function mouse(session, type, x, y, extra = {}) {
@@ -16,10 +18,11 @@ async function mouse(session, type, x, y, extra = {}) {
 async function settle(session) {
   await session.eval('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
 }
-async function drag(session, fraction) {
+async function drag(session, fraction, row=0) {
   const g = await session.eval(geometry);
-  assert.ok(g.handle && g.handle.width > 0, 'slot-column divider is rendered');
-  const x = g.handle.x + g.handle.width/2, y = g.grid.y + g.grid.height/2;
+  const handle=g.handles[row];
+  assert.ok(handle && handle.width > 0, 'slot-column divider is rendered');
+  const x = handle.x + handle.width/2, y = handle.y + handle.height/2;
   const target = g.grid.x + (g.grid.width-g.gap)*fraction + g.gap/2;
   await mouse(session,'mousePressed',x,y,{clickCount:1,buttons:1});
   for (let i=1;i<=5;i++) await mouse(session,'mouseMoved',x+(target-x)*i/5,y,{buttons:1});
@@ -27,9 +30,10 @@ async function drag(session, fraction) {
   await settle(session);
   return session.eval(geometry);
 }
-async function doubleTap(session, touch=false) {
+async function doubleTap(session, touch=false, row=0) {
+  const g=await session.eval(geometry),h=g.handles[row],x=h.x+h.width/2,y=h.y+h.height/2;
+  await session.eval(`window.__splitTapEvents=[]; if(!window.__splitTapObserver){window.__splitTapObserver=true;for(const type of ['pointerdown','pointerup'])document.addEventListener(type,e=>window.__splitTapEvents.push({type,at:Date.now(),pointerType:e.pointerType,row:e.target.closest('.grid-row')?.dataset.row,primary:e.isPrimary,x:e.clientX,y:e.clientY}),true);}`);
   for(let i=0;i<2;i++) {
-    const g=await session.eval(geometry),x=g.handle.x+g.handle.width/2,y=g.grid.y+g.grid.height/2;
     if(touch) {
       await session.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y,id:1}]});
       await session.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
@@ -39,46 +43,77 @@ async function doubleTap(session, touch=false) {
     }
   }
   await settle(session);
+  const events=await session.eval('window.__splitTapEvents');
+  const valid=events.length===4&&events.every(e=>e.row===(row===0?'top':'bottom')&&e.primary!==false&&e.pointerType===(touch?'touch':'mouse'))&&events.map(e=>e.type).join(',')==='pointerdown,pointerup,pointerdown,pointerup'&&events[1].at-events[0].at<=300&&events[3].at-events[2].at<=300&&events[3].at-events[1].at<=350;
+  if(!valid)throw Object.assign(Error('double-tap injection did not meet gesture timing contract: '+JSON.stringify(events)),{classification:'HARNESS_ERROR'});
 }
-async function runGridSplit(ctx) {
-  const {session,report}=ctx;
-  await session.waitFor("document.readyState==='complete' && !!window.cc && !!document.querySelector('.grid')");
-  const before=await session.eval(geometry);
-  report.ok('slot-column divider is rendered',!!before.handle && before.handle.width>=10,before);
-  const after=await drag(session,.65);
-  report.ok('drag changes both column tracks and preserves rows/sidebar',
-    after.cells[0].width>before.cells[0].width+20 && Math.abs(after.cells[0].width-after.cells[2].width)<2 &&
-    Math.abs(after.cells[1].width-after.cells[3].width)<2 && Math.abs(after.cells[0].height-before.cells[0].height)<2 &&
-    after.sidebar.width===before.sidebar.width && Math.abs(after.cells[0].width+after.cells[1].width+after.gap-after.grid.width)<2,after);
-  report.ok('committed split saved',Math.abs(after.saved-.65)<.005,after.saved);
+
+async function reload(session) {
   await session.eval('window.__splitOldDocument=true');
   await session.send('Page.reload');
-  await session.waitFor("!window.__splitOldDocument && document.readyState==='complete' && !!document.querySelector('.grid-col-resizer')?.getAttribute('aria-valuenow')");
+  await session.waitFor("!window.__splitOldDocument && document.readyState==='complete' && document.querySelectorAll('.grid-col-resizer[aria-valuenow]').length===2");
   await settle(session);
-  const reload=await session.eval(geometry);
-  report.ok('split restored after real renderer reload',Math.abs(reload.cells[0].width-after.cells[0].width)<2,reload);
+}
+async function runGridSplit({session,report}) {
+  await session.waitFor("document.readyState==='complete' && document.querySelectorAll('.grid-col-resizer[aria-valuenow]').length===2");
+  const before=await session.eval(geometry);
+  report.ok('two row-scoped accessible dividers are rendered',before.handles.length===2&&before.handles.every((h,i)=>h.width>=10&&Math.abs(h.height-before.cells[i*2].height)<2),before);
+  const top=await drag(session,.3);
+  report.ok('top30/70 leaves bottom50/50 and rows/sidebar unchanged',Math.abs(top.cells[0].width/(top.grid.width-top.gap)-.3)<.005&&Math.abs(top.cells[2].width-before.cells[2].width)<2&&top.cells.every((c,i)=>c.y===before.cells[i].y&&c.height===before.cells[i].height)&&top.sidebar.width===before.sidebar.width,top);
+  const both=await drag(session,.65,1);
+  report.ok('bottom65/35 leaves top30/70 unchanged',Math.abs(both.cells[2].width/(both.grid.width-both.gap)-.65)<.005&&Math.abs(both.cells[0].width-top.cells[0].width)<2,both);
+  await reload(session);
+  const restored=await session.eval(geometry);
+  report.ok('both row preferences survive true reload',Math.abs(restored.saved-.3)<.005&&Math.abs(restored.savedBottom-.65)<.005&&restored.cells.every((c,i)=>Math.abs(c.width-both.cells[i].width)<2),restored);
   await doubleTap(session);
-  const reset=await session.eval(geometry);
-  report.ok('mouse double-click resets to equal columns and persists',Math.abs(reset.cells[0].width-reset.cells[1].width)<2 && reset.saved===.5,reset);
-  await drag(session,.62);
-  await doubleTap(session,true);
-  const touch=await session.eval(geometry);
-  report.ok('touch double-tap resets and persists',Math.abs(touch.cells[0].width-touch.cells[1].width)<2 && touch.saved===.5,touch);
-  for (const f of [-1,2]) {
-    const bound=await drag(session,f);
-    report.ok('column bounds '+f,bound.cells[0].width>=219.5 && bound.cells[1].width>=219.5,bound);
-  }
-  await session.eval("document.querySelector('.grid-col-resizer').focus()");
-  for(const [key,code] of [['Home',36],['End',35],['Enter',13],['ArrowRight',39],['ArrowLeft',37]]) {
-    await session.send('Input.dispatchKeyEvent',{type:'keyDown',key,code:key,windowsVirtualKeyCode:code});
-    await session.send('Input.dispatchKeyEvent',{type:'keyUp',key,code:key,windowsVirtualKeyCode:code});
+  const topReset=await session.eval(geometry);
+  report.ok('top mouse reset preserves bottom',topReset.saved===.5&&topReset.savedBottom===restored.savedBottom&&Math.abs(topReset.cells[2].width-restored.cells[2].width)<2,topReset);
+  await drag(session,.3);
+  await doubleTap(session,true,1);
+  const bottomReset=await session.eval(geometry);
+  report.ok('bottom touch reset preserves top',bottomReset.savedBottom===.5&&bottomReset.saved===bottomReset.appearance.gridColSplitTop&&Math.abs(bottomReset.cells[0].width-top.cells[0].width)<2,bottomReset);
+
+  // Migrate a real old settings record; a true reload must not rewrite it.
+  await session.eval(`localStorage.setItem('pentacle.settings.v1',JSON.stringify({appearance:{gridColSplit:.61,theme:'dark',density:'comfortable',keep:'unchanged'},features:{inputBar:true}}))`);
+  await reload(session);
+  const migrated=await session.eval(geometry);
+  report.ok('legacy preference initializes both without eager persistence',migrated.saved===.61&&migrated.savedBottom===.61&&migrated.appearance.gridColSplitTop===undefined&&migrated.appearance.gridColSplitBottom===undefined&&migrated.cells.filter((_,i)=>i%2===0).every(c=>Math.abs(c.width/(migrated.grid.width-migrated.gap)-.61)<.005),migrated);
+  await drag(session,.3);
+  await reload(session);
+  const partial=await session.eval(geometry);
+  report.ok('one saved row leaves sibling legacy fallback and unrelated preferences intact',Math.abs(partial.saved-.3)<.005&&partial.savedBottom===.61&&partial.appearance.keep==='unchanged'&&partial.appearance.gridColSplit===.61,partial);
+  for(const row of [0,1]) {
+    const savedKey=row===0?'saved':'savedBottom', otherKey=row===0?'savedBottom':'saved';
+    const sibling=(await session.eval(geometry))[otherKey];
+    for(const f of [-1,2]) {
+      const bound=await drag(session,f,row);
+      report.ok('row '+row+' bounds '+f,bound.cells[row*2].width>=219.5&&bound.cells[row*2+1].width>=219.5&&bound[otherKey]===sibling,bound);
+    }
+    await session.eval(`document.querySelectorAll('.grid-col-resizer')[${row}].focus()`);
+    for(const [key,code] of [['Home',36],['End',35],['Enter',13],['ArrowRight',39],['ArrowLeft',37]]) {
+      await session.send('Input.dispatchKeyEvent',{type:'keyDown',key,code:key,windowsVirtualKeyCode:code});
+      await session.send('Input.dispatchKeyEvent',{type:'keyUp',key,code:key,windowsVirtualKeyCode:code});
+      await settle(session);
+      const g=await session.eval(geometry),want=key==='Home'?220/(g.grid.width-g.gap):key==='End'?1-220/(g.grid.width-g.gap):key==='ArrowRight'?.52:.5;
+      report.ok('row '+row+' keyboard '+key+' preserves sibling and updates ARIA',Math.abs(g[savedKey]-want)<.001&&g[otherKey]===sibling&&await session.eval(`document.querySelectorAll('.grid-col-resizer')[${row}].getAttribute('aria-valuenow')===${JSON.stringify(String(Math.round(want*100)))}`),g);
+    }
+    await drag(session,.62,row); await doubleTap(session,true,row);
+    const touchReset=await session.eval(geometry);
+    report.ok('row '+row+' touch reset stays local',touchReset[savedKey]===.5&&touchReset[otherKey]===sibling,{geometry:touchReset,timing:await session.eval('window.__splitTapEvents')});
+    // Cancel a real touch drag; no preference or sibling may change.
+    const start=await session.eval(geometry),h=start.handles[row],x=h.x+h.width/2,y=h.y+h.height/2;
+    await session.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y,id:1}]});
+    await session.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:x+80,y,id:1}]});
     await settle(session);
-    const g=await session.eval(geometry);
-    const want=key==='Home'?220/(g.grid.width-g.gap):key==='End'?1-220/(g.grid.width-g.gap):key==='ArrowRight'?.52:.5;
-    report.ok('keyboard '+key+' saves and updates ARIA',Math.abs(g.saved-want)<.001&&await session.eval(`document.querySelector('.grid-col-resizer').getAttribute('aria-valuenow')===${JSON.stringify(String(Math.round(want*100)))}`),g.saved);
+    const moving=await session.eval(geometry);
+    report.ok('row '+row+' cancellation probe moved its own track before abort',Math.abs(moving.cells[row*2].width-start.cells[row*2].width)>20&&moving.cells[(1-row)*2].width===start.cells[(1-row)*2].width,moving);
+    await session.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});
+    await settle(session);
+    const cancelled=await session.eval(geometry);
+    report.ok('row '+row+' cancelled drag restores both widths and persisted preferences',cancelled.saved===start.saved&&cancelled.savedBottom===start.savedBottom&&cancelled.cells.every((c,i)=>Math.abs(c.width-start.cells[i].width)<2)&&await session.eval("!document.querySelector('.resizing-columns')"),cancelled);
   }
-  await drag(session,.65);
-  return {before,after};
+  await drag(session,.65); await drag(session,.65,1);
+  return {before,after:await session.eval(geometry)};
 }
 
 async function runGridSplitTerminals({session,report,fixtures,tmux,cdp}) {
@@ -114,7 +149,10 @@ async function runGridSplitTerminals({session,report,fixtures,tmux,cdp}) {
   await drag(session,.4);
   await cdp.sleep(150);
   const after=await dimensions();
-  report.ok('all four real terminal widths follow their resized column',[0,2].every(i=>after[i].cols<before[i].cols)&&[1,3].every(i=>after[i].cols>before[i].cols),{before,after});
+  report.ok('top real terminal widths resize while bottom stays fixed',after[0].cols<before[0].cols&&after[1].cols>before[1].cols&&[2,3].every(i=>after[i].cols===before[i].cols),{before,after});
+  await drag(session,.35,1); await cdp.sleep(150);
+  const bottom=await dimensions();
+  report.ok('bottom real terminal widths resize while top stays fixed',bottom[2].cols<after[2].cols&&bottom[3].cols>after[3].cols&&[0,1].every(i=>bottom[i].cols===after[i].cols),{after,bottom});
 
   // Maximize via the existing control, then prove hidden terminal preservation.
   const split=await session.eval(geometry);
@@ -122,11 +160,16 @@ async function runGridSplitTerminals({session,report,fixtures,tmux,cdp}) {
   await session.waitFor("document.querySelector('.grid').classList.contains('maximized')");
   await cdp.sleep(150);
   const maximized=await session.eval(geometry),sizes=await session.eval('window.__splitSizes');
-  report.ok('maximize hides separator and spans both tracks',maximized.handle.width===0&&Math.abs(maximized.cells[0].width-maximized.grid.width)<2,maximized);
-  report.ok('maximized-away terminals keep their previous dimensions',[1,2,3].every(i=>sizes[i].cols===after[i].cols&&sizes[i].rows===after[i].rows),sizes);
+  report.ok('maximize hides separator and spans both tracks',maximized.handles.every(h=>h.width===0)&&Math.abs(maximized.cells[0].width-maximized.grid.width)<2,maximized);
+  report.ok('maximized-away terminals keep their previous dimensions',[1,2,3].every(i=>sizes[i].cols===bottom[i].cols&&sizes[i].rows===bottom[i].rows),sizes);
   await session.click('#header-0 .cell-maximize');await settle(session);await cdp.sleep(150);
   const restored=await session.eval(geometry);
   report.ok('restore returns previous column split',Math.abs(restored.cells[0].width-split.cells[0].width)<2&&restored.saved===split.saved,restored);
+  await dimensions();
+  await session.click('#header-2 .cell-maximize'); await settle(session);
+  const lowerMax=await session.eval(geometry);
+  report.ok('bottom-row maximize spans the full outer grid',Math.abs(lowerMax.cells[2].width-lowerMax.grid.width)<2&&Math.abs(lowerMax.cells[2].height-lowerMax.grid.height)<2&&lowerMax.handles.every(h=>h.width===0),lowerMax);
+  await session.click('#header-2 .cell-maximize'); await settle(session); await cdp.sleep(150);
   await dimensions();
 
   // A chat surface hides its xterm without hiding its cell.
@@ -145,6 +188,8 @@ async function runGridSplitTerminals({session,report,fixtures,tmux,cdp}) {
   report.ok('dashboard return restores split',Math.abs((await session.eval(geometry)).cells[0].width-gridBeforeDashboard.cells[0].width)<2);
   await dimensions();
 
+  report.ok('all emitted terminal sizes remain positive',await session.eval('window.__splitResizes.every(r=>r.cols>0&&r.rows>0)'));
+
   // Close means detach, using the existing control; the owned tmux session lives
   // until the runner's finally block removes it.
   await session.click('#header-3 .cell-close');
@@ -153,13 +198,13 @@ async function runGridSplitTerminals({session,report,fixtures,tmux,cdp}) {
 }
 
 async function runGridSplitWidths({session,report}) {
-  await drag(session,.7);
-  const saved=(await session.eval(geometry)).saved;
+  await drag(session,.7); await drag(session,.3,1);
+  const initial=await session.eval(geometry),saved=initial.saved,savedBottom=initial.savedBottom;
   for(const density of ['comfortable','compact']) {
     await session.eval(`document.querySelector('.settings-row[data-setting="density"] [data-value="${density}"]').click()`);
     await session.send('Emulation.setDeviceMetricsOverride',{width:720,height:700,deviceScaleFactor:1,mobile:false});await settle(session);
     const g=await session.eval(geometry);
-    report.ok('720px '+density+' has feasible 220px columns',g.cells[0].width>=219.5&&g.cells[1].width>=219.5&&g.saved===saved,g);
+    report.ok('720px '+density+' has feasible 220px columns',g.cells.every(c=>c.width>=219.5)&&g.saved===saved&&g.savedBottom===savedBottom,g);
     const controls=await session.eval(`(() => {
       const cell=document.getElementById('cell-1'),button=cell.querySelector('.cell-close');
       button.focus();
@@ -170,10 +215,10 @@ async function runGridSplitWidths({session,report}) {
   }
   await session.send('Emulation.setDeviceMetricsOverride',{width:500,height:700,deviceScaleFactor:1,mobile:false});await settle(session);
   const narrow=await session.eval(geometry);
-  report.ok('infeasible minimum falls back to equal positive halves without losing preference',Math.abs(narrow.cells[0].width-narrow.cells[1].width)<2&&narrow.cells[0].width>0&&narrow.saved===saved,narrow);
+  report.ok('infeasible minimum falls back to equal positive halves without losing preference',narrow.cells.every(c=>c.width>0&&Math.abs(c.width-narrow.cells[0].width)<2)&&narrow.saved===saved&&narrow.savedBottom===savedBottom,narrow);
   report.ok('narrow grid introduces no page overflow',await session.eval('document.documentElement.scrollWidth<=innerWidth'));
   await session.send('Emulation.clearDeviceMetricsOverride');await settle(session);
   const restored=await session.eval(geometry);
-  report.ok('wide viewport restores preferred fraction',Math.abs(restored.cells[0].width/(restored.grid.width-restored.gap)-saved)<.005,restored);
+  report.ok('wide viewport restores preferred fraction',Math.abs(restored.cells[0].width/(restored.grid.width-restored.gap)-saved)<.005&&Math.abs(restored.cells[2].width/(restored.grid.width-restored.gap)-savedBottom)<.005,restored);
 }
 module.exports={geometry,mouse,drag,doubleTap,settle,runGridSplit,runGridSplitTerminals,runGridSplitWidths};

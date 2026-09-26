@@ -467,3 +467,30 @@ test('usage panel toggle collapses and expands the sidebar section', async () =>
   assert.equal(body.hidden, false);
   assert.equal(section.classList.contains('is-collapsed'), false);
 });
+
+test('independent row preferences migrate legacy values and preserve sibling and unrelated settings', async () => {
+  const stored = { appearance: { theme: 'light', density: 'compact', gridColSplit: .68, custom: 'retained' }, features: { showTurnDuration: true } };
+  const first = installRenderer({ settingsRecord: stored });
+  await flush(); await flush();
+  const appearance = () => JSON.parse(vm.runInContext('JSON.stringify(state.appearance)', first.context));
+  assert.equal(appearance().gridColSplitTop, .68);
+  assert.equal(appearance().gridColSplitBottom, .68);
+  assert.deepEqual(JSON.parse(first.dom.window.localStorage.getItem('pentacle.settings.v1')), stored, 'migration never eagerly writes');
+  vm.runInContext("saveAppearanceSetting('gridColSplitTop', .3)", first.context);
+  const afterTop = JSON.parse(first.dom.window.localStorage.getItem('pentacle.settings.v1'));
+  const next = installRenderer({ settingsRecord: afterTop });
+  await flush(); await flush();
+  assert.equal(vm.runInContext('state.appearance.gridColSplitTop', next.context), .3);
+  assert.equal(vm.runInContext('state.appearance.gridColSplitBottom', next.context), .68);
+  vm.runInContext("saveAppearanceSetting('gridColSplitBottom', .65); saveAppearanceSetting('gridColSplitTop', .5)", next.context);
+  const reset = JSON.parse(next.dom.window.localStorage.getItem('pentacle.settings.v1'));
+  assert.deepEqual(reset, { ...stored, appearance: { ...stored.appearance, gridColSplitTop: .5, gridColSplitBottom: .65 } });
+  for (const invalid of [null, true, [], -1, 0, 1, 'invalid']) {
+    for (const key of ['gridColSplitTop', 'gridColSplitBottom']) {
+      const normalized = JSON.parse(vm.runInContext(`JSON.stringify(normalizeAppearance({gridColSplit:.68,${key}:${JSON.stringify(invalid)}}))`, next.context));
+      assert.equal(normalized[key], .5);
+      assert.equal(normalized[key === 'gridColSplitTop' ? 'gridColSplitBottom' : 'gridColSplitTop'], .68);
+    }
+  }
+  first.dom.window.close(); next.dom.window.close();
+});

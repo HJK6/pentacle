@@ -105,4 +105,4 @@ async function closedChatSlot(ctx) {
     await session.eval(`(() => { Object.assign(window.cc, window.__closedGate.saved); delete window.__closedGate; return true; })()`);
   }
 }
-module.exports = { closedChatSlot };
+module.exports = { closedChatSlot, fixtureRequest };

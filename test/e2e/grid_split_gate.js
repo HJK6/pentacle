@@ -11,7 +11,7 @@ const {geometry,settle,runGridSplit,runGridSplitTerminals,runGridSplitWidths}=re
 const ROOT=path.resolve(__dirname,'../..');
 async function run(surface,output) {
   fs.mkdirSync(output,{recursive:true});
-  const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'pentacle-split-'));
+  const scratch=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'pentacle-split-')));
   const runtime={},steps=[],cleanup=[];
   const report={ok(name,ok,detail){steps.push({name,ok,detail});if(!ok)throw Object.assign(Error(name),{classification:'PRODUCT_FAIL'});}};
   let host,proc,session,error;
@@ -50,17 +50,21 @@ async function run(surface,output) {
       await session.waitFor("document.readyState==='complete' && !!document.querySelector('.grid-col-resizer')?.getAttribute('aria-valuenow')");
       await settle(session);
       const after=await session.eval(geometry);
-      report.ok('desktop process relaunch restores the same saved split',oldPid!==proc.pid&&before.saved===after.saved&&Math.abs(before.cells[0].width-after.cells[0].width)<2,{oldPid,newPid:proc.pid,before,after});
+      report.ok('desktop process relaunch restores the same saved split',oldPid!==proc.pid&&before.saved===after.saved&&before.savedBottom===after.savedBottom&&before.cells.every((c,i)=>Math.abs(c.width-after.cells[i].width)<2),{oldPid,newPid:proc.pid,before,after});
     }
   } catch(e) {error={classification:e.classification||'HARNESS_ERROR',message:e.message,stack:e.stack};}
   finally {
-    if(session) {try{fs.writeFileSync(path.join(output,'pointer.json'),JSON.stringify(await session.eval(`({events:window.__splitPointerEvents,focus:document.hasFocus(),style:document.querySelector('.grid')?.getAttribute('style'),app:typeof gridColResizer,handle:document.querySelector('.grid-col-resizer')?.outerHTML})`),null,2));await session.screenshot(path.join(output,'surface.png'));fs.writeFileSync(path.join(output,'console.json'),JSON.stringify(session.consoleLines,null,2));}catch(e){cleanup.push(e.message);}session.close();}
+    if(session) {try{fs.writeFileSync(path.join(output,'pointer.json'),JSON.stringify(await session.eval(`({events:window.__splitPointerEvents,focus:document.hasFocus(),style:document.querySelector('.grid')?.getAttribute('style'),app:typeof gridColResizers,handle:document.querySelector('.grid-col-resizer')?.outerHTML})`),null,2));await session.screenshot(path.join(output,'surface.png'));fs.writeFileSync(path.join(output,'console.json'),JSON.stringify(session.consoleLines,null,2));}catch(e){cleanup.push(e.message);}session.close();}
     if(proc){proc.kill('SIGTERM');await onceExit(proc);if(proc.exitCode===null&&proc.signalCode===null){proc.kill('SIGKILL');await onceExit(proc);}cleanup.push({appExited:proc.exitCode!==null||proc.signalCode!==null});}
     if(host)try{await host.close();}catch(e){cleanup.push({webHostClosed:false,error:e.message});}
     if(runtime.daemonProc){runtime.daemonProc.kill('SIGTERM');await onceExit(runtime.daemonProc);cleanup.push({daemonExited:runtime.daemonProc.exitCode!==null||runtime.daemonProc.signalCode!==null});}
     for(const name of owned){try{tmux(['kill-session','-t','='+name]);}catch(e){cleanup.push({session:name,error:e.message});}}
     for(const name of owned){try{tmux(['has-session','-t','='+name]);cleanup.push({session:name,closed:false});}catch(e){cleanup.push({session:name,closed:e.status===1&&/can't find session|no server running|No such file/.test(String(e.stderr))});}}
-    fs.closeSync(log);fs.rmSync(scratch,{recursive:true,force:true});
+    fs.closeSync(log);
+    const registry=path.join(scratch,'operator-auth','registry.json'),token=path.join(scratch,'operator-auth','token');
+    const generatedCredentialCount=fs.existsSync(registry)?Object.keys(JSON.parse(fs.readFileSync(registry,'utf8')).credentials||{}).length:0;
+    fs.rmSync(scratch,{recursive:true,force:true});
+    cleanup.push({generatedCredentialCount,remainingCredentialCount:0,registryRemoved:!fs.existsSync(registry),tokenRemoved:!fs.existsSync(token)});
   }
   if(cleanup.some(c=>typeof c==='string'||c.error||Object.values(c).includes(false)))error={classification:'CLEANUP_FAIL',prior:error,cleanup};
   const result={surface,source:execFileSync('git',['rev-parse','HEAD'],{cwd:ROOT,encoding:'utf8'}).trim(),files,steps,error,cleanup,status:error?'FAIL':'PASS'};

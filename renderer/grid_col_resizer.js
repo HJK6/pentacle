@@ -13,7 +13,7 @@ function clampSplit(width, gap, preferred) {
   return { available, min, max, fraction, left: available * fraction, right: available * (1 - fraction), movable: min < max };
 }
 
-// One grid, one preference. The effective clamp is deliberately not saved:
+// One row grid, one preference. The effective clamp is deliberately not saved:
 // shrinking a window must not erase the user's wide-window split.
 function createGridColResizer({ grid, handle, initialSplit, save, onResize = () => {}, isVisible = () => true, emit = () => {} }) {
   const win = grid.ownerDocument.defaultView;
@@ -30,7 +30,7 @@ function createGridColResizer({ grid, handle, initialSplit, save, onResize = () 
     return { gap, paddingLeft: parseFloat(css.paddingLeft) || 0, borderLeft: parseFloat(css.borderLeftWidth) || 0, ...clampSplit(width, gap, preferred) };
   }
   function evidence(name) {
-    emit(name, { subsystem: 'slot-layout', bug_ref: 'spec_pentacle__resizable_panel_split', preferred, effective: geometry?.fraction ?? preferred, left: geometry?.left ?? 0, right: geometry?.right ?? 0 });
+    emit(name, { subsystem: 'slot-layout', bug_ref: 'spec_pentacle__independent_row_dividers_2026_09', preferred, effective: geometry?.fraction ?? preferred, left: geometry?.left ?? 0, right: geometry?.right ?? 0 });
   }
   function apply() {
     if (destroyed || !visible()) return;

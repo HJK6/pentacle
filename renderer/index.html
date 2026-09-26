@@ -104,7 +104,8 @@
 
     <!-- Terminal Grid -->
     <div class="grid">
-      <div class="grid-col-resizer" role="separator" aria-label="Slot column widths" aria-orientation="vertical" tabindex="0" title="Drag to resize columns. Double-click or double-tap to reset."></div>
+      <div class="grid-row" data-row="top">
+        <div class="grid-col-resizer" role="separator" aria-label="Top row column widths" aria-orientation="vertical" tabindex="0" title="Drag to resize this row. Double-click or double-tap to reset."></div>
       <div class="grid-cell" id="cell-0">
         <div class="cell-header" id="header-0">
           <span class="cell-label">Slot 1</span>
@@ -135,6 +136,9 @@
         <div class="cell-activity-strip" id="activity-strip-1"></div>
         <div class="cell-terminal" id="term-1"></div>
       </div>
+      </div>
+      <div class="grid-row" data-row="bottom">
+        <div class="grid-col-resizer" role="separator" aria-label="Bottom row column widths" aria-orientation="vertical" tabindex="0" title="Drag to resize this row. Double-click or double-tap to reset."></div>
       <div class="grid-cell" id="cell-2">
         <div class="cell-header" id="header-2">
           <span class="cell-label">Slot 3</span>
@@ -164,6 +168,7 @@
         </div>
         <div class="cell-activity-strip" id="activity-strip-3"></div>
         <div class="cell-terminal" id="term-3"></div>
+      </div>
       </div>
     </div>
 

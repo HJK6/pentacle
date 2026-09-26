@@ -739,3 +739,33 @@ test('mobile parity: deferred bottom follow respects scrolling after a view rend
   frames.splice(0).forEach(fn => fn());
   dom.window.close();
 });
+
+test('durable zero-option free_text uses text protocol even with allow_custom', async () => {
+  const h = installRenderer({ questionOverride: null });
+  await flush(); await flush(); mountRaceSlot(h.context);
+  const notification = { ...durableFixture('free-text-protocol'), question: {
+    question_id:'free-text-protocol', producer_stream_id:STREAM, state:'open', response_mode:'free_text', allow_custom:true, options:[],
+  } };
+  vm.runInContext(`indexDurableQuestionNotification(${JSON.stringify(notification)});renderSlotChat(0);`, h.context);
+  openDesktopQuestions(h.dom);
+  const doc = h.dom.window.document, input = doc.querySelector('.slot-chat-question-freetext');
+  assert.equal(input.hidden, false);
+  input.value='typed result'; input.dispatchEvent(new h.dom.window.Event('input',{bubbles:true}));
+  doc.querySelector('.slot-chat-question-submit').click();
+  await flush(); await flush();
+  assert.equal(h.notificationResolveCalls.length, 1);
+  assert.equal(h.notificationResolveCalls[0].actionKind, 'resolved');
+  assert.equal(h.notificationResolveCalls[0].options.text, 'typed result');
+  assert.equal(h.notificationResolveCalls[0].options.custom_text, undefined);
+});
+
+test('expired durable free-text notification cannot reopen an answer card', async () => {
+  const h = installRenderer({ questionOverride: null });
+  await flush(); await flush(); mountRaceSlot(h.context);
+  const notification = { ...durableFixture('expired-free-text'), state:'expired', question: {
+    question_id:'expired-free-text', producer_stream_id:STREAM, state:'expired', response_mode:'free_text', allow_custom:true, options:[],
+  } };
+  vm.runInContext(`indexDurableQuestionNotification(${JSON.stringify(notification)});renderSlotChat(0);`, h.context);
+  assert.equal(h.dom.window.document.querySelector('.slot-chat-question-open'), null);
+  assert.equal(h.notificationResolveCalls.length, 0);
+});

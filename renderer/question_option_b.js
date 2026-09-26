@@ -251,10 +251,11 @@ function renderQuestionOptionB(opts) {
       freeText.dataset.questionKey = String(item._draftKey || '');
       freeText.rows = 2;
       freeText.placeholder = 'Type an answer';
+      freeText.setAttribute('aria-label', promptText(item, question) || `Answer to question ${item._displayIndex}`);
       if (item.customText) freeText.placeholder = 'Type a custom answer';
       freeText.disabled = alreadyAnswered || !!item._locked || !!item._unavailable;
       freeText.value = current.text || '';
-      freeText.hidden = !!item.customText && !current.customActive && !current.text;
+      freeText.hidden = !!item.customText && selectableOptions(item).length > 0 && !current.customActive && !current.text;
       freeText.addEventListener('input', () => {
         current.text = freeText.value;
         {

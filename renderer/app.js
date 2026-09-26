@@ -140,7 +140,12 @@ function saveSettingsOverride(key, value) {
 function normalizeAppearance(raw = {}) {
   const theme = raw.theme === 'light' ? 'light' : 'dark';
   const density = raw.density === 'compact' ? 'compact' : 'comfortable';
-  return { theme, density, ...(raw.gridColSplit !== undefined ? { gridColSplit: normalizeSplit(raw.gridColSplit) } : {}) };
+  return {
+    theme, density,
+    ...(raw.gridColSplit !== undefined ? { gridColSplit: normalizeSplit(raw.gridColSplit) } : {}),
+    gridColSplitTop: normalizeSplit(raw.gridColSplitTop === undefined ? raw.gridColSplit : raw.gridColSplitTop),
+    gridColSplitBottom: normalizeSplit(raw.gridColSplitBottom === undefined ? raw.gridColSplit : raw.gridColSplitBottom),
+  };
 }
 
 function loadAppearanceSettings() {
@@ -709,7 +714,7 @@ function durableQuestionOptionBModel(notification) {
     header: notification?.title || 'Question',
     prompt: notification?.body || '',
     multiSelect: question.response_mode === 'multi_choice',
-    customText: allowCustom,
+    customText: allowCustom && question.response_mode !== 'free_text',
     options: options.map((opt, index) => ({
       index: index + 1,
       label: opt?.label || String(opt?.value ?? `Option ${index + 1}`),
@@ -741,6 +746,7 @@ async function reconcileQuestionAnswers(streamId) {
 }
 
 function durableQuestionActionKind(notification) {
+  if (notification?.question?.response_mode === 'free_text') return 'resolved';
   const actions = Array.isArray(notification?.actions) ? notification.actions : [];
   const firstKind = actions.find((action) => action && action.kind)?.kind;
   if (firstKind) return firstKind;
@@ -3336,6 +3342,7 @@ function renderSlotChat(slot) {
             resolvingNotificationId = notificationId;
             const result = await window.cc.notificationResolve(notificationId, durableQuestionActionKind(entry.notification), options);
             if (!result?.ok) throw new Error(result?.error || 'Question answer failed.');
+            console.info('[question.answer]', { subsystem: 'questions', bug_ref: 'spec_pentacle__web_question_free_text_missing_2026_09', response_mode: entry.notification.question?.response_mode, accepted: true });
             resolvingNotificationId = '';
             lock(entry);
             indexDurableQuestionNotification({ ...entry.notification, state: 'answered', resolved_at: new Date().toISOString(), ...result.notification, question: { ...entry.notification.question, state: 'answered', answer: options, ...result.notification?.question } });
@@ -4779,7 +4786,7 @@ function scheduleVisibleSlotFits() {
     for (let slot = 0; slot < 4; slot++) fitVisibleSlot(slot);
   });
 }
-let gridColResizer = null;
+const gridColResizers = [];
 
 // ── Maximize / Minimize ───────────────────────────────────────
 
@@ -4801,7 +4808,7 @@ function maximizeSlot(slot) {
     cell.classList.toggle('maximized-cell', i === slot);
   }
 
-  gridColResizer?.refresh();
+  gridColResizers.forEach(resizer => resizer.refresh());
   requestAnimationFrame(() => {
     if (fitVisibleSlot(slot)) state.terminals[slot].term.focus();
   });
@@ -4819,7 +4826,7 @@ function minimizeAll() {
     document.getElementById(`cell-${i}`).classList.remove('maximized-cell');
   }
 
-  gridColResizer?.refresh();
+  gridColResizers.forEach(resizer => resizer.refresh());
   scheduleVisibleSlotFits();
 
   renderSidebar();
@@ -5668,7 +5675,7 @@ function switchView(view) {
 
   // Toggle DOM visibility
   document.querySelector('.grid').style.display = view === 'chats' ? '' : 'none';
-  gridColResizer?.refresh();
+  gridColResizers.forEach(resizer => resizer.refresh());
   document.getElementById('dashboard-content').style.display = view === 'dashboards' ? '' : 'none';
   document.getElementById('panel-dashboards').style.display = view === 'dashboards' ? 'flex' : 'none';
 
@@ -7026,18 +7033,21 @@ function setupSettingsPanel() {
 }
 setupSettingsPanel();
 const slotGrid = document.querySelector('.grid');
-const columnHandle = slotGrid?.querySelector('.grid-col-resizer');
-if (columnHandle) gridColResizer = createGridColResizer({
-  grid: slotGrid, handle: columnHandle, initialSplit: state.appearance.gridColSplit,
-  isVisible: () => state.currentView === 'chats',
-  save: fraction => {
-    state.appearance.gridColSplit = fraction;
-    saveAppearanceSetting('gridColSplit', fraction);
-  },
-  onResize: scheduleVisibleSlotFits,
-  emit: (name, data) => window.PentacleHarness?.emit?.(`slot-layout:${name}`, { data }),
-});
-window.addEventListener('beforeunload', () => gridColResizer?.destroy());
+for (const row of slotGrid?.querySelectorAll('.grid-row') || []) {
+  const rowName = row.dataset.row;
+  const key = rowName === 'top' ? 'gridColSplitTop' : 'gridColSplitBottom';
+  gridColResizers.push(createGridColResizer({
+    grid: row, handle: row.querySelector('.grid-col-resizer'), initialSplit: state.appearance[key],
+    isVisible: () => state.currentView === 'chats' && state.maximizedSlot === null,
+    save: fraction => {
+      state.appearance[key] = fraction;
+      saveAppearanceSetting(key, fraction);
+    },
+    onResize: scheduleVisibleSlotFits,
+    emit: (name, data) => window.PentacleHarness?.emit?.(`slot-layout:${name}`, { data: { ...data, row: rowName } }),
+  }));
+}
+window.addEventListener('beforeunload', () => gridColResizers.forEach(resizer => resizer.destroy()));
 
 // Set empty state for all cells.
 for (let i = 0; i < 4; i++) {

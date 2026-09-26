@@ -30,7 +30,7 @@ const { main: startHost } = require('../../server');
 const ROOT = path.join(__dirname, '..', '..');
 const CHROME_CANDIDATES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'];
 const SEEDER = path.join(__dirname, 'lib', 'seed_web_gate.py');
-const DAEMON = path.join(ROOT, 'services', 'chat-stream-v2', 'main.py');
+const DAEMON = path.join(__dirname, 'lib', 'web_gate_daemon.py');
 
 // The seeded fixture — MUST match test/e2e/lib/seed_web_gate.py TRANSCRIPT.
 const FIXTURE = {
@@ -139,8 +139,8 @@ function writeProfile(scratch, daemonPort) {
       url: `ws://127.0.0.1:${daemonPort}`,
       localHost: 'local',
       hosts: ['local'],
-      // The loopback daemon trusts 127.0.0.1 and keeps no credential registry.
-      tokenPath: path.join(scratch, 'no-such-operator-token'),
+      // An isolated credential exercises the real operator authentication contract.
+      tokenPath: path.join(scratch, 'operator-auth', 'token'),
     },
   };
   const file = path.join(scratch, 'web_gate_profile.js');
@@ -150,6 +150,7 @@ function writeProfile(scratch, daemonPort) {
 
 async function startDaemon(args, scratch, runtime, fixtures = [FIXTURE, { host: 'local', sessionName: 'web-gate-survivor', streamId: 'local:web-gate-survivor' }]) {
   const db = path.join(scratch, 'sessions.db');
+  execFileSync(args.python, [DAEMON, scratch, '--issue'], { cwd: ROOT });
   // Seed BEFORE boot: the daemon rebuilds its inventory purely from this DB.
   runtime.fixtureTokens = {};
   const seed = fixtures.map(fixture => {
@@ -169,7 +170,7 @@ async function startDaemon(args, scratch, runtime, fixtures = [FIXTURE, { host: 
   let lastErr;
   for (let attempt = 0; attempt < 4; attempt++) {
     const port = await freePort();
-    const proc = spawn(args.python, [DAEMON,
+    const proc = spawn(args.python, [DAEMON, scratch,
       '--host', '127.0.0.1', '--port', String(port), '--local-host', 'local',
       '--db', db,
       '--notifications-db', path.join(scratch, 'notifications.db'),
@@ -198,13 +199,16 @@ async function startDaemon(args, scratch, runtime, fixtures = [FIXTURE, { host: 
 async function run(args) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const report = new Report(path.join(__dirname, 'runs', stamp, 'web_gate'));
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-gate-'));
+  const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-gate-')));
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-gate-chrome-'));
   const runtime = {};
   let daemon = null; let host = null; let chrome = null; let session = null;
   const fixture = args.profile ? null : FIXTURE;
 
   const cleanup = async () => {
+    const registryPath = path.join(scratch, 'operator-auth', 'registry.json');
+    const tokenPath = path.join(scratch, 'operator-auth', 'token');
+    const generatedCount = fs.existsSync(registryPath) ? Object.keys(JSON.parse(fs.readFileSync(registryPath, 'utf8')).credentials || {}).length : 0;
     try { if (session) session.close(); } catch {}
     try { if (chrome && !args.keep) chrome.kill('SIGTERM'); } catch {}
     try { if (runtime.tmuxSession) tmux(['kill-session', '-t', `=${runtime.tmuxSession}`], { stdio: 'ignore' }); } catch {}
@@ -223,6 +227,8 @@ async function run(args) {
     await onceExit(dproc);
     try { if (!args.keep) fs.rmSync(scratch, { recursive: true, force: true }); } catch {}
     try { if (!args.keep) fs.rmSync(userDataDir, { recursive: true, force: true }); } catch {}
+    runtime.fixtureAuthCleanup = { generated_credential_count: generatedCount, retained_for_debug: args.keep, registry_removed: !fs.existsSync(registryPath), token_removed: !fs.existsSync(tokenPath), remaining_credential_count: fs.existsSync(registryPath) ? Object.keys(JSON.parse(fs.readFileSync(registryPath, 'utf8')).credentials || {}).length : 0 };
+    if (!args.keep && (!runtime.fixtureAuthCleanup.registry_removed || !runtime.fixtureAuthCleanup.token_removed)) throw new Error('CLEANUP_FAIL: isolated credential artifacts remain');
   };
 
   try {
@@ -294,7 +300,7 @@ async function run(args) {
       let lastErr;
       for (let i = 0; i < 40; i++) {
         const dlog = fs.openSync(path.join(scratch, 'daemon.log'), 'a');
-        const proc = spawn(args.python, [DAEMON,
+        const proc = spawn(args.python, [DAEMON, scratch,
           '--host', '127.0.0.1', '--port', String(daemon.port), '--local-host', 'local',
           '--db', db,
           '--notifications-db', path.join(scratch, 'notifications.db'),
@@ -358,7 +364,15 @@ async function run(args) {
     console.error(`  artifacts: ${report.dir}`);
     return 1;
   } finally {
-    await cleanup();
+    try { await cleanup(); } finally {
+      const verdictPath = path.join(report.dir, 'verdict.json');
+      if (fs.existsSync(verdictPath)) {
+        const verdict = JSON.parse(fs.readFileSync(verdictPath, 'utf8'));
+        verdict.fixture_auth_cleanup = runtime.fixtureAuthCleanup;
+        if (!args.keep && (!runtime.fixtureAuthCleanup?.registry_removed || !runtime.fixtureAuthCleanup?.token_removed)) { verdict.status = 'FAIL'; verdict.cleanup_error = 'CLEANUP_FAIL'; }
+        fs.writeFileSync(verdictPath, JSON.stringify(verdict, null, 2));
+      }
+    }
   }
 }
 

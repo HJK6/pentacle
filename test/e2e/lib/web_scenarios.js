@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { closedChatSlot } = require('./closed_chat_scenario');
+const { questionFreeText } = require('./question_free_text_scenario');
 const { runGridSplit } = require('./grid_split_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
@@ -420,6 +421,7 @@ const SCENARIOS = [
   // the page at both ends, so it neither depends on nor disturbs its neighbours.
   ['slot-survives-cc-reconnect', slotSurvivesCcReconnect],
   ['slot-column-split', runGridSplit],
+  ['question-free-text', questionFreeText],
   ['closed-chat-slot', closedChatSlot],
   // Host-restart walk runs LAST: it tears the host process (and briefly the
   // daemon) down, so it must not disturb the deterministic scenarios above.

@@ -167,22 +167,24 @@ localHostId, hostMap, mic/micServerUrl and your feature flags when those explici
 choices differ from the defaults. A legacy machineStats object may remain but
 does not configure cards. Use config mappings for old local/remote aliases.
 
-The divider between the two slot columns works in both the desktop app and web
-mode. Drag it to give either column more room. Double-click or double-tap it to
-reset to 50/50. With the divider focused, Left/Right adjust by two percentage
-points, Home/End move to the width limits, and Enter resets the split.
+Each terminal row has its own left/right divider in the shared desktop and web
+renderer. Drag a divider to adjust only that row. Double-click or double-tap it
+to reset that row to 50/50. With a divider focused, Left/Right adjust by two
+percentage points, Home/End move to the width limits, and Enter resets that row.
 
 Each column keeps at least 220px when the workspace has room. A narrower
-workspace uses equal halves; widening it restores the preferred split. In
-narrow columns, scroll the header controls horizontally or use Tab to reach
-them. Maximizing a slot hides the divider; restoring the grid restores its split.
-Rows and sidebar width are unchanged.
+workspace uses equal halves; widening it restores each row's preferred split.
+In narrow columns, scroll the header controls horizontally or use Tab to reach
+them. Maximizing any slot hides both dividers; restoring the grid restores both
+splits. Row heights and sidebar width are unchanged.
 
-The preferred left fraction is saved as `appearance.gridColSplit` in
-`pentacle.settings.v1` only after a completed adjustment or reset. It survives
-reloads and desktop restarts. Desktop profiles and browser origins each remember
-their own split. Invalid values use 50/50; resizing the window does not overwrite
-the preference.
+Preferred left fractions are saved as `appearance.gridColSplitTop` and
+`appearance.gridColSplitBottom` in `pentacle.settings.v1` only after a completed
+adjustment or reset. Missing row preferences fall back to the older
+`appearance.gridColSplit` value, then 50/50. Invalid values use 50/50. Changing
+one row preserves the other row and unrelated settings; temporary width clamps
+never overwrite preferences. Each desktop profile or browser origin retains
+its own settings across reloads.
 
 Settings overrides are stored under `pentacle.settings.v1` in the renderer's
 localStorage. They override config defaults both before and after asynchronous

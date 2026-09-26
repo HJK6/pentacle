@@ -343,3 +343,26 @@ test('mobile parity: free_text false does not expose a custom answer control', (
   const container = renderInto(doc, { question: { ...singleQuestion(), free_text: false } });
   assert.equal(container.querySelector('.slot-chat-question-freetext'), null);
 });
+
+
+test('zero-option custom-enabled free text is visible, labeled and submits once', async () => {
+  const doc = freshDoc();
+  const submissions = [];
+  const container = renderInto(doc, {
+    question: { question_key: 'free-text-zero', prompt: 'Describe the result', options: [], free_text: true, customText: true },
+    onSubmit: async (_text, detail) => { submissions.push(detail.answers); },
+  });
+  const input = container.querySelector('.slot-chat-question-freetext');
+  assert.equal(input.hidden, false);
+  assert.ok(input.getAttribute('aria-label'));
+  const submit = container.querySelector('.slot-chat-question-submit');
+  input.value = '  ';
+  input.dispatchEvent(new doc.defaultView.Event('input', { bubbles: true }));
+  assert.equal(submit.disabled, true);
+  input.value = 'typed answer';
+  input.dispatchEvent(new doc.defaultView.Event('input', { bubbles: true }));
+  assert.equal(submit.disabled, false);
+  submit.click(); submit.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(submissions, [[{ customText: 'typed answer' }]]);
+});
