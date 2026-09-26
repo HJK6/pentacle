@@ -335,24 +335,6 @@ body {
 }
 .source-filter-btn:hover { border-color: var(--pc-accent-dim); color: var(--pc-text); }
 .source-filter-btn.active { background: var(--pc-chip-bg); color: var(--pc-text); border-color: var(--pc-accent-dim); }
-.source-filter-btn.color-red    { color: #fff; border-color: var(--bridge-red); background: var(--bridge-red); }
-.source-filter-btn.color-purple { color: #fff; border-color: var(--purple); background: var(--purple); }
-.source-filter-btn.color-yellow { color: #fff; border-color: var(--yellow); background: var(--yellow); }
-.source-filter-btn.color-green  { color: #fff; border-color: var(--green); background: var(--green); }
-.source-filter-btn.color-blue   { color: #fff; border-color: var(--blue); background: var(--blue); }
-.source-filter-btn.color-orange { color: #fff; border-color: var(--bridge-orange); background: var(--bridge-orange); }
-.source-filter-btn.color-royal-blue { color: #fff; border-color: var(--bridge-royal-blue); background: var(--bridge-royal-blue); }
-.source-filter-btn.color-forest-green { color: #fff; border-color: var(--bridge-forest-green); background: var(--bridge-forest-green); }
-.source-filter-btn.color-deep-raspberry { color: #fff; border-color: #b83280; background: #b83280; }
-.source-filter-btn.color-red.active    { color: #fff; border-color: var(--bridge-red); background: var(--bridge-red); }
-.source-filter-btn.color-purple.active { color: #fff; border-color: var(--purple); background: var(--purple); }
-.source-filter-btn.color-yellow.active { color: #fff; border-color: var(--yellow); background: var(--yellow); }
-.source-filter-btn.color-green.active  { color: #fff; border-color: var(--green); background: var(--green); }
-.source-filter-btn.color-blue.active   { color: #fff; border-color: var(--blue); background: var(--blue); }
-.source-filter-btn.color-orange.active { color: #fff; border-color: var(--bridge-orange); background: var(--bridge-orange); }
-.source-filter-btn.color-royal-blue.active { color: #fff; border-color: var(--bridge-royal-blue); background: var(--bridge-royal-blue); }
-.source-filter-btn.color-forest-green.active { color: #fff; border-color: var(--bridge-forest-green); background: var(--bridge-forest-green); }
-.source-filter-btn.color-deep-raspberry.active { color: #fff; border-color: #b83280; background: #b83280; }
 
 .session-list {
   flex: 1;
@@ -419,22 +401,59 @@ body {
   border-radius: 7px;
   font-size: 11px;
   font-weight: 800;
-  color: #fff;
-  border: 1px solid var(--green);
-  background: var(--green);
+  color: var(--host-sigil-green);
+  border: 1px solid var(--pc-line);
+  background: transparent;
 }
 
 /* Machine sigil glyph inside the sidebar avatar and host-filter chips
    (spec_pentacle__web_machine_sigil_icons_2026_09). The SVG is stroked in
-   currentColor so it reads white on the accent chip, mirroring the previous
-   letter glyph while showing the mobile MachineSigil shapes. */
+   currentColor: the symbol carries the host colour on a neutral surface. */
 .machine-sigil { display: block; }
 .s-machine-avatar .machine-sigil,
 .source-filter-btn .machine-sigil { width: 15px; height: 15px; }
-.s-machine-avatar.color-red { color: #fff; border-color: var(--bridge-red); background: var(--bridge-red); }
-.s-machine-avatar.color-royal-blue { color: #fff; border-color: var(--bridge-royal-blue); background: var(--bridge-royal-blue); }
-.s-machine-avatar.color-forest-green { color: #fff; border-color: var(--bridge-forest-green); background: var(--bridge-forest-green); }
-.s-machine-avatar.color-orange { color: #fff; border-color: var(--bridge-orange); background: var(--bridge-orange); }
+
+/* Host glyph colours retain their hue with contrast on both theme palettes. */
+:root, [data-theme="dark"] {
+  --host-sigil-green: #48d36a;
+  --host-sigil-red: #ff757b;
+  --host-sigil-blue: #779cff;
+  --host-sigil-mauve: #cc9acb;
+  --host-sigil-yellow: #ffd60a;
+  --host-sigil-cyan: #6fb3ff;
+  --host-sigil-raspberry: #ef83be;
+}
+[data-theme="light"] {
+  --host-sigil-green: #20723b;
+  --host-sigil-red: #bc2439;
+  --host-sigil-blue: #2455c5;
+  --host-sigil-mauve: #804979;
+  --host-sigil-yellow: #806100;
+  --host-sigil-cyan: #235f9f;
+  --host-sigil-raspberry: #982765;
+}
+:is(.s-machine-avatar, .source-filter-btn).color-green,
+:is(.s-machine-avatar, .source-filter-btn).color-forest-green { --host-glyph: var(--host-sigil-green); }
+:is(.s-machine-avatar, .source-filter-btn).color-red { --host-glyph: var(--host-sigil-red); }
+:is(.s-machine-avatar, .source-filter-btn).color-blue,
+:is(.s-machine-avatar, .source-filter-btn).color-royal-blue { --host-glyph: var(--host-sigil-blue); }
+:is(.s-machine-avatar, .source-filter-btn).color-purple,
+:is(.s-machine-avatar, .source-filter-btn).color-orange,
+:is(.s-machine-avatar, .source-filter-btn).color-mauve { --host-glyph: var(--host-sigil-mauve); }
+:is(.s-machine-avatar, .source-filter-btn).color-yellow { --host-glyph: var(--host-sigil-yellow); }
+:is(.s-machine-avatar, .source-filter-btn).color-cyan { --host-glyph: var(--host-sigil-cyan); }
+:is(.s-machine-avatar, .source-filter-btn).color-deep-raspberry { --host-glyph: var(--host-sigil-raspberry); }
+:is(.s-machine-avatar, .source-filter-btn)[class*="color-"] {
+  color: var(--host-glyph, var(--host-sigil-green));
+  background: transparent;
+  border-color: var(--pc-line);
+}
+.source-filter-btn[class*="color-"]:is(:hover, .active) {
+  color: var(--host-glyph, var(--host-sigil-green));
+  background: var(--pc-chip-bg);
+  border-color: var(--pc-accent-dim);
+}
+
 
 .s-offline-badge {
   color: #f5d08a;
@@ -5650,15 +5669,15 @@ body.chat-stream-degraded button[data-cleanup-action] {
 
 /* Optional named colours share the host badge presentation. */
 .titlebar-machine.color-green { color: var(--green); }
-:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag).color-green { color: #fff; background: var(--green); border-color: var(--green); }
+:is(.s-source-tag, .cell-source-tag).color-green { color: #fff; background: var(--green); border-color: var(--green); }
 .titlebar-machine.color-blue { color: var(--blue); }
-:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag).color-blue { color: #fff; background: var(--blue); border-color: var(--blue); }
+:is(.s-source-tag, .cell-source-tag).color-blue { color: #fff; background: var(--blue); border-color: var(--blue); }
 .titlebar-machine.color-purple { color: var(--purple); }
-:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag).color-purple { color: #fff; background: var(--purple); border-color: var(--purple); }
+:is(.s-source-tag, .cell-source-tag).color-purple { color: #fff; background: var(--purple); border-color: var(--purple); }
 .titlebar-machine.color-yellow { color: var(--yellow); }
-:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag).color-yellow { color: #fff; background: var(--yellow); border-color: var(--yellow); }
+:is(.s-source-tag, .cell-source-tag).color-yellow { color: #fff; background: var(--yellow); border-color: var(--yellow); }
 .titlebar-machine.color-cyan { color: var(--cyan); }
-:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag).color-cyan { color: #fff; background: var(--cyan); border-color: var(--cyan); }
+:is(.s-source-tag, .cell-source-tag).color-cyan { color: #fff; background: var(--cyan); border-color: var(--cyan); }
 #limits-health { padding: 6px 10px; color: var(--yellow); font-size: 11px; overflow-wrap: anywhere; }
 .slot-chat-reply-preview:not([hidden]) {
   display: flex;

@@ -14,6 +14,12 @@ example values from behavior when a key is omitted.
 
 ## Hosts and identity
 
+Sidebar avatars and host filters use the established sigil for each configured
+host colour. The symbol itself carries that colour on a neutral background;
+hover and selection keep the colour. Dark/light palettes adjust glyph luminance
+(including golden yellow on light surfaces) for at least 3:1 graphic contrast.
+Host names and accessible labels remain the identity, independent of colour.
+
 With `chatStream.hosts: ['local', 'workstation']`, the titlebar and filters show
 **Local / L** in forest green and **Workstation / W** in royal blue. No private
 host inventory is built into the renderer. Configure actual daemon identities
@@ -100,7 +106,14 @@ Microphone controls require an independently installed, running compatible HTTP
 service implementing the [mic-server contract](../mic-server/README.md). The
 public repository does not ship a microphone server; keep `features.mic: false`
 unless you operate that endpoint yourself.
-Set its URL (or useStreamHost), verify its `/status` response, then enable mic. The request caller follows localHostId → hostMap.local →
+Set its URL (or useStreamHost), verify its `/status` response, then enable mic.
+For a hosted web profile, explicitly set `micServerUrl` to the endpoint reachable
+**from the web server**. A service on that same host uses
+`http://127.0.0.1:7780`; this is server loopback, not the browser viewer’s host.
+The browser sends allow-listed mic operations through its authenticated,
+same-origin WebSocket (`cc.micRequest`), so HTTPS viewers do not contact an HTTP
+backend directly. This controls the server’s hardware microphone; it does not
+enable browser audio capture. Keep `features.mic: false` if no service is operated. The request caller follows localHostId → hostMap.local →
 chatStream.localHost → local; it never guesses from your OS hostname.
 
 Machine-stat cards render the `hosts` payload in daemon `hosts.stats` frames and are

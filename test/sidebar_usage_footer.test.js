@@ -133,7 +133,7 @@ test('limits panel has a single source: the daemon frame, no local IPC path', ()
   assert.match(app, /renderLimits\(\s*payload\.limits,\s*/);
 });
 
-test('desktop reskin preserves bridge colors for filters, avatars, stats, and source tags', () => {
+test('host glyphs carry colour while stats and source tags preserve bridge colours', () => {
   const css = read('renderer/styles.css');
   const app = read('renderer/app.js');
 
@@ -141,12 +141,11 @@ test('desktop reskin preserves bridge colors for filters, avatars, stats, and so
     assert.match(css, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   for (const klass of ['color-red', 'color-royal-blue', 'color-forest-green', 'color-orange']) {
-    assert.match(css, new RegExp(`source-filter-btn\\.${klass}`));
-    assert.match(css, new RegExp(`s-machine-avatar\\.${klass}`));
+    assert.match(css, new RegExp(`\\)\\.${klass}(?:,| \\{ --host-glyph:)`));
     assert.match(css, new RegExp(`machine-stat-card\\.${klass}`));
     assert.match(css, new RegExp(`s-source-tag\\.${klass}`));
   }
-  assert.match(css, /\.s-machine-avatar\.color-royal-blue \{ color: #fff; border-color: var\(--bridge-royal-blue\); background: var\(--bridge-royal-blue\); \}/);
+  assert.doesNotMatch(css, /s-machine-avatar\.color-[^{]*\{[^}]*color: #fff/);
   assert.doesNotMatch(css, /s-machine-avatar\.color-royal-blue[^{]*\{[^}]*color-mix/);
   assert.deepEqual(require('../renderer/host_presentation').PALETTE, ['forest-green', 'red', 'royal-blue', 'mauve', 'yellow']);
   assert.match(app, /s-machine-avatar color-\$\{machineColor\}/);
