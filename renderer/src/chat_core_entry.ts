@@ -18,9 +18,9 @@ store.setSendBridge(async ({ streamId, text, requestId, optimisticId, attachment
   return browser.cc.chatSendCorrelated(host, session, text, requestId, optimisticId, attachments,
     { stream_id: streamId, reply_to_message_id: replyToMessageId, reply_to_question_id: replyToQuestionId });
 });
-store.setCancelBridge(async ({ streamId }) => {
+store.setCancelBridge(async ({ streamId, expectedSessionGeneration }) => {
   const { host, session } = target(streamId);
-  return browser.cc.chatInterrupt(host, session);
+  return browser.cc.chatInterrupt(host, session, expectedSessionGeneration);
 });
 browser.PentacleChatCore = PentacleChatCore;
 browser.PentacleChatStore = store;

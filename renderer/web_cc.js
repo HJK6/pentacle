@@ -358,7 +358,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
     chatSendCorrelated: (hostId, sessionName, text, requestId, optimisticId, attachments, reply) => call('chat-stream:send', hostId || 'local', sessionName, text, requestId, optimisticId, attachments, reply),
     chatUploadBlob: (payload) => call('chat-stream:upload-blob', payload || {}),
     chatFetchBlob: (blobSha) => call('chat-stream:fetch-blob', blobSha),
-    chatInterrupt: (hostId, sessionName) => call('chat-stream:interrupt', hostId || 'local', sessionName),
+    chatInterrupt: (hostId, sessionName, expectedSessionGeneration) => call('chat-stream:interrupt', hostId || 'local', sessionName, expectedSessionGeneration),
     chatDismissQuestion: (hostId, sessionName, payload) => call('chat-stream:dismiss-question', hostId || 'local', sessionName, payload || {}),
     chatRename: (hostId, sessionName, displayName) => call('chat-stream:rename', hostId || 'local', sessionName, displayName),
     forceReconnect: () => call('harness:force-reconnect'),

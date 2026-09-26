@@ -17,10 +17,10 @@ the honest level v2 can support this increment:
 
   FUNCTIONAL-DEGRADED (the action runs; the confirm that needs the tmux mirror
   does not, so the outcome is honestly labelled, never faked):
-    - `send.interrupt`: injects the Escape into the local pane (the interrupt
-      itself) but cannot scrape the `Interrupted` landing marker without the
-      mirror (lane 4), so `confirm` is `interrupt_unconfirmed` (a live pane) or
-      `pane_unavailable` (no pane). Keyed on (host, session_name) like v1.
+    - `send.interrupt`: injects Escape into a verified local pane or a
+      configured peer's exact SSH tmux pane. Remote calls require the selected
+      row generation and recheck its durable/live identity before the key.
+      Without mirror landing proof, a live pane reports `interrupt_unconfirmed`.
 
   HONEST-DEGRADED (the backing subsystem is a REDESIGN-out or not-yet-built
   plane; v2 returns v1's own error for that state rather than a fake success):
@@ -161,6 +161,8 @@ class UIVerbs:
         if not host or not name:
             return {"type": "send.interrupt.error", "request_id": rid,
                     "error": "host and session_name are required"}
+        if host != self.sessions.local_host:
+            return await self._send_remote_interrupt(rid, host, name, msg)
         try:
             self.sessions.assert_local(host, "send.interrupt")
         except VerbError as exc:
@@ -174,6 +176,78 @@ class UIVerbs:
         # mirror (lane 4); without it v2 reports the honest `interrupt_unconfirmed`
         # rather than claiming a confirmed landing.
         await tmux.run("send-keys", "-t", f"={name}:", "Escape")
+        return {"type": "send.interrupt.ok", "request_id": rid, "host": host, "session_name": name,
+                "interrupted": True, "landed": False, "confirm": "interrupt_unconfirmed", "coalesced": False}
+
+    async def _send_remote_interrupt(
+        self, rid: str, host: str, name: str, msg: dict[str, Any],
+    ) -> dict[str, Any]:
+        def error(code: str, detail: str = "") -> dict[str, Any]:
+            return {"type": "send.interrupt.error", "request_id": rid,
+                    "error_code": code, "error": f"{code}: {detail}" if detail else code}
+
+        hosts = getattr(self.spawnctl, "hosts", None)
+        # Hosts.tmux_for falls back to LOCAL for unknown peers. Admission must
+        # precede transport selection, even when the caller omitted generation.
+        if hosts is None or host not in getattr(hosts, "peers", {}):
+            return error("unsupported_host", f"{host} is not a configured peer")
+        expected = str(msg.get("expected_session_generation") or "").strip()
+        if not expected:
+            return error("generation_required", "remote interrupt needs the selected session generation")
+
+        async def row_matches(pid: str | None = None) -> bool:
+            row = await self.store.fetch_session(host, name)
+            return bool(
+                isinstance(row, dict)
+                and row.get("status") == "open"
+                and str(row.get("session_generation") or "") == expected
+                and str(row.get("pane_pid") or "")
+                and (pid is None or str(row.get("pane_pid") or "") == pid)
+            )
+
+        row = await self.store.fetch_session(host, name)
+        if not isinstance(row, dict) or row.get("status") != "open" or str(row.get("session_generation") or "") != expected:
+            return error("stale_session_generation", "the selected session is no longer open")
+        stored_pid = str(row.get("pane_pid") or "")
+        if not stored_pid:
+            return error("pane_identity_unavailable", "open row has no pane PID")
+        try:
+            await hosts.ensure_reachable(host, "send.interrupt")
+            tmux = hosts.tmux_for(host)
+            state = await tmux.session_state(name)
+        except VerbError as exc:
+            return error(exc.code, str(exc))
+        if state == "gone":
+            return {"type": "send.interrupt.ok", "request_id": rid, "host": host, "session_name": name,
+                    "interrupted": False, "landed": False, "confirm": "pane_unavailable", "coalesced": False}
+        if state != "alive":
+            return error("host_unreachable", "remote pane liveness was not observed")
+        try:
+            identity = await tmux.pane_identity(name)
+        except VerbError as exc:
+            return error(exc.code, str(exc))
+        if not isinstance(identity, dict) or not identity.get("pane_id"):
+            return error("pane_identity_unavailable", "remote pane identity was not observed")
+        if identity.get("session_name") != name or identity.get("pane_pid") != stored_pid:
+            return error("pane_identity_changed", "remote pane differs from the selected row")
+
+        # The durable row and live pane may change while SSH is in flight. Read
+        # both again immediately before one key, then target the checked pane ID
+        # rather than resolving a possibly reused session name a third time.
+        try:
+            final_identity = await tmux.pane_identity(name)
+        except VerbError as exc:
+            return error(exc.code, str(exc))
+        if final_identity != identity:
+            return error("pane_identity_changed", "remote pane changed before interrupt")
+        if not await row_matches(stored_pid):
+            return error("stale_session_generation", "selected session changed before interrupt")
+        try:
+            rc, output = await tmux.run("send-keys", "-t", str(identity["pane_id"]), "Escape")
+        except VerbError as exc:
+            return error(exc.code, str(exc))
+        if rc != 0:
+            return error("interrupt_transport_failed", output.strip() or f"tmux exited {rc}")
         return {"type": "send.interrupt.ok", "request_id": rid, "host": host, "session_name": name,
                 "interrupted": True, "landed": False, "confirm": "interrupt_unconfirmed", "coalesced": False}
 

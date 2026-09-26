@@ -43,6 +43,27 @@ An SSH tunnel can retain a loopback daemon listener; forwarded connections
 inherit the tunnel endpoint's trust boundary. Restrict tunnel access to the
 operator.
 
+## Remote session interrupt
+
+`send.interrupt` targets a session by `host` and `session_name`. For a configured
+remote host, updated web and desktop clients also send the selected open row's
+`expected_session_generation`. They capture that value before handing the
+request to an asynchronous bridge and retain it for a retry. A remote request
+without the selected generation returns `generation_required`; the daemon does
+not substitute the current row's generation. The existing local request may
+omit it.
+
+For a remote request, the daemon requires an open durable row of the expected
+generation and an SSH tmux pane whose session name and PID match that row. It
+rechecks the row and exact pane identity before sending one Escape to the
+checked pane ID. Unknown hosts, unreachable peers, changed rows or panes, and
+missing identity return typed errors without sending a key. A missing pane
+returns `pane_unavailable`. A live pane returns `interrupt_unconfirmed` after
+the key because a successful tmux send does not prove that the provider stopped
+its turn. Installed mobile clients that lack selected-generation propagation
+receive `generation_required` for remote targets until their separate client
+release; this daemon release does not claim mobile remote interrupt support.
+
 ## Tests and supported integrations
 
 ```sh

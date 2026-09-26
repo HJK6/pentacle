@@ -670,10 +670,19 @@ try {
   // session (daemon injects Escape into the agent pane — the ESC-in-terminal
   // equivalent). msg_id is optional; the desktop chat send path does not carry
   // one, so the interrupt is driven purely by host+session.
-  interruptMessage({ host, sessionName, msgId } = {}) {
+  interruptMessage({ host, sessionName, msgId, expectedSessionGeneration } = {}) {
     const payload = { type: 'send.interrupt', host, session_name: sessionName };
     if (typeof msgId === 'number' && Number.isFinite(msgId)) payload.msg_id = msgId;
-    return this.sendCommand(payload, 'send.interrupt');
+    if (typeof expectedSessionGeneration === 'string' && expectedSessionGeneration) {
+      payload.expected_session_generation = expectedSessionGeneration;
+    }
+    return this.sendCommand(payload, 'send.interrupt').catch((error) => {
+      // The daemon uses `error_code`; the IPC command wrapper forwards `code`.
+      if (error && typeof error === 'object' && error.error_code && !error.code) {
+        throw { ...error, code: error.error_code };
+      }
+      throw error;
+    });
   }
 
   // Settle an agent-asked question (claude AskUserQuestion selector). Optional

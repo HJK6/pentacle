@@ -179,7 +179,8 @@ function createCcHandlers({
           ...(receipt.delivery === 'not_landed' && !receipt.action_committed ? { error: receipt.reason || 'Message was not delivered' } : {}) };
       }));
     target.handle('chat-stream:request-stream-events', (_event, args) => command(() => chatStreamClient.requestStreamEvents(args)));
-    target.handle('chat-stream:interrupt', (_event, host, sessionName) => command(() => chatStreamClient.interruptMessage({ host, sessionName })));
+    target.handle('chat-stream:interrupt', (_event, host, sessionName, expectedSessionGeneration) =>
+      command(() => chatStreamClient.interruptMessage({ host, sessionName, expectedSessionGeneration })));
     target.handle('chat-stream:dismiss-question', (_event, host, sessionName, payload = {}) =>
       command(() => chatStreamClient.dismissQuestion({ host, sessionName, questionKey: payload.questionKey || payload.question_key, text: payload.text })));
     target.handle('chat-stream:rename', (_event, host, sessionName, displayName) => {

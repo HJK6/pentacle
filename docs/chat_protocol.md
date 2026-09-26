@@ -65,6 +65,28 @@ Each implementation must document the exact fields and error codes it registers.
 
 Image attachments (both operator→agent and agent→operator) reuse one content-addressed blob path: the client uploads bytes with the chunked `upload_blob_init` / `upload_blob_chunk` verbs, then references the blob by its sha256 in an attachment descriptor `{key, mime, bytes, width?, height?}` (supported mime: `image/jpeg`, `image/png`; per-attachment and per-message size/count limits apply). `send_image` is the agent-authored form: the daemon authorizes the destination from the caller's verified stream token — a seat may attach only to its OWN conversation — confirms the referenced blob is present, and emits exactly one agent-authored transcript event carrying the attachment (no pane injection). It is idempotent by `request_id`, so a retry adds no second transcript row. Clients fetch the bytes for display through the existing blob-read path and render the same image bubble/viewer regardless of author. Agent-side usage: `agent-orch send-image` (see the agent-orch README "Send an image").
 
+## Session interrupt
+
+`send.interrupt` names a session with `host` and `session_name`. For a configured
+remote host, updated web and desktop clients also send the selected open row's
+`expected_session_generation`. They capture it when the user requests Stop and
+keep that same value across asynchronous dispatch and retry. The daemon never
+fills in a missing value from the current row: a remote request without it
+returns `send.interrupt.error` with `error_code: "generation_required"` and
+sends no key. Existing local requests may omit the field.
+
+The daemon checks that the remote row is still open at that generation, the SSH
+tmux pane matches its session name and PID, and the row and exact pane identity
+still match immediately before sending one Escape to the checked pane ID.
+Unknown or unreachable hosts, stale rows, and changed pane identity return
+typed errors without sending a key. An absent pane returns
+`confirm: "pane_unavailable"`; a successful key send returns
+`confirm: "interrupt_unconfirmed"`, since key delivery alone does not prove the
+provider stopped. Installed mobile clients without generation propagation
+receive the typed remote refusal until their separate client release. The
+[daemon README](../services/chat-stream-v2/README.md#remote-session-interrupt)
+describes the implementation and live validation boundary.
+
 ## Close and open inventories
 
 Once a close is durably recorded it also leaves every open inventory, even if
