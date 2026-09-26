@@ -65,6 +65,17 @@ Each implementation must document the exact fields and error codes it registers.
 
 Image attachments (both operator→agent and agent→operator) reuse one content-addressed blob path: the client uploads bytes with the chunked `upload_blob_init` / `upload_blob_chunk` verbs, then references the blob by its sha256 in an attachment descriptor `{key, mime, bytes, width?, height?}` (supported mime: `image/jpeg`, `image/png`; per-attachment and per-message size/count limits apply). `send_image` is the agent-authored form: the daemon authorizes the destination from the caller's verified stream token — a seat may attach only to its OWN conversation — confirms the referenced blob is present, and emits exactly one agent-authored transcript event carrying the attachment (no pane injection). It is idempotent by `request_id`, so a retry adds no second transcript row. Clients fetch the bytes for display through the existing blob-read path and render the same image bubble/viewer regardless of author. Agent-side usage: `agent-orch send-image` (see the agent-orch README "Send an image").
 
+## Close and open inventories
+
+Once a close is durably recorded it also leaves every open inventory, even if
+the requesting connection drops mid-request (a self-close kills its own
+caller): the daemon finishes the inventory update before honouring the
+cancellation. A close that finds the generation it targets already closed, or
+archived out of the live table, removes that exact generation from open
+inventories before replying `close.already_closed`; a reopened generation is
+never removed by a close aimed at its predecessor. A deferred or refused close
+leaves the row open and says so in its reply.
+
 ## Close on an offline host
 
 `close` accepts the target as `stream_id` or `host` plus `session_name`.

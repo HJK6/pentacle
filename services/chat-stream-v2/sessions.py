@@ -136,6 +136,31 @@ def operator_user_epoch(event: object, created_at: object = None) -> float | Non
     return epoch
 
 
+async def _finish_despite_cancel(coro: Any) -> Any:
+    """Run a durable transition and its in-memory follow-up to completion.
+
+    The store thread commits queued work whether or not the awaiting task is
+    still alive, and the server cancels a connection's in-flight requests when
+    it drops (a self-close kills its own caller). Stopping between the commit
+    and the inventory update leaves a closed generation served as open until
+    restart (spec_pentacle__migration_chat_reappears_2026_09). Finish first,
+    then re-raise the caller's cancellation.
+    """
+    task = asyncio.ensure_future(coro)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Record the caller's cancellation even when the follow-up
+            # completed in the same loop turn; an inner failure still wins.
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 def _title_is_untitled(value: object) -> bool:
     title = str(value or "").strip()
     if not title:
@@ -1089,7 +1114,11 @@ class Sessions:
                 expected_generation=generation, close_kind=close_kind,
             )
 
-    async def _mark_closed_locked(
+    async def _mark_closed_locked(self, *args: Any, **kwargs: Any) -> dict[str, Any] | None:
+        # The caller still holds the lifecycle lock while this finishes.
+        return await _finish_despite_cancel(self._mark_closed_and_evict(*args, **kwargs))
+
+    async def _mark_closed_and_evict(
         self,
         host: str,
         session_name: str,
@@ -1369,6 +1398,7 @@ class Sessions:
         # carry the predecessor while a close/reopen happened in another task.
         row = await self.store.fetch_session(host, session_name) or self._inv.get(sid)
         if row is not None and str(row.get("status") or "open") != "open":
+            await self._evict_durably_closed_generation(sid, self._row_generation(row), row)
             reap = await self.store.get_session_reap(sid)
             return {
                 "already_closed": True,
@@ -1444,6 +1474,7 @@ class Sessions:
         )
         if closed is None and expected_generation is not None:
             current = await self.store.fetch_session(host, session_name)
+            await self._evict_durably_closed_generation(sid, expected_generation, current)
             return await self._stale_close_result(sid, current or row)
         # Close can race spawn: the pane exists but its row is not written yet,
         # so `row` is None and `mark_closed`'s UPDATE touches nothing. The kill
@@ -1476,6 +1507,28 @@ class Sessions:
             "visibility_changed": True,
             "session": row,
         }
+
+    async def _evict_durably_closed_generation(
+        self, sid: str, generation: str, durable: dict[str, Any] | None,
+    ) -> None:
+        """Drop an in-memory row whose exact generation is no longer open durably.
+
+        A close that finds its generation already closed (or archived out of
+        ``sessions``) must not answer ``already_closed`` while the inventory
+        keeps serving that generation as open. A reopened generation is left
+        alone: only the exact generation the close was fenced to is evicted.
+        """
+        if durable is not None and str(durable.get("status") or "") == "open":
+            return
+        with self._inventory_context():
+            cached = self._inv.get(sid)
+            if cached is None or self._row_generation(cached) != generation:
+                return
+            self._pop_inventory_locked(sid)
+        log.info("session close evicted stale inventory stream=%s generation=%s durable=%s",
+                 sid, generation, (durable or {}).get("status") or "absent")
+        if emit_if_changed := getattr(self._inventory_emitter, "emit_if_changed", None):
+            await emit_if_changed(immediate=True)
 
     async def _stale_close_result(self, sid: str, row: dict[str, Any] | None) -> dict[str, Any]:
         reap = await self.store.get_session_reap(sid)
@@ -1642,15 +1695,23 @@ class Sessions:
     ) -> dict[str, Any]:
         host, name = row["host"], row["session_name"]
         sid = f"{host}:{name}"
-        closed = await self.store.mark_closed(
-            host, name, closed_at=iso_now(), pane_status="unknown",
-            expected_generation=generation, close_kind="operator_offline_close",
-            attribution=attribution, reason=reason or "operator_confirmed_host_offline",
-        )
+        async def _commit() -> dict[str, Any] | None:
+            committed = await self.store.mark_closed(
+                host, name, closed_at=iso_now(), pane_status="unknown",
+                expected_generation=generation, close_kind="operator_offline_close",
+                attribution=attribution, reason=reason or "operator_confirmed_host_offline",
+            )
+            if committed is not None:
+                with self._inventory_context():
+                    self._pop_inventory_locked(sid)
+            return committed
+
+        closed = await _finish_despite_cancel(_commit())
         if closed is None:
-            return await self._stale_close_result(sid, await self.store.fetch_session(host, name) or row)
-        with self._inventory_context():
-            self._pop_inventory_locked(sid)
+            current = await self.store.fetch_session(host, name)
+            if generation is not None:
+                await self._evict_durably_closed_generation(sid, generation, current)
+            return await self._stale_close_result(sid, current or row)
         if emit := getattr(self._inventory_emitter, "emit_if_changed", None):
             await emit(immediate=True)
         # No confirmed-dead awaiter resolution or session_reap='reaped' write:
@@ -1767,6 +1828,7 @@ class Sessions:
             raise VerbError("unsupported_host", f"v2 close does not know host {host}")
         row = await self.store.fetch_session(host, session_name) or self._inv.get(sid)
         if row is not None and str(row.get("status") or "open") != "open":
+            await self._evict_durably_closed_generation(sid, self._row_generation(row), row)
             deferred = await self.store.get_deferred_reap(sid)
             reap = await self.store.get_session_reap(sid)
             return {
@@ -1881,6 +1943,7 @@ class Sessions:
         )
         if closed is None and expected_generation is not None:
             current = await self.store.fetch_session(host, session_name)
+            await self._evict_durably_closed_generation(sid, expected_generation, current)
             return await self._stale_close_result(sid, current or row)
         session = closed or row or {
             "stream_id": sid, "host": host, "session_name": session_name,
