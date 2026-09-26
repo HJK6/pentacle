@@ -837,7 +837,22 @@ function renderReport(doc, payload, options = {}) {
     // The floating panel owns comment cards and composer controls; replacing it
     // leaves every report body node (and its browser selection) connected.
     const panel = root_.querySelector(`.${prefix}-report-panel`);
-    if (panel) panel.replaceWith(renderPanel(doc, context));
+    if (panel) {
+      const field = panel.querySelector(`.${prefix}-report-comment-input`);
+      const focused = field && doc.activeElement === field;
+      const caret = focused ? [field.selectionStart, field.selectionEnd, field.selectionDirection] : null;
+      const scrollTop = focused ? field.scrollTop : 0;
+      const replacement = renderPanel(doc, context);
+      panel.replaceWith(replacement);
+      if (focused) {
+        const nextField = replacement.querySelector(`.${prefix}-report-comment-input`);
+        if (nextField) {
+          nextField.focus({ preventScroll: true });
+          nextField.setSelectionRange(...caret);
+          nextField.scrollTop = scrollTop;
+        }
+      }
+    }
   }
 
   function draw() {

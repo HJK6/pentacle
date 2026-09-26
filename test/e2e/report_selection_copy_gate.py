@@ -191,6 +191,19 @@ def run_browser(driver, verdict):
     composer = js(driver, "return !!document.querySelector('#report-copy-gate .slot-asset-report-panel.is-open .slot-asset-report-comment-input')")
     require(verdict, "ordinary click opens comment composer", composer)
 
+    caret = js(driver, """
+      const field=document.querySelector('#report-copy-gate .slot-asset-report-comment-input');
+      field.value='Draft stays editable through updates';
+      field.dispatchEvent(new Event('input',{bubbles:true}));
+      field.focus();field.setSelectionRange(6,11);
+      PentacleReportRender.updateComments(window.__reportGate.key,[{comment_id:'c1',section_id:'sec',block_id:'first',
+        excerpt:arguments[0],body:'Edited synthetic comment',resolved:true}]);
+      const next=document.querySelector('#report-copy-gate .slot-asset-report-comment-input');
+      return {focused:document.activeElement===next,text:next.value,start:next.selectionStart,end:next.selectionEnd};
+    """, TEXT)
+    require(verdict, "comment refresh preserves focused composer and caret", caret == {
+        "focused": True, "text": "Draft stays editable through updates", "start": 6, "end": 11}, caret)
+
     revision = js(driver, """
       const mount=window.__reportGate.mount, old=mount.querySelector('.slot-asset-report');
       const report={...window.__reportGate.report,sections:[{...window.__reportGate.report.sections[0],blocks:[

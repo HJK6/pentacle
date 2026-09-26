@@ -94,18 +94,27 @@ test('comment refresh updates every mounted copy without replacing selected repo
     assert.equal(mount.querySelector('[data-block-id="block-1"] .slot-asset-report-comment-pin').textContent, '1');
     assert.equal(mount.querySelector('[data-block-id="block-1"]').classList.contains('has-unresolved-comments'), true);
   }
-  assert.equal(sibling.querySelector('.slot-asset-report-comment-input').value, 'Unsent note in the other copy');
+  let refreshedDraft = sibling.querySelector('.slot-asset-report-comment-input');
+  assert.equal(refreshedDraft.value, 'Unsent note in the other copy');
+  doc.getSelection().removeAllRanges();
+  refreshedDraft.focus();
+  refreshedDraft.setSelectionRange(7, 11);
   assert.equal(updateReportComments(key, [{ ...comment, resolved: true }]), true);
   for (const mount of [root, sibling]) {
     assert.equal(mount.querySelector('[data-block-id="block-1"] .slot-asset-report-comment-pin').textContent, '1');
     assert.equal(mount.querySelector('[data-block-id="block-1"]').classList.contains('has-unresolved-comments'), false);
   }
+  refreshedDraft = sibling.querySelector('.slot-asset-report-comment-input');
+  assert.equal(doc.activeElement, refreshedDraft);
+  assert.deepEqual([refreshedDraft.selectionStart, refreshedDraft.selectionEnd], [7, 11]);
   assert.equal(updateReportComments(key, []), true);
   for (const mount of [root, sibling]) {
     assert.equal(mount.querySelector('[data-block-id="block-1"] .slot-asset-report-comment-pin').textContent, '+');
   }
-  assert.equal(sibling.querySelector('.slot-asset-report-comment-input').value, 'Unsent note in the other copy');
-  assert.equal(doc.getSelection().toString(), chosen);
+  refreshedDraft = sibling.querySelector('.slot-asset-report-comment-input');
+  assert.equal(refreshedDraft.value, 'Unsent note in the other copy');
+  assert.equal(doc.activeElement, refreshedDraft);
+  assert.deepEqual([refreshedDraft.selectionStart, refreshedDraft.selectionEnd], [7, 11]);
 });
 
 test('ordinary body click without text selection still opens the comment composer', () => {
