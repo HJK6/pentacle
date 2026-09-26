@@ -2,6 +2,7 @@
 
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '..');
@@ -29,8 +30,10 @@ const cacheRoot = path.join(repoRoot, 'node_modules', '.cache');
 fs.mkdirSync(cacheRoot, { recursive: true });
 const outDir = fs.mkdtempSync(path.join(cacheRoot, 'pentacle-tests-'));
 const tests = entries.filter((entry) => entry.endsWith('.js'));
+let testHome;
 
 try {
+  testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-test-home-'));
   for (const entry of entries.filter((candidate) => candidate.endsWith('.ts'))) {
     const outFile = path.join(outDir, `${path.basename(entry, '.ts')}.cjs`);
     execFileSync(esbuild, [
@@ -45,7 +48,15 @@ try {
     ], { stdio: 'inherit', cwd: repoRoot, shell: process.platform === 'win32' });
     tests.push(outFile);
   }
-  execFileSync(process.execPath, ['--test', ...tests], { stdio: 'inherit', cwd: repoRoot });
+  execFileSync(process.execPath, ['--test', ...tests], {
+    stdio: 'inherit',
+    cwd: repoRoot,
+    env: { ...process.env, HOME: testHome, USERPROFILE: testHome },
+  });
 } finally {
-  fs.rmSync(outDir, { recursive: true, force: true });
+  try {
+    if (testHome) fs.rmSync(testHome, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
 }

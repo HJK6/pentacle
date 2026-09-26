@@ -229,6 +229,15 @@ function renderMarkdownBlocksHtml(blocks: MdBlock[]): string {
         case 'heading':
           return `<div class="slot-chat-md-heading slot-chat-md-h${block.level}">${renderMarkdownInlineHtml(block.children)}</div>`;
         case 'paragraph':
+          // The reference treats leading milestone words as metadata, while
+          // the rest of the paragraph keeps the normal escaped markdown path.
+          const first = block.children[0];
+          const match = first?.type === 'text' ? /^(GATE|BLOCKER|DONE|REJECT)\s*[—–-]\s*/i.exec(first.value) : null;
+          if (match && first?.type === 'text') {
+            const status = match[1].toUpperCase();
+            const children: MdInline[] = [{ ...first, value: first.value.slice(match[0].length) }, ...block.children.slice(1)];
+            return `<div class="slot-chat-line"><span class="slot-chat-v3-status is-${status.toLowerCase()}">${status}</span>${renderMarkdownInlineHtml(children)}</div>`;
+          }
           return `<div class="slot-chat-line">${renderMarkdownInlineHtml(block.children)}</div>`;
         case 'code_block':
           return `<pre class="slot-chat-md-code"${block.lang ? ` data-lang="${escapeHtml(block.lang)}"` : ''}>${renderCopyButton(block.text, 'Copy code block', 'slot-chat-code-copy')}<code>${escapeHtml(block.text)}</code></pre>`;
@@ -391,6 +400,10 @@ function renderAttachmentHtml(attachment: RenderAttachment, index: number): stri
   const src = attachmentImageSrc(attachment);
   const key = String(attachment.key || '');
   const alt = attachment.name || `Image attachment ${index + 1}`;
+  const mime = String(attachment.mime || '').toLowerCase();
+  if (mime !== 'image/jpeg' && mime !== 'image/png') {
+    return `<span class="slot-chat-media-unsupported" data-attachment-mime="${escapeHtml(mime)}">${escapeHtml(attachment.name || 'Unsupported attachment')} · unavailable preview</span>`;
+  }
   const width = Number(attachment.width);
   const height = Number(attachment.height);
   const ratioStyle = Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0
@@ -530,7 +543,74 @@ export function renderTranscriptItemHtml(
     const reply = `<button type="button" class="slot-chat-reply-btn" data-reply-message-id="${escapeHtml(item.messageId)}"${item.replyToQuestionId ? ` data-reply-question-id="${escapeHtml(item.replyToQuestionId)}"` : ''} aria-label="Reply to message">Reply</button>`;
     html = html.replace(/<\/article>$/, `${reply}</article>`);
   }
-  return html.replace(/^(<(?:article|div)\b[^>]*)(>)/, (_match, open, close) => `${open} data-transcript-key="${escapeHtml(JSON.stringify([options.streamId || '', item.id]))}"${close}`);
+  return html.replace(/^(<(?:article|div)\b[^>]*)(>)/, (_match, open, close) => `${open} data-transcript-key="${escapeHtml(JSON.stringify([options.streamId || '', item.id]))}"${item.timestamp ? ` title="${escapeHtml(item.timestamp)}"` : ''}${close}`);
+}
+
+function isAnswer(item: PentacleTranscriptItem): boolean {
+  return item.eventCase === 'agent-question-answer' || /^Operator answered:/i.test(item.text || '');
+}
+
+function isSubagent(item: PentacleTranscriptItem): boolean {
+  return item.displayRule === 'bubble:agent' || item.tone === 'agent';
+}
+
+function statusFromText(text: string): string {
+  return /^(GATE|BLOCKER|DONE|REJECT)\s*[—–:-]/i.exec(text.trim())?.[1]?.toUpperCase() || '';
+}
+
+function exactTime(item: PentacleTranscriptItem): string {
+  const time = Date.parse(item.timestamp || '');
+  return Number.isFinite(time) ? new Date(time).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : (item.timestampLabel || '');
+}
+
+function renderSubagent(item: PentacleTranscriptItem, options: TranscriptRenderOptions): string {
+  const status = statusFromText(item.text || '');
+  const firstLine = (item.disclosure?.previewText || item.text || '').split('\n')[0].trim();
+  const id = /v2-[a-z0-9]+/i.exec(item.label || item.text || '')?.[0] || item.label || 'Subagent';
+  const key = escapeHtml(JSON.stringify([options.streamId || '', item.id, 'subagent']));
+  return `<details class="slot-chat-v3-subagent" data-disclosure-key="${key}" data-transcript-key="${escapeHtml(JSON.stringify([options.streamId || '', item.id]))}">
+    <summary title="${escapeHtml(item.timestamp || '')}" aria-label="Show full subagent update ${escapeHtml(id)}">
+      <span class="slot-chat-v3-dot is-${escapeHtml(status.toLowerCase() || 'neutral')}"></span>
+      <span class="slot-chat-v3-agent-id">${escapeHtml(id)}</span>
+      ${status ? `<span class="slot-chat-v3-agent-status is-${status.toLowerCase()}">${status}</span>` : ''}
+      <span class="slot-chat-v3-agent-summary">${escapeHtml(firstLine)}</span>
+      <time>${escapeHtml(exactTime(item))}</time><span class="slot-chat-v3-chevron" aria-hidden="true">›</span>
+    </summary><div class="slot-chat-v3-subagent-body"><pre>${escapeHtml(item.disclosure?.expandedText ?? item.text)}</pre>${renderCopyButton(item.disclosure?.expandedText ?? item.text, 'Copy message', 'slot-chat-message-copy')}</div>
+  </details>`;
+}
+
+function renderSubagents(items: PentacleTranscriptItem[], options: TranscriptRenderOptions): string {
+  if (items.length === 1) return renderSubagent(items[0], options);
+  const blockers = items.filter(item => statusFromText(item.text || '') === 'BLOCKER').length;
+  const last = items[items.length - 1];
+  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, last.id, 'subagent-group']));
+  return `<details class="slot-chat-v3-subagent-group" data-disclosure-key="${key}" data-transcript-key="${key}">
+    <summary title="${escapeHtml(last.timestamp || '')}" aria-label="Show ${items.length} subagent updates">
+      <span class="slot-chat-v3-group-dots" aria-hidden="true">${items.slice(0, 3).map(item => `<i class="slot-chat-v3-dot is-${escapeHtml(statusFromText(item.text || '').toLowerCase() || 'neutral')}"></i>`).join('')}</span>
+      <span>${items.length} subagent updates</span>${blockers ? `<span class="slot-chat-v3-blocker-count">${blockers} blocker${blockers === 1 ? '' : 's'}</span>` : ''}
+      <time>${escapeHtml(exactTime(last))}</time><span class="slot-chat-v3-chevron" aria-hidden="true">›</span>
+    </summary><div class="slot-chat-v3-subagent-group-body">${items.map(item => renderSubagent(item, options)).join('')}</div>
+  </details>`;
+}
+
+function renderAnswers(items: PentacleTranscriptItem[], options: TranscriptRenderOptions): string {
+  const answers = items.flatMap(item => {
+    const raw = item.text || '';
+    const structured = parsePentacleQuestionAnswerText(raw);
+    if (structured?.items?.length) return structured.items.map(part => ({
+      item, answer: part.selectedLabels?.join(', ') || part.text || part.header,
+      note: part.note || '', header: part.header,
+    }));
+    const [head, ...tail] = raw.split('\n');
+    return [{ item, answer: head.replace(/^Operator answered:\s*/i, '').trim() || head.trim(), note: tail.join('\n').replace(/^\s*Note:\s*/i, '').trim(), header: '' }];
+  });
+  const key = escapeHtml(JSON.stringify([options.streamId || '', items[0].id, items[items.length - 1].id, 'answers']));
+  return `<details class="slot-chat-v3-answers" data-disclosure-key="${key}" data-transcript-key="${key}">
+    <summary title="${escapeHtml(items[items.length - 1].timestamp || '')}" aria-label="Show ${answers.length} answered question${answers.length === 1 ? '' : 's'}">
+      <span class="slot-chat-v3-answer-check" aria-hidden="true">✓</span><span>You answered ${answers.length} question${answers.length === 1 ? '' : 's'}</span>
+      <span class="slot-chat-v3-chevron" aria-hidden="true">›</span>
+    </summary><div class="slot-chat-v3-answer-body">${answers.map(({ item, answer, note, header }) => `<div class="slot-chat-v3-answer-entry" title="${escapeHtml(item.timestamp || '')}" data-transcript-key="${escapeHtml(JSON.stringify([options.streamId || '', item.id]))}">${header ? `<b>${escapeHtml(header)}</b>` : ''}<div>${escapeHtml(answer)}</div>${note ? `<p>${escapeHtml(note)}</p>` : ''}${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}</div>`).join('')}</div>
+  </details>`;
 }
 
 // Build the full transcript timeline HTML for a session detail, mirroring
@@ -544,17 +624,44 @@ export function renderTranscriptTimelineHtml(
   options = { ...options, streamId: detail?.streamId || options.streamId };
   const items = withResolvedQuestionAnswers(detail?.transcriptItems || [], options.resolvedQuestions);
   if (!items.length) return '';
-  let lastMinute = '';
-  return items
-    .map((item) => {
-      if (item.isUser) return renderTranscriptItemHtml(item, chrome, options);
-      const itemHtml = renderTranscriptItemHtml(item, chrome, options);
-      if (!itemHtml) return '';
-      const showTimestamp = Boolean(item.timestampLabel && item.timestampLabel !== lastMinute);
-      if (item.timestampLabel) lastMinute = item.timestampLabel;
-      return `${showTimestamp ? `<div class="slot-chat-timestamp">${escapeHtml(item.timestampLabel)}</div>` : ''}${itemHtml}`;
-    })
-    .join('');
+  const output: string[] = [];
+  const assistantTurn: string[] = [];
+  const flushTurn = () => {
+    if (assistantTurn.length) output.push(`<div class="slot-chat-v3-turn">${assistantTurn.splice(0).join('')}</div>`);
+  };
+  let lastTime = Number.NaN;
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index];
+    const time = Date.parse(item.timestamp || '');
+    if (Number.isFinite(time) && Number.isFinite(lastTime) && time - lastTime >= 5 * 60 * 1000) {
+      flushTurn();
+      output.push(`<div class="slot-chat-timestamp" role="separator" title="${escapeHtml(item.timestamp)}">${escapeHtml(exactTime(item))}</div>`);
+    }
+    if (isAnswer(item)) {
+      flushTurn();
+      const group = [item];
+      while (index + 1 < items.length && isAnswer(items[index + 1])) group.push(items[++index]);
+      output.push(renderAnswers(group, options));
+      lastTime = Date.parse(group[group.length - 1].timestamp || '');
+      continue;
+    }
+    if (item.isUser) {
+      flushTurn();
+      output.push(renderTranscriptItemHtml(item, chrome, options));
+    } else if (isSubagent(item)) {
+      const group = [item];
+      while (index + 1 < items.length && isSubagent(items[index + 1])) group.push(items[++index]);
+      assistantTurn.push(renderSubagents(group, options));
+      lastTime = Date.parse(group[group.length - 1].timestamp || '');
+      continue;
+    } else {
+      const html = renderTranscriptItemHtml(item, chrome, options);
+      if (html) assistantTurn.push(html);
+    }
+    if (Number.isFinite(time)) lastTime = time;
+  }
+  flushTurn();
+  return output.join('');
 }
 
 type StoreLike = {

@@ -12,9 +12,9 @@ assert.ok(start >= 0 && end > start);
 
 function controls(initialTarget, pending = false) {
   let target = initialTarget;
-  const refs = { sendEl: {}, inputEl: { value: 'draft survives' }, attachEl: {} };
-  const state = { slotSendPending: [pending], slotChatRefs: [refs] };
-  const context = vm.createContext({ state, chatControlTargetForSlot: () => target });
+  const refs = { sendEl: { dataset: {}, classList: { toggle() {} }, setAttribute() {} }, inputEl: { value: 'draft survives' }, attachEl: {} };
+  const state = { slotSendPending: [pending], slotChatRefs: [refs], slotDrafts: ['draft survives'], slotAttachments: [[]], slotChatBoundStream: [null] };
+  const context = vm.createContext({ state, window: {}, chatControlTargetForSlot: () => target, slotAttachmentDrafts: () => [], isCompositeSlot: () => false });
   vm.runInContext(app.slice(start, end), context);
   const update = () => vm.runInContext('updateSendControls(0)', context);
   return { refs, state, update, setTarget: value => { target = value; } };
@@ -59,4 +59,3 @@ test('existing pending operation still disables every control until it finishes'
   c.update();
   for (const ref of Object.values(c.refs)) assert.equal(ref.disabled, false);
 });
-

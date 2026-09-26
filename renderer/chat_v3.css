@@ -1,0 +1,93 @@
+/* Desktop Chat v3: scoped to the chat pane; the rest of Pentacle retains its theme. */
+.slot-chat-layer.cosmic { background: #0a130f; }
+.cosmic .slot-chat-starfield { display: none; }
+.cosmic .slot-chat-shell { height: 100%; min-height: 0; padding: 0; gap: 0; background: #0a130f; font-family: 'IBM Plex Sans', sans-serif; }
+.cosmic .slot-chat-scroll { min-height: 0; padding: 34px 32px calc(var(--slot-chat-dock-height, 130px) + 22px); scrollbar-color: #294638 #0a130f; scrollbar-width: thin; }
+.cosmic .slot-chat-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.cosmic .slot-chat-scroll::-webkit-scrollbar-track { background: #0a130f; }
+.cosmic .slot-chat-scroll::-webkit-scrollbar-thumb { background: #294638; border-radius: 8px; }
+.cosmic .slot-chat-list, .cosmic .slot-chat-load-earlier { width: 100%; max-width: 760px; margin-inline: auto; }
+.cosmic .slot-chat-list { display: flex; flex-direction: column; gap: 30px; }
+.cosmic .slot-chat-v3-turn { display: flex; flex-direction: column; gap: 10px; }
+.cosmic .slot-chat-row { font-family: 'IBM Plex Sans', sans-serif; }
+.cosmic .slot-chat-row.is-user { align-self: flex-end; width: fit-content; max-width: 70%; }
+.cosmic .slot-chat-user-bubble { box-sizing: border-box; max-width: 100%; border: 1px solid #254b39; border-radius: 18px; clip-path: none; background: #13281e; color: #e9f3ed; padding: 11px 17px; font: 400 15.5px/1.55 'IBM Plex Sans', sans-serif; }
+.cosmic .slot-chat-assistant-card { padding: 0; border: 0; background: transparent; color: #e5eee8; font: 400 15.5px/1.62 'IBM Plex Sans', sans-serif; }
+.cosmic .slot-chat-assistant-card strong { color: #f0f7f2; font-weight: 600; }
+.cosmic .slot-chat-assistant-card .slot-chat-line { line-height: 1.62; }
+.cosmic .slot-chat-assistant-card p { margin: 0 0 10px; }
+.cosmic .slot-chat-assistant-card ul, .cosmic .slot-chat-assistant-card ol { padding-left: 22px; }
+.cosmic .slot-chat-assistant-card li { padding-left: 4px; margin: 4px 0; }
+.cosmic .slot-chat-assistant-card li::marker { color: #69c995; }
+.cosmic .slot-chat-assistant-card code, .cosmic .slot-chat-assistant-card pre, .cosmic .slot-chat-timestamp { font-family: 'Desktop Questions Mono', monospace; }
+.cosmic .slot-chat-v3-status { display: inline-flex; align-items: center; min-height: 20px; margin-right: 9px; padding: 2px 8px; border: 1px solid #315541; border-radius: 5px; background: #14291e; color: #8ed5a8; font: 600 10px/1.2 'Desktop Questions Mono', monospace; vertical-align: 2px; }
+.cosmic .slot-chat-v3-status.is-blocker, .cosmic .slot-chat-v3-status.is-reject { border-color: #775338; background: #302217; color: #e8b581; }
+.cosmic .slot-chat-timestamp { align-self: center; margin: 0; padding: 0; color: #687a6f; text-align: center; text-transform: none; letter-spacing: 0; font: 400 11px/1.4 'Desktop Questions Mono', monospace; }
+.cosmic .slot-chat-v3-subagent, .cosmic .slot-chat-v3-subagent-group, .cosmic .slot-chat-v3-answers { border: 1px solid #243c2d; border-radius: 9px; background: #101c15; color: #c7d8ca; font-family: 'Desktop Questions Mono', monospace; }
+.cosmic .slot-chat-v3-subagent > summary, .cosmic .slot-chat-v3-subagent-group > summary, .cosmic .slot-chat-v3-answers > summary { display: flex; align-items: center; min-height: 32px; gap: 8px; padding: 4px 10px; cursor: pointer; list-style: none; font: 400 11px/1.35 'Desktop Questions Mono', monospace; }
+.cosmic .slot-chat-v3-subagent > summary::-webkit-details-marker, .cosmic .slot-chat-v3-subagent-group > summary::-webkit-details-marker, .cosmic .slot-chat-v3-answers > summary::-webkit-details-marker { display: none; }
+.cosmic .slot-chat-v3-subagent summary time, .cosmic .slot-chat-v3-subagent-group summary time { margin-left: auto; color: #738b79; white-space: nowrap; }
+.cosmic .slot-chat-v3-chevron { color: #7e9a84; font-size: 17px; line-height: 1; transition: transform .15s ease; }
+.cosmic details[open] > summary .slot-chat-v3-chevron { transform: rotate(90deg); }
+.cosmic .slot-chat-v3-agent-id { color: #cce9d5; white-space: nowrap; }
+.cosmic .slot-chat-v3-agent-summary, .cosmic .slot-chat-v3-answer-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8da797; }
+.cosmic .slot-chat-v3-agent-status, .cosmic .slot-chat-v3-blocker-count { color: #e4b37f; white-space: nowrap; }
+.cosmic .slot-chat-v3-dot { display: inline-block; flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: #62be81; }
+.cosmic .slot-chat-v3-dot.is-blocker, .cosmic .slot-chat-v3-dot.is-reject { background: #df986b; }
+.cosmic .slot-chat-v3-group-dots { display: inline-flex; gap: 2px; }
+.cosmic .slot-chat-v3-answer-check { color: #6cc795; }
+.cosmic .slot-chat-v3-answer-preview { margin-left: auto; }
+.cosmic .slot-chat-v3-subagent-body, .cosmic .slot-chat-v3-subagent-group-body, .cosmic .slot-chat-v3-answer-body { padding: 9px 12px 11px; border-top: 1px solid #263c2e; color: #d7e6da; font: 400 12px/1.55 'Desktop Questions Mono', monospace; overflow-wrap: anywhere; }
+.cosmic .slot-chat-v3-subagent-body pre { margin: 0; white-space: pre-wrap; font: inherit; }
+.cosmic .slot-chat-v3-subagent-group-body { display: grid; gap: 7px; }
+.cosmic .slot-chat-v3-answer-entry + .slot-chat-v3-answer-entry { margin-top: 9px; padding-top: 9px; border-top: 1px solid #253c2f; }
+.cosmic .slot-chat-v3-answer-entry p { color: #9aafa0; margin: 4px 0; }
+.cosmic .slot-chat-dock { position: absolute; z-index: 3; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; align-items: center; padding: 22px 32px 18px; background: linear-gradient(0deg, #0a130f 74%, rgba(10,19,15,0)); pointer-events: none; }
+.cosmic .slot-chat-dock > * { box-sizing: border-box; width: 100%; max-width: 760px; pointer-events: auto; }
+.cosmic .slot-chat-dock > .slot-chat-status { min-height: 0; padding: 0; margin-bottom: 7px; color: #9abc9f; }
+.cosmic .slot-chat-dock > .slot-chat-status:empty, .cosmic .slot-chat-status.is-idle:not(:has(.slot-chat-cancel-btn)), .cosmic .slot-chat-status.is-waiting:not(:has(.slot-chat-cancel-btn)) { display: none; }
+.cosmic .slot-chat-status-badge { border: 0; background: transparent; padding: 0; min-height: 17px; color: #95bd9e; font: 400 11px/1.2 'Desktop Questions Mono', monospace; }
+.cosmic .slot-chat-status-badge.is-working::after { content: 'Working'; order: -1; }
+.cosmic .slot-chat-status-badge.is-working .slot-chat-status-dot { order: -2; }
+.cosmic .slot-chat-compose { box-sizing: border-box; display: grid; grid-template-columns: 36px 1fr 36px; align-items: center; gap: 5px 8px; min-height: 90px; padding: 12px 13px 10px; border: 1px solid #315441; border-radius: 20px; background: #101e16; box-shadow: 0 9px 34px rgba(0,0,0,.35); }
+.cosmic .slot-chat-compose:focus-within { border-color: #5d9c70; }
+.cosmic .slot-chat-attachment-tray { grid-column: 1 / -1; }
+.cosmic .slot-chat-compose-input { grid-column: 1 / -1; width: 100%; min-height: 32px; max-height: 220px; padding: 3px 4px; border: 0; border-radius: 0; background: transparent; color: #e7f0e9; resize: none; outline: 0; box-shadow: none; font: 400 15px/1.5 'IBM Plex Sans', sans-serif; scrollbar-color: #294638 #101e16; }
+.cosmic .slot-chat-compose-input:focus { border: 0; box-shadow: none; }
+.cosmic .slot-chat-compose-input::placeholder { color: #8ca393; }
+.cosmic .slot-chat-plus-wrap { position: relative; grid-column: 1; }
+.cosmic .slot-chat-attach, .cosmic .slot-chat-compose-mic { width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #a2baa9; cursor: pointer; }
+.cosmic .slot-chat-attach { font: 400 25px/1 'IBM Plex Sans', sans-serif; }
+.cosmic .slot-chat-compose-mic { grid-column: 2; justify-self: end; display: inline-flex; align-items: center; justify-content: center; }
+.cosmic .slot-chat-attach:hover, .cosmic .slot-chat-compose-mic:hover { background: #1b3023; color: #e5f3e9; }
+.cosmic .slot-chat-compose-send { grid-column: 3; width: 34px; height: 34px; border: 0; border-radius: 50%; background: #5dba7d; color: #092011; font: 700 22px/1 'IBM Plex Sans', sans-serif; }
+.cosmic .slot-chat-compose-send[data-action="stop"] { background: #a86359; color: #fff; }
+.cosmic .slot-chat-compose-send:disabled { background: #274133; color: #8ca493; opacity: 1; }
+.cosmic .slot-chat-plus-menu { position: absolute; z-index: 12; left: 0; bottom: 42px; width: 236px; padding: 6px; border: 1px solid #345441; border-radius: 11px; background: #15251a; box-shadow: 0 10px 26px rgba(0,0,0,.4); }
+.cosmic .slot-chat-plus-menu[hidden] { display: none; }
+.cosmic .slot-chat-plus-menu button { display: block; width: 100%; border: 0; border-radius: 7px; padding: 8px 10px; background: transparent; color: #e0eee4; text-align: left; font: 400 12px/1.3 'IBM Plex Sans', sans-serif; cursor: pointer; }
+.cosmic .slot-chat-plus-menu button:hover { background: #243d2c; }
+.cosmic .slot-chat-plus-menu button:disabled { color: #748c79; cursor: default; }
+.cosmic .slot-chat-plus-menu p { margin: 5px 8px 3px; color: #8ba492; font: 400 10px/1.4 'Desktop Questions Mono', monospace; }
+.cosmic .slot-chat-attachment-chip { display: flex; align-items: center; gap: 9px; width: min(100%, 220px); height: 50px; padding: 6px 7px; border: 1px solid #315140; border-radius: 9px; background: #17281d; overflow: visible; }
+.cosmic .slot-chat-attachment-chip img { flex: 0 0 34px; width: 34px; height: 34px; border-radius: 5px; }
+.cosmic .slot-chat-attachment-meta { display: flex; flex-direction: column; min-width: 0; overflow: hidden; color: #adc9b3; font: 400 10px/1.3 'Desktop Questions Mono', monospace; }
+.cosmic .slot-chat-attachment-meta b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dceadf; font-weight: 500; }
+.cosmic .slot-chat-attachment-meta small { color: #8fa89d; font: inherit; }
+.cosmic .slot-chat-attachment-remove { position: static; flex: 0 0 18px; margin-left: auto; }
+.cosmic .slot-chat-jump-latest { position: absolute; z-index: 4; bottom: calc(var(--slot-chat-dock-height, 130px) + 12px); left: 50%; transform: translateX(-50%); display: inline-flex; align-items: center; justify-content: center; width: 35px; height: 35px; padding: 0; border: 1px solid #3d6c4b; border-radius: 50%; background: #183422; color: #d7f3dc; box-shadow: 0 4px 15px rgba(0,0,0,.3); font: 600 19px/1 'IBM Plex Sans', sans-serif; }
+.cosmic .slot-chat-jump-latest[style*="none"] { display: none; }
+.cosmic .slot-chat-jump-latest .slot-chat-jump-count { position: absolute; top: -5px; right: -8px; min-width: 16px; padding: 2px 4px; border-radius: 9px; background: #69c687; color: #092011; font: 700 9px/1 'Desktop Questions Mono', monospace; }
+.cosmic .slot-chat-question { position: absolute; z-index: 5; right: 32px; bottom: calc(var(--slot-chat-dock-height, 130px) + 18px); width: auto; margin: 0; pointer-events: none; }
+.cosmic .slot-chat-question > * { pointer-events: auto; }
+.cosmic .slot-chat-question-open { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 48px; padding: 0; border: 1px solid #8adfa5; border-radius: 50%; background: #275e3c; color: #effff1; box-shadow: 0 0 0 4px rgba(82,183,107,.13), 0 0 20px rgba(80,219,115,.5); cursor: pointer; animation: chat-v3-question-glow 2s ease-in-out infinite; }
+.cosmic .slot-chat-question-open svg { width: 21px; height: 21px; }
+.cosmic .slot-chat-question-count { position: absolute; top: -5px; right: -6px; min-width: 16px; padding: 2px 4px; border-radius: 9px; background: #c8e982; color: #102414; font: 700 10px/1 'Desktop Questions Mono', monospace; }
+@keyframes chat-v3-question-glow { 50% { box-shadow: 0 0 0 8px rgba(82,183,107,.08), 0 0 27px rgba(80,219,115,.65); } }
+@media (prefers-reduced-motion: reduce) { .cosmic .slot-chat-question-open { animation: none; } }
+.cosmic .slot-chat-drop-overlay { position: absolute; z-index: 8; inset: 12px; display: none; align-items: center; justify-content: center; border: 2px dashed #73d18d; border-radius: 18px; background: rgba(12,37,22,.88); color: #e6fbe9; font: 600 17px/1.4 'IBM Plex Sans', sans-serif; pointer-events: none; }
+.cosmic .slot-chat-shell.is-drag-over > .slot-chat-drop-overlay { display: flex; }
+.cosmic .slot-chat-shell.is-status-card-open > .slot-chat-dock { display: none; }
+.cosmic .slot-chat-shell.is-status-card-open > .slot-chat-question { display: none !important; }
+.cosmic .slot-chat-shell.is-status-card-open > .slot-chat-jump-latest { display: none !important; }
+@media (max-width: 600px) { .cosmic .slot-chat-scroll { padding-inline: 16px; } .cosmic .slot-chat-dock { padding-inline: 16px; } .cosmic .slot-chat-question { right: 16px; } .cosmic .slot-chat-row.is-user { max-width: 86%; } }

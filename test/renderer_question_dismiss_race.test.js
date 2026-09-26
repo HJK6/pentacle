@@ -26,7 +26,8 @@ test('desktop question affordance opens a cosmic portal with desktop CSS contrac
 
   const open = dom.window.document.querySelector('.slot-chat-question-open');
   assert.ok(open);
-  assert.match(open.textContent, /unanswered/);
+  assert.match(open.getAttribute('aria-label'), /unanswered question/);
+  assert.ok(open.querySelector('svg'), 'compact launcher uses the mobile question glyph');
   open.click();
 
   const portal = dom.window.document.querySelector('.desktop-question-portal');

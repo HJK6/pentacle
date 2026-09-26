@@ -65,6 +65,29 @@ Run locally: `npm run build:web && node test/e2e/web_gate.js` (needs a system
 Chrome, `tmux`, and a Python with the daemon's `websockets`). `--profile <config.js>`
 runs the scenarios against an external daemon for a by-hand check.
 
+For the external loopback profile, choose a free port for each run and use that
+same value for the daemon and gate. For example, start the daemon in one shell:
+
+```bash
+export PENTACLE_SMOKE_PORT=49001
+SCRATCH=$(mktemp -d)
+python3 services/chat-stream-v2/main.py --host 127.0.0.1 --port "$PENTACLE_SMOKE_PORT" \
+  --local-host local --db "$SCRATCH/sessions.db" \
+  --notifications-db "$SCRATCH/notifications.db" \
+  --assets-db "$SCRATCH/assets.db" --blob-root "$SCRATCH/blobs" \
+  --disable-hosts --disable-mirror --disable-nudges \
+  --disable-outbound-notices --disable-remote-presence
+```
+
+In a second shell, export the same `PENTACLE_SMOKE_PORT` and run
+`node test/e2e/web_gate.js --profile test/e2e/configs/web_mode_local_smoke.js`.
+Stop the daemon and remove its scratch directory afterward. The profile rejects
+missing ports and values outside decimal `1..65535`. Each gate run stores its
+verdict in a unique directory under `test/e2e/runs/`, including runs started in
+the same millisecond. The no-profile gate still starts its own daemon on an
+ephemeral port. Its verdict records the owned daemon PID and confirmed exit;
+failure to stop that process fails the gate after a forced termination attempt.
+
 For focused full-renderer slot-layout acceptance, build the web bundle and run:
 
 ```bash

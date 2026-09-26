@@ -48,8 +48,8 @@ takes priority over one under its resolved identity. `localHostId` takes
 priority for the local display/mic identity; `hostMap` takes priority for
 routing. Reverse routing searches the configured roster for an exact mapped
 identity. Names are never matched by substring. An empty identity falls back
-to `local`; an unlisted identity uses the first palette colour. Badges use the
-first Unicode code point of the display label, uppercased.
+to `local`; an unlisted identity uses the first palette colour. Host selectors,
+sidebar rows, slot headers and machine stats use the resolved coloured glyph.
 
 Supported colour tokens are `forest-green`, `royal-blue`, `red`, `orange`,
 `green`, `blue`, `purple`, `yellow`, and `cyan`. Unsupported tokens use the
@@ -99,6 +99,7 @@ provider models and effort. See [daemon setup](../services/chat-stream-v2/README
 | `features.sourceTags` | Boolean; false | Host tags on sessions. Reload after changing. |
 | `features.showTurnDuration` | Boolean; false | Timing annotations in Chat; changes live. |
 | `features.assistantRole` | String; absent or empty | Private opt-in for a daemon session with exactly this existing `role`. That row pins first and cannot be deleted in desktop. Public examples leave it off; do not commit a private role value. |
+| `features.assistantDirectTarget` | Object; absent | Optional temporary **web entry** alias: `{sourceStreamId, streamId, generation}`. The protected composite source row opens the exact ordinary target stream and generation when that target is online. Keep actual IDs in an ignored private web profile. Removing the object restores the prior entry route. |
 | `features.rawTmux` | Boolean; example false | Retained compatibility flag; currently unused. |
 | `mic` | Object; absent | Optional microphone settings below. |
 | `micServerUrl` | String; `http://127.0.0.1:7780` | Mic HTTP endpoint unless useStreamHost is enabled. |
@@ -107,6 +108,16 @@ provider models and effort. See [daemon setup](../services/chat-stream-v2/README
 | `mic.autoSpawn` | Boolean; helper default true | Compatibility-only in public main: the desktop probes the service; it does not start a mic server. |
 | `wakeWord` | String; absent | Text displayed in the sleeping mic state. Set it to the server's actual configured wake word. |
 | `machineStats` | Object; absent, ignored | Accepted compatibility key for old overlays. No fields in this object configure public desktop stats. |
+
+The direct assistant target is a temporary browser entry route, not a daemon
+alias. It uses the target's existing transcript, draft, questions, attachments,
+receipts and copy-chat-ID, while the official entry keeps its assistant label
+and green lamp. Each send checks the configured ID and generation against the
+current open inventory; an absent, offline or replaced target shows an error
+and keeps unsent text. The ordinary target row keeps its host glyph. This
+setting does not redirect the mobile app or change composite daemon delivery.
+Record the binding before changing it and update or remove it when the target
+conversation hands off; no successor is selected automatically.
 
 Microphone controls require an independently installed, running compatible HTTP
 service implementing the [mic-server contract](../mic-server/README.md). The

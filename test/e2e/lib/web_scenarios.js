@@ -327,10 +327,17 @@ async function slotSurvivesCcReconnect(ctx) {
     await session.eval(`document.querySelector('#header-${slot} [data-mode="chat"]').click()`);
     await session.eval(`window.cc.requestStreamEvents({ streamId: ${JSON.stringify(sid)}, limit: 20 })`, { awaitPromise: true });
     const chatText = () => session.eval(`(document.querySelector('#cell-${slot} .slot-chat-list')?.innerText||'')`);
-    // The composer's Send target: enabled (not disabled) means chatControlTargetForSlot
-    // resolved the stream's session detail — i.e. the composer is usable, not the
-    // "Waiting for websocket session detail." degraded state. Non-side-effecting read.
-    const sendEnabled = () => session.eval(`(() => { const b = document.querySelector('#cell-${slot} .slot-chat-compose-send'); return !!b && b.disabled === false; })()`);
+    // The v3 Send button is deliberately disabled on an empty draft. Insert a
+    // harmless unsent draft to distinguish that idle state from a disconnected
+    // or missing control target, then retain it across the reconnect check.
+    const sendEnabled = () => session.eval(`(() => {
+      const input = document.querySelector('#cell-${slot} .slot-chat-compose-input');
+      const button = document.querySelector('#cell-${slot} .slot-chat-compose-send');
+      if (!input || !button) return false;
+      input.value = 'unsent reconnect probe';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return button.disabled === false;
+    })()`);
     await waitForValue(session, cdp, `(document.querySelector('#cell-${slot} .slot-chat-list')?.innerText||'').includes('fixture assistant reply')`,
       Boolean, { timeoutMs, label: 'chat transcript painted before the drop' });
     const sendBefore = await sendEnabled();

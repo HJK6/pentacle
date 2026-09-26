@@ -1,6 +1,6 @@
 // Pure, DOM-free view state for a bounded desktop transcript.
 
-export const INITIAL_TRANSCRIPT_ROWS = 16;
+export const INITIAL_TRANSCRIPT_ROWS = 120;
 export const TRANSCRIPT_PAGE_ROWS = 48;
 export const NEAR_BOTTOM_PX = 32;
 

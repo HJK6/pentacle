@@ -99,6 +99,100 @@ function sendFrame(ws, frame) {
   ws.emit('message', Buffer.from(JSON.stringify(frame)));
 }
 
+test('renderer state pull does not expose the shared partial event cache as a complete transcript', (t) => {
+  const { createCcHandlers, createCollector } = require('../main/cc_handlers');
+  const { client } = openClient();
+  t.after(() => client.destroy());
+  client._events = [
+    { stream_id: 'chat-a', daemon_seq: 1, kind: 'USER', text: 'kept in another browser' },
+    { stream_id: 'chat-b', daemon_seq: 2, kind: 'ASSIST_TEXT', text: 'shared cache tail' },
+  ];
+  const collector = createCollector();
+  createCcHandlers({ CONFIG: { chatStream: {} }, chatStreamClient: client, harness: true }).register(collector);
+  const state = collector.table['chat-stream:get-state'].handler();
+  assert.deepEqual(state.events, [], 'a partial global ring must not replace fetched per-stream history');
+  assert.equal(client.snapshot().events.length, 2, 'internal bounded cache is retained for its own consumers');
+});
+
+test('image upload frames obey the daemon one MiB decoded chunk limit', async (t) => {
+  const { client, ws } = openClient();
+  t.after(() => client.destroy());
+  sendFrame(ws, { type: 'snapshot', events: [], sessions: [] });
+  const bytes = Buffer.alloc(1024 * 1024 + 1, 0x5a);
+  const pending = client.uploadBlob({ data: bytes, requestId: 'upload-boundary' });
+  sendFrame(ws, { type: 'upload_blob.init.ok', request_id: 'upload-boundary' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const chunks = ws.sent.filter((frame) => frame.type === 'upload_blob_chunk');
+  sendFrame(ws, { type: 'upload_blob.ok', request_id: 'upload-boundary', blob_sha: 'fixture' });
+  await pending;
+  assert.ok(chunks.length >= 2, 'a one MiB plus one byte image needs multiple chunks');
+  assert.ok(chunks.every((frame) => Buffer.from(frame.data_b64, 'base64').length <= 1024 * 1024));
+  assert.equal(chunks.at(-1).final, true);
+  assert.ok(chunks.slice(0, -1).every((frame) => frame.final === false));
+  assert.deepEqual(Buffer.concat(chunks.map((frame) => Buffer.from(frame.data_b64, 'base64'))), bytes);
+});
+
+test('image upload boundaries preserve exact bytes through the final frame', async (t) => {
+  const { client, ws } = openClient();
+  t.after(() => client.destroy());
+  sendFrame(ws, { type: 'snapshot', events: [], sessions: [] });
+  for (const length of [1024 * 1024 - 1, 1024 * 1024, 25 * 1024 * 1024]) {
+    ws.sent.length = 0;
+    const bytes = Buffer.alloc(length, length % 251);
+    const id = `upload-${length}`;
+    const pending = client.uploadBlob({ data: bytes, requestId: id });
+    sendFrame(ws, { type: 'upload_blob.init.ok', request_id: id });
+    await new Promise((resolve) => setImmediate(resolve));
+    const chunks = ws.sent.filter((frame) => frame.type === 'upload_blob_chunk');
+    assert.equal(chunks.length, Math.ceil(length / (1024 * 1024)));
+    assert.ok(chunks.every((frame) => Buffer.from(frame.data_b64, 'base64').length <= 1024 * 1024));
+    assert.ok(chunks.slice(0, -1).every((frame) => frame.final === false));
+    assert.equal(chunks.at(-1).final, true);
+    assert.deepEqual(Buffer.concat(chunks.map((frame) => Buffer.from(frame.data_b64, 'base64'))), bytes);
+    sendFrame(ws, { type: 'upload_blob.ok', request_id: id, blob_sha: 'fixture' });
+    await pending;
+  }
+});
+
+test('lost final image upload response times out without sending a chat message', async (t) => {
+  const { client, ws } = openClient();
+  t.after(() => client.destroy());
+  sendFrame(ws, { type: 'snapshot', events: [], sessions: [] });
+  const pending = client.uploadBlob({ data: Buffer.from('fixture'), requestId: 'upload-timeout', timeoutMs: 15 });
+  const settled = pending.then(() => null, (error) => error);
+  sendFrame(ws, { type: 'upload_blob.init.ok', request_id: 'upload-timeout' });
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  assert.equal((await settled)?.error, 'timed_out');
+  assert.equal(ws.sent.filter((frame) => frame.type === 'send').length, 0);
+});
+
+test('fetched image chunks decode and re-encode into one valid blob', async (t) => {
+  const { client, ws } = openClient();
+  t.after(() => client.destroy());
+  sendFrame(ws, { type: 'snapshot', events: [], sessions: [] });
+  const pending = client.fetchBlob({ blobSha: 'fixture', requestId: 'fetch-image' });
+  sendFrame(ws, { type: 'fetch_blob.chunk', request_id: 'fetch-image', blob_sha: 'fixture', size_bytes: 4, content_b64: Buffer.from('ab').toString('base64'), final: false });
+  sendFrame(ws, { type: 'fetch_blob.chunk', request_id: 'fetch-image', blob_sha: 'fixture', size_bytes: 4, content_b64: Buffer.from('cd').toString('base64'), final: false });
+  sendFrame(ws, { type: 'fetch_blob.ok', request_id: 'fetch-image', blob_sha: 'fixture', size_bytes: 4, final: true });
+  const result = await pending;
+  assert.deepEqual(Buffer.from(result.content_b64, 'base64'), Buffer.from('abcd'));
+});
+
+test('image upload bridge passes the renderer base64 bytes to the blob client', async () => {
+  const { createCcHandlers, createCollector } = require('../main/cc_handlers');
+  const collector = createCollector();
+  let received;
+  createCcHandlers({ CONFIG: { chatStream: {} }, chatStreamClient: {
+    uploadBlob: async (payload) => { received = payload; return { blob_sha: 'fixture' }; },
+  }, harness: true }).register(collector);
+  const bytes = Buffer.from('image-bytes');
+  const reply = await collector.table['chat-stream:upload-blob'].handler({}, {
+    dataBase64: bytes.toString('base64'), sizeHintBytes: bytes.length,
+  });
+  assert.equal(reply.ok, true);
+  assert.deepEqual(received.data, bytes);
+});
+
 const NULL_LIMITS = Object.freeze([
   Object.freeze({ id: 'claude', label: 'Claude', pct: null, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),
   Object.freeze({ id: 'fable', label: 'Fable', pct: null, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),

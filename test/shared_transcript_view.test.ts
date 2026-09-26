@@ -230,6 +230,40 @@ test('G1b: caption-less agent image still renders the assistant media bubble', (
   );
 });
 
+test('unsupported historical attachment metadata never becomes an image', () => {
+  const html = renderTranscriptItemHtml(assistantItem({
+    text: 'legacy attachment',
+    attachments: [{ key: 'e'.repeat(64), mime: 'application/pdf', name: '<unsafe>.pdf' }],
+  }), CHROME);
+  const { container } = newDom();
+  container.innerHTML = html;
+  assert.equal(container.querySelector('.slot-chat-media-img'), null);
+  assert.equal(container.querySelector('.slot-chat-media-button'), null);
+  assert.match(container.textContent || '', /unavailable preview/);
+  assert.equal(container.querySelector('unsafe'), null);
+});
+
+test('consecutive subagents and answers group with accessible expandable bodies', () => {
+  const items = [
+    assistantItem({ id: 'agent-1', timestamp: '2026-09-26T10:00:00Z', tone: 'agent', displayRule: 'bubble:agent', label: 'v2-one', text: 'GATE — checked <private>' }),
+    assistantItem({ id: 'agent-2', timestamp: '2026-09-26T10:00:01Z', tone: 'agent', displayRule: 'bubble:agent', label: 'v2-two', text: 'BLOCKER — needs repair' }),
+    userItem({ id: 'answer-1', timestamp: '2026-09-26T10:00:02Z', eventCase: 'agent-question-answer', text: 'Operator answered: Yes\nNote: Keep this note' }),
+    userItem({ id: 'answer-2', timestamp: '2026-09-26T10:00:03Z', eventCase: 'agent-question-answer', text: 'Operator answered: Later' }),
+  ];
+  const { container } = newDom();
+  container.innerHTML = renderTranscriptTimelineHtml({ streamId: STREAM, transcriptItems: items } as never, CHROME);
+  const group = container.querySelector('details.slot-chat-v3-subagent-group');
+  assert.ok(group);
+  assert.equal(group!.querySelectorAll('details.slot-chat-v3-subagent').length, 2);
+  assert.match(group!.textContent || '', /1 blocker/);
+  assert.match(group!.textContent || '', /checked <private>/);
+  assert.equal(group!.querySelector('private'), null);
+  const answers = container.querySelector('details.slot-chat-v3-answers');
+  assert.ok(answers);
+  assert.match(answers!.querySelector('summary')!.getAttribute('aria-label') || '', /2 answered questions/);
+  assert.match(answers!.textContent || '', /Keep this note/);
+});
+
 test('bubble:assistant renders an assistant card with escaped text', () => {
   const controller = controllerWithEvents([
     makeEvent({ daemon_seq: 11, kind: 'ASSIST', text: 'Here is a plan <b>bold</b>' }),
@@ -265,7 +299,7 @@ test('activity:* renders an activity pill (dot + title + detail)', () => {
   assert.ok(body!.querySelector('p'), 'activity detail <p> present for multi-line text');
 });
 
-test('agent-orch notification.answer renders as a compact desktop question row', () => {
+test('agent-orch notification.answer renders as an expandable answered question', () => {
   const payload = {
     type: 'notification.answer',
     answer: {
@@ -286,9 +320,9 @@ test('agent-orch notification.answer renders as a compact desktop question row',
   const { container } = newDom();
   renderStreamTranscript(STREAM, container, { store: controller as never, chrome: CHROME });
 
-  assert.ok(container.querySelector('.slot-chat-activity'), 'question activity row rendered');
-  assert.ok(container.textContent?.includes('Operator answered: hostc'), 'selected label rendered');
-  assert.ok(container.textContent?.includes('Note: Use the orchestrator.'), 'note rendered');
+  assert.ok(container.querySelector('details.slot-chat-v3-answers'), 'answered question group rendered');
+  assert.ok(container.textContent?.includes('hostc'), 'selected label rendered');
+  assert.ok(container.textContent?.includes('Use the orchestrator.'), 'note rendered');
   assert.equal(container.textContent?.includes('notification.answer'), false, 'raw JSON suppressed');
 });
 
@@ -330,9 +364,9 @@ test('proven notification answer correction leaves one durable full answer card'
     }],
   });
 
-  assert.equal(container.querySelectorAll('.slot-chat-activity').length, 1);
-  assert.match(container.textContent || '', /Operator answered: Approve release/);
-  assert.match(container.textContent || '', /Note: Keep the operator note\./);
+  assert.equal(container.querySelectorAll('details.slot-chat-v3-answers').length, 1);
+  assert.match(container.textContent || '', /Approve release/);
+  assert.match(container.textContent || '', /Keep the operator note\./);
   assert.equal((container.textContent || '').includes('[pentacle-notice:'), false);
 
   const copied = controllerWithEvents([answerWire.explicit_user_copy.event], {

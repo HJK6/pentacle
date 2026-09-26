@@ -97,12 +97,31 @@ function waitForListen(port, timeoutMs, isDead = () => false) {
   });
 }
 
-function onceExit(proc) {
+function onceExit(proc, timeoutMs = 3000) {
   return new Promise((resolve) => {
-    if (!proc || proc.exitCode !== null || proc.signalCode !== null) { resolve(); return; }
-    proc.once('exit', () => resolve());
-    setTimeout(resolve, 3000); // don't hang teardown on a stuck child
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) { resolve(true); return; }
+    let timer;
+    const finish = (exited) => { clearTimeout(timer); proc.removeListener('exit', onExit); resolve(exited); };
+    const onExit = () => finish(true);
+    proc.once('exit', onExit);
+    timer = setTimeout(() => finish(false), timeoutMs);
   });
+}
+
+async function stopOwnedProcess(proc, graceMs = 3000) {
+  if (!proc) return { pid: null, exited: true, forced: false };
+  let forced = false;
+  if (proc.exitCode === null && proc.signalCode === null) {
+    try { proc.kill('SIGTERM'); } catch { /* verify exit below */ }
+    if (!await onceExit(proc, graceMs)) {
+      forced = true;
+      try { proc.kill('SIGKILL'); } catch { /* verify exit below */ }
+      if (!await onceExit(proc, graceMs)) {
+        throw new Error(`CLEANUP_FAIL: owned process ${proc.pid} survived SIGKILL`);
+      }
+    }
+  }
+  return { pid: proc.pid, exited: true, forced, exit_code: proc.exitCode, signal: proc.signalCode };
 }
 
 class Report {
@@ -197,8 +216,7 @@ async function startDaemon(args, scratch, runtime, fixtures = [FIXTURE, { host: 
 }
 
 async function run(args) {
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const report = new Report(path.join(__dirname, 'runs', stamp, 'web_gate'));
+  const report = new Report(allocateReportDir());
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-gate-')));
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-gate-chrome-'));
   const runtime = {};
@@ -223,11 +241,20 @@ async function run(args) {
     // it avoids orphaning a restarted daemon. `daemon.proc` is the fallback for
     // a readiness-failure mid-startup where runtime.daemonProc was cleared.
     const dproc = runtime.daemonProc || (daemon && daemon.proc);
-    try { if (dproc) dproc.kill('SIGTERM'); } catch {}
-    await onceExit(dproc);
-    try { if (!args.keep) fs.rmSync(scratch, { recursive: true, force: true }); } catch {}
-    try { if (!args.keep) fs.rmSync(userDataDir, { recursive: true, force: true }); } catch {}
+    let daemonCleanupError = null;
+    try { runtime.daemonCleanup = await stopOwnedProcess(dproc); }
+    catch (e) {
+      daemonCleanupError = e;
+      runtime.daemonCleanup = { pid: dproc && dproc.pid, exited: false, error: String(e && e.message ? e.message : e) };
+    }
+    // Keep scratch evidence if its daemon survived; deleting a live process's
+    // files would hide the failed teardown. The verdict and exit code fail.
+    if (!daemonCleanupError) {
+      try { if (!args.keep) fs.rmSync(scratch, { recursive: true, force: true }); } catch {}
+      try { if (!args.keep) fs.rmSync(userDataDir, { recursive: true, force: true }); } catch {}
+    }
     runtime.fixtureAuthCleanup = { generated_credential_count: generatedCount, retained_for_debug: args.keep, registry_removed: !fs.existsSync(registryPath), token_removed: !fs.existsSync(tokenPath), remaining_credential_count: fs.existsSync(registryPath) ? Object.keys(JSON.parse(fs.readFileSync(registryPath, 'utf8')).credentials || {}).length : 0 };
+    if (daemonCleanupError) throw daemonCleanupError;
     if (!args.keep && (!runtime.fixtureAuthCleanup.registry_removed || !runtime.fixtureAuthCleanup.token_removed)) throw new Error('CLEANUP_FAIL: isolated credential artifacts remain');
   };
 
@@ -364,20 +391,31 @@ async function run(args) {
     console.error(`  artifacts: ${report.dir}`);
     return 1;
   } finally {
-    try { await cleanup(); } finally {
+    let cleanupError = null;
+    try { await cleanup(); } catch (e) { cleanupError = e; }
+    finally {
       const verdictPath = path.join(report.dir, 'verdict.json');
       if (fs.existsSync(verdictPath)) {
         const verdict = JSON.parse(fs.readFileSync(verdictPath, 'utf8'));
         verdict.fixture_auth_cleanup = runtime.fixtureAuthCleanup;
+        verdict.daemon_cleanup = runtime.daemonCleanup;
+        if (cleanupError) { verdict.status = 'FAIL'; verdict.cleanup_error = String(cleanupError && cleanupError.message ? cleanupError.message : cleanupError); }
         if (!args.keep && (!runtime.fixtureAuthCleanup?.registry_removed || !runtime.fixtureAuthCleanup?.token_removed)) { verdict.status = 'FAIL'; verdict.cleanup_error = 'CLEANUP_FAIL'; }
         fs.writeFileSync(verdictPath, JSON.stringify(verdict, null, 2));
       }
     }
+    if (cleanupError) { console.error(`CLEANUP_FAIL: ${cleanupError.message || cleanupError}`); return 1; }
   }
+}
+
+function allocateReportDir(now = () => new Date(), root = path.join(__dirname, 'runs')) {
+  const stamp = now().toISOString().replace(/[:.]/g, '-');
+  fs.mkdirSync(root, { recursive: true });
+  return path.join(fs.mkdtempSync(path.join(root, `${stamp}-`)), 'web_gate');
 }
 
 if (require.main === module) {
   run(parseArgs(process.argv.slice(2))).then((code) => process.exit(code));
 }
 
-module.exports = { run, parseArgs, FIXTURE, startDaemon, writeProfile, freePort, onceExit };
+module.exports = { run, parseArgs, FIXTURE, startDaemon, writeProfile, freePort, onceExit, stopOwnedProcess, allocateReportDir };

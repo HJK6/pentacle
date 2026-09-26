@@ -13,6 +13,7 @@ const assetRender = require('./asset_render');
 const { showToast } = require('./toast');
 const { decideUseChatClose } = require('./delete_session_gate');
 const { configuredAssistantRole, isConfiguredAssistant, isCompositeAssistant } = require('./assistant_role');
+const { resolveAssistantDirectTarget } = require('./assistant_direct_entry');
 const { createClosedChatSlots } = require('./closed_chat_slots');
 const { applyVersionedConnectionState } = require('./chat_stream_connection_state');
 const { resolveMicUrl } = require('../main/mic-url');
@@ -896,7 +897,7 @@ if (typeof window !== 'undefined') window.focusStreamId = focusStreamId;
 // set of REAL handler wrappers + parameterized helpers the walks need but that
 // are non-deterministic / impossible to reach by a single DOM click. This object
 // is ABSENT in normal runs (the harness is inert), so production is unaffected.
-if (typeof window !== 'undefined' && window.PentacleHarness && window.PentacleHarness.armed) {
+if (typeof window !== 'undefined' && (window.PentacleHarness?.armed || CONFIG.features?.chatHarnessTelemetry === true)) {
   window.PentacleHarnessActions = {
     // Spawn a fresh THROWAWAY agent chat (default local = this machine), via the
     // REAL newSession path (chatSpawn -> attach -> chat view). Returns the
@@ -922,6 +923,18 @@ if (typeof window !== 'undefined' && window.PentacleHarness && window.PentacleHa
     forceReconnect: async () => {
       if (window.cc && typeof window.cc.forceReconnect === 'function') return await window.cc.forceReconnect();
       return { ok: false, error: 'no force-reconnect channel' };
+    },
+    // Feed already-transcribed disposable text through the real voice delivery
+    // path. The microphone/transcription transport is outside this web alias.
+    deliverVoiceText: async (slot, text) => {
+      const target = chatControlTargetForSlot(slot);
+      if (!target || target.error) return { ok: false, error: target?.error || 'No chat target' };
+      const capture = { slot, streamId: target.streamSession?.stream_id,
+        hostId: target.hostId, sessionName: target.sessionName,
+        direct: state.slots[slot]?.assistantDirect || null, delivered: false };
+      voiceState.unsentText = '';
+      await deliverVoiceCapture(capture, text);
+      return { ok: capture.delivered && !voiceState.unsentText, retained: voiceState.unsentText };
     },
   };
 }
@@ -1969,6 +1982,12 @@ function chatDraftStateForSession(session) {
 
 function chatSessionStateForSession(session) {
   if (!session) return null;
+  if (session.assistantDirect) {
+    const alias = session.assistantDirect;
+    const current = assistantDirectForEntry(alias.sourceId);
+    return current.enabled && !current.error && current.targetId === alias.targetId
+      && current.generation === alias.generation ? current.target : null;
+  }
   const host = streamHostForHostId(session.hostId);
   return chatUi.findStreamSessionForDesktopSession(state.chatStream, session, host);
 }
@@ -2013,16 +2032,50 @@ function sessionStateForNameHost(sessionName, hostId) {
 function canonicalChatSessionStateForNameHost(sessionName, hostId) {
   if (!sessionName) return null;
   const streamHost = streamHostForHostId(hostId);
-  return (state.chatStream.sessions || []).find((session) => {
+  const sessions = state.chatStream.sessions || [];
+  const strict = sessions.find((session) => {
     if (session?.host !== streamHost) return false;
     return [session.stream_id, session.session_name, session.session_id, session.name]
       .some((identifier) => identifier === sessionName);
-  }) || null;
+  });
+  if (strict) return strict;
+  // A composite assistant is advertised under its own stream host (for
+  // example bart:assistant) while the desktop sidebar assigns its pane to the
+  // local machine. Resolve only an unambiguous composite by stable daemon
+  // metadata; a normal session with the same display name is never eligible.
+  const composites = sessions.filter((session) => isCompositeAssistant(session)
+    && [session.stream_id, session.session_name, session.session_id, session.name].includes(sessionName));
+  return composites.length === 1 ? composites[0] : null;
 }
 
 function isProtectedAssistantNameHost(sessionName, hostId) {
   return isProtectedAssistantSession(canonicalChatSessionStateForNameHost(sessionName, hostId))
-    || isProtectedAssistantSession(sessionStateForNameHost(sessionName, hostId));
+    || isProtectedAssistantSession(sessionStateForNameHost(sessionName, hostId))
+    || state.sessions.some((entry) => entry.name === sessionName
+      && (entry.hostId || (IS_CLIENT ? 'remote' : 'local')) === hostId
+      && isProtectedAssistantSession(entry));
+}
+
+function syncSlotAssistantIcon(slot) {
+  const header = document.getElementById(`header-${slot}`);
+  if (!header) return;
+  const session = state.slots[slot];
+  const protectedAssistant = session && (session.assistantDirect || isCompositeSlot(slot)
+    || isProtectedAssistantNameHost(session.name, session.hostId)
+    || slotCopyIdStreamId(slot) === 'bart:assistant');
+  if (!protectedAssistant) {
+    header.querySelector('.cell-assistant-icon')?.remove();
+    return;
+  }
+  if (header.querySelector('.cell-assistant-icon')) return;
+  const icon = document.createElement('span');
+  icon.className = 'cell-assistant-icon color-forest-green';
+  const assistantName = session.displayName || 'Assistant';
+  const assistantLabel = `${assistantName} assistant`;
+  icon.title = assistantLabel;
+  icon.setAttribute('aria-label', assistantLabel);
+  icon.innerHTML = machineSigilMarkup(session.hostId, assistantName, 16, 'djinni');
+  header.querySelector('.cell-label')?.after(icon);
 }
 
 function isCompositeSlot(slot) {
@@ -2031,11 +2084,33 @@ function isCompositeSlot(slot) {
     || isCompositeAssistant(canonicalChatSessionStateForNameHost(session.name, session.hostId)));
 }
 
+function assistantDirectForEntry(streamId) {
+  return resolveAssistantDirectTarget(CONFIG.features, state.chatStream.sessions, streamId);
+}
+
+function assistantDirectForSlot(slot) {
+  const alias = state.slots[slot]?.assistantDirect;
+  if (!alias) return null;
+  const current = assistantDirectForEntry(alias.sourceId);
+  if (!current.enabled || current.error || current.targetId !== alias.targetId
+    || current.generation !== alias.generation) {
+    return { error: current.error || 'Direct assistant binding changed. Update the private binding.' };
+  }
+  return current;
+}
+
+function assertAssistantDirectSlot(slot) {
+  const current = assistantDirectForSlot(slot);
+  if (!current?.error) return true;
+  setSlotSendError(slot, current.error);
+  return false;
+}
+
 function syncSlotAssistantControls(slot) {
   const header = document.getElementById(`header-${slot}`);
   if (!header) return;
   const session = state.slots[slot];
-  const protectedAssistant = !!session && isProtectedAssistantNameHost(session.name, session.hostId);
+  const protectedAssistant = !!session && (session.assistantDirect || isProtectedAssistantNameHost(session.name, session.hostId));
   header.querySelectorAll('.cell-trash, .cell-edit').forEach((control) => {
     control.hidden = protectedAssistant;
     control.disabled = protectedAssistant;
@@ -2080,7 +2155,7 @@ const CHAT_ATTACHMENT_MIMES = new Set(['image/jpeg', 'image/png']);
 
 function chatAttachmentLimit() {
   const value = Number(window.PentacleChatCore?.MAX_CHAT_ATTACHMENTS);
-  return Number.isFinite(value) && value > 0 ? value : 5;
+  return Number.isFinite(value) && value > 0 ? Math.min(5, Math.floor(value)) : 5;
 }
 
 function slotAttachmentDrafts(slot) {
@@ -2118,9 +2193,11 @@ function readImageDimensions(previewUrl) {
 
 async function addSlotAttachmentFiles(slot, files) {
   const allFiles = Array.from(files || []);
+  if (!allFiles.length) return;
+  setSlotSendError(slot, '');
   const drafts = slotAttachmentDrafts(slot);
   const limit = chatAttachmentLimit();
-  const accepted = allFiles.filter((file) => file && CHAT_ATTACHMENT_MIMES.has(String(file.type || '')));
+  const accepted = allFiles.filter((file) => file && CHAT_ATTACHMENT_MIMES.has(String(file.type || '').toLowerCase()));
   if (accepted.length !== allFiles.length) {
     setSlotSendError(slot, 'Only JPEG and PNG image attachments are supported.');
   }
@@ -2129,24 +2206,68 @@ async function addSlotAttachmentFiles(slot, files) {
       setSlotSendError(slot, `At most ${limit} images can be attached.`);
       break;
     }
+    if (!file.size || file.size > 25 * 1024 * 1024) {
+      setSlotSendError(slot, file.size ? 'Each image must be 25 MiB or smaller.' : 'Empty images cannot be attached.');
+      continue;
+    }
     const previewUrl = URL.createObjectURL(file);
-    const [dataBase64, dims] = await Promise.all([
-      readFileAsDataBase64(file),
-      readImageDimensions(previewUrl),
-    ]);
-    drafts.push({
-      id: nextAttachmentDraftId(slot),
-      name: file.name || 'image',
-      mime: file.type,
-      bytes: file.size,
-      dataBase64,
-      previewUrl,
-      width: dims.width,
-      height: dims.height,
-    });
+    try {
+      const [dataBase64, dims] = await Promise.all([
+        readFileAsDataBase64(file),
+        readImageDimensions(previewUrl),
+      ]);
+      const padding = (dataBase64.match(/=+$/) || [''])[0].length;
+      const decodedBytes = Math.floor(dataBase64.length * 3 / 4) - padding;
+      if (!dims.width || !dims.height || decodedBytes !== file.size) {
+        throw new Error('This JPEG or PNG image could not be decoded.');
+      }
+      drafts.push({
+        id: nextAttachmentDraftId(slot),
+        name: file.name || 'image',
+        mime: file.type,
+        bytes: file.size,
+        dataBase64,
+        previewUrl,
+        width: dims.width,
+        height: dims.height,
+      });
+    } catch (error) {
+      URL.revokeObjectURL(previewUrl);
+      setSlotSendError(slot, error?.message || 'This image could not be read.');
+    }
   }
   renderSlotAttachmentTray(slot);
   updateSendControls(slot);
+}
+
+async function addSlotScreenshot(slot) {
+  const capture = window.navigator?.mediaDevices?.getDisplayMedia;
+  if (typeof capture !== 'function') throw new Error('Screen capture is unavailable in this browser.');
+  let stream;
+  const video = document.createElement('video');
+  try {
+    stream = await capture.call(window.navigator.mediaDevices, { video: true, audio: false });
+    video.srcObject = stream;
+    await video.play();
+    if (!video.videoWidth || !video.videoHeight) {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Screen capture did not produce an image.')), 10000);
+        video.addEventListener('loadedmetadata', () => { clearTimeout(timer); resolve(); }, { once: true });
+      });
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('Screen capture failed.')), 'image/png'));
+    await addSlotAttachmentFiles(slot, [new File([blob], `screenshot-${Date.now()}.png`, { type: 'image/png' })]);
+  } catch (error) {
+    // The browser chooser's Cancel is an ordinary no-op; it leaves the draft.
+    if (error?.name !== 'NotAllowedError' && error?.name !== 'AbortError') throw error;
+  } finally {
+    stream?.getTracks?.().forEach(track => track.stop());
+    video.srcObject = null;
+  }
 }
 
 function removeSlotAttachment(slot, id) {
@@ -2180,6 +2301,14 @@ function renderSlotAttachmentTray(slot) {
     const img = document.createElement('img');
     img.src = item.previewUrl;
     img.alt = item.name || 'Attached image';
+    const meta = document.createElement('span');
+    meta.className = 'slot-chat-attachment-meta';
+    const name = document.createElement('b');
+    name.textContent = item.name || 'image';
+    const details = document.createElement('small');
+    details.textContent = `${item.mime === 'image/png' ? 'PNG' : 'JPEG'} · ${item.bytes < 1024 * 1024 ? `${Math.ceil(item.bytes / 1024)} KB` : `${(item.bytes / 1024 / 1024).toFixed(1)} MB`}`;
+    meta.appendChild(name);
+    meta.appendChild(details);
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'slot-chat-attachment-remove';
@@ -2187,6 +2316,7 @@ function renderSlotAttachmentTray(slot) {
     remove.title = 'Remove attachment';
     remove.textContent = '×';
     card.appendChild(img);
+    card.appendChild(meta);
     card.appendChild(remove);
     refs.attachmentTrayEl.appendChild(card);
   }
@@ -2370,6 +2500,8 @@ function ensureSlotChatSurface(slot) {
 
 	  const composeEl = document.createElement('div');
 	  composeEl.className = 'slot-chat-compose';
+	  const dockEl = document.createElement('div');
+	  dockEl.className = 'slot-chat-dock';
 
   const statusEl = document.createElement('div');
   statusEl.className = 'slot-chat-status';
@@ -2378,6 +2510,7 @@ function ensureSlotChatSurface(slot) {
 	  inputEl.className = 'slot-chat-compose-input';
   inputEl.rows = 1;
   inputEl.placeholder = '';
+  inputEl.setAttribute('aria-label', 'Message');
   inputEl.dataset.slot = String(slot);
 
 	  const attachmentTrayEl = document.createElement('div');
@@ -2395,18 +2528,42 @@ function ensureSlotChatSurface(slot) {
 	  attachEl.type = 'button';
 	  attachEl.className = 'slot-chat-attach';
 	  attachEl.dataset.slot = String(slot);
-	  attachEl.title = 'Attach image';
+	  attachEl.title = 'Add image';
+	  attachEl.setAttribute('aria-label', 'Add image');
+	  attachEl.setAttribute('aria-expanded', 'false');
 	  attachEl.innerHTML = '<span aria-hidden="true">＋</span>';
+	  const plusWrapEl = document.createElement('div');
+	  plusWrapEl.className = 'slot-chat-plus-wrap';
+	  const menuEl = document.createElement('div');
+	  menuEl.className = 'slot-chat-plus-menu';
+	  menuEl.hidden = true;
+	  menuEl.innerHTML = '<button type="button" data-chat-image-action="upload">Upload images</button><button type="button" data-chat-image-action="photos">Photos</button><button type="button" data-chat-image-action="screenshot">Take screenshot</button><p>JPEG or PNG · up to 5 images · 25 MiB each</p>';
+	  if (typeof window.navigator?.mediaDevices?.getDisplayMedia !== 'function') {
+	    const screenshotAction = menuEl.querySelector('[data-chat-image-action="screenshot"]');
+	    screenshotAction.disabled = true;
+	    screenshotAction.title = 'Screen capture is unavailable in this browser';
+	  }
+	  plusWrapEl.appendChild(attachEl);
+	  plusWrapEl.appendChild(menuEl);
+	  const micEl = document.createElement('button');
+	  micEl.type = 'button';
+	  micEl.className = 'slot-chat-compose-mic';
+	  micEl.setAttribute('aria-label', 'Microphone controls');
+	  micEl.title = 'Microphone controls';
+	  micEl.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-4 0h8"/></svg>';
 
 	  const sendEl = document.createElement('button');
   sendEl.className = 'slot-chat-compose-send';
   sendEl.dataset.slot = String(slot);
-  sendEl.title = 'Send';
-  sendEl.innerHTML = '<span aria-hidden="true">↑</span>';
+	  sendEl.title = 'Send';
+	  sendEl.setAttribute('aria-label', 'Send message');
+	  sendEl.innerHTML = '<span aria-hidden="true">↑</span>';
 
 	  composeEl.appendChild(fileInputEl);
-	  composeEl.appendChild(attachEl);
+	  composeEl.appendChild(attachmentTrayEl);
 	  composeEl.appendChild(inputEl);
+	  composeEl.appendChild(plusWrapEl);
+	  composeEl.appendChild(micEl);
 	  composeEl.appendChild(sendEl);
 	  chatShell.appendChild(scrollEl);
 
@@ -2425,13 +2582,13 @@ function ensureSlotChatSurface(slot) {
   // full transcript re-render).
   scrollEl.addEventListener('scroll', () => onSlotChatScroll(slot), { passive: true });
 
-	  chatShell.appendChild(statusEl);
-	  chatShell.appendChild(draftPreviewEl);
-	  chatShell.appendChild(errorEl);
 	  chatShell.appendChild(questionEl);
-	  chatShell.appendChild(attachmentTrayEl);
-	  chatShell.appendChild(replyEl);
-	  chatShell.appendChild(composeEl);
+	  dockEl.appendChild(statusEl);
+	  dockEl.appendChild(draftPreviewEl);
+	  dockEl.appendChild(errorEl);
+	  dockEl.appendChild(replyEl);
+	  dockEl.appendChild(composeEl);
+	  chatShell.appendChild(dockEl);
 	  // Session Status card view — a toggle-pane that replaces the transcript/
 	  // composer when the header glyph is open (spec_pentacle__status_card_ui_desktop).
 	  const cardViewEl = document.createElement('div');
@@ -2456,15 +2613,21 @@ function ensureSlotChatSurface(slot) {
 
   const autoSize = () => {
     inputEl.style.height = '';
-    const h = Math.min(inputEl.scrollHeight, 120);
+    const h = Math.min(inputEl.scrollHeight, 220);
     inputEl.style.height = `${h}px`;
-    inputEl.style.overflowY = inputEl.scrollHeight > 120 ? 'auto' : 'hidden';
+    inputEl.style.overflowY = inputEl.scrollHeight > 220 ? 'auto' : 'hidden';
   };
 	  inputEl.addEventListener('input', () => {
 	    state.slotDrafts[slot] = inputEl.value;
 	    state.slotDraftTouched[slot] = true;
 	    autoSize();
 	    updateSendControls(slot);
+	  });
+	  inputEl.addEventListener('paste', (event) => {
+	    const files = Array.from(event.clipboardData?.files || []);
+	    if (!files.length) return;
+	    event.preventDefault();
+	    addSlotAttachmentFiles(slot, files).catch(error => setSlotSendError(slot, error?.message || 'Attachment failed.'));
 	  });
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -2481,7 +2644,21 @@ function ensureSlotChatSurface(slot) {
 	    if (!remove || !attachmentTrayEl.contains(remove)) return;
 	    removeSlotAttachment(slot, remove.dataset.attachmentId || '');
 	  });
-	  attachEl.addEventListener('click', () => fileInputEl.click());
+	  const closePlusMenu = () => { menuEl.hidden = true; attachEl.setAttribute('aria-expanded', 'false'); };
+	  attachEl.addEventListener('click', () => {
+	    menuEl.hidden = !menuEl.hidden;
+	    attachEl.setAttribute('aria-expanded', String(!menuEl.hidden));
+	  });
+	  menuEl.addEventListener('click', (event) => {
+	    const action = event.target?.closest?.('[data-chat-image-action]')?.dataset.chatImageAction;
+	    if (!action) return;
+	    closePlusMenu();
+	    if (action === 'screenshot') addSlotScreenshot(slot).catch(error => setSlotSendError(slot, error?.message || 'Screen capture failed.'));
+	    else fileInputEl.click();
+	  });
+	  document.addEventListener('pointerdown', (event) => { if (!plusWrapEl.contains(event.target)) closePlusMenu(); });
+	  plusWrapEl.addEventListener('keydown', (event) => { if (event.key === 'Escape') { closePlusMenu(); attachEl.focus(); } });
+	  micEl.addEventListener('click', () => document.getElementById('mic-btn-toggle')?.click());
 	  fileInputEl.addEventListener('change', () => {
 	    addSlotAttachmentFiles(slot, fileInputEl.files).catch((error) => {
 	      setSlotSendError(slot, error instanceof Error ? error.message : String(error || 'Attachment failed.'));
@@ -2489,23 +2666,34 @@ function ensureSlotChatSurface(slot) {
 	      fileInputEl.value = '';
 	    });
 	  });
-	  composeEl.addEventListener('dragover', (event) => {
+	  const dropEl = document.createElement('div');
+	  dropEl.className = 'slot-chat-drop-overlay';
+	  dropEl.innerHTML = '<span>Drop images to attach</span>';
+	  chatShell.appendChild(dropEl);
+	  let dragDepth = 0;
+	  chatShell.addEventListener('dragenter', (event) => {
+	    if (!event.dataTransfer?.types?.includes?.('Files')) return;
+	    event.preventDefault(); dragDepth++; chatShell.classList.add('is-drag-over');
+	  });
+	  chatShell.addEventListener('dragover', (event) => { if (event.dataTransfer?.types?.includes?.('Files')) event.preventDefault(); });
+	  chatShell.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) chatShell.classList.remove('is-drag-over'); });
+	  chatShell.addEventListener('drop', (event) => {
 	    if (!event.dataTransfer?.files?.length) return;
-	    event.preventDefault();
-	    composeEl.classList.add('is-drag-over');
+	    event.preventDefault(); dragDepth = 0; chatShell.classList.remove('is-drag-over');
+	    addSlotAttachmentFiles(slot, event.dataTransfer.files).catch((error) => setSlotSendError(slot, error?.message || 'Attachment failed.'));
 	  });
-	  composeEl.addEventListener('dragleave', () => {
-	    composeEl.classList.remove('is-drag-over');
-	  });
-	  composeEl.addEventListener('drop', (event) => {
-	    if (!event.dataTransfer?.files?.length) return;
-	    event.preventDefault();
-	    composeEl.classList.remove('is-drag-over');
-	    addSlotAttachmentFiles(slot, event.dataTransfer.files).catch((error) => {
-	      setSlotSendError(slot, error instanceof Error ? error.message : String(error || 'Attachment failed.'));
-	    });
-	  });
-	  sendEl.addEventListener('click', () => sendChatComposer(slot));
+	  sendEl.addEventListener('click', () => sendEl.dataset.action === 'stop' ? cancelChatComposer(slot) : sendChatComposer(slot));
+	  if (typeof ResizeObserver === 'function') {
+	    new ResizeObserver(() => {
+	      chatShell.style.setProperty('--slot-chat-dock-height', `${Math.ceil(dockEl.getBoundingClientRect().height)}px`);
+	      if (state.slotReliability[slot]?.pinnedToBottom) scrollSlotChatToBottom({ scrollEl });
+	    }).observe(dockEl);
+	  }
+	  document.fonts?.ready?.then(() => {
+	    if (state.slotChatRefs[slot]?.chatShell === chatShell && state.slotReliability[slot]?.pinnedToBottom) {
+	      scrollSlotChatToBottom({ scrollEl });
+	    }
+	  }).catch(() => {});
 	  autoSize();
 
   shell.appendChild(terminalMount);
@@ -2514,7 +2702,7 @@ function ensureSlotChatSurface(slot) {
   shell.appendChild(statusMount);
   container.appendChild(shell);
 
-	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, inputEl, sendEl };
+	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, dockEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, micEl, menuEl, inputEl, sendEl };
   return state.slotChatRefs[slot];
 }
 
@@ -2536,7 +2724,19 @@ function updateSendControls(slot) {
   const pending = !!state.slotSendPending[slot];
   const target = chatControlTargetForSlot(slot);
   const refs = state.slotChatRefs[slot];
-  if (refs?.sendEl) refs.sendEl.disabled = pending || !target || !!target.error;
+  if (refs?.sendEl) {
+    const hasDraft = !!String(refs.inputEl?.value || state.slotDrafts[slot] || '').trim() || slotAttachmentDrafts(slot).length > 0;
+    const streamId = state.slotChatBoundStream[slot];
+    const phase = streamId && window.PentacleChatStore?.getTurnPhase?.(streamId);
+    const stop = !hasDraft && !isCompositeSlot(slot) && phase && phase !== 'idle';
+    refs.sendEl.dataset.action = stop ? 'stop' : 'send';
+    refs.sendEl.classList.toggle('is-stop', !!stop);
+    refs.sendEl.classList.toggle('is-idle', !stop && !hasDraft);
+    refs.sendEl.innerHTML = stop ? '<span aria-hidden="true">■</span>' : '<span aria-hidden="true">↑</span>';
+    refs.sendEl.title = stop ? 'Stop current turn' : 'Send';
+    refs.sendEl.setAttribute('aria-label', stop ? 'Stop current turn' : 'Send message');
+    refs.sendEl.disabled = pending || !target || !!target.error || (!hasDraft && !stop);
+  }
   if (refs?.inputEl) refs.inputEl.disabled = pending;
   if (refs?.attachEl) refs.attachEl.disabled = pending;
 }
@@ -2555,9 +2755,9 @@ function maybeRestoreReturnedToPromptDraft(slot, streamId) {
     if (refs?.inputEl) {
       refs.inputEl.value = draft.text;
       refs.inputEl.style.height = '';
-      const h = Math.min(refs.inputEl.scrollHeight, 120);
+      const h = Math.min(refs.inputEl.scrollHeight, 220);
       refs.inputEl.style.height = `${h}px`;
-      refs.inputEl.style.overflowY = refs.inputEl.scrollHeight > 120 ? 'auto' : 'hidden';
+      refs.inputEl.style.overflowY = refs.inputEl.scrollHeight > 220 ? 'auto' : 'hidden';
     }
     setSlotSendError(slot, '');
     state.returnedPromptDrafts[key] = 'restored';
@@ -2570,12 +2770,17 @@ function maybeRestoreReturnedToPromptDraft(slot, streamId) {
 function chatControlTargetForSlot(slot) {
   const session = state.slots[slot];
   if (!session || state.botSlots[slot]) return null;
+  const direct = assistantDirectForSlot(slot);
+  if (direct?.error) return { error: direct.error };
   if (!state.chatStream.connected) {
     return { error: 'Chat stream offline.' };
   }
   const streamSession = chatSessionStateForSession(session);
   if (!streamSession?.stream_id) {
     return { error: 'Waiting for websocket session detail.' };
+  }
+  if (direct && streamSession.stream_id !== direct.targetId) {
+    return { error: 'Direct assistant target changed. Update the private binding.' };
   }
   return {
     hostId: session.hostId || (IS_CLIENT ? 'remote' : 'local'),
@@ -2670,12 +2875,13 @@ function slotChatRowIds(slot) {
 function updateSlotJumpPill(slot, rel) {
   const refs = state.slotChatRefs[slot];
   if (!refs || !refs.jumpPillEl) return;
-  if (!rel || rel.pinnedToBottom) {
+  const distance = refs.scrollEl ? refs.scrollEl.scrollHeight - refs.scrollEl.clientHeight - refs.scrollEl.scrollTop : 0;
+  if (!rel || rel.pinnedToBottom || distance < 120) {
     refs.jumpPillEl.style.display = 'none';
     return;
   }
   const unread = rel.unreadCount || 0;
-  refs.jumpPillEl.textContent = unread > 0 ? `${unread} new message${unread === 1 ? '' : 's'} ↓` : '↓';
+  refs.jumpPillEl.innerHTML = `<span aria-hidden="true">↓</span>${unread > 0 ? `<span class="slot-chat-jump-count" aria-hidden="true">${Math.min(unread, 99)}${unread > 99 ? '+' : ''}</span>` : ''}`;
   refs.jumpPillEl.setAttribute('aria-label', unread > 0 ? `Jump to latest, ${unread} unread` : 'Jump to latest');
   refs.jumpPillEl.style.display = '';
 }
@@ -2703,6 +2909,8 @@ function onSlotChatScroll(slot) {
   } else if (rel.pinnedToBottom) {
     state.slotReliability[slot] = { ...rel, pinnedToBottom: false };
     updateSlotJumpPill(slot, state.slotReliability[slot]);
+  } else {
+    updateSlotJumpPill(slot, rel);
   }
 }
 
@@ -2732,7 +2940,7 @@ function applySlotChatListRender(slot, refs, render) {
   refs.listEl.dataset.streamId = render.paintedStreamId || '';
   refs.listEl.querySelectorAll('.slot-chat-reply-btn').forEach(button => {
     button.addEventListener('click', () => {
-      if (!isCompositeSlot(slot)) return;
+      if (!isCompositeSlot(slot) && !state.slots[slot]?.assistantDirect) return;
       const messageId = button.dataset.replyMessageId;
       const text = button.closest('article')?.querySelector('.slot-chat-user-bubble, .slot-chat-assistant-card')?.textContent || '';
       state.slotReplies[slot] = { reply_to_message_id: messageId, reply_to_question_id: button.dataset.replyQuestionId, preview: text.slice(0, 160) };
@@ -2925,6 +3133,10 @@ function renderSlotChat(slot) {
   const refs = state.slotChatRefs[slot];
   const session = state.slots[slot];
   if (!refs || !session || state.botSlots[slot]) return;
+  const direct = assistantDirectForSlot(slot);
+  if (direct?.error) setSlotSendError(slot, direct.error);
+  else if (direct && /Direct assistant (target|binding)/.test(state.slotSendErrors[slot] || '')) setSlotSendError(slot, '');
+  syncSlotAssistantIcon(slot);
 
   // Restore any Session Status overlay BEFORE this render recomputes body
   // visibility, so the normal render always works on clean state and never
@@ -3030,8 +3242,9 @@ function renderSlotChat(slot) {
   const prevStreamId = state.slotChatBoundStream[slot];
   const sessionChanged = prevSessionKey !== sessionKey;
   const resolvedStreamId = streamId;
-  const boundStreamId =
-    chatUi.findStrongStreamSessionForDesktopSession(state.chatStream, session, streamHost)?.stream_id || null;
+  const boundStreamId = session.assistantDirect
+    ? remoteSessionState?.stream_id || null
+    : chatUi.findStrongStreamSessionForDesktopSession(state.chatStream, session, streamHost)?.stream_id || null;
   // The leak: on a session change, a resolved stream identical to the stream
   // this slot last painted is the id-only fallback grabbing the OLD stream.
   // BUT only when it is NOT this session's OWN strong host+id match: two
@@ -3124,7 +3337,7 @@ function renderSlotChat(slot) {
   const renderedTranscript = (detail && window.PentacleChatView
     ? window.PentacleChatView.renderTranscriptTimelineHtml(detail, chrome, {
       showTurnDuration,
-      allowReplies: isCompositeSlot(slot),
+      allowReplies: isCompositeSlot(slot) || !!session.assistantDirect,
       resolvedQuestions: resolvedQuestionsForStream(streamId),
     })
     : '') || '';
@@ -3138,53 +3351,8 @@ function renderSlotChat(slot) {
     ? `${historyMessage ? `<div class="slot-chat-history-state" role="status">${historyMessage}${historyRetry}</div>` : ''}${renderedTranscript}`
     : `<div class="slot-chat-empty" role="status">${historyMessage || 'No messages yet.'}${historyRetry}</div>`;
 
-  // Cosmic theme (workstream D): arcane header ornaments for the ACTIVE machine —
-  // the ArcaneRingFrame-wrapped MachineSigil, the Cinzel epithet, and the
-  // provider + working/idle status tags. Styling-only: degrades to the plain hero
-  // when the cosmic bundle is absent.
-  // Optional decorative metadata is keyed by sigil name, independently of host identity.
-  let cosmicSigilHtml = '';
-  let cosmicEpithetHtml = '';
-  let cosmicTagsHtml = '';
-  const cosmic = window.PentacleCosmic;
-  const sigil = hostPresentation.hostSigil(CONFIG, _streamHostToHostId(session.hostId) || session.hostId, HOST_IDS);
-  const machineMeta = cosmic && cosmic.MACHINES ? cosmic.MACHINES[sigil] : null;
-  if (cosmic && machineMeta) {
-    try {
-      cosmicSigilHtml = cosmic.arcaneRingFrame({ machine: sigil, size: 44, sigilSize: 27 }).outerHTML;
-      cosmicEpithetHtml = `<span class="slot-chat-session-epithet cosmic-myth">${esc(machineMeta.epithet)}</span>`;
-      const providerName = providerForSession(session.name, session.hostId);
-      const tagsWrap = document.createElement('div');
-      tagsWrap.className = 'slot-chat-session-tags';
-      if (providerName === 'codex' || providerName === 'claude') {
-        tagsWrap.appendChild(cosmic.providerTag(providerName, { color: machineMeta.accent }));
-      }
-      tagsWrap.appendChild(cosmic.statusTag(activity, { color: machineMeta.accent }));
-      cosmicTagsHtml = tagsWrap.outerHTML;
-    } catch (_) {
-      // styling only — never block the transcript on a theme error
-      cosmicSigilHtml = '';
-      cosmicEpithetHtml = '';
-      cosmicTagsHtml = '';
-    }
-  }
-
   const listHtml = detail
-    ? `
-      <div class="slot-chat-session-hero${cosmicSigilHtml ? ' is-cosmic' : ''}" style="--machine:${esc(chrome.accent)};--machine-surface:${esc(chrome.surface)};--machine-border:${esc(chrome.border)};">
-        <div class="slot-chat-session-band"></div>
-        ${cosmicSigilHtml ? `<div class="slot-chat-session-sigil">${cosmicSigilHtml}</div>` : ''}
-        <div class="slot-chat-session-head">
-          <div class="slot-chat-session-kicker">
-            <span class="slot-chat-session-machine cosmic-display">${esc(chrome.title)}</span>
-            ${cosmicEpithetHtml}
-            ${isCompositeSlot(slot) ? '' : `<span class="slot-chat-session-provider">${esc(providerLabelForHero(providerForSession(session.name, session.hostId)))}</span>`}
-          </div>
-          <div class="slot-chat-session-title cosmic-display">${esc(detail.title || session.displayName || session.name)}</div>
-          ${cosmicTagsHtml}
-        </div>
-      </div>
-      ${transcriptHtml}`
+    ? transcriptHtml
     : `<div class="slot-chat-empty">${state.chatStream.connected ? 'Loading chat…' : 'Reconnecting…'}</div>`;
 
   // Bug1 (chat_ui_hardening_batch3): tag the rendered list with the stream whose
@@ -3334,7 +3502,11 @@ function renderSlotChat(slot) {
       state.desktopQuestionOverlayOpen[streamId] = false;
       closeDesktopQuestionPortal(streamId, refs.questionEl);
       renderSlotChat(slot);
-      refs.questionEl.querySelector('.slot-chat-question-open')?.focus();
+      // Closing removes the focused portal button. Restore keyboard position
+      // after the launcher has been recreated by the chat render.
+      requestAnimationFrame(() => {
+        document.querySelector(`#cell-${slot} .slot-chat-question-open`)?.focus({ preventScroll: true });
+      });
     };
     if (!unsettled.length) {
       state.desktopQuestionOverlayOpen[streamId] = false;
@@ -3347,7 +3519,10 @@ function renderSlotChat(slot) {
       const open = document.createElement('button');
       open.type = 'button';
       open.className = 'slot-chat-question-open';
-      open.textContent = `${entries.filter(incomplete).length || unsettled.length} unanswered`;
+      const count = entries.filter(incomplete).length || unsettled.length;
+      open.setAttribute('aria-label', `${count} unanswered question${count === 1 ? '' : 's'}`);
+      open.setAttribute('aria-expanded', 'false');
+      open.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-2.9 2.4-2.9 4.5"/><circle cx="12" cy="18" r=".9" fill="currentColor" stroke="none"/></svg>${count > 1 ? `<span class="slot-chat-question-count" aria-hidden="true">${count}</span>` : ''}`;
       open.addEventListener('click', () => { state.desktopQuestionOverlayOpen[streamId] = true; renderSlotChat(slot); });
       refs.questionEl.appendChild(open);
     } else {
@@ -3395,11 +3570,13 @@ function renderSlotChat(slot) {
       const lock = entry => { state.answeredQuestionSig[entry.key] = entry.signature; entry.locked = true; };
       const needsReconcile = () => (state.questionUncertainIdsByStream?.[streamId]?.size || 0) > 0;
       const submit = async (_text, detail) => {
+        if (!assertAssistantDirectSlot(slot)) throw new Error('Direct assistant target is unavailable or changed.');
         if (state.questionSubmissionPending[streamId] || needsReconcile()) return;
         let resolvingNotificationId = '';
         state.questionSubmissionPending[streamId] = true;
         try {
           if (paneEntries.some(entry => !entry.locked)) {
+            if (!assertAssistantDirectSlot(slot)) throw new Error('Direct assistant target is unavailable or changed.');
             if (!question.question_key || !window.cc?.chatDismissQuestion) throw new Error('Question dismiss is unavailable.');
             const answers = detail.answers.slice(0, paneEntries.length).map(answer => answer.customText ? { ...answer, text: answer.customText } : answer);
             const text = window.PentacleChatCore.buildPentacleQuestionAnswerText({ question, answers });
@@ -3424,6 +3601,7 @@ function renderSlotChat(slot) {
             if (!options.custom_text && answer.note?.trim()) options.note = answer.note;
             const notificationId = durableQuestionNotificationId(entry.notification);
             if (!window.cc?.notificationResolve) throw new Error('Question answer is unavailable.');
+            if (!assertAssistantDirectSlot(slot)) throw new Error('Direct assistant target is unavailable or changed.');
             resolvingNotificationId = notificationId;
             const result = await window.cc.notificationResolve(notificationId, durableQuestionActionKind(entry.notification), options);
             if (!result?.ok) throw new Error(result?.error || 'Question answer failed.');
@@ -3502,13 +3680,13 @@ function renderSlotChat(slot) {
   if (refs.inputEl && refs.inputEl !== document.activeElement && refs.inputEl.value !== composerValue) {
     refs.inputEl.value = composerValue;
     refs.inputEl.style.height = '';
-    const h = Math.min(refs.inputEl.scrollHeight, 120);
+    const h = Math.min(refs.inputEl.scrollHeight, 220);
     refs.inputEl.style.height = `${h}px`;
-    refs.inputEl.style.overflowY = refs.inputEl.scrollHeight > 120 ? 'auto' : 'hidden';
+    refs.inputEl.style.overflowY = refs.inputEl.scrollHeight > 220 ? 'auto' : 'hidden';
   }
   refs.inputEl?.classList.toggle('is-remote-draft', !!remoteDraft && !state.slotDraftTouched[slot]);
   refs.inputEl?.classList.toggle('is-remote-pending', !!remotePending && !state.slotDraftTouched[slot]);
-  refs.inputEl?.setAttribute('placeholder', composerValue ? '' : 'Type a message');
+  refs.inputEl?.setAttribute('placeholder', '');
   renderSlotReply(slot);
 
   if (refs.scrollEl && shouldStick) scrollSlotChatToBottom(refs);
@@ -3753,6 +3931,7 @@ async function sendChatComposer(slot) {
       const sendGeneration = state.slotGen[slot];
       try {
         const attachments = pendingAttachments.length ? await uploadSlotAttachments(slot) : [];
+        if (!assertAssistantDirectSlot(slot)) return;
         const optimisticId = window.PentacleChatStore.sendTurn(streamId, text, attachments,
           reply ? { reply_to_message_id: reply.reply_to_message_id, reply_to_question_id: reply.reply_to_question_id } : undefined);
         if (optimisticId && state.slotGen[slot] === sendGeneration) {
@@ -3793,7 +3972,7 @@ async function sendChatComposer(slot) {
 function renderSlotReply(slot) {
   const el = state.slotChatRefs[slot]?.replyEl;
   if (!el) return;
-  const reply = isCompositeSlot(slot) ? state.slotReplies[slot] : null;
+  const reply = (isCompositeSlot(slot) || state.slots[slot]?.assistantDirect) ? state.slotReplies[slot] : null;
   el.hidden = !reply;
   el.replaceChildren();
   if (!reply) return;
@@ -3809,6 +3988,7 @@ function renderSlotReply(slot) {
 
 async function sendComposerQuestionAnswer(slot, streamId, text, inputEl, attachmentCount = 0) {
   if (isCompositeSlot(slot)) return false;
+  if (!assertAssistantDirectSlot(slot)) return true;
   if (!window.PentacleChatStore || typeof window.PentacleChatStore.getQuestion !== 'function') return false;
   const question = window.PentacleChatStore.getQuestion(streamId);
   if (!question || !question.question_key) return false;
@@ -3935,6 +4115,7 @@ function renderSlotStatus(slot, remoteSessionState) {
 function updateSlotViewMode(slot, mode) {
   if (!chatUiEnabled()) mode = 'terminal';
   if (isCompositeSlot(slot) && mode !== 'asset') mode = 'chat';
+  const previousMode = state.slotViewModes[slot];
   state.slotViewModes[slot] = mode;
   window.PentacleHarness?.emit?.('slot:viewmode', { slot, data: { mode } });
   const header = document.getElementById(`header-${slot}`);
@@ -3949,6 +4130,12 @@ function updateSlotViewMode(slot, mode) {
     });
   }
   if (chatUiEnabled()) renderSlotChat(slot);
+  if (mode === 'chat' && previousMode !== 'chat') {
+    requestAnimationFrame(() => {
+      if (state.slotViewModes[slot] !== 'chat' || document.querySelector('.desktop-question-portal')) return;
+      state.slotChatRefs[slot]?.inputEl?.focus({ preventScroll: true });
+    });
+  }
   ensureSlotAssetTabs(slot);
   if (mode === 'terminal') scheduleVisibleSlotFits();
 }
@@ -4085,9 +4272,9 @@ function getSourceInitial(source) {
 // host filter, in the host's configured accent (via currentColor so it tracks
 // the color-<accent> class and stays consistent with the yellow spec). Falls
 // back to the initial letter if the cosmic bundle is unavailable.
-function machineSigilMarkup(hostId, fallbackName = '', size = 15) {
+function machineSigilMarkup(hostId, fallbackName = '', size = 15, identityKind = '') {
   const cosmic = window.PentacleCosmic;
-  const kind = hostPresentation.hostSigil(CONFIG, hostId, HOST_IDS);
+  const kind = identityKind || hostPresentation.hostSigil(CONFIG, hostId, HOST_IDS);
   if (cosmic && kind && typeof cosmic.machineSigil === 'function') {
     try {
       const el = cosmic.machineSigil(kind, { size, color: 'currentColor' });
@@ -4107,6 +4294,7 @@ function syncSlotDisplayNames() {
   for (let i = 0; i < 4; i++) {
     const slot = state.slots[i];
     if (!slot || state.botSlots[i]) continue;
+    if (slot.assistantDirect) continue;
     const session = findSession(slot.name, slot.hostId);
     const displayName = session?.display_name || slot.displayName || slot.name;
     if (slot.displayName === displayName) continue;
@@ -4232,13 +4420,19 @@ function renderSidebar() {
   // the tier/order/primary-action decision; here we only assemble descriptors
   // (open-question and unread-report counts per stream + working state).
   const attentionRows = orderSidebarRows(active.map((s) => {
-    const streamId = sidebarStreamIdForSession(s);
+    const entryStreamId = sidebarStreamIdForSession(s);
+    const direct = isProtectedAssistantSession(s) ? assistantDirectForEntry(entryStreamId) : null;
+    const streamId = direct?.target ? direct.targetId : entryStreamId;
+    const summary = direct?.target || s;
     return {
-      session: s,
+      session: direct?.target ? { ...s, working: !!summary.working,
+        preview: summary.preview || summary.last_text || '', last_event_at: summary.last_event_at } : s,
       streamId,
+      entryStreamId,
+      direct,
       isPinned: isProtectedAssistantSession(s),
-      isWorking: !!s.working,
-      lastEventAt: s.last_event_at || null,
+      isWorking: !!summary.working,
+      lastEventAt: summary.last_event_at || null,
       openQuestionCount: streamId ? getOpenQuestionsForStream(streamId).length : 0,
       unreadReportCount: streamId ? unreadReportCountForStream(streamId) : 0,
     };
@@ -4255,7 +4449,9 @@ function renderSidebar() {
   function renderSessionItem(row) {
     const s = row.session;
     const hostId = s.hostId || (IS_CLIENT ? 'remote' : 'local');
-    const slotIdx = getSlotForSession(s.name, hostId);
+    const slotIdx = row.direct?.target
+      ? state.slots.findIndex(slot => slot?.assistantDirect?.sourceId === row.entryStreamId)
+      : getSlotForSession(s.name, hostId);
     const isActive = slotIdx >= 0;
     const activity = s.working ? 'working' : 'idle';
     const displayName = s.display_name || s.name;
@@ -4266,9 +4462,10 @@ function renderSidebar() {
       ? `<span class="activity-indicator working" aria-label="In progress"><span class="activity-spinner"></span></span>`
       : '';
     const machineName = getSourceForSession(s.name, hostId) || hostId;
-    const machineColor = getSourceColorForSession(s.name, hostId);
-    const machineAvatar = `<span class="s-machine-avatar color-${machineColor}" title="${esc(machineName)}" aria-label="${esc(machineName)}">${machineSigilMarkup(hostId, machineName)}</span>`;
-    const offlineLabel = offlineHostStatus(s);
+    const machineColor = protectedAssistant ? 'forest-green' : getSourceColorForSession(s.name, hostId);
+    const iconLabel = protectedAssistant ? `${displayName} assistant` : machineName;
+    const machineAvatar = `<span class="s-machine-avatar color-${machineColor}" title="${esc(iconLabel)}" aria-label="${esc(iconLabel)}">${machineSigilMarkup(hostId, iconLabel, 15, protectedAssistant ? 'djinni' : '')}</span>`;
+    const offlineLabel = row.direct?.error || offlineHostStatus(s);
     const offline = !!offlineLabel;
     const offlineBadge = offline
       ? `<span class="s-offline-badge" title="${esc(offlineLabel)}" aria-label="${esc(offlineLabel)}">Offline</span>`
@@ -4315,7 +4512,7 @@ function renderSidebar() {
                  data-host="${esc(hostId)}"
                  data-display="${esc(displayName)}"
                  data-primary-action="${esc(row.primaryAction || 'status')}"
-                 data-stream-id="${esc(row.streamId || '')}">
+                 data-stream-id="${esc(row.entryStreamId || row.streamId || '')}">
       <div class="s-top">
         ${machineAvatar}
         <span class="s-name">${esc(displayName)}</span>
@@ -4484,8 +4681,38 @@ function activateSidebarRow(el, defaultHostId) {
   const hostId = el.dataset.host || defaultHostId;
   const streamId = el.dataset.streamId || '';
   const action = el.dataset.primaryAction || 'status';
+  const direct = assistantDirectForEntry(streamId);
+  if (direct.enabled) {
+    if (direct.error) {
+      showToast(direct.error, { type: 'error' });
+      return;
+    }
+    const targetHostId = _streamHostToHostId(direct.host) || direct.host;
+    const slot = assignToSlot(direct.sessionName, display, targetHostId);
+    if (typeof slot !== 'number' || slot < 0 || !state.slots[slot]) return;
+    state.slots[slot].assistantDirect = {
+      sourceId: direct.sourceId, targetId: direct.targetId, generation: direct.generation,
+    };
+    state.slots[slot].displayName = display;
+    const label = document.querySelector(`#header-${slot} .cell-label`);
+    if (label) label.textContent = display;
+    syncSlotAssistantIcon(slot);
+    syncSlotAssistantControls(slot);
+    updateSlotViewMode(slot, 'chat');
+    renderSidebar();
+    return;
+  }
   const slot = assignToSlot(name, display, hostId);
   if (typeof slot !== 'number' || slot < 0) return;
+  if (state.slots[slot]?.assistantDirect) {
+    delete state.slots[slot].assistantDirect;
+    state.slots[slot].displayName = display;
+    const label = document.querySelector(`#header-${slot} .cell-label`);
+    if (label) label.textContent = display;
+    syncSlotAssistantIcon(slot);
+    syncSlotAssistantControls(slot);
+    renderSidebar();
+  }
   if (isCompositeSlot(slot)) {
     updateSlotViewMode(slot, 'chat');
     return;
@@ -4581,6 +4808,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
       label.after(tag);
     }
   }
+  syncSlotAssistantIcon(slot);
   updateSlotProviderTag(slot);
   syncSlotAssistantControls(slot);
   syncSlotCopyId(slot);
@@ -4788,6 +5016,7 @@ function detachSlot(slot) {
   const statusGlyph = header.querySelector('.cell-status');
   if (statusGlyph) { statusGlyph.style.display = 'none'; statusGlyph.classList.remove('is-open', 'has-attention'); statusGlyph.disabled = true; }
   header.querySelector('.cell-source-tag')?.remove();
+  header.querySelector('.cell-assistant-icon')?.remove();
   header.querySelector('.cell-provider-tag')?.remove();
   header.querySelector('.cell-pending-peer-badge')?.remove();
   const trashButton = header.querySelector('.cell-trash');
@@ -5424,8 +5653,8 @@ function renderNewSessionLocationOptions(container) {
   }
 
   container.innerHTML = options.map((opt) => (
-    `<button class="new-session-option new-session-machine color-${esc(opt.color)}" data-loc="${esc(opt.id)}" title="Select ${esc(opt.label)}">
-      <span class="new-session-option-mark">${esc(getSourceInitial(opt.label))}</span>
+    `<button class="new-session-option new-session-machine color-${esc(opt.color)}" data-loc="${esc(opt.id)}" title="Select ${esc(opt.label)}" aria-label="Select ${esc(opt.label)} machine">
+      <span class="new-session-option-mark" aria-hidden="true">${machineSigilMarkup(opt.id, opt.label, 25)}</span>
       <span class="new-session-option-label">${esc(opt.label)}</span>
       <span class="new-session-option-meta">Machine</span>
     </button>`
@@ -6595,6 +6824,11 @@ async function deliverVoiceCapture(capture, text) {
   if (!clean) return;
   let ok = false;
   try {
+    if (capture.direct && (!state.slots[capture.slot]?.assistantDirect
+      || state.slots[capture.slot].assistantDirect.targetId !== capture.direct.targetId
+      || !assertAssistantDirectSlot(capture.slot))) {
+      throw new Error('Direct assistant target is unavailable or changed.');
+    }
     if (capture.streamId && window.PentacleChatStore) {
       ok = await window.PentacleChatStore.sendTurn(capture.streamId, clean);
     } else {
@@ -6668,6 +6902,7 @@ async function toggleVoiceRecordInner(slot) {
   const capture = {
     slot, streamId: target.streamSession?.stream_id,
     hostId: target.hostId, sessionName: target.sessionName, delivered: false,
+    direct: state.slots?.[slot]?.assistantDirect || null,
   };
 
   // Mic must be in "on" mode — auto-enable if off

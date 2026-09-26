@@ -84,13 +84,10 @@ test('app.js puts .cosmic on the chat container only', () => {
   );
 });
 
-test('app.js builds the cosmic header (ring sigil + epithet + provider/status tags)', () => {
-  assert.match(appJs, /window\.PentacleCosmic/, 'reads the cosmic component global');
-  assert.match(appJs, /arcaneRingFrame\(/, 'header uses arcaneRingFrame');
-  assert.match(appJs, /slot-chat-session-epithet cosmic-myth/, 'epithet rendered in Cinzel (.cosmic-myth)');
-  assert.match(appJs, /providerTag\(/, 'header renders a provider tag');
-  assert.match(appJs, /statusTag\(/, 'header renders a status tag');
-  assert.match(appJs, /starfield\(/, 'subtle starfield mounted behind the transcript');
+test('chat v3 uses a floating dock without the redundant cosmic transcript hero', () => {
+  assert.match(appJs, /slot-chat-dock/, 'composer dock exists');
+  assert.doesNotMatch(appJs, /slot-chat-session-hero/, 'transcript hero was removed');
+  assert.doesNotMatch(appJs, /arcaneRingFrame\(/, 'old ring header was removed');
 });
 
 // ── 3. Scoped token layer + user bubble in JetBrains Mono ──────────────
@@ -169,22 +166,9 @@ test('MACHINES in the component lib is the single source of truth (cosmic_tokens
   assert.equal(MACHINES['mage'].epithet, 'the mage');
 });
 
-test('example hosts render real app header ornaments independently of their labels', () => {
-  const start = appJs.indexOf("  let cosmicSigilHtml = '';");
-  const end = appJs.indexOf('  const listHtml', start);
-  assert.ok(start > 0 && end > start);
-  const code = appJs.slice(start, end) + '\nresult = { cosmicSigilHtml, cosmicEpithetHtml, cosmicTagsHtml };';
-  const CONFIG = { chatStream: { hosts: ['local', 'workstation'] }, hostNames: { local: 'My desk' } };
-  for (const hostId of CONFIG.chatStream.hosts) {
-    const context: any = { CONFIG, HOST_IDS: CONFIG.chatStream.hosts, hostPresentation,
-      _streamHostToHostId: (id: string) => id,
-      session: { hostId, name: 'codex' }, chrome: { title: hostPresentation.hostLabel(CONFIG, hostId) },
-      window: { PentacleCosmic: { MACHINES, arcaneRingFrame, providerTag, statusTag } },
-      document: bootDom.window.document, esc: (s: string) => s, providerForSession: () => 'codex', activity: 'idle' };
-    vm.runInNewContext(code, context);
-    assert.match(context.result.cosmicSigilHtml, /viewBox="0 0 64 64"/);
-    assert.match(context.result.cosmicEpithetHtml, /cosmic-myth/);
-    assert.match(context.result.cosmicTagsHtml, /Codex/);
-    assert.match(context.result.cosmicTagsHtml, /Idle/);
-  }
+test('host glyph identity follows the configured colour even when labels change', () => {
+  const config = { chatStream: { hosts: ['local', 'workstation'] }, hostNames: { local: 'My desk', workstation: 'Other label' }, hostColors: { local: 'yellow', workstation: 'royal-blue' } };
+  assert.equal(hostPresentation.hostSigil(config, 'local'), 'ibis');
+  assert.equal(hostPresentation.hostSigil(config, 'workstation'), 'mage');
+  assert.match(appJs, /machineSigilMarkup\(opt\.id, opt\.label, 25\)/, 'New Chat uses the canonical host resolver');
 });

@@ -178,12 +178,16 @@ class ChatStreamClient {
     this._connect();
   }
 
-  snapshot() {
+  snapshot({ includeEvents = true } = {}) {
     return {
       connected: this.connected,
       error: this._connectionError,
       state_version: this._stateVersion,
-      events: this._events.slice(-500),
+      // The cache is bounded across *all* streams. It is not an authoritative
+      // transcript snapshot for a renderer: treating a nonempty partial ring as
+      // one makes the shared reducer discard a chat's fetched older events.
+      // Chat views fetch their own history with requestStreamEvents instead.
+      events: includeEvents ? this._events.slice(-500) : [],
       drafts: { ...this._drafts },
       sessions: this._sessions.slice(),
       capabilities: { ...this._capabilities },
@@ -503,7 +507,10 @@ try {
       const chunks = this._fetchBlobChunks.get(msg.request_id);
       if (chunks) {
         this._fetchBlobChunks.delete(msg.request_id);
-        if (!msg.content_b64) msg.content_b64 = chunks.chunks.join('');
+        // Each daemon frame is independently base64-encoded and may end in
+        // padding. Concatenating those strings makes atob stop at the first
+        // frame; join the decoded bytes, then encode the complete blob once.
+        if (!msg.content_b64) msg.content_b64 = Buffer.concat(chunks.chunks.map((part) => Buffer.from(part, 'base64'))).toString('base64');
         if (!msg.blob_sha && chunks.blob_sha) msg.blob_sha = chunks.blob_sha;
         if (!msg.size_bytes && Number.isFinite(chunks.size_bytes)) msg.size_bytes = chunks.size_bytes;
       }
@@ -621,18 +628,33 @@ try {
     );
   }
 
-  async uploadBlob({ data, sizeHintBytes, requestId } = {}) {
+  async uploadBlob({ data, sizeHintBytes, requestId, timeoutMs = 120000 } = {}) {
     const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data || []);
     const uploadRequestId = typeof requestId === 'string' && requestId ? requestId : this._requestId('upload');
     await this.sendCommand(
       { type: 'upload_blob_init', size_hint_bytes: Number.isFinite(Number(sizeHintBytes)) ? Number(sizeHintBytes) : buffer.length },
       'upload_blob.init',
-      { requestId: uploadRequestId },
+      { requestId: uploadRequestId, timeoutMs: Math.min(timeoutMs, 30000) },
     );
+    // The daemon accepts at most 1 MiB of decoded bytes per chunk and answers
+    // only the final one. Send nonfinal frames directly on the same socket;
+    // awaiting each as an RPC would hang forever. Register the final reply via
+    // sendCommand so disconnect or a lost final response remains a visible error.
+    const chunkBytes = 1024 * 1024;
+    const ws = this._ws;
+    for (let offset = 0; offset + chunkBytes < buffer.length; offset += chunkBytes) {
+      if (!this.connected || ws !== this._ws || ws?.readyState !== WebSocket.OPEN) {
+        throw new Error('Chat stream disconnected during image upload');
+      }
+      ws.send(JSON.stringify({
+        type: 'upload_blob_chunk', request_id: uploadRequestId,
+        data_b64: buffer.subarray(offset, offset + chunkBytes).toString('base64'), final: false,
+      }));
+    }
+    const finalOffset = buffer.length > 0 ? Math.floor((buffer.length - 1) / chunkBytes) * chunkBytes : 0;
     return this.sendCommand(
-      { type: 'upload_blob_chunk', data_b64: buffer.toString('base64'), final: true },
-      'upload_blob',
-      { requestId: uploadRequestId },
+      { type: 'upload_blob_chunk', data_b64: buffer.subarray(finalOffset).toString('base64'), final: true },
+      'upload_blob', { requestId: uploadRequestId, timeoutMs },
     );
   }
 

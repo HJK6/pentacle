@@ -28,11 +28,11 @@ import {
 const ids = (n: number, base = 0): string[] =>
   Array.from({ length: n }, (_, i) => `row-${base + i}`);
 
-test('initial state mounts exactly 16 rows, pinned, no unread', () => {
-  assert.equal(INITIAL_TRANSCRIPT_ROWS, 16);
+test('initial state mounts 120 rows, pinned, no unread', () => {
+  assert.equal(INITIAL_TRANSCRIPT_ROWS, 120);
   assert.equal(TRANSCRIPT_PAGE_ROWS, 48);
   const s = createSlotReliabilityState();
-  assert.equal(s.visibleCount, 16);
+  assert.equal(s.visibleCount, 120);
   assert.equal(s.pinnedToBottom, true);
   assert.equal(s.unreadCount, 0);
   assert.equal(s.lastSeenRowId, null);
@@ -40,16 +40,16 @@ test('initial state mounts exactly 16 rows, pinned, no unread', () => {
 
 test('earlier page adds at most 48 and terminates at history start', () => {
   const s = createSlotReliabilityState();
-  // 200 older rows held above the initial 16 window.
+  // 200 older rows held above the initial 120 window.
   assert.equal(hasEarlierHistory(200), true);
   assert.equal(earlierPageSize(200), 48);
   let vc = visibleCountForEarlierPage(s, 200);
-  assert.equal(vc, 16 + 48); // one full page
+  assert.equal(vc, 120 + 48); // one full page
 
   // A final short page: only 5 older rows remain.
   assert.equal(earlierPageSize(5), 5);
   vc = visibleCountForEarlierPage({ ...s, visibleCount: vc }, 5);
-  assert.equal(vc, 16 + 48 + 5);
+  assert.equal(vc, 120 + 48 + 5);
 
   // History start reached: nothing remains, affordance ends, window unchanged.
   assert.equal(hasEarlierHistory(0), false);
@@ -132,11 +132,11 @@ test('per-slot isolation: two states evolve independently', () => {
   const a = markCaughtUp(createSlotReliabilityState(), ids(20));
   const b = reconcileOnRender(createSlotReliabilityState(), ids(5), false);
   const aPaged = { ...a, visibleCount: visibleCountForEarlierPage(a, 100) };
-  assert.equal(aPaged.visibleCount, 64);
+  assert.equal(aPaged.visibleCount, 168);
   assert.equal(a.lastSeenRowId, 'row-19');
   assert.equal(a.pinnedToBottom, true); // a caught up
   // b is untouched by a's paging / seen watermark and evolved on its own inputs.
-  assert.equal(b.visibleCount, 16);
+  assert.equal(b.visibleCount, 120);
   assert.equal(b.lastSeenRowId, null); // null watermark held while unpinned
   assert.equal(b.pinnedToBottom, false); // b was reconciled unpinned
   assert.equal(b.unreadCount, 0); // null watermark ⇒ unattributable ⇒ 0

@@ -376,6 +376,8 @@ body {
 .machine-sigil { display: block; }
 .s-machine-avatar .machine-sigil,
 .source-filter-btn .machine-sigil { width: 15px; height: 15px; }
+.cell-assistant-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 20px; width: 20px; height: 20px; border: 1px solid var(--pc-line); border-radius: 6px; color: var(--host-sigil-green); }
+.cell-assistant-icon .machine-sigil { width: 16px; height: 16px; }
 
 /* Host glyph colours retain their hue with contrast on both theme palettes. */
 :root, [data-theme="dark"] {
@@ -4116,15 +4118,17 @@ body.chat-stream-degraded button[data-cleanup-action] {
   font-weight: 800;
 }
 
-.new-session-machine.color-red .new-session-option-mark { background: var(--bridge-red); }
-.new-session-machine.color-purple .new-session-option-mark { background: var(--purple); }
-.new-session-machine.color-yellow .new-session-option-mark { background: var(--yellow); }
-.new-session-machine.color-green .new-session-option-mark { background: var(--green); }
-.new-session-machine.color-blue .new-session-option-mark { background: var(--blue); }
-.new-session-machine.color-orange .new-session-option-mark { background: var(--bridge-orange); }
-.new-session-machine.color-royal-blue .new-session-option-mark { background: var(--bridge-royal-blue); }
-.new-session-machine.color-forest-green .new-session-option-mark { background: var(--bridge-forest-green); }
-.new-session-machine.color-deep-raspberry .new-session-option-mark { background: #b83280; }
+.new-session-machine .new-session-option-mark { background: transparent; border: 1px solid var(--pc-line); color: var(--host-glyph, var(--host-sigil-green)); }
+.new-session-machine .new-session-option-mark .machine-sigil { width: 25px; height: 25px; }
+.new-session-machine.color-red .new-session-option-mark { --host-glyph: var(--host-sigil-red); background: transparent; }
+.new-session-machine.color-purple .new-session-option-mark { --host-glyph: var(--host-sigil-mauve); background: transparent; }
+.new-session-machine.color-yellow .new-session-option-mark { --host-glyph: var(--host-sigil-yellow); background: transparent; }
+.new-session-machine.color-green .new-session-option-mark { --host-glyph: var(--host-sigil-green); background: transparent; }
+.new-session-machine.color-blue .new-session-option-mark { --host-glyph: var(--host-sigil-blue); background: transparent; }
+.new-session-machine.color-orange .new-session-option-mark { --host-glyph: var(--host-sigil-orange); background: transparent; }
+.new-session-machine.color-royal-blue .new-session-option-mark { --host-glyph: var(--host-sigil-blue); background: transparent; }
+.new-session-machine.color-forest-green .new-session-option-mark { --host-glyph: var(--host-sigil-green); background: transparent; }
+.new-session-machine.color-deep-raspberry .new-session-option-mark { --host-glyph: var(--host-sigil-raspberry); background: transparent; }
 
 .new-session-agent .new-session-option-mark {
   background: var(--blue);
@@ -4133,7 +4137,7 @@ body.chat-stream-degraded button[data-cleanup-action] {
 .new-session-option-label {
   font-size: 14px;
   font-weight: 800;
-  color: #fff;
+  color: var(--fg);
 }
 
 .new-session-option-meta {

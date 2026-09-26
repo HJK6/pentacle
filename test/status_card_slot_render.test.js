@@ -180,8 +180,8 @@ test('desktop mixed-provider chat labels follow each session canonical provider'
 
   assert.equal(dom.window.document.querySelector('#header-0 .cell-provider-tag').textContent, 'Codex');
   assert.equal(dom.window.document.querySelector('#header-1 .cell-provider-tag').textContent, 'Claude');
-  assert.equal(dom.window.document.querySelector('#cell-0 .slot-chat-session-provider').textContent, 'Codex');
-  assert.equal(dom.window.document.querySelector('#cell-1 .slot-chat-session-provider').textContent, 'Claude');
+  assert.equal(dom.window.document.querySelector('#cell-0 .slot-chat-session-hero'), null);
+  assert.equal(dom.window.document.querySelector('#cell-1 .slot-chat-session-hero'), null);
 });
 
 // ── Session Status card-view surface (public_behavior_spec) ──
@@ -426,4 +426,3 @@ test('attention affordance — one fixture per trigger + negatives', async () =>
   mountCardSlot(context, { status_card: { goal: 'g', updated_at: new Date().toISOString() }, context_tokens: 40000, model_context_window: 1000000, context_level: 'none' });
   assert.ok(enabled() && !attn(), 'benign -> enabled, no attention');
 });
-
