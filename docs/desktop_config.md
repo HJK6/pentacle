@@ -26,9 +26,9 @@ hover and selection keep the colour. Dark/light palettes adjust glyph luminance
 (including golden yellow on light surfaces) for at least 3:1 graphic contrast.
 Host names and accessible labels remain the identity, independent of colour.
 
-With `chatStream.hosts: ['local', 'workstation']`, the titlebar and filters show
-**Local / L** in forest green and **Workstation / W** in royal blue. No private
-host inventory is built into the renderer. Configure actual daemon identities
+With `chatStream.hosts: ['local', 'workstation']`, the sidebar and host filters
+identify both configured machines with their host labels and sigils; attached
+slots show the host label. No private host inventory is built into the renderer. Configure actual daemon identities
 and terminal transports when adding a host; a display label alone does not make
 a remote machine reachable.
 
