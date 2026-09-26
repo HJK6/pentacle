@@ -14,6 +14,12 @@ example values from behavior when a key is omitted.
 
 ## Hosts and identity
 
+Slot host labels and machine stats use the same theme-aware host colours as
+sidebar glyphs. Labels sit on a neutral dark chip or white light-theme chip for
+readable text; stats reuse the established machine sigils and accessible host
+names. The titlebar keeps Settings and update controls; host identity appears
+in the sidebar and slot labels.
+
 Sidebar avatars and host filters use the established sigil for each configured
 host colour. The symbol itself carries that colour on a neutral background;
 hover and selection keep the colour. Dark/light palettes adjust glyph luminance

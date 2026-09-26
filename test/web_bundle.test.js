@@ -80,7 +80,7 @@ test('web.html carries the config injection point and keeps the desktop markup',
   assert.ok(html.indexOf('<!--PENTACLE_CONFIG-->') < html.indexOf('<script src="bundle.js">'),
     'the config must be injected before the bundle runs');
   // The page is derived from index.html, so the app's DOM must survive verbatim.
-  for (const id of ['titlebar-text', 'settings-list', 'toast-container']) {
+  for (const id of ['settings-btn', 'web-refresh-btn', 'settings-list', 'toast-container']) {
     assert.ok(html.includes(`id="${id}"`), `web.html lost #${id} from index.html`);
   }
 });

@@ -95,43 +95,7 @@ body {
   padding: 0 16px;
 }
 
-.titlebar-left, .titlebar-right {
-  display: flex;
-  align-items: center;
-}
-.titlebar-left { padding-left: 65px; gap: 12px; }
-
-.titlebar-text {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--pc-accent);
-  letter-spacing: 0;
-}
-
-.titlebar-machines {
-  -webkit-app-region: no-drag;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.titlebar-machine {
-  width: 20px;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  border: 1px solid currentColor;
-  color: var(--pc-accent);
-  background: color-mix(in srgb, currentColor 22%, transparent);
-  font-size: 10px;
-  font-weight: 800;
-}
-.titlebar-machine.color-red { color: var(--bridge-red); }
-.titlebar-machine.color-royal-blue { color: var(--bridge-royal-blue); }
-.titlebar-machine.color-forest-green { color: var(--bridge-forest-green); }
-.titlebar-machine.color-orange { color: var(--bridge-orange); }
+.titlebar-right { display: flex; align-items: center; margin-left: auto; }
 
 /* ── Settings Button ──────────────────────────── */
 
@@ -415,6 +379,7 @@ body {
 
 /* Host glyph colours retain their hue with contrast on both theme palettes. */
 :root, [data-theme="dark"] {
+  --host-label-bg: var(--pc-chip-bg);
   --host-sigil-green: #48d36a;
   --host-sigil-red: #ff757b;
   --host-sigil-blue: #779cff;
@@ -425,6 +390,7 @@ body {
   --host-sigil-raspberry: #ef83be;
 }
 [data-theme="light"] {
+  --host-label-bg: #fff;
   --host-sigil-green: #20723b;
   --host-sigil-red: #bc2439;
   --host-sigil-blue: #2455c5;
@@ -434,17 +400,17 @@ body {
   --host-sigil-cyan: #235f9f;
   --host-sigil-raspberry: #982765;
 }
-:is(.s-machine-avatar, .source-filter-btn).color-green,
-:is(.s-machine-avatar, .source-filter-btn).color-forest-green { --host-glyph: var(--host-sigil-green); }
-:is(.s-machine-avatar, .source-filter-btn).color-red { --host-glyph: var(--host-sigil-red); }
-:is(.s-machine-avatar, .source-filter-btn).color-blue,
-:is(.s-machine-avatar, .source-filter-btn).color-royal-blue { --host-glyph: var(--host-sigil-blue); }
-:is(.s-machine-avatar, .source-filter-btn).color-purple,
-:is(.s-machine-avatar, .source-filter-btn).color-mauve { --host-glyph: var(--host-sigil-mauve); }
-:is(.s-machine-avatar, .source-filter-btn).color-orange { --host-glyph: var(--host-sigil-orange); }
-:is(.s-machine-avatar, .source-filter-btn).color-yellow { --host-glyph: var(--host-sigil-yellow); }
-:is(.s-machine-avatar, .source-filter-btn).color-cyan { --host-glyph: var(--host-sigil-cyan); }
-:is(.s-machine-avatar, .source-filter-btn).color-deep-raspberry { --host-glyph: var(--host-sigil-raspberry); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag, .machine-stat-mark).color-green,
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag, .machine-stat-mark).color-forest-green { --host-glyph: var(--host-sigil-green); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag, .machine-stat-mark).color-red { --host-glyph: var(--host-sigil-red); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag, .machine-stat-mark).color-blue,
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag, .machine-stat-mark).color-royal-blue { --host-glyph: var(--host-sigil-blue); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag, .machine-stat-mark).color-purple,
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag, .machine-stat-mark).color-mauve { --host-glyph: var(--host-sigil-mauve); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag, .machine-stat-mark).color-orange { --host-glyph: var(--host-sigil-orange); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag, .machine-stat-mark).color-yellow { --host-glyph: var(--host-sigil-yellow); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag, .machine-stat-mark).color-cyan { --host-glyph: var(--host-sigil-cyan); }
+:is(.s-machine-avatar, .source-filter-btn, .s-source-tag, .cell-source-tag, .machine-stat-mark).color-deep-raspberry { --host-glyph: var(--host-sigil-raspberry); }
 :is(.s-machine-avatar, .source-filter-btn)[class*="color-"] {
   color: var(--host-glyph, var(--host-sigil-green));
   background: transparent;
@@ -773,16 +739,6 @@ body.chat-stream-degraded button[data-cleanup-action] {
   font-size: 9px;
   font-weight: 800;
 }
-
-.machine-stat-card.color-red .machine-stat-mark { background: var(--bridge-red); }
-.machine-stat-card.color-purple .machine-stat-mark { background: var(--purple); }
-.machine-stat-card.color-yellow .machine-stat-mark { background: var(--yellow); }
-.machine-stat-card.color-green .machine-stat-mark { background: var(--green); }
-.machine-stat-card.color-blue .machine-stat-mark { background: var(--blue); }
-.machine-stat-card.color-orange .machine-stat-mark { background: var(--bridge-orange); }
-.machine-stat-card.color-royal-blue .machine-stat-mark { background: var(--bridge-royal-blue); }
-.machine-stat-card.color-forest-green .machine-stat-mark { background: var(--bridge-forest-green); }
-.machine-stat-card.color-deep-raspberry .machine-stat-mark { background: #b83280; }
 
 .machine-stat-name {
   flex: 1;
@@ -4487,15 +4443,13 @@ body.chat-stream-degraded button[data-cleanup-action] {
   letter-spacing: 0;
   flex-shrink: 0;
 }
-.s-source-tag.color-red,    .cell-source-tag.color-red    { color: #fff; background: var(--bridge-red); }
-.s-source-tag.color-purple, .cell-source-tag.color-purple { color: #fff; background: var(--purple); }
-.s-source-tag.color-yellow, .cell-source-tag.color-yellow { color: #fff; background: var(--yellow); }
-.s-source-tag.color-green,  .cell-source-tag.color-green  { color: #fff; background: var(--green); }
-.s-source-tag.color-blue,   .cell-source-tag.color-blue   { color: #fff; background: var(--blue); }
-.s-source-tag.color-orange, .cell-source-tag.color-orange { color: #fff; background: var(--bridge-orange); }
-.s-source-tag.color-royal-blue, .cell-source-tag.color-royal-blue { color: #fff; background: var(--bridge-royal-blue); }
-.s-source-tag.color-forest-green, .cell-source-tag.color-forest-green { color: #fff; background: var(--bridge-forest-green); }
-.s-source-tag.color-deep-raspberry, .cell-source-tag.color-deep-raspberry { color: #fff; background: #b83280; }
+/* Host labels and stats share the glyph palette; neutral fill preserves contrast. */
+:is(.s-source-tag, .cell-source-tag, .machine-stat-mark)[class*="color-"] {
+  color: var(--host-glyph, var(--host-sigil-green));
+  background: var(--host-label-bg);
+  border-color: var(--pc-line);
+}
+.machine-stat-mark .machine-sigil { width: 15px; height: 15px; }
 
 /* ── Session Summary in Sidebar ───────────────── */
 
@@ -5669,17 +5623,6 @@ body.chat-stream-degraded button[data-cleanup-action] {
   to   { opacity: 1; transform: translateY(0); }
 }
 
-/* Optional named colours share the host badge presentation. */
-.titlebar-machine.color-green { color: var(--green); }
-:is(.s-source-tag, .cell-source-tag).color-green { color: #fff; background: var(--green); border-color: var(--green); }
-.titlebar-machine.color-blue { color: var(--blue); }
-:is(.s-source-tag, .cell-source-tag).color-blue { color: #fff; background: var(--blue); border-color: var(--blue); }
-.titlebar-machine.color-purple { color: var(--purple); }
-:is(.s-source-tag, .cell-source-tag).color-purple { color: #fff; background: var(--purple); border-color: var(--purple); }
-.titlebar-machine.color-yellow { color: var(--yellow); }
-:is(.s-source-tag, .cell-source-tag).color-yellow { color: #fff; background: var(--yellow); border-color: var(--yellow); }
-.titlebar-machine.color-cyan { color: var(--cyan); }
-:is(.s-source-tag, .cell-source-tag).color-cyan { color: #fff; background: var(--cyan); border-color: var(--cyan); }
 #limits-health { padding: 6px 10px; color: var(--yellow); font-size: 11px; overflow-wrap: anywhere; }
 .slot-chat-reply-preview:not([hidden]) {
   display: flex;

@@ -4,13 +4,13 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../renderer/app.js'), 'utf8');
 
-test('async config preserves saved Chat opt-in and refreshes machine badges', async () => {
+test('async config preserves saved Chat opt-in and applies host roster', async () => {
   const context = { CONFIG: { features: { chatUi: true } }, window: { cc: { getConfig: async () => ({ features: { chatUi: false }, hostIds: ['workstation'] }) } },
-    SETTINGS_FLAGS: [{ key: 'chatUi' }], IS_CLIENT: false, HOST_IDS: ['local'], _perfRecord() {}, loadSettingsOverrides: () => ({ chatUi: true }), renderConfigWarnings() {}, renderTitlebarMachines() { context.badges = [...context.HOST_IDS]; } };
+    SETTINGS_FLAGS: [{ key: 'chatUi' }], IS_CLIENT: false, HOST_IDS: ['local'], _perfRecord() {}, loadSettingsOverrides: () => ({ chatUi: true }), renderConfigWarnings() {} };
   const start = source.indexOf('const CFG_READY =');
   await vm.runInNewContext(source.slice(start, source.indexOf('})();', start) + 5) + ';CFG_READY', context);
   assert.equal(context.CONFIG.features.chatUi, true);
-  assert.deepEqual(context.badges, ['workstation']);
+  assert.deepEqual(context.HOST_IDS, ['workstation']);
 });
 
 test('configured stream host mapping takes priority over legacy aliases', () => {
