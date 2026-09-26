@@ -731,7 +731,10 @@ try {
   // the actor from this connection's operator credential; the target
   // generation and grant revision are read back fresh and re-checked in the
   // daemon's mutation transaction.
-  async lifecycleAuthority({ action, targetStreamId, reason } = {}) {
+  async lifecycleAuthority({ action, targetStreamId, reason, challengeId } = {}) {
+    if (action === 'consent-status') {
+      return this.sendCommand({type: 'consent.status', challenge_id: String(challengeId || '')}, 'consent.status');
+    }
     const inspect = { type: 'assistant.lifecycle', action: 'inspect' };
     if (targetStreamId) inspect.target_stream_id = String(targetStreamId);
     const current = await this.sendCommand(inspect, 'assistant.lifecycle');

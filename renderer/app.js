@@ -5169,9 +5169,9 @@ async function changeLifecycleAuthority(action, name, hostId) {
     return;
   }
   const message = action === 'designate'
-    ? `Designate ${streamId} (generation ${target.session_generation}) as the fleet lifecycle manager? Current holder: ${holder}.`
-    : `Revoke fleet lifecycle authority from ${holder}?`;
-  const confirmed = await window.confirmDialog(message, { confirmLabel: action === 'designate' ? 'Designate' : 'Revoke' });
+    ? `Request phone approval to designate ${streamId} (generation ${target.session_generation})? Current holder: ${holder}.`
+    : `Request phone approval to revoke fleet lifecycle authority from ${holder}?`;
+  const confirmed = await window.confirmDialog(message, { confirmLabel: 'Request approval on phone' });
   if (!confirmed) return;
   const reason = action === 'designate' ? `operator designated ${streamId} via web` : `operator revoked ${holder} via web`;
   const result = await window.cc.chatLifecycleAuthority({ action, targetStreamId: streamId, reason });
@@ -5179,9 +5179,22 @@ async function changeLifecycleAuthority(action, name, hostId) {
     showToast(result?.error || 'Fleet lifecycle authority change failed', { type: 'error' });
     return;
   }
-  showToast(action === 'designate'
-    ? `Fleet lifecycle manager: ${result?.receipt?.holder_stream_id} (revision ${result?.receipt?.revision})`
-    : `Fleet lifecycle authority revoked (revision ${result?.receipt?.revision})`);
+  const challenge = result?.challenge;
+  if (!challenge || result?.code !== 'consent_pending') {
+    showToast('Phone approval is required; no authority was changed.', { type: 'error' });
+    return;
+  }
+  showToast('Pending approval on phone. Open Pentacle on the paired iPhone.');
+  while (Date.now() < Number(challenge.expires_at) * 1000 + 2000) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const status = await window.cc.chatLifecycleAuthority({action: 'consent-status', challengeId: challenge.challenge_id});
+    if (!status?.ok) { showToast('Approval status unavailable. Check the phone.', {type: 'error'}); return; }
+    const state = status?.challenge?.state;
+    if (state === 'pending') continue;
+    showToast(state === 'approved' ? 'Phone approval applied.' : `Phone approval ${state || 'ended'}.`);
+    return;
+  }
+  showToast('Phone approval expired. Request a new approval.');
 }
 
 // ── Actions ────────────────────────────────────────────────────

@@ -240,8 +240,8 @@ function webContextMenuItems(sessionName, displayName, hostId, emit) {
   items.push({ label: 'Rename', onSelect: () => emit('action', 'rename', sessionName, { displayName, hostId }) });
   items.push({ label: 'Delete', onSelect: () => emit('action', 'trash', sessionName, hostId) });
   items.push({ separator: true });
-  items.push({ label: 'Designate fleet lifecycle manager', onSelect: () => emit('action', 'lifecycle-designate', sessionName, hostId) });
-  items.push({ label: 'Revoke fleet lifecycle manager', onSelect: () => emit('action', 'lifecycle-revoke', sessionName, hostId) });
+  items.push({ label: 'Request manager approval on phone', onSelect: () => emit('action', 'lifecycle-designate', sessionName, hostId) });
+  items.push({ label: 'Request revocation approval on phone', onSelect: () => emit('action', 'lifecycle-revoke', sessionName, hostId) });
   return items;
 }
 

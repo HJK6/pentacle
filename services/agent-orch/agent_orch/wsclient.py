@@ -2697,6 +2697,25 @@ async def assistant_lifecycle_once(
         await ws.close()
 
 
+async def consent_once(config: Config, verb: str, fields: dict[str, Any], *,
+                       timeout: float = 30.0, from_stream_id: str | None = None,
+                       local_admin: bool = False) -> dict[str, Any]:
+    """Consent RPC; local ceremony deliberately carries no seat identity."""
+    ws = await _connect_rpc_ready(config, from_stream_id=from_stream_id,
+                                 infer_from_env=not local_admin, infer_identity_token=not local_admin)
+    request_id = str(fields.get("request_id") or f"consent-{uuid.uuid4()}")
+    try:
+        payload = {**fields, "type": verb, "request_id": request_id}
+        if from_stream_id and not local_admin:
+            payload["from_stream_id"] = from_stream_id
+            if _stream_token_from_env():
+                payload["stream_token"] = _stream_token_from_env()
+        await ws.send(json.dumps(payload, separators=(",", ":")))
+        return await _read_rpc_response(ws, request_id, prefix=verb, deadline=time.monotonic() + timeout)
+    finally:
+        await ws.close()
+
+
 async def grant_token_once(
     config: Config,
     stream_id: str,

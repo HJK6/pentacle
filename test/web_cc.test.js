@@ -470,8 +470,8 @@ test('the web context menu fires the same assign-slot / action events as the des
 test('the web context menu offers operator lifecycle designate and revoke actions', () => {
   const fired = [];
   const items = webContextMenuItems('sessY', 'Display Y', 'node-b', (event, ...args) => fired.push([event, ...args]));
-  items.find((i) => i.label === 'Designate fleet lifecycle manager').onSelect();
-  items.find((i) => i.label === 'Revoke fleet lifecycle manager').onSelect();
+  items.find((i) => i.label === 'Request manager approval on phone').onSelect();
+  items.find((i) => i.label === 'Request revocation approval on phone').onSelect();
   assert.deepEqual(fired, [
     ['action', 'lifecycle-designate', 'sessY', 'node-b'],
     ['action', 'lifecycle-revoke', 'sessY', 'node-b'],

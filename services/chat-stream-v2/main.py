@@ -33,6 +33,7 @@ from alerts import Alerts
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from assistant_router import AssistantRouterAdapter
 import launch
+import local_admin
 from assets import DEFAULT_ASSETS_DB, Assets
 from blobs import DEFAULT_BLOB_ROOT, BlobStore
 from comms import Comms
@@ -401,6 +402,8 @@ async def run(args: argparse.Namespace) -> int:
         notice_store=store,
     )
     server.notify = notify
+    notify.consent_snapshot = store.consent_notifications
+    spawnctl.consent_notify = notify
     server.handlers.update(notify.wire_handlers())
 
     # D3 (daemon_updates_2026_09): a producer's confirmed-dead close or
@@ -537,6 +540,7 @@ async def run(args: argparse.Namespace) -> int:
     server.inventory_ready.clear()
 
     # 1. BIND FIRST. Nothing above this line may block on I/O.
+    await asyncio.to_thread(local_admin.initialize)
     port = await server.bind()
     print(f"chat_streamd_v2 listening on {binds[0]}:{port}", flush=True)
     # Install the shutdown handler immediately after bind, BEFORE the blocking
@@ -619,6 +623,7 @@ async def run(args: argparse.Namespace) -> int:
     # 3. Background tasks start last, each under the loop rules
     #    (cadence, per-pass cap, backoff, kill switch).
     tasks: list[asyncio.Task] = []
+    tasks.append(asyncio.create_task(server.consent_expiry_loop(), name="consent-expiry"))
     tasks.append(asyncio.create_task(
         _run_machine_stats(server, args.local_host), name="machine-stats"))
     if not args.disable_window_schedule and window_schedule.schema_health == "ok":

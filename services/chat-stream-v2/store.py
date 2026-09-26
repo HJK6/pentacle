@@ -41,6 +41,7 @@ import store_exchange
 import store_usage
 import store_qa
 import store_lifecycle_authority as lifecycle_authority
+import store_consent as consent
 from store_qa import QaStoreMixin
 from store_exchange import ExchangeStoreMixin
 
@@ -1538,6 +1539,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN objective TEXT")
             store_qa.initialize(conn)
             lifecycle_authority.initialize(conn)
+            consent.initialize(conn)
             store_exchange.initialize(conn)
             if "objective_source" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN objective_source TEXT")
@@ -3364,6 +3366,76 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         return await self.submit(_op)
 
     # -- operator-designated lifecycle authority ---------------------------
+
+    async def consent_notifications(self) -> list[dict[str, Any]]:
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            cur = conn.execute("SELECT * FROM v2_consent_challenges WHERE state='pending'")
+            cols = [c[0] for c in cur.description]
+            return [consent.notification(consent.view(dict(zip(cols, row)))) for row in cur.fetchall()]
+        return await self.submit(_op)
+
+    async def consent_expire(self, registry: Any) -> list[dict[str, Any]]:
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            from _shared import operator_auth
+            # The sweeper is a server principal; nevertheless every transition
+            # takes the same registry snapshot and authority lock as a caller.
+            with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + ".lock")):
+                registry.load()
+                snapshot_at = time.time()
+            cur = conn.execute("SELECT * FROM v2_consent_challenges WHERE state='pending' AND expires_at<=?", (snapshot_at,))
+            cols = [c[0] for c in cur.description]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+            for row in rows:
+                conn.execute("UPDATE v2_consent_challenges SET state='expired' WHERE challenge_id=?", (row["challenge_id"],))
+                consent.audit(conn, "consent.expire", row["challenge_id"], {"kind": "server"}, snapshot_at, "expired")
+                row["state"] = "expired"
+            conn.commit()
+            return [consent.notification(consent.view(row)) for row in rows]
+        return await self.submit(_op)
+
+    async def consent_operation(self, verb: str, msg: dict[str, Any], auth: dict[str, Any],
+                                registry: Any, protected_role: str) -> dict[str, Any]:
+        """Caller holds authority_lock; registry snapshot and effects stay in worker.
+
+        Registry revocation linearizes at this locked snapshot, not at commit.
+        Refusals commit only their audit (and an admitted expiry), never a grant.
+        """
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            from _shared import operator_auth
+            snapshot_at = time.time()
+            try:
+                with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + ".lock")):
+                    credentials = dict(registry.load().credentials)
+                    snapshot_at = time.time()
+                if verb.startswith("consent_key."):
+                    result = consent.key_operation(conn, verb, msg, auth, credentials)
+                else:
+                    result = consent.transition(conn, verb, msg, auth, credentials, snapshot_at, protected_role)
+                consent.audit(conn, verb, msg.get("challenge_id"),
+                              {"identity": auth.get("operator_principal") or auth.get("stream_id")},
+                              snapshot_at, "applied")
+            except (consent.ConsentError, lifecycle_authority.AuthorityError) as exc:
+                consent.audit(conn, verb, msg.get("challenge_id"),
+                              {"identity": auth.get("operator_principal") or auth.get("stream_id")},
+                              snapshot_at, "refused", exc.code)
+                conn.commit()
+                raise
+            except operator_auth.OperatorRegistryUnavailable as exc:
+                conn.rollback()
+                consent.audit(conn, verb, msg.get("challenge_id"), {}, snapshot_at,
+                              "refused", "consent_registry_unavailable")
+                conn.commit()
+                raise consent.ConsentError("consent_registry_unavailable") from exc
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+            return result
+        return await self.submit(_op)
+
+    async def consent_approve_and_mutate(self, msg: dict[str, Any], auth: dict[str, Any],
+                                         registry: Any, protected_role: str) -> dict[str, Any]:
+        return await self.consent_operation("consent.approve", msg, auth, registry, protected_role)
 
     async def lifecycle_authority_mutate(
         self, msg: dict[str, Any], auth: dict[str, Any], protected_role: str,

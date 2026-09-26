@@ -48,6 +48,8 @@ except ImportError:  # pragma: no cover
 from _shared import operator_auth
 from comms import ATTACHMENT_MAX_BYTES, AttachmentValidationError, validate_send_attachments
 import store_lifecycle_authority as lifecycle_authority
+import store_consent as consent
+import local_admin
 from ledger import TERMINAL_REPORT_STATUSES, StatusCardError, _claim_wire_fields
 from seat_token_telemetry import (
     SeatTokenTelemetry,
@@ -461,6 +463,8 @@ class Server:
             "status_card": self._on_status_card,
             "spawn": self._on_spawn,
             "assistant.lifecycle": self._on_assistant_lifecycle,
+            **{f"consent.{verb}": self._on_consent for verb in ("request", "approve", "deny", "cancel", "status")},
+            **{f"consent_key.{verb}": self._on_consent for verb in ("enroll_code", "prepare", "enroll", "confirm", "revoke", "list")},
             **{f"coordination.spec_issue.{verb}": self._on_qa_issue for verb in ("adjudicate", "diagnose", "show")},
             "await_spawn": self._on_await_spawn,
             "spawn_cancel": self._on_spawn_cancel,
@@ -1138,6 +1142,10 @@ class Server:
             "service_authenticated": False,
             "service_actor": "",
             "service_attempted": False,
+            "peer_loopback": self._is_loopback_client(websocket),
+            "local_admin_verified": (isinstance(msg.get("local_admin_token"), str)
+                                     and self._is_loopback_client(websocket)
+                                     and await asyncio.to_thread(local_admin.verify, msg.get("local_admin_token"))),
         }
         bound_system_actor = self._client_system_producers.get(websocket)
         if bound_system_actor is not None:
@@ -1775,7 +1783,9 @@ class Server:
             "sessions": snapshot_sessions,
             "notifications": (await self.notify.snapshot_notifications(
                 summary=(events_mode == "summary"),
-            )) if self.notify else [],
+            ) if self.notify else []) + (
+                await self.store.consent_notifications() if self.store else []
+            ),
             "updates": [],
             "hosts": hosts,
             "working_states": {
@@ -2789,7 +2799,7 @@ class Server:
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         action = str(msg.get("action") or "")
         if action == "inspect":
-            if not (auth.get("operator_authenticated") or auth.get("token_verified")):
+            if not (auth.get("operator_authenticated") or auth.get("token_verified") or (auth.get("peer_loopback") and auth.get("local_admin_verified"))):
                 raise VerbError("authentication_required", "lifecycle inspect requires an authenticated caller")
             reply = {"type": "assistant.lifecycle.ok", "action": "inspect",
                      "grant": await self.store.lifecycle_authority_current(),
@@ -2801,13 +2811,55 @@ class Server:
             return reply
         if action not in lifecycle_authority.ACTIONS:
             raise VerbError("invalid_request", "action must be designate, transfer, revoke or inspect")
+        if action == "transfer":
+            raise VerbError("authority_transfer_disabled", "Use a phone-approved designation to change holders")
+        if msg.get("emergency"):
+            if action != "revoke" or not auth.get("peer_loopback") or not auth.get("local_admin_verified"):
+                raise VerbError("emergency_local_only", "Emergency revoke requires the local admin token on loopback")
+            try:
+                async with self.sessions.assistant.authority_lock:
+                    receipt = await _finish_despite_cancel(self.store.lifecycle_authority_mutate(
+                        msg, {**auth, "operator_authenticated": True,
+                              "operator_principal": "operator:local-admin", "token_verified": False,
+                              "_emergency_verified": True}, self.sessions.assistant.role))
+            except lifecycle_authority.AuthorityError as exc:
+                raise VerbError(exc.code, str(exc)) from exc
+            return {"type": "assistant.lifecycle.ok", "action": action, "receipt": receipt}
+        # Cached socket trust never authorizes a lifecycle effect.
+        result = await self._on_consent({**msg, "type": "consent.request", "action": f"lifecycle.{action}"})
+        return {**result, "type": "assistant.lifecycle.ok", "action": action}
+
+    async def _on_consent(self, msg: dict[str, Any]) -> dict[str, Any]:
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        verb = str(msg.get("type") or "")
+        async def finish() -> dict[str, Any]:
+            if verb == "consent.approve":
+                result = await self.store.consent_approve_and_mutate(
+                    msg, auth, self.operator_credential_registry, self.sessions.assistant.role)
+            else:
+                result = await self.store.consent_operation(
+                    verb, msg, auth, self.operator_credential_registry, self.sessions.assistant.role)
+            if result.get("challenge"):
+                await self.broadcast({"type": "notification", "notification": consent.notification(result["challenge"])})
+            return {"type": f"{verb}.ok", **result}
         try:
             async with self.sessions.assistant.authority_lock:
-                receipt = await self.store.lifecycle_authority_mutate(
-                    msg, auth, self.sessions.assistant.role)
-        except lifecycle_authority.AuthorityError as exc:
+                # Store submission is a completion boundary. Cancellation must
+                # not release authority_lock while its worker can still commit.
+                return await _finish_despite_cancel(finish())
+        except (consent.ConsentError, lifecycle_authority.AuthorityError) as exc:
             raise VerbError(exc.code, str(exc)) from exc
-        return {"type": "assistant.lifecycle.ok", "action": action, "receipt": receipt}
+
+    async def consent_expiry_loop(self) -> None:
+        while True:
+            await asyncio.sleep(1)
+            try:
+                async with self.sessions.assistant.authority_lock:
+                    expired = await _finish_despite_cancel(self.store.consent_expire(self.operator_credential_registry))
+                for record in expired:
+                    await self.broadcast({"type": "notification", "notification": record})
+            except Exception:
+                log.exception("consent expiry failed", extra={"subsystem": "consent", "bug_ref": "mobile_faceid_privileged_consent_2026_09"})
 
     @staticmethod
     def _log_close_unauthorized(auth: dict[str, Any]) -> None:

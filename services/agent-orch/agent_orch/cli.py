@@ -52,6 +52,7 @@ from .wsclient import (
     reconcile_status_once,
     reparent_once,
     assistant_lifecycle_once,
+    consent_once,
     report_once,
     rename_once,
     role_get_once,
@@ -3187,6 +3188,62 @@ def reconcile_status(args: argparse.Namespace) -> int:
     return 0 if response.get("type") == "reconcile.status.ok" else 1
 
 
+def _local_admin_token(config) -> str:
+    from urllib.parse import urlparse
+    import ipaddress
+    import stat
+    hostname = urlparse(config.ws_url).hostname or ""
+    if hostname != "localhost":
+        try:
+            if not ipaddress.ip_address(hostname).is_loopback:
+                raise ValueError("local admin commands require a loopback endpoint")
+        except ValueError:
+            raise ValueError("local admin commands require a loopback endpoint") from None
+    path = Path.home() / ".config/pentacle-stream/local-admin.token"
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd) as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
+            raise ValueError("unsafe local admin token file")
+        return source.read(256).strip()
+
+
+def consent_command(args: argparse.Namespace) -> int:
+    config = load_config()
+    command = args.consent_command
+    key_mode = args.consent_family == "consent-key"
+    verb = "consent_key." + command.replace("-", "_") if key_mode else "consent." + command
+    local = key_mode
+    caller = None if local else discover_leader_stream_id_short(config)
+    fields = {}
+    try:
+        if local:
+            fields["local_admin_token"] = _local_admin_token(config)
+        if key_mode and command in {"confirm", "revoke"}:
+            fields["fingerprint"] = args.fingerprint
+        elif not key_mode and command == "request":
+            inspected = asyncio.run(assistant_lifecycle_once(config,
+                {"action": "inspect", **({"target_stream_id": args.target} if args.target else {})},
+                timeout=args.timeout, from_stream_id=caller))
+            if inspected.get("type") != "assistant.lifecycle.ok":
+                _print_response(inspected)
+                return 1
+            fields.update(action="lifecycle." + args.action, reason=args.reason,
+                target_stream_id=args.target,
+                target_generation=args.target_generation or (inspected.get("target") or {}).get("session_generation"),
+                expected_revision=args.expected_revision if args.expected_revision is not None else inspected["grant"]["revision"])
+        elif not key_mode:
+            fields["challenge_id"] = args.challenge_id
+        response = asyncio.run(consent_once(config, verb, fields, timeout=args.timeout,
+                                             from_stream_id=caller, local_admin=local))
+    except Exception as exc:
+        # Transport exceptions must not render the outbound admin token.
+        print(f"agent-orch {args.consent_family}: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    _print_response(response)
+    return 0 if response.get("type") == verb + ".ok" else 1
+
+
 def lifecycle(args: argparse.Namespace) -> int:
     """Inspect, or (as the designated manager) transfer, fleet lifecycle authority.
 
@@ -3196,6 +3253,26 @@ def lifecycle(args: argparse.Namespace) -> int:
     config = load_config()
     caller = getattr(args, "from_stream_id", None) or discover_leader_stream_id_short(config)
     timeout = float(getattr(args, "timeout", 30.0) or 30.0)
+    if args.lifecycle_command == "revoke":
+        if not args.emergency:
+            print("Use agent-orch consent request revoke --reason …", file=sys.stderr)
+            return 1
+        try:
+            local_token = _local_admin_token(config)
+            inspected = asyncio.run(consent_once(config, "assistant.lifecycle", {"action": "inspect", "local_admin_token": local_token}, timeout=timeout, local_admin=True))
+            if inspected.get("type") != "assistant.lifecycle.ok":
+                _print_response(inspected)
+                return 1
+            response = asyncio.run(consent_once(config, "assistant.lifecycle", {
+                "action": "revoke", "emergency": True, "local_admin_token": local_token,
+                "expected_revision": inspected["grant"]["revision"], "reason": args.reason,
+                "caller_claims": {"os_user": str(os.getuid()), "pid": os.getpid(), "executable": sys.executable}},
+                timeout=timeout, local_admin=True))
+            _print_response(response)
+            return 0 if response.get("type") == "assistant.lifecycle.ok" else 1
+        except Exception as exc:
+            print(f"agent-orch lifecycle revoke: {type(exc).__name__}", file=sys.stderr)
+            return 1
 
     def call(fields: dict[str, object]) -> dict[str, object]:
         return asyncio.run(assistant_lifecycle_once(config, fields, timeout=timeout, from_stream_id=caller))
@@ -5277,6 +5354,24 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_status_parser.add_argument("--json", action="store_true")
     reconcile_status_parser.add_argument("--timeout", type=float, default=30.0)
     reconcile_status_parser.set_defaults(func=reconcile_status)
+    for family in ("consent", "consent-key"):
+        group = subparsers.add_parser(family)
+        commands = group.add_subparsers(dest="consent_command", required=True)
+        names = ("request", "status", "cancel", "deny") if family == "consent" else ("enroll-code", "list", "confirm", "revoke")
+        for name in names:
+            command = commands.add_parser(name)
+            command.add_argument("--timeout", type=float, default=30.0)
+            command.set_defaults(func=consent_command, consent_family=family)
+            if family == "consent" and name == "request":
+                command.add_argument("action", choices=("designate", "revoke"))
+                command.add_argument("--target")
+                command.add_argument("--target-generation")
+                command.add_argument("--expected-revision", type=int)
+                command.add_argument("--reason", required=True)
+            elif family == "consent":
+                command.add_argument("challenge_id")
+            elif name in {"confirm", "revoke"}:
+                command.add_argument("fingerprint")
     lifecycle_parser = subparsers.add_parser(
         "lifecycle",
         description="inspect or transfer operator-designated fleet lifecycle authority",
@@ -5290,7 +5385,10 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle_transfer.add_argument("--target-generation", help="exact recipient generation (default: fresh readback)")
     lifecycle_transfer.add_argument("--expected-revision", type=int, help="grant revision (default: fresh readback)")
     lifecycle_transfer.add_argument("--request-id", help="idempotency key; reuse it to retry the same transfer")
-    for sub in (lifecycle_inspect, lifecycle_transfer):
+    lifecycle_revoke = lifecycle_sub.add_parser("revoke", help="loopback emergency reduction of authority")
+    lifecycle_revoke.add_argument("--emergency", action="store_true", required=True)
+    lifecycle_revoke.add_argument("--reason", required=True)
+    for sub in (lifecycle_inspect, lifecycle_transfer, lifecycle_revoke):
         sub.add_argument("--from-stream-id", dest="from_stream_id", default=None)
         sub.add_argument("--timeout", type=float, default=30.0)
         sub.set_defaults(func=lifecycle)
