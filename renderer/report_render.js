@@ -38,24 +38,21 @@ const KIND_GLYPHS = {
 // session-scoped assets sharing an asset_id never share state. Metadata changes
 // (republish, review status) still re-render the whole asset — this store keeps
 // the reader place across those. Comment mutations instead update in place
-// via updateComments(), which redraws synchronously inside the mounted root so
-// scroll position and the surrounding DOM survive.
+// via updateComments(), which updates comment controls without replacing report
+// text nodes so a reader can keep a selection through live comment changes.
 const uiStore = new Map();
 
 function updateComments(key, comments) {
   const shared = uiStore.get(String(key == null ? '' : key));
   if (!shared) return false;
   shared.comments = Array.isArray(comments) ? comments : [];
-  // Redraw EVERY currently-mounted copy of this scoped report. A report-scoped
-  // report can be open in multiple slots at once (two sessions carrying the report), so a single render callback would leave every copy but the last
-  // stale. Each mount redraws from the shared comment data but its OWN composer
-  // state. Only DOM-connected roots are live: a mount torn down by a full
-  // re-render is detached, so it is pruned here and never counted or redrawn —
-  // and the caller falls back to a full render when nothing is mounted.
+  // Update EVERY connected copy of this scoped report. A report-scoped asset can
+  // be open in several slots, each with its own composer state. Detached mounts
+  // are pruned so callers can fall back to a full render when none remain.
   const live = (Array.isArray(shared.renderers) ? shared.renderers : [])
     .filter((entry) => entry.root && entry.root.isConnected);
   shared.renderers = live;
-  for (const entry of live) entry.draw();
+  for (const entry of live) entry.updateCommentChrome();
   return live.length > 0;
 }
 
@@ -373,7 +370,14 @@ function renderBlock(doc, block, section, context) {
   wrap.appendChild(pin);
 
   const body = renderBlockBody(doc, block, prefix, placeholders);
-  body.addEventListener('click', () => context.selectBlock(section, block, key));
+  body.addEventListener('click', () => {
+    const selection = doc.getSelection?.();
+    // A pointer drag ends in a click on the text. Opening the composer redraws
+    // the report and destroys the range before the reader can copy it.
+    if (selection && !selection.isCollapsed
+      && (body.contains(selection.anchorNode) || body.contains(selection.focusNode))) return;
+    context.selectBlock(section, block, key);
+  });
   wrap.appendChild(body);
   return wrap;
 }
@@ -791,19 +795,22 @@ function renderReport(doc, payload, options = {}) {
     },
   };
 
-  function draw() {
-    root_.innerHTML = '';
+  function reportContext() {
     const comments = Array.isArray(state.comments) ? state.comments : [];
     const anchorComments = commentsByAnchor(comments);
     const knownAnchors = new Set();
-    const placeholders = { count: 0 };
-    const context = {
+    for (const section of Array.isArray(report?.sections) ? report.sections : []) {
+      for (const block of Array.isArray(section.blocks) ? section.blocks : []) {
+        knownAnchors.add(commentKey(safeText(section.id), safeText(block?.id)));
+      }
+    }
+    return {
       prefix,
       report,
       comments,
       anchorComments,
       knownAnchors,
-      placeholders,
+      placeholders: { count: 0 },
       state,
       actions: safeActions,
       // Per-mount redraw + block selection: builders/handlers redraw THIS copy,
@@ -812,6 +819,31 @@ function renderReport(doc, payload, options = {}) {
       selectBlock,
       reviewStatus: options.reviewStatus || options.asset?.review_status || 'pending_review',
     };
+  }
+
+  function updateCommentChrome() {
+    const context = reportContext();
+    for (const block of root_.querySelectorAll(`.${prefix}-report-block`)) {
+      const comments = context.anchorComments.get(commentKey(block.dataset.sectionId, block.dataset.blockId)) || [];
+      const unresolved = comments.filter((comment) => !comment.resolved).length;
+      block.classList.toggle('has-unresolved-comments', unresolved > 0);
+      block.classList.toggle('has-comments', comments.length > 0);
+      const pin = block.querySelector(`.${prefix}-report-comment-pin`);
+      if (pin) {
+        pin.title = comments.length ? `${comments.length} comment${comments.length === 1 ? '' : 's'}` : 'Add comment';
+        pin.textContent = comments.length ? String(comments.length) : '+';
+      }
+    }
+    // The floating panel owns comment cards and composer controls; replacing it
+    // leaves every report body node (and its browser selection) connected.
+    const panel = root_.querySelector(`.${prefix}-report-panel`);
+    if (panel) panel.replaceWith(renderPanel(doc, context));
+  }
+
+  function draw() {
+    root_.innerHTML = '';
+    const context = reportContext();
+    const { knownAnchors } = context;
 
     if (parsed.parseError || !report || typeof report !== 'object') {
       const fallback = doc.createElement('div');
@@ -960,7 +992,7 @@ function renderReport(doc, payload, options = {}) {
   // synchronously, so a still-live sibling is connected before the next registers.
   shared.renderers = (Array.isArray(shared.renderers) ? shared.renderers : [])
     .filter((entry) => entry.root !== root_ && entry.root && entry.root.isConnected);
-  shared.renderers.push({ root: root_, draw });
+  shared.renderers.push({ root: root_, updateCommentChrome });
   draw();
   return root_;
 }
