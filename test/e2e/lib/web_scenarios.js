@@ -422,6 +422,11 @@ async function colouredHostGlyphs({ session, report }) {
   report.ok('host labels, stats glyphs and header controls remain readable and consistent',
     surfaces.filter(cell => cell.type !== 'stats').length === 45 && surfaces.every(cell => cell.pass),
     { subsystem: 'host-presentation', bug_ref: 'web_visual_consistency_2026_09', surfaces });
+  const { machineStatsLayout } = require('./machine_stats_layout');
+  const layout = await machineStatsLayout(session);
+  report.ok('machine stats use compact rows and wrap without clipping at narrow width',
+    layout.length === 2 && layout.every(cell => cell.pass),
+    { subsystem: 'machine-stats', bug_ref: 'web_machine_stats_cpu_compaction_2026_09', layout });
 }
 
 const SCENARIOS = [

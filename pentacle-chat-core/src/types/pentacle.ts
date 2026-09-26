@@ -137,6 +137,9 @@ export interface PentacleHostStatus {
 export interface PentacleMachineStats {
   host: string;
   cpu_load_1m: number;
+  // Additive wire-v1 field. Absent from legacy producers; null means the
+  // current producer could not measure CPU utilization.
+  cpu_usage_pct?: number | null;
   memory_used_bytes: number;
   memory_total_bytes: number;
   disk_used_bytes: number;

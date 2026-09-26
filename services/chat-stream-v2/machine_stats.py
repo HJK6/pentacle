@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
@@ -21,6 +22,8 @@ STATS_FIELDS = (
     "disk_total_bytes",
     "uptime_seconds",
 )
+
+CPU_USAGE_FIELD = "cpu_usage_pct"
 
 
 def _sysctl_int(name: str) -> int:
@@ -85,8 +88,62 @@ def _uptime_seconds() -> int:
     return max(0, int(time.clock_gettime(clock))) if clock is not None else 0
 
 
-def sample_machine_stats(host: str) -> dict[str, int | float | str]:
-    """Return the six footer facts for ``host`` without third-party probes."""
+def _linux_cpu_ticks() -> tuple[int, int] | None:
+    """Read system-wide total and idle ticks, excluding duplicated guest fields."""
+    try:
+        first = Path("/proc/stat").read_text().splitlines()[0].split()
+        if first[0] != "cpu" or len(first) < 5:
+            return None
+        ticks = [int(value) for value in first[1:9]]
+        return sum(ticks), ticks[3] + (ticks[4] if len(ticks) > 4 else 0)
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _darwin_cpu_usage_pct() -> float | None:
+    # The second top sample measures an interval; its first line may reflect
+    # counters since boot and is not the current utilization.
+    try:
+        output = subprocess.check_output(
+            ["top", "-l", "2", "-n", "0", "-s", "1"],
+            text=True,
+            timeout=5,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = [line for line in output.splitlines() if "CPU usage:" in line]
+    if len(lines) < 2:
+        return None
+    idle = re.search(r"(\d+(?:\.\d+)?)%\s+idle\b", lines[-1])
+    if idle is None:
+        return None
+    percent = 100.0 - float(idle.group(1))
+    return percent if math.isfinite(percent) and 0 <= percent <= 100 else None
+
+
+def _cpu_usage_pct() -> float | None:
+    system = platform.system()
+    if system == "Darwin":
+        return _darwin_cpu_usage_pct()
+    if system != "Linux":
+        return None
+    before = _linux_cpu_ticks()
+    if before is None:
+        return None
+    time.sleep(0.1)
+    after = _linux_cpu_ticks()
+    if after is None:
+        return None
+    total = after[0] - before[0]
+    idle = after[1] - before[1]
+    if total <= 0 or idle < 0 or idle > total:
+        return None
+    return 100.0 * (total - idle) / total
+
+
+def sample_machine_stats(host: str) -> dict[str, int | float | str | None]:
+    """Return host stats with an optional measured CPU utilization percent."""
     try:
         load = float(os.getloadavg()[0])
     except (AttributeError, OSError):
@@ -96,6 +153,7 @@ def sample_machine_stats(host: str) -> dict[str, int | float | str]:
     return {
         "host": str(host),
         "cpu_load_1m": load if math.isfinite(load) and load >= 0 else 0.0,
+        CPU_USAGE_FIELD: _cpu_usage_pct(),
         "memory_used_bytes": memory_used,
         "memory_total_bytes": memory_total,
         "disk_used_bytes": disk.used,
@@ -104,7 +162,7 @@ def sample_machine_stats(host: str) -> dict[str, int | float | str]:
     }
 
 
-def validate_machine_stats(stats: object, host: str) -> dict[str, int | float | str] | None:
+def validate_machine_stats(stats: object, host: str) -> dict[str, int | float | str | None] | None:
     if (
         not isinstance(host, str)
         or not host
@@ -114,7 +172,7 @@ def validate_machine_stats(stats: object, host: str) -> dict[str, int | float | 
         or stats["host"] != host
     ):
         return None
-    result: dict[str, int | float | str] = {"host": host}
+    result: dict[str, int | float | str | None] = {"host": host}
     for field in STATS_FIELDS:
         value = stats.get(field)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -128,4 +186,14 @@ def validate_machine_stats(stats: object, host: str) -> dict[str, int | float | 
         return None
     if result["disk_used_bytes"] > result["disk_total_bytes"]:
         return None
+    if CPU_USAGE_FIELD in stats:
+        cpu = stats[CPU_USAGE_FIELD]
+        if cpu is None:
+            result[CPU_USAGE_FIELD] = None
+        elif isinstance(cpu, bool) or not isinstance(cpu, (int, float)):
+            result[CPU_USAGE_FIELD] = None
+        elif not 0 <= cpu <= 100 or not math.isfinite(float(cpu)):
+            result[CPU_USAGE_FIELD] = None
+        else:
+            result[CPU_USAGE_FIELD] = float(cpu)
     return result

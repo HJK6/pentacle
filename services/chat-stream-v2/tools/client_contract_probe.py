@@ -480,6 +480,13 @@ def assert_hosts_stats_frame(frame: dict) -> list[str]:
             value = stats.get(field)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or value < 0:
                 problems.append(f"{host}: {field} is not numeric")
+        if "cpu_usage_pct" in stats:
+            cpu = stats["cpu_usage_pct"]
+            if cpu is not None and (
+                not isinstance(cpu, (int, float)) or isinstance(cpu, bool)
+                or not 0 <= cpu <= 100 or not math.isfinite(float(cpu))
+            ):
+                problems.append(f"{host}: cpu_usage_pct must be null or a 0-100 percent")
         memory_used = stats.get("memory_used_bytes")
         memory_total = stats.get("memory_total_bytes")
         disk_used = stats.get("disk_used_bytes")

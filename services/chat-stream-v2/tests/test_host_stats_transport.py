@@ -19,6 +19,7 @@ def _sample() -> dict:
     return {
         "host": "hostc",
         "cpu_load_1m": 0.5,
+        "cpu_usage_pct": 24.5,
         "memory_used_bytes": 100,
         "memory_total_bytes": 1000,
         "disk_used_bytes": 500,
