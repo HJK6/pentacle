@@ -1,38 +1,15 @@
-# Desktop configuration
+# Web host profiles
 
-Select a private JavaScript config with `PENTACLE_CONFIG=/absolute/path/desktop.config.js`.
-When set, this is the only path tried; a missing explicit file is an error.
-Otherwise the loader tries `pentacle.config.js` beside the app, then
-`pentacle.config.example.js`. Files under `configs/` are not discovered automatically.
+The supported desktop client is the browser/PWA served by Pentacle's web host.
+The Electron app is deprecated and receives no further upgrades, packaging or
+rollout. Configure the host with `node server --profile <name>`. The name resolves
+to `configs/<name>.local.js`, then `configs/<name>.js`; an argument containing a
+path separator or ending in `.js` is used verbatim. Keep private endpoints and
+topology in a gitignored `configs/<name>.local.js`; tracked examples stay
+share-safe. See the [web host guide](../server/README.md) for build, run and
+authentication details.
 
-Copy the bundled example before editing. Only missing `dark` and `terminal`
-objects are backfilled; other settings are not merged with the example.
-For a local connection, the supported fields include:
-
-```js
-module.exports = {
-  appName: 'Pentacle',
-  chatStream: {
-    url: 'ws://127.0.0.1:7791',
-    localHost: 'local',
-    hosts: ['local'],
-  },
-  features: { mic: false },
-};
-```
-
-Start the daemon separately and match its local identity to `localHost`.
-Restart the desktop after changing its config. Keep credentials and private
-endpoints outside version control. See [desktop configuration](../docs/desktop_config.md)
-for supported fields, routing, presentation, defaults, and warnings.
-
-## Web host profiles
-
-`server/` (web mode) loads a profile the same way the desktop does, selected with
-`node server --profile <name>`. The name resolves to `configs/<name>.local.js`,
-then `configs/<name>.js`; an argument containing a path separator or ending in
-`.js` is used verbatim. Keep private endpoints and topology in a gitignored
-`configs/<name>.local.js` (the tracked `<name>.js` stays share-safe).
+## Browser profile shape
 
 A web host uses two independent credentials, both server-side (`get-config` and
 `/api/config` strip `chatStream.token`/`tokenPath` from the browser):
@@ -44,11 +21,11 @@ A web host uses two independent credentials, both server-side (`get-config` and
   (`operator_auth_v2_private_path_required`), so a web host that talks to one must
   name it: a mode-0600 file in a mode-0700 directory, no symlink ancestors.
 
-A profile served to **browser clients** must use the public host shape, not the
-desktop-only `remote`/`peers` fields, or the renderer maps peer sessions to the
-wrong host:
+The web host resolves local terminals, the `remote` transport, top-level
+`hosts` entries, and SSH targets in `peers[]`. For a browser profile, keep the
+daemon host roster and the terminal transport mappings aligned:
 
-- `chatStream.hosts` — the desktop host roster (labels, colours, and the set the
+- `chatStream.hosts` — the host ID roster (labels, colours, and the set the
   renderer reverse-maps daemon sessions onto).
 - top-level `hosts` — `{ id: { host, user, port, tmux } }` SSH transports for the
   non-local roster ids.
@@ -56,8 +33,12 @@ wrong host:
   machine the web host runs on, so its local sessions attach locally while the
   others attach over SSH.
 
-Field-by-field host semantics are in [desktop configuration](../docs/desktop_config.md)
-§ Hosts; the web host's flags, wire protocol and security posture are in
+`remote` and `peers[]` remain supported terminal transport inputs. See the
+[web host guide](../server/README.md#websocket-protocol-cc) for resolution
+behavior and the [shared configuration reference](../docs/desktop_config.md) § Hosts for
+the shared client fields.
+
+The web host's flags, wire protocol and security posture are in
 [`server/README.md`](../server/README.md).
 
 ## Fleet release targets
@@ -67,3 +48,11 @@ installer's explicit `--host-config` argument. It is not a desktop config or
 a daemon machines file. Replace its SSH targets and absolute release roots
 with your own before running the installer; see
 [CLI deployment](../services/agent-orch/deploy/README.md).
+
+## Shared client settings
+
+Browser profiles use the shared client config fields documented in the
+[shared configuration reference](../docs/desktop_config.md), including host identity,
+terminal transport and optional features. That reference retains Electron
+history where needed; the supported setup and deployment path is the web host
+described above.

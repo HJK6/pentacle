@@ -61,12 +61,13 @@ agent-orch reconcile status --json
 
 Create one fixture session, send `hello from fixture`, observe the typed reply, and close it. Use generated request ids when scripting the flow.
 
-## 5. Run the desktop
+## 5. Run the web client
 
 Save this JavaScript module as `/tmp/pentacle-example/pentacle.config.js`.
-The desktop connects to the separately started daemon; session working
-directories and provider paths belong to the daemon configuration. See
-[desktop configuration](desktop_config.md) for the complete supported fields.
+The web host connects to the separately started daemon; session working
+directories and provider paths belong to the daemon configuration. See the
+[shared configuration reference](desktop_config.md) for client settings and
+the [web host guide](../server/README.md) for server flags and authentication.
 
 ```js
 module.exports = {
@@ -80,11 +81,25 @@ module.exports = {
 };
 ```
 
-Start with `PENTACLE_CONFIG=/tmp/pentacle-example/pentacle.config.js npm start`. The desktop should show the synthetic session and render a bounded fixture response. A credential file, if enabled by a local test, belongs outside the repository, is owner-readable only, and contains a placeholder or generated value rather than a committed secret.
+Build and serve the web client from the repository root:
+
+```sh
+npm run build:web
+PENTACLE_CONFIG=/tmp/pentacle-example/pentacle.config.js node server --bind 127.0.0.1 --port 7795
+```
+
+Open the printed URL in a browser. A browser that supports web-app installation
+can add Pentacle to its app launcher; the installed PWA uses the same served web
+client and daemon. The Electron desktop app is deprecated and receives no further
+upgrades, packaging or rollout. A credentialed daemon requires its explicit
+private `chatStream.tokenPath`; keep that file outside the repository and follow
+the [web host authentication guide](../server/README.md).
 
 ## 6. Test optional adapters
 
-Use `example.local` and `10.0.0.0` only in isolated adapter fixtures. Keep SSH, WSL, microphone, dashboard, and remote-daemon tests opt-in. Their failures should appear as typed degraded states without preventing the core local chat flow.
+Use `example.local` and `10.0.0.0` only in isolated adapter fixtures. Keep SSH,
+WSL, microphone, dashboard and remote-daemon integrations opt-in; see the
+[configuration reference](desktop_config.md) for supported feature flags.
 
 ## 7. Run validation
 

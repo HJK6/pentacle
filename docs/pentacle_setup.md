@@ -1,58 +1,58 @@
-# Pentacle desktop topology
+# Pentacle web client topology
 
-The desktop's WebSocket connection and terminal transport are configured
-separately. Start with [developer onboarding](developer_onboarding.md) for a
-local daemon with scratch stores, and [desktop configuration](desktop_config.md)
-for the complete supported configuration contract.
+The supported desktop experience is Pentacle's web client in a browser or
+installed as a PWA. The Electron app is deprecated; it receives no further
+upgrades, packaging or rollout. The web host serves the renderer and connects to
+the separately configured chat daemon, which owns agent processes and session
+working directories.
 
-## Local desktop
+## Local setup
 
-Save a private JavaScript module and select it with `PENTACLE_CONFIG`:
+Follow [developer onboarding](developer_onboarding.md) for a scratch daemon and
+web host. The root [local setup](../README.md#local-setup) is the complete
+developer walkthrough. The web host prints the local URL to open in a browser;
+for a shared HTTPS deployment, use the [web host guide](../server/README.md)
+and its authentication requirements.
 
-```js
-module.exports = {
-  appName: 'Pentacle',
-  chatStream: {
-    url: 'ws://127.0.0.1:7791',
-    localHost: 'local',
-    hosts: ['local'],
-  },
-};
-```
+## Host profiles and terminals
 
-The desktop connects to the daemon started separately. Set daemon bind addresses
-with `--bind`, identity with `--local-host`, and machine configuration with
-`PENTACLE_MACHINES_FILE` or `PENTACLE_MACHINES_JSON`. Match the desktop local
-identity to the daemon identity, or provide an explicit `chatStream.hostMap`.
-The daemon owns provider executables and session working directories.
+Choose a browser profile with `node server --profile <name>`. Keep private
+endpoints, host inventories and credentials in an untracked
+`configs/<name>.local.js`; keep tracked examples generic. The [profile guide](../configs/README.md)
+covers profile selection and shape, while [configuration reference](desktop_config.md)
+covers shared client settings.
 
-## Remote terminal transport
+The web host talks to the daemon over its configured WebSocket URL. The daemon
+creates sessions and runs providers; the web profile maps daemon host IDs to
+terminal transports. See
+[web host profiles](../configs/README.md#browser-profile-shape)
+and [daemon setup](../services/chat-stream-v2/README.md) before adding remote
+machines. A display label alone does not configure a terminal transport.
 
-A synthetic remote example adds the following keys to that module:
+## Web client controls
 
-```js
-hosts: { workstation: { host: 'example.local', user: 'example', port: 22, tmux: '/usr/bin/tmux' } },
-chatStream: {
-  url: 'ws://127.0.0.1:7791',
-  localHost: 'local',
-  hosts: ['local', 'workstation'],
-},
-```
+Machine sigils identify the host for each session. Each terminal slot has a
+Copy Chat ID control in its header. Provider usage appears in the sidebar when
+`features.usage` is enabled and the daemon limits collector supplies data. Once
+the host serves a build with update checking, each open browser window
+independently shows a refresh control beside Settings when that window's loaded
+build is older; refreshing updates that window.
 
-Configure the matching daemon machine separately. Public main attaches local
-terminal IDs through local tmux; other IDs need an entry in `hosts` or the
-legacy `remote` transport for the literal `remote` ID. Display labels do not
-configure transport. The retained `hosts.js` helper's `localWsl` and `peers`
-inputs do not configure public main's terminal path.
+The top and bottom terminal rows have independent column dividers, and each row
+keeps its preferred split on this browser origin; the [shared configuration
+reference](desktop_config.md) covers divider controls and persistence. In the
+experimental structured Chat view, durable question cards support typed
+free-text answers, including prompts without choices.
 
-Use remote examples only with an explicitly configured environment. Keep
-credentials and private topology outside the repository.
+The web client also supports microphone input and voice actions through a
+configured host-managed service. See [local voice action delivery](local_voice_actions.md)
+for the current behavior and setup.
 
 ## Verification
 
 | Symptom | First check |
 |---|---|
 | Sidebar is empty | Check the WebSocket URL and `agent-orch list`. |
-| Structured chat is unavailable | Enable `features.chatUi` and inspect the daemon health result. |
-| Terminal attach fails | Check the selected ID and test its tmux transport outside the UI. |
+| Experimental structured Chat is unavailable | Enable `features.chatUi` and inspect the daemon health result. |
+| Terminal attach fails | Check the selected host ID and its configured tmux transport. |
 | Local daemon exits | Run the daemon command directly and inspect its startup error. |
