@@ -3314,6 +3314,9 @@ def _merge_report_structured_flags(payload: dict[str, object], args: argparse.Na
     completion_kind = getattr(args, "completion_kind", None)
     qa_verdict = getattr(args, "qa_verdict", None)
     target_sha = getattr(args, "target_sha", None)
+    reviewed_scope = getattr(args, "qa_reviewed_scope", None)
+    gate_evidence_digest = getattr(args, "qa_gate_evidence_digest", None)
+    qa_review_requested = reviewed_scope is not None or gate_evidence_digest is not None
     attestation_stream_id = getattr(args, "qa_attestation_stream_id", None)
     attestation_report_id = getattr(args, "qa_attestation_report_id", None)
     violations: list[dict[str, object]] = []
@@ -3343,6 +3346,46 @@ def _merge_report_structured_flags(payload: dict[str, object], args: argparse.Na
             "code": "flag_payload_conflict",
             "detail": "--target-sha conflicts with target_sha in --result or --result-file",
         })
+    if qa_review_requested:
+        for value, flag in ((reviewed_scope, "--qa-reviewed-scope"),
+                            (gate_evidence_digest, "--qa-gate-evidence-digest"),
+                            (target_sha, "--target-sha")):
+            if value is None:
+                violations.append({
+                    "field": "qa_review", "code": "missing_field",
+                    "detail": f"QA review evidence requires {flag}",
+                })
+        if reviewed_scope is not None and not reviewed_scope.strip():
+            violations.append({
+                "field": "qa_review.reviewed_scope", "code": "invalid_value",
+                "detail": "--qa-reviewed-scope must be non-empty",
+            })
+        if gate_evidence_digest is not None and re.fullmatch(r"[a-f0-9]{64}", gate_evidence_digest) is None:
+            violations.append({
+                "field": "qa_review.gate_evidence_digest", "code": "invalid_value",
+                "detail": "--qa-gate-evidence-digest must be a lowercase 64-hex SHA-256",
+            })
+        if target_sha is not None and re.fullmatch(r"[a-fA-F0-9]{40}", target_sha) is None:
+            violations.append({
+                "field": "target_sha", "code": "invalid_value",
+                "detail": "--target-sha must be a full 40-hex git SHA",
+            })
+        extras = payload.get("extras")
+        if extras is not None and not isinstance(extras, dict):
+            violations.append({
+                "field": "extras", "code": "wrong_type",
+                "detail": "QA review evidence requires extras to be an object",
+            })
+        elif isinstance(extras, dict) and "qa_review" in extras:
+            violations.append({
+                "field": "extras.qa_review", "code": "flag_payload_conflict",
+                "detail": "QA review flags conflict with extras.qa_review in --result or --result-file",
+            })
+        if qa_verdict is None and payload.get("qa_verdict") is None:
+            violations.append({
+                "field": "qa_verdict", "code": "missing_field",
+                "detail": "QA review evidence requires an explicit --qa-verdict or payload qa_verdict",
+            })
     if attestation_stream_id is not None and "qa_attestation" in payload:
         violations.append({
             "field": "qa_attestation",
@@ -3357,6 +3400,15 @@ def _merge_report_structured_flags(payload: dict[str, object], args: argparse.Na
         payload["qa_verdict"] = qa_verdict
     if target_sha is not None:
         payload["target_sha"] = target_sha
+    if qa_review_requested:
+        payload["extras"] = {
+            **(payload.get("extras") or {}),
+            "qa_review": {
+                "candidate_identity": target_sha,
+                "reviewed_scope": reviewed_scope,
+                "gate_evidence_digest": gate_evidence_digest,
+            },
+        }
     if attestation_stream_id is not None:
         payload["qa_attestation"] = {
             "stream_id": attestation_stream_id,
@@ -3410,7 +3462,9 @@ def _report_payload_from_args(args: argparse.Namespace) -> tuple[dict[str, objec
                     "detail": "completion and attestation flags require inline --result",
                 }],
             )
-        if getattr(args, "qa_verdict", None) is not None or getattr(args, "target_sha", None) is not None:
+        if any(getattr(args, field, None) is not None for field in (
+            "qa_verdict", "target_sha", "qa_reviewed_scope", "qa_gate_evidence_digest",
+        )):
             validate_report_payload(payload, args.status, enforce_inline_caps=True)
             return payload, None
         validate_report_payload(payload, args.status, enforce_inline_caps=False)
@@ -4549,7 +4603,7 @@ def build_parser() -> argparse.ArgumentParser:
     spawn_parser.add_argument("--host")
     spawn_parser.add_argument("--qa-spec-id", type=_spec_id_arg)
     spawn_parser.add_argument("--qa-surface", help="Stable QA acceptance surface slug")
-    spawn_parser.add_argument("--qa-cycle", type=int, help="Expected current QA cycle (starts at 1)")
+    spawn_parser.add_argument("--qa-cycle", type=int, help="Current diagnosis epoch (starts at 1); same-scope repair reviews stay in this cycle, and only spec-issue diagnose advances it")
     spawn_parser.add_argument(
         "--cwd",
         metavar="ABS_PATH",
@@ -4775,7 +4829,7 @@ def build_parser() -> argparse.ArgumentParser:
     send_parser.add_argument("--timeout", type=float, default=30.0)
     send_parser.add_argument("--qa-spec-id", type=_spec_id_arg)
     send_parser.add_argument("--qa-surface", help="Stable QA acceptance surface slug")
-    send_parser.add_argument("--qa-cycle", type=int)
+    send_parser.add_argument("--qa-cycle", type=int, help="Current diagnosis epoch; same-scope repair stays in this cycle, and only spec-issue diagnose advances it")
     send_parser.add_argument("stream_id")
     send_parser.add_argument("msg_id", type=int)
     send_parser.add_argument("prompt_text")
@@ -5366,7 +5420,9 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--report-id")
     report_parser.add_argument("--completion-kind", choices=["implementation_ready", "tracked"])
     report_parser.add_argument("--qa-verdict", choices=["accept", "reject"])
-    report_parser.add_argument("--target-sha")
+    report_parser.add_argument("--target-sha", help="Full 40-hex reviewed candidate SHA; with QA review flags, copied exactly to extras.qa_review.candidate_identity")
+    report_parser.add_argument("--qa-reviewed-scope", help="Reviewer-supplied nonempty acceptance scope; requires --target-sha and --qa-gate-evidence-digest")
+    report_parser.add_argument("--qa-gate-evidence-digest", help="Reviewer-supplied lowercase 64-hex SHA-256 of gate/review evidence; requires --target-sha and --qa-reviewed-scope")
     report_parser.add_argument("--qa-attestation-stream-id")
     report_parser.add_argument("--qa-attestation-report-id")
     report_parser.add_argument("--from-stream-id", dest="from_stream_id")

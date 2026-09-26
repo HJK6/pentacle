@@ -5,6 +5,7 @@ import hashlib
 import json
 
 import pytest
+from agent_orch import cli
 
 from ledger import Ledger
 from server import Server
@@ -204,6 +205,13 @@ def test_invalid_adjudications_do_not_write(monkeypatch, mutation, expected):
                 "gate_evidence_digest": "bad",
             }
         },
+        {
+            "qa_review": {
+                "candidate_identity": "BASE14 descriptive candidate",
+                "reviewed_scope": "admission",
+                "gate_evidence_digest": "b" * 64,
+            }
+        },
     ],
 )
 def test_missing_typed_evidence_cannot_count(monkeypatch, evidence):
@@ -222,6 +230,51 @@ def test_missing_typed_evidence_cannot_count(monkeypatch, evidence):
                 reason="test",
             )
             assert result["error_code"] == "qa_report_invalid"
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_qa_report_producer_bindings_reach_commissioned_store(monkeypatch):
+    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
+
+    async def run():
+        store, _, _, comms, ledger, server = await state()
+        try:
+            for reviewer, verdict in (("qa1", "reject"), ("qa2", "accept")):
+                await comms.send(send_msg(reviewer))
+                args = cli.build_parser().parse_args([
+                    "report", "--msg-id", "0", "--status", "done",
+                    "--result", json.dumps({
+                        "summary": "Reviewed admission", "findings": [],
+                        "next_action": "repair" if verdict == "reject" else "lead_proceed",
+                        "extras": {"review_note": "retained"},
+                    }),
+                    "--qa-verdict", verdict, "--target-sha", SHA,
+                    "--qa-reviewed-scope", "admission",
+                    "--qa-gate-evidence-digest", "b" * 64,
+                ])
+                payload, blob = cli._report_payload_from_args(args)
+                assert blob is None
+                assert payload["extras"] == {
+                    "review_note": "retained",
+                    "qa_review": {
+                        "candidate_identity": SHA,
+                        "reviewed_scope": "admission",
+                        "gate_evidence_digest": "b" * 64,
+                    },
+                }
+                report_id = f"produced-{reviewer}"
+                await ledger.ingest(report_msg(reviewer, report_id=report_id, **payload))
+                durable = await store.get_report(report_id)
+                assert durable["qa_verdict"] == verdict
+                assert durable["from_stream_id"] == f"localhost:{reviewer}"
+                assert durable["session_generation"]
+                if verdict == "reject":
+                    result = await issue(server, "adjudicate", report_id=report_id,
+                                         adjudicated_valid=True, reason="in scope")
+                    assert result["type"] == "coordination.spec_issue.adjudicate.ok", result
         finally:
             store.stop()
 

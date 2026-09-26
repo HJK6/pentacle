@@ -65,6 +65,35 @@ gate/review evidence. The coordinator still judges whether the finding is an
 in-scope substantive defect under Loop Containment; the daemon does not read
 findings prose to invent validity.
 
+The commissioned reviewer can construct that binding without writing
+`candidate_identity` by hand. Supply the full reviewed commit SHA, the actual
+reviewed scope and the SHA-256 of durable gate/review evidence:
+
+```sh
+agent-orch report --msg-id 7 --status done \
+  --result '{"summary":"Reviewed admission","findings":[],"next_action":"lead_proceed"}' \
+  --qa-verdict accept --target-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --qa-reviewed-scope 'admission acceptance criteria' \
+  --qa-gate-evidence-digest bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+```
+
+The CLI copies `--target-sha` exactly into `extras.qa_review.candidate_identity`.
+The two evidence flags require each other and an explicit full `--target-sha`;
+blank scope, non-lowercase or non-64-hex digest, and a prebuilt
+`extras.qa_review` alongside those flags fail before transport. Other `extras`
+keys survive composition. `--result-file` follows the same rule and sends the
+composed report inline. A valid prebuilt JSON `qa_review` remains usable without
+the new flags. The reviewer still supplies the verdict and evidence digest;
+the commissioned stream, generation and message id bind reviewer identity at
+the daemon. This producer path applies to both ACCEPT and REJECT reports.
+
+`--qa-cycle` names the current diagnosis epoch, not a review pass number.
+Repairing the same acceptance surface and commissioning another review after
+one valid reject stays in cycle 1. Only a recorded `spec-issue diagnose` after
+two valid rejects and a pivot advances that surface to cycle 2; the next
+commission then uses cycle 2. A new candidate SHA by itself does not advance
+the cycle.
+
 ```sh
 agent-orch spec-issue adjudicate REPORT_ID --spec-id spec_pentacle__example \
   --surface admission --cycle 1 --valid --reason 'Acceptance criterion violated'

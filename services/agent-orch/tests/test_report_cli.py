@@ -510,6 +510,81 @@ def test_report_result_file_composes_qa_verdict_and_target_sha(tmp_path):
     }
 
 
+@pytest.mark.parametrize("file_backed", [False, True])
+def test_qa_review_flags_compose_inline_and_file_without_losing_extras(tmp_path, file_backed):
+    body = {
+        "summary": "reviewed", "findings": [], "next_action": "lead_proceed",
+        "extras": {"review_note": "retained"},
+    }
+    result_file = tmp_path / "review.json"
+    result_file.write_text(json.dumps(body), encoding="utf-8")
+    payload, blob = cli._report_payload_from_args(_args(
+        result=None if file_backed else json.dumps(body),
+        result_file=str(result_file) if file_backed else None,
+        qa_verdict="accept", target_sha="a" * 40,
+        qa_reviewed_scope="admission", qa_gate_evidence_digest="b" * 64,
+    ))
+    assert blob is None
+    assert payload["extras"] == {
+        "review_note": "retained",
+        "qa_review": {
+            "candidate_identity": "a" * 40,
+            "reviewed_scope": "admission",
+            "gate_evidence_digest": "b" * 64,
+        },
+    }
+
+
+@pytest.mark.parametrize("overrides,field", [
+    ({"qa_reviewed_scope": "admission"}, "qa_review"),
+    ({"qa_gate_evidence_digest": "b" * 64}, "qa_review"),
+    ({"qa_reviewed_scope": "admission", "qa_gate_evidence_digest": "b" * 64}, "qa_review"),
+    ({"target_sha": "a" * 40, "qa_reviewed_scope": " "}, "qa_review.reviewed_scope"),
+    ({"target_sha": "a" * 40, "qa_reviewed_scope": "admission", "qa_gate_evidence_digest": "B" * 64}, "qa_review.gate_evidence_digest"),
+    ({"target_sha": "short", "qa_reviewed_scope": "admission", "qa_gate_evidence_digest": "b" * 64}, "target_sha"),
+])
+def test_qa_review_flags_reject_partial_or_invalid_inputs(overrides, field):
+    with pytest.raises(SchemaError) as exc_info:
+        cli._report_payload_from_args(_args(qa_verdict="reject", **overrides))
+    assert any(item["field"] == field for item in exc_info.value.violations)
+
+
+def test_qa_review_flags_conflict_with_prebuilt_evidence_but_legacy_payload_survives():
+    body = {
+        "summary": "reviewed", "findings": [], "next_action": "lead_proceed",
+        "qa_verdict": "accept", "target_sha": "a" * 40,
+        "extras": {"qa_review": {
+            "candidate_identity": "a" * 40,
+            "reviewed_scope": "admission",
+            "gate_evidence_digest": "b" * 64,
+        }},
+    }
+    payload, blob = cli._report_payload_from_args(_args(result=json.dumps(body)))
+    assert payload == body and blob is None
+    with pytest.raises(SchemaError) as exc_info:
+        cli._report_payload_from_args(_args(
+            result=json.dumps(body), qa_reviewed_scope="admission",
+            qa_gate_evidence_digest="b" * 64, target_sha="a" * 40,
+        ))
+    fields = {item["field"] for item in exc_info.value.violations}
+    assert {"target_sha", "extras.qa_review"} <= fields
+
+
+@pytest.mark.parametrize("result", [None, json.dumps({
+    "summary": "reviewed", "findings": [], "next_action": "lead_proceed",
+    "qa_verdict": None,
+})])
+def test_qa_review_flags_do_not_infer_verdict(result):
+    with pytest.raises(SchemaError) as exc_info:
+        cli._report_payload_from_args(_args(
+            **({"result": result} if result is not None else {}),
+            target_sha="a" * 40,
+            qa_reviewed_scope="admission",
+            qa_gate_evidence_digest="b" * 64,
+        ))
+    assert any(item["field"] == "qa_verdict" for item in exc_info.value.violations)
+
+
 def test_report_result_file_qa_flags_send_inline_without_blob_upload(monkeypatch, tmp_path):
     result_file = tmp_path / "report.json"
     result_file.write_text(json.dumps({
