@@ -17,6 +17,7 @@ const path = require('node:path');
 const repoRoot = path.resolve(__dirname, '..');
 const hooksDir = path.join(repoRoot, 'scripts', 'hooks');
 const hookPath = path.join(hooksDir, 'pre-push');
+const windowsArgvHelper = path.join(hooksDir, 'read-windows-push-argv.ps1');
 const ID = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com'];
 
 function childEnv(extra = {}) {
@@ -64,6 +65,15 @@ function makeForeignBranch(work, name) {
   git(work, [...ID, 'rm', '-rf', '.']);
   commitFile(work, 'OTHER', 'a different repo\n', 'foreign root');
 }
+
+test('Windows argv reader refuses when no git push is its ancestor', {
+  skip: process.platform !== 'win32' && 'requires native Windows process ancestry',
+}, () => {
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', windowsArgvHelper],
+    { encoding: 'utf8', env: childEnv() });
+  assert.notEqual(r.status, 0);
+  assert.equal(r.stdout, '', 'no unverified argv may reach the hook parser');
+});
 
 // ── core accept/reject ───────────────────────────────────────────────────────
 test('clean public branch is ACCEPTED', () => {

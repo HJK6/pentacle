@@ -75,7 +75,8 @@ test('machineKey normalizes a public hostname deterministically', () => {
 test('config candidates use the public local overlay and bundled example', () => {
   const paths = candidateConfigPaths('/repo/public-desktop', {}, 'example.local');
   const base = path.resolve('/repo/public-desktop');
-  assert.deepEqual(candidateConfigPaths(base, { PENTACLE_CONFIG: '/private/config.js' }), ['/private/config.js']);
+  const privateConfig = path.join(path.parse(base).root, 'private', 'config.js');
+  assert.deepEqual(candidateConfigPaths(base, { PENTACLE_CONFIG: privateConfig }), [privateConfig]);
 
   assert.equal(paths[0], path.join(base, 'pentacle.config.js'));
   assert.equal(paths[1], path.join(base, 'pentacle.config.example.js'));

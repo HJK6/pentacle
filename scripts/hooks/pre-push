@@ -35,9 +35,10 @@
 # `BASH_ENV` nor `ENV`, so an environment startup script (e.g. a fleet interop
 # heal) can neither consume the hook's stdin nor `exit 0` out of the hook before
 # it runs — a bash hook is vulnerable to both. This also removes any bash-version
-# dependency. The decision path uses only `git` + shell builtins; `tr`/`ps` are
-# used only to read the invoking argv and degrade to a public fail-closed if
-# absent. Never trusts a remote-tracking ref for the public repo — it re-resolves
+# dependency. The decision path uses `git` + shell builtins; `tr`/`ps` read
+# invoking argv on POSIX, and the checked-in PowerShell helper does so on Git
+# for Windows. Missing argv tools degrade to a public fail-closed refusal.
+# Never trusts a remote-tracking ref for the public repo — it re-resolves
 # the live `refs/heads/main` via `git ls-remote` every invocation.
 #
 # Origin: 2026-09-12 — a private branch (no merge base with this repo) was pushed
@@ -201,6 +202,17 @@ fi
 
 # ── (b) explicit refspec: no bare / matching-branch (`:` or `+:`) pushes ─────
 read_parent_argv() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*)
+      # Git for Windows launches this POSIX shell with $PPID=1; its /proc and
+      # ps cannot identify the native git.exe process. The helper walks the
+      # Windows parent chain and emits the actual git.exe argv, or nothing.
+      helper="${0%/*}/read-windows-push-argv.ps1"
+      [ -r "$helper" ] && command -v powershell.exe >/dev/null 2>&1 || return 1
+      powershell.exe -NoProfile -NonInteractive -File "$helper"
+      return
+      ;;
+  esac
   if [ -r "/proc/$GIT_PARENT_PID/cmdline" ] && command -v tr >/dev/null 2>&1; then
     tr '\0' '\n' < "/proc/$GIT_PARENT_PID/cmdline"
   elif command -v ps >/dev/null 2>&1 && command -v tr >/dev/null 2>&1; then

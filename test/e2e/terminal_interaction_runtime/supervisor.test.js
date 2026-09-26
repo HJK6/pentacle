@@ -41,7 +41,13 @@ test('signaled child with uncertain server preserves its root despite a stale su
   try {
     fs.writeFileSync(path.join(output, 'receipt.json'), JSON.stringify({ fixtureRoot: '/unrelated-prior-root', cleanup: { serverCleaned: true } }));
     result = await runOwnedElectron({ executable: process.execPath, args: ['-e', "process.kill(process.pid,'SIGTERM')"], output });
-    assert.equal(result.childSignal, 'SIGTERM');
+    if (process.platform === 'win32') {
+      // Node reports a Windows self-termination as exit code 1, with no POSIX signal.
+      assert.equal(result.childSignal, null);
+      assert.equal(result.childCode, 1);
+    } else {
+      assert.equal(result.childSignal, 'SIGTERM');
+    }
     assert.equal(result.receiptMatchesRoot, false);
     assert.equal(result.preservedForRecovery, true);
     assert.equal(fs.existsSync(result.root), true);

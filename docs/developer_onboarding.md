@@ -150,7 +150,7 @@ git push --dry-run public HEAD:refs/heads/tmp-foreign-probe
 | GitHub destination (including private) whose `main` cannot be resolved (no ref, fetch fails) | **REJECTED** (fail closed) |
 | Non-GitHub destination without private test/mirror classification and no resolvable `main` | Allowed with a note (nothing to compare) |
 
-The foreign-ancestry check is a root-set comparison, not a shared-ancestor test: a merge of unrelated history still shares a merge-base with `main`, so `git merge-base` is not enough. The explicit-refspec check reads the invoking `git push` from `/proc` (Linux) or `ps` (macOS/BSD); if that argv cannot be read at all, a push to the public repo fails closed.
+The foreign-ancestry check is a root-set comparison, not a shared-ancestor test: a merge of unrelated history still shares a merge-base with `main`, so `git merge-base` is not enough. The explicit-refspec check reads the invoking `git push` from `/proc` (Linux) or `ps` (macOS/BSD). Git for Windows runs the hook in MSYS with no useful `$PPID`, so its checked-in PowerShell helper reads the native `git.exe` process ancestry and tokenizes that command line. If the argv cannot be verified on any platform, a push to the public repo fails closed.
 
 Push with an explicit refspec and read the remote back before announcing a push landed:
 
