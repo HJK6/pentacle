@@ -412,9 +412,18 @@ async function slotSurvivesCcReconnect(ctx) {
 // Nexus (2026-09-12): the browser send path is covered by the web_cc/ws_bridge
 // unit tests and the daemon send/ingest by the service's own python tests; see
 // spec_pentacle__web_mode_e2e_gate_2026_09 § Findings.
+async function colouredHostGlyphs({ session, report }) {
+  const { hostGlyphContrast } = require('./host_glyph_contrast');
+  const cells = await hostGlyphContrast(session);
+  report.ok('host glyphs retain colour, labels and graphic contrast across themes/states',
+    cells.length === 48 && cells.every(cell => cell.pass),
+    { subsystem: 'host-presentation', bug_ref: 'web_mic_endpoint_coloured_glyphs_2026_09', cells });
+}
+
 const SCENARIOS = [
   ['transport-and-config', transportAndConfig],
   ['sidebar-from-inventory', sidebarFromInventory],
+  ['coloured-host-glyphs', colouredHostGlyphs],
   ['slot-attach-type-resize-kill', slotAttachTypeResizeKill],
   ['chat-transcript-paint', chatTranscriptPaint],
   // Runs before closed-chat-slot (which retires the seeded fixture) and reloads
