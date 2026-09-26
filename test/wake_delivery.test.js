@@ -105,3 +105,20 @@ test('answer-ready text agrees with echo-tail readiness flag',()=>{
   f.status.local_actions.pending.ready=true;
   assert.equal(f.helper.message(f.status),'Ready for your answer — say over to finish.');
 });
+function pinnedFixture(){const f=fixture();delete f.config.features.assistantRole;f.config.mic.wakeTargetStreamId='bart:direct';f.state.sessions=[row('bart:direct',{role:'lead'}),row('bart:unrelated',{role:'lead'})];f.helper=f.make();return f;}
+test('explicit wake identity bypasses ambiguous lead roles without selecting other leads',async()=>{const f=pinnedFixture();await f.helper.tick(f.status);assert.deepEqual(f.sends,[['bart:direct','hello']]);});
+test('explicit identity follows unique forward handoff lineage',async()=>{const f=pinnedFixture();f.state.sessions=[row('bart:direct',{role:'lead',closed_at:'closed'}),row('bart:next',{role:'lead',handoff_from_stream_id:'bart:direct',closed_at:'closed'}),row('bart:current',{role:'lead',handoff_from_stream_id:'bart:next'}),row('bart:other',{role:'lead'})];await f.helper.tick(f.status);assert.deepEqual(f.sends,[['bart:current','hello']]);});
+for(const kind of ['missing','closed','ambiguous','wrong-host','cycle'])test(`explicit identity fails closed: ${kind}`,async()=>{
+ const f=pinnedFixture();f.status.wake.pending_count=0;
+ if(kind==='missing')f.state.sessions=[row('bart:other',{role:'lead'})];
+ if(kind==='closed')f.state.sessions=[row('bart:direct',{role:'lead',closed_at:'closed'})];
+ if(kind==='ambiguous')f.state.sessions.push(row('bart:other-successor',{role:'lead',handoff_from_stream_id:'bart:direct'}));
+ if(kind==='wrong-host')f.state.sessions[0].host='other';
+ if(kind==='cycle')f.state.sessions=[row('bart:direct',{role:'lead',handoff_from_stream_id:'bart:next'}),row('bart:next',{closed_at:'closed',handoff_from_stream_id:'bart:direct'})];
+ await f.helper.tick(f.status);assert.equal(f.apiCalls.length,0);assert.equal(f.sends.length,0);assert.match(f.notes.join(' '),/no wake target/i);
+});
+test('explicit handoff during claim holds capture and sends once to successor',async()=>{
+ const f=pinnedFixture();const original=f.api;
+ f.api=async(...args)=>{const r=await original(...args);if(args[1]==='/wake/claim')f.state.sessions=[row('bart:direct',{closed_at:'closed'}),row('bart:new',{role:'lead',handoff_from_stream_id:'bart:direct'})];return r;};
+ await f.helper.tick(f.status);assert.equal(f.sends.length,0);f.status.wake.pending_count=0;await f.helper.tick(f.status);await f.helper.tick(f.status);assert.deepEqual(f.sends,[['bart:new','hello']]);assert.equal(f.apiCalls.filter(p=>p==='/wake/claim').length,1);
+});

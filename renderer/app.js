@@ -6311,6 +6311,7 @@ function micModeBody(extra = {}) {
 
 async function micApi(method, path, body) {
   try {
+    if (window.cc.micRequest) return await window.cc.micRequest(method, path, body);
     const opts = { method };
     if (body !== undefined) {
       opts.headers = { 'Content-Type': 'application/json' };

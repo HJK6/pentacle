@@ -24,6 +24,7 @@ const { WebSocketServer } = require('ws');
 const ROOT = path.join(__dirname, '..');
 const { loadConfig } = require(path.join(ROOT, 'config-loader'));
 const { createMicStarter, micStartSameOrigin, isLoopbackPeer } = require('./mic_starter');
+const { createMicRequest } = require('../main/mic_request');
 const { createCcHandlers, createCollector } = require(path.join(ROOT, 'main', 'cc_handlers'));
 const { createWsBridge } = require('./ws_bridge');
 const chatStreamClient = require(path.join(ROOT, 'main', 'chat_stream_client'));
@@ -369,6 +370,7 @@ async function main(argv = process.argv.slice(2)) {
 
   const ccHandlers = createCcHandlers({ CONFIG, chatStreamClient, configError, configWarnings,
     startMicServer: createMicStarter(CONFIG),
+    micRequest: createMicRequest(CONFIG),
     terminalOptions: { maxPtysPerConnection: MAX_PTYS_PER_CONNECTION } });
   const collector = createCollector();
   const stopTerminals = ccHandlers.register(collector);

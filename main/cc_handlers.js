@@ -28,6 +28,7 @@ const { registerTerminalIpc } = require('./terminal_adapter');
 const { registerProviderRelogin } = require('./provider_relogin');
 const { isProtectedAssistantRename } = require('./assistant_role_guard');
 const { probeMicServer } = require('./mic-url');
+const { createMicRequest } = require('./mic_request');
 
 // Channels the browser answers itself rather than sending to the host. The
 // clipboard is the important one: a round trip would read the SERVER's
@@ -132,6 +133,7 @@ function createCcHandlers({
   terminalOptions = undefined,
   reloginOptions = undefined,
   startMicServer = null,
+  micRequest = null,
 }) {
   const telemetry = [];
 
@@ -220,6 +222,8 @@ function createCcHandlers({
 
     // Microphone service ownership stays external to the public desktop.
     target.handle('mic:start-server', () => startMicServer ? startMicServer() : probeMicServer(CONFIG));
+    const requestMic = micRequest || createMicRequest(CONFIG);
+    target.handle('mic:request', (_event, method, path, body) => requestMic(method, path, body));
 
     target.on('perf-telemetry:record', (_event, value) => {
       if (telemetry.length >= 1000) telemetry.shift();

@@ -115,7 +115,7 @@ function createWsBridge({ table, logger = console } = {}) {
         return refuse('web_unsupported', WEB_UNSUPPORTED[method], (reason) => `${method} is not available in web mode: ${reason}`);
       }
 
-      if (method === 'mic:start-server' && !connection.micStartAllowed)
+      if ((method === 'mic:start-server' || method === 'mic:request') && !connection.micStartAllowed)
         return rawSend(socket, errorPayload(id, 'mic_origin_refused', 'Microphone recovery requires the web page on this origin.'));
       if (method.startsWith('provider-relogin:') && !connection.reloginAllowed)
         return rawSend(socket, errorPayload(id, 'relogin_origin_refused', 'Provider sign-in requires the web page on this origin.'));

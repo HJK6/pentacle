@@ -13,11 +13,42 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
   let lastAttemptedId;
   let note = '';
   const role = () => configuredAssistantRole(config.features);
-  const enabled = () => config.features?.mic === true && !!role()
+  const pinnedIdentity = () => typeof config.mic?.wakeTargetStreamId === 'string' && config.mic.wakeTargetStreamId.trim();
+  const enabled = () => config.features?.mic === true && (!!role() || !!pinnedIdentity())
     && typeof config.mic?.wakeTargetHost === 'string' && !!config.mic.wakeTargetHost
     && config.chatStream?.snapshot !== false;
   const target = (state) => {
     if (!state?.connected || !Array.isArray(state.sessions)) return null;
+    const root = pinnedIdentity();
+    if (root) {
+      // These rows come from the authenticated daemon snapshot. Titles and
+      // roles cannot establish a successor; only its explicit handoff link can.
+      const lineage = new Set([root]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const row of state.sessions) {
+          if (row.stream_id && row.host === config.mic.wakeTargetHost
+            && lineage.has(row.handoff_from_stream_id) && !lineage.has(row.stream_id)) {
+            lineage.add(row.stream_id);
+            changed = true;
+          }
+        }
+      }
+      // Reject cyclic or contradictory lineage rather than guess an owner.
+      for (const row of state.sessions.filter(s => lineage.has(s.stream_id))) {
+        const seen = new Set([row.stream_id]);
+        let previous = row.handoff_from_stream_id;
+        while (previous && lineage.has(previous)) {
+          if (seen.has(previous)) return null;
+          seen.add(previous);
+          previous = state.sessions.find(s => s.stream_id === previous)?.handoff_from_stream_id;
+        }
+      }
+      const matches = state.sessions.filter(s => lineage.has(s.stream_id)
+        && s.host === config.mic.wakeTargetHost && s.status !== 'closed' && !s.closed_at);
+      return matches.length === 1 ? matches[0].stream_id : null;
+    }
     const matches = state.sessions.filter(s => s.role === role()
       && s.host === config.mic.wakeTargetHost && s.status !== 'closed' && !s.closed_at && s.stream_id);
     return matches.length === 1 ? matches[0].stream_id : null;
@@ -54,7 +85,7 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
   async function tick(status) {
     observe(status);
     if (!enabled() || !status?.wake?.enabled || status.mode !== 'on' || muted || busy) return;
-    if (!held && !status.wake.pending_count) return;
+    if (!held && !status.wake.pending_count && !pinnedIdentity()) return;
     busy = true;
     const current = epoch;
     const valid = () => epoch === current && !muted;
@@ -62,8 +93,12 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
       const initialState = await getState();
       const initialTarget = target(initialState);
       if (!valid()) return;
+      if (!held && !status.wake.pending_count) {
+        note = initialTarget ? '' : 'No wake target: connect a unique current assistant.';
+        return;
+      }
       if (!initialTarget && !(status.local_actions?.enabled && initialState?.connected && spawnAgent && getSpawnCatalog)) {
-        note = 'Wake message waiting for a connected, unique assistant.';
+        note = 'No wake target: connect a unique current assistant.';
         return;
       }
       if (!held) {

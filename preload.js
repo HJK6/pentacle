@@ -92,6 +92,7 @@ window.cc = {
 
   // Mic server
   startMicServer: () => ipcRenderer.invoke('mic:start-server'),
+  micRequest: (method, path, body) => ipcRenderer.invoke('mic:request', method, path, body),
   writeClipboard: (text) => ipcRenderer.invoke('clipboard:write-text', String(text ?? '')),
   readClipboard: () => ipcRenderer.invoke('clipboard:read-text'),
 
