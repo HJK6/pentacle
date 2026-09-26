@@ -4675,12 +4675,13 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
-            "Authorize the spawned worker to self-close via `agent-orch report --terminate` "
-            "(default: disabled). When enabled, a worker whose leader is still live may self-close "
-            "after its terminal report instead of being refused with terminate_requires_leader_close — "
-            "pass this flag deliberately when that lifecycle is wanted. "
-            "Pass --no-self-close-on-completion to keep the worker open for follow-up sends. "
-            "Only applies to spawns with --parent or --handoff lineage."
+            "Set the spawned seat's self_close_on_completion bit used by `agent-orch report "
+            "--terminate` and completion sweep. With neither flag, --visibility hidden and a real parent sets true "
+            "(including an inferred parent); --visibility default/nested and handoff-only "
+            "spawns leave this bit unset. "
+            "--no-self-close-on-completion persists false so a parented seat stays open for "
+            "follow-up sends. Explicit true or false requires parent or handoff lineage: "
+            "immediate leaderless spawns omit the bit, while scheduled --top-level flags are refused."
         ),
     )
     initial_prompt_group = spawn_parser.add_mutually_exclusive_group()

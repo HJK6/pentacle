@@ -1009,7 +1009,12 @@ def test_spawn_help_lists_self_close_on_completion_flag() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "--self-close-on-completion" in result.stdout
+    help_text = " ".join(result.stdout.split())  # argparse wraps help to terminal width
+    assert "--self-close-on-completion" in help_text
+    assert "--visibility hidden and a real parent sets true" in help_text
+    assert "--visibility default/nested and handoff-only spawns leave this bit unset" in help_text
+    assert "--no-self-close-on-completion persists false" in help_text
+    assert "immediate leaderless spawns omit the bit" in help_text
 
 
 def test_spawn_help_subprocess_imports_the_tree_under_test() -> None:
@@ -1268,8 +1273,8 @@ def test_prompted_spawn_subprocess_preserves_raw_and_pipeline_outcomes(tmp_path:
 def test_spawn_parser_self_close_on_completion_tracks_absent_and_explicit_values() -> None:
     parser = cli.build_parser()
 
-    # Absence remains semantically disabled while preserving schedule-row
-    # tri-state truth (NULL versus an explicit --no-* override).
+    # The parser preserves absence as None; visibility and lineage resolve its
+    # meaning when the payload is built.
     default_args = parser.parse_args(["spawn", "--objective", "Exercise the existing spawn contract", "--provider", "codex"])
     assert default_args.self_close_on_completion is None
 
@@ -1291,8 +1296,8 @@ def test_spawn_payload_includes_self_close_by_default_for_parented_spawn(monkeyp
         return {"type": "spawn.ok", "session": {"stream_id": "hostc:codex-child"}}
 
     monkeypatch.setattr(cli, "spawn_once", fake_send)
-    args = _spawn_args(tmp_path)  # has parent="hostc:claude-leader", no explicit flag
-    args.self_close_on_completion = True  # argparse default
+    args = _spawn_args(tmp_path)  # has parent="hostc:claude-leader"
+    args.self_close_on_completion = None  # no explicit flag
 
     result = cli.spawn(args)
     _printed_json(capsys)
@@ -1593,10 +1598,13 @@ def test_hidden_spawn_defaults_self_close_when_flag_absent(monkeypatch, tmp_path
     assert captured["payload"]["self_close_on_completion"] is True
 
 
-def test_visible_spawn_stays_default_off_without_flag(monkeypatch, tmp_path: Path, capsys) -> None:
+@pytest.mark.parametrize("visibility", ["default", "nested"])
+def test_nonhidden_spawn_stays_default_off_without_flag(
+    monkeypatch, tmp_path: Path, capsys, visibility: str,
+) -> None:
     captured = _capture_spawn_payload(monkeypatch, tmp_path)
     args = _spawn_args(tmp_path)
-    args.visibility = "default"
+    args.visibility = visibility
     args.self_close_on_completion = None
 
     assert cli.spawn(args) == 0

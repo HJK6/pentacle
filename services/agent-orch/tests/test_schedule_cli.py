@@ -249,6 +249,25 @@ def test_fresh_schedule_rejections_have_fixed_codes(
     assert "payload" not in captured
 
 
+@pytest.mark.parametrize(
+    ("flag", "expected"),
+    [(None, True), (False, False)],
+    ids=["hidden-parent-default", "hidden-parent-explicit-opt-out"],
+)
+def test_scheduled_hidden_parent_self_close_payload(
+    monkeypatch, tmp_path, capsys, flag, expected,
+):
+    captured: dict = {}
+    _install_spawn_fakes(monkeypatch, tmp_path, captured)
+    assert cli.spawn(_spawn_args(
+        handoff=False, delay="2m", initial_prompt=None,
+        parent="hosta:leader", visibility="hidden",
+        self_close_on_completion=flag,
+    )) == 0
+    assert captured["payload"]["self_close_on_completion"] is expected
+    json.loads(capsys.readouterr().out)
+
+
 def test_schedule_validation_precedes_prompt_blob_upload(monkeypatch, tmp_path, capsys):
     captured: dict = {}
     _install_spawn_fakes(monkeypatch, tmp_path, captured)
@@ -531,4 +550,3 @@ def test_public_schedule_read_omits_unusable_receipt_guidance(monkeypatch, tmp_p
     assert "recovery" not in json.loads(captured.out)
     assert "receipt" not in captured.err
     assert "<request-id>" not in captured.err
-
