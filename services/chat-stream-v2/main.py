@@ -258,7 +258,7 @@ async def run(args: argparse.Namespace) -> int:
             timeout_s=assistant_config.router_timeout_s,
             ssh_bin=args.ssh_bin,
             action_path=assistant_config.router_action_path,
-        ) if assistant_config.enabled else None
+        ) if assistant_config.enabled and not assistant_config.direct_primary else None
     )
 
     async def _dispatch_assistant_route(route: dict[str, object]) -> dict[str, object]:
@@ -285,7 +285,27 @@ async def run(args: argparse.Namespace) -> int:
         # dispatch/correlation values come from durable daemon state, never a
         # model-generated reply id.  Attachments travel through the existing
         # send materializer unchanged.
-        if str(route.get("routing_state") or "") == "fallback_dispatched":
+        if assistant_config.direct_primary:
+            target_generation = str(route.get("route_target_generation") or "")
+            if (target != assistant_config.direct_primary_stream_id
+                    or target_generation != assistant_config.direct_primary_generation):
+                return {"delivery": "failed", "reason": "assistant_direct_generation_conflict"}
+            envelope = route_payload.get("direct_envelope")
+            if not isinstance(envelope, dict) or (
+                envelope.get("origin") != assistant_config.stream_id
+                or envelope.get("dispatch_id") != dispatch_id
+                or envelope.get("reply_to_message_id") != source_message_id
+                or envelope.get("reply_to_question_id") != (str(route.get("reply_to_question_id") or "") or None)
+                or envelope.get("target_stream_id") != target
+                or envelope.get("target_generation") != target_generation
+                or envelope.get("original_input") != {"text": body, "attachments": attachments}
+                or not isinstance(envelope.get("wire_body"), str)
+                or not isinstance(envelope.get("publish_command"), str)
+                or envelope["publish_command"] not in envelope["wire_body"]
+            ):
+                return {"delivery": "failed", "reason": "assistant_direct_envelope_invalid"}
+            wire_body = envelope["wire_body"]
+        elif str(route.get("routing_state") or "") == "fallback_dispatched":
             routing_context = route_payload.get("routing_context")
             context_block = "{}"
             if isinstance(routing_context, dict):
@@ -347,6 +367,7 @@ async def run(args: argparse.Namespace) -> int:
             "request_id": dispatch_id,
             "optimistic_id": dispatch_id,
             "from_stream_id": assistant_config.stream_id,
+            "_assistant_expected_generation": str(route.get("route_target_generation") or "") if assistant_config.direct_primary else None,
         })
 
     assistant_composite = AssistantComposite(

@@ -2139,9 +2139,13 @@ class Server:
                 "host": host,
                 "session_name": name,
                 "to_stream_id": stream_id,
-                "delivery": "accepted",
-                "submission_confirmed": True,
-                "action_committed": True,
+                **({
+                    # The canonical USER row and its per-attempt receipt
+                    # committed atomically; answer routing remains pending.
+                    "state": "landed", "delivery": "landed",
+                    "submission_confirmed": True, "action_committed": True,
+                    "receipt_id": accepted.get("receipt_id"),
+                } if composite.config.direct_primary else {"delivery": "accepted"}),
                 "assistant_composite": accepted,
             }
         # Wire callers cannot suppress ordinary QA/progress admission with the

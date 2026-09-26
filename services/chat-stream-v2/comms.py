@@ -1657,6 +1657,7 @@ class Comms:
     async def _submit_send_plan(
         self, plan: SendPlan, *, request_id: str, receipt_id: str,
         qa_generation: str | None = None,
+        assistant_generation: str | None = None,
     ) -> dict[str, Any]:
         """Inject one accepted plan and append its known durable outcome."""
         target = str(plan.route["final_target"])
@@ -1665,7 +1666,8 @@ class Comms:
             row = await self.store.fetch_session(host, name)
             lifecycle = (
                 self.sessions._lifecycle_lock(host, name)
-                if qa_generation is not None or (row or {}).get("provider") == "claude" else nullcontext()
+                if qa_generation is not None or assistant_generation is not None
+                or (row or {}).get("provider") == "claude" else nullcontext()
             )
             # Match bootstrap publishers: lifecycle before pane input, never the reverse.
             async with lifecycle, self._pane_input_lock(target):
@@ -1675,6 +1677,14 @@ class Comms:
                         raise VerbError(
                             "qa_reviewer_generation_conflict",
                             "QA reviewer lifecycle changed after admission",
+                            phase="not_started",
+                        )
+                if assistant_generation is not None:
+                    current = await self.store.fetch_session(host, name) or {}
+                    if current.get("status") != "open" or current.get("session_generation") != assistant_generation:
+                        raise VerbError(
+                            "assistant_direct_generation_conflict",
+                            "Direct Bart target generation changed before delivery",
                             phase="not_started",
                         )
                 await self._assert_claude_send_ready(plan.route)
@@ -1866,6 +1876,8 @@ class Comms:
         return await self._submit_send_plan(
             materialized, request_id=request_id, receipt_id=receipt_id,
             qa_generation=commission["generation"] if commission is not None else None,
+            assistant_generation=(str(msg.get("_assistant_expected_generation") or "") or None)
+            if msg.get("_assistant_composite_backend_dispatch") is True else None,
         )
 
     async def send_assistant_backend(self, msg: dict[str, Any]) -> dict[str, Any]:

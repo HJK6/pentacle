@@ -672,6 +672,9 @@ class _RoutingStoreMixin:
         reply_to_message_id: str | None,
         reply_to_question_id: str | None,
         actor_stream_id: str | None,
+        direct_primary: bool = False,
+        direct_target_stream_id: str | None = None,
+        direct_target_generation: str | None = None,
     ) -> dict[str, Any]:
         """Atomically append the visible USER event and its routing receipt."""
         if not input_identity:
@@ -691,6 +694,37 @@ class _RoutingStoreMixin:
         if not separator or not host or not session_name:
             raise ValueError("assistant_composite_invalid_stream_id")
 
+        def _ensure_receipt(conn: sqlite3.Connection, stamp: str) -> str:
+            # The canonical USER admission is landed even while its answer is
+            # pending. Keep the mobile/desktop transport attempt in the same
+            # transaction as the USER row, including a rotated-request retry.
+            prior = conn.execute(
+                "SELECT optimistic_id,receipt_id,state FROM v2_send_receipts "
+                "WHERE to_stream_id=? AND request_id=? ORDER BY rowid DESC LIMIT 1",
+                (stream_id, input_request_id),
+            ).fetchone()
+            if prior is not None:
+                if prior["optimistic_id"] != input_identity or prior["state"] != "landed":
+                    raise ValueError("assistant_receipt_request_conflict")
+                return str(prior["receipt_id"])
+            from store import _send_wire_digest  # local import avoids a Store façade import cycle
+            receipt_id = "assistant-receipt-" + hashlib.sha256(
+                (stream_id + "\x00" + input_identity + "\x00" + input_request_id).encode("utf-8"),
+            ).hexdigest()[:32]
+            kind = ("image_and_text" if attachments and body else
+                    "attachment_only" if attachments else "text")
+            conn.execute(
+                """INSERT INTO v2_send_receipts (
+                    to_stream_id,request_id,receipt_id,state,optimistic_id,wire_digest,
+                    display_text,content_kind,attachments_json,delivery,submission_confirmed,
+                    created_at,actor_stream_id,actor_trusted,meta_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (stream_id, input_request_id, receipt_id, "landed", input_identity,
+                 _send_wire_digest(body), body, kind, canonical_attachments, "landed", 1,
+                 stamp, actor_stream_id, 1, json.dumps({"assistant_composite": True}, sort_keys=True)),
+            )
+            return receipt_id
+
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -702,9 +736,17 @@ class _RoutingStoreMixin:
                     record = dict(prior)
                     if record["payload_digest"] != digest:
                         raise ValueError("assistant_input_idempotency_conflict")
+                    record["receipt_id"] = _ensure_receipt(conn, _routing_iso_now()) if direct_primary else None
                     record["duplicate"] = True
                     conn.commit()
                     return record
+                if direct_primary:
+                    if not direct_target_stream_id or not direct_target_generation:
+                        raise ValueError("assistant_direct_binding_invalid")
+                    try:
+                        _assistant_actor_conn(conn, direct_target_stream_id, direct_target_generation)
+                    except ValueError as exc:
+                        raise ValueError("assistant_direct_generation_conflict") from exc
                 session = conn.execute(
                     "SELECT created_at,status,provider FROM sessions WHERE host=? AND session_name=?",
                     (host, session_name),
@@ -749,18 +791,22 @@ class _RoutingStoreMixin:
                     """INSERT INTO v2_assistant_composite_routes(
                         route_id,stream_id,input_identity,payload_digest,input_request_id,event_id,body,
                         attachments_json,reply_to_message_id,reply_to_question_id,actor_stream_id,
-                        routing_state,delivery_state,created_at,updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        routing_state,delivery_state,route_json,created_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         route_id, stream_id, input_identity, digest, input_request_id, event_id, body,
                         canonical_attachments, reply_to_message_id, reply_to_question_id, actor_stream_id,
-                        "queued", None, timestamp, timestamp,
+                        "queued", None,
+                        json.dumps({"admission_mode": "direct_primary"}, sort_keys=True) if direct_primary else None,
+                        timestamp, timestamp,
                     ),
                 )
+                receipt_id = _ensure_receipt(conn, timestamp) if direct_primary else None
                 row = dict(conn.execute(
                     "SELECT * FROM v2_assistant_composite_routes WHERE route_id=?", (route_id,),
                 ).fetchone())
                 row["event"] = event | {"daemon_seq": event_id}
+                row["receipt_id"] = receipt_id
                 row["duplicate"] = False
                 conn.commit()
                 return row
@@ -1042,6 +1088,9 @@ class _RoutingStoreMixin:
         actor_stream_id: str | None = None,
         actor_generation: str | None = None,
         authority_stream_id: str | None = None,
+        direct_target_stream_id: str | None = None,
+        direct_target_generation: str | None = None,
+        direct_single_final: bool = False,
     ) -> dict[str, Any]:
         """Append one assistant event and its idempotency receipt together."""
         if not publication_key or not dispatch_id:
@@ -1058,6 +1107,28 @@ class _RoutingStoreMixin:
             try:
                 if actor_generation is not None:
                     _assistant_actor_conn(conn, actor_stream_id, actor_generation)
+                if direct_single_final:
+                    if (not direct_target_stream_id or not direct_target_generation
+                            or actor_stream_id != direct_target_stream_id
+                            or actor_generation != direct_target_generation):
+                        raise ValueError("assistant_direct_actor_unverified")
+                    direct_route = conn.execute(
+                        "SELECT route_target,route_target_generation,routing_state,input_identity,"
+                        "reply_to_question_id FROM v2_assistant_composite_routes "
+                        "WHERE stream_id=? AND dispatch_id=?", (stream_id, dispatch_id),
+                    ).fetchone()
+                    if (direct_route is None or direct_route["route_target"] != direct_target_stream_id
+                            or direct_route["route_target_generation"] != direct_target_generation
+                            or direct_route["routing_state"] != "resolved"):
+                        raise ValueError("assistant_direct_dispatch_unverified")
+                    if (reply_to_message_id != direct_route["input_identity"]
+                            or reply_to_question_id != direct_route["reply_to_question_id"]):
+                        raise ValueError("assistant_direct_reply_unverified")
+                    if publish_kind == "prose" and (
+                        publication_key != "publish:" + dispatch_id
+                        or canonical_payload.get("response_state") != "final"
+                    ):
+                        raise ValueError("assistant_direct_publication_identity_invalid")
                 prior = conn.execute(
                     "SELECT * FROM v2_assistant_composite_publications WHERE publication_key=?",
                     (publication_key,),
@@ -1074,10 +1145,10 @@ class _RoutingStoreMixin:
                     conn.commit()
                     return saved
                 if actor_generation is not None:
-                    route = _assistant_dispatch_conn(
+                    route = (dict(direct_route) if direct_single_final else _assistant_dispatch_conn(
                         conn, stream_id, dispatch_id, actor_stream_id, actor_generation,
                         authority=authority_stream_id if publish_kind != "question" else None,
-                    )
+                    ))
                     if route["routing_state"] != "resolved":
                         raise ValueError("assistant_publish_dispatch_state_invalid")
                     if reply_to_message_id != route["input_identity"]:
@@ -1121,6 +1192,15 @@ class _RoutingStoreMixin:
                                 break
                         if not correlated:
                             raise ValueError("assistant_publish_operation_receipt_required")
+                if direct_single_final and publish_kind == "prose":
+                    previous_finals = conn.execute(
+                        "SELECT publication_key,canonical_payload_json FROM v2_assistant_composite_publications "
+                        "WHERE stream_id=? AND dispatch_id=? AND publish_kind='prose'",
+                        (stream_id, dispatch_id),
+                    ).fetchall()
+                    if any(json.loads(row["canonical_payload_json"]).get("response_state") == "final"
+                           for row in previous_finals):
+                        raise ValueError("assistant_direct_final_already_published")
                 session = conn.execute(
                     "SELECT created_at,status,provider FROM sessions WHERE host=? AND session_name=?",
                     (host, session_name),
