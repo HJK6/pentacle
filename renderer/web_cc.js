@@ -315,7 +315,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
 
     // Explicit recovery uses the configured web host; no browser-supplied command.
     startMicServer: () => micFeature ? call('mic:start-server') : Promise.resolve(false),
-    micRequest: (method, path, body) => micFeature ? call('mic:request', method, path, body) : Promise.resolve(null),
+    micRequest: (method, path, body) => micFeature ? call('mic:request', method, path, ...(body === undefined ? [] : [body])) : Promise.resolve(null),
     // The viewer's clipboard, not the host's — see WEB_LOCAL.
     writeClipboard: (text) => clipboard.writeText(String(text ?? '')),
     readClipboard: () => clipboard.readText(),
