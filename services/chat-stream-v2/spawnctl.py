@@ -42,6 +42,7 @@ if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide module, never a
 from _shared.spawn_objective import objective_error, objective_required_for, resolve_objective
 
 import qa_dispatch
+import store_lifecycle_authority as lifecycle_authority
 
 import asyncio
 import tmux_transport
@@ -1257,8 +1258,35 @@ class SpawnCtl:
             "initial_prompt_delivery": receipt,
         }
 
+    async def _replay_retired_handoff(self, msg: dict[str, Any], local_host: str,
+                                      owner: dict[str, Any]) -> dict[str, Any]:
+        """A retired protected source reads back only its own handoff receipt.
+
+        No snapshot, admission, reservation, transfer or authority revival: a
+        missing, foreign or altered receipt fails closed.
+        """
+        host = str(msg.get("host") or local_host).strip()
+        key = str(msg.get("idempotency_key") or msg.get("request_id") or "").strip()
+        if not key:
+            raise VerbError("assistant_handoff_receipt_unavailable", "a receipt replay needs its idempotency key")
+        try:
+            await self.store.retired_assistant_handoff_receipt(
+                host, key, owner, lifecycle_authority.logical_payload_hash(msg))
+        except lifecycle_authority.AuthorityError as exc:
+            raise VerbError(exc.code, str(exc)) from exc
+        record = await self.store.spawn_record_for_key(host, key)
+        if record is None:
+            raise VerbError("assistant_handoff_receipt_unavailable", "no stored outcome for this handoff")
+        reply = await self._reply_from_replay(
+            host, str(msg.get("request_id") or ""), record["kind"], record["row"], key)
+        reply["do_not_respawn"] = True
+        return reply
+
     async def spawn(self, msg: dict[str, Any], local_host: str) -> dict[str, Any]:
         """Keep the durable spawn obligation running after request cancellation."""
+        retired = (msg.get("_auth_context") or {}).get("retired_handoff_owner")
+        if retired:
+            return await self._replay_retired_handoff(msg, local_host, retired)
         # Objectives are required only for parented child spawns (roster projection);
         # a top-level/handoff spawn derives one, and the brief is read only then.
         supported, parent = msg.get("objective_supported"), msg.get("parent_stream_id")
@@ -1652,6 +1680,7 @@ class SpawnCtl:
                 raise VerbError("spawn_frozen", self._frozen_reason(host, hold))
             if status != "claimed":
                 raise VerbError("stream_id_unavailable", f"{host}:{name} is live or already reserved")
+            await self._record_protected_handoff(msg, host, name, idempotency_key)
         elif not await self.store.reserve_stream_id(
             host, name, ttl_s=RESERVATION_TTL_S, request_id=request_id,
             nonce=nonce, owner_instance_id=self.instance_id, refuse_if_held=True,
@@ -2954,6 +2983,21 @@ class SpawnCtl:
         resolved["_handoff_model_change_warning"] = warning
         return resolved
 
+    async def _record_protected_handoff(self, msg: dict[str, Any], host: str, name: str, key: str) -> None:
+        """Bind a protected source's own handoff to its generation and token."""
+        policy = getattr(self.sessions, "assistant", None)
+        source_id = str(msg.get("handoff_from_stream_id") or "").strip()
+        auth = msg.get("_auth_context") or {}
+        if (policy is None or not msg.get("handoff") or ":" not in source_id
+                or not auth.get("token_verified") or auth.get("stream_id") != source_id):
+            return
+        source = await self.store.fetch_session(*source_id.split(":", 1))
+        if not policy.protects(source) or not source.get("token_hash"):
+            return
+        await self.store.record_assistant_handoff_receipt(
+            host, key, source_id, str(auth.get("session_generation") or ""),
+            str(source["token_hash"]), lifecycle_authority.logical_payload_hash(msg), name)
+
     async def _finish_handoff(self, msg: dict[str, Any], successor_stream_id: str) -> None:
         """Post-boot handoff steps, best-effort and non-raising: the successor is
         already live and returned, so neither failing here fails the spawn.
@@ -2973,10 +3017,29 @@ class SpawnCtl:
             except Exception:  # noqa: BLE001 - a reparent failure never fails the handoff
                 log.exception("handoff child reparent failed")
         src_host, src_name = handoff_from.split(":", 1)
+        source = await self.store.fetch_session(src_host, src_name)
         try:
-            await self.sessions.close(src_host, src_name, reason="handed_off", close_kind="handed_off")
+            closed = await self.sessions.close(src_host, src_name, reason="handed_off", close_kind="handed_off")
         except VerbError as exc:
             log.info("handoff close of %s: %s", handoff_from, exc.code)
+            return
+        policy = getattr(self.sessions, "assistant", None)
+        if (policy is None or not policy.protects(source) or closed.get("failed")
+                or closed.get("stale_generation") or closed.get("already_closed")):
+            return
+        succ_host, succ_name = successor_stream_id.split(":", 1)
+        successor = await self.store.fetch_session(succ_host, succ_name)
+        try:
+            async with policy.authority_lock:
+                moved = await self.store.lifecycle_authority_carry_on_handoff(
+                    handoff_from, str(source.get("session_generation") or ""), successor_stream_id,
+                    str((successor or {}).get("session_generation") or ""), policy.role)
+        except Exception:  # noqa: BLE001 - authority stays with no one rather than failing the handoff
+            log.exception("handoff lifecycle authority carry failed")
+            return
+        if moved:
+            log.info("handoff carried lifecycle authority %s -> %s revision=%s",
+                     handoff_from, successor_stream_id, moved["revision"])
 
     # -- reservation identity probes (spec §D1) ------------------------------
 

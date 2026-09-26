@@ -286,6 +286,9 @@ class Sessions:
         # callers that bypass this registry (or race a restart), but this lock
         # prevents two in-process close requests from both driving tmux.
         self._lifecycle_locks: dict[str, asyncio.Lock] = {}
+        # Parent-graph mutations (reparent, manager close) validate ancestry and
+        # write under this one lock, so concurrent moves cannot form a cycle.
+        self._graph_lock = asyncio.Lock()
         #: Ledger callback for confirmed-dead close resolution. The callback is
         #: optional so the registry remains usable in focused lifecycle tests.
         self._awaiter_resolver: Any = None
@@ -884,6 +887,21 @@ class Sessions:
         new_parent_stream_id: str,
         *,
         auth_context: dict[str, Any] | None = None,
+        manager_authorized: bool = False,
+    ) -> dict[str, Any]:
+        async with self._graph_lock:
+            return await self._reparent_locked(
+                host, session_name, new_parent_stream_id,
+                auth_context=auth_context, manager_authorized=manager_authorized)
+
+    async def _reparent_locked(
+        self,
+        host: str,
+        session_name: str,
+        new_parent_stream_id: str,
+        *,
+        auth_context: dict[str, Any] | None = None,
+        manager_authorized: bool = False,
     ) -> dict[str, Any]:
         """Move one open worker to an open parent in the central registry.
 
@@ -891,10 +909,10 @@ class Sessions:
         distinction is what makes a successor on one host able to adopt a
         child on another host without pretending that local tmux can observe
         the peer.  The caller check mirrors the useful v1 authorization rows:
-        the new parent, the current parent, or a live handoff successor may
-        perform the move. The caller must be the server-derived owner of a
-        verified stream token; a wire identity claim alone cannot authorize a
-        lifecycle mutation.
+        the current parent or a live handoff successor of that parent may
+        perform the move; naming yourself the new parent grants nothing. The
+        caller must be the server-derived owner of a verified stream token; a
+        wire identity claim alone cannot authorize a lifecycle mutation.
         """
         worker_stream_id = f"{host}:{session_name}"
         new_parent_stream_id = str(new_parent_stream_id or "").strip()
@@ -921,7 +939,9 @@ class Sessions:
         caller = str(auth.get("stream_id") or "").strip()
         if not caller:
             raise VerbError("stream_ownership_unverified", "reparent requires a verified stream-token owner")
-        allowed = caller in {new_parent_stream_id, old_parent_stream_id}
+        # Only the owner moves a worker: a top-level stream (including a
+        # protected assistant) has none, and adopting oneself confers nothing.
+        allowed = old_parent_stream_id is not None and caller == old_parent_stream_id
         if not allowed:
             caller_row = None
             if ":" in caller:
@@ -929,12 +949,29 @@ class Sessions:
                 caller_row = self._inv.get(caller) or await self.store.fetch_session(
                     caller_host, caller_name
                 )
+            # A successor adopts only its predecessor's children: a top-level
+            # worker has no predecessor, and "" must never match "".
             allowed = (
-                isinstance(caller_row, dict)
+                old_parent_stream_id is not None
+                and isinstance(caller_row, dict)
                 and str(caller_row.get("status") or "open") == "open"
                 and str(caller_row.get("handoff_from_stream_id") or "").strip()
-                == (old_parent_stream_id or "")
+                == old_parent_stream_id
             )
+        if not allowed and manager_authorized:
+            # The designated lifecycle manager (verified by the caller) may move a
+            # non-child, but never a protected assistant or into a cycle.
+            if self.assistant.protects(worker):
+                raise VerbError("reparent_protected", f"{worker_stream_id} is a protected assistant")
+            seen, cursor = set(), new_parent_stream_id
+            while cursor and cursor not in seen:
+                if cursor == worker_stream_id:
+                    raise VerbError("reparent_cycle", f"{new_parent_stream_id} descends from {worker_stream_id}")
+                seen.add(cursor)
+                c_host, c_name = self.split(cursor)
+                row = await self.store.fetch_session(c_host, c_name)
+                cursor = str((row or {}).get("parent_stream_id") or "").strip()
+            allowed = True
         if not allowed:
             raise VerbError("reparent_unauthorized", f"{caller} cannot reparent {worker_stream_id}")
 
@@ -1293,8 +1330,12 @@ class Sessions:
         operator_confirm: bool = False,
         defer_if_working: bool = False,
         attribution: dict[str, Any] | None = None,
+        admission_guard: Any = None,
     ) -> dict[str, Any]:
         """Serialize one lifecycle operation for this host/session name.
+
+        `admission_guard(row)`, when given, runs under the lifecycle lock after
+        the authoritative re-read and before any kill; raising refuses the close.
 
         A caller that validated a specific generation (e.g. the reconciler
         self-close sweep, which authorizes a close from a generation-scoped
@@ -1318,6 +1359,19 @@ class Sessions:
         async with self._lifecycle_lock(host, session_name):
             row = await self.store.fetch_session(host, session_name)
             self.assistant.guard_close(row, close_kind)
+            if admission_guard is not None:
+                # Hold the graph lock from admission through the kill so no
+                # child can be reparented under the target in between.
+                async with self._graph_lock:
+                    await admission_guard(row)
+                    return await self._close_locked(
+                        host, session_name, reason,
+                        expected_generation=expected_generation, close_kind=close_kind,
+                        requires_idle=requires_idle, requires_hidden=requires_hidden,
+                        operator_override=operator_override,
+                        operator_confirm=operator_confirm,
+                        defer_if_working=defer_if_working, attribution=attribution,
+                    )
             return await self._close_locked(
                 host, session_name, reason,
                 expected_generation=expected_generation, close_kind=close_kind,

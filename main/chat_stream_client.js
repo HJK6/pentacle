@@ -727,6 +727,29 @@ try {
     return this.sendCommand(payload, 'close');
   }
 
+  // Operator designate/revoke of fleet lifecycle authority. The daemon derives
+  // the actor from this connection's operator credential; the target
+  // generation and grant revision are read back fresh and re-checked in the
+  // daemon's mutation transaction.
+  async lifecycleAuthority({ action, targetStreamId, reason } = {}) {
+    const inspect = { type: 'assistant.lifecycle', action: 'inspect' };
+    if (targetStreamId) inspect.target_stream_id = String(targetStreamId);
+    const current = await this.sendCommand(inspect, 'assistant.lifecycle');
+    if (action === 'inspect') return current;
+    if (action !== 'designate' && action !== 'revoke') {
+      throw { type: 'assistant.lifecycle.error', error: 'unsupported lifecycle action' };
+    }
+    const payload = {
+      type: 'assistant.lifecycle', action, reason: String(reason || ''),
+      expected_revision: Number(current?.grant?.revision || 0),
+    };
+    if (action === 'designate') {
+      payload.target_stream_id = String(targetStreamId || '');
+      payload.target_generation = String(current?.target?.session_generation || '');
+    }
+    return this.sendCommand(payload, 'assistant.lifecycle', { requestId: crypto.randomUUID() });
+  }
+
   async requestStreamEvents({ streamId, limit, beforeDaemonSeq, chunkLimit } = {}) {
     const stream_id = String(streamId || '');
     if (!stream_id) {

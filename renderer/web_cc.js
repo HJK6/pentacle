@@ -239,6 +239,9 @@ function webContextMenuItems(sessionName, displayName, hostId, emit) {
   items.push({ separator: true });
   items.push({ label: 'Rename', onSelect: () => emit('action', 'rename', sessionName, { displayName, hostId }) });
   items.push({ label: 'Delete', onSelect: () => emit('action', 'trash', sessionName, hostId) });
+  items.push({ separator: true });
+  items.push({ label: 'Designate fleet lifecycle manager', onSelect: () => emit('action', 'lifecycle-designate', sessionName, hostId) });
+  items.push({ label: 'Revoke fleet lifecycle manager', onSelect: () => emit('action', 'lifecycle-revoke', sessionName, hostId) });
   return items;
 }
 
@@ -366,6 +369,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
     chatClose: (hostId, sessionName, options) => call('chat-stream:close', hostId || 'local', sessionName, options || null),
 
     chatKill: (args) => call('chat-stream:kill', args || {}),
+    chatLifecycleAuthority: (args) => call('chat-stream:lifecycle-authority', args || {}),
     requestStreamEvents: (args) => call('chat-stream:request-stream-events', args || {}),
     scheduleGet: (scheduleId) => call('chat-stream:schedule-get', scheduleId),
     scheduleCancel: (scheduleId) => call('chat-stream:schedule-cancel', scheduleId),

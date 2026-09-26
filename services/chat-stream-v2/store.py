@@ -40,6 +40,7 @@ import uuid
 import store_exchange
 import store_usage
 import store_qa
+import store_lifecycle_authority as lifecycle_authority
 from store_qa import QaStoreMixin
 from store_exchange import ExchangeStoreMixin
 
@@ -1518,6 +1519,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                 if "objective" not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN objective TEXT")
             store_qa.initialize(conn)
+            lifecycle_authority.initialize(conn)
             store_exchange.initialize(conn)
             if "objective_source" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN objective_source TEXT")
@@ -3236,6 +3238,27 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
 
         return await self.submit(_op)
 
+    async def spawn_record_for_key(self, host: str, idempotency_key: str) -> dict[str, Any] | None:
+        """Read-only twin of `atomic_claim_or_replay`'s lookup: never reserves."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            outcome = _row(conn.execute(
+                f"SELECT * FROM (SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_outcomes UNION ALL "
+                f"SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_cancellations) "
+                "WHERE host=? AND idempotency_key=? ORDER BY updated_at DESC LIMIT 1",
+                (host, idempotency_key),
+            ).fetchone())
+            if outcome is not None:
+                conn.commit()
+                return {"kind": "terminal", "row": _decode_spawn_outcome(outcome) or {}}
+            reservation = _row(conn.execute(
+                "SELECT * FROM v2_stream_reservations WHERE host=? AND idempotency_key=? LIMIT 1",
+                (host, idempotency_key),
+            ).fetchone())
+            conn.commit()
+            return {"kind": "in_flight", "row": reservation} if reservation is not None else None
+
+        return await self.submit(_op)
+
     async def atomic_claim_or_replay(
         self, host: str, session_name: str, *, idempotency_key: str,
         request_payload_hash: str, ttl_s: float, request_id: str = "",
@@ -3319,6 +3342,107 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                 return {"status": "unavailable"}
             conn.commit()
             return {"status": "claimed"}
+
+        return await self.submit(_op)
+
+    # -- operator-designated lifecycle authority ---------------------------
+
+    async def lifecycle_authority_mutate(
+        self, msg: dict[str, Any], auth: dict[str, Any], protected_role: str,
+    ) -> dict[str, Any]:
+        """Atomic designate/transfer/revoke; a refusal commits only its audit row."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            try:
+                receipt = lifecycle_authority.mutate(conn, msg, auth, protected_role)
+            except lifecycle_authority.AuthorityError:
+                conn.commit()
+                raise
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+            return receipt
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_current(self) -> dict[str, Any]:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            grant = lifecycle_authority.current(conn)
+            conn.commit()
+            return grant
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_target(self, stream_id: str, protected_role: str) -> dict[str, Any]:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            readback = lifecycle_authority.target_readback(conn, stream_id, protected_role)
+            conn.commit()
+            return readback
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_holder(self, stream_id: str, generation: str | None) -> bool:
+        def _op(conn: sqlite3.Connection) -> bool:
+            held = lifecycle_authority.holder_is(conn, stream_id, generation)
+            conn.commit()
+            return held
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_audit(self, **fields: Any) -> None:
+        def _op(conn: sqlite3.Connection) -> None:
+            lifecycle_authority.audit(conn, **fields)
+            conn.commit()
+
+        await self.submit(_op)
+
+    async def lifecycle_authority_audit_rows(self, target_stream_id: str | None = None,
+                                             limit: int = 20) -> list[dict[str, Any]]:
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            where, params = ("WHERE target_stream_id=?", [target_stream_id]) if target_stream_id else ("", [])
+            cur = conn.execute(f"SELECT * FROM v2_lifecycle_authority_audit {where} "
+                               "ORDER BY id DESC LIMIT ?", (*params, limit))
+            rows = [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
+            conn.commit()
+            return rows
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_carry_on_handoff(
+        self, source: str, source_generation: str, successor: str,
+        successor_generation: str, protected_role: str,
+    ) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            try:
+                moved = lifecycle_authority.carry_on_handoff(
+                    conn, source, source_generation, successor, successor_generation, protected_role)
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+            return moved
+
+        return await self.submit(_op)
+
+    async def record_assistant_handoff_receipt(
+        self, host: str, key: str, source: str, source_generation: str,
+        token_hash: str, payload_hash: str, successor_name: str,
+    ) -> None:
+        def _op(conn: sqlite3.Connection) -> None:
+            lifecycle_authority.record_handoff_receipt(
+                conn, host, key, source, source_generation, token_hash, payload_hash, successor_name)
+            conn.commit()
+
+        await self.submit(_op)
+
+    async def retired_assistant_handoff_receipt(
+        self, host: str, key: str, owner: dict[str, Any], payload_hash: str,
+    ) -> dict[str, Any]:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            try:
+                return lifecycle_authority.retired_handoff_receipt(conn, host, key, owner, payload_hash)
+            finally:
+                conn.commit()
 
         return await self.submit(_op)
 

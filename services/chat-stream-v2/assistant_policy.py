@@ -20,6 +20,12 @@ class AssistantPolicy:
         if self.role and (len(self.role) > 40 or not re.fullmatch(r"[a-z0-9_-]+", self.role)):
             raise ValueError("PENTACLE_ASSISTANT_ROLE must be a short role slug")
         self.lock = asyncio.Lock()
+        # Fleet lifecycle authority: designate/transfer/revoke/handoff-carry and a
+        # manager close/reparent from admission through effect all hold this
+        # lock, so the grant cannot change under an admitted effect. Ordering:
+        # authority (outermost) -> per-target lifecycle lock -> graph lock.
+        # Nothing holding a lifecycle or graph lock may acquire it.
+        self.authority_lock = asyncio.Lock()
 
     def protects(self, row):
         return bool(self.role and row and row.get("role") == self.role)
@@ -93,3 +99,42 @@ class AssistantPolicy:
     def guard_close(self, row, close_kind):
         if self.protects(row) and close_kind not in {"handed_off", "spawn_rollback"}:
             raise self._error("close_protected", "assistant session is protected; use managed handoff for replacement")
+
+    # -- operator-designated fleet lifecycle authority ----------------------
+    # The durable grant (store_lifecycle_authority) is the only source of this
+    # authority: no role, title, config entry or lineage confers it.
+
+    async def manager_holds(self, auth):
+        """True only for the verified current holder generation."""
+        auth = auth or {}
+        if not auth.get("token_verified"):
+            return False
+        return await self.store.lifecycle_authority_holder(
+            str(auth.get("stream_id") or ""), auth.get("session_generation"))
+
+    # CLI defaults are not an explicit reason for a fleet lifecycle action.
+    DEFAULT_REASONS = frozenset({"", "manual", "reparent"})
+
+    def manager_request_code(self, msg):
+        """Refusal code when a manager request lacks explicit reason/request id."""
+        if str(msg.get("reason") or "").strip() in self.DEFAULT_REASONS:
+            return "lifecycle_reason_required"
+        if not str(msg.get("request_id") or "").strip():
+            return "lifecycle_request_id_required"
+        return None
+
+    async def manager_fences(self, target_row, generation, msg, *, children, pending_spawns):
+        """Refusal code for a manager close of a non-child, or None."""
+        code = self.manager_request_code(msg)
+        if code:
+            return code
+        if (target_row is None or str(target_row.get("status") or "") != "open"
+                or target_row.get("offline_since_ts") or target_row.get("presumed_dead_at")):
+            return "lifecycle_target_unavailable"
+        if self.protects(target_row):
+            return "close_protected"
+        if children:
+            return "close_live_children"
+        if pending_spawns:
+            return "close_pending_spawn"
+        return None

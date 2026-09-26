@@ -154,6 +154,7 @@ window.cc = {
   // a fetch wrapper; it's now an alias for chatKill so the trash drawer's
   // permanent-delete flow keeps working.
   chatKill: (args) => ipcRenderer.invoke('chat-stream:kill', args || {}),
+  chatLifecycleAuthority: (args) => ipcRenderer.invoke('chat-stream:lifecycle-authority', args || {}),
   requestStreamEvents: (args) => ipcRenderer.invoke('chat-stream:request-stream-events', args || {}),
   scheduleGet: (scheduleId) => ipcRenderer.invoke('chat-stream:schedule-get', scheduleId),
   scheduleCancel: (scheduleId) => ipcRenderer.invoke('chat-stream:schedule-cancel', scheduleId),

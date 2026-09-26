@@ -5156,8 +5156,46 @@ window.cc.onAction((action, sessionName, extra) => {
     else showRenameModal(sessionName, extra);
   } else if (action === 'trash') {
     deleteSession(sessionName, extra);
+  } else if (action === 'lifecycle-designate' || action === 'lifecycle-revoke') {
+    changeLifecycleAuthority(action === 'lifecycle-designate' ? 'designate' : 'revoke', sessionName, extra);
   }
 });
+
+// Operator-only: name one existing lead (or protected assistant) seat as the
+// fleet lifecycle manager, or revoke the current grant. The daemon re-reads
+// the target's generation and eligibility and records this operator.
+async function changeLifecycleAuthority(action, name, hostId) {
+  const streamId = chatSessionStateForNameHost(name, hostId || (IS_CLIENT ? 'remote' : 'local'))?.stream_id;
+  if (!streamId || typeof window.cc.chatLifecycleAuthority !== 'function') {
+    showToast('Fleet lifecycle authority needs a chat-stream session', { type: 'error' });
+    return;
+  }
+  const inspected = await window.cc.chatLifecycleAuthority({ action: 'inspect', targetStreamId: streamId });
+  if (!inspected?.ok) {
+    showToast(inspected?.error || 'Could not read fleet lifecycle authority', { type: 'error' });
+    return;
+  }
+  const holder = inspected?.grant?.stream_id || 'none';
+  const target = inspected?.target || {};
+  if (action === 'designate' && !target.eligible) {
+    showToast(`Not eligible: ${target.refusal_code || 'unknown'}`, { type: 'error' });
+    return;
+  }
+  const message = action === 'designate'
+    ? `Designate ${streamId} (generation ${target.session_generation}) as the fleet lifecycle manager? Current holder: ${holder}.`
+    : `Revoke fleet lifecycle authority from ${holder}?`;
+  const confirmed = await window.confirmDialog(message, { confirmLabel: action === 'designate' ? 'Designate' : 'Revoke' });
+  if (!confirmed) return;
+  const reason = action === 'designate' ? `operator designated ${streamId} via web` : `operator revoked ${holder} via web`;
+  const result = await window.cc.chatLifecycleAuthority({ action, targetStreamId: streamId, reason });
+  if (!result?.ok) {
+    showToast(result?.error || 'Fleet lifecycle authority change failed', { type: 'error' });
+    return;
+  }
+  showToast(action === 'designate'
+    ? `Fleet lifecycle manager: ${result?.receipt?.holder_stream_id} (revision ${result?.receipt?.revision})`
+    : `Fleet lifecycle authority revoked (revision ${result?.receipt?.revision})`);
+}
 
 // ── Actions ────────────────────────────────────────────────────
 

@@ -51,6 +51,7 @@ from .wsclient import (
     prompt_status_once,
     reconcile_status_once,
     reparent_once,
+    assistant_lifecycle_once,
     report_once,
     rename_once,
     role_get_once,
@@ -770,6 +771,42 @@ def schedule_receipt(args: argparse.Namespace) -> int:
     return 0 if _schedule_ok(response) else 1
 
 
+def _handoff_request_path(config, source_stream_id: str) -> Path:
+    digest = hashlib.sha256(source_stream_id.encode("utf-8")).hexdigest()[:32]
+    return Path(config.runtime_dir).expanduser() / "handoff-requests" / f"{digest}.json"
+
+
+def _store_handoff_request(config, source_stream_id: str, payload: dict[str, object]) -> None:
+    """Keep the exact outbound handoff so a retired source can replay its receipt.
+
+    Written before the RPC with owner-only permissions; it holds no credential.
+    """
+    path = _handoff_request_path(config, source_stream_id)
+    stored = {k: v for k, v in payload.items() if k != "request_id"}
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump({"source_stream_id": source_stream_id, "payload": stored}, handle)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"agent-orch spawn: handoff request not cached: {exc}", file=sys.stderr)
+
+
+def _stored_handoff_request(config, source_stream_id: str, explicit_key: str | None) -> dict[str, object] | None:
+    try:
+        data = json.loads(_handoff_request_path(config, source_stream_id).read_text())
+    except (OSError, ValueError):
+        return None
+    payload = data.get("payload") if isinstance(data, dict) else None
+    if (not isinstance(payload, dict) or data.get("source_stream_id") != source_stream_id
+            or payload.get("handoff_from_stream_id") != source_stream_id
+            or (explicit_key and payload.get("idempotency_key") != explicit_key)):
+        return None
+    return payload
+
+
 def _handoff_source_row(config, stream_id: str, *, timeout: float) -> dict[str, object]:
     snapshot = fetch_snapshot(config, timeout=timeout)
     for row in snapshot.get("sessions") or []:
@@ -956,6 +993,27 @@ def spawn(args: argparse.Namespace) -> int:
     if model is not None and provider is not None and provider not in {"claude", "codex"}:
         print("agent-orch spawn: validation failed: --model requires --provider claude or codex", file=sys.stderr)
         return 2
+    stored_handoff = (
+        _stored_handoff_request(config, handoff_from_stream_id, getattr(args, "idempotency_key", None))
+        if handoff and handoff_from_stream_id and not scheduled else None
+    )
+    if stored_handoff is not None:
+        # Retry of this seat's own handoff: resend the exact stored request. A
+        # retired source cannot read the fleet, and needs only its receipt.
+        payload = {**stored_handoff, "request_id": getattr(args, "request_id", None) or f"spawn-{uuid.uuid4()}"}
+        print(f"spawn key: {payload['idempotency_key']}", file=sys.stderr)
+        try:
+            response = asyncio.run(spawn_once(
+                config, payload,
+                timeout=float(getattr(args, "timeout", None) or SPAWN_RPC_TIMEOUT_DEFAULT_S),
+            ))
+        except Exception as exc:
+            response, exit_code, message = _direct_rpc_transport_error("spawn", str(payload["request_id"]), exc)
+            _print_response(response)
+            print(f"agent-orch spawn: {message}", file=sys.stderr)
+            return exit_code
+        _print_response(response)
+        return 0 if response.get("type") == "spawn.ok" and response.get("ok") is not False else 1
     try:
         if handoff:
             if not handoff_from_stream_id:
@@ -1160,6 +1218,8 @@ def spawn(args: argparse.Namespace) -> int:
     # sees it on stderr and can retry (same key), `spawn status <key>`, or
     # `spawn cancel <key>`.
     print(f"spawn key: {payload['idempotency_key']}", file=sys.stderr)
+    if handoff and handoff_from_stream_id:
+        _store_handoff_request(config, handoff_from_stream_id, payload)
     try:
         response = asyncio.run(spawn_once(
             config,
@@ -3125,6 +3185,45 @@ def reconcile_status(args: argparse.Namespace) -> int:
                 continue
             print(f"{item.get('class')} {item.get('stream_id')}")
     return 0 if response.get("type") == "reconcile.status.ok" else 1
+
+
+def lifecycle(args: argparse.Namespace) -> int:
+    """Inspect, or (as the designated manager) transfer, fleet lifecycle authority.
+
+    Designation and revocation require the authenticated operator (web UI);
+    a seat token can only transfer a grant it currently holds.
+    """
+    config = load_config()
+    caller = getattr(args, "from_stream_id", None) or discover_leader_stream_id_short(config)
+    timeout = float(getattr(args, "timeout", 30.0) or 30.0)
+
+    def call(fields: dict[str, object]) -> dict[str, object]:
+        return asyncio.run(assistant_lifecycle_once(config, fields, timeout=timeout, from_stream_id=caller))
+
+    try:
+        target = getattr(args, "target", None)
+        inspected = call({"action": "inspect", **({"target_stream_id": target} if target else {})})
+        if args.lifecycle_command == "inspect" or inspected.get("type") != "assistant.lifecycle.ok":
+            response = inspected
+        else:
+            readback = inspected.get("target") or {}
+            generation = getattr(args, "target_generation", None) or readback.get("session_generation")
+            expected = getattr(args, "expected_revision", None)
+            request_id = getattr(args, "request_id", None) or f"lifecycle-{uuid.uuid4()}"
+            print(f"lifecycle request id: {request_id}", file=sys.stderr)
+            response = call({
+                "action": "transfer", "request_id": request_id, "reason": args.reason,
+                "target_stream_id": target, "target_generation": generation,
+                "expected_revision": expected if expected is not None
+                else int((inspected.get("grant") or {}).get("revision") or 0),
+            })
+    except Exception as exc:
+        response, exit_code, message = _direct_rpc_transport_error("assistant.lifecycle", None, exc)
+        _print_response(response)
+        print(f"agent-orch lifecycle: {message}", file=sys.stderr)
+        return exit_code
+    _print_response(response)
+    return 0 if response.get("type") == "assistant.lifecycle.ok" else 1
 
 
 def reparent(args: argparse.Namespace) -> int:
@@ -5178,6 +5277,23 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_status_parser.add_argument("--json", action="store_true")
     reconcile_status_parser.add_argument("--timeout", type=float, default=30.0)
     reconcile_status_parser.set_defaults(func=reconcile_status)
+    lifecycle_parser = subparsers.add_parser(
+        "lifecycle",
+        description="inspect or transfer operator-designated fleet lifecycle authority",
+    )
+    lifecycle_sub = lifecycle_parser.add_subparsers(dest="lifecycle_command", required=True)
+    lifecycle_inspect = lifecycle_sub.add_parser("inspect", help="current grant, recent audit, optional target readback")
+    lifecycle_inspect.add_argument("--target", help="stream id to read back generation and eligibility")
+    lifecycle_transfer = lifecycle_sub.add_parser("transfer", help="holder-only: move the grant to an existing eligible seat")
+    lifecycle_transfer.add_argument("target", help="recipient stream id (existing open lead or protected assistant)")
+    lifecycle_transfer.add_argument("--reason", required=True)
+    lifecycle_transfer.add_argument("--target-generation", help="exact recipient generation (default: fresh readback)")
+    lifecycle_transfer.add_argument("--expected-revision", type=int, help="grant revision (default: fresh readback)")
+    lifecycle_transfer.add_argument("--request-id", help="idempotency key; reuse it to retry the same transfer")
+    for sub in (lifecycle_inspect, lifecycle_transfer):
+        sub.add_argument("--from-stream-id", dest="from_stream_id", default=None)
+        sub.add_argument("--timeout", type=float, default=30.0)
+        sub.set_defaults(func=lifecycle)
     reparent_parser = subparsers.add_parser(
         "reparent",
         description="move a direct-child worker to a new parent (same-daemon, same-host)",

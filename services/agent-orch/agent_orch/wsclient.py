@@ -2671,6 +2671,32 @@ async def reparent_once(
     raise TimeoutError("reparent_timeout")
 
 
+async def assistant_lifecycle_once(
+    config: Config,
+    fields: dict[str, Any],
+    *,
+    timeout: float = 30.0,
+    from_stream_id: str | None = None,
+) -> dict[str, Any]:
+    """One ``assistant.lifecycle`` RPC (inspect/transfer) under this seat's token.
+
+    The daemon derives the actor from the verified token; nothing here claims it.
+    """
+    ws = await _connect_rpc_ready(config, from_stream_id=from_stream_id)
+    request_id = str(fields.get("request_id") or f"lifecycle-{uuid.uuid4()}")
+    try:
+        payload: dict[str, Any] = {**fields, "type": "assistant.lifecycle", "request_id": request_id}
+        if from_stream_id:
+            payload["from_stream_id"] = from_stream_id
+            if _stream_token_from_env():
+                payload["stream_token"] = _stream_token_from_env()
+        await ws.send(json.dumps(payload, separators=(",", ":")))
+        deadline = time.monotonic() + timeout
+        return await _read_rpc_response(ws, request_id, prefix="assistant.lifecycle", deadline=deadline)
+    finally:
+        await ws.close()
+
+
 async def grant_token_once(
     config: Config,
     stream_id: str,

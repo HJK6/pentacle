@@ -188,6 +188,7 @@ function createCcHandlers({
     });
     target.handle('chat-stream:close', (_event, host, sessionName, options) => command(() => chatStreamClient.closeSession({ ...options, host, sessionName })));
     target.handle('chat-stream:kill', (_event, args) => command(() => chatStreamClient.killSessionRpc(args)));
+    target.handle('chat-stream:lifecycle-authority', (_event, args) => command(() => chatStreamClient.lifecycleAuthority(args || {})));
     target.handle('chat-stream:upload-blob', (_event, payload) => command(() => chatStreamClient.uploadBlob({ ...payload,
       data: typeof payload?.data === 'string' ? Buffer.from(payload.data, 'base64') : payload?.data })));
     target.handle('chat-stream:fetch-blob', (_event, blobSha) => command(() => chatStreamClient.fetchBlob({ blobSha })));

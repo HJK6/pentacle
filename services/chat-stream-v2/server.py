@@ -23,6 +23,7 @@ import qa_dispatch
 
 import asyncio
 import errno
+import functools
 import hmac
 import hashlib
 import ipaddress
@@ -46,6 +47,7 @@ except ImportError:  # pragma: no cover
 
 from _shared import operator_auth
 from comms import ATTACHMENT_MAX_BYTES, AttachmentValidationError, validate_send_attachments
+import store_lifecycle_authority as lifecycle_authority
 from ledger import TERMINAL_REPORT_STATUSES, StatusCardError, _claim_wire_fields
 from seat_token_telemetry import (
     SeatTokenTelemetry,
@@ -56,7 +58,7 @@ from seat_token_telemetry import (
     TOKEN_REASON_VERIFIED,
     TOKEN_REASON_WRONG_SEAT,
 )
-from sessions import VerbError, with_bootstrap_state
+from sessions import VerbError, _finish_despite_cancel, with_bootstrap_state
 from store import STREAM_TOKEN_HASH_VERSION, role_source_for
 from machine_stats import validate_machine_stats
 
@@ -458,6 +460,7 @@ class Server:
             "set_visibility": self._on_set_visibility,
             "status_card": self._on_status_card,
             "spawn": self._on_spawn,
+            "assistant.lifecycle": self._on_assistant_lifecycle,
             **{f"coordination.spec_issue.{verb}": self._on_qa_issue for verb in ("adjudicate", "diagnose", "show")},
             "await_spawn": self._on_await_spawn,
             "spawn_cancel": self._on_spawn_cancel,
@@ -1195,6 +1198,7 @@ class Server:
         reason_code = None if use_binding else self._token_input_reason(token)
         owner: str | None = None
         verified_generation: str | None = None
+        retired_owner: dict[str, Any] | None = None
 
         if reason_code is None:
             if self.store is None:
@@ -1209,6 +1213,19 @@ class Server:
                         reason_code = TOKEN_REASON_INTERNAL_ERROR
                     elif state.get("status") != "open":
                         reason_code = TOKEN_REASON_EXPIRED
+                        # Narrow read-back identity for a retired protected
+                        # assistant's own handoff receipt. Never token_verified;
+                        # SpawnCtl serves only the stored receipt with it.
+                        closed_owner = str(state.get("stream_id") or "")
+                        if (msg.get("type") == "spawn" and msg.get("handoff") is True
+                                and closed_owner
+                                and msg.get("handoff_from_stream_id") == closed_owner
+                                and (not claim or claim == closed_owner)):
+                            retired_owner = {
+                                "stream_id": closed_owner,
+                                "session_generation": state.get("session_generation"),
+                                "token_hash": token_hash,
+                            }
                     else:
                         owner = str(state.get("stream_id") or "").strip() or None
                         verified_generation = state.get("session_generation")
@@ -1255,6 +1272,8 @@ class Server:
                 "reason_code": reason_code or TOKEN_REASON_INTERNAL_ERROR,
             }
         )
+        if retired_owner is not None and reason_code == TOKEN_REASON_EXPIRED:
+            context["retired_handoff_owner"] = retired_owner
         return context
 
     @staticmethod
@@ -1978,12 +1997,51 @@ class Server:
 
     async def _on_reparent(self, msg: dict[str, Any]) -> dict[str, Any]:
         host, name = await self.sessions.resolve(msg)
-        return await self.sessions.reparent(
-            host,
-            name,
-            str(msg.get("new_parent_stream_id") or "").strip(),
-            auth_context=msg.get("_auth_context"),
-        )
+        new_parent = str(msg.get("new_parent_stream_id") or "").strip()
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        try:
+            return await self.sessions.reparent(host, name, new_parent, auth_context=auth)
+        except VerbError as exc:
+            if exc.code != "reparent_unauthorized":
+                raise
+            if not await self.sessions.assistant.manager_holds(auth):
+                row = await self.store.fetch_session(host, name)
+                await self._manager_audit(
+                    "reparent", msg, auth, f"{host}:{name}",
+                    str((row or {}).get("session_generation") or "") or None,
+                    result="refused", refusal_code=exc.code, actor_kind="seat")
+                raise
+        sid = f"{host}:{name}"
+        policy = self.sessions.assistant
+        # Authority (outermost), then the worker's lifecycle lock: the grant is
+        # re-verified and cannot change until the effect is written. Once both
+        # are held, admission, effect and outcome audit finish together; a
+        # cancelled caller sees its cancellation only after the outcome row.
+        async with policy.authority_lock, self.sessions._lifecycle_lock(host, name):
+            return await _finish_despite_cancel(
+                self._manager_reparent_locked(msg, auth, host, name, new_parent))
+
+    async def _manager_reparent_locked(self, msg: dict[str, Any], auth: dict[str, Any],
+                                       host: str, name: str, new_parent: str) -> dict[str, Any]:
+        sid = f"{host}:{name}"
+        policy = self.sessions.assistant
+        target = await self.store.fetch_session(host, name)
+        generation = str((target or {}).get("session_generation") or "") or None
+        code = policy.manager_request_code(msg)
+        if code is None and not await policy.manager_holds(auth):
+            code = "authority_holder_required"
+        if code is not None:
+            await self._manager_audit("reparent", msg, auth, sid, generation, result="refused", refusal_code=code)
+            raise VerbError(code, f"manager reparent refused: {code}")
+        await self._manager_audit("reparent", msg, auth, sid, generation, result="admitted")
+        try:
+            reply = await self.sessions.reparent(
+                host, name, new_parent, auth_context=auth, manager_authorized=True)
+        except VerbError as exc:
+            await self._manager_audit("reparent", msg, auth, sid, generation, result="refused", refusal_code=exc.code)
+            raise
+        await self._manager_audit("reparent", msg, auth, sid, generation, result="applied")
+        return reply
 
     async def _on_role_set(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Set a role on a live seat, then deliver its baseline into the pane
@@ -2488,6 +2546,7 @@ class Server:
             caller_stream_id = target_stream_id
         close_kind = "session_close"
         coordinator_authorized = False
+        manager_generation: str | None = None
         if caller_stream_id != target_stream_id:
             target = await self.store.fetch_session(host, name) if self.store is not None else None
             if not (
@@ -2497,11 +2556,20 @@ class Server:
             ):
                 if operator_authenticated:
                     close_kind = "operator_close"
+                elif await self.sessions.assistant.manager_holds(auth):
+                    # Fenced to the generation read now; every lifecycle fence
+                    # is re-checked under the lifecycle lock before any kill.
+                    manager_generation = expected_generation or self._manager_target_generation(target)
+                    close_kind = "manager_close"
                 else:
                     # A seat token proves only that seat's identity. Visibility
                     # and a caller-supplied confirmation bit do not promote it
                     # into a connection-authenticated operator principal.
                     self._log_close_unauthorized(auth)
+                    await self._manager_audit(
+                        "close", msg, auth, target_stream_id,
+                        str((target or {}).get("session_generation") or "") or None,
+                        result="refused", refusal_code="close_unauthorized", actor_kind="seat")
                     raise VerbError(
                         "close_unauthorized",
                         "close requires a verified self, direct-parent, or authenticated operator",
@@ -2522,6 +2590,8 @@ class Server:
             actor_kind, auth_kind = "expired_self", "expired"
         elif close_kind == "operator_close":
             actor_kind, auth_kind = "operator", "operator_authenticated"
+        elif close_kind == "manager_close":
+            actor_kind, auth_kind = "manager", "token_verified"
         elif coordinator_authorized:
             actor_kind, auth_kind = "parent", "token_verified"
         else:
@@ -2538,19 +2608,41 @@ class Server:
             "request_id": str(msg.get("request_id") or ""),
             "defer_if_working": defer_if_working,
         }
-        result = await self.sessions.close(
+        if manager_generation is not None:
+            # A manager close is fenced to the reported generation and never
+            # kills a busy or unobservable seat, nor leaves a deferred intent.
+            expected_generation = manager_generation
+            defer_if_working = False
+            attribution["defer_if_working"] = False
+        close = functools.partial(
+            self.sessions.close,
             host,
             name,
             str(msg.get("reason") or ""),
             expected_generation=expected_generation,
             close_kind=close_kind,
-            requires_idle=bool(msg.get("requires_idle") or msg.get("reap")),
+            requires_idle=bool(msg.get("requires_idle") or msg.get("reap")) or manager_generation is not None,
             operator_override=bool(msg.get("operator_override"))
-            and (operator_authenticated or coordinator_authorized),
-            operator_confirm=msg.get("operator_confirm") is True,
+            and (operator_authenticated or coordinator_authorized)
+            and manager_generation is None,
+            operator_confirm=msg.get("operator_confirm") is True and manager_generation is None,
             defer_if_working=defer_if_working,
             attribution=attribution,
+            admission_guard=(
+                None if manager_generation is None
+                else lambda row: self._manager_close_admission(msg, host, name, row, manager_generation, auth)
+            ),
         )
+        if manager_generation is None:
+            result = await close()
+        else:
+            # The grant cannot change between the manager's admission, the kill
+            # and its audit; a concurrent revoke/transfer waits for this close.
+            # Once the lock is held the close and its outcome audit finish
+            # together; a cancelled caller sees it only after the outcome row.
+            async with self.sessions.assistant.authority_lock:
+                result = await _finish_despite_cancel(self._manager_close_locked(
+                    close, msg, auth, target_stream_id, manager_generation))
         # A working pane refused via `defer_if_working` is an explicit,
         # non-error deferral (not a kill, not a generic failure) — intercept it
         # before the `already_closed` read below.
@@ -2583,6 +2675,110 @@ class Server:
             "reap_status": result.get("reap_status", "unknown"),
             **_claim_wire_fields(claim_verified, claim_mismatch),
         }
+
+    async def _manager_close_locked(
+        self, close: Callable[[], Awaitable[dict[str, Any]]], msg: dict[str, Any], auth: dict[str, Any],
+        target_stream_id: str, generation: str,
+    ) -> dict[str, Any]:
+        result = await close()
+        closed_now = not (result.get("failed") or result.get("deferred")
+                          or result.get("already_closed") or result.get("stale_generation"))
+        await self._manager_audit(
+            "close", msg, auth, target_stream_id, generation,
+            result="applied" if closed_now else "refused",
+            refusal_code=None if closed_now else str(result.get("reason") or "close_not_applied")[:200],
+        )
+        return result
+
+    async def _manager_audit(self, action: str, msg: dict[str, Any], auth: dict[str, Any],
+                             target: str, generation: str | None, *, result: str,
+                             refusal_code: str | None = None, actor_kind: str = "manager") -> None:
+        """Audit a lifecycle action under the grant revision current at write time.
+
+        Only the server-verified seat identity is recorded, never wire claims.
+        """
+        revision = (await self.store.lifecycle_authority_current())["revision"]
+        await self.store.lifecycle_authority_audit(
+            action=f"manager_{action}", actor_kind=actor_kind,
+            actor_identity=str(auth.get("stream_id") or "") or None,
+            actor_generation=auth.get("session_generation"), target_stream_id=target,
+            target_generation=generation, old_revision=revision, new_revision=revision,
+            reason=msg.get("reason"), request_id=msg.get("request_id"),
+            result=result, refusal_code=refusal_code,
+        )
+
+    @staticmethod
+    def _manager_target_generation(target: dict[str, Any] | None) -> str:
+        return str((target or {}).get("session_generation") or "") or "unknown"
+
+    async def _manager_lifecycle_fences(
+        self, action: str, msg: dict[str, Any], host: str, name: str,
+        target: dict[str, Any] | None, auth: dict[str, Any], expected_generation: str,
+    ) -> None:
+        """Refuse (auditing the verified manager) unless every fence passes.
+
+        Requires the caller to still hold the grant, an explicit reason and
+        request id, the target's terminal report for this exact generation, no
+        live children or pending spawns, and a non-protected target.
+        """
+        sid = f"{host}:{name}"
+        generation = str((target or {}).get("session_generation") or "") or None
+        code = None
+        if not await self.sessions.assistant.manager_holds(auth):
+            code = "authority_holder_required"
+        elif target is None:
+            code = "lifecycle_target_unavailable"
+        elif generation != expected_generation:
+            code = "lifecycle_generation_mismatch"
+        if code is None:
+            children = await self.sessions._live_children(sid)
+            pending = []
+            for reservation in await self.store.reservations(include_expired=True):
+                raw = reservation.get("payload")
+                intent = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
+                if str((intent.get("open_fields") or {}).get("parent_stream_id") or "") == sid:
+                    pending.append(reservation)
+            code = await self.sessions.assistant.manager_fences(
+                target, generation, msg, children=children, pending_spawns=pending)
+        if code is None and await self.store.find_report(
+                sid, statuses=INSPECT_TERMINAL_STATUSES, session_generation=generation) is None:
+            code = "lifecycle_report_required"
+        if code is not None:
+            await self._manager_audit(action, msg, auth, sid, generation, result="refused", refusal_code=code)
+            raise VerbError(code, f"manager {action} refused: {code}")
+
+    async def _manager_close_admission(
+        self, msg: dict[str, Any], host: str, name: str, row: dict[str, Any] | None,
+        expected_generation: str, auth: dict[str, Any],
+    ) -> None:
+        await self._manager_lifecycle_fences("close", msg, host, name, row, auth, expected_generation)
+        # Durable attribution precedes the effect: an audit failure refuses the close.
+        await self._manager_audit("close", msg, auth, f"{host}:{name}", expected_generation, result="admitted")
+
+    async def _on_assistant_lifecycle(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Operator designate/revoke and holder transfer of lifecycle authority."""
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        action = str(msg.get("action") or "")
+        if action == "inspect":
+            if not (auth.get("operator_authenticated") or auth.get("token_verified")):
+                raise VerbError("authentication_required", "lifecycle inspect requires an authenticated caller")
+            reply = {"type": "assistant.lifecycle.ok", "action": "inspect",
+                     "grant": await self.store.lifecycle_authority_current(),
+                     "audit": await self.store.lifecycle_authority_audit_rows(limit=20)}
+            target = str(msg.get("target_stream_id") or "").strip()
+            if ":" in target:
+                reply["target"] = await self.store.lifecycle_authority_target(
+                    target, self.sessions.assistant.role)
+            return reply
+        if action not in lifecycle_authority.ACTIONS:
+            raise VerbError("invalid_request", "action must be designate, transfer, revoke or inspect")
+        try:
+            async with self.sessions.assistant.authority_lock:
+                receipt = await self.store.lifecycle_authority_mutate(
+                    msg, auth, self.sessions.assistant.role)
+        except lifecycle_authority.AuthorityError as exc:
+            raise VerbError(exc.code, str(exc)) from exc
+        return {"type": "assistant.lifecycle.ok", "action": action, "receipt": receipt}
 
     @staticmethod
     def _log_close_unauthorized(auth: dict[str, Any]) -> None:
