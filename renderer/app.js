@@ -4059,10 +4059,13 @@ async function sendComposerQuestionAnswer(slot, streamId, text, inputEl, attachm
 function scheduleSlotChatRender(slot) {
   if (!chatUiEnabled()) return;
   if (state.slotChatRenderTimers[slot]) return;
-  state.slotChatRenderTimers[slot] = setTimeout(() => {
+  // Coalesce bursty stream/store updates into one browser paint. The previous
+  // 120 ms timer alone exceeded the live-append latency budget before any
+  // transcript work could begin.
+  state.slotChatRenderTimers[slot] = requestAnimationFrame(() => {
     state.slotChatRenderTimers[slot] = null;
     renderSlotChat(slot);
-  }, 120);
+  });
 }
 
 // renderSlotStatus paints the full slot-scoped status view (spec items 3/4)

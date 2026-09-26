@@ -19,6 +19,68 @@ const legacy = process.env.PENTACLE_GATE_EXPECT_LEGACY === '1';
 const browserBinary = process.env.PENTACLE_TEST_BROWSER || process.env.PENTACLE_CHROME || 'google-chrome';
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+function p95(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.ceil(sorted.length * 0.95) - 1];
+}
+
+async function measureAppends(page, daemon, label, count = 20) {
+  const samples = [];
+  let baselineRows = null;
+  const longTasks = await page.eval(`(() => {
+    window.__appendLongTasks = [];
+    window.__appendTaskObserver?.disconnect();
+    window.__appendTaskObserver = new PerformanceObserver(list => {
+      for (const entry of list.getEntries()) window.__appendLongTasks.push(entry.duration);
+    });
+    window.__appendTaskObserver.observe({entryTypes:['longtask']});
+    return true;
+  })()`);
+  assert.equal(longTasks, true);
+  for (let i = 0; i < count; i++) {
+    const marker = `${label} ${i}`;
+    const before = await page.eval(`(() => {
+      const scroll=document.querySelector('#cell-0 .slot-chat-scroll');
+      scroll.scrollTop=Math.round((scroll.scrollHeight-scroll.clientHeight)/2);
+      const list=document.querySelector('#cell-0 .slot-chat-list');
+      const marker=${JSON.stringify(marker)};
+      window.__appendSample={start:performance.now(),done:null};
+      const observer=new MutationObserver(() => {
+        if (list.textContent.includes(marker)) {
+          window.__appendSample.done=performance.now(); observer.disconnect();
+        }
+      });
+      observer.observe(list,{childList:true,subtree:true,characterData:true});
+      return {top:scroll.scrollTop,rows:document.querySelectorAll('#cell-0 .slot-chat-row').length};
+    })()`);
+    assert.ok(before.top > 0, 'fixture must be scrollable');
+    if (baselineRows === null) baselineRows = before.rows;
+    const sentAt = Date.now();
+    daemon.appendTarget(marker);
+    await page.waitFor('window.__appendSample?.done !== null', {timeoutMs:10000});
+    const after = await page.eval(`(() => ({
+      top:document.querySelector('#cell-0 .slot-chat-scroll').scrollTop,
+      elapsedMs:window.__appendSample.done-window.__appendSample.start,
+      doneEpochMs:performance.timeOrigin+window.__appendSample.done,
+      rows:document.querySelectorAll('#cell-0 .slot-chat-row').length
+    }))()`);
+    samples.push({marker, before, after, hostToDomMs:after.doneEpochMs-sentAt});
+    assert.ok(Math.abs(after.top-before.top) <= 3, 'mid-history scroll anchor preserved');
+    if (!legacy) assert.ok(after.rows >= baselineRows && after.rows <= baselineRows + count,
+      `visible history stays bounded while unread grows: ${JSON.stringify({before,after})}`);
+  }
+  const tasks = await page.eval('window.__appendLongTasks.slice()');
+  const stats = { samples, p95BrowserMs:p95(samples.map(s=>s.after.elapsedMs)),
+    p95HostToDomMs:p95(samples.map(s=>s.hostToDomMs)), longTasksMs:tasks };
+  fs.writeFileSync(path.join(out, `${label.replace(/[^a-z0-9]+/gi, '-')}.json`), JSON.stringify(stats, null, 2));
+  if (!legacy) {
+    assert.ok(stats.p95BrowserMs <= 100, `${label} browser append p95 <=100ms`);
+    assert.ok(stats.p95HostToDomMs <= 100, `${label} host-to-DOM append p95 <=100ms`);
+    assert.ok(tasks.filter(ms=>ms>200).length < 2, `${label} has no repeated >200ms long task`);
+  }
+  return stats;
+}
+
 async function run() {
   fs.mkdirSync(out, { recursive: true, mode: 0o700 });
   const daemon = await startDaemon({ artifactsDir: out });
@@ -81,34 +143,9 @@ async function run() {
     assert.equal(after.detail, before.detail);
     assert.equal(after.rows, legacy ? 16 : 120);
     assert.equal(after.last, true);
-    // A live append while scrolled away from the bottom must keep the reader's
-    // position. Measure from the host emission to the browser DOM mutation.
-    const scrollBefore = await page.eval(`(() => {
-      const s=document.querySelector('#cell-0 .slot-chat-scroll');
-      s.scrollTop=Math.round((s.scrollHeight-s.clientHeight)/2);
-      const p=s.scrollTop;
-      window.__historyAppend={start:performance.now(),done:null};
-      const list=document.querySelector('#cell-0 .slot-chat-list');
-      const observer=new MutationObserver(()=>{if(list.textContent.includes('Live append after reconnect')){
-        window.__historyAppend.done=performance.now();observer.disconnect();}});
-      observer.observe(list,{childList:true,subtree:true,characterData:true});
-      return {top:p,height:s.scrollHeight,client:s.clientHeight};
-    })()`);
-    assert.ok(scrollBefore.top > 0, 'fixture must be scrollable');
-    const emittedAt = Date.now();
-    daemon.appendTarget('Live append after reconnect');
-    await page.waitFor("window.__historyAppend?.done !== null", { timeoutMs: 10000 });
-    const append = await page.eval(`(() => {
-      const s=document.querySelector('#cell-0 .slot-chat-scroll');
-      return {top:s.scrollTop,renderMs:window.__historyAppend.done-window.__historyAppend.start,
-        rows:document.querySelectorAll('#cell-0 .slot-chat-row').length,
-        visible:document.querySelector('#cell-0 .slot-chat-list')?.textContent.includes('Live append after reconnect')};
-    })()`);
-    append.hostToDomMs = Date.now() - emittedAt;
-    assert.equal(append.visible, true);
-    assert.ok(Math.abs(append.top - scrollBefore.top) <= 3, 'mid-history scroll position preserved');
-    assert.ok(append.hostToDomMs < 2000, 'live append responsive');
-    assert.ok(append.renderMs < 2000, 'browser append responsive');
+    // The backfill is complete here; these samples isolate live append from
+    // fetch latency and retain the reader's mid-history scroll anchor.
+    const append = await measureAppends(page, daemon, 'one-pane live append');
     // Exercise the same live append and scroll anchor with four occupied chat
     // panes, where the renderer has substantially more DOM work per frame.
     const otherIds = [daemon.noiseId, ...daemon.extraSessions.map(session => session.stream_id)];
@@ -117,34 +154,16 @@ async function run() {
       await page.click(`#cell-${index + 1} .cell-view-toggle[data-mode="chat"]`);
       await page.waitFor(`document.querySelectorAll('#cell-${index + 1} .slot-chat-row').length >= ${legacy ? 16 : 120}`, { timeoutMs: 10000 });
     }
-    const fourBefore = await page.eval(`(() => {
-      const scroll=document.querySelector('#cell-0 .slot-chat-scroll');
-      scroll.scrollTop=Math.round((scroll.scrollHeight-scroll.clientHeight)/2);
-      window.__fourAppend={start:performance.now(),done:null};
-      const list=document.querySelector('#cell-0 .slot-chat-list');
-      const observer=new MutationObserver(()=>{if(list.textContent.includes('Four-pane live append')){
-        window.__fourAppend.done=performance.now();observer.disconnect();}});
-      observer.observe(list,{childList:true,subtree:true,characterData:true});
-      return {top:scroll.scrollTop,rows:[0,1,2,3].map(i=>document.querySelectorAll('#cell-'+i+' .slot-chat-row').length),
-        widths:[0,1,2,3].map(i=>document.querySelector('#cell-'+i)?.getBoundingClientRect().width)};
-    })()`);
+    const fourBefore = await page.eval(`(() => ({
+      rows:[0,1,2,3].map(i=>document.querySelectorAll('#cell-'+i+' .slot-chat-row').length),
+      widths:[0,1,2,3].map(i=>document.querySelector('#cell-'+i)?.getBoundingClientRect().width)
+    }))()`);
     assert.ok(fourBefore.rows.every(rows => rows >= (legacy ? 16 : 120)));
     assert.ok(fourBefore.widths.every(width => width > 200));
-    const fourEmittedAt = Date.now();
-    daemon.appendTarget('Four-pane live append');
-    await page.waitFor("window.__fourAppend?.done !== null", { timeoutMs: 10000 });
-    const fourAppend = await page.eval(`(() => ({
-      top:document.querySelector('#cell-0 .slot-chat-scroll').scrollTop,
-      renderMs:window.__fourAppend.done-window.__fourAppend.start,
-      rows:[0,1,2,3].map(i=>document.querySelectorAll('#cell-'+i+' .slot-chat-row').length)
-    }))()`);
-    fourAppend.hostToDomMs = Date.now() - fourEmittedAt;
-    assert.ok(Math.abs(fourAppend.top - fourBefore.top) <= 3, 'four-pane scroll position preserved');
-    assert.ok(fourAppend.hostToDomMs < 2000, 'four-pane live append responsive');
-    assert.ok(fourAppend.renderMs < 2000, 'four-pane browser append responsive');
+    const fourAppend = await measureAppends(page, daemon, 'four-pane live append');
     const result = { status: legacy ? 'BASELINE_RED' : 'PASS', before, pressure, browserConnections, fetchesBefore, fetchesAfter,
       duringBackfill, after,
-      scrollBefore, append, fourBefore, fourAppend,
+      append, fourBefore, fourAppend,
       source: require('node:child_process').execFileSync('git', ['-C', productRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() };
     fs.writeFileSync(path.join(out, 'verdict.json'), JSON.stringify(result, null, 2));
     console.log(`${result.status} history /cc transport, append, scroll: ${out}`);
