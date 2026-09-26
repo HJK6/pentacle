@@ -27,6 +27,7 @@ const { createMicStarter, micStartSameOrigin, isLoopbackPeer } = require('./mic_
 const { createMicRequest } = require('../main/mic_request');
 const { createCcHandlers, createCollector } = require(path.join(ROOT, 'main', 'cc_handlers'));
 const { createWsBridge } = require('./ws_bridge');
+const { freezeWebDist } = require('./web_build_id');
 const chatStreamClient = require(path.join(ROOT, 'main', 'chat_stream_client'));
 
 const DEFAULT_PORT = 7795;
@@ -279,18 +280,17 @@ function resolveProfilePath(profile) {
   return path.join(ROOT, 'configs', `${profile}.js`);
 }
 
-function serveStatic(res, urlPath, configJson) {
+function serveStatic(res, urlPath, configJson, frozen) {
   const rel = urlPath === '/' ? 'web.html' : urlPath.replace(/^\/+/, '');
-  const target = path.resolve(WEB_DIST, rel);
-  // Path traversal guard — a request must not escape the bundle directory.
-  if (target !== WEB_DIST && !target.startsWith(WEB_DIST + path.sep)) {
+  // Path traversal guard — a request must not escape the frozen bundle.
+  if (path.isAbsolute(rel) || rel.split('/').includes('..')) {
     res.writeHead(403).end('forbidden');
     return;
   }
-  let body;
-  try {
-    body = fs.readFileSync(target);
-  } catch {
+  // Serve from the frozen startup snapshot so the bytes always match the build
+  // id computed over them (no old-page/new-id skew mid-deploy).
+  let body = frozen && frozen.files ? frozen.files.get(rel) : null;
+  if (!body) {
     if (rel === 'web.html') {
       res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' })
         .end('The web bundle is not built yet. Run `npm run build:web`.');
@@ -299,7 +299,7 @@ function serveStatic(res, urlPath, configJson) {
     res.writeHead(404).end('not found');
     return;
   }
-  const ext = path.extname(target).toLowerCase();
+  const ext = path.extname(rel).toLowerCase();
   if (ext === '.html') {
     // Inject the computed config before any bundle script runs, so the
     // config-loader shim can answer synchronously exactly like the preload does.
@@ -368,9 +368,12 @@ async function main(argv = process.argv.slice(2)) {
     CONFIG.chatStream = { ...(CONFIG.chatStream || {}), tokenPath: args.tokenPath };
   }
 
+  // Freeze the served dist and derive the build id once, before any request.
+  const frozen = freezeWebDist(WEB_DIST);
   const ccHandlers = createCcHandlers({ CONFIG, chatStreamClient, configError, configWarnings,
     startMicServer: createMicStarter(CONFIG),
     micRequest: createMicRequest(CONFIG),
+    buildId: frozen.buildId,
     terminalOptions: { maxPtysPerConnection: MAX_PTYS_PER_CONNECTION } });
   const collector = createCollector();
   const stopTerminals = ccHandlers.register(collector);
@@ -416,7 +419,7 @@ async function main(argv = process.argv.slice(2)) {
         .end(JSON.stringify({ ok: true, connections: bridge.connections.size }));
       return;
     }
-    serveStatic(res, urlPath, configJson);
+    serveStatic(res, urlPath, configJson, frozen);
   });
 
   const wss = new WebSocketServer({

@@ -2762,6 +2762,7 @@ function applySlotChatListRender(slot, refs, render) {
   if (render.detailPresent) {
     state.slotChatBoundSession[slot] = render.sessionKey;
     state.slotChatBoundStream[slot] = render.paintedStreamId;
+    syncSlotCopyId(slot);
   }
 
   // Render-time beacon (armed-telemetry seam): fires on EVERY paint, including
@@ -2831,6 +2832,91 @@ function markCopyButtonCopied(button) {
     button.classList.remove('is-copied');
     button._slotChatCopyTimer = null;
   }, 1000);
+}
+
+// ── Slot-header copy-chat-id control ──────────────────────────────────────
+// spec_pentacle__web_slot_header_copy_chat_id_2026_09. Copies the full
+// `<host>:<session>` stream id and shows a success check ONLY after the
+// clipboard write resolves; a failed/unavailable write shows truthful failure
+// (no success) and permits retry. Empty slots never carry a visible control.
+function markCopyIdState(button, kind) {
+  if (!button) return;
+  // A success checkmark shown for the ~1.5s success interval, then the copy
+  // glyph is restored (the icon visibly changes only after the clipboard
+  // resolves). Local so the function is self-contained for slicing/tests.
+  const COPYID_CHECK_SVG = '<svg class="copyid-check" width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.485 1.929a.75.75 0 0 1 .086 1.057l-6.5 8a.75.75 0 0 1-1.117.06l-3-3a.75.75 0 1 1 1.06-1.06l2.41 2.41 5.95-7.32a.75.75 0 0 1 1.111-.147z"/></svg>';
+  if (button._copyIdTimer) { clearTimeout(button._copyIdTimer); button._copyIdTimer = null; }
+  if (button._copyIdIcon === undefined) button._copyIdIcon = button.innerHTML; // save the copy glyph once
+  button.classList.remove('is-copied', 'is-copy-failed');
+  const restore = () => {
+    button.classList.remove('is-copied', 'is-copy-failed');
+    if (button._copyIdIcon !== undefined) button.innerHTML = button._copyIdIcon;
+    button.setAttribute('aria-label', button.dataset.copyLabel || 'Copy chat id');
+    button._copyIdTimer = null;
+  };
+  if (kind === 'copied') {
+    button.classList.add('is-copied');
+    button.innerHTML = COPYID_CHECK_SVG;
+    button.setAttribute('aria-label', 'Chat id copied');
+    button._copyIdTimer = setTimeout(restore, 1500);
+  } else if (kind === 'failed') {
+    // Keep the copy glyph so the control stays recognisable for retry.
+    button.classList.add('is-copy-failed');
+    button.setAttribute('aria-label', 'Copy failed — click to retry');
+    button._copyIdTimer = setTimeout(restore, 2000);
+  }
+}
+
+async function copyChatIdFromButton(button) {
+  if (!button) return false;
+  const streamId = String(button.dataset.streamId || '').trim();
+  if (!streamId) { markCopyIdState(button, 'failed'); return false; }
+  let ok = false;
+  try {
+    ok = await writeChatCopyText(streamId);
+  } catch (error) {
+    console.warn('[copy-id] copy failed:', error);
+    ok = false;
+  }
+  markCopyIdState(button, ok ? 'copied' : 'failed');
+  return ok;
+}
+
+function slotCopyIdStreamId(slot) {
+  const s = state.slots[slot];
+  if (!s) return '';
+  // Derive from the CURRENT slot session, never the retained bound-stream: after
+  // a slot rebind (A→B) detachSlot preserves slotChatBoundStream and attach syncs
+  // the control before B's first chat paint, so the bound value can still be A's
+  // id — and in terminal-only mode a chat paint never refreshes it. The current
+  // session's own stream id (or host:session) is always correct for this slot.
+  return String(
+    sidebarStreamIdForSession(findSession(s.name, s.hostId))
+    || (s.hostId && s.name ? `${s.hostId}:${s.name}` : '')
+    || '',
+  ).trim();
+}
+
+function syncSlotCopyId(slot) {
+  const header = document.getElementById(`header-${slot}`);
+  if (!header) return;
+  const btn = header.querySelector('.cell-copyid');
+  if (!btn) return;
+  const streamId = state.botSlots[slot] ? '' : slotCopyIdStreamId(slot);
+  if (streamId) {
+    btn.dataset.streamId = streamId;
+    btn.dataset.copyLabel = 'Copy chat id';
+    btn.title = `Copy chat id (${streamId})`;
+    if (!btn.classList.contains('is-copied') && !btn.classList.contains('is-copy-failed')) {
+      btn.setAttribute('aria-label', 'Copy chat id');
+    }
+    btn.style.display = 'inline-flex';
+  } else {
+    if (btn._copyIdTimer) { clearTimeout(btn._copyIdTimer); btn._copyIdTimer = null; }
+    btn.classList.remove('is-copied', 'is-copy-failed');
+    delete btn.dataset.streamId;
+    btn.style.display = 'none';
+  }
 }
 
 document.addEventListener('selectionchange', maybeApplyDeferredSlotChatRenders);
@@ -4006,6 +4092,26 @@ function getSourceInitial(source) {
   return hostPresentation.initial(source);
 }
 
+// Machine sigil badge markup (spec_pentacle__web_machine_sigil_icons_2026_09).
+// Renders the per-machine sigil icon (same MachineSigil family as Pentacle
+// mobile, ported verbatim into the cosmic bundle) for the sidebar rows and the
+// host filter, in the host's configured accent (via currentColor so it tracks
+// the color-<accent> class and stays consistent with the yellow spec). Falls
+// back to the initial letter if the cosmic bundle is unavailable.
+function machineSigilMarkup(hostId, fallbackName = '', size = 15) {
+  const cosmic = window.PentacleCosmic;
+  const kind = hostPresentation.hostSigil(CONFIG, hostId, HOST_IDS);
+  if (cosmic && kind && typeof cosmic.machineSigil === 'function') {
+    try {
+      const el = cosmic.machineSigil(kind, { size, color: 'currentColor' });
+      el.setAttribute('aria-hidden', 'true');
+      el.classList.add('machine-sigil');
+      return el.outerHTML;
+    } catch (_) { /* fall through to the letter */ }
+  }
+  return esc(getSourceInitial(fallbackName));
+}
+
 function findSession(sessionName, hostId) {
   return state.sessions.find((session) => session.name === sessionName && session.hostId === hostId);
 }
@@ -4074,7 +4180,7 @@ function renderSourceFilterBar(visibleSessions) {
     const name = getSourceForSession('', id) || id;
     const color = getSourceColorForSession('', id);
     const isActive = state.sourceFilter === id;
-    html += `<button class="source-filter-btn color-${color}${isActive ? ' active' : ''}" data-host="${esc(id)}" title="${esc(name)}">${esc(getSourceInitial(name))}</button>`;
+    html += `<button class="source-filter-btn color-${color}${isActive ? ' active' : ''}" data-host="${esc(id)}" title="${esc(name)}" aria-label="${esc(name)}">${machineSigilMarkup(id, name)}</button>`;
   }
   bar.innerHTML = html;
 
@@ -4174,7 +4280,7 @@ function renderSidebar() {
       : '';
     const machineName = getSourceForSession(s.name, hostId) || hostId;
     const machineColor = getSourceColorForSession(s.name, hostId);
-    const machineAvatar = `<span class="s-machine-avatar color-${machineColor}" title="${esc(machineName)}">${esc(getSourceInitial(machineName))}</span>`;
+    const machineAvatar = `<span class="s-machine-avatar color-${machineColor}" title="${esc(machineName)}" aria-label="${esc(machineName)}">${machineSigilMarkup(hostId, machineName)}</span>`;
     const offlineLabel = offlineHostStatus(s);
     const offline = !!offlineLabel;
     const offlineBadge = offline
@@ -4490,6 +4596,7 @@ async function attachSession(slot, sessionName, displayName, hostId) {
   }
   updateSlotProviderTag(slot);
   syncSlotAssistantControls(slot);
+  syncSlotCopyId(slot);
 
   // Create terminal
   const refs = chatUiEnabled() ? ensureSlotChatSurface(slot) : null;
@@ -4711,6 +4818,7 @@ function detachSlot(slot) {
   state.slots[slot] = null;
   state.slotReplies[slot] = null;
   state.botSlots[slot] = false;
+  syncSlotCopyId(slot);
   state.slotBuffers[slot] = '';
   state.slotDrafts[slot] = '';
   state.slotDraftTouched[slot] = false;
@@ -4882,7 +4990,42 @@ window.cc.onReconnect?.(() => {
     window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...(snapshot || {}) });
     restoreSlotsAfterReconnect();
   }).catch(() => { /* the next reconnect retries the re-sync */ });
+  // A Thoth web update restarts the host, so every open window reconnects; use
+  // that edge to check whether the served build now differs from ours.
+  checkForWebUpdate();
 });
+
+// Update-available refresh icon (spec_pentacle__web_update_available_refresh_icon_2026_09).
+// The window's OWN build id is the one injected into the page at load
+// (window.__PENTACLE_CONFIG__ buildId); compare it with the id the host serves
+// (get-build). When they differ — and both are known — a refresh icon appears
+// beside Settings and one click reloads. A window running the current build, or
+// a freshly opened one, never shows it (own === served). Per window, so each
+// machine reflects its own stale/fresh state.
+function webUpdateAvailable(ownId, servedId) {
+  return !!ownId && !!servedId && ownId !== servedId;
+}
+function setWebRefreshVisible(visible) {
+  const btn = document.getElementById('web-refresh-btn');
+  if (btn) btn.hidden = !visible;
+}
+async function checkForWebUpdate() {
+  // Our OWN build id is the one injected into this page at serve time.
+  const injected = window.__PENTACLE_CONFIG__;
+  const ownId = injected && injected.buildId;
+  if (!ownId || !window.cc || typeof window.cc.getBuild !== 'function') return;
+  try {
+    const served = await window.cc.getBuild();
+    setWebRefreshVisible(webUpdateAvailable(ownId, served && served.buildId));
+  } catch (_) { /* keep the current state; the next check retries */ }
+}
+(function initWebRefreshControl() {
+  const btn = document.getElementById('web-refresh-btn');
+  if (btn) btn.addEventListener('click', () => { (window.cc?.reloadApp || (() => location.reload()))(); });
+  // Reconnect drives the primary check (above); a low-frequency fallback lets a
+  // long-lived window notice an update even without a reconnect.
+  setInterval(checkForWebUpdate, 10 * 60 * 1000);
+})();
 
 // Restore the whole slot after a /cc socket reconnect (host stays up). The
 // browser socket drop tore down this connection's server-side PTY attachments
@@ -5983,6 +6126,15 @@ document.querySelectorAll('.cell-status').forEach(btn => {
     e.stopPropagation();
     if (btn.disabled) return;
     toggleSlotStatusCard(parseInt(btn.dataset.slot));
+  });
+});
+
+// Copy the slot's full `<host>:<session>` chat id to the clipboard.
+document.querySelectorAll('.cell-copyid').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    copyChatIdFromButton(btn);
   });
 });
 

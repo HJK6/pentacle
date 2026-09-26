@@ -117,6 +117,7 @@ window.cc = {
   // Session metadata used to come via apiUrl/apiPort tunnel; that's gone
   // since the server.py deprecation — use chat-stream:* IPC instead.
   getConfig: () => ipcRenderer.invoke('get-config'),
+  getBuild: () => ipcRenderer.invoke('get-build'),
   // Open an external http(s) link in the OS browser (report/markdown links).
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   chatSpawn: (provider, hostId) => ipcRenderer.invoke('chat-stream:spawn', provider, hostId || 'local'),
