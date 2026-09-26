@@ -107,6 +107,11 @@ def test_below_floor_ladder_is_absent_and_readiness_stays_live() -> None:
     statement = "ALTER TABLE v2_reports ADD COLUMN usage_snapshot TEXT"
     assert store_source.count(statement) == 1
     store_source = store_source.replace(statement, "")
+    # Voice-input lane adds one additive receipt field (meta.voice={duration_s})
+    # above the retained floor; historical receipt migrations stay forbidden.
+    statement = "ALTER TABLE v2_send_receipts ADD COLUMN meta_json TEXT NOT NULL DEFAULT '{}'"
+    assert store_source.count(statement) == 1
+    store_source = store_source.replace(statement, "")
     for token in STORE_TOKENS:
         assert token not in store_source, token
     assert "_migrate_legacy_outbound_notices" not in routing_source

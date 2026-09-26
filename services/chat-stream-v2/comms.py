@@ -32,12 +32,13 @@ import qa_dispatch
 import asyncio
 from contextlib import nullcontext
 import hashlib
+import json
 import logging
 import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
@@ -325,6 +326,25 @@ class _AttachmentMaterializer:
         return paths
 
 
+def normalize_send_meta(raw: object) -> dict[str, Any]:
+    """Whitelist the additive ``meta`` a send may carry (voice-input lane).
+
+    Only ``meta.voice.duration_s`` is persisted so a producer cannot smuggle
+    arbitrary durable state onto the USER event. Returns ``{}`` for anything
+    that is not a well-formed voice envelope."""
+    if not isinstance(raw, dict):
+        return {}
+    voice = raw.get("voice")
+    if not isinstance(voice, dict):
+        return {}
+    duration = voice.get("duration_s")
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+        return {}
+    if duration < 0:
+        return {}
+    return {"voice": {"duration_s": round(float(duration), 3)}}
+
+
 @dataclass
 class SendPlan:
     message: dict[str, Any]
@@ -334,6 +354,7 @@ class SendPlan:
     attachments: list[dict]
     wire_text: str
     optimistic_id: str | None
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 class Comms:
@@ -1403,6 +1424,7 @@ class Comms:
             attachments=attachments,
             wire_text=self._peer_delivery_wire(msg, "send", send_anchor, body),
             optimistic_id=str(msg.get("optimistic_id") or "") or None,
+            meta=normalize_send_meta(msg.get("meta")),
         )
 
     async def _materialize_send_plan(self, plan: SendPlan) -> SendPlan:
@@ -1436,6 +1458,7 @@ class Comms:
             attachments=plan.attachments,
             wire_text=wire_text,
             optimistic_id=plan.optimistic_id,
+            meta=plan.meta,
         )
 
     async def _send_enter(self, tmux: Any, name: str) -> str | None:
@@ -1817,6 +1840,7 @@ class Comms:
             from_stream_id=from_stream_id,
             actor_stream_id=actor_stream_id,
             actor_trusted=actor_trusted,
+            meta_json=json.dumps(plan.meta, separators=(",", ":"), sort_keys=True),
         )
         if claim.get("coalesced"):
             return await self._coalesced_send_result(

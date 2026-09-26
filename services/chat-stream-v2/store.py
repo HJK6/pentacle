@@ -520,6 +520,13 @@ def _send_receipt_row(
         result["actor_stream_id"] = str(row["actor_stream_id"])
     if "actor_trusted" in columns:
         result["actor_trusted"] = bool(row["actor_trusted"])
+    if "meta_json" in columns:
+        try:
+            meta = json.loads(str(row["meta_json"] or "{}"))
+        except (TypeError, ValueError):
+            meta = {}
+        if isinstance(meta, dict) and meta:
+            result["meta"] = meta
     if row["optimistic_id"]:
         result["optimistic_id"] = str(row["optimistic_id"])
     if row["reason"]:
@@ -542,6 +549,7 @@ def _insert_send_receipt_row(
     content_kind: str, attachments_json: str, delivery: str, submission_confirmed: bool,
     reason: str | None, attempts: int | None, created_at: str,
     from_stream_id: str | None, actor_stream_id: str | None, actor_trusted: bool,
+    meta_json: str = "{}",
 ) -> dict[str, Any]:
     """Append one immutable send-receipt row and return its rowid-bearing projection.
 
@@ -553,8 +561,8 @@ def _insert_send_receipt_row(
             to_stream_id, request_id, receipt_id, state, optimistic_id,
             wire_digest, display_text, content_kind, attachments_json,
             delivery, submission_confirmed, reason, attempts, created_at,
-            from_stream_id, actor_stream_id, actor_trusted
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            from_stream_id, actor_stream_id, actor_trusted, meta_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             to_stream_id, request_id, receipt_id, state, optimistic_id or None,
             wire_digest, str(display_text or ""), str(content_kind),
@@ -563,6 +571,7 @@ def _insert_send_receipt_row(
             _safe_provenance_id(from_stream_id),
             _safe_provenance_id(actor_stream_id),
             1 if actor_trusted else 0,
+            str(meta_json or "{}"),
         ),
     )
     conn.commit()
@@ -820,7 +829,8 @@ CREATE TABLE IF NOT EXISTS v2_send_receipts (
     created_at TEXT NOT NULL,
     from_stream_id TEXT,
     actor_stream_id TEXT,
-    actor_trusted INTEGER NOT NULL DEFAULT 0
+    actor_trusted INTEGER NOT NULL DEFAULT 0,
+    meta_json TEXT NOT NULL DEFAULT '{}'
 )
 """
 
@@ -1505,6 +1515,14 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
             conn.execute(SESSION_EVENT_TAIL_IDENTITY_DDL)
             conn.execute(SESSION_EVENT_TAIL_RECORDED_DDL)
             conn.execute(SEND_RECEIPT_DDL)
+            # Additive migration: an older receipts table gains meta_json (carries
+            # meta.voice={duration_s} for the voice-input lane); a fresh DDL has it.
+            if "meta_json" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_send_receipts)")
+            }:
+                conn.execute(
+                    "ALTER TABLE v2_send_receipts ADD COLUMN meta_json TEXT NOT NULL DEFAULT '{}'"
+                )
             conn.execute(CLOSE_AUDIT_DDL)
             conn.execute(CLOSE_AUDIT_INDEX_DDL)
             for ddl in SCHEDULE_DDL:
@@ -4117,6 +4135,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         from_stream_id: str | None = None,
         actor_stream_id: str | None = None,
         actor_trusted: bool = False,
+        meta_json: str = "{}",
     ) -> dict[str, Any]:
         """Append one immutable send receipt and return its safe wire shape.
 
@@ -4156,6 +4175,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                 submission_confirmed=submission_confirmed, reason=reason,
                 attempts=attempts, created_at=timestamp, from_stream_id=from_stream_id,
                 actor_stream_id=actor_stream_id, actor_trusted=actor_trusted,
+                meta_json=meta_json,
             )
 
         return await self.submit(_op)
@@ -4194,6 +4214,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         actor_trusted: bool = False,
         content_kind: str | None = None,
         created_at: str | None = None,
+        meta_json: str = "{}",
     ) -> dict[str, Any]:
         """Atomically decide winner-vs-coalesced for one logical send, in ONE
         serialized op so concurrent retries cannot both race past the check.
@@ -4267,6 +4288,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                 submission_confirmed=False, reason=None, attempts=None,
                 created_at=timestamp, from_stream_id=from_stream_id,
                 actor_stream_id=actor_stream_id, actor_trusted=actor_trusted,
+                meta_json=meta_json,
             )
             return {"coalesced": False, "receipt": row}
 
@@ -4385,6 +4407,11 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         })
         if receipt.get("optimistic_id"):
             payload["optimistic_id"] = receipt["optimistic_id"]
+        # Echo durable send metadata (meta.voice={duration_s}) so the voice-input
+        # mic-glyph caption survives reload/reconcile. Additive; ignored by clients
+        # that do not read it.
+        if receipt.get("meta"):
+            payload["meta"] = receipt["meta"]
         attachments = receipt.pop("attachments", [])
         if attachments:
             payload["attachments"] = attachments

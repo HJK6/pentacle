@@ -471,6 +471,7 @@ class Server:
             "close": self._on_close,
             "tell": self._on_tell,
             "send": self._on_send,
+            "transcribe_blob": self._on_transcribe_blob,
             "assistant.publish": self._on_assistant_publish,
             "assistant.operation": self._on_assistant_operation,
             "send_image": self._on_send_image,
@@ -2214,6 +2215,34 @@ class Server:
             # without declared metadata is downloadable, never mislabeled as an image.
             attachments.append(originals.get(key) or {"key": key, "mime": "application/octet-stream", "size": len(data)})
         return attachments
+
+    def _get_transcriber(self) -> Any:
+        """Lazily build the transcription proxy bound to the blob store.
+
+        Kept on the server so the 10-minute content-addressed cache survives
+        across calls. Authentication is enforced by the generic dispatch gate
+        (a new verb requires operator/token/service auth for non-loopback
+        clients, exactly like ``send``)."""
+        transcriber = getattr(self, "_transcriber", None)
+        if transcriber is None:
+            from transcribe import Transcriber
+            blob_store = getattr(self.comms, "blob_store", None)
+            transcriber = Transcriber(blob_store)
+            self._transcriber = transcriber
+        return transcriber
+
+    async def _on_transcribe_blob(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Transcribe an uploaded audio blob on the managed mic backend.
+
+        Reads the content-addressed blob and forwards it to the loopback mic
+        route with ``prompt_profile=fleet``; the daemon never loads a model.
+        See ``transcribe.py`` for the contract and error codes."""
+        result = await self._get_transcriber().transcribe_blob(
+            request_id=str(msg.get("request_id") or ""),
+            blob_sha=str(msg.get("blob_sha") or ""),
+            mime=str(msg.get("mime") or ""),
+        )
+        return {"type": "transcribe_blob.ok", **result}
 
     async def _on_assistant_publish(self, msg: dict[str, Any]) -> dict[str, Any]:
         composite = self.assistant_composite
