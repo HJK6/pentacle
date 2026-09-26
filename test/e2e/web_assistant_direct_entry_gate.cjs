@@ -34,7 +34,7 @@ async function runInstalled() {
     await page.waitFor(`document.querySelector('.session-item[data-stream-id=${JSON.stringify(expected.sourceStreamId)}]')`, { timeoutMs: 15000 });
     const binding = await page.eval('window.__PENTACLE_CONFIG__.features.assistantDirectTarget');
     assert.deepEqual(binding, expected);
-    const current = await page.eval(`window.PentacleChatStore?.snapshot?.()?.sessions?.find(s=>s.stream_id===${JSON.stringify(expected.streamId)})`);
+    const current = await page.eval(`window.PentacleChatStore?.state?.sessions?.find(s=>s.stream_id===${JSON.stringify(expected.streamId)})`);
     assert.equal(current?.session_generation, expected.generation);
     assert.equal(current?.online, true);
     for (const theme of ['dark', 'light']) for (const width of [1600, 850]) {

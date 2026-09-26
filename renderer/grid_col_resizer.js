@@ -1,4 +1,5 @@
 'use strict';
+const { splitForDifference } = require('./sidebar_resizer');
 
 const COLUMN_MIN = 220;
 function normalizeSplit(value) {
@@ -154,6 +155,16 @@ function createGridColResizer({ grid, handle, initialSplit, save, onResize = () 
   observer?.observe(grid);
   on(win, 'resize', refresh);
   refresh();
-  return { refresh, cancel, destroy() { cancel(); destroyed = true; if (frame !== null) win.cancelAnimationFrame(frame); observer?.disconnect(); listeners.forEach(remove => remove()); } };
+  return { refresh, cancel,
+    getPreferred: () => preferred,
+    setPreference(value) { preferred = normalizeSplit(value); flush(); },
+    setPixelDifference(difference) {
+      const next = measure();
+      if (!next.available) return;
+      preferred = splitForDifference(next.available, difference).fraction;
+      flush();
+    },
+    commitPreference() { save(preferred); },
+    destroy() { cancel(); destroyed = true; if (frame !== null) win.cancelAnimationFrame(frame); observer?.disconnect(); listeners.forEach(remove => remove()); } };
 }
 module.exports = { COLUMN_MIN, normalizeSplit, clampSplit, createGridColResizer };

@@ -100,8 +100,16 @@
       </div>
     </div>
 
+    <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="Sidebar width" aria-orientation="vertical" tabindex="0" title="Drag to resize the sidebar. Arrow keys adjust its width."></div>
+
     <!-- Terminal Grid -->
     <div class="grid">
+      <nav class="narrow-slot-nav" aria-label="Visible slot">
+        <button type="button" data-narrow-slot="0" aria-label="Show slot 1" aria-pressed="true">1</button>
+        <button type="button" data-narrow-slot="1" aria-label="Show slot 2" aria-pressed="false">2</button>
+        <button type="button" data-narrow-slot="2" aria-label="Show slot 3" aria-pressed="false">3</button>
+        <button type="button" data-narrow-slot="3" aria-label="Show slot 4" aria-pressed="false">4</button>
+      </nav>
       <div class="grid-row" data-row="top">
         <div class="grid-col-resizer" role="separator" aria-label="Top row column widths" aria-orientation="vertical" tabindex="0" title="Drag to resize this row. Double-click or double-tap to reset."></div>
       <div class="grid-cell" id="cell-0">

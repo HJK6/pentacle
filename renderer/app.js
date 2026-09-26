@@ -7,6 +7,7 @@ const { Unicode11Addon } = require('@xterm/addon-unicode11'); // REQUIRED: witho
 const { WebglAddon } = require('@xterm/addon-webgl'); // GPU-accelerated rendering — fixes partial text paint on screen refresh
 const { createTerminalPaste } = require('./terminal_paste');
 const { normalizeSplit, createGridColResizer } = require('./grid_col_resizer');
+const { normalizeSidebarWidth, createSidebarResizer } = require('./sidebar_resizer');
 const path = require('path');
 const chatUi = require('./chat_ui_state');
 const assetRender = require('./asset_render');
@@ -146,6 +147,7 @@ function normalizeAppearance(raw = {}) {
     ...(raw.gridColSplit !== undefined ? { gridColSplit: normalizeSplit(raw.gridColSplit) } : {}),
     gridColSplitTop: normalizeSplit(raw.gridColSplitTop === undefined ? raw.gridColSplit : raw.gridColSplitTop),
     gridColSplitBottom: normalizeSplit(raw.gridColSplitBottom === undefined ? raw.gridColSplit : raw.gridColSplitBottom),
+    sidebarWidth: normalizeSidebarWidth(raw.sidebarWidth),
   };
 }
 
@@ -986,7 +988,9 @@ function refetchEventsForActiveChatSlots() {
     streamState: state.chatStream,
     cc: window?.cc,
     streamHostForHostId,
-    findStreamSession: chatUi.findStreamSessionForDesktopSession,
+    findStreamSession: (streamState, session, host) => session.popoutStreamId
+      ? streamState.sessions.find(item => item.stream_id === session.popoutStreamId && item.host === host) || null
+      : chatUi.findStreamSessionForDesktopSession(streamState, session, host),
     onChange: onChatHistoryChanged,
   });
 }
@@ -1099,7 +1103,8 @@ function slotMatchesAssetSession(slot, sessionKey = {}) {
   if (!session || state.botSlots[slot]) return false;
   const host = streamHostForHostId(session.hostId);
   if (sessionKey.host !== host || sessionKey.session_name !== session.name) return false;
-  const streamSession = chatUi.findStreamSessionForDesktopSession(state.chatStream, session, host);
+  const streamSession = chatSessionStateForSession(session);
+  if (session.popoutStreamId || session.assistantDirect) return streamSession?.stream_id === sessionKey.stream_id;
   return !streamSession?.stream_id || streamSession.stream_id === sessionKey.stream_id;
 }
 
@@ -1107,7 +1112,7 @@ function slotSpecIds(slot) {
   const session = state.slots[slot];
   if (!session || state.botSlots[slot]) return [];
   const host = streamHostForHostId(session.hostId);
-  const streamSession = chatUi.findStreamSessionForDesktopSession(state.chatStream, session, host);
+  const streamSession = chatSessionStateForSession(session);
   return normalizeSpecIds(streamSession?.spec_ids, streamSession?.spec_id);
 }
 
@@ -1305,7 +1310,7 @@ function assetContextForSlot(slot) {
   const session = state.slots[slot];
   if (!session || state.botSlots[slot]) return null;
   const host = streamHostForHostId(session.hostId);
-  const streamSession = chatUi.findStreamSessionForDesktopSession(state.chatStream, session, host);
+  const streamSession = chatSessionStateForSession(session);
   const streamId = streamSession?.stream_id || `${host}:${session.name}`;
   const bucket = state.chatStream.assets[streamId];
   return { session, host, streamId, bucket };
@@ -1928,10 +1933,11 @@ function applyChatStreamPayload(payload) {
 function chatEventsForSession(session) {
   if (!session) return [];
   const host = streamHostForHostId(session.hostId);
-  const streamSession = chatUi.findStreamSessionForDesktopSession(state.chatStream, session, host);
+  const streamSession = chatSessionStateForSession(session);
   if (streamSession?.stream_id) {
     return state.chatStream.events.filter((event) => event.stream_id === streamSession.stream_id);
   }
+  if (session.popoutStreamId || session.assistantDirect) return [];
   return state.chatStream.events.filter((event) => event.host === host && event.session_name === session.name);
 }
 
@@ -1989,6 +1995,9 @@ function chatSessionStateForSession(session) {
       && current.generation === alias.generation ? current.target : null;
   }
   const host = streamHostForHostId(session.hostId);
+  if (session.popoutStreamId) {
+    return state.chatStream.sessions.find(item => item.stream_id === session.popoutStreamId && item.host === host) || null;
+  }
   return chatUi.findStreamSessionForDesktopSession(state.chatStream, session, host);
 }
 
@@ -3092,6 +3101,13 @@ async function copyChatIdFromButton(button) {
 function slotCopyIdStreamId(slot) {
   const s = state.slots[slot];
   if (!s) return '';
+  if (isCompositeAssistant(s)) {
+    // The canonical assistant's pane is local, but its daemon-owned stream is
+    // bart:assistant. Resolve it from the current daemon row and fail closed
+    // if that row has disappeared; the local pane name is not a chat id.
+    const canonical = canonicalChatSessionStateForNameHost(s.name, s.hostId);
+    return isCompositeAssistant(canonical) ? sessionSummaryStreamId(canonical) : '';
+  }
   // Derive from the CURRENT slot session, never the retained bound-stream: after
   // a slot rebind (A→B) detachSlot preserves slotChatBoundStream and attach syncs
   // the control before B's first chat paint, so the bound value can still be A's
@@ -3242,7 +3258,7 @@ function renderSlotChat(slot) {
   const prevStreamId = state.slotChatBoundStream[slot];
   const sessionChanged = prevSessionKey !== sessionKey;
   const resolvedStreamId = streamId;
-  const boundStreamId = session.assistantDirect
+  const boundStreamId = session.assistantDirect || session.popoutStreamId
     ? remoteSessionState?.stream_id || null
     : chatUi.findStrongStreamSessionForDesktopSession(state.chatStream, session, streamHost)?.stream_id || null;
   // The leak: on a session change, a resolved stream identical to the stream
@@ -4187,22 +4203,86 @@ function ensureChatPopoutAction(slot) {
     : '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M8.636 3.5a.5.5 0 0 0-.5-.5H1.5A1.5 1.5 0 0 0 0 4.5v10A1.5 1.5 0 0 0 1.5 16h10a1.5 1.5 0 0 0 1.5-1.5V7.864a.5.5 0 0 0-1 0V14.5a.5.5 0 0 1-.5.5h-10a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h6.636a.5.5 0 0 0 .5-.5z"/><path fill-rule="evenodd" d="M16 .5a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1h3.793L6.146 9.146a.5.5 0 1 0 .708.708L15 1.707V5.5a.5.5 0 0 0 1 0v-5z"/></svg>';
   button.addEventListener('click', async (event) => {
     event.stopPropagation();
-    const stream = chatSessionStateForNameHost(session.name, session.hostId);
+    const stream = chatSessionStateForSession(session);
     const args = {
       stream_id: stream?.stream_id || CHAT_POPOUT_CONTEXT?.stream_id,
       host: stream?.host || CHAT_POPOUT_CONTEXT?.host || session.hostId,
       desktop_host: session.hostId,
       session_name: stream?.session_name || session.name,
       title: session.displayName || session.name,
+      assistant_source_stream_id: session.assistantDirect?.sourceId || CHAT_POPOUT_CONTEXT?.assistant_source_stream_id || '',
+      assistant_generation: session.assistantDirect?.generation || CHAT_POPOUT_CONTEXT?.assistant_generation || '',
     };
+    if (window.PentacleWebPopoutBridge) args.transfer_state = captureChatPopoutState(slot, args.stream_id);
     const reply = IS_CHAT_POPOUT
       ? await window.cc.chatDock?.(args)
       : await window.cc.chatPopOut?.(args);
-    if (reply?.ok === false) console.warn('[chat-popout] action failed:', reply.error);
+    if (reply?.ok === false) {
+      console.warn('[chat-popout] action failed:', reply.error);
+      if (reply.error !== 'popup_blocked') showToast('Could not move this chat window. Your draft is still here.', { type: 'error' });
+    }
   });
   const maximizeBtn = actions.querySelector('.cell-maximize');
   if (maximizeBtn) maximizeBtn.insertAdjacentElement('afterend', button);
   else actions.prepend(button);
+}
+
+function captureChatPopoutState(slot, streamId) {
+  const refs = state.slotChatRefs[slot];
+  const rel = state.slotReliability[slot];
+  return {
+    streamId: String(streamId || ''),
+    draft: refs?.inputEl?.value ?? state.slotDrafts[slot] ?? '',
+    attachments: slotAttachmentDrafts(slot).map(({ name, mime, bytes, dataBase64, width, height }) =>
+      ({ name, mime, bytes, dataBase64, width, height })),
+    visibleCount: rel?.visibleCount || 120,
+    pinnedToBottom: rel?.pinnedToBottom !== false,
+    scrollTop: refs?.scrollEl?.scrollTop || 0,
+    disclosures: [...(refs?.listEl?.querySelectorAll('details[data-disclosure-key][open]') || [])]
+      .map(el => el.dataset.disclosureKey).filter(Boolean),
+  };
+}
+
+function restoreChatPopoutState(slot, transfer, expectedStreamId) {
+  if (!transfer || transfer.streamId !== expectedStreamId) return false;
+  state.slotDrafts[slot] = String(transfer.draft || '');
+  state.slotDraftTouched[slot] = true;
+  const refs = state.slotChatRefs[slot];
+  if (refs?.inputEl) {
+    refs.inputEl.value = state.slotDrafts[slot];
+    refs.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  clearSlotAttachments(slot);
+  for (const item of Array.isArray(transfer.attachments) ? transfer.attachments.slice(0, chatAttachmentLimit()) : []) {
+    if (!CHAT_ATTACHMENT_MIMES.has(item?.mime) || !item.dataBase64 || item.bytes > 25 * 1024 * 1024) continue;
+    const previewUrl = `data:${item.mime};base64,${item.dataBase64}`;
+    slotAttachmentDrafts(slot).push({ ...item, id: nextAttachmentDraftId(slot), previewUrl });
+  }
+  renderSlotAttachmentTray(slot);
+  const rel = ensureSlotReliability(slot);
+  if (rel) {
+    rel.visibleCount = Math.max(120, Number(transfer.visibleCount) || 120);
+    rel.pinnedToBottom = transfer.pinnedToBottom !== false;
+  }
+  renderSlotChat(slot);
+  updateSendControls(slot);
+  const disclosureKeys = new Set(Array.isArray(transfer.disclosures) ? transfer.disclosures : []);
+  const scrollTop = Math.max(0, Number(transfer.scrollTop) || 0);
+  const restoreViewport = () => {
+    if (state.slots[slot] && state.slotViewModes[slot] === 'chat' && state.slotChatBoundStream[slot] === expectedStreamId) {
+      refs?.listEl?.querySelectorAll('details[data-disclosure-key]').forEach(el => {
+        el.open = disclosureKeys.has(el.dataset.disclosureKey);
+      });
+      if (refs?.scrollEl && transfer.pinnedToBottom === false) refs.scrollEl.scrollTop = scrollTop;
+      return true;
+    }
+    return false;
+  };
+  if (!restoreViewport()) {
+    let tries = 0;
+    const retry = setInterval(() => { if (restoreViewport() || ++tries >= 50) clearInterval(retry); }, 100);
+  }
+  return true;
 }
 
 function updateSlotProviderTag(slot) {
@@ -4646,6 +4726,7 @@ function assignToSlot(sessionName, displayName, hostId) {
   // Already in a slot? Focus it (and maximize if in maximized mode)
   const existing = getSlotForSession(sessionName, hostId);
   if (existing >= 0) {
+    if (document.body.classList.contains('web-sidebar-narrow')) setNarrowActiveSlot(existing);
     if (state.maximizedSlot !== null && state.maximizedSlot !== existing) {
       // In maximized mode, switch the maximized view to this slot
       maximizeSlot(existing);
@@ -4756,7 +4837,7 @@ function firstUnreadReportForStream(streamId) {
   return { assetId: item.asset_id, assetKey: key };
 }
 
-async function attachSession(slot, sessionName, displayName, hostId) {
+async function attachSession(slot, sessionName, displayName, hostId, options = {}) {
   hostId = hostId || 'local';
   // Kill existing terminal in this slot
   detachSlot(slot);
@@ -4764,7 +4845,10 @@ async function attachSession(slot, sessionName, displayName, hostId) {
   state.slotGen[slot]++;
   const gen = state.slotGen[slot]; // capture generation to detect stale async resumes
   state.slots[slot] = { name: sessionName, displayName, hostId,
+    popoutStreamId: options.popoutStreamId || null,
+    assistantDirect: options.assistantDirect || null,
     session_kind: canonicalChatSessionStateForNameHost(sessionName, hostId)?.session_kind };
+  if (document.body.classList.contains('web-sidebar-narrow')) setNarrowActiveSlot(slot);
   closedChatSlots.update();
   window.PentacleHarness?.emit?.('slot:attach', { slot, host: hostId, data: { sessionName } });
 
@@ -5114,6 +5198,17 @@ function scheduleVisibleSlotFits() {
   });
 }
 const gridColResizers = [];
+let sidebarResizer = null;
+let narrowActiveSlot = 0;
+function setNarrowActiveSlot(slot) {
+  if (!Number.isInteger(slot) || slot < 0 || slot > 3) return;
+  narrowActiveSlot = slot;
+  for (let i = 0; i < 4; i++) {
+    document.getElementById(`cell-${i}`)?.classList.toggle('narrow-active', i === slot);
+    document.querySelector(`[data-narrow-slot="${i}"]`)?.setAttribute('aria-pressed', String(i === slot));
+  }
+  scheduleVisibleSlotFits();
+}
 
 // ── Maximize / Minimize ───────────────────────────────────────
 
@@ -5136,6 +5231,7 @@ function maximizeSlot(slot) {
   }
 
   gridColResizers.forEach(resizer => resizer.refresh());
+  sidebarResizer?.refresh();
   requestAnimationFrame(() => {
     if (fitVisibleSlot(slot)) state.terminals[slot].term.focus();
   });
@@ -5154,6 +5250,7 @@ function minimizeAll() {
   }
 
   gridColResizers.forEach(resizer => resizer.refresh());
+  sidebarResizer?.refresh();
   scheduleVisibleSlotFits();
 
   renderSidebar();
@@ -5288,12 +5385,26 @@ function restoreSlotsAfterReconnect() {
 }
 
 window.cc.onAssetDock?.((payload) => {
-  dockAssetFromPayload(payload);
+  return dockAssetFromPayload(payload);
 });
 
-window.cc.onChatPopoutDock?.((payload) => {
-  if (!payload?.session_name || !payload?.host) return;
-  assignToSlot(payload.session_name, payload.title || payload.session_name, payload.desktop_host || payload.host);
+window.cc.onChatPopoutDock?.(async (payload) => {
+  if (!payload?.session_name || !payload?.host || !payload?.stream_id) return false;
+  let direct = null;
+  if (payload.assistant_source_stream_id) {
+    direct = assistantDirectForEntry(payload.assistant_source_stream_id);
+    if (!direct.enabled || direct.error || direct.targetId !== payload.stream_id
+      || direct.generation !== payload.assistant_generation) return false;
+  }
+  const slot = assignToSlot(payload.session_name, payload.title || payload.session_name, payload.desktop_host || payload.host);
+  if (slot < 0) return false;
+  state.slots[slot].popoutStreamId = payload.stream_id;
+  state.slots[slot].assistantDirect = direct ? {
+    sourceId: direct.sourceId, targetId: direct.targetId, generation: direct.generation,
+  } : null;
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  updateSlotViewMode(slot, 'chat');
+  return restoreChatPopoutState(slot, payload.transfer_state, payload.stream_id);
 });
 
 // Shared-core store-driven re-render (desktop_chat_ui_mobile_parity): the
@@ -6076,6 +6187,7 @@ function switchView(view) {
   // Toggle DOM visibility
   document.querySelector('.grid').style.display = view === 'chats' ? '' : 'none';
   gridColResizers.forEach(resizer => resizer.refresh());
+  sidebarResizer?.refresh();
   document.getElementById('dashboard-content').style.display = view === 'dashboards' ? '' : 'none';
   document.getElementById('panel-dashboards').style.display = view === 'dashboards' ? 'flex' : 'none';
 
@@ -7447,7 +7559,7 @@ for (const row of slotGrid?.querySelectorAll('.grid-row') || []) {
   const key = rowName === 'top' ? 'gridColSplitTop' : 'gridColSplitBottom';
   gridColResizers.push(createGridColResizer({
     grid: row, handle: row.querySelector('.grid-col-resizer'), initialSplit: state.appearance[key],
-    isVisible: () => state.currentView === 'chats' && state.maximizedSlot === null,
+    isVisible: () => state.currentView === 'chats' && state.maximizedSlot === null && !document.body.classList.contains('web-sidebar-narrow'),
     save: fraction => {
       state.appearance[key] = fraction;
       saveAppearanceSetting(key, fraction);
@@ -7456,7 +7568,32 @@ for (const row of slotGrid?.querySelectorAll('.grid-row') || []) {
     emit: (name, data) => window.PentacleHarness?.emit?.(`slot-layout:${name}`, { data: { ...data, row: rowName } }),
   }));
 }
-window.addEventListener('beforeunload', () => gridColResizers.forEach(resizer => resizer.destroy()));
+if (window.__PENTACLE_CONFIG__ && !new URLSearchParams(location.search).has('pentacle-chat-popout')) {
+  document.body.classList.add('web-sidebar-resizable');
+  for (const button of document.querySelectorAll('[data-narrow-slot]')) {
+    button.addEventListener('click', () => setNarrowActiveSlot(Number(button.dataset.narrowSlot)));
+  }
+  setNarrowActiveSlot(narrowActiveSlot);
+  sidebarResizer = createSidebarResizer({
+    main: document.querySelector('.main'), sidebar: document.querySelector('.sidebar'),
+    handle: document.getElementById('sidebar-resizer'), grid: slotGrid,
+    rows: [...slotGrid.querySelectorAll('.grid-row')], rowResizers: gridColResizers,
+    initialWidth: state.appearance.sidebarWidth,
+    save: width => {
+      state.appearance.sidebarWidth = width;
+      saveAppearanceSetting('sidebarWidth', width);
+    },
+    onNarrow: narrow => {
+      document.body.classList.toggle('web-sidebar-narrow', narrow);
+      if (narrow) setNarrowActiveSlot(narrowActiveSlot);
+    },
+    onResize: scheduleVisibleSlotFits,
+  });
+}
+window.addEventListener('beforeunload', () => {
+  sidebarResizer?.destroy();
+  gridColResizers.forEach(resizer => resizer.destroy());
+});
 
 // Set empty state for all cells.
 for (let i = 0; i < 4; i++) {
@@ -7511,7 +7648,7 @@ document.addEventListener('wheel', (e) => {
 // kicking off any chat-stream IPC or activity polling. The pre-config
 // bootstrap doesn't know whether this is host or client mode and would
 // pick the wrong default new-session location.
-function bindChatPopout() {
+async function bindChatPopout() {
   if (!IS_CHAT_POPOUT || chatPopoutBound) return;
   chatPopoutBound = true;
   document.body.classList.add('chat-popout');
@@ -7519,7 +7656,33 @@ function bindChatPopout() {
   stylesheet.rel = 'stylesheet';
   stylesheet.href = 'chat_popout.css';
   document.head.appendChild(stylesheet);
-  attachSession(0, CHAT_POPOUT_CONTEXT.session_name, CHAT_POPOUT_CONTEXT.title, CHAT_POPOUT_CONTEXT.desktop_host || CHAT_POPOUT_CONTEXT.host);
+  let direct = null;
+  if (CHAT_POPOUT_CONTEXT.assistant_source_stream_id) {
+    direct = assistantDirectForEntry(CHAT_POPOUT_CONTEXT.assistant_source_stream_id);
+    if (!direct.enabled || direct.error || direct.targetId !== CHAT_POPOUT_CONTEXT.stream_id
+      || direct.generation !== CHAT_POPOUT_CONTEXT.assistant_generation) {
+      document.body.textContent = 'This assistant popout binding changed. Return to the main window and reopen it.';
+      return;
+    }
+  }
+  await attachSession(0, CHAT_POPOUT_CONTEXT.session_name, CHAT_POPOUT_CONTEXT.title,
+    CHAT_POPOUT_CONTEXT.desktop_host || CHAT_POPOUT_CONTEXT.host, {
+      popoutStreamId: CHAT_POPOUT_CONTEXT.stream_id,
+      assistantDirect: direct ? { sourceId: direct.sourceId, targetId: direct.targetId, generation: direct.generation } : null,
+    });
+  updateSlotViewMode(0, 'chat');
+  window.PentacleWebPopoutBridge?.onHydrate((transfer) => {
+    restoreChatPopoutState(0, transfer, CHAT_POPOUT_CONTEXT.stream_id);
+  });
+  window.PentacleWebPopoutBridge?.announceReady();
+  // A new browser window has its own store. Request this exact stream after
+  // its frame listener is installed, even if the shared web host has already
+  // fetched it for the opener; a summary snapshot carries no history rows.
+  if (window.PentacleWebPopoutBridge && CHAT_POPOUT_CONTEXT.stream_id) {
+    window.cc.requestStreamEvents({ streamId: CHAT_POPOUT_CONTEXT.stream_id })
+      .then(() => scheduleSlotChatRender(0))
+      .catch(error => console.warn('[chat-popout] history load failed:', error?.message || error));
+  }
 }
 
 CFG_READY.then((cfg) => {
