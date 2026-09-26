@@ -136,6 +136,7 @@ test('chat send/spawn reach the bridge with the right method and host mapping', 
   cc.chatSend(undefined, 'sess', 'hi');
   cc.chatSend('amaterasu', 'sess2', 'yo');
   cc.chatInterrupt(undefined, 'sess');
+  cc.chatInterrupt('peer', 'remote-seat', 'selected-generation');
 
   assert.deepEqual(transport.calls.map((c) => [c.method, c.args]), [
     ['chat-stream:spawn', ['claude', 'local']],
@@ -143,7 +144,8 @@ test('chat send/spawn reach the bridge with the right method and host mapping', 
     ['chat-stream:spawn', [{ host: 'local', provider: 'claude' }]],
     ['chat-stream:send', ['local', 'sess', 'hi']],
     ['chat-stream:send', ['amaterasu', 'sess2', 'yo']],
-    ['chat-stream:interrupt', ['local', 'sess']],
+    ['chat-stream:interrupt', ['local', 'sess', undefined]],
+    ['chat-stream:interrupt', ['peer', 'remote-seat', 'selected-generation']],
   ]);
 });
 

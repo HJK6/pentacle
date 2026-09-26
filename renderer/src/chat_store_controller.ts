@@ -146,6 +146,7 @@ export type ChatSendBridge = (args: {
 // for tests; absent → cancelTurn still does its local UI cleanup.
 export type ChatCancelBridge = (args: {
   streamId: string;
+  expectedSessionGeneration?: string;
 }) => Promise<ChatInterruptResult | undefined>;
 
 export type ChatInterruptConfirm =
@@ -158,6 +159,7 @@ export type ChatInterruptConfirm =
 export type ChatInterruptResult = {
   ok?: boolean;
   error?: string;
+  code?: string;
   interrupted?: boolean;
   landed?: boolean;
   confirm?: string;
@@ -167,6 +169,7 @@ export type ChatInterruptResult = {
 export type ChatInterruptState = {
   streamId: string;
   turnId: string;
+  expectedSessionGeneration?: string;
   optimisticId?: string;
   pending: boolean;
   retryable: boolean;
@@ -680,12 +683,13 @@ export class ChatStoreController {
     }
   }
 
-  private requestInterrupt(streamId: string, turnId: string, optimisticId?: string): void {
+  private requestInterrupt(streamId: string, turnId: string, optimisticId?: string, expectedSessionGeneration?: string): void {
     if (!this.cancelBridge) return;
     const requestedAt = Date.now();
     this.setInterruptState(streamId, {
       streamId,
       turnId,
+      expectedSessionGeneration,
       optimisticId,
       pending: true,
       retryable: false,
@@ -693,7 +697,7 @@ export class ChatStoreController {
       requestedAt,
     });
     Promise.resolve()
-      .then(() => this.cancelBridge!({ streamId }))
+      .then(() => this.cancelBridge!({ streamId, expectedSessionGeneration }))
       .then((result) => {
         const confirm = ChatStoreController.normalizeInterruptConfirm(result);
         const retryable = confirm === 'interrupt_unconfirmed' || confirm === 'pane_unavailable';
@@ -701,6 +705,7 @@ export class ChatStoreController {
         this.setInterruptState(streamId, {
           streamId,
           turnId,
+          expectedSessionGeneration,
           optimisticId,
           pending: false,
           retryable,
@@ -721,6 +726,7 @@ export class ChatStoreController {
         this.setInterruptState(streamId, {
           streamId,
           turnId,
+          expectedSessionGeneration,
           optimisticId,
           pending: false,
           retryable: true,
@@ -760,6 +766,11 @@ export class ChatStoreController {
       if (existing && existing.turnId === turnId && (existing.pending || !existing.retryable)) {
         return true;
       }
+      const selectedGeneration = existing?.turnId === turnId
+        ? existing.expectedSessionGeneration
+        : this.state.sessions.find(session => session.stream_id === streamId)?.session_generation;
+      const expectedSessionGeneration = typeof selectedGeneration === 'string' && selectedGeneration
+        ? selectedGeneration : undefined;
       // Clear the indicator promptly: drop the elapsed anchor + any pending
       // stale-settle timer, then clear the turn.
       delete this.workingElapsedAnchors[streamId];
@@ -778,7 +789,7 @@ export class ChatStoreController {
         }
       }
       this.setState(next);
-      this.requestInterrupt(streamId, turnId, optimisticId);
+      this.requestInterrupt(streamId, turnId, optimisticId, expectedSessionGeneration);
       logTelemetry(TELEMETRY_EVENTS.CHAT_COMPOSE_OPTIMISTIC_FAILED, {
         stream_id: streamId,
         optimistic_id: optimisticId,
@@ -790,7 +801,7 @@ export class ChatStoreController {
     const existing = this.interruptStates[streamId];
     if (existing?.pending) return true;
     if (existing?.retryable) {
-      this.requestInterrupt(streamId, existing.turnId, existing.optimisticId);
+      this.requestInterrupt(streamId, existing.turnId, existing.optimisticId, existing.expectedSessionGeneration);
       return true;
     }
 

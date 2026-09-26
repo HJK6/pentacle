@@ -23,11 +23,32 @@ keep private material out of this repository and keep the two lines mergeable.
 ## Landing on `main`
 
 `main` is branch-protected: push the exact commit to a branch, let the
-`checks` workflow go green on that SHA, then fast-forward `main` with an
+`Public checks` workflow go green on that SHA, then fast-forward `main` with an
 explicit refspec (`git push origin <sha>:refs/heads/main`) and read it back
 with `git ls-remote`. Every landing is tagged on both lines when it is a
 publish. External contributions arrive as pull requests against `main` and are
 merged back into the private line at the next publish.
+
+For daemon releases, the public promotion helper adds an exact-run guard before
+that fast-forward. From this public checkout, set
+`PENTACLE_GITHUB_REPOSITORY=HJK6/pentacle` and run
+`python3 tools/merge_gate.py promote --candidate <full-sha> --run-id <push-run-id>`.
+It accepts only a completed successful branch-push `Public checks` run for that
+SHA on the same repository and current branch tip. The candidate's tracked
+`.github/workflows/predeploy-tests.yml` must match the audited command digest,
+and the run's job steps must prove Node, residue, web, v2/CLI and source-integrity
+checks succeeded. It creates and verifies the annotated `v2-gate/<sha>` tag,
+then advances `main` with a compare-and-swap push. Read back remote `main` and
+the tag after promotion. The private repository has its own mapped smoke
+workflow; an unknown or mismatched repository is refused.
+
+The tag push can start another required `Public checks` run. If branch
+protection holds `main` while that check is queued, wait for its result before
+re-entering the helper with the original successful branch-push run ID. On
+re-entry the helper skips a redundant tag push only when the remote annotated
+tag object and peel exactly match its locally validated tag; conflicting or
+unreadable tag state refuses before the `main` push. Keep the pre-push guard
+enabled and preserve the original tag and refusal receipts.
 
 ## Push guard
 
