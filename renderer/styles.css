@@ -419,6 +419,7 @@ body {
   --host-sigil-red: #ff757b;
   --host-sigil-blue: #779cff;
   --host-sigil-mauve: #cc9acb;
+  --host-sigil-orange: #f6a554;
   --host-sigil-yellow: #ffd60a;
   --host-sigil-cyan: #6fb3ff;
   --host-sigil-raspberry: #ef83be;
@@ -428,6 +429,7 @@ body {
   --host-sigil-red: #bc2439;
   --host-sigil-blue: #2455c5;
   --host-sigil-mauve: #804979;
+  --host-sigil-orange: #994900;
   --host-sigil-yellow: #806100;
   --host-sigil-cyan: #235f9f;
   --host-sigil-raspberry: #982765;
@@ -438,8 +440,8 @@ body {
 :is(.s-machine-avatar, .source-filter-btn).color-blue,
 :is(.s-machine-avatar, .source-filter-btn).color-royal-blue { --host-glyph: var(--host-sigil-blue); }
 :is(.s-machine-avatar, .source-filter-btn).color-purple,
-:is(.s-machine-avatar, .source-filter-btn).color-orange,
 :is(.s-machine-avatar, .source-filter-btn).color-mauve { --host-glyph: var(--host-sigil-mauve); }
+:is(.s-machine-avatar, .source-filter-btn).color-orange { --host-glyph: var(--host-sigil-orange); }
 :is(.s-machine-avatar, .source-filter-btn).color-yellow { --host-glyph: var(--host-sigil-yellow); }
 :is(.s-machine-avatar, .source-filter-btn).color-cyan { --host-glyph: var(--host-sigil-cyan); }
 :is(.s-machine-avatar, .source-filter-btn).color-deep-raspberry { --host-glyph: var(--host-sigil-raspberry); }

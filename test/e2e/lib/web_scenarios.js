@@ -416,7 +416,7 @@ async function colouredHostGlyphs({ session, report }) {
   const { hostGlyphContrast } = require('./host_glyph_contrast');
   const cells = await hostGlyphContrast(session);
   report.ok('host glyphs retain colour, labels and graphic contrast across themes/states',
-    cells.length === 36 && cells.every(cell => cell.pass),
+    cells.length === 48 && cells.every(cell => cell.pass),
     { subsystem: 'host-presentation', bug_ref: 'web_mic_endpoint_coloured_glyphs_2026_09', cells });
 }
 
