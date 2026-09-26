@@ -50,6 +50,20 @@ test('millisecond (3-digit) and no-fraction sampled_at still accepted', () => {
   assert.deepEqual(Object.keys(next.machineStats).sort(), ['host_b', 'host_c']);
 });
 
+test('CPU utilization survives host stats projection with legacy and unavailable readings', () => {
+  const sampledAt = '2025-01-15T12:00:01.123456Z';
+  const next = applyPentacleHostsStats(state(), {
+    measured: { ...sample('measured', sampledAt), cpu_usage_pct: 24.5 },
+    unavailable: { ...sample('unavailable', sampledAt), cpu_usage_pct: null },
+    malformed: { ...sample('malformed', sampledAt), cpu_usage_pct: 101 },
+    legacy: sample('legacy', sampledAt),
+  });
+  assert.equal(next.machineStats.measured.cpu_usage_pct, 24.5);
+  assert.equal(next.machineStats.unavailable.cpu_usage_pct, null);
+  assert.equal(next.machineStats.malformed.cpu_usage_pct, null);
+  assert.equal('cpu_usage_pct' in next.machineStats.legacy, false);
+});
+
 test('nanosecond (9-digit) sampled_at is accepted (future-proof precision)', () => {
   const next = applyPentacleHostsStats(state(), {
     host_b: sample('host_b', '2025-01-15T12:00:01.123456123Z'),

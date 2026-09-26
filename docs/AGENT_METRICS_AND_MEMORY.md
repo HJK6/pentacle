@@ -61,13 +61,19 @@ the probe. Do not fabricate zero or repeatedly rebuild clients.
 ## Machine stats
 
 The daemon samples its local host every 30 seconds without provider login:
-one-minute load average (not CPU percentage), used/total RAM, used/total space
-on the home filesystem, and uptime. Use a consistent `--local-host` identity
-and matching client `hosts` key. Enrolled clients receive `hosts.stats`.
+system-wide CPU utilization, one-minute load average (retained on the wire for
+older consumers), used/total RAM, used/total space on the home filesystem, and
+uptime. `cpu_usage_pct` is a measured 0–100% value or `null` when the probe is
+unavailable; older satellites may omit it. The web card shows `--` for missing,
+null, or stale CPU values and never treats load average as utilization. Use a
+consistent `--local-host` identity and matching client `hosts` key. Enrolled
+clients receive `hosts.stats`.
 
-Check that sample timestamps advance and RAM/disk values agree with the host
-OS. Samples older than 90 seconds are stale. Desktop machine stats do not depend
-on the Claude usage toggle. Mobile Settings preserves distinct configured host
+Check that sample timestamps advance and CPU/RAM/disk values agree with the host
+OS. On Linux, CPU is the busy fraction between two `/proc/stat` reads; on macOS,
+it is `100 - idle` from the second `top` sample. Samples older than 90 seconds
+are stale. Desktop machine stats do not depend on the Claude usage toggle.
+Mobile Settings preserves distinct configured host
 names and offline entries.
 
 For another computer, install the Python dependencies and run its satellite.

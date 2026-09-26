@@ -266,6 +266,16 @@ def test_hosts_stats_contract_requires_a_non_empty_exact_host_entry() -> None:
     assert probe.assert_hosts_stats_frame({
         "type": "hosts.stats", "hosts": {"hosta": sample},
     }) == []
+    assert probe.assert_hosts_stats_frame({
+        "type": "hosts.stats", "hosts": {"hosta": {**sample, "cpu_usage_pct": None}},
+    }) == []
+    assert probe.assert_hosts_stats_frame({
+        "type": "hosts.stats", "hosts": {"hosta": {**sample, "cpu_usage_pct": 0}},
+    }) == []
+    for cpu in (-1, 101, 10 ** 1000, True, "12"):
+        assert any("cpu_usage_pct" in problem for problem in probe.assert_hosts_stats_frame({
+            "type": "hosts.stats", "hosts": {"hosta": {**sample, "cpu_usage_pct": cpu}},
+        }))
     for inner_host in (None, "", "hostc"):
         malformed = {**sample, "host": inner_host}
         problems = probe.assert_hosts_stats_frame({

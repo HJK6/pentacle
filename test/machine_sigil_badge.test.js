@@ -100,11 +100,12 @@ test('machine stats reuse configured sigils with accessible labels and retain da
     _streamHostToHostId: id => id, getSourceForSession: (_, id) => names[id],
     getSourceColorForSession: (_, id) => colors[id], esc: s => String(s),
     machineSigilMarkup: loadFn(cosmic), statUsagePct: (used, total) => used / total * 100,
-    machineStatsIsStale: stats => stats.stale, fmtStatLoad: String, fmtStatPct: n => n + '%',
+    machineStatsIsStale: stats => stats.stale, statNumber: n => n == null ? null : Number(n),
+    fmtStatPct: n => n == null ? '--' : n + '%',
     fmtStatBytes: String, fmtStatUptime: String, usageBarClass: () => 'low',
   };
   vm.runInNewContext(code, context);
-  const stats = stale => ({ cpu_load_1m: 0.42, memory_used_bytes: 4, memory_total_bytes: 8,
+  const stats = stale => ({ cpu_load_1m: 0.42, cpu_usage_pct: 31.5, memory_used_bytes: 4, memory_total_bytes: 8,
     disk_used_bytes: 64, disk_total_bytes: 256, uptime_seconds: 123, stale });
   context.renderHostsStats({ merlin: stats(false), thoth: stats(false), amaterasu: stats(true) });
   const cards = [...document.querySelectorAll('.machine-stat-card')];
@@ -119,8 +120,15 @@ test('machine stats reuse configured sigils with accessible labels and retain da
     assert.equal(mark.querySelector('svg').getAttribute('aria-hidden'), 'true');
     assert.equal(card.querySelector('.machine-stat-name').textContent, names[host]);
     assert.equal(card.querySelector('.machine-stat-state').textContent, host === 'amaterasu' ? 'Stale' : 'Live');
-    assert.match(card.textContent, /RAM50%/);
-    assert.match(card.textContent, /Storage25%/);
-    assert.match(card.textContent, /Load 1m0.42/);
+    const rows = [...card.querySelectorAll('.machine-stat-row')];
+    assert.equal(rows.length, 3);
+    assert.equal(rows[0].textContent, host === 'amaterasu' ? 'CPU--' : 'CPU31.5%');
+    assert.equal(rows[1].textContent, 'RAM50%4 / 8');
+    assert.equal(rows[2].textContent, 'Storage25%64 / 256');
+    assert.doesNotMatch(card.textContent, /Load 1m/);
   }
+  context.renderHostsStats({ thoth: { ...stats(false), cpu_usage_pct: null } });
+  assert.equal(document.querySelector('.machine-stat-row').textContent, 'CPU--');
+  context.renderHostsStats({ thoth: { ...stats(false), cpu_usage_pct: 0 } });
+  assert.equal(document.querySelector('.machine-stat-row').textContent, 'CPU0%');
 });

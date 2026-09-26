@@ -1681,9 +1681,13 @@ function normalizeHostStats(key: string, raw: unknown): PentacleMachineStats | n
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(sampledAt) ||
     !Number.isFinite(Date.parse(sampledAt))
   ) return null;
+  const cpuRaw = record.cpu_usage_pct;
+  const cpuUsage = typeof cpuRaw === 'number' && Number.isFinite(cpuRaw)
+    && cpuRaw >= 0 && cpuRaw <= 100 ? cpuRaw : null;
   return {
     host,
     cpu_load_1m: numbers.cpu_load_1m,
+    ...('cpu_usage_pct' in record ? { cpu_usage_pct: cpuUsage } : {}),
     memory_used_bytes: numbers.memory_used_bytes,
     memory_total_bytes: numbers.memory_total_bytes,
     disk_used_bytes: numbers.disk_used_bytes,

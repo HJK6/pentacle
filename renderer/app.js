@@ -6364,11 +6364,6 @@ function fmtStatBytes(value) {
   return scaled.toFixed(digits).replace(/\.0+$/, '') + ' ' + units[unit];
 }
 
-function fmtStatLoad(value) {
-  const number = statNumber(value);
-  return number === null ? '--' : number.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
-}
-
 function fmtStatUptime(value) {
   let seconds = statNumber(value);
   if (seconds === null || seconds < 0) return '--';
@@ -6448,6 +6443,9 @@ function renderHostsStats(hosts = state.chatStream.hostsStats) {
     const memoryPct = statUsagePct(stats.memory_used_bytes, stats.memory_total_bytes);
     const diskPct = statUsagePct(stats.disk_used_bytes, stats.disk_total_bytes);
     const stale = machineStatsIsStale(stats);
+    const reportedCpuPct = statNumber(stats.cpu_usage_pct);
+    const cpuPct = stale || reportedCpuPct === null || reportedCpuPct < 0 || reportedCpuPct > 100
+      ? null : reportedCpuPct;
     const card = [];
     card.push('<div class="machine-stat-card color-' + esc(color) + '" data-machine-stats-host="' + esc(streamHost) + '">');
     card.push('<div class="machine-stat-head">');
@@ -6455,14 +6453,12 @@ function renderHostsStats(hosts = state.chatStream.hostsStats) {
     card.push('<span class="machine-stat-name">' + esc(label) + '</span>');
     card.push('<span class="machine-stat-state ' + (stale ? 'error' : 'ok') + '">' + (stale ? 'Stale' : 'Live') + '</span>');
     card.push('</div>');
-    card.push('<div class="machine-stat-row"><span>Load 1m</span><b>' + esc(fmtStatLoad(stats.cpu_load_1m)) + '</b></div>');
-    card.push('<div class="machine-stat-row"><span>RAM</span><b>' + esc(fmtStatPct(memoryPct)) + '</b></div>');
-    card.push('<div class="machine-stat-note">' + esc(fmtStatBytes(stats.memory_used_bytes) + ' / ' + fmtStatBytes(stats.memory_total_bytes)) + '</div>');
+    card.push('<div class="machine-stat-row"><span>CPU</span><b>' + esc(fmtStatPct(cpuPct)) + '</b></div>');
+    card.push('<div class="machine-stat-row"><span>RAM</span><b>' + esc(fmtStatPct(memoryPct)) + '</b><span class="machine-stat-capacity">' + esc(fmtStatBytes(stats.memory_used_bytes) + ' / ' + fmtStatBytes(stats.memory_total_bytes)) + '</span></div>');
     if (memoryPct !== null) {
       card.push('<div class="usage-bar"><div class="usage-bar-fill ' + usageBarClass(memoryPct) + '" style="width:' + Math.round(memoryPct) + '%"></div></div>');
     }
-    card.push('<div class="machine-stat-row"><span>Storage</span><b>' + esc(fmtStatPct(diskPct)) + '</b></div>');
-    card.push('<div class="machine-stat-note">' + esc(fmtStatBytes(stats.disk_used_bytes) + ' / ' + fmtStatBytes(stats.disk_total_bytes)) + '</div>');
+    card.push('<div class="machine-stat-row"><span>Storage</span><b>' + esc(fmtStatPct(diskPct)) + '</b><span class="machine-stat-capacity">' + esc(fmtStatBytes(stats.disk_used_bytes) + ' / ' + fmtStatBytes(stats.disk_total_bytes)) + '</span></div>');
     if (diskPct !== null) {
       card.push('<div class="usage-bar"><div class="usage-bar-fill ' + usageBarClass(diskPct) + '" style="width:' + Math.round(diskPct) + '%"></div></div>');
     }
