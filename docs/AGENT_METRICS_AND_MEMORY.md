@@ -12,13 +12,21 @@ from the authenticated Claude CLI's `/usage` UI. This is account quota, not
 session cost, API spend or requests per minute. It does not change the quota.
 
 1. As the same OS user that will run the collector, verify Claude login and
-   complete any trust prompt in an existing private working directory. Install
-   tmux. Then, from this repository:
+   complete the trust prompt **in the exact directory you will pass as
+   `PENTACLE_USAGE_CWD`** (the probe launches the CLI there and never
+   auto-accepts trust; if that directory is untrusted it fails with
+   `cwd '<dir>' is not a trusted Claude workspace ...`). If `PENTACLE_USAGE_CWD`
+   is unset the probe uses `$HOME` (never the launchd cwd `/`), which must then be
+   trusted. Install tmux. Then, from this repository:
 
    ```sh
    export PENTACLE_USAGE_CWD="$HOME/workspace"
    .venv/bin/python scripts/check_claude_usage.py --json
    ```
+
+   Note: an account relog can drop a directory's trust; re-trust the
+   `PENTACLE_USAGE_CWD` folder (or repoint the variable at a trusted one) after
+   switching Claude accounts.
 
    Set `PENTACLE_USAGE_CLAUDE_BIN` and `PENTACLE_USAGE_TMUX_BIN` to absolute paths
    if the service PATH needs them. The bounded probe opens its own tmux server,
