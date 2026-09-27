@@ -2060,7 +2060,10 @@ function chatSessionStateForSession(session) {
   }
   const host = streamHostForHostId(session.hostId);
   if (session.popoutStreamId) {
-    return state.chatStream.sessions.find(item => item.stream_id === session.popoutStreamId && item.host === host) || null;
+    // Popout identity outlives the live roster: closed streams can still have
+    // fetched history. Keep live metadata when present without inventing it.
+    return state.chatStream.sessions.find(item => item.stream_id === session.popoutStreamId && item.host === host)
+      || { stream_id: session.popoutStreamId, host };
   }
   return chatUi.findStreamSessionForDesktopSession(state.chatStream, session, host);
 }

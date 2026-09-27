@@ -24,6 +24,11 @@ Exercise reconnect, delayed replies, duplicate frames, daemon restart, log rotat
 
 ## Chat history states
 
+Chat popouts bind fetched history by their explicit stream id even when a closed
+stream is absent from the live roster. Roster metadata still supplies live status
+when available; its absence does not imply an open or working session. Assistant
+direct popouts retain their source and generation validation.
+
 `renderer/chat_events_lazy.js` tracks history requests independently from
 websocket connectivity. Failed fetches and completed fetches that leave no
 transcript rows retry after 1, 2, 4, 8 and 16 seconds while the stream remains in
