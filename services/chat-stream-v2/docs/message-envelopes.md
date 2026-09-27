@@ -23,6 +23,15 @@ against the existing notice kinds first. A known inner notice wins over the
 `claude_pasted_content` fallback; plain wrapped prose keeps the wrapper tag.
 `provider_wrapper` and `raw.provider_content` remain intact in both cases.
 
+Authenticated satellite Claude events use the same annotator in
+`EventPush.handle_push`, after durable receipt stamping and before the
+lifecycle-CAS append. The sink computes durable identity before annotation,
+preserves source/session admission and raw provider bytes, and broadcasts the
+tag only for a new insert. Satellite replay adds no rows or broadcasts.
+Non-Claude events retain their existing remote-ingress behavior. Local/remote
+parity, wrapped notice precedence and replay are covered in
+`tests/test_event_push.py` through the real sink and Store.
+
 Version-one kinds and policies are:
 
 | Kind | Policy | Purpose |

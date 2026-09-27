@@ -50,6 +50,7 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from ingest import _identity_key, broadcast_assistant_mirror, codex_source_pane_pid, validate_event_payload
 from machine_stats import WIRE_VERSION as STATS_WIRE_VERSION, validate_machine_stats
+from message_envelopes import annotate_message_envelope
 from store import ENTRY_DROPPED
 
 log = logging.getLogger("chat_streamd_v2.event_push")
@@ -485,11 +486,14 @@ class EventPush:
             entry["lifecycle"] = snapshots.get(entry["stream_id"])
 
         # The whole batch has passed admission. Stamp the existing event from
-        # the current durable receipt projection before it is persisted and
-        # broadcast through this established event path.
+        # the current durable receipt projection, then apply the local-ingest
+        # envelope registry to Claude events before persistence and broadcast.
+        # Identity was computed from the source above; annotation is additive.
         try:
             for entry in entries:
                 entry["event"] = await self.store.stamp_event_with_send_receipt(entry["event"])
+                if entry["event"].get("provider") == "claude":
+                    entry["event"] = annotate_message_envelope(entry["event"])
         except Exception as exc:  # noqa: BLE001 - fail closed before durable append
             log.warning("event.push receipt stamp failed host=%s: %s", host, exc)
             return err("ingest_failed")

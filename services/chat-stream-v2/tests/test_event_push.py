@@ -7,12 +7,19 @@ version gate — each assertion fails if its behaviour is reverted.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import hmac
 import json
 import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
+
+import pytest
+
+from claude_jsonl_norm import normalize_claude_jsonl_records
+from ingest import _identity_key, append_ingested_event
+from message_envelopes import MESSAGE_ENVELOPES
 
 from event_push import WIRE_VERSION, EventPush  # noqa: E402
 from inventory import InventoryEmitter  # noqa: E402
@@ -1534,3 +1541,183 @@ def test_authenticated_usage_push_projects_snapshot_into_live_inventory() -> Non
             store.stop()
 
     _run(_go())
+
+
+_WRAPPER_CORPUS = json.loads((Path(__file__).resolve().parents[3] /
+    "pentacle-chat-core/tests/fixtures/provider-wrapper.json").read_text())
+_SATELLITE_QUEUED_CAPTURE = json.loads((Path(__file__).parent /
+    "fixtures/event-push-queued-notice.json").read_text())["record"]
+
+
+async def _assert_remote_envelope_parity(
+    record: dict, expected_kind: str, *, receipt_display: str | None = None,
+) -> None:
+    """Real normalized source -> both ingress writers -> durable Store + fanout."""
+    stores = [Store(":memory:"), Store(":memory:")]
+    for store in stores:
+        store.start()
+    remote, local = stores
+    try:
+        for store in stores:
+            await store.open_session("hostc", "v2-envelope", provider="claude")
+        payload = normalize_claude_jsonl_records(
+            [record], host="hostc", session_name="v2-envelope",
+        )[0]
+        original = copy.deepcopy(payload)
+        identity = _identity_key(payload)
+        for store in stores:
+            await store.append_send_receipt(
+                to_stream_id=payload["stream_id"], request_id="send-envelope-fixture",
+                receipt_id="receipt-envelope-fixture", state="landed",
+                wire_text=payload["text"], display_text=receipt_display or payload["text"],
+                attachments=[], delivery="landed", submission_confirmed=True,
+            )
+        ep, remote_casts, _ = _sink(remote)
+        local_casts = []
+
+        async def broadcast(frame: dict) -> None:
+            local_casts.append(frame)
+
+        first = await ep.handle_push(_push(ep, [payload]))
+        assert first["type"] == "event.push.ok" and first["inserted"] == 1
+        assert await append_ingested_event(
+            local, broadcast, payload, recent_limit=500,
+        ) is not None
+        remote_rows = await remote.fetch_session_event_tail(payload["stream_id"], limit=500)
+        local_rows = await local.fetch_session_event_tail(payload["stream_id"], limit=500)
+        assert len(remote_rows) == len(local_rows) == 1
+        row, local_row = remote_rows[0], local_rows[0]
+        assert row.get("message_envelope", {}).get("kind") == expected_kind
+        assert row["message_envelope"] == local_row["message_envelope"]
+        assert row.get("provider_wrapper") == local_row.get("provider_wrapper") == payload.get("provider_wrapper")
+        assert row["raw"] == local_row["raw"]
+        assert row["raw"]["provider_content"] == payload["raw"]["provider_content"]
+        assert row["raw"]["envelope_source"] == payload["raw"]["provider_content"]
+        assert row["kind"] == "USER" and row["text"] == (receipt_display or payload["text"])
+        assert row["timestamp"] == payload["timestamp"]
+        assert _identity_key(row) == identity
+        if record.get("sessionId"):
+            assert row["session_id"] == record["sessionId"]
+            session = await remote.fetch_session("hostc", "v2-envelope")
+            assert session["claude_session_id"] == record["sessionId"]
+        assert row["receipt_state"] == "landed" and row["receipt_id"] == "receipt-envelope-fixture"
+        assert row["request_id"] == "send-envelope-fixture"
+        if record["type"] == "attachment":
+            assert row["raw"]["subtype"] == "queued-command"
+            assert row["raw"]["queued_at"] == record["attachment"]["timestamp"]
+        assert remote_casts[0]["event"]["message_envelope"] == row["message_envelope"]
+        assert remote_casts[0]["event"]["raw"] == row["raw"]
+        for replay_payload in (payload, remote_casts[0]["event"]):
+            replay = await ep.handle_push(_push(ep, [replay_payload]))
+            assert replay["accepted"] == 1 and replay["inserted"] == 0
+        assert len(remote_casts) == 1
+        assert await remote.fetch_session_event_tail(payload["stream_id"], limit=500) == remote_rows
+        assert payload == original, "ingress must not mutate the satellite source object"
+    finally:
+        for store in stores:
+            store.stop()
+
+
+def test_satellite_captured_queued_notice_envelope_parity_and_replay() -> None:
+    _run(_assert_remote_envelope_parity(_SATELLITE_QUEUED_CAPTURE, "notification_answer"))
+
+
+@pytest.mark.parametrize("case", _WRAPPER_CORPUS["notice_cases"], ids=lambda c: c["kind"])
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("queued", [False, True])
+def test_satellite_every_notice_envelope_parity(case, padded, queued) -> None:
+    assert {c["kind"] for c in _WRAPPER_CORPUS["notice_cases"]} == {
+        entry.kind for entry in MESSAGE_ENVELOPES if entry.kind != "claude_pasted_content"
+    }
+    text = f'<pasted_content id="bd91">\n{case["wire_text"]}\n</pasted_content id="bd91">'
+    if padded:
+        text = "\n\n" + text + "\n"
+    record = {"type": "user", "uuid": "envelope-matrix", "timestamp": "2026-09-20T00:00:00Z",
+              "message": {"content": text}}
+    if queued:
+        record.update(type="attachment", attachment={"type": "queued_command",
+            "origin": {"kind": "human"}, "prompt": text, "timestamp": record["timestamp"]})
+    _run(_assert_remote_envelope_parity(record, case["kind"]))
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_satellite_wrapped_prose_keeps_wrapper_envelope(queued) -> None:
+    text = '<pasted_content id="bd91">\nordinary operator prose\n</pasted_content id="bd91">'
+    record = {"type": "user", "uuid": "wrapped-prose", "timestamp": "2026-09-20T00:00:00Z",
+              "message": {"content": text}}
+    if queued:
+        record.update(type="attachment", attachment={"type": "queued_command",
+            "origin": {"kind": "human"}, "prompt": text, "timestamp": "2026-09-20T00:00:00Z"})
+    _run(_assert_remote_envelope_parity(record, "claude_pasted_content"))
+
+
+def test_satellite_annotation_keeps_non_claude_and_non_user_payloads_unchanged() -> None:
+    async def go() -> None:
+        store = Store(":memory:"); store.start()
+        try:
+            await store.open_session("hostc", "v2-envelope", provider="codex", pane_pid="8123")
+            ep, casts, _ = _sink(store)
+            codex = _proven_codex_ev(CURRENT_CODEX_ROLLOUT, 1, stream_id="hostc:v2-envelope")
+            codex["text"] = _WRAPPER_CORPUS["notice_cases"][0]["wire_text"]
+            assistant = _ev("assistant-wrapper", '<pasted_content id="bd91">\nbody\n</pasted_content id="bd91">')
+            assistant["kind"] = "ASSIST_TEXT"
+            for payload in (codex, assistant):
+                result = await ep.handle_push(_push(ep, [payload]))
+                assert result["inserted"] == 1
+                event = casts[-1]["event"]
+                expected = {k: v for k, v in payload.items() if k != "source_pane_pid"}
+                assert {k: v for k, v in event.items() if k != "daemon_seq"} == expected
+        finally:
+            store.stop()
+    _run(go())
+
+
+def test_satellite_notice_annotation_does_not_bypass_auth_or_host_admission() -> None:
+    async def go() -> None:
+        store = Store(":memory:"); store.start()
+        try:
+            await store.open_session("hostc", "v2-envelope", provider="claude")
+            ep, casts, _ = _sink(store)
+            payload = normalize_claude_jsonl_records(
+                [_SATELLITE_QUEUED_CAPTURE], host="hostc", session_name="v2-envelope",
+            )[0]
+            assert (await ep.handle_push(_push(ep, [payload], secret="wrong")))["error"] == "unauthorized"
+            bad_host_proof = {**_push(ep, [payload]), "usage": [], "source_host_proof": "invalid"}
+            assert (await ep.handle_push(bad_host_proof))["error"] == "unauthorized_source_host"
+            assert await store.fetch_session_event_tail(payload["stream_id"], limit=500) == []
+            assert casts == []
+        finally:
+            store.stop()
+    _run(go())
+
+
+@pytest.mark.parametrize("text", [
+    "ordinary operator prose",
+    "[Image: original 2000x1000, displayed at 1000x500. Multiply coordinates by 2 to map to original image.]",
+    '<pasted_content id="bd91">\nbody\n</pasted_content id="bd92">',
+    '[pentacle-notice:notification-answer-fixture]\n[notification.answer]\nnotification_id=other\nanswer=done\nby=operator',
+])
+def test_satellite_operator_text_and_negative_lookalikes_remain_untagged(text) -> None:
+    async def go() -> None:
+        store = Store(":memory:"); store.start()
+        try:
+            await store.open_session("hostc", "v2-controls", provider="claude")
+            ep, casts, _ = _sink(store)
+            payload = normalize_claude_jsonl_records([{
+                "type": "user", "uuid": "operator-control", "message": {"content": text},
+            }], host="hostc", session_name="v2-controls")[0]
+            assert (await ep.handle_push(_push(ep, [payload])))["inserted"] == 1
+            event = casts[0]["event"]
+            assert event["text"] == text and event["kind"] == "USER"
+            assert "message_envelope" not in event and "provider_wrapper" not in event
+        finally:
+            store.stop()
+    _run(go())
+
+
+def test_satellite_envelope_annotation_uses_receipt_display_projection() -> None:
+    text = '<pasted_content id="bd91">\ntransport text\n</pasted_content id="bd91">'
+    record = {"type": "user", "uuid": "receipt-before-annotation", "message": {"content": text}}
+    notice = next(case["wire_text"] for case in _WRAPPER_CORPUS["notice_cases"]
+                  if case["kind"] == "notification_answer")
+    _run(_assert_remote_envelope_parity(record, "notification_answer", receipt_display=notice))
