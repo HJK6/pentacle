@@ -1029,7 +1029,8 @@ function chatStreamStillNeedsHistory(streamId) {
     if (!state.slots[slot] || state.botSlots[slot] || state.slotViewModes[slot] !== 'chat') continue;
     if (state.slotChatBoundStream[slot] !== streamId) continue;
     const rel = state.slotReliability[slot];
-    return !chatDetailHasRows(selectSlotSessionDetail(streamId, showTurnDurationEnabled(), false, rel ? rel.visibleCount : 120));
+    return state.chatStream.historyLoads?.[streamId]?.status === 'error'
+      || !chatDetailHasRows(selectSlotSessionDetail(streamId, showTurnDurationEnabled(), false, rel ? rel.visibleCount : 120));
   }
   return false;
 }

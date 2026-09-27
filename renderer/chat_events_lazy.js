@@ -59,10 +59,12 @@ function scheduleHistoryRetry(streamState, streamId, cc, logger = console, optio
   if (!id || !streamState.connected || load?.retryPending || !historyLoadIncomplete(load, options.hasRows)) return false;
   const attempt = load.attempt || 0;
   if (attempt >= HISTORY_RETRY_DELAYS_MS.length) {
+    if (!load.exhausted) logger.info?.('[chat.history]', { subsystem: 'chat_history', bug_ref: 'spec_pentacle__web_chat_transcript_collapse_2026_09', streamId: id, event: 'retry_exhausted', attempt });
     load.exhausted = true;
     return false;
   }
   load.retryPending = true;
+  logger.info?.('[chat.history]', { subsystem: 'chat_history', bug_ref: 'spec_pentacle__web_chat_transcript_collapse_2026_09', streamId: id, event: 'retry_scheduled', attempt: attempt + 1, delayMs: HISTORY_RETRY_DELAYS_MS[attempt] });
   const setTimer = options.setTimer || setTimeout;
   setTimer(() => {
     load.retryPending = false;
@@ -75,16 +77,18 @@ function scheduleHistoryRetry(streamState, streamId, cc, logger = console, optio
   return true;
 }
 
-// Status line for a chat slot. A view whose store holds no history rows never
-// shows synthesized answers alone: it says messages are loading, then that
-// they could not be loaded once the retry budget is spent.
+// The history status stays visible above durable answer groups until rows
+// arrive or the bounded retry budget ends. An empty success is distinct from
+// a failed request; both exhausted states offer an explicit fresh budget.
 function chatHistoryStatus({ connected, load, hasRows, hasRendered }) {
   if (!connected) return { message: 'Reconnecting…', retry: false };
-  if (load?.status === 'error') return { message: 'Messages could not be loaded.', retry: true };
-  if (load?.status !== 'loaded') return { message: hasRendered ? 'Syncing messages…' : 'Loading messages…', retry: false };
-  if (hasRows || !hasRendered) return { message: '', retry: false };
-  return load.exhausted
+  if (load?.status === 'error') return load.exhausted
     ? { message: 'Messages could not be loaded.', retry: true }
+    : { message: 'Loading messages…', retry: false };
+  if (load?.status !== 'loaded') return { message: hasRows && hasRendered ? 'Syncing messages…' : 'Loading messages…', retry: false };
+  if (hasRows) return { message: '', retry: false };
+  return load.exhausted
+    ? { message: 'No messages yet.', retry: true }
     : { message: 'Loading messages…', retry: false };
 }
 

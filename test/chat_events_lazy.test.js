@@ -307,12 +307,14 @@ test('manual retry resets the retry budget', async () => {
 test('chatHistoryStatus never leaves a row-less view without a status line while answers render', () => {
   const loaded = { status: 'loaded' };
   assert.deepEqual(chatHistoryStatus({ connected: false, load: loaded, hasRows: true, hasRendered: true }), { message: 'Reconnecting…', retry: false });
-  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'error' }, hasRows: false, hasRendered: true }), { message: 'Messages could not be loaded.', retry: true });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'error' }, hasRows: false, hasRendered: true }), { message: 'Loading messages…', retry: false });
   assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'loading' }, hasRows: true, hasRendered: true }), { message: 'Syncing messages…', retry: false });
   assert.deepEqual(chatHistoryStatus({ connected: true, load: undefined, hasRows: false, hasRendered: false }), { message: 'Loading messages…', retry: false });
   assert.deepEqual(chatHistoryStatus({ connected: true, load: loaded, hasRows: true, hasRendered: true }), { message: '', retry: false });
   assert.deepEqual(chatHistoryStatus({ connected: true, load: loaded, hasRows: false, hasRendered: true }), { message: 'Loading messages…', retry: false });
-  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'loaded', exhausted: true }, hasRows: false, hasRendered: true }), { message: 'Messages could not be loaded.', retry: true });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'loaded', exhausted: true }, hasRows: false, hasRendered: true }), { message: 'No messages yet.', retry: true });
   // A genuinely empty stream keeps the ordinary empty state once retries are spent.
-  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'loaded', exhausted: true }, hasRows: false, hasRendered: false }), { message: '', retry: false });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'loaded', exhausted: true }, hasRows: false, hasRendered: false }), { message: 'No messages yet.', retry: true });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: loaded, hasRows: false, hasRendered: false }), { message: 'Loading messages…', retry: false });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'error', exhausted: true }, hasRows: false, hasRendered: false }), { message: 'Messages could not be loaded.', retry: true });
 });

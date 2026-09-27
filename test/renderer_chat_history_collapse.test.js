@@ -12,20 +12,20 @@ const { installRenderer, mountRaceSlot, STREAM } = require('./helpers/renderer_c
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const ANSWERS_ONLY = '<details class="slot-chat-v3-answers"><summary>You answered 2 questions</summary></details>';
 
-function fixture({ rowsAfterCall = Infinity } = {}) {
+function fixture({ rowsAfterCall = Infinity, answers = true, initialRows = [], fail = false } = {}) {
   const calls = [];
   const timers = [];
-  let rows = [];
+  let rows = initialRows;
   const installed = installRenderer({
     requestStreamEvents: async (args) => {
       calls.push(args);
       if (calls.length >= rowsAfterCall) rows = [{ id: 'row-1', displayRule: 'bubble:assistant', text: 'ASSISTANT-TEXT' }];
-      return { ok: true, count: 0 };
+      return fail ? { ok: false, error: 'temporary history failure' } : { ok: true, count: 0 };
     },
     selectSessionDetail: (streamId) => ({ streamId, title: 'Race Fixture', providerLabel: 'claude', transcriptItems: rows, remainingCount: 0 }),
     renderTranscriptTimelineHtml: (detail) => (detail.transcriptItems.length
-      ? `<article class="slot-chat-row"><div class="slot-chat-assistant-card">ASSISTANT-TEXT</div></article>${ANSWERS_ONLY}`
-      : ANSWERS_ONLY),
+      ? `<article class="slot-chat-row"><div class="slot-chat-assistant-card">ASSISTANT-TEXT</div></article>${answers ? ANSWERS_ONLY : ''}`
+      : answers ? ANSWERS_ONLY : ''),
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
   });
   return { ...installed, calls, timers };
@@ -73,7 +73,7 @@ test('zero-row history re-requests on a bounded backoff and renders text once ro
   assert.equal(dom.window.document.querySelector('.slot-chat-history-state'), null, 'status line cleared once rows render');
 });
 
-test('exhausted retries leave an honest error line with a manual Retry that resets the budget', async () => {
+test('exhausted zero-row retries show no messages with a Retry that resets the budget', async () => {
   const { context, dom, calls, timers } = fixture();
   await mount(context);
   const delays = [];
@@ -85,7 +85,7 @@ test('exhausted retries leave an honest error line with a manual Retry that rese
   assert.deepEqual(delays, [1000, 2000, 4000, 8000, 16000]);
   assert.equal(calls.length, 6, 'initial request plus five retries, then stop');
   const state = dom.window.document.querySelector('.slot-chat-history-state');
-  assert.match(state.textContent, /Messages could not be loaded/);
+  assert.match(state.textContent, /No messages yet/);
   state.querySelector('.slot-chat-history-retry').click();
   await flush(); await flush();
   assert.equal(calls.length, 7, 'manual retry requests again');
@@ -105,4 +105,28 @@ test('retry stops when the slot leaves chat mode', async () => {
   await flush();
   assert.equal(calls.length, 1);
   assert.equal(STREAM.length > 0, true);
+});
+
+test('a stream without answers stays loading until empty retries exhaust', async () => {
+  const { context, dom, timers } = fixture({ answers: false });
+  await mount(context);
+  assert.match(listText(dom), /Loading messages/);
+  for (let i = 0; i < 5; i += 1) {
+    runDueTimers(timers, context); await flush(); await flush(); vmRender(context);
+  }
+  assert.match(listText(dom), /No messages yet/);
+  assert.ok(dom.window.document.querySelector('.slot-chat-history-retry'));
+});
+
+test('a failed load retries while cached rows remain and ends with an error', async () => {
+  const { context, dom, calls, timers } = fixture({ fail: true, initialRows: [{ id: 'cached', displayRule: 'bubble:assistant', text: 'ASSISTANT-TEXT' }] });
+  await mount(context);
+  assert.match(listText(dom), /Loading messages/);
+  for (let i = 0; i < 5; i += 1) {
+    runDueTimers(timers, context); await flush(); await flush(); vmRender(context);
+  }
+  assert.equal(calls.length, 6);
+  assert.match(listText(dom), /ASSISTANT-TEXT/);
+  assert.match(listText(dom), /Messages could not be loaded/);
+  assert.ok(dom.window.document.querySelector('.slot-chat-history-retry'));
 });
