@@ -105,3 +105,5 @@ CAS transaction. Rehearsal applies twice, verifies the second is a no-op,
 then restores exact preimages and verifies row bytes. A scratch rehearsal is
 not permission to write a running daemon's database. The coordinator receives
 the exact hash-bound runtime commands with the external evidence packet.
+If rollback commits before its external receipt is written, a retry reconciles
+that receipt only after verifying every original row and all live bindings.

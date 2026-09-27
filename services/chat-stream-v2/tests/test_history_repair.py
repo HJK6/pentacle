@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import history_repair
 
 from claude_jsonl_norm import normalize_claude_jsonl_record
 from history_repair import (
@@ -615,5 +616,74 @@ def test_already_rolled_back_refuses_changed_event_hash(tmp_path: Path) -> None:
                 conn, manifest, expected_manifest_sha256=manifest_sha,
                 source_jsonl_sha256=manifest["source"]["jsonl_sha256"], preimages_path=preimages,
             )
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("fields", [("session_id",), ("source_session_identity",),
+                                    ("session_id", "source_session_identity")])
+def test_metadata_freeze_refuses_contradicting_provider_session(fields: tuple[str, ...]) -> None:
+    source_rows, prompt, notice = _source_rows()
+    conn = _database(source_rows, prompt, notice)
+    try:
+        event = json.loads(conn.execute(
+            "SELECT event_json FROM session_event_tail WHERE event_id=9002",
+        ).fetchone()[0])
+        for field in fields:
+            if field == "session_id":
+                event[field] = "different-provider-session"
+            else:
+                event["raw"][field] = "different-provider-session"
+        event_json = _canonical_json(event)
+        conn.execute("UPDATE session_event_tail SET event_json=?,event_key=? WHERE event_id=9002",
+                     (event_json, _sha(event_json)))
+        conn.commit()
+        with pytest.raises(RepairRefused, match="provider.session identity"):
+            _freeze(conn)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("retry_drift", [None, "preimage", "generation", "operator_binding"])
+def test_interrupted_rollback_reconciles_only_exact_restored_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry_drift: str | None,
+) -> None:
+    source_rows, prompt, notice = _source_rows()
+    conn = _database(source_rows, prompt, notice)
+    try:
+        manifest, _digests, _ = _freeze(conn)
+        original = _table_bytes(conn)
+        preimages = tmp_path / "history-preimages.json"
+        kwargs = {"expected_manifest_sha256": manifest_sha256(manifest),
+                  "source_jsonl_sha256": manifest["source"]["jsonl_sha256"],
+                  "preimages_path": preimages}
+        apply_manifest(conn, manifest, **kwargs)
+        def fail_receipt_write(*_args: Any) -> None:
+            raise OSError("injected receipt write failure")
+        with monkeypatch.context() as fault:
+            fault.setattr(history_repair, "_atomic_write_json", fail_receipt_write)
+            with pytest.raises(OSError, match="injected receipt write failure"):
+                rollback_manifest(conn, manifest, **kwargs)
+        assert _table_bytes(conn) == original
+        assert json.loads(preimages.read_text())["status"] == "applied"
+        if retry_drift == "preimage":
+            saved = json.loads(preimages.read_text())
+            saved["rows"][0]["event_json"] = "{}"
+            preimages.write_text(json.dumps(saved))
+        elif retry_drift == "generation":
+            conn.execute("UPDATE v2_session_generations SET generation='changed-generation'")
+            conn.commit()
+        elif retry_drift == "operator_binding":
+            conn.execute("UPDATE v2_outbound_notices SET proof_binding='{}'")
+            conn.commit()
+        if retry_drift is not None:
+            with pytest.raises(RepairRefused):
+                rollback_manifest(conn, manifest, **kwargs)
+            assert json.loads(preimages.read_text())["status"] == "applied"
+        else:
+            assert rollback_manifest(conn, manifest, **kwargs)["status"] == "already_rolled_back"
+            assert json.loads(preimages.read_text())["status"] == "rolled_back"
+            assert rollback_manifest(conn, manifest, **kwargs)["status"] == "already_rolled_back"
+            assert _table_bytes(conn) == original
     finally:
         conn.close()

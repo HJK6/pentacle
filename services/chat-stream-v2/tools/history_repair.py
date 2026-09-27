@@ -251,10 +251,14 @@ def _identity_key(event: Mapping[str, Any]) -> str:
 
 def _validate_existing_row(
     row: Mapping[str, Any], *, target: Mapping[str, Any], source_uuid: str,
-    source_text: str, row_class: str,
+    source_text: str, row_class: str, source_record: Mapping[str, Any],
 ) -> dict[str, Any]:
     event = _event_for_row(row)
     raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+    source_session_id = str(source_record.get("sessionId") or source_record.get("session_id") or "")
+    if (event.get("session_id") != source_session_id
+            or raw.get("source_session_identity") != (source_session_id or None)):
+        raise RepairRefused("database/source provider-session identity mismatch")
     if (row["stream_id"] != target["stream_id"]
             or row["session_created_at"] != target["session_created_at"]
             or event.get("stream_id") != target["stream_id"]
@@ -685,6 +689,7 @@ def freeze_manifest(
             source_uuid=source_uuid,
             source_text=source_text,
             row_class=item["class"],
+            source_record=record,
         )
         old_json = str(old_row["event_json"])
         old_digest = _sha256_bytes(old_json.encode("utf-8"))
@@ -1103,69 +1108,75 @@ def rollback_manifest(
     if not already_rolled_back and saved_preimages.get("status") != "applied":
         raise RepairRefused("rollback requires an applied preimage receipt")
     rows = saved_preimages["rows"]
-    if len(rows) != len(actions) or any(not isinstance(row, dict) for row in rows):
+    if len(rows) != len(actions) or any(
+        not isinstance(row, dict) or set(row) != set(_EVENT_COLUMNS) for row in rows
+    ):
         raise RepairRefused("rollback preimage row set does not match manifest")
+    for action, old_row in zip(actions, rows):
+        if (old_row.get("event_id") != action["event_id"]
+                or old_row.get("stream_id") != action["stream_id"]
+                or old_row.get("session_created_at") != action["session_created_at"]
+                or old_row.get("identity") != action["identity"]
+                or old_row.get("event_key") != action["old_event_key"]
+                or old_row.get("event_ts") != action["event_ts"]
+                or old_row.get("recorded_at") != action["recorded_at"]
+                or _sha256_bytes(str(old_row.get("event_json") or "").encode("utf-8"))
+                != action["old_event_json_sha256"]):
+            raise RepairRefused("rollback preimage differs from frozen row")
     outer = _begin_savepoint(connection, "history_repair_rollback")
     try:
+        restored = already_rolled_back or all(
+            _manifest_action_state(connection, action) == "before" for action in actions
+        )
         before_fk = _assert_live_guards(
             connection, target, actions,
-            expected_state="before" if already_rolled_back else "applied",
-            check_deleted_references=not already_rolled_back,
+            expected_state="before" if restored else "applied",
+            check_deleted_references=not restored,
         )
-        if already_rolled_back:
-            _finish_savepoint(connection, "history_repair_rollback", outer)
-            return {"status": "already_rolled_back", "manifest_sha256": manifest_sha, "row_count": len(actions)}
-        for action, old_row in zip(actions, rows):
-            if (old_row.get("event_id") != action["event_id"]
-                    or old_row.get("stream_id") != action["stream_id"]
-                    or old_row.get("session_created_at") != action["session_created_at"]
-                    or old_row.get("identity") != action["identity"]
-                    or old_row.get("event_key") != action["old_event_key"]
-                    or old_row.get("event_ts") != action["event_ts"]
-                    or old_row.get("recorded_at") != action["recorded_at"]
-                    or _sha256_bytes(str(old_row.get("event_json") or "").encode("utf-8"))
-                    != action["old_event_json_sha256"]):
-                raise RepairRefused("rollback preimage differs from frozen row")
-            if action["operation"] == "replace":
-                new_json = event_json_bytes(action["new_event"]).decode("utf-8")
-                new_key = _sha256_bytes(new_json.encode("utf-8"))
-                if new_key != action["new_event_key"]:
-                    raise RepairRefused("replacement payload changed after manifest freeze")
-                cursor = connection.execute(
-                    """UPDATE session_event_tail SET event_key=?,event_json=?
-                       WHERE event_id=? AND stream_id=? AND session_created_at=?
-                         AND event_key=? AND event_json=? AND identity=?
-                         AND event_ts IS ? AND recorded_at IS ?""",
-                    (
-                        old_row["event_key"], old_row["event_json"], action["event_id"],
-                        action["stream_id"], action["session_created_at"],
-                        new_key, new_json, action["identity"],
-                        action["event_ts"], action["recorded_at"],
-                    ),
-                )
-            else:
-                columns = tuple(old_row.keys())
-                quoted = ",".join('"' + column.replace('"', '""') + '"' for column in columns)
-                marks = ",".join("?" for _ in columns)
-                cursor = connection.execute(
-                    f"INSERT INTO session_event_tail({quoted}) VALUES({marks})",
-                    tuple(old_row[column] for column in columns),
-                )
-            if cursor.rowcount != 1:
-                raise RepairRefused("rollback did not restore exactly one target row")
-        after_fk = _foreign_key_violations(connection)
-        if not set(after_fk).issubset(set(before_fk)):
-            raise RepairRefused("rollback introduced a foreign-key violation")
-        for action in actions:
-            if _manifest_action_state(connection, action) != "before":
-                raise RepairRefused("rollback row/key invariant failed")
+        if not restored:
+            for action, old_row in zip(actions, rows):
+                if action["operation"] == "replace":
+                    new_json = event_json_bytes(action["new_event"]).decode("utf-8")
+                    new_key = _sha256_bytes(new_json.encode("utf-8"))
+                    if new_key != action["new_event_key"]:
+                        raise RepairRefused("replacement payload changed after manifest freeze")
+                    cursor = connection.execute(
+                        """UPDATE session_event_tail SET event_key=?,event_json=?
+                           WHERE event_id=? AND stream_id=? AND session_created_at=?
+                             AND event_key=? AND event_json=? AND identity=?
+                             AND event_ts IS ? AND recorded_at IS ?""",
+                        (
+                            old_row["event_key"], old_row["event_json"], action["event_id"],
+                            action["stream_id"], action["session_created_at"],
+                            new_key, new_json, action["identity"],
+                            action["event_ts"], action["recorded_at"],
+                        ),
+                    )
+                else:
+                    columns = tuple(old_row.keys())
+                    quoted = ",".join('"' + column.replace('"', '""') + '"' for column in columns)
+                    marks = ",".join("?" for _ in columns)
+                    cursor = connection.execute(
+                        f"INSERT INTO session_event_tail({quoted}) VALUES({marks})",
+                        tuple(old_row[column] for column in columns),
+                    )
+                if cursor.rowcount != 1:
+                    raise RepairRefused("rollback did not restore exactly one target row")
+            after_fk = _foreign_key_violations(connection)
+            if not set(after_fk).issubset(set(before_fk)):
+                raise RepairRefused("rollback introduced a foreign-key violation")
+            for action in actions:
+                if _manifest_action_state(connection, action) != "before":
+                    raise RepairRefused("rollback row/key invariant failed")
         _finish_savepoint(connection, "history_repair_rollback", outer)
     except BaseException:
         _abort_savepoint(connection, "history_repair_rollback", outer)
         raise
-    saved_preimages["status"] = "rolled_back"
-    _atomic_write_json(path, saved_preimages)
-    return {"status": "rolled_back", "manifest_sha256": manifest_sha, "row_count": len(actions)}
+    if not already_rolled_back:
+        saved_preimages["status"] = "rolled_back"
+        _atomic_write_json(path, saved_preimages)
+    return {"status": "already_rolled_back" if restored else "rolled_back",
+            "manifest_sha256": manifest_sha, "row_count": len(actions)}
 
 
 def _sqlite_readonly(path: Path) -> sqlite3.Connection:
@@ -1311,6 +1322,7 @@ def _scope_from_snapshot(
         _validate_existing_row(
             rows[0], target=target, source_uuid=item["source_uuid"],
             source_text=source_text, row_class=item["class"],
+            source_record=source_record,
         )
         db_rows.append({
             "source_uuid": item["source_uuid"],
