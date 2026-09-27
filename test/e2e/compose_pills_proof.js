@@ -46,6 +46,73 @@ async function shot(session, dir, name, evidence) {
   return file;
 }
 
+function assertProofMetrics(metrics) {
+  const failures = [];
+  let checks = 0;
+  const check = (label, condition, actual) => {
+    checks += 1;
+    if (!condition) failures.push(`${label}: ${JSON.stringify(actual)}`);
+  };
+  const segmentPairs = (segments) => Array.isArray(segments)
+    ? segments.map(({ value, active }) => `${value}:${active}`)
+    : null;
+  const expectSegments = (label, segments, expected) => {
+    check(label, JSON.stringify(segmentPairs(segments)) === JSON.stringify(expected), segmentPairs(segments));
+  };
+
+  check('fresh default view is Chat', metrics.defaultViewMode === 'chat', metrics.defaultViewMode);
+  check('fresh Chat surface is visible', metrics.defaultViewSurface === 'chat-surface-visible', metrics.defaultViewSurface);
+  check('view pill order', JSON.stringify(metrics.pillOrder) === JSON.stringify(['status', 'chat', 'terminal']), metrics.pillOrder);
+  check('view pill labels', JSON.stringify(metrics.pillLabels) === JSON.stringify(['Status', 'Chat', 'Terminal']), metrics.pillLabels);
+
+  const expectCompose = (label, state, expanded, minHeight, maxHeight, sendVisible) => {
+    check(`${label} metric present`, !!state && typeof state === 'object', state);
+    if (!state || typeof state !== 'object') return;
+    check(`${label} expanded state`, state.expandedClass === expanded, state.expandedClass);
+    check(`${label} height ${minHeight}-${maxHeight}px`, Number.isFinite(state.composeHeight) && state.composeHeight >= minHeight && state.composeHeight <= maxHeight, state.composeHeight);
+    for (const control of ['plus', 'input', 'mic']) check(`${label} ${control} visible`, state[control]?.visible === true, state[control]);
+    check(`${label} Send visibility`, state.send?.visible === sendVisible, state.send);
+  };
+  expectCompose('empty composer', metrics.compose_empty, false, 40, 60, false);
+  expectCompose('short-line composer', metrics.compose_shortLine, false, 40, 60, false);
+  expectCompose('wrapped composer', metrics.compose_longWrap, true, 110, 160, true);
+  expectCompose('cleared composer', metrics.compose_backToCompact, false, 40, 60, false);
+
+  const settings = metrics.settings;
+  check('settings metrics present', !!settings, settings);
+  if (settings) {
+    check('settings list present', settings.listExists === true, settings.listExists);
+    check('Chat UI toggle removed', settings.hasChatUiToggle === false, settings.hasChatUiToggle);
+    check('Default view setting present', settings.hasDefaultViewSetting === true && settings.flagLabels?.includes('Default view'), settings);
+    expectSegments('fresh Default view selects Chat', settings.defaultViewSegments, ['chat:true', 'terminal:false']);
+  }
+
+  const explicitChat = metrics.explicitDefaultChat;
+  const explicitTerminal = metrics.explicitDefaultTerminal;
+  check('explicit Chat setting persisted', explicitChat?.persistedDefaultChatView === true, explicitChat);
+  expectSegments('explicit Chat setting selected', explicitChat?.defaultViewSegments, ['chat:true', 'terminal:false']);
+  check('explicit Terminal setting persisted', explicitTerminal?.persistedDefaultChatView === false, explicitTerminal);
+  expectSegments('explicit Terminal setting selected', explicitTerminal?.defaultViewSegments, ['chat:false', 'terminal:true']);
+
+  const migration = metrics.migration;
+  check('legacy chatUi key removed', migration?.legacyChatUiRemoved === true, migration);
+  check('legacy chatUi:false migrates to Terminal default', migration?.defaultChatViewAfter === false, migration);
+  check('migrated fresh attach lands on Terminal', metrics.migrationViewMode === 'terminal', metrics.migrationViewMode);
+  const migrationSettings = metrics.migrationSettings;
+  check('migrated settings still remove Chat UI toggle', migrationSettings?.hasChatUiToggle === false, migrationSettings);
+  expectSegments('migrated Default view selects Terminal', migrationSettings?.defaultViewSegments, ['chat:false', 'terminal:true']);
+  const reachability = metrics.migrationChatReachability;
+  check('Chat remains reachable after migration', reachability?.chatPillPresent === true && reachability?.composerReachable === true, reachability);
+  check('Terminal remains available after migration', reachability?.terminalPillPresent === true, reachability);
+
+  if (failures.length) throw new Error(`proof metric assertion failures:\n- ${failures.join('\n- ')}`);
+  return {
+    asserted: true,
+    checks,
+    result: 'all expected values matched',
+  };
+}
+
 async function run(args) {
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'compose-proof-')));
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compose-proof-chrome-'));
@@ -206,6 +273,23 @@ async function run(args) {
     })()`);
     await shot(session, args.out, 'settings-panel', evidence);
 
+    // Exercise both explicit values through the real segmented control and
+    // require the persisted value plus selected segment to agree.
+    await session.eval(`document.querySelector('#settings-default-view-row [data-value="chat"]')?.click()`);
+    await cdp.sleep(150);
+    evidence.metrics.explicitDefaultChat = await session.eval(`(() => {
+      let rec = {}; try { rec = JSON.parse(localStorage.getItem('pentacle.settings.v1') || '{}'); } catch {}
+      const row = document.getElementById('settings-default-view-row');
+      return { persistedDefaultChatView: rec.features?.defaultChatView, defaultViewSegments: Array.from(row ? row.querySelectorAll('.settings-segment-btn') : []).map(b => ({ value: b.dataset.value, active: b.classList.contains('active') })) };
+    })()`);
+    await session.eval(`document.querySelector('#settings-default-view-row [data-value="terminal"]')?.click()`);
+    await cdp.sleep(150);
+    evidence.metrics.explicitDefaultTerminal = await session.eval(`(() => {
+      let rec = {}; try { rec = JSON.parse(localStorage.getItem('pentacle.settings.v1') || '{}'); } catch {}
+      const row = document.getElementById('settings-default-view-row');
+      return { persistedDefaultChatView: rec.features?.defaultChatView, defaultViewSegments: Array.from(row ? row.querySelectorAll('.settings-segment-btn') : []).map(b => ({ value: b.dataset.value, active: b.classList.contains('active') })) };
+    })()`);
+
     // ── MIGRATION proof: a legacy `chatUi:false` (chat disabled) must NOT hide
     // chat; it migrates to a Terminal-first default while chat stays available.
     await session.eval(`document.getElementById('settings-close')?.click()`);
@@ -232,6 +316,32 @@ async function run(args) {
       return { hasChatUiToggle: flagLabels.some(l => /chat ui/i.test(l)), defaultViewSegments: seg };
     })()`);
     await shot(session, args.out, 'migration-settings', evidence);
+
+    // Re-open the seeded session after the migration reload. This exercises the
+    // Terminal-first default while proving the Chat pill and composer still work.
+    await session.eval(`document.getElementById('settings-close')?.click()`);
+    await session.waitFor(`!!document.querySelector('#session-list .session-item[data-stream-id="${streamId}"]')`, { timeoutMs: args.timeoutMs, label: 'session row after migration' });
+    await session.eval(`document.querySelector('#session-list .session-item[data-stream-id="${streamId}"]').click()`);
+    const migrationSlot = await session.waitFor(`(() => {
+      for (let i = 0; i < 4; i++) {
+        const cell = document.getElementById('cell-' + i);
+        if (cell && cell.classList.contains('occupied')) return i;
+      }
+      return false;
+    })()`, { timeoutMs: args.timeoutMs, label: 'session assigned after migration' });
+    await session.waitFor(`!!document.querySelector('#cell-${migrationSlot} .cell-view-toggle.active')`, { timeoutMs: args.timeoutMs, label: 'migrated default view selected' });
+    await cdp.sleep(500);
+    evidence.metrics.migrationViewMode = await session.eval(`document.querySelector('#cell-${migrationSlot} .cell-view-toggle.active')?.dataset.mode || null`);
+    const migratedPills = await session.eval(`(() => ({
+      chatPillPresent: !!document.querySelector('#cell-${migrationSlot} [data-mode="chat"]'),
+      terminalPillPresent: !!document.querySelector('#cell-${migrationSlot} [data-mode="terminal"]'),
+    }))()`);
+    await session.eval(`document.querySelector('#cell-${migrationSlot} [data-mode="chat"]')?.click()`);
+    await session.waitFor(`!!document.querySelector('#cell-${migrationSlot} .slot-chat-compose-input')`, { timeoutMs: args.timeoutMs, label: 'Chat composer reachable after migration' });
+    evidence.metrics.migrationChatReachability = { ...migratedPills, composerReachable: true };
+    await shot(session, args.out, 'migration-chat-reachable', evidence);
+
+    evidence.assertions = assertProofMetrics(evidence.metrics);
 
     fs.writeFileSync(path.join(args.out, 'evidence.json'), JSON.stringify(evidence, null, 2));
     console.log('[proof] evidence:\n' + JSON.stringify(evidence.metrics, null, 2));
