@@ -98,7 +98,12 @@
 .cosmic .slot-chat-jump-latest { position: absolute; z-index: 4; bottom: calc(var(--slot-chat-dock-height, 130px) + 12px); left: 50%; transform: translateX(-50%); display: inline-flex; align-items: center; justify-content: center; width: 35px; height: 35px; padding: 0; border: 1px solid #3d6c4b; border-radius: 50%; background: #183422; color: #d7f3dc; box-shadow: 0 4px 15px rgba(0,0,0,.3); font: 600 19px/1 'IBM Plex Sans', sans-serif; }
 .cosmic .slot-chat-jump-latest[style*="none"] { display: none; }
 .cosmic .slot-chat-jump-latest .slot-chat-jump-count { position: absolute; top: -5px; right: -8px; min-width: 16px; padding: 2px 4px; border-radius: 9px; background: #69c687; color: #092011; font: 700 9px/1 'Desktop Questions Mono', monospace; }
-.cosmic .slot-chat-question { position: absolute; z-index: 5; right: 32px; bottom: calc(var(--slot-chat-dock-height, 130px) + 18px); width: auto; margin: 0; pointer-events: none; }
+/* Floating question launcher: a bare positioned wrapper around the pulsing
+   circle (.slot-chat-question-open). The base .slot-chat-question rule
+   (styles.css) and cosmic_chat_surface.css:303 give it a bordered/filled box
+   meant for the old inline dock; neutralize it here so only the circle shows.
+   chat_v3.css loads last, so this beats those equal/lower-specificity rules. */
+.cosmic .slot-chat-question { position: absolute; z-index: 5; right: 32px; bottom: calc(var(--slot-chat-dock-height, 130px) + 18px); width: auto; margin: 0; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none; pointer-events: none; }
 .cosmic .slot-chat-question > * { pointer-events: auto; }
 .cosmic .slot-chat-question-open { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 48px; padding: 0; border: 1px solid #8adfa5; border-radius: 50%; background: #275e3c; color: #effff1; box-shadow: 0 0 0 4px rgba(82,183,107,.13), 0 0 20px rgba(80,219,115,.5); cursor: pointer; animation: chat-v3-question-glow 2s ease-in-out infinite; }
 .cosmic .slot-chat-question-open svg { width: 21px; height: 21px; }

@@ -466,7 +466,11 @@
 .cosmic summary:focus-visible, .desktop-question-portal.cosmic button:focus-visible,
 .desktop-question-portal.cosmic textarea:focus-visible { outline: 2px solid var(--machine); outline-offset: 2px; }
 
-.desktop-question-portal.cosmic .slot-chat-question { border: 0; background: transparent; margin: 0; padding: 0; }
+/* The floating-icon container (chat_v3.css) is position:absolute; inside the
+   portal the dock must return to normal flow so the frame contains and scrolls
+   it (otherwise it escapes to the fixed full-viewport portal and stretches past
+   the window). pointer-events:auto re-enables the whole dock in the modal. */
+.desktop-question-portal.cosmic .slot-chat-question { position: static; inset: auto; pointer-events: auto; border: 0; background: transparent; margin: 0; padding: 0; }
 .desktop-question-portal.cosmic .slot-chat-question-page,
 .desktop-question-portal.cosmic .slot-chat-question-reconcile { font: 12px/18px var(--cosmic-font-mono); background: var(--cosmic-panel); color: var(--cosmic-text); border: 1px solid var(--cosmic-line); border-radius: 6px; padding: 6px 9px; cursor: pointer; }
 .desktop-question-portal.cosmic .slot-chat-question-reconcile { flex: 0 0 auto; border-color: var(--machine); }
