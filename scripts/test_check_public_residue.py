@@ -9,6 +9,8 @@ for its own patterns. Run: `python3 scripts/test_check_public_residue.py`.
 from __future__ import annotations
 
 import importlib.util
+from contextlib import contextmanager
+import os
 import json
 import subprocess
 import tempfile
@@ -24,6 +26,19 @@ _P = "100."  # not a CGNAT address on its own (not four octets)
 
 def _cgnat(second: int, rest: str) -> str:
     return _P + f"{second}.{rest}"
+
+
+@contextmanager
+def isolated_git_environment():
+    # Hooks export repository-selection variables. Fixture Git commands must
+    # select their owned temporary repository, then restore the caller context.
+    saved = {key: value for key, value in os.environ.items() if key.startswith("GIT_")}
+    for key in saved:
+        os.environ.pop(key)
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 
 def main() -> int:
@@ -66,7 +81,7 @@ def main() -> int:
     for address in hits:
         assert cpr._line_hits("host" + "a " + address, True), "mobile profile masked address"
 
-    with tempfile.TemporaryDirectory() as temporary:
+    with isolated_git_environment(), tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         source = root / "source.txt"
