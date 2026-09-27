@@ -142,6 +142,7 @@
     "test/chat_display_rule_parity.test.ts": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/chat_events_lazy.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/chat_harness_scenario.test.ts": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
+    "test/chat_popout_closed_stream.test.js": "Synthetic stream identities exercise closed popout history binding and assistant-direct isolation.",
     "test/chat_popout_windows.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/chat_reconnect_replay.test.ts": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/chat_stream_client_usage.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
