@@ -14,9 +14,11 @@ function ensureChatEventsLoaded(streamState, streamId, cc, logger = console, opt
   if (!id || !streamState?.eventsLoadedFor || !streamState.connected) return false;
   if (!cc || typeof cc.requestStreamEvents !== 'function') return false;
   const loads = streamState.historyLoads || (streamState.historyLoads = {});
+  // An explicit retry re-requests any settled load, including a zero-row one.
+  if (options.retry && loads[id] && loads[id].status !== 'loading') streamState.eventsLoadedFor.delete(id);
   if (streamState.eventsLoadedFor.has(id)) return false;
   if (loads[id]?.status === 'error' && !options.retry) return false;
-  const request = { status: 'loading', error: '' };
+  const request = { status: 'loading', error: '', attempt: options.attempt || 0 };
   loads[id] = request;
   streamState.eventsLoadedFor.add(id);
   const complete = (reply) => {
@@ -39,6 +41,51 @@ function ensureChatEventsLoaded(streamState, streamId, cc, logger = console, opt
     complete({ ok: false, error: error?.message || error });
   }
   return true;
+}
+
+// A load that failed, or that completed while the store still holds no rows
+// for the stream, is not final: the view would otherwise show only durable
+// answered-question rows as if they were the conversation. Render-driven calls
+// above keep the explicit-retry contract; this timer-driven retry is bounded.
+const HISTORY_RETRY_DELAYS_MS = Object.freeze([1000, 2000, 4000, 8000, 16000]);
+
+function historyLoadIncomplete(load, hasRows) {
+  return !!load && (load.status === 'error' || (load.status === 'loaded' && !hasRows));
+}
+
+function scheduleHistoryRetry(streamState, streamId, cc, logger = console, options = {}) {
+  const id = String(streamId || '');
+  const load = streamState?.historyLoads?.[id];
+  if (!id || !streamState.connected || load?.retryPending || !historyLoadIncomplete(load, options.hasRows)) return false;
+  const attempt = load.attempt || 0;
+  if (attempt >= HISTORY_RETRY_DELAYS_MS.length) {
+    load.exhausted = true;
+    return false;
+  }
+  load.retryPending = true;
+  const setTimer = options.setTimer || setTimeout;
+  setTimer(() => {
+    load.retryPending = false;
+    // The slot may have moved on, rows may have arrived, or a reconnect may
+    // have replaced this load; each makes the retry moot.
+    if (streamState.historyLoads?.[id] !== load || !streamState.connected) return;
+    if (typeof options.stillNeeded === 'function' && !options.stillNeeded(id)) return;
+    ensureChatEventsLoaded(streamState, id, cc, logger, { retry: true, attempt: attempt + 1, onChange: options.onChange });
+  }, HISTORY_RETRY_DELAYS_MS[attempt]);
+  return true;
+}
+
+// Status line for a chat slot. A view whose store holds no history rows never
+// shows synthesized answers alone: it says messages are loading, then that
+// they could not be loaded once the retry budget is spent.
+function chatHistoryStatus({ connected, load, hasRows, hasRendered }) {
+  if (!connected) return { message: 'Reconnecting…', retry: false };
+  if (load?.status === 'error') return { message: 'Messages could not be loaded.', retry: true };
+  if (load?.status !== 'loaded') return { message: hasRendered ? 'Syncing messages…' : 'Loading messages…', retry: false };
+  if (hasRows || !hasRendered) return { message: '', retry: false };
+  return load.exhausted
+    ? { message: 'Messages could not be loaded.', retry: true }
+    : { message: 'Loading messages…', retry: false };
 }
 
 function refetchEventsForActiveChatSlots(args) {
@@ -77,4 +124,7 @@ function refetchEventsForActiveChatSlots(args) {
 module.exports = {
   ensureChatEventsLoaded,
   refetchEventsForActiveChatSlots,
+  scheduleHistoryRetry,
+  chatHistoryStatus,
+  HISTORY_RETRY_DELAYS_MS,
 };

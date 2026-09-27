@@ -98,7 +98,9 @@ test('mobile parity: a pane group cannot submit until every page is answered', a
 });
 
 test('mobile parity: pending history is loading and an RPC failure remains retryable', async () => {
-  const h = installRenderer({ questionOverride: null });
+  // Deferred timers: the bounded automatic history retry (1 s after a failure)
+  // must not fire before the failure state is observed.
+  const h = installRenderer({ questionOverride: null, setTimeout: () => 0 });
   await flush(); await flush();
   let finish;
   h.dom.window.cc.requestStreamEvents = () => new Promise(resolve => { finish = resolve; });

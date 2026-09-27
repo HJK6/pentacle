@@ -44,6 +44,8 @@ const {
 const {
   ensureChatEventsLoaded: _ensureChatEventsLoaded,
   refetchEventsForActiveChatSlots: _refetchEventsForActiveChatSlots,
+  scheduleHistoryRetry: _scheduleHistoryRetry,
+  chatHistoryStatus,
 } = require('./chat_events_lazy');
 const { reattachTerminalSlotsAfterReconnect, preserveOpenSlotSessionsInSnapshot } = require('./slot_reconnect');
 const {
@@ -1015,6 +1017,30 @@ function onChatHistoryChanged(streamId) {
 
 function ensureChatEventsLoaded(streamId, retry = false) {
   return _ensureChatEventsLoaded(state.chatStream, streamId, window?.cc, console, { retry, onChange: onChatHistoryChanged });
+}
+
+// Rows the store holds for a slot's stream, before synthesized durable answers.
+function chatDetailHasRows(detail) {
+  return !!detail && ((detail.transcriptItems || []).length + (detail.remainingCount || 0)) > 0;
+}
+
+function chatStreamStillNeedsHistory(streamId) {
+  for (let slot = 0; slot < state.slots.length; slot++) {
+    if (!state.slots[slot] || state.botSlots[slot] || state.slotViewModes[slot] !== 'chat') continue;
+    if (state.slotChatBoundStream[slot] !== streamId) continue;
+    const rel = state.slotReliability[slot];
+    return !chatDetailHasRows(selectSlotSessionDetail(streamId, showTurnDurationEnabled(), false, rel ? rel.visibleCount : 120));
+  }
+  return false;
+}
+
+function scheduleChatHistoryRetry(streamId, hasRows) {
+  return _scheduleHistoryRetry(state.chatStream, streamId, window?.cc, console, {
+    hasRows,
+    stillNeeded: chatStreamStillNeedsHistory,
+    onChange: onChatHistoryChanged,
+    setTimer: setTimeout,
+  });
 }
 
 function refetchEventsForActiveChatSlots() {
@@ -3362,6 +3388,7 @@ function renderSlotChat(slot) {
   // with the transcript.
   if (detail?.streamId) {
     ensureChatEventsLoaded(detail.streamId);
+    scheduleChatHistoryRetry(detail.streamId, chatDetailHasRows(detail));
   }
 
   const shouldStick = !refs.scrollEl || (refs.scrollEl.scrollHeight - refs.scrollEl.scrollTop - refs.scrollEl.clientHeight) < 32;
@@ -3416,11 +3443,14 @@ function renderSlotChat(slot) {
       resolvedQuestions: resolvedQuestionsForStream(streamId),
     })
     : '') || '';
-  const history = state.chatStream.historyLoads?.[streamId];
-  const historyMessage = !state.chatStream.connected ? 'Reconnecting…'
-    : history?.status === 'error' ? 'Messages could not be loaded.'
-      : history?.status !== 'loaded' ? (renderedTranscript ? 'Syncing messages…' : 'Loading messages…') : '';
-  const historyRetry = state.chatStream.connected && history?.status === 'error'
+  const historyStatus = chatHistoryStatus({
+    connected: state.chatStream.connected,
+    load: state.chatStream.historyLoads?.[streamId],
+    hasRows: chatDetailHasRows(detail),
+    hasRendered: !!renderedTranscript,
+  });
+  const historyMessage = historyStatus.message;
+  const historyRetry = historyStatus.retry
     ? '<button type="button" class="slot-chat-history-retry">Retry</button>' : '';
   const transcriptHtml = renderedTranscript
     ? `${historyMessage ? `<div class="slot-chat-history-state" role="status">${historyMessage}${historyRetry}</div>` : ''}${renderedTranscript}`

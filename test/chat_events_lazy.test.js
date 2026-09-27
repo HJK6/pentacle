@@ -4,6 +4,9 @@ const assert = require('node:assert/strict');
 const {
   ensureChatEventsLoaded,
   refetchEventsForActiveChatSlots,
+  scheduleHistoryRetry,
+  chatHistoryStatus,
+  HISTORY_RETRY_DELAYS_MS,
 } = require('../renderer/chat_events_lazy');
 
 function makeStreamState({ connected = true } = {}) {
@@ -229,4 +232,87 @@ test('failed history waits for explicit retry and zero-row success triggers a re
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(state.historyLoads.a.status, 'loaded');
   assert.deepEqual(changes, ['a', 'a']);
+});
+
+// L6: a load that failed, or that left the store without rows for the stream,
+// is not final. Timer-driven retries follow a bounded schedule; render-driven
+// calls keep the explicit-retry contract above.
+function fakeTimers() {
+  const queue = [];
+  return { queue, setTimer: (fn, ms) => { queue.push({ fn, ms }); return queue.length; }, runAll() { const due = queue.splice(0); due.forEach(t => t.fn()); return due.map(t => t.ms); } };
+}
+
+test('zero-row and failed loads retry on the bounded schedule, then stop', async () => {
+  for (const reply of [{ ok: true, count: 0 }, { ok: false, error: 'unknown_session' }]) {
+    const state = makeStreamState(); const cc = makeCc(() => reply); const timers = fakeTimers();
+    const retry = { hasRows: false, stillNeeded: () => true, setTimer: timers.setTimer };
+    ensureChatEventsLoaded(state, 'a', cc, silentLogger);
+    await new Promise(resolve => setImmediate(resolve));
+    const delays = [];
+    for (let i = 0; i < 8; i += 1) {
+      scheduleHistoryRetry(state, 'a', cc, silentLogger, retry);
+      delays.push(...timers.runAll());
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.deepEqual(delays, [...HISTORY_RETRY_DELAYS_MS]);
+    assert.deepEqual(HISTORY_RETRY_DELAYS_MS, [1000, 2000, 4000, 8000, 16000]);
+    assert.equal(cc.calls.length, 6, `${JSON.stringify(reply)}: initial plus five retries`);
+    assert.equal(state.historyLoads.a.exhausted, true);
+  }
+});
+
+test('a scheduled retry is skipped when rows arrived, the slot moved on, or the host disconnected', async () => {
+  for (const [label, mutate] of [
+    ['rows arrived', (ctx) => { ctx.needed = false; }],
+    ['disconnected', (ctx) => { ctx.state.connected = false; }],
+    ['load replaced', (ctx) => { ctx.state.historyLoads.a = { status: 'loading' }; }],
+  ]) {
+    const ctx = { state: makeStreamState(), needed: true };
+    const cc = makeCc(() => ({ ok: true, count: 0 })); const timers = fakeTimers();
+    ensureChatEventsLoaded(ctx.state, 'a', cc, silentLogger);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(scheduleHistoryRetry(ctx.state, 'a', cc, silentLogger, { hasRows: false, stillNeeded: () => ctx.needed, setTimer: timers.setTimer }), true);
+    mutate(ctx);
+    timers.runAll();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(cc.calls.length, 1, label);
+  }
+});
+
+test('no retry is scheduled for a load that produced rows, is in flight, or is already pending', async () => {
+  const state = makeStreamState(); const cc = makeCc(() => ({ ok: true, count: 3 })); const timers = fakeTimers();
+  const opts = { hasRows: false, stillNeeded: () => true, setTimer: timers.setTimer };
+  ensureChatEventsLoaded(state, 'a', cc, silentLogger);
+  assert.equal(scheduleHistoryRetry(state, 'a', cc, silentLogger, opts), false, 'in flight');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(scheduleHistoryRetry(state, 'a', cc, silentLogger, { ...opts, hasRows: true }), false, 'rows present');
+  assert.equal(scheduleHistoryRetry(state, 'a', cc, silentLogger, opts), true);
+  assert.equal(scheduleHistoryRetry(state, 'a', cc, silentLogger, opts), false, 'already pending');
+  assert.equal(timers.queue.length, 1);
+});
+
+test('manual retry resets the retry budget', async () => {
+  const state = makeStreamState(); const cc = makeCc(() => ({ ok: true, count: 0 })); const timers = fakeTimers();
+  const opts = { hasRows: false, stillNeeded: () => true, setTimer: timers.setTimer };
+  ensureChatEventsLoaded(state, 'a', cc, silentLogger);
+  await new Promise(resolve => setImmediate(resolve));
+  for (let i = 0; i < 6; i += 1) { scheduleHistoryRetry(state, 'a', cc, silentLogger, opts); timers.runAll(); await new Promise(resolve => setImmediate(resolve)); }
+  assert.equal(state.historyLoads.a.exhausted, true);
+  assert.equal(ensureChatEventsLoaded(state, 'a', cc, silentLogger, { retry: true }), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(scheduleHistoryRetry(state, 'a', cc, silentLogger, opts), true);
+  assert.deepEqual(timers.runAll(), [1000]);
+});
+
+test('chatHistoryStatus never leaves a row-less view without a status line while answers render', () => {
+  const loaded = { status: 'loaded' };
+  assert.deepEqual(chatHistoryStatus({ connected: false, load: loaded, hasRows: true, hasRendered: true }), { message: 'Reconnecting…', retry: false });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'error' }, hasRows: false, hasRendered: true }), { message: 'Messages could not be loaded.', retry: true });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'loading' }, hasRows: true, hasRendered: true }), { message: 'Syncing messages…', retry: false });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: undefined, hasRows: false, hasRendered: false }), { message: 'Loading messages…', retry: false });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: loaded, hasRows: true, hasRendered: true }), { message: '', retry: false });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: loaded, hasRows: false, hasRendered: true }), { message: 'Loading messages…', retry: false });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'loaded', exhausted: true }, hasRows: false, hasRendered: true }), { message: 'Messages could not be loaded.', retry: true });
+  // A genuinely empty stream keeps the ordinary empty state once retries are spent.
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'loaded', exhausted: true }, hasRows: false, hasRendered: false }), { message: '', retry: false });
 });

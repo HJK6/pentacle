@@ -685,3 +685,36 @@ test('markdown preserves non-prose handling: tool label + tree log unchanged', (
   assert.ok(html.includes('slot-chat-loglist'), 'tree-char log list preserved');
   assert.ok(html.includes('<strong>bug</strong>'), 'prose markdown still rendered');
 });
+
+test('notice rows (bare and pasted_content-wrapped) between ordinary rows never suppress an ordinary row', () => {
+  const notice = (id: string) => `[pentacle-notice:notification-answer-${id}]\n[notification.answer]\nnotification_id=${id}\nanswer=done\nchoice=True\nby=operator`;
+  const at = (minute: number) => `2026-09-27T14:${String(minute).padStart(2, '0')}:00.000Z`;
+  const ordinary = [
+    makeEvent({ daemon_seq: 1, kind: 'ASSIST', text: 'ORDINARY-A1 before the first answer', timestamp: at(40) }),
+    makeEvent({ daemon_seq: 3, kind: 'ASSIST', text: 'ORDINARY-A2 after the bare notice', timestamp: at(42) }),
+    makeEvent({ daemon_seq: 4, kind: 'USER', text: 'ORDINARY-U1 operator message', timestamp: at(51) }),
+    makeEvent({ daemon_seq: 6, kind: 'ASSIST', text: 'ORDINARY-A3 after the wrapped notice', timestamp: at(53) }),
+  ];
+  const controller = controllerWithEvents([
+    ordinary[0],
+    makeEvent({ daemon_seq: 2, kind: 'USER', text: notice('8b9e1efb-65ba-40a2-996f-ebe865d271b6'), timestamp: at(41) }),
+    ordinary[1],
+    ordinary[2],
+    makeEvent({ daemon_seq: 5, kind: 'USER', text: `<pasted_content id="8d21">\n${notice('a3a9abdc-7510-4489-8774-31300e7bfb12')}\n</pasted_content>`, timestamp: at(52) }),
+    ordinary[3],
+  ]);
+  const detail = controller.selectSessionDetail(STREAM, { visibleCount: 'all' } as never);
+  const resolvedQuestions = ['8b9e1efb-65ba-40a2-996f-ebe865d271b6', 'a3a9abdc-7510-4489-8774-31300e7bfb12'].map((id, index) => ({
+    notification_id: id, state: 'answered', resolved_at: index ? at(52) : at(41),
+    question: { question_id: `q-${index}`, state: 'answered', answer: { text: 'Done' } },
+  }));
+  const { container } = newDom();
+  container.innerHTML = renderTranscriptTimelineHtml(detail, CHROME, { resolvedQuestions });
+  const text = container.textContent || '';
+  for (const event of ordinary) assert.ok(text.includes(String(event.text)), `ordinary row rendered: ${event.text}`);
+  assert.equal(container.querySelectorAll('.slot-chat-assistant-card').length, 3);
+  // Answered questions keep timeline position: the first group sits between A1 and A2.
+  const html = container.innerHTML;
+  const firstAnswers = html.indexOf('slot-chat-v3-answers');
+  assert.ok(firstAnswers > html.indexOf('ORDINARY-A1') && firstAnswers < html.indexOf('ORDINARY-A2'));
+});
