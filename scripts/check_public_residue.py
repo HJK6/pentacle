@@ -21,14 +21,31 @@ CGNAT_PATTERN = re.compile(
 )
 
 
-def _line_hits(line: str) -> bool:
-    return bool(PATTERN.search(line) or CGNAT_PATTERN.search(line))
+# Mobile uses these fixed symbolic identifiers and ordinary words in its public
+# source. Keep the default detector unchanged and inspect addresses before
+# normalization. Underscores delimit fixture-ID components.
+MOBILE_SYNTHETIC_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:" + "|".join(
+        ["host" + suffix for suffix in "abc"]
+        + ["host" + suffix for suffix in ("config", "admission", "busy")]
+    ) + r")(?![A-Za-z0-9])"
+)
+
+
+def _line_hits(line: str, mobile_synthetic: bool = False) -> bool:
+    if CGNAT_PATTERN.search(line):
+        return True
+    normalized = MOBILE_SYNTHETIC_PATTERN.sub("synthetic", line) if mobile_synthetic else line
+    return bool(PATTERN.search(normalized))
 
 
 def check(root: Path, allowlist: Path) -> dict:
     manifest = json.loads(allowlist.read_text())
     if manifest.get("version") != 1 or not isinstance(manifest.get("fixtures"), dict):
         raise ValueError("expected version 1 and an exact-path fixtures object")
+    profile = manifest.get("profile")
+    if profile not in (None, "mobile-synthetic"):
+        raise ValueError("unknown residue profile")
     fixtures = manifest["fixtures"]
     tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
     names = set(tracked)
@@ -48,7 +65,7 @@ def check(root: Path, allowlist: Path) -> dict:
             content = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        lines = [number for number, line in enumerate(content.splitlines(), 1) if _line_hits(line)]
+        lines = [number for number, line in enumerate(content.splitlines(), 1) if _line_hits(line, profile == "mobile-synthetic")]
         if not lines:
             continue
         if name in fixtures:

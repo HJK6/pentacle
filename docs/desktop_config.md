@@ -191,6 +191,9 @@ reachability, credentials, every nested field, or completeness of host maps.
 
 ## Upgrading an existing install
 
+The web client updates on its public-code host. Electron remains maintained,
+with desktop upgrades on demand rather than per web landing.
+
 Keep your private overlay outside the app/repository and keep selecting it with
 PENTACLE_CONFIG after replacing the package. Preserve hostNames, hostColors,
 localHostId, hostMap, mic/micServerUrl and your feature flags when those explicit
