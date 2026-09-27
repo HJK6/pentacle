@@ -55,7 +55,13 @@ def _stamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _binding_conn(conn: sqlite3.Connection, env_binding: dict[str, str]) -> dict[str, Any]:
+def _binding_conn(
+    conn: sqlite3.Connection, env_binding: dict[str, str], *, include_target: bool = True,
+) -> dict[str, Any]:
+    # ``include_target`` resolves the bound seat row for diagnostic
+    # provider/model/effort fields.  Per-event callers on the ingest hot path
+    # (the prose mirror) pass ``False`` to skip that extra sessions JOIN when
+    # they only need the effective stream/generation/source.
     row = conn.execute(
         "SELECT stream_id,generation,revision FROM v2_assistant_direct_binding WHERE id=1"
     ).fetchone()
@@ -73,7 +79,8 @@ def _binding_conn(conn: sqlite3.Connection, env_binding: dict[str, str]) -> dict
         or not _GENERATION_RE.fullmatch(str(pair.get("generation") or ""))
     ):
         raise ValueError("assistant_binding_corrupt")
-    target = _seat_conn(conn, str(pair.get("stream_id") or "")) if source != "unconfigured" else None
+    target = (_seat_conn(conn, str(pair.get("stream_id") or ""))
+              if include_target and source != "unconfigured" else None)
     return {"source": source, "stream_id": pair.get("stream_id") or "",
             "generation": pair.get("generation") or "", "revision": revision,
             "effective_provider": (target or {}).get("provider"),

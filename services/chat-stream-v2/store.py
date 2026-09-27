@@ -44,7 +44,7 @@ import store_lifecycle_authority as lifecycle_authority
 from store_assistant_binding import (
     ASSISTANT_BINDING_DDL, ASSISTANT_REBIND_AUDIT_DDL,
     ASSISTANT_REBIND_AUDIT_INDEX_DDL, ASSISTANT_HANDOFF_PROOF_DDL,
-    AssistantBindingStoreMixin,
+    AssistantBindingStoreMixin, _binding_conn,
 )
 from assistant_lane_rulings import RULING_REQUESTS_DDL, BART_LANE_OWNERSHIP_DDL, RULING_AUDIT_DDL
 from store_qa import QaStoreMixin
@@ -1641,6 +1641,32 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             )
         await self.submit(_op)
 
+    def _effective_mirror_source_conn(
+        self, conn: sqlite3.Connection,
+    ) -> tuple[str, str, str] | None:
+        """Resolve the live direct-primary source seat for the mirror.
+
+        The composite target and the enable default stay pinned to the daemon's
+        configured binding, but the *source* seat follows the durable binding
+        (through the shared ``_binding_conn`` resolver that routing, delivery and
+        wake already use) so a no-restart hot rebind carries the mirror with
+        them.  Returns ``(stream_id, generation, source)`` or ``None`` when no
+        usable source is bound.  Fails closed on a corrupt or unconfigured
+        binding rather than break source-event ingestion.
+        """
+        binding = self._assistant_mirror_binding
+        if binding is None:
+            return None
+        try:
+            effective = _binding_conn(
+                conn, {"stream_id": binding[1], "generation": binding[2]}, include_target=False,
+            )
+        except ValueError:
+            return None
+        if effective["source"] == "unconfigured" or not effective["stream_id"] or not effective["generation"]:
+            return None
+        return effective["stream_id"], effective["generation"], effective["source"]
+
     def _assistant_mirror_state_conn(self, conn: sqlite3.Connection) -> dict[str, Any]:
         binding = self._assistant_mirror_binding
         if binding is None:
@@ -1652,10 +1678,17 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             normalized = str(override[0]).strip().lower()
             enabled = normalized in {"1", "true", "on"}
             source = "kv" if normalized in {"1", "true", "on", "0", "false", "off"} else "kv_invalid"
+        effective = self._effective_mirror_source_conn(conn)
+        if effective is None:
+            source_stream_id, source_generation, source_binding = binding[1], binding[2], "unavailable"
+        else:
+            source_stream_id, source_generation, source_binding = effective
         return {
             "enabled": enabled, "source": source,
             "binding": {"composite_stream_id": binding[0],
-                        "source_stream_id": binding[1], "source_generation": binding[2]},
+                        "source_stream_id": source_stream_id,
+                        "source_generation": source_generation,
+                        "source_binding": source_binding},
         }
 
     async def assistant_mirror_state(self) -> dict[str, Any]:
@@ -1667,7 +1700,13 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
     ) -> None:
         """Project an admitted source event in its ingest transaction only."""
         binding = self._assistant_mirror_binding
-        if binding is None or source_stream_id != binding[1]:
+        if binding is None:
+            return
+        effective = self._effective_mirror_source_conn(conn)
+        if effective is None:
+            return
+        effective_source_stream_id, source_generation, _source_binding = effective
+        if source_stream_id != effective_source_stream_id:
             return
         if not self._assistant_mirror_state_conn(conn)["enabled"]:
             return
@@ -1684,7 +1723,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             "JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
             "WHERE s.host=? AND s.session_name=?", (host, name),
         ).fetchone()
-        if source is None or source["status"] != "open" or source["generation"] != binding[2]:
+        if source is None or source["status"] != "open" or source["generation"] != source_generation:
             return
         composite_host, _, composite_name = binding[0].partition(":")
         composite = conn.execute(
@@ -1707,7 +1746,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             "WHERE p.stream_id=r.stream_id AND p.dispatch_id=r.dispatch_id "
             "AND p.publish_kind='prose' "
             "AND json_extract(p.canonical_payload_json,'$.response_state')='final') "
-            "LIMIT 1", (binding[0], source_stream_id, binding[2]),
+            "LIMIT 1", (binding[0], source_stream_id, source_generation),
         ).fetchone()
         if open_route is not None:
             return
@@ -1719,13 +1758,13 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             "AND json_extract(p.canonical_payload_json,'$.response_state')='final' "
             "AND json_extract(p.canonical_payload_json,'$.message')=? "
             "ORDER BY p.event_id DESC LIMIT 1",
-            (binding[0], source_stream_id, binding[2], body),
+            (binding[0], source_stream_id, source_generation, body),
         ).fetchone()
         if recent is not None:
             published_at = datetime.fromisoformat(str(recent["created_at"]).replace("Z", "+00:00")).timestamp()
             if 0 <= recorded_at - published_at < 120:
                 return
-        origin = {"stream_id": source_stream_id, "generation": binding[2],
+        origin = {"stream_id": source_stream_id, "generation": source_generation,
                   "event_id": source_event_id, "event_ts": source_event.get("timestamp")}
         publication_key = f"mirror:{source_event_id}"
         canonical_payload = {
