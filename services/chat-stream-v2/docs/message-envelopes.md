@@ -18,6 +18,11 @@ The exact pre-projection text is retained as `raw.envelope_source`. Existing
 An untagged event beginning with a notice marker is counted and logged with
 `subsystem=message_envelopes`; it is never trusted by clients.
 
+For authenticated provider wrappers, annotation matches unwrapped display text
+against the existing notice kinds first. A known inner notice wins over the
+`claude_pasted_content` fallback; plain wrapped prose keeps the wrapper tag.
+`provider_wrapper` and `raw.provider_content` remain intact in both cases.
+
 Version-one kinds and policies are:
 
 | Kind | Policy | Purpose |

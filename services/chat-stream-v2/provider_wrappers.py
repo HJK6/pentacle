@@ -15,7 +15,21 @@ PROVIDER_WRAPPERS = (
         r'\n\n<pasted_content id="(?P<id>[0-9a-f]+)">\n'
         r'(?P<body>[\s\S]*)\n</pasted_content id="(?P=id)">\n'
     )),
+    ("claude", "claude_pasted_content", re.compile(
+        r'<pasted_content id="(?P<id>[0-9a-f]+)">\n'
+        r'(?P<body>[\s\S]*)\n</pasted_content id="(?P=id)">'
+    )),
 )
+
+
+def log_provider_classification(action: str) -> None:
+    """Bounded ingress diagnostics without prompt or image content."""
+    logging.getLogger("chat_streamd_v2.provider_wrappers").info(
+        "subsystem=provider_wrapper bug_ref=spec_pentacle__claude_queued_notice_and_image_meta_2026_09 action=%s",
+        action,
+        extra={"subsystem": "provider_wrapper", "bug_ref":
+               "spec_pentacle__claude_queued_notice_and_image_meta_2026_09"},
+    )
 
 
 def normalize_provider_user_text(

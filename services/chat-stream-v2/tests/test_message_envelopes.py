@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+import pytest
 
 from ingest import append_ingested_event
 from store import Store
@@ -169,3 +170,33 @@ def test_provider_wrapper_is_preserved_when_normalized_text_is_a_registered_noti
     assert result["provider_wrapper"]["kind"] == "claude_pasted_content"
     assert result["message_envelope"]["kind"] == "child_session_closed"
     assert result["raw"]["envelope_source"] == "wrapped-source"
+
+
+CORPUS = json.loads((Path(__file__).resolve().parents[3] /
+    'pentacle-chat-core/tests/fixtures/provider-wrapper.json').read_text())
+
+
+@pytest.mark.parametrize('case', CORPUS['notice_cases'], ids=lambda c: c['kind'])
+@pytest.mark.parametrize('padded', [False, True])
+@pytest.mark.parametrize('queued', [False, True])
+def test_every_notice_kind_wins_over_authenticated_provider_wrapper(case, padded, queued):
+    from claude_jsonl_norm import normalize_claude_jsonl_records
+    from message_envelopes import annotate_message_envelope, MESSAGE_ENVELOPES
+    assert {c['kind'] for c in CORPUS['notice_cases']} == {
+        entry.kind for entry in MESSAGE_ENVELOPES if entry.kind != 'claude_pasted_content'}
+    body = case['wire_text']
+    raw = f'<pasted_content id="8d21">\n{body}\n</pasted_content id="8d21">'
+    if padded:
+        raw = '\n\n' + raw + '\n'
+    record = {'type': 'user', 'uuid': 'notice-matrix', 'message': {'content': raw}}
+    if queued:
+        record.update(type='attachment', attachment={'type': 'queued_command',
+            'origin': {'kind': 'human'}, 'prompt': raw})
+    event = normalize_claude_jsonl_records([record], host='host', session_name='matrix')[0]
+    result = annotate_message_envelope(event)
+    assert result['kind'] == 'USER'
+    assert result['text'] == body
+    assert result['message_envelope'] == {'kind': case['kind'], 'id': case['expected_tag']['id'], 'schema_version': 1}
+    assert result['provider_wrapper'] == {'kind': 'claude_pasted_content', 'id': '8d21', 'provenance': 'grammar'}
+    assert result['raw']['provider_content'] == raw
+    assert result['raw']['envelope_source'] == raw

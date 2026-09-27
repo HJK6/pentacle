@@ -278,3 +278,40 @@ def test_answer_response_diagnostic_is_socket_outcome_only(caplog,sent):
         assert 'socket_send='+('completed' if sent else 'failed') in caplog.text
         assert 'private answer contents' not in caplog.text
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('padded', [False, True])
+def test_busy_claude_queued_answer_obtains_durable_proof_once(tmp_path, padded):
+    from claude_jsonl_norm import normalize_claude_jsonl_records
+    from ingest import append_ingested_event
+    from submission_events import submission_text_matches
+    async def run():
+        async with fixture(tmp_path) as (notify, queue, comms, provider, sessions, store):
+            await sessions.open('hosta', 'v2-test', provider='claude', visibility='visible')
+            async def queued_user(text):
+                raw = f'<pasted_content id="8d21">\n{text}\n</pasted_content id="8d21">'
+                if padded:
+                    raw = '\n\n' + raw + '\n'
+                record = {'type': 'attachment', 'uuid': 'queued-answer-fixture',
+                    'sessionId': 'owned-claude', 'timestamp': '2026-09-27T14:52:45.443Z',
+                    'attachment': {'type': 'queued_command', 'origin': {'kind': 'human'}, 'prompt': raw}}
+                async def broadcast(frame):
+                    pass
+                for event in normalize_claude_jsonl_records([record], host='hosta', session_name='v2-test'):
+                    await append_ingested_event(store, broadcast, event, recent_limit=500)
+            provider.user = queued_user
+            q = await _seed_live_shaped_question(notify)
+            await answer(notify, q)
+            await queue.drain_once(force=True)
+            assert (await state(notify, q))['resolution']['delivery_status'] == 'delivered'
+            assert len(provider.pastes) == 1
+            rows = await store.fetch_session_event_tail('hosta:v2-test', limit=500)
+            row = next(e for e in rows if (e.get('raw') or {}).get('jsonl_record_uuid') == 'queued-answer-fixture')
+            assert row['kind'] == 'USER'
+            assert row['raw']['subtype'] == 'queued-command'
+            assert row['message_envelope']['kind'] == 'notification_answer'
+            assert submission_text_matches(row, provider.pastes[0])
+            assert (await answer(notify, q))['replayed'] is True
+            await queue.drain_once(force=True)
+            assert len(provider.pastes) == 1
+    asyncio.run(run())

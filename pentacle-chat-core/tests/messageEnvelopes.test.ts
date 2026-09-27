@@ -13,8 +13,35 @@ import {
   sendOptimisticMessage,
   type PentacleEvent,
 } from '../src/index.ts';
+import { normalizeProviderUserText } from '../src/services/providerWrapper.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/message-envelopes.json', import.meta.url), 'utf8'));
+const wrappers = JSON.parse(readFileSync(new URL('./fixtures/provider-wrapper.json', import.meta.url), 'utf8'));
+
+test('every notice kind traverses padded/compact ordinary/queued wrapper routes', () => {
+  for (const item of wrappers.notice_cases) {
+    for (const padded of [false, true]) {
+      for (const queued of [false, true]) {
+        const compact = `<pasted_content id="8d21">\n${item.wire_text}\n</pasted_content id="8d21">`;
+        const raw = padded ? `\n\n${compact}\n` : compact;
+        const normalized = normalizeProviderUserText(raw, 'claude', true);
+        assert.equal(normalized.text, item.wire_text);
+        assert.equal(normalized.provider_wrapper?.id, '8d21');
+        const input = event({ provider: 'claude', ...normalized,
+          message_envelope: { kind: item.kind, id: item.expected_tag.id, schema_version: 1 },
+          raw: { source: 'structured', transport: 'claude-jsonl', provider_content: raw,
+            ...(queued ? { subtype: 'queued-command' } : {}) } });
+        const interpreted = interpretPentacleEvent(input);
+        assert.notEqual(interpreted.displayRule, 'bubble:user');
+        assert.ok(!interpreted.text.includes('<pasted_content'));
+        if (item.kind === 'notification_answer') {
+          assert.equal(interpreted.caseId, 'agent-question-answer');
+          assert.equal(interpreted.hidden, false);
+        }
+      }
+    }
+  }
+});
 
 function event(overrides: Partial<PentacleEvent> = {}): PentacleEvent {
   return {

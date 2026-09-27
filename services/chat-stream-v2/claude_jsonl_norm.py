@@ -11,7 +11,13 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from provider_wrappers import normalize_provider_user_text
+from provider_wrappers import log_provider_classification, normalize_provider_user_text
+
+
+_IMAGE_COORDINATE_META = re.compile(
+    r'\[Image: original [0-9]+x[0-9]+, displayed at [0-9]+x[0-9]+\. '
+    r'Multiply coordinates by [0-9]+(?:\.[0-9]+)? to map to original image\.\]'
+)
 
 
 def _to_text(content: Any) -> str:
@@ -348,29 +354,39 @@ def normalize_claude_jsonl_record(
             )
         return _stamp_jsonl_event_identity([make("SYSTEM", text, {"subtype": subtype})], record_uuid)
 
-    if record_type == "user":
-        def make_user(provider_content: str) -> dict:
-            content, wrapper = normalize_provider_user_text(
-                provider_content, provider="claude", authenticated=True,
-            )
-            peer_tell = _parse_peer_tell(content)
-            if peer_tell is not None:
-                event = make("TELL", peer_tell["payload"], {
-                    "sender": peer_tell["sender"],
-                    "tell_id": peer_tell["tell_id"],
-                    "enqueued_at": peer_tell["enqueued_at"],
-                    "peer_payload": peer_tell["payload"],
-                })
-            elif _classify_user_string(content) == "system":
-                event = make("SYSTEM", content, {"subtype": "synthetic-user"})
-            else:
-                event = make("USER", content)
-            if wrapper is not None:
-                event["provider_wrapper"] = wrapper
-                event["raw"]["provider_content"] = provider_content
-            return event
+    def make_user(provider_content: str, *, queued: bool = False) -> dict:
+        content, wrapper = normalize_provider_user_text(
+            provider_content, provider="claude", authenticated=True,
+        )
+        # Kind is part of durable ingest identity. Historical queued peers and
+        # synthetic prompts remain USER; the shared interpreter handles them.
+        peer_tell = None if queued else _parse_peer_tell(content)
+        if queued:
+            event = make("USER", content, {"subtype": "queued-command", "queued_at": timestamp})
+        elif peer_tell is not None:
+            event = make("TELL", peer_tell["payload"], {
+                "sender": peer_tell["sender"],
+                "tell_id": peer_tell["tell_id"],
+                "enqueued_at": peer_tell["enqueued_at"],
+                "peer_payload": peer_tell["payload"],
+            })
+        elif _classify_user_string(content) == "system":
+            event = make("SYSTEM", content, {"subtype": "synthetic-user"})
+        else:
+            event = make("USER", content)
+        if wrapper is not None:
+            event["provider_wrapper"] = wrapper
+            event["raw"]["provider_content"] = provider_content
+            if queued:
+                log_provider_classification("queued-wrapper-recognized")
+        return event
 
+    if record_type == "user":
         content = msg.get("content")
+        if (record.get("isMeta") is True and record.get("turnCompanion") is True
+                and isinstance(content, str) and _IMAGE_COORDINATE_META.fullmatch(content)):
+            log_provider_classification("image-meta-suppressed")
+            return []
         if isinstance(content, str):
             return _stamp_jsonl_event_identity([make_user(content)], record_uuid)
         events: list[dict] = []
@@ -406,7 +422,7 @@ def normalize_claude_jsonl_record(
             if not prompt:
                 return []
             return _stamp_jsonl_event_identity(
-                [make("USER", prompt, {"subtype": "queued-command", "queued_at": timestamp})],
+                [make_user(prompt, queued=True)],
                 record_uuid,
             )
         return []

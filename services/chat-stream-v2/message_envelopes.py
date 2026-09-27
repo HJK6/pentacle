@@ -411,24 +411,16 @@ def annotate_message_envelope(event: dict[str, Any]) -> dict[str, Any]:
         and isinstance(provider_wrapper.get("id"), str)
         and re.fullmatch(r"[0-9a-f]+", provider_wrapper["id"]),
     )
-    # A provider wrapper is authenticated first. A normalized event can carry
-    # only its already-unwrapped text, while an ingress event retains the
-    # provider bytes in raw.provider_content; both paths use the same adapter.
+    # Notice kinds precede the provider adapter in the existing registry.
+    # Match display text first so retained XML audit bytes cannot mask a notice.
     matched = None
     if authenticated_wrapper:
         matched = match_message_envelope(
-            source,
+            text,
             provider=provider,
             authenticated=True,
             provider_wrapper=provider_wrapper,
         )
-        if matched is None and source != text:
-            matched = match_message_envelope(
-                text,
-                provider=provider,
-                authenticated=True,
-                provider_wrapper=provider_wrapper,
-            )
     if matched is None:
         matched = match_message_envelope(
             text,

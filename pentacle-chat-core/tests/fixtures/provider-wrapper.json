@@ -40,7 +40,20 @@
     "\n\n<pasted_content id=\"g\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"g\">\n",
     "\n\n<pasted_content id=\"１２\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"１２\">\n",
     "\n\n<pasted_content id=\"0x079c\">\nReply exactly PENTACLE_FLEET_SMOKE_fa32f8ed75c94d6c832ad2f65d62d9ad and do nothing else.\n</pasted_content id=\"0x079c\">\n",
-    "\n\n<pasted_content id=\"079c\">\nReply exactly PENTACLE_FLEET_SMOKE_551086dc72d74142bc0c15fdc22b5e29 and do nothing else.\n</pasted_content id=\"079d\">\n"
+    "\n\n<pasted_content id=\"079c\">\nReply exactly PENTACLE_FLEET_SMOKE_551086dc72d74142bc0c15fdc22b5e29 and do nothing else.\n</pasted_content id=\"079d\">\n",
+    "<pasted_content id=\"8d21\">\nbody\n</pasted_content id=\"8d21\">\n",
+    "\n<pasted_content id=\"8d21\">\nbody\n</pasted_content id=\"8d21\">",
+    "\n\n<pasted_content id=\"8d21\">\nbody\n</pasted_content id=\"8d21\">",
+    "\n\n<pasted_content id=\"8d21\">\nbody\n</pasted_content id=\"8d21\">\n\n",
+    "\\<pasted_content id=\"8d21\">\nbody\n</pasted_content id=\"8d21\">",
+    "<pasted_content id=\"8d21\">\nbody",
+    "<pasted_content id=\"\">\nbody\n</pasted_content id=\"\">",
+    "<pasted_content id=\"AB\">\nbody\n</pasted_content id=\"AB\">",
+    "<pasted_content id=\"8d22\">\nbody\n</pasted_content id=\"8d21\">",
+    "\n\n\n<pasted_content id=\"8d21\">\n[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator\n</pasted_content id=\"8d21\">\n",
+    " <pasted_content id=\"8d21\">\n[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator\n</pasted_content id=\"8d21\">",
+    "<pasted_content id=\"8d21\">\n[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator\n</pasted_content id=\"8d21\"> ",
+    "\n\n<pasted_content id=\"8d21\">\n[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator\n</pasted_content id=\"8d21\">"
   ],
   "normalization_cases": [
     {
@@ -99,5 +112,401 @@
     "f",
     "00e0f5",
     "0123456789abcdef"
-  ]
+  ],
+  "queued_capture": {
+    "sanitized": true,
+    "record": {
+      "type": "attachment",
+      "uuid": "queued-fixture",
+      "sessionId": "session-fixture",
+      "timestamp": "2026-09-27T14:52:45.443Z",
+      "attachment": {
+        "type": "queued_command",
+        "origin": {
+          "kind": "human"
+        },
+        "source_uuid": "source-fixture",
+        "prompt": "<pasted_content id=\"8d21\">\n[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator\n</pasted_content id=\"8d21\">"
+      }
+    },
+    "display_text": "[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator",
+    "wrapper": {
+      "kind": "claude_pasted_content",
+      "id": "8d21",
+      "provenance": "grammar"
+    },
+    "content_sha256": "580d689c8cc310446703f7abd8013f1f33ee42a28706961992f093a7fccf7245"
+  },
+  "image_meta_capture": {
+    "type": "user",
+    "uuid": "image-meta-fixture",
+    "parentUuid": "read-result-fixture",
+    "sessionId": "session-fixture",
+    "timestamp": "2026-09-27T14:53:28.285Z",
+    "isMeta": true,
+    "turnCompanion": true,
+    "message": {
+      "role": "user",
+      "content": "[Image: original 1206x2622, displayed at 920x2000. Multiply coordinates by 1.31 to map to original image.]"
+    }
+  },
+  "grammar_cases": [
+    {
+      "text": "<pasted_content id=\"8d21\">\n\n</pasted_content id=\"8d21\">",
+      "display_text": "",
+      "id": "8d21"
+    },
+    {
+      "text": "<pasted_content id=\"8d21\">\nfirst\nsecond\nvalue=operator\nprose\n</pasted_content id=\"8d21\">",
+      "display_text": "first\nsecond\nvalue=operator\nprose",
+      "id": "8d21"
+    },
+    {
+      "text": "<pasted_content id=\"8d21\">\n\n  body \n\n</pasted_content id=\"8d21\">",
+      "display_text": "\n  body \n",
+      "id": "8d21"
+    },
+    {
+      "text": "<pasted_content id=\"8d21\">\n<pasted_content id=\"8d21\">\nliteral\n</pasted_content id=\"8d21\">\n</pasted_content id=\"8d21\">",
+      "display_text": "<pasted_content id=\"8d21\">\nliteral\n</pasted_content id=\"8d21\">",
+      "id": "8d21"
+    },
+    {
+      "text": "<pasted_content id=\"8d21\">\none\n</pasted_content id=\"8d21\"><pasted_content id=\"8d21\">\ntwo\n</pasted_content id=\"8d21\">",
+      "display_text": "one\n</pasted_content id=\"8d21\"><pasted_content id=\"8d21\">\ntwo",
+      "id": "8d21"
+    },
+    {
+      "text": "\n\n<pasted_content id=\"8d21\">\n\n</pasted_content id=\"8d21\">\n",
+      "display_text": "",
+      "id": "8d21"
+    },
+    {
+      "text": "\n\n<pasted_content id=\"8d21\">\nfirst\nsecond\nvalue=operator\nprose\n</pasted_content id=\"8d21\">\n",
+      "display_text": "first\nsecond\nvalue=operator\nprose",
+      "id": "8d21"
+    },
+    {
+      "text": "\n\n<pasted_content id=\"8d21\">\n\n  body \n\n</pasted_content id=\"8d21\">\n",
+      "display_text": "\n  body \n",
+      "id": "8d21"
+    },
+    {
+      "text": "\n\n<pasted_content id=\"8d21\">\n\n\n<pasted_content id=\"8d21\">\nliteral\n</pasted_content id=\"8d21\">\n\n</pasted_content id=\"8d21\">\n",
+      "display_text": "\n\n<pasted_content id=\"8d21\">\nliteral\n</pasted_content id=\"8d21\">\n",
+      "id": "8d21"
+    },
+    {
+      "text": "\n\n<pasted_content id=\"8d21\">\none\n</pasted_content id=\"8d21\">\n\n\n<pasted_content id=\"8d21\">\ntwo\n</pasted_content id=\"8d21\">\n",
+      "display_text": "one\n</pasted_content id=\"8d21\">\n\n\n<pasted_content id=\"8d21\">\ntwo",
+      "id": "8d21"
+    }
+  ],
+  "notice_cases": [
+    {
+      "kind": "notice_marker",
+      "wire_text": "[pentacle-notice:notice-fixture-1]",
+      "expected_tag": {
+        "kind": "notice_marker",
+        "id": "notice-fixture-1"
+      }
+    },
+    {
+      "kind": "notification_answer",
+      "wire_text": "[pentacle-notice:notification-answer-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=Done\nchoice=True\nby=operator",
+      "expected_tag": {
+        "kind": "notification_answer",
+        "id": "notification-answer-fixture",
+        "notification_id": "notification-fixture"
+      }
+    },
+    {
+      "kind": "child_session_closed",
+      "wire_text": "[pentacle-notice:d2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\nChild session host:child closed.",
+      "expected_tag": {
+        "kind": "child_session_closed",
+        "id": "d2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "child_stream_id": "host:child"
+      }
+    },
+    {
+      "kind": "child_inactivity_threshold",
+      "wire_text": "[pentacle-notice:d2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]\nChild session host:child reached an inactivity threshold at 2026-09-20T00:00:00Z.",
+      "expected_tag": {
+        "kind": "child_inactivity_threshold",
+        "id": "d2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "child_stream_id": "host:child",
+        "trigger_at": "2026-09-20T00:00:00Z"
+      }
+    },
+    {
+      "kind": "child_report_ready",
+      "wire_text": "[pentacle-notice:child-report-ready-v2-0705c6a38a6903bd8ae3e108d9d9374eef7c57b1edd2529dd3f254aecb79dc5b]\n[child_report_ready]\nreport_id=report-fixture\nledger_row_id=42\nchild_stream_id=host:child\nmsg_id=msg-fixture\nstatus=done\nsummary=Fixture report complete",
+      "expected_tag": {
+        "kind": "child_report_ready",
+        "id": "child-report-ready-v2-0705c6a38a6903bd8ae3e108d9d9374eef7c57b1edd2529dd3f254aecb79dc5b",
+        "report_id": "report-fixture",
+        "ledger_row_id": 42,
+        "child_stream_id": "host:child",
+        "msg_id": "msg-fixture",
+        "status": "done"
+      }
+    },
+    {
+      "kind": "tree_idle",
+      "wire_text": "[pentacle-notice:d2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc]\n[tree_idle]\n{\"lane_stream_id\":\"host:lead\",\"oldest_idle_s\":1200,\"open_seats\":2,\"open_terminal_reports\":1}",
+      "expected_tag": {
+        "kind": "tree_idle",
+        "id": "d2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    },
+    {
+      "kind": "lane_digest",
+      "wire_text": "[pentacle-notice:d2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc]\n[lane_digest]\n{\"evaluated_at\":\"2026-09-27T05:00:00Z\",\"lanes\":[]}",
+      "expected_tag": {
+        "kind": "lane_digest",
+        "id": "d2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    }
+  ],
+  "replay_capture": {
+    "sanitized": true,
+    "baseline_sha": "a3b140d82ffde83bb7c9d2ed5f5881a964aa878b",
+    "records": [
+      {
+        "type": "attachment",
+        "uuid": "queued-fixture",
+        "sessionId": "session-fixture",
+        "timestamp": "2026-09-27T14:52:45.443Z",
+        "attachment": {
+          "type": "queued_command",
+          "origin": {
+            "kind": "human"
+          },
+          "source_uuid": "source-fixture",
+          "prompt": "<pasted_content id=\"8d21\">\n[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator\n</pasted_content id=\"8d21\">"
+        }
+      },
+      {
+        "type": "attachment",
+        "uuid": "queued-peer-bare",
+        "sessionId": "session-fixture",
+        "timestamp": "2026-09-27T14:52:45.443Z",
+        "attachment": {
+          "type": "queued_command",
+          "origin": {
+            "kind": "human"
+          },
+          "source_uuid": "source-fixture",
+          "prompt": "[from peer:seat] [tell:peer-fixture]\nplease review"
+        }
+      },
+      {
+        "type": "attachment",
+        "uuid": "queued-peer-compact",
+        "sessionId": "session-fixture",
+        "timestamp": "2026-09-27T14:52:45.443Z",
+        "attachment": {
+          "type": "queued_command",
+          "origin": {
+            "kind": "human"
+          },
+          "source_uuid": "source-fixture",
+          "prompt": "<pasted_content id=\"8d21\">\n[from peer:seat] [tell:peer-fixture]\nplease review\n</pasted_content id=\"8d21\">"
+        }
+      },
+      {
+        "type": "user",
+        "uuid": "ordinary-notice",
+        "sessionId": "session-fixture",
+        "timestamp": "2026-09-27T14:52:45.444Z",
+        "message": {
+          "content": "\n\n<pasted_content id=\"8d21\">\n[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator\n</pasted_content id=\"8d21\">\n"
+        }
+      },
+      {
+        "type": "user",
+        "uuid": "image-meta-fixture",
+        "parentUuid": "read-result-fixture",
+        "sessionId": "session-fixture",
+        "timestamp": "2026-09-27T14:53:28.285Z",
+        "isMeta": true,
+        "turnCompanion": true,
+        "message": {
+          "role": "user",
+          "content": "[Image: original 1206x2622, displayed at 920x2000. Multiply coordinates by 1.31 to map to original image.]"
+        }
+      },
+      {
+        "type": "user",
+        "uuid": "operator-control",
+        "sessionId": "session-fixture",
+        "timestamp": "2026-09-27T14:53:29.000Z",
+        "message": {
+          "content": "[Image: original 1206x2622, displayed at 920x2000. Multiply coordinates by 1.31 to map to original image.]"
+        }
+      }
+    ],
+    "legacy_events": [
+      {
+        "host": "host",
+        "provider": "claude",
+        "session_id": "session-fixture",
+        "session_name": "session",
+        "stream_id": "host:session",
+        "timestamp": "2026-09-27T14:52:45.443Z",
+        "kind": "USER",
+        "text": "<pasted_content id=\"8d21\">\n[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator\n</pasted_content id=\"8d21\">",
+        "raw": {
+          "source": "structured",
+          "transport": "claude-jsonl",
+          "host": "host",
+          "provider": "claude",
+          "session_name": "session",
+          "source_session_identity": "session-fixture",
+          "uuid": "queued-fixture",
+          "is_sidechain": false,
+          "subtype": "queued-command",
+          "queued_at": "2026-09-27T14:52:45.443Z",
+          "jsonl_record_uuid": "queued-fixture",
+          "jsonl_event_index": 0,
+          "envelope_source": "<pasted_content id=\"8d21\">\n[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator\n</pasted_content id=\"8d21\">"
+        }
+      },
+      {
+        "host": "host",
+        "provider": "claude",
+        "session_id": "session-fixture",
+        "session_name": "session",
+        "stream_id": "host:session",
+        "timestamp": "2026-09-27T14:52:45.443Z",
+        "kind": "USER",
+        "text": "[from peer:seat] [tell:peer-fixture]\nplease review",
+        "raw": {
+          "source": "structured",
+          "transport": "claude-jsonl",
+          "host": "host",
+          "provider": "claude",
+          "session_name": "session",
+          "source_session_identity": "session-fixture",
+          "uuid": "queued-peer-bare",
+          "is_sidechain": false,
+          "subtype": "queued-command",
+          "queued_at": "2026-09-27T14:52:45.443Z",
+          "jsonl_record_uuid": "queued-peer-bare",
+          "jsonl_event_index": 0,
+          "envelope_source": "[from peer:seat] [tell:peer-fixture]\nplease review"
+        }
+      },
+      {
+        "host": "host",
+        "provider": "claude",
+        "session_id": "session-fixture",
+        "session_name": "session",
+        "stream_id": "host:session",
+        "timestamp": "2026-09-27T14:52:45.443Z",
+        "kind": "USER",
+        "text": "<pasted_content id=\"8d21\">\n[from peer:seat] [tell:peer-fixture]\nplease review\n</pasted_content id=\"8d21\">",
+        "raw": {
+          "source": "structured",
+          "transport": "claude-jsonl",
+          "host": "host",
+          "provider": "claude",
+          "session_name": "session",
+          "source_session_identity": "session-fixture",
+          "uuid": "queued-peer-compact",
+          "is_sidechain": false,
+          "subtype": "queued-command",
+          "queued_at": "2026-09-27T14:52:45.443Z",
+          "jsonl_record_uuid": "queued-peer-compact",
+          "jsonl_event_index": 0,
+          "envelope_source": "<pasted_content id=\"8d21\">\n[from peer:seat] [tell:peer-fixture]\nplease review\n</pasted_content id=\"8d21\">"
+        }
+      },
+      {
+        "host": "host",
+        "provider": "claude",
+        "session_id": "session-fixture",
+        "session_name": "session",
+        "stream_id": "host:session",
+        "timestamp": "2026-09-27T14:52:45.444Z",
+        "kind": "USER",
+        "text": "[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator",
+        "raw": {
+          "source": "structured",
+          "transport": "claude-jsonl",
+          "host": "host",
+          "provider": "claude",
+          "session_name": "session",
+          "source_session_identity": "session-fixture",
+          "uuid": "ordinary-notice",
+          "is_sidechain": false,
+          "provider_content": "\n\n<pasted_content id=\"8d21\">\n[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator\n</pasted_content id=\"8d21\">\n",
+          "jsonl_record_uuid": "ordinary-notice",
+          "jsonl_event_index": 0,
+          "user_delivery_state": "sent",
+          "envelope_source": "\n\n<pasted_content id=\"8d21\">\n[pentacle-notice:notification-answer-notification-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer=done\nchoice=True\nby=operator\n</pasted_content id=\"8d21\">\n"
+        },
+        "provider_wrapper": {
+          "kind": "claude_pasted_content",
+          "id": "8d21",
+          "provenance": "grammar"
+        },
+        "message_envelope": {
+          "kind": "claude_pasted_content",
+          "id": "8d21",
+          "schema_version": 1
+        }
+      },
+      {
+        "host": "host",
+        "provider": "claude",
+        "session_id": "session-fixture",
+        "session_name": "session",
+        "stream_id": "host:session",
+        "timestamp": "2026-09-27T14:53:28.285Z",
+        "kind": "USER",
+        "text": "[Image: original 1206x2622, displayed at 920x2000. Multiply coordinates by 1.31 to map to original image.]",
+        "raw": {
+          "source": "structured",
+          "transport": "claude-jsonl",
+          "host": "host",
+          "provider": "claude",
+          "session_name": "session",
+          "source_session_identity": "session-fixture",
+          "uuid": "image-meta-fixture",
+          "parent_uuid": "read-result-fixture",
+          "is_sidechain": false,
+          "jsonl_record_uuid": "image-meta-fixture",
+          "jsonl_event_index": 0,
+          "user_delivery_state": "sent",
+          "envelope_source": "[Image: original 1206x2622, displayed at 920x2000. Multiply coordinates by 1.31 to map to original image.]"
+        }
+      },
+      {
+        "host": "host",
+        "provider": "claude",
+        "session_id": "session-fixture",
+        "session_name": "session",
+        "stream_id": "host:session",
+        "timestamp": "2026-09-27T14:53:29.000Z",
+        "kind": "USER",
+        "text": "[Image: original 1206x2622, displayed at 920x2000. Multiply coordinates by 1.31 to map to original image.]",
+        "raw": {
+          "source": "structured",
+          "transport": "claude-jsonl",
+          "host": "host",
+          "provider": "claude",
+          "session_name": "session",
+          "source_session_identity": "session-fixture",
+          "uuid": "operator-control",
+          "is_sidechain": false,
+          "jsonl_record_uuid": "operator-control",
+          "jsonl_event_index": 0,
+          "user_delivery_state": "sent",
+          "envelope_source": "[Image: original 1206x2622, displayed at 920x2000. Multiply coordinates by 1.31 to map to original image.]"
+        }
+      }
+    ]
+  }
 }

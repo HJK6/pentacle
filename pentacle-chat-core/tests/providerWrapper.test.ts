@@ -88,3 +88,28 @@ test('identity and time guards still bound normalized text fallback', () => {
   assert.equal(optimisticMatchesServerUser(send, { ...event, timestamp: 'invalid' }, 60_000), false);
   assert.equal(optimisticMatchesServerUser({ ...send, created_at: send.created_at - 60_001 }, event, 60_000), false);
 });
+
+test('finite padded/compact corpus preserves exact body and one-layer grammar', () => {
+  for (const sample of fixture.grammar_cases) {
+    assert.deepEqual(normalizeProviderUserText(sample.text, 'claude', true), {
+      text: sample.display_text,
+      provider_wrapper: { kind: 'claude_pasted_content', id: sample.id, provenance: 'grammar' },
+    });
+    assert.equal(providerDisplayText({ ...event, text: sample.display_text,
+      provider_wrapper: { kind: 'claude_pasted_content', id: sample.id, provenance: 'grammar' } }), sample.display_text);
+    assert.deepEqual(normalizeProviderUserText(sample.text, 'claude'), { text: sample.text });
+    assert.deepEqual(normalizeProviderUserText(sample.text, 'codex', true), { text: sample.text });
+  }
+});
+
+test('sanitized compact queued capture shares display and optimistic matching', () => {
+  const capture = fixture.queued_capture;
+  const raw = capture.record.attachment.prompt;
+  const projected = normalizeProviderUserText(raw, 'claude', true);
+  assert.deepEqual(projected, { text: capture.display_text, provider_wrapper: capture.wrapper });
+  const queued = { ...event, text: raw, raw: { ...event.raw, subtype: 'queued-command' } };
+  assert.equal(optimisticMatchesServerUser({ ...send, text: capture.display_text }, queued, 60_000), true);
+  for (const kind of ['ASSIST_TEXT', 'TOOL_RESULT'] as const) {
+    assert.equal(providerDisplayText({ ...queued, kind }), raw);
+  }
+});

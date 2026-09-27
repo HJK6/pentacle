@@ -139,6 +139,160 @@ def test_identity_key_stable_and_discriminating() -> None:
     assert isinstance(_jsonl_event_identity(a), tuple)
 
 
+def test_queued_wrapper_timestamp_and_identity_survive_replay(tmp_path):
+    import json
+    import copy
+    from ingest import append_ingested_event
+    from submission_events import submission_text_matches
+    corpus = json.loads((SERVICE_DIR.parents[1] / 'pentacle-chat-core/tests/fixtures/provider-wrapper.json').read_text())
+    queued = copy.deepcopy(corpus['queued_capture']['record'])
+    records = [{'type': 'assistant', 'uuid': 'preceding-tool', 'timestamp': '2026-09-27T14:52:46.000Z',
+        'message': {'content': [{'type': 'text', 'text': 'preceding output'}]}}, queued,
+        corpus['image_meta_capture']]
+    events = normalize_claude_jsonl_records(records, host='h', session_name='s')
+    assert len(events) == 2
+    event = events[1]
+    assert event['timestamp'] == events[0]['timestamp']
+    assert event['raw']['queued_at'] == queued['timestamp']
+    assert event['kind'] == 'USER'
+    assert event['text'] == corpus['queued_capture']['display_text']
+    async def go():
+        store = _open_store()
+        broadcasts = []
+        async def broadcast(frame):
+            broadcasts.append(frame)
+        try:
+            await store.open_session('h', 's', provider='claude')
+            ids = []
+            for payload in events:
+                ids.append(await append_ingested_event(store, broadcast, payload, recent_limit=500))
+            broadcasts.clear()
+            for _ in range(2):
+                for payload in normalize_claude_jsonl_records(records, host='h', session_name='s'):
+                    assert await append_ingested_event(store, broadcast, payload, recent_limit=500) is None
+            assert broadcasts == []
+            rows = await store.fetch_session_event_tail('h:s', limit=500)
+            assert [e['daemon_seq'] for e in rows] == ids
+            assert submission_text_matches(rows[1], corpus['queued_capture']['display_text'])
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+def test_current_format_ingress_replay_keeps_legacy_identities(tmp_path):
+    import json
+    import hashlib
+    import sqlite3
+    from ingest import append_ingested_event
+    from claude_jsonl_norm import normalize_claude_jsonl_record
+    from message_envelopes import annotate_message_envelope
+    from tools.history_repair import (freeze_manifest, apply_manifest, rollback_manifest,
+        manifest_sha256, scope_packet_sha256)
+    from submission_events import DurableUserEventProof, EventWatermark
+    corpus = json.loads((SERVICE_DIR.parents[1] / 'pentacle-chat-core/tests/fixtures/provider-wrapper.json').read_text())
+    capture = corpus['replay_capture']
+    async def go():
+        store = _open_store()
+        broadcasts = []
+        async def broadcast(frame):
+            broadcasts.append(frame)
+        try:
+            session = await store.open_session('host', 'session', provider='claude')
+            nid = 'notification-answer-notification-fixture'
+            notice_body = corpus['queued_capture']['display_text']
+            await store.enqueue_outbound_notice(notice_id=nid, kind='notification_answer',
+                dedupe_key=nid, recipient_stream_id='host:session', tell_id=nid, body=notice_body,
+                metadata={'notification_id': 'notification-fixture',
+                    'producer_session_generation': session['session_generation']})
+            await store.put_tell_delivery(nid, {'delivery': {'tell_id': nid,
+                'to_stream_id': 'host:session', 'text': notice_body,
+                'notification_answer_generation': session['session_generation'], 'attachments': []}})
+            for event in capture['legacy_events']:
+                assert await store.append_session_event('host:session', event,
+                    identity=_identity_key(event), limit=500) is not None
+            before = await store.fetch_session_event_tail('host:session', limit=500)
+            identities = {e['raw']['jsonl_record_uuid']: (e['daemon_seq'], _identity_key(e)) for e in before}
+            for _ in range(2):
+                for event in normalize_claude_jsonl_records(capture['records'], host='host', session_name='session'):
+                    assert await append_ingested_event(store, broadcast, event, recent_limit=500) is None
+            after = await store.fetch_session_event_tail('host:session', limit=500)
+            assert after == before
+            assert broadcasts == []
+            assert {e['raw']['jsonl_record_uuid']: (e['daemon_seq'], _identity_key(e)) for e in after} == identities
+            assert all(e['kind'] == 'USER' for e in after)
+            # The ordinary notice remains eligible for the real USER-only proof
+            # even before the targeted queued-notice history correction.
+            proof = await DurableUserEventProof(store, local_host='host').lookup('host:session',
+                expected_text=corpus['queued_capture']['display_text'],
+                watermark=EventWatermark('host:session', 0, 'reachable'))
+            assert proof.proven
+            # Freeze correction against this exact scratch Store and raw source
+            # bytes, then replay through the same production ingest path again.
+            lines = [json.dumps(r, sort_keys=True, separators=(',', ':')).encode() + b'\n'
+                     for r in capture['records']]
+            source_sha = hashlib.sha256(b''.join(lines)).hexdigest()
+            record_sha = {r['uuid']: hashlib.sha256(line).hexdigest()
+                          for r, line in zip(capture['records'], lines)}
+            backup_path = tmp_path / 'replay-snapshot.db'
+            def backup(conn):
+                with sqlite3.connect(backup_path) as target:
+                    conn.backup(target)
+            await store.submit(backup)
+            database_sha = hashlib.sha256(backup_path.read_bytes()).hexdigest()
+            scope = {'schema_version': 1, 'target': {'host': 'host', 'session_name': 'session',
+                'stream_id': 'host:session', 'session_created_at': session['created_at'],
+                'session_generation': session['session_generation']},
+                'source': {'jsonl_sha256': source_sha, 'records': [
+                    {'class': 'queued_notice', 'source_uuid': 'queued-fixture',
+                     'source_line_number': 1, 'source_sha256': record_sha['queued-fixture'],
+                     'attachment_source_uuid': 'source-fixture'},
+                    {'class': 'image_meta', 'source_uuid': 'image-meta-fixture',
+                     'source_line_number': 5, 'source_sha256': record_sha['image-meta-fixture']}]},
+                'database_snapshot_sha256': database_sha}
+            selected = [r for r in capture['records']
+                        if r['uuid'] in {'queued-fixture', 'image-meta-fixture'}]
+            selected_sha = {r['uuid']: record_sha[r['uuid']] for r in selected}
+            manifest = await store.submit(lambda conn: freeze_manifest(conn, selected,
+                scope_packet=scope, expected_scope_sha256=scope_packet_sha256(scope),
+                source_record_sha256_by_uuid=selected_sha, source_jsonl_sha256=source_sha,
+                database_snapshot_sha256=database_sha, normalizer=normalize_claude_jsonl_record,
+                annotator=annotate_message_envelope))
+            preimages = tmp_path / 'replay-preimages.json'
+            correction = dict(expected_manifest_sha256=manifest_sha256(manifest),
+                source_jsonl_sha256=source_sha, preimages_path=preimages)
+            assert (await store.submit(lambda conn: apply_manifest(conn, manifest, **correction)))['status'] == 'applied'
+            assert (await store.submit(lambda conn: apply_manifest(conn, manifest, **correction)))['status'] == 'already_applied'
+            corrected = await store.fetch_session_event_tail('host:session', limit=500)
+            assert len(corrected) == len(before) - 1
+            assert all(e['raw']['jsonl_record_uuid'] != 'image-meta-fixture' for e in corrected)
+            for event in corrected:
+                assert identities[event['raw']['jsonl_record_uuid']] == (event['daemon_seq'], _identity_key(event))
+                assert event['kind'] == 'USER'
+            queued = next(e for e in corrected if e['raw']['jsonl_record_uuid'] == 'queued-fixture')
+            assert queued['text'] == notice_body
+            assert queued['message_envelope']['kind'] == 'notification_answer'
+            assert queued['raw']['subtype'] == 'queued-command'
+            controls = [e for e in before if e['raw']['jsonl_record_uuid'] not in ('queued-fixture', 'image-meta-fixture')]
+            assert [e for e in corrected if e['raw']['jsonl_record_uuid'] != 'queued-fixture'] == controls
+            for _ in range(2):
+                for event in normalize_claude_jsonl_records(capture['records'], host='host', session_name='session'):
+                    assert await append_ingested_event(store, broadcast, event, recent_limit=500) is None
+            assert broadcasts == []
+            assert await store.fetch_session_event_tail('host:session', limit=500) == corrected
+            proof = await DurableUserEventProof(store, local_host='host').lookup('host:session',
+                expected_text=notice_body, watermark=EventWatermark('host:session', queued['daemon_seq'] - 1, 'reachable'))
+            assert proof.proven and proof.event_id == queued['daemon_seq']
+            def keys_agree(conn):
+                return all(r['event_key'] == hashlib.sha256(r['event_json'].encode()).hexdigest()
+                    for r in conn.execute('SELECT event_key,event_json FROM session_event_tail'))
+            assert await store.submit(keys_agree)
+            assert (await store.submit(lambda conn: rollback_manifest(conn, manifest, **correction)))['status'] == 'rolled_back'
+            assert await store.fetch_session_event_tail('host:session', limit=500) == before
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
 # -- Codex rollout ingest ----------------------------------------------------
 # These drive `_ingest_stream` directly with local synthetic records.
 
