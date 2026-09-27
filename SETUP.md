@@ -1,7 +1,9 @@
 # Pentacle setup
 
 Follow [Local setup in README](README.md#local-setup) to install dependencies,
-start the daemon, issue a desktop credential and launch the app.
+start the daemon and serve the web client with `npm run build:web`. See
+[the web host reference](server/README.md). The Electron client remains
+maintained; desktop rollout happens on demand.
 
 Copy `pentacle.config.example.js` to a private file and select it with
 `PENTACLE_CONFIG`. Use the [desktop config reference](docs/desktop_config.md)

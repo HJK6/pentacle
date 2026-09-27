@@ -9,6 +9,9 @@ for its own patterns. Run: `python3 scripts/test_check_public_residue.py`.
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
+import tempfile
 from pathlib import Path
 
 _mod_path = Path(__file__).resolve().with_name("check_public_residue.py")
@@ -54,7 +57,35 @@ def main() -> int:
     assert cpr._line_hits("something " + "host" + "b here")
     assert not cpr._line_hits("a perfectly clean line 10.0.0.1")
 
-    print("ok - check_public_residue detectors: CGNAT + anonymizer")
+    for word in ["host" + suffix for suffix in ("a", "b", "c", "config", "admission", "busy")]:
+        assert cpr._line_hits(word), "default web detector changed"
+        assert not cpr._line_hits(word, True), "fixed mobile vocabulary rejected"
+        assert not cpr._line_hits("optimistic_" + word + "_one", True), "underscore boundary rejected"
+    assert cpr._line_hits("host" + "alpha", True), "non-approved residue exempted"
+    assert cpr._line_hits("ab" + "ra", True), "other anonymizer exempted"
+    for address in hits:
+        assert cpr._line_hits("host" + "a " + address, True), "mobile profile masked address"
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        source = root / "source.txt"
+        source.write_text("id_" + "host" + "b_fixture " + "host" + "config")
+        subprocess.run(["git", "-C", str(root), "add", "source.txt"], check=True)
+        allowlist = root / "allowlist.json"
+        allowlist.write_text(json.dumps({"version": 1, "profile": "mobile-synthetic", "fixtures": {}}))
+        assert cpr.check(root, allowlist)["passed"]
+        source.write_text(source.read_text() + " " + hits[0])
+        assert not cpr.check(root, allowlist)["passed"], "profile hid original address"
+        allowlist.write_text(json.dumps({"version": 1, "profile": "arbitrary", "fixtures": {}}))
+        try:
+            cpr.check(root, allowlist)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unknown profile accepted")
+
+    print("ok - check_public_residue detectors: default web + bounded mobile profile")
     return 0
 
 
