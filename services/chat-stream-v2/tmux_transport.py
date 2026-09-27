@@ -408,14 +408,33 @@ class Tmux:
         log.warning("pane_mode_cancelled stream=%s mode=%s", name, mode)
         return False
 
-    async def paste(self, name: str, text: str) -> str | None:
+    async def input_mode_clear(self, name: str) -> bool:
+        """Fail closed when the pane is in a tmux mode or cannot be inspected."""
+        rc, out = await self.run(
+            "display-message", "-p", "-t", _target(name), "#{pane_in_mode} #{pane_mode}",
+        )
+        return rc == 0 and out.strip().split(maxsplit=1)[:1] == ["0"]
+
+    async def paste_compact(self, name: str, text: str) -> str | None:
+        """Keep a compaction command out of copy mode, including a late mode entry."""
+        return await self.paste(name, text, reject_mode=True)
+
+    async def paste(self, name: str, text: str, *, reject_mode: bool = False) -> str | None:
         """Human-equivalent injection (ledger req 1): ONE atomic bracketed
         paste of the whole message, then Enter. No chunking, no readiness
         gating, no stray control sequences. tmux 3.4 does not treat `-` as a
         portable stdin path for `load-buffer`, so stage one private local or
         remote file and load that path instead."""
         assert_injectable(text)  # the one chokepoint every injection passes
-        pane_in_mode = await self._cancel_copy_mode(name)
+        if reject_mode:
+            if not await self.input_mode_clear(name):
+                raise VerbError(
+                    "pane_mode_active", "pane mode blocks compaction input",
+                    phase="not_started",
+                )
+            pane_in_mode = False
+        else:
+            pane_in_mode = await self._cancel_copy_mode(name)
         buf = f"v2-{uuid.uuid4().hex[:8]}"
         data = text.encode("utf-8")
         paste_path = _remote_paste_path() if self.ssh_target is not None else None
@@ -439,6 +458,13 @@ class Tmux:
             # that a provider TUI finished folding the bracketed paste into its
             # composer. Give that transition one normal poll tick before Enter.
             await asyncio.sleep(POLL_INTERVAL_S)
+            if reject_mode and not await self.input_mode_clear(name):
+                # The body may already be in the composer. Do not cancel tmux
+                # mode or send Enter; the caller must retain pending_input.
+                raise VerbError(
+                    "pane_mode_active", "pane mode changed after compaction paste",
+                    phase=phase,
+                )
             phase = "enter_failed"
             rc, out = await self.run("send-keys", "-t", _target(name), "Enter")
             if rc != 0:
@@ -468,9 +494,21 @@ class Tmux:
                     log.warning("remote paste cleanup failed for %s", paste_path)
         return "pane_in_mode" if pane_in_mode else None
 
-    async def send_enter(self, name: str) -> str | None:
+    async def send_enter_compact(self, name: str) -> str | None:
+        """Recover only while the pane remains outside tmux modes."""
+        return await self.send_enter(name, reject_mode=True)
+
+    async def send_enter(self, name: str, *, reject_mode: bool = False) -> str | None:
         """Enter-only retry seam; callers must never paste the body again."""
-        pane_in_mode = await self._cancel_copy_mode(name)
+        if reject_mode:
+            if not await self.input_mode_clear(name):
+                raise VerbError(
+                    "pane_mode_active", "pane mode blocks compaction Enter",
+                    phase="not_started",
+                )
+            pane_in_mode = False
+        else:
+            pane_in_mode = await self._cancel_copy_mode(name)
         rc, out = await self.run("send-keys", "-t", _target(name), "Enter")
         if rc != 0:
             raise VerbError(

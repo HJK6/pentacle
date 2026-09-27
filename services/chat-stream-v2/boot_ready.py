@@ -75,6 +75,27 @@ def claude_prompt_ready(pane_text: str) -> bool:
     return "⏵⏵ bypass permissions" in pane_text and "❯" in pane_text
 
 
+def claude_composer_empty(pane_text: str) -> bool:
+    """Conservatively prove the current Claude composer contains no draft.
+
+    The prompt marker may appear in history, so inspect the last one and allow
+    only the persistent divider and permission footer below it. Unknown chrome
+    fails closed rather than risking a slash command appended to a user draft.
+    """
+    lines = pane_text.splitlines()
+    start = _last_claude_input_start(lines)
+    if start is None or lines[start].strip() != "❯":
+        return False
+    for line in lines[start + 1:]:
+        content = line.strip()
+        if not content or set(content) == {"─"}:
+            continue
+        if content.startswith("⏵⏵ bypass permissions"):
+            continue
+        return False
+    return True
+
+
 def _codex_input_line(line: str) -> bool:
     return line.strip().startswith(("›", "❯"))
 
@@ -245,6 +266,31 @@ def claude_prompt_in_active_draft(pane_text: str, prompt: str) -> bool:
     if not _claude_prompt_in_lines(lines[input_start:], prompt):
         return False
     return not _claude_post_submit_marker_after(lines, input_start)
+
+
+def claude_command_exactly_in_active_draft(pane_text: str, command: str) -> bool:
+    """Allow Enter recovery only for the fully visible, sole active command.
+
+    Claude's ``[Pasted text #N]`` placeholder hides the pasted bytes and cannot
+    establish which text Enter would submit. A partial or mixed draft likewise
+    leaves the possible input fenced for human review.
+    """
+    lines = pane_text.splitlines()
+    start = _last_claude_input_start(lines)
+    if start is None:
+        return False
+    draft = [lines[start].strip().removeprefix("❯").strip()]
+    for line in lines[start + 1:]:
+        content = line.strip()
+        if not content or set(content) == {"─"}:
+            continue
+        if content.startswith("⏵⏵ bypass permissions"):
+            break
+        if content.startswith(("✻ ", "✶ ", "✳ ", "⏺ ", "⎿ ", "● ")):
+            return False
+        draft.append(content)
+    visible = _normalize_for_claude_pane_match(" ".join(draft))
+    return visible == _normalize_for_claude_pane_match(command)
 
 
 def _normalize_for_codex_pane_match(text: str) -> str:
@@ -550,4 +596,3 @@ DRAFT_PREDICATES = {
 # tell forever. Tells ALWAYS submit — the TUIs queue mid-turn input natively.
 # The predicates above are submission EVIDENCE, gathered after the paste; they
 # must never become a precondition for it.
-

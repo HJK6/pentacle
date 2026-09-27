@@ -49,12 +49,16 @@ from boot_ready import (
     DRAFT_PREDICATES,
     SUBMIT_PREDICATES,
     _last_claude_input_start,
+    claude_command_exactly_in_active_draft,
+    claude_composer_empty,
+    claude_prompt_ready,
     claude_prompt_in_active_draft,
     codex_prompt_in_active_draft,
     codex_reset_interstitial_visible,
     codex_tui_session_visible,
     submission_proven_after,
 )
+from mirror import _extract_live_state
 from outbound_notices import ensure_notice_marker, notice_needle
 from sessions import VerbError
 from tmux_transport import RECEIPT_TIMEOUT_S, assert_injectable, receipt_needle, sanitize_injectable
@@ -404,6 +408,102 @@ class Comms:
     def _pane_input_lock(self, target: str) -> asyncio.Lock:
         """Return the Comms-owned lock for one resolved ``host:session``."""
         return self._pane_input_locks.setdefault(target, asyncio.Lock())
+
+    async def submit_context_compact(
+        self, stream_id: str, command: str, *, expected_generation: str,
+        before_input: Any,
+    ) -> dict[str, Any]:
+        """Submit one daemon-owned Claude slash command under the shared pane lock.
+
+        The caller owns the source lifecycle lock. This method rechecks the
+        live row and composer after acquiring the pane lock, then persists a
+        possible-input fence through `before_input` before touching the pane.
+        Only a current-generation USER event confirms submission.
+        """
+        host, name = self.sessions.split(stream_id)
+        async with self._pane_input_lock(stream_id):
+            durable = await self.store.fetch_session(host, name) or {}
+            live = self.sessions.get(stream_id) or {}
+            session_generation = str(live.get("session_generation") or "")
+            local_mirror = (
+                (live.get("local_mirror") is True or live.get("mirror_local") is True)
+                and str(live.get("mirror_generation") or live.get("local_mirror_generation") or "")
+                == session_generation
+            )
+            fresh_capture = (
+                live.get("capture_generation") == session_generation
+                and live.get("capture_liveness") == "idle"
+            )
+            if (
+                durable.get("status") != "open"
+                or durable.get("created_at") != expected_generation
+                or durable.get("provider") != "claude"
+                or durable.get("context_level") != "compact"
+                or live.get("created_at") != expected_generation
+                or not session_generation
+                or live.get("working") is not False
+                or not (local_mirror or fresh_capture)
+                or live.get("capture_liveness") not in {None, "idle"}
+                or live.get("pane_status") != "pane_alive"
+                or live.get("routing_integrity") == "mismatch"
+                or live.get("host_status") == "offline"
+                or live.get("limit_stalled") is True
+                or live.get("parked") is True
+            ):
+                return {"outcome": "deferred", "reason": "seat_not_idle_or_current"}
+            if self.hosts is not None and not self.hosts.is_local(host):
+                await self.hosts.ensure_reachable(host, "context_compact")
+            tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
+            if not await tmux.input_mode_clear(name):
+                return {"outcome": "deferred", "reason": "pane_mode_active_or_unknown"}
+            pane = await tmux.capture(name)
+            if (
+                not claude_prompt_ready(pane)
+                or not claude_composer_empty(pane)
+                or _extract_live_state(pane, "claude")["working"] is True
+            ):
+                return {"outcome": "deferred", "reason": "composer_not_proven_empty"}
+            watermark = await self._watermark_before_action(stream_id)
+            if watermark.state != "reachable":
+                return {"outcome": "deferred", "reason": "watermark_unavailable"}
+            await before_input(watermark)
+
+            async def confirm_or_recover() -> dict[str, Any]:
+                # A pane echo alone is never a submission receipt. An exact
+                # active draft permits one Enter-only recovery under this lock.
+                try:
+                    proof = await self._durable_submission_evidence(
+                        stream_id, command, watermark=watermark,
+                    )
+                    if proof.proven:
+                        return {"outcome": "submitted", **proof.audit_fields()}
+                    current_pane = await tmux.capture(name)
+                    if (claude_command_exactly_in_active_draft(current_pane, command)
+                            and await tmux.input_mode_clear(name)):
+                        await tmux.send_enter_compact(name)
+                        proof = await self._durable_submission_evidence(
+                            stream_id, command, watermark=watermark,
+                        )
+                        if proof.proven:
+                            return {"outcome": "submitted", **proof.audit_fields()}
+                    return {"outcome": "pending_input", **proof.audit_fields()}
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    return {"outcome": "pending_input", "reason": type(exc).__name__}
+
+            try:
+                await tmux.paste_compact(name, command)
+            except VerbError as exc:
+                phase = str(exc.extra.get("phase") or "body_maybe_pasted")
+                if phase == "not_started":
+                    return {"outcome": "no_input", "reason": exc.code}
+                return await confirm_or_recover()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # pane input may already have happened
+                return await confirm_or_recover()
+            return await confirm_or_recover()
 
     async def _watermark_before_action(
         self, stream_id: str,

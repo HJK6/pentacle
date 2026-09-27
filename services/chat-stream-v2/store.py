@@ -2107,7 +2107,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         Recording transitions here preserves a compaction between nudge sweeps.
         The existing nudge basis holds the episode; no sessions schema changes.
         """
-        ranks = {"none": 0, "advisory": 1, "handoff": 2}
+        ranks = {"none": 0, "advisory": 1, "compact": 2}
         if context_level not in ranks or context_tokens < 0 or model_context_window <= 0:
             return None
         def epoch(stamp: str) -> float | None:
@@ -2136,15 +2136,38 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                              context_level=?, context_updated_at=? WHERE host=? AND session_name=?""",
                              (context_tokens, model_context_window, context_level,
                               context_updated_at, host, session_name))
-                for level in ("advisory", "handoff"):
+                for level in ("advisory", "compact"):
                     kind = "context_" + level
                     prior = conn.execute("SELECT basis FROM v2_nudge_state WHERE stream_id=? AND kind=?",
                                          (sid, kind)).fetchone()
                     basis = json.loads(prior[0]) if prior is not None else {}
-                    active = ranks[context_level] >= ranks[level]
+                    # A compact crossing stays in one episode through the
+                    # advisory band. Only an observation below advisory, or a
+                    # new generation, rearms a later crossing.
+                    active = (
+                        ranks[context_level] >= 1 and
+                        (context_level == "compact" or basis.get("active"))
+                        if level == "compact"
+                        else ranks[context_level] >= 1
+                    )
+                    if level == "compact" and basis.get("generation") != expected_generation:
+                        active = context_level == "compact"
                     if prior is None and not active:
                         continue
                     if basis.get("generation") != expected_generation or active and not basis.get("active"):
+                        # A below-advisory observation starts a new crossing,
+                        # but it cannot erase proof debt from possible pane
+                        # input in the previous crossing. Keep that fence
+                        # across same-generation rearms until its USER event
+                        # is reconciled; a new generation never inherits it.
+                        pending_prior = None
+                        if level == "compact" and basis.get("generation") == expected_generation:
+                            for key in ("attempt", "pending_prior_attempt"):
+                                candidate = basis.get(key)
+                                if (isinstance(candidate, dict)
+                                        and candidate.get("outcome") == "pending_input"):
+                                    pending_prior = candidate
+                                    break
                         basis = {
                             "version": 1, "generation": expected_generation,
                             "epoch": uuid.uuid4().hex, "deliveries": {},
@@ -2152,9 +2175,11 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                                          "tokens": context_tokens, "window": model_context_window,
                                          "level": level},
                         }
+                        if pending_prior is not None:
+                            basis["pending_prior_attempt"] = pending_prior
                     basis["active"] = active
-                    if level == "advisory" and context_level == "handoff":
-                        basis["superseded"] = True
+                    if level == "advisory":
+                        basis.pop("superseded", None)
                     conn.execute("""INSERT INTO v2_nudge_state (stream_id,kind,last_nudged_at,basis)
                                  VALUES (?,?,0,?) ON CONFLICT(stream_id,kind)
                                  DO UPDATE SET basis=excluded.basis""",

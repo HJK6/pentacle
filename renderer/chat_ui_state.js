@@ -175,7 +175,8 @@ function statusCardIndicators(streamSession, card) {
     // Window % must be visible on the badge (not just the tooltip).
     const pctText = hasWindow ? ` · ${Math.round((tokens / windowTokens) * 100)}%` : '';
     const level = String(streamSession.context_level || '').toLowerCase();
-    const levelClass = level ? ` is-ctx-${escapeHtml(level)}` : '';
+    const levelClass = (level === 'advisory' || level === 'compact')
+      ? ` is-ctx-${escapeHtml(level)}` : '';
     const title = hasWindow
       ? `${escapeHtml(String(tokens))} context tokens of ${escapeHtml(String(windowTokens))}`
       : `${escapeHtml(String(tokens))} context tokens`;
@@ -367,7 +368,7 @@ function renderStatusView(streamSession = {}, { nowMs = Date.now() } = {}) {
 
 // Attention + content state for a session, driving the header glyph:
 //  - hasContent: a card OR any daemon-attached indicator exists (toggle enabled)
-//  - attention: a spec issue, advisory/handoff context level, or planned handoff
+//  - attention: a spec issue, advisory/compact context level, or planned handoff
 //    exists — the closed glyph must signal this so the at-a-glance cue is kept.
 function statusCardAttentionState(streamSession = {}) {
   const s = streamSession || {};
@@ -376,9 +377,9 @@ function statusCardAttentionState(streamSession = {}) {
   const tokens = Number(s.context_tokens);
   const hasContext = Number.isFinite(tokens) && tokens > 0;
   const level = String(s.context_level || '').toLowerCase();
-  const levelSignal = level === 'advisory' || level === 'handoff';
+  const levelSignal = level === 'advisory' || level === 'compact';
   // levelSignal is folded into hasIndicators so the "closed-glyph attention iff
-  // advisory/handoff level" contract can never contradict a disabled glyph. The
+  // advisory/compact level" contract can never contradict a disabled glyph. The
   // daemon always sends context_tokens alongside a level, so this only matters
   // as a defensive invariant.
   const hasIndicators = specIssues.length > 0 || hasContext || levelSignal;
@@ -395,7 +396,8 @@ function statusCardContextBadge(streamSession) {
   const hasWindow = Number.isFinite(windowTokens) && windowTokens > 0;
   const pctText = hasWindow ? ` · ${Math.round((tokens / windowTokens) * 100)}%` : '';
   const level = String(streamSession.context_level || '').toLowerCase();
-  const levelClass = level ? ` is-ctx-${escapeHtml(level)}` : '';
+  const levelClass = (level === 'advisory' || level === 'compact')
+    ? ` is-ctx-${escapeHtml(level)}` : '';
   const title = hasWindow
     ? `${escapeHtml(String(tokens))} context tokens of ${escapeHtml(String(windowTokens))}`
     : `${escapeHtml(String(tokens))} context tokens`;

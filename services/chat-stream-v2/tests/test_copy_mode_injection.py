@@ -11,7 +11,7 @@ import pytest
 import comms as comms_module
 import spawnctl as spawnctl_module
 from comms import Comms
-from sessions import Sessions
+from sessions import Sessions, VerbError
 from spawnctl import SpawnCtl
 from tmux_transport import Tmux
 from store import Store
@@ -60,6 +60,46 @@ def test_tmux_paste_still_submits_when_copy_mode_cannot_cancel() -> None:
     assert reason == "pane_in_mode"
     assert "paste-buffer" in [call[0] for call in tmux.calls]
     assert tmux.calls[-1] == ("send-keys", "-t", "=copy-mode-target:", "Enter")
+
+
+def test_compact_paste_rejects_copy_mode_before_touching_pane() -> None:
+    tmux = ModeTmux(cancel_succeeds=True)
+
+    with pytest.raises(VerbError) as error:
+        asyncio.run(tmux.paste_compact(NAME, BODY))
+
+    assert error.value.extra["phase"] == "not_started"
+    assert [call[0] for call in tmux.calls] == ["display-message"]
+
+
+def test_compact_enter_rejects_copy_mode_without_sending_key() -> None:
+    tmux = ModeTmux(cancel_succeeds=True)
+
+    with pytest.raises(VerbError) as error:
+        asyncio.run(tmux.send_enter_compact(NAME))
+
+    assert error.value.extra["phase"] == "not_started"
+    assert [call[0] for call in tmux.calls] == ["display-message"]
+
+
+def test_compact_paste_rechecks_mode_between_body_and_enter() -> None:
+    tmux = ModeTmux(cancel_succeeds=True)
+    tmux.in_mode = False
+    original_run = tmux.run
+
+    async def enter_mode_after_body(*args: str, **kwargs: object) -> tuple[int, str]:
+        result = await original_run(*args, **kwargs)
+        if args[0] == "paste-buffer":
+            tmux.in_mode = True
+        return result
+
+    tmux.run = enter_mode_after_body
+    with pytest.raises(VerbError) as error:
+        asyncio.run(tmux.paste_compact(NAME, BODY))
+
+    assert error.value.extra["phase"] == "body_maybe_pasted"
+    assert "paste-buffer" in [call[0] for call in tmux.calls]
+    assert not any(call[0] == "send-keys" for call in tmux.calls)
 
 
 def test_tmux_paste_settles_before_enter(monkeypatch: pytest.MonkeyPatch) -> None:

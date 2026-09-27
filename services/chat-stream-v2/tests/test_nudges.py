@@ -54,6 +54,19 @@ class RecordingTmux:
         self.pasted.append(text)
         self.pasted_by_name.append((name, text))
 
+    async def input_mode_clear(self, name: str) -> bool:
+        return name not in self.dead
+
+    async def paste_compact(self, name: str, text: str) -> None:
+        if not await self.input_mode_clear(name):
+            raise RuntimeError("pane mode blocks input")
+        await self.paste(name, text)
+
+    async def send_enter_compact(self, name: str) -> None:
+        if not await self.input_mode_clear(name):
+            raise RuntimeError("pane mode blocks Enter")
+        await self.send_enter(name)
+
     async def capture(self, name: str) -> str:
         return self._panes.get(name, self.IDLE)
 

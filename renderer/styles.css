@@ -2252,7 +2252,7 @@ body.web-sidebar-narrow .grid.maximized .grid-cell.narrow-active {
   border-color: #f7d15466;
 }
 
-.slot-status-card-badge.is-context.is-ctx-handoff {
+.slot-status-card-badge.is-context.is-ctx-compact {
   color: #f47067;
   border-color: #f4706766;
 }
@@ -2367,7 +2367,7 @@ body.web-sidebar-narrow .grid.maximized .grid-cell.narrow-active {
   padding: 2px 7px; border: 1px solid var(--pc-line, var(--border)); border-radius: 999px;
 }
 .session-status-context.is-ctx-advisory { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, transparent); }
-.session-status-context.is-ctx-handoff { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.session-status-context.is-ctx-compact { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
 .session-status-handoff {
   font-size: 11px; font-weight: 700; color: var(--red);
   padding: 2px 8px; border: 1px solid color-mix(in srgb, var(--red) 45%, transparent); border-radius: 999px;

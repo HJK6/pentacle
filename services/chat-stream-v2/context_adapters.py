@@ -58,9 +58,9 @@ def _claude_window(model: str | None) -> int:
     )
 
 
-def _context_level(tokens: int, advisory: int, handoff: int) -> str:
-    if tokens >= handoff:
-        return "handoff"
+def _context_level(tokens: int, advisory: int, compact: int) -> str:
+    if tokens >= compact:
+        return "compact"
     if tokens >= advisory:
         return "advisory"
     return "none"
@@ -74,33 +74,17 @@ def context_fields(
 ) -> tuple[int, int, str]:
     """Translate one reading into the four persisted v2 context dimensions.
 
-    Codex compacts its own context automatically, so it receives no routine
-    context-threshold handoff/advisory pressure: its level is always "none"
-    (never advisory/handoff). The real tokens and window are still reported so
-    the context badge keeps displaying usage, but "none" suppresses the context
-    nudge (``ledger._context_fresh``), prevents arming a nudge basis
-    (``store.update_context``), and keeps the status card from showing
-    handoff-level pressure. Deliberate ``spawn --handoff``, scheduled and
-    recovery handoff are independent of this level. Claude is unchanged: it uses
-    its model window and the capped 70/85% thresholds.
-    See spec_pentacle__codex_context_handoff_policy_2026_09.
+    Codex compacts itself, including the configured assistant backend. It
+    retains token/window telemetry but never receives threshold pressure.
+    Claude warns at the capped 70%/400K line and requests compaction at the
+    capped 85%/500K line. Deliberate, scheduled and recovery handoff are
+    independent of these levels.
     """
     tokens = int(reading.tokens)
     if provider == "codex":
         window = int(reading.model_context_window or 0)
         if window <= 0:
             raise ValueError("Codex context reading lacks a positive window")
-        # Codex normally compacts itself and must not receive routine pressure.
-        # A configured pane-less assistant backend is the narrow exception: its
-        # managed handoff keeps lane/pending-question/child state durable, so
-        # operators need an advisory before the backend exhausts its working
-        # window.  No role alias or provider-wide change opts a session in.
-        if assistant_backend:
-            # Reuse the established 70/85% runway for smaller windows;
-            # the assistant absolute limits remain 120K/200K on larger ones.
-            advisory = min(120_000, round(0.70 * window))
-            handoff = min(200_000, round(0.85 * window))
-            return tokens, window, _context_level(tokens, advisory, handoff)
         return tokens, window, "none"
     if provider == "claude":
         window = _claude_window(reading.model)
@@ -111,14 +95,14 @@ def context_fields(
             ),
             round(env_number(os.environ, "PENTACLE_CONTEXT_ADVISORY_PCT", 0.70, float) * window),
         )
-        handoff = min(
+        compact = min(
             env_number(
-                os.environ, "PENTACLE_CONTEXT_HANDOFF_ABS", 600_000,
+                os.environ, "PENTACLE_CONTEXT_COMPACT_ABS", 500_000,
                 lambda raw: int(float(raw)),
             ),
-            round(env_number(os.environ, "PENTACLE_CONTEXT_HANDOFF_PCT", 0.85, float) * window),
+            round(env_number(os.environ, "PENTACLE_CONTEXT_COMPACT_PCT", 0.85, float) * window),
         )
-        return tokens, window, _context_level(tokens, advisory, handoff)
+        return tokens, window, _context_level(tokens, advisory, compact)
     raise ValueError(f"unsupported context provider: {provider}")
 
 

@@ -51,6 +51,8 @@ from outbound_notices import (
     OutboundNoticeQueue,
 )
 from message_envelopes import build_message_envelope, build_notice_body
+from submission_events import EventWatermark
+from tmux_transport import sanitize_injectable
 
 SERVICES_ROOT = str(Path(__file__).resolve().parents[1])
 if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide schema, not a v2 copy
@@ -1361,7 +1363,12 @@ class AwaiterResolutionJob:
 NUDGE_KIND_TITLE = "title"
 NUDGE_KIND_CARD = "status_card"
 NUDGE_KIND_CONTEXT_ADVISORY = "context_advisory"
-NUDGE_KIND_CONTEXT_HANDOFF = "context_handoff"
+NUDGE_KIND_CONTEXT_COMPACT = "context_compact"
+CONTEXT_COMPACT_COMMAND = (
+    "/compact Preserve verbatim: spec id and path; open children with stream ids and roles; "
+    "active grants, windows and holds; pending operator prompts; the last three decisions "
+    "with evidence pointers; current next action. Drop tool output and resolved threads."
+)
 
 NUDGE_TITLE_TEXT = 'Please run: agent-orch title "<succinct durable goal>" (2-7 words).'
 NUDGE_CARD_TEXT = (
@@ -1438,6 +1445,8 @@ class NudgeConfig:
     engaged_window_s: float = NUDGE_DEFAULT_ENGAGED_WINDOW_S
     backoff_base_s: float = NUDGE_DEFAULT_BACKOFF_BASE_S
     backoff_max_s: float = NUDGE_DEFAULT_BACKOFF_MAX_S
+    compact_enabled: bool = True
+    compact_cooldown_s: float = 600.0
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "NudgeConfig":
@@ -1466,6 +1475,12 @@ class NudgeConfig:
             engaged_window_s=env_number(
                 e, "ENGAGED_WINDOW_S", NUDGE_DEFAULT_ENGAGED_WINDOW_S, float,
                 prefix=_NUDGE_ENV_PREFIX,
+            ),
+            compact_enabled=env_number(
+                e, "COMPACT_ENABLED", 1, int, prefix="PENTACLE_CONTEXT_",
+            ) != 0,
+            compact_cooldown_s=env_number(
+                e, "COMPACT_COOLDOWN_S", 600.0, float, prefix="PENTACLE_CONTEXT_",
             ),
         )
 
@@ -1747,7 +1762,7 @@ class NudgeJob:
         return bool(
             self._context_recipient_live(row)
             and row.get("provider") in _NUDGE_PROVIDERS
-            and row.get("context_level") in {"advisory", "handoff"}
+            and row.get("context_level") in {"advisory", "compact"}
             and isinstance(tokens, (int, float)) and not isinstance(tokens, bool)
             and math.isfinite(tokens) and tokens >= 0
             and isinstance(window, (int, float)) and not isinstance(window, bool)
@@ -1777,7 +1792,7 @@ class NudgeJob:
                     log.debug("subsystem=context_nudge bug_ref=context_notifications_handoff_proof "
                               "suppressed source=%s reason=ineligible_or_stale", sid)
                     continue
-                kind = "context_" + row["context_level"]
+                kind = NUDGE_KIND_CONTEXT_ADVISORY
                 state = await self.store.nudge_state(sid, kind)
                 basis = json.loads(state["basis"]) if state else {}
                 if (not basis.get("active") or basis.get("superseded")
@@ -1789,7 +1804,9 @@ class NudgeJob:
                     route = await self.comms.resolve_route_target(parent)
                     target = str(route.get("final_target") or "")
                     parent_row = self.sessions.get(target) or {}
-                    if route.get("ok") and target != sid and self._context_recipient_live(parent_row):
+                    if (route.get("ok") and target != sid
+                            and self._context_recipient_live(parent_row)
+                            and parent_row.get("provider") != "codex"):
                         recipients.append((target, str(parent_row["created_at"])))
                     else:
                         log.debug("subsystem=context_nudge bug_ref=context_notifications_handoff_proof "
@@ -1832,13 +1849,13 @@ class NudgeJob:
                         identity = [sid, row["created_at"], kind, basis["epoch"], target, generation]
                         tell_id = "context-nudge:" + hashlib.sha256(json.dumps(identity).encode()).hexdigest()
                         crossing = basis["crossing"]
-                        action = ("Prepare a cold-resumable checkpoint and arrange succession with your parent/Nexus."
-                                  if kind == NUDGE_KIND_CONTEXT_HANDOFF else
-                                  "Review context quality and prepare your next checkpoint.")
+                        action = (
+                            "Compact at your next safe point: finish the current step, "
+                            "write your checkpoint, then run /compact. "
+                            "The daemon will submit /compact at the compact threshold if needed."
+                        )
                         if target != sid:
-                            action = (f"Coordinate a checkpoint and succession for {sid}."
-                                      if kind == NUDGE_KIND_CONTEXT_HANDOFF else
-                                      f"Review context quality and checkpoint readiness for {sid}.")
+                            action = f"Coordinate safe compaction and checkpoint readiness for {sid}."
                         text = (f"{kind}: {sid} crossed {crossing['tokens']:,} context tokens "
                                 f"of {crossing['window']:,} at {crossing['observed_at']}. {action}")
                         delivery = {"tell_id": tell_id, "message": text}
@@ -1883,6 +1900,172 @@ class NudgeJob:
                              "source=%s kind=%s epoch=%s target=%s outcome=%s tell_id=%s",
                              sid, kind, basis["epoch"], target, delivery["outcome"], delivery["tell_id"])
         return result
+
+    async def _compact_pass(
+        self, rows: list[dict[str, Any]], now: float, result: NudgePassResult,
+    ) -> None:
+        """Submit one compact command per durable crossing, with no blind retry."""
+        if not self.config.compact_enabled:
+            return
+        command = sanitize_injectable(CONTEXT_COMPACT_COMMAND)
+        for initial in sorted(rows, key=lambda r: str(r.get("stream_id") or "")):
+            sid = str(initial.get("stream_id") or "")
+            if not sid or initial.get("provider") != "claude":
+                continue
+            async with self.store.routing_integrity_lifecycle_lock(sid):
+                row = self.sessions.get(sid) or {}
+                if row.get("context_level") != "compact" or not self._context_fresh(row, now):
+                    continue
+                state = await self.store.nudge_state(sid, NUDGE_KIND_CONTEXT_COMPACT)
+                basis = json.loads(state["basis"]) if state else {}
+                if not basis.get("active") or basis.get("generation") != row.get("created_at"):
+                    continue
+                prior_pending = basis.get("pending_prior_attempt")
+                if (isinstance(prior_pending, dict)
+                        and prior_pending.get("outcome") == "pending_input"):
+                    saved = prior_pending.get("watermark")
+                    if isinstance(saved, int):
+                        proof = await self.comms.submission_proof.lookup(
+                            sid, expected_text=command,
+                            watermark=EventWatermark(sid, saved, "reachable"),
+                        )
+                        if proof.proven:
+                            prior_pending.update(outcome="submitted", **proof.audit_fields())
+                            await self.store.record_nudge(
+                                sid, NUDGE_KIND_CONTEXT_COMPACT, now,
+                                json.dumps(basis, sort_keys=True),
+                            )
+                        else:
+                            await self._alert_compact_pending(
+                                sid, str(prior_pending.get("id") or ""),
+                            )
+                    else:
+                        await self._alert_compact_pending(
+                            sid, str(prior_pending.get("id") or ""),
+                        )
+                    continue  # reconcile before any attempt in the new epoch
+                attempt = basis.get("attempt")
+                if isinstance(attempt, dict):
+                    if attempt.get("outcome") == "submitted":
+                        continue
+                    if attempt.get("outcome") == "pending_input":
+                        saved = attempt.get("watermark")
+                        if isinstance(saved, int):
+                            proof = await self.comms.submission_proof.lookup(
+                                sid, expected_text=command,
+                                watermark=EventWatermark(sid, saved, "reachable"),
+                            )
+                            if proof.proven:
+                                attempt.update(outcome="submitted", **proof.audit_fields())
+                                await self.store.record_nudge(
+                                    sid, NUDGE_KIND_CONTEXT_COMPACT, now,
+                                    json.dumps(basis, sort_keys=True),
+                                )
+                            else:
+                                await self._alert_compact_pending(sid, str(attempt.get("id") or ""))
+                        continue
+                    if attempt.get("outcome") != "no_input":
+                        continue
+                    if now - float(attempt.get("at") or 0) < self.config.compact_cooldown_s:
+                        continue
+                result.candidates += 1
+                if result.attempted >= self.config.max_per_pass:
+                    result._capped = True
+                    continue
+                ordinal = int(attempt.get("ordinal") or 0) + 1 if isinstance(attempt, dict) else 1
+                identity = [sid, row["created_at"], basis["epoch"], ordinal]
+                attempt_id = "context-compact:" + hashlib.sha256(
+                    json.dumps(identity, separators=(",", ":")).encode(),
+                ).hexdigest()
+                prepared = False
+
+                async def before_input(watermark: EventWatermark) -> None:
+                    nonlocal prepared
+                    current = self.sessions.get(sid) or {}
+                    if (current.get("context_level") != "compact"
+                            or not self._context_fresh(current, time.time())
+                            or current.get("working") is not False):
+                        raise VerbError(
+                            "context_compact_not_idle",
+                            "context or turn changed before pane input",
+                            phase="not_started",
+                        )
+                    basis["attempt"] = {
+                        "id": attempt_id, "ordinal": ordinal, "at": now,
+                        "watermark": watermark.daemon_seq,
+                        "outcome": "pending_input",
+                    }
+                    await self.store.record_nudge(
+                        sid, NUDGE_KIND_CONTEXT_COMPACT, now,
+                        json.dumps(basis, sort_keys=True),
+                    )
+                    prepared = True
+
+                try:
+                    reply = await self.comms.submit_context_compact(
+                        sid, command, expected_generation=str(row["created_at"]),
+                        before_input=before_input,
+                    )
+                except asyncio.CancelledError:
+                    raise  # persisted pending_input fences a restarted pass
+                except Exception:
+                    if prepared:
+                        result.pending += 1
+                        await self._alert_compact_pending(sid, attempt_id)
+                    else:
+                        result.errors += 1
+                    log.exception(
+                        "subsystem=context_compact bug_ref=assistant_context_compaction "
+                        "attempt_failed stream=%s attempt_id=%s", sid, attempt_id,
+                    )
+                    continue
+                if not prepared:
+                    continue  # an ineligible seat or occupied draft caused no input
+                result.attempted += 1
+                basis["attempt"].update(reply)
+                await self.store.record_nudge(
+                    sid, NUDGE_KIND_CONTEXT_COMPACT, now,
+                    json.dumps(basis, sort_keys=True),
+                )
+                log.info(
+                    "subsystem=context_compact bug_ref=assistant_context_compaction "
+                    "stream=%s generation=%s epoch=%s attempt_id=%s outcome=%s proof_event_id=%s",
+                    sid, row["created_at"], basis["epoch"], attempt_id,
+                    reply["outcome"], reply.get("proof_event_id"),
+                )
+                if reply["outcome"] == "submitted":
+                    result.sent += 1
+                elif reply["outcome"] == "no_input":
+                    result.errors += 1
+                else:
+                    result.pending += 1
+                    log.warning(
+                        "subsystem=context_compact bug_ref=assistant_context_compaction "
+                        "pending_input stream=%s attempt_id=%s", sid, attempt_id,
+                    )
+                    await self._alert_compact_pending(sid, attempt_id)
+
+    async def _alert_compact_pending(self, sid: str, attempt_id: str) -> None:
+        """Escalate one ambiguous command without letting alert I/O cause repaste."""
+        if self.notify is None:
+            return
+        try:
+            await self.notify.create_internal_notification(
+                producer="context_compact",
+                title="Compaction input needs review",
+                body=(
+                    f"{sid} has an unconfirmed /compact attempt {attempt_id}. "
+                    "Inspect the saved USER-event watermark and pane before any manual action; "
+                    "the daemon will not repaste it."
+                ),
+                dedup_key=attempt_id,
+                severity="warning",
+            )
+        except Exception:
+            log.exception(
+                "subsystem=context_compact bug_ref=assistant_context_compaction "
+                "pending_alert_failed stream=%s attempt_id=%s", sid, attempt_id,
+            )
 
     # -- one pass ----------------------------------------------------------
 
@@ -1931,6 +2114,7 @@ class NudgeJob:
                 candidates.append((sid, tuple(due), row))
 
         result = await self._context_pass(rows, now)
+        await self._compact_pass(rows, now, result)
         remaining = max(0, self.config.max_per_pass - result.attempted)
         result.candidates += len(candidates)
         result._capped = result._capped or len(candidates) > remaining

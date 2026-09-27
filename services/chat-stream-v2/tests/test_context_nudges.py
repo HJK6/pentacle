@@ -8,10 +8,11 @@ import pytest
 
 from context_adapters import ContextReading, context_fields
 from test_nudges import HOST, Harness, _new_store, _iso
+from ledger import NudgeConfig
 from routing_integrity import RoutingIntegrity
 
 
-def test_hidden_handoff_crossing_notifies_seat_and_live_parent():
+def test_hidden_compact_crossing_advises_seat_and_live_parent():
     async def run():
         store = _new_store()
         try:
@@ -26,22 +27,25 @@ def test_hidden_handoff_crossing_notifies_seat_and_live_parent():
             result = await h.job.run_pass()
             assert result.sent == 2
             assert {name for name, text in h.tmux.pasted_by_name} == {'parent', 'child'}
-            assert all('context_handoff' in text for name, text in h.tmux.pasted_by_name)
+            assert all('context_advisory' in text for name, text in h.tmux.pasted_by_name)
+            assert all('context_handoff' not in text for name, text in h.tmux.pasted_by_name)
             assert len(await store.nudge_states()) >= 1
         finally:
             store.stop()
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('tokens,expected', [(250_000,'none'),(399_999,'none'),(400_000,'advisory'),(599_999,'advisory'),(600_000,'handoff')])
+@pytest.mark.parametrize('tokens,expected', [(250_000,'none'),(399_999,'none'),(400_000,'advisory'),(499_999,'advisory'),(500_000,'compact'),(600_000,'compact')])
 def test_claude_threshold_contract(tokens, expected, monkeypatch):
-    for key in ('ADVISORY_ABS','HANDOFF_ABS','ADVISORY_PCT','HANDOFF_PCT'):
+    for key in ('ADVISORY_ABS','COMPACT_ABS','ADVISORY_PCT','COMPACT_PCT'):
         monkeypatch.delenv('PENTACLE_CONTEXT_'+key, raising=False)
     assert context_fields('claude', ContextReading(tokens, model='claude-fable-5-1'))[2] == expected
 
 
 async def _context_harness(store, *, parent=True, config=None):
-    h = Harness(store, config)
+    # Legacy notification fixtures isolate advisory delivery. Dedicated
+    # compaction tests enable pane input and its durable proof path explicitly.
+    h = Harness(store, config or NudgeConfig(compact_enabled=False))
     if parent:
         await h.open('parent', visibility='hidden', user_event_count=0)
     await h.open('child', visibility='hidden', user_event_count=0,
@@ -57,7 +61,7 @@ async def _read(h, tokens, at, *, provider='claude', name='child'):
         observed_at=_iso(at))
 
 
-def test_ingestion_preserves_inter_sweep_compaction_and_restart_epochs(tmp_path):
+def test_ingestion_preserves_inter_sweep_advisory_and_restart_epochs(tmp_path):
     import json
     from ledger import NudgeJob
     async def run():
@@ -71,16 +75,14 @@ def test_ingestion_preserves_inter_sweep_compaction_and_restart_epochs(tmp_path)
             h.job=NudgeJob(h.sessions,h.comms,store)
             assert (await h.job.run_pass()).sent == 0
             assert json.loads((await store.nudge_state(f'{HOST}:child','context_advisory'))['basis'])['epoch']==first['epoch']
-            await _read(h,700_000,now-80)
-            assert (await h.job.run_pass()).sent==2
             # Both observations happen without a nudge sweep in between.
-            await _read(h,450_000,now-70)
-            await _read(h,710_000,now-60)
+            await _read(h,100_000,now-70)
+            await _read(h,450_000,now-60)
             assert (await h.job.run_pass()).sent==2
             await _read(h,100_000,now-50)
             await _read(h,450_000,now-40)
             assert (await h.job.run_pass()).sent==2
-            assert len(h.tmux.pasted)==8
+            assert len(h.tmux.pasted)==6
             assert all('480,000' not in text for text in h.tmux.pasted)
             # Reopen the SQLite worker as well as the job, not just an object.
             store.stop(); store.start(); await h.sessions.refresh()
@@ -221,16 +223,16 @@ def test_codex_high_context_never_enters_the_nudge_or_receipt_path(monkeypatch):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('window,tokens,expected', [(200_000,139_999,'none'),(200_000,140_000,'advisory'),(200_000,170_000,'handoff')])
+@pytest.mark.parametrize('window,tokens,expected', [(200_000,139_999,'none'),(200_000,140_000,'advisory'),(200_000,170_000,'compact')])
 def test_small_claude_window_keeps_percentage_caps(window,tokens,expected,monkeypatch):
-    for key in ('ADVISORY_ABS','HANDOFF_ABS','ADVISORY_PCT','HANDOFF_PCT'):
+    for key in ('ADVISORY_ABS','COMPACT_ABS','ADVISORY_PCT','COMPACT_PCT'):
         monkeypatch.delenv('PENTACLE_CONTEXT_'+key,raising=False)
     assert context_fields('claude',ContextReading(tokens,model='claude-haiku-4-5'))==(tokens,window,expected)
 
 
 def test_threshold_environment_overrides_and_codex_contract(monkeypatch):
     monkeypatch.setenv('PENTACLE_CONTEXT_ADVISORY_ABS','200000')
-    monkeypatch.setenv('PENTACLE_CONTEXT_HANDOFF_ABS','300000')
+    monkeypatch.setenv('PENTACLE_CONTEXT_COMPACT_ABS','300000')
     assert context_fields('claude',ContextReading(250_000,model='claude-fable-5-1'))[2]=='advisory'
     # Codex compacts automatically: it reports real tokens+window for display but
     # never an advisory/handoff level, at any usage and regardless of env caps.
@@ -271,16 +273,16 @@ def test_precommit_route_failure_retries_same_identity_after_cooldown(monkeypatc
     async def run():
         store=_new_store()
         try:
-            h=await _context_harness(store,config=NudgeConfig(cooldown_s=1))
+            h=await _context_harness(store,config=NudgeConfig(cooldown_s=1,compact_enabled=False))
             now=time.time();await _read(h,700_000,now-10)
             hosts=Hosts();hosts.tmux=h.tmux;h.comms.hosts=hosts
             result=await h.job.run_pass();assert result.errors==2 and not h.tmux.pasted
-            before=json.loads((await store.nudge_state(f'{HOST}:child','context_handoff'))['basis'])
+            before=json.loads((await store.nudge_state(f'{HOST}:child','context_advisory'))['basis'])
             assert (await h.job.run_pass()).attempted==0
             hosts.blocked=False;monkeypatch.setattr('ledger.time.time',lambda:now+2)
             await _read(h,710_000,now+1)
             assert (await h.job.run_pass()).sent==2
-            after=json.loads((await store.nudge_state(f'{HOST}:child','context_handoff'))['basis'])
+            after=json.loads((await store.nudge_state(f'{HOST}:child','context_advisory'))['basis'])
             assert {k:v['tell_id'] for k,v in before['deliveries'].items()}=={k:v['tell_id'] for k,v in after['deliveries'].items()}
             assert all('700,000' in text and '710,000' not in text for text in h.tmux.pasted)
         finally:store.stop()
@@ -331,7 +333,7 @@ def test_crash_after_receipt_before_episode_stamp_reconciles_without_resend():
     asyncio.run(run())
 
 
-def test_handoff_supersedes_an_unsent_advisory_until_below_advisory_rearm():
+def test_compact_band_keeps_advisory_episode_until_below_advisory_rearm():
     async def run():
         store=_new_store()
         try:
@@ -354,7 +356,7 @@ def test_reopened_source_generation_starts_a_new_episode(monkeypatch):
             h=await _context_harness(store);now=time.time()
             await _read(h,700_000,now-10)
             assert (await h.job.run_pass()).sent==2
-            old=json.loads((await store.nudge_state(f'{HOST}:child','context_handoff'))['basis'])
+            old=json.loads((await store.nudge_state(f'{HOST}:child','context_advisory'))['basis'])
             await store.update_session(HOST,'child',status='closed')
             await h.sessions.refresh()
             await h.open('child',visibility='hidden',parent_stream_id=f'{HOST}:parent',user_event_count=0)
@@ -362,7 +364,7 @@ def test_reopened_source_generation_starts_a_new_episode(monkeypatch):
             monkeypatch.setattr('ledger.time.time',lambda:now+2)
             await _read(h,700_000,now+1)
             assert (await h.job.run_pass()).sent==2
-            new=json.loads((await store.nudge_state(f'{HOST}:child','context_handoff'))['basis'])
+            new=json.loads((await store.nudge_state(f'{HOST}:child','context_advisory'))['basis'])
             assert old['generation']!=new['generation'] and old['epoch']!=new['epoch']
             assert len(h.tmux.pasted)==4
         finally:store.stop()
@@ -376,7 +378,7 @@ def test_observation_and_episode_transaction_roll_back_together():
             h=await _context_harness(store);now=time.time()
             await _read(h,450_000,now-20)
             def install_failure(conn):
-                conn.execute("CREATE TRIGGER fail_context BEFORE INSERT ON v2_nudge_state WHEN NEW.kind='context_handoff' BEGIN SELECT RAISE(ABORT,'injected episode write'); END")
+                conn.execute("CREATE TRIGGER fail_context BEFORE INSERT ON v2_nudge_state WHEN NEW.kind='context_compact' BEGIN SELECT RAISE(ABORT,'injected episode write'); END")
             await store.submit(install_failure)
             import sqlite3
             with pytest.raises(sqlite3.IntegrityError,match='injected episode write'):
@@ -414,8 +416,8 @@ def test_codex_context_level_never_nudges_or_rotates():
         t, w, level = context_fields('codex', ContextReading(tokens, model_context_window=1_000_000))
         assert (t, w) == (tokens, 1_000_000)
         assert level == 'none'
-    # A Claude seat at comparable pressure still classifies handoff (unchanged).
-    assert context_fields('claude', ContextReading(900_000, model='claude-fable-5-1'))[2] == 'handoff'
+    # A Claude seat at comparable pressure now classifies compact.
+    assert context_fields('claude', ContextReading(900_000, model='claude-fable-5-1'))[2] == 'compact'
 
     async def run():
         store = _new_store()

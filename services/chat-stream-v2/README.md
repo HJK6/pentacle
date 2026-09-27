@@ -135,25 +135,40 @@ than proof of a network outage. Fallback resolution preserves this evidence.
 
 Committed history batches yield between broadcasts so existing socket writers can drain. Each client still has one writer and a 256-frame queue; a blocked writer remains subject to `1011 slow_consumer` isolation. Smoke failure records retain the full exception chain, including the original cell failure when teardown also fails. Preserve the smoke command's complete output when investigating a failed deployment; the deployment stamp contains only a shortened command detail.
 
-## Context crossing notifications
+## Context crossing and compaction
 
-`NudgeJob` sends `context_advisory` and `context_handoff` notices to an open,
-reachable seat and its current live parent, including hidden and working seats.
+`NudgeJob` sends a `context_advisory` notice to an open, reachable Claude
+seat and its current live non-Codex parent, including hidden and working seats.
 Parentless seats also get a daemon-owned operator notification through `Notify`.
-Title/card reminders keep their existing visible, idle, operator-engaged filter.
-Context notices do not refuse spawns or implement a `handoff_planned` exemption.
+Codex seats, including the configured assistant backend and Codex parents of
+Claude children, receive no context-pressure notices. Title/card reminders
+keep their existing visible, idle, operator-engaged filter. Context notices
+do not refuse spawns or implement a `handoff_planned` exemption.
 
-Claude defaults follow the fleet handoff policy: advisory at
-`min(400000, 70% of model window)`, handoff at `min(600000, 85%)`.
-`PENTACLE_CONTEXT_ADVISORY_ABS`, `PENTACLE_CONTEXT_HANDOFF_ABS`, and the matching
-`_PCT` overrides remain supported. Codex keeps its reported-window 50%/75% lines.
+Claude defaults are advisory at `min(400000, 70% of model window)` and compact
+at `min(500000, 85%)`. `PENTACLE_CONTEXT_ADVISORY_ABS`,
+`PENTACLE_CONTEXT_COMPACT_ABS` and their `_PCT` overrides are supported.
+Codex still reports tokens and model window but always has level `none`.
+Routine context-threshold handoff is retired; deliberate, scheduled and
+recovery handoff remain independent of the level.
 
-Telemetry ingestion atomically stores the reading and threshold episodes in
-`v2_nudge_state.basis`. Each kind has a source-generation-bound epoch, immutable
-crossing snapshot, and per-recipient delivery records. A reading below a kind's
-threshold rearms its next crossing, even between sweeps. A handoff supersedes
-an unsent advisory until context falls below advisory again. Restart preserves
-an episode; a reopened source generation starts a new one. Close prunes its state.
+Telemetry ingestion atomically stores the reading and crossing episodes in
+`v2_nudge_state.basis`. The compact episode persists through compact →
+advisory → compact and rearms only after a reading below advisory or a new
+source generation. Restart preserves the episode and its input outcome; close
+prunes its state. Advisory keeps its one-delivery-per-recipient episode.
+
+With `PENTACLE_CONTEXT_COMPACT_ENABLED=1` (the default), a fresh compact
+reading can submit one daemon-owned `/compact` command after the Claude seat
+is idle with a proven empty composer. The source lifecycle lock and Comms pane
+input lock serialize this with observations and other input. A durable attempt
+ID and USER-event watermark are recorded before possible pane input.
+Only a matching current-generation USER event proves submission. Ambiguous
+input stays `pending_input` and is never automatically repasted; only a
+proved pre-input failure can retry after
+`PENTACLE_CONTEXT_COMPACT_COOLDOWN_S=600`. Disabling the action leaves the
+advisory and pending-input fence intact. A confirmed submission consumes the
+episode, so continued high context does not repeat the command.
 
 Only valid readings no older than 1800 seconds and no earlier than session
 creation qualify. Future/malformed readings, offline/dead sources and routing

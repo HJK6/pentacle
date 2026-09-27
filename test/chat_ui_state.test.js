@@ -121,6 +121,21 @@ test('renderStatusCard: context indicator renders without a card, with window pc
   assert.doesNotMatch(html, /is-goal/);
 });
 
+test('renderStatusCard: compact level retains numeric badge and replaces retired handoff styling', () => {
+  const compact = chatUi.renderStatusCard(
+    { context_tokens: 500000, model_context_window: 1000000, context_level: 'compact' },
+    { nowMs: CARD_NOW_MS },
+  );
+  assert.match(compact, /ctx 500k/);
+  assert.match(compact, /is-ctx-compact/);
+  const retired = chatUi.renderStatusCard(
+    { context_tokens: 600000, model_context_window: 1000000, context_level: 'handoff' },
+    { nowMs: CARD_NOW_MS },
+  );
+  assert.match(retired, /ctx 600k/);
+  assert.doesNotMatch(retired, /is-ctx-handoff/);
+});
+
 test('renderStatusCard: codex-style level none shows tokens without handoff pressure, seat handoff_planned still renders', () => {
   // Codex reports real tokens+window but context_level "none" (it compacts
   // automatically). The context badge still shows the token usage for display,

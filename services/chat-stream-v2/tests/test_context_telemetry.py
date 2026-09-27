@@ -237,8 +237,8 @@ def test_fd_bound_codex_token_count_without_session_identity_stays_null(tmp_path
     asyncio.run(run())
 
 
-def test_configured_assistant_backend_gets_narrow_codex_handoff_bounds(tmp_path) -> None:
-    """Only a current configured backend opts out of ordinary Codex suppression."""
+def test_configured_assistant_backend_keeps_telemetry_without_pressure(tmp_path) -> None:
+    """The configured Codex backend now has the same exemption as other Codex."""
     async def run() -> None:
         store = Store(str(tmp_path / "assistant-context.db"))
         store.start()
@@ -261,24 +261,26 @@ def test_configured_assistant_backend_gets_narrow_codex_handoff_bounds(tmp_path)
                 HOST, "ordinary-codex", provider="codex",
                 reading=ContextReading(240_000, model_context_window=258_400),
             )
-            handoff = await observer.observe_context(
+            high = await observer.observe_context(
                 HOST, "assistant-authority", provider="codex",
                 reading=ContextReading(200_000, model_context_window=258_400),
             )
-            assert advisory is not None and advisory["context_level"] == "advisory"
-            assert handoff is not None and handoff["context_level"] == "handoff"
+            assert advisory is not None and advisory["context_level"] == "none"
+            assert high is not None and high["context_level"] == "none"
+            assert high["context_tokens"] == 200_000
             assert ordinary is not None and ordinary["context_level"] == "none"
+            assert await store.nudge_state(configured, "context_advisory") is None
+            assert await store.nudge_state(configured, "context_compact") is None
         finally:
             store.stop()
 
     asyncio.run(run())
 
 
-def test_assistant_context_bounds_leave_room_in_smaller_model_windows() -> None:
+def test_assistant_context_level_none_in_smaller_model_windows() -> None:
     from context_adapters import context_fields
 
-    for window, advisory, handoff in ((100_000, 70_000, 85_000), (160_000, 112_000, 136_000), (258_400, 120_000, 200_000)):
-        assert context_fields('codex', ContextReading(advisory - 1, model_context_window=window), assistant_backend=True)[2] == 'none'
-        assert context_fields('codex', ContextReading(advisory, model_context_window=window), assistant_backend=True)[2] == 'advisory'
-        assert context_fields('codex', ContextReading(handoff, model_context_window=window), assistant_backend=True)[2] == 'handoff'
+    for window in (100_000, 160_000, 258_400):
+        for tokens in (0, int(window * .7), int(window * .85), window):
+            assert context_fields('codex', ContextReading(tokens, model_context_window=window), assistant_backend=True)[2] == 'none'
         assert context_fields('codex', ContextReading(window, model_context_window=window))[2] == 'none'

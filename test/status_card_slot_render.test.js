@@ -358,14 +358,14 @@ test('partial card hides absent plan/update/spec sections (no placeholders)', as
 test('indicator-only session (no card) still toggles a card with just the indicators', async () => {
   const { context, dom } = installRenderer();
   await flush(); await flush();
-  mountCardSlot(context, { context_tokens: 300000, model_context_window: 1000000, context_level: 'handoff', spec_issues: [{ obligation_id: 'ob-9', detail: 'obligation past expiry' }] });
+  mountCardSlot(context, { context_tokens: 300000, model_context_window: 1000000, context_level: 'compact', spec_issues: [{ obligation_id: 'ob-9', detail: 'obligation past expiry' }] });
   const document = dom.window.document;
   const glyph = glyphOf(document);
   assert.equal(glyph.disabled, false);
   assert.ok(glyph.classList.contains('has-attention'));
   glyph.click();
   const card = cardOf(document);
-  assert.ok(card.querySelector('.session-status-context.is-ctx-handoff'));
+  assert.ok(card.querySelector('.session-status-context.is-ctx-compact'));
   assert.ok(card.querySelector('.is-spec-issues'));
   assert.equal(card.querySelector('.is-goal'), null);
   assert.equal(card.querySelector('.is-plan'), null);
@@ -419,10 +419,12 @@ test('attention affordance — one fixture per trigger + negatives', async () =>
   assert.ok(enabled() && attn(), 'spec-issue -> attention');
   mountCardSlot(context, { status_card: { goal: 'g', handoff_planned: true, updated_at: new Date().toISOString() } });
   assert.ok(enabled() && attn(), 'handoff_planned -> attention');
-  mountCardSlot(context, { context_tokens: 300000, model_context_window: 1000000, context_level: 'handoff' });
-  assert.ok(enabled() && attn(), 'handoff level -> attention');
+  mountCardSlot(context, { context_tokens: 300000, model_context_window: 1000000, context_level: 'compact' });
+  assert.ok(enabled() && attn(), 'compact level -> attention');
   mountCardSlot(context, { context_level: 'advisory' });
   assert.ok(enabled() && attn(), 'advisory level alone -> enabled + attention');
+  mountCardSlot(context, { context_tokens: 300000, model_context_window: 1000000, context_level: 'handoff' });
+  assert.ok(enabled() && !attn(), 'retired handoff level -> numeric badge without pressure');
   mountCardSlot(context, { status_card: { goal: 'g', updated_at: new Date().toISOString() }, context_tokens: 40000, model_context_window: 1000000, context_level: 'none' });
   assert.ok(enabled() && !attn(), 'benign -> enabled, no attention');
 });
