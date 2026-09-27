@@ -230,10 +230,15 @@ test('the chat popout context comes from the query string', () => {
     desktop_host: 'amaterasu',
     session_name: 'sess',
     title: 'T',
+    assistant_source_stream_id: '',
+    assistant_generation: '',
   });
+  const direct = { ...ctx, assistant_source_stream_id: 'bart:assistant', assistant_generation: 'generation-1' };
+  assert.equal(chatPopoutContextFromSearch(`?pentacle-chat-popout=${encodeURIComponent(JSON.stringify(direct))}`).assistant_generation,
+    'generation-1');
   // Regression: URLSearchParams already decodes, so a second decodeURIComponent
   // ate a literal % in a title and could turn a valid context into null.
-  const percent = { stream_id: 'amaterasu:v2-1', host: 'amaterasu', session_name: 'sess', title: '100% done' };
+  const percent = { stream_id: 'node-b:v2-1', host: 'node-b', session_name: 'sess', title: '100% done' };
   assert.equal(
     chatPopoutContextFromSearch(`?pentacle-chat-popout=${encodeURIComponent(JSON.stringify(percent))}`).title,
     '100% done',
@@ -453,7 +458,7 @@ test('meeting stays local while enabled microphone recovery calls the host', asy
 test('the web context menu fires the same assign-slot / action events as the desktop', () => {
   const fired = [];
   const emit = (event, ...args) => fired.push([event, ...args]);
-  const items = webContextMenuItems('sessX', 'Display X', 'amaterasu', emit);
+  const items = webContextMenuItems('sessX', 'Display X', 'node-b', emit);
 
   // Four slots, then rename + delete.
   const slots = items.filter((i) => /^Open in slot/.test(i.label || ''));
@@ -463,9 +468,9 @@ test('the web context menu fires the same assign-slot / action events as the des
   items.find((i) => i.label === 'Delete').onSelect();
 
   assert.deepEqual(fired, [
-    ['assign-slot', 2, 'sessX', 'amaterasu'],
-    ['action', 'rename', 'sessX', { displayName: 'Display X', hostId: 'amaterasu' }],
-    ['action', 'trash', 'sessX', 'amaterasu'],
+    ['assign-slot', 2, 'sessX', 'node-b'],
+    ['action', 'rename', 'sessX', { displayName: 'Display X', hostId: 'node-b' }],
+    ['action', 'trash', 'sessX', 'node-b'],
   ]);
 });
 

@@ -1,15 +1,18 @@
 # Pentacle
 
-Pentacle is a desktop terminal workspace for coding agents, work specifications and review evidence. This repository includes the desktop app and the Python daemon that runs your agent sessions. [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile) connects to that same daemon from your phone.
+Pentacle is a terminal workspace for coding agents, work specifications and review evidence. **Pentacle Web is the recommended way to install and use Pentacle**: a browser (or installed PWA) served by the Node web host (`node server`) on the computer running your agents, so the app ships once on that host and every device just reloads. This repository includes that web host, the Python daemon that runs your agent sessions, and a deprecated Electron desktop app. [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile) connects to the same daemon from your phone.
 
-Desktop **Chat view is experimental and disabled by default**. Use terminal view for normal work. Mobile is a separate client and is unaffected by this desktop setting.
+> **The Electron desktop app is deprecated** — no further upgrades, packaging or rollout, and it is not recommended for new installs. Use Pentacle Web for daily work; run the daemon and open the served URL in a browser. The desktop source remains available; see [Desktop (deprecated)](#desktop-deprecated) and [web host setup](server/README.md).
+
+The renderer's structured **Chat view is experimental and disabled by default**. Use terminal view for normal work. Mobile is a separate client and is unaffected by this setting.
 
 ## Getting started
 
 The easiest setup is to start a coding agent such as Fable or Astra and give it
 [AGENT_SETUP.md](AGENT_SETUP.md). That separate guide contains the agent's full
 setup checklist. Have your provider account ready; login or device approvals
-may need your attention. The manual steps are below.
+may need your attention. The manual steps are below: install, start the daemon,
+then serve and open Pentacle Web.
 
 For a phone, see [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile).
 
@@ -17,15 +20,15 @@ For a phone, see [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile).
 
 | Repository | What it provides | Do I need to clone it? |
 | --- | --- | --- |
-| [pentacle](https://github.com/HJK6/pentacle) | Desktop app and daemon | Yes, on the computer running your agents. The daemon can run without the desktop. |
+| [pentacle](https://github.com/HJK6/pentacle) | Web client + daemon (and the deprecated Electron desktop app) | Yes, on the computer running your agents. The daemon serves the web client; the desktop app is deprecated. |
 | [pentacle-mobile](https://github.com/HJK6/pentacle-mobile) | Mobile app | Only if you want to build the phone app. |
 | [pentacle-chat-core](https://github.com/HJK6/pentacle-chat-core) | Shared chat model and rendering library | No. Both clients already vendor a copy in `pentacle-chat-core/`; normal dependency installation uses it automatically. Clone upstream only to work on the library itself. |
 
 ## Local setup
 
-See the [desktop config reference](docs/desktop_config.md) for host defaults, optional mic/limits setup, warnings and upgrade behavior.
+See the [configuration reference](docs/desktop_config.md) for host defaults, optional mic/limits setup, warnings and upgrade behavior; the web host loads the same config.
 
-Use macOS or Linux with Node.js 22.12 or newer, Python 3.11 or newer, tmux and at least one configured agent CLI (`claude` or `codex`). Authenticate the CLI with your own account before using it through Pentacle. On Windows, run the daemon and tmux inside WSL and set `localWsl` in the desktop config so local terminals attach through `wsl.exe`, or configure a separate SSH terminal host; the shell commands below target macOS/Linux (or a WSL shell).
+Use macOS or Linux with Node.js 22.12 or newer, Python 3.11 or newer, tmux and at least one configured agent CLI (`claude` or `codex`). Authenticate the CLI with your own account before using it through Pentacle. On Windows, run the daemon and tmux inside WSL and set `localWsl` in the config so local terminals attach through `wsl.exe`, or configure a separate SSH terminal host; the shell commands below target macOS/Linux (or a WSL shell).
 
 From this repository:
 
@@ -39,14 +42,14 @@ chmod 700 "$HOME/.config/pentacle"
 cp pentacle.config.example.js "$HOME/.config/pentacle/pentacle.config.js"
 ```
 
-Issue a desktop credential without printing it to your terminal:
+Issue the web host's daemon credential without printing it to your terminal (the path matches `chatStream.tokenPath` in the example config):
 
 ```sh
-python services/chat-stream-v2/tools/operator_auth_cli.py issue --client-kind pentacle --label desktop |
+python services/chat-stream-v2/tools/operator_auth_cli.py issue --client-kind pentacle --label web |
   python -c 'import json,os,pathlib,sys; p=pathlib.Path.home()/".config/pentacle/desktop.token"; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.write(fd,json.load(sys.stdin)["code"].encode()); os.close(fd); p.chmod(0o600)'
 ```
 
-Start the daemon in one terminal. The `local` identity matches the desktop example; the provider binaries come from your PATH, and transcripts remain in the provider's native directories.
+Start the daemon in one terminal. The `local` identity matches the example config; the provider binaries come from your PATH, and transcripts remain in the provider's native directories.
 
 ```sh
 python services/chat-stream-v2/main.py --host 127.0.0.1 --port 7791 \
@@ -55,17 +58,28 @@ python services/chat-stream-v2/main.py --host 127.0.0.1 --port 7791 \
   --spawn-cwd "$HOME/workspace" --projects-root "$HOME/.claude/projects"
 ```
 
-An absent provider resolves to an empty binary and cannot be launched; use the provider you installed. Choose a different port in both the daemon command and private desktop config if 7791 is already in use. In another terminal, from the repository:
+An absent provider resolves to an empty binary and cannot be launched; use the provider you installed. Choose a different port in both the daemon command and private config if 7791 is already in use. In another terminal, from the repository:
+
+Build Pentacle Web, then serve it. Open the printed `http://127.0.0.1:7795` in a browser (and, if you like, install it as a PWA). To reach it from other devices, put it behind `tailscale serve` with Tailscale identity — see [web host setup](server/README.md) for `--auth`, `--origin`, `--allow-login` and the security boundary.
 
 ```sh
-PENTACLE_CONFIG="$HOME/.config/pentacle/pentacle.config.js" npm start
+npm run build:web
+PENTACLE_CONFIG="$HOME/.config/pentacle/pentacle.config.js" node server --port 7795
 ```
 
-Use **New Chat**, select `local`, then the provider/model. Sessions open in terminal view. A disconnected daemon produces an error and creates no synthetic session. Keep the daemon running while using desktop or mobile.
+Use **New Chat**, select `local`, then the provider/model. Sessions open in terminal view. A disconnected daemon produces an error and creates no synthetic session. Keep the daemon running while using the web client or mobile.
 
 To try the unfinished structured view, enable **Chat UI (experimental)** in Settings and reload, or set `features.chatUi: true` in your private config. Fresh installs default to `false`; an existing saved opt-in is preserved. Keep it off for normal use.
 
 The private config selects `chatStream.url`, `chatStream.tokenPath`, host labels, terminal transports and optional features. The token must be a regular mode-0600 file inside a mode-0700 directory, using a path without symbolic-link ancestors. Do not commit credentials or runtime databases. See [daemon setup and remote clients](services/chat-stream-v2/README.md) and [public support boundaries](docs/public_release.md).
+
+### Desktop (deprecated)
+
+The Electron desktop app still starts from the same config, but it receives no upgrades and is not recommended for new users. Use Pentacle Web instead unless you already depend on the desktop app:
+
+```sh
+PENTACLE_CONFIG="$HOME/.config/pentacle/pentacle.config.js" npm start
+```
 
 ## Build and test
 

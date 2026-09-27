@@ -86,6 +86,11 @@ function buildHtml(html) {
   return out.replace('</head>', '  <!--PENTACLE_CONFIG-->\n</head>');
 }
 
+function buildAssetPopoutHtml(html) {
+  return html.replace('<script src="asset_popout.js"></script>', '<script src="asset-popout.bundle.js"></script>')
+    .replace('</head>', '  <!--PENTACLE_CONFIG-->\n</head>');
+}
+
 function copyExternalScripts() {
   for (const [src, local] of Object.entries(EXTERNAL_SCRIPTS)) {
     fs.copyFileSync(path.resolve(RENDERER, src), path.join(OUT, local));
@@ -170,8 +175,22 @@ async function build({ minify = false } = {}) {
     logLevel: 'info',
   });
 
+  await esbuild.build({
+    entryPoints: [path.join(RENDERER, 'asset_popout_web_entry.js')],
+    bundle: true,
+    format: 'iife',
+    target: 'chrome134',
+    platform: 'browser',
+    outfile: path.join(OUT, 'asset-popout.bundle.js'),
+    sourcemap: true,
+    minify,
+    logLevel: 'info',
+  });
+
   const html = readIndexHtml();
   fs.writeFileSync(path.join(OUT, 'web.html'), buildHtml(html));
+  fs.writeFileSync(path.join(OUT, 'asset-popout.html'), buildAssetPopoutHtml(
+    fs.readFileSync(path.join(RENDERER, 'asset_popout.html'), 'utf8')));
   copyExternalScripts();
   copyStyles(html);
   copyIcons(html);
@@ -185,7 +204,7 @@ async function build({ minify = false } = {}) {
   console.log(`[build:web] wrote ${path.relative(ROOT, OUT)}`);
 }
 
-module.exports = { build, buildHtml, scriptSources, styleSources, EXTERNAL_CSS, EXTERNAL_SCRIPTS, BUNDLE_ANCHOR, OUT, RENDERER, PREREQ_BUNDLES };
+module.exports = { build, buildHtml, buildAssetPopoutHtml, scriptSources, styleSources, EXTERNAL_CSS, EXTERNAL_SCRIPTS, BUNDLE_ANCHOR, OUT, RENDERER, PREREQ_BUNDLES };
 
 if (require.main === module) {
   build({ minify: process.argv.includes('--minify') }).catch((e) => {

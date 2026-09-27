@@ -18,6 +18,7 @@
 
 const RECONNECT_MIN_MS = 250;
 const RECONNECT_MAX_MS = 5000;
+const { createBrowserPopouts, parseAssetContext } = require('./browser_popouts');
 
 function chatPopoutContextFromSearch(search) {
   // URLSearchParams already percent-decodes the value. Decoding a second time
@@ -34,6 +35,8 @@ function chatPopoutContextFromSearch(search) {
       desktop_host: String(context.desktop_host || context.host),
       session_name: String(context.session_name),
       title: String(context.title || context.session_name),
+      assistant_source_stream_id: String(context.assistant_source_stream_id || ''),
+      assistant_generation: String(context.assistant_generation || ''),
     };
   } catch (_) {
     return null;
@@ -283,7 +286,8 @@ function renderWebContextMenu(items, { document: doc = (typeof document !== 'und
   return menu;
 }
 
-function buildCc(transport, { clipboard, chatPopoutContext, reload = () => window.location.reload(), config = {} }) {
+function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext = null,
+  popouts = null, reload = () => window.location.reload(), config = {} }) {
   const call = transport.call.bind(transport);
   const fire = transport.fire.bind(transport);
   const on = transport.on.bind(transport);
@@ -405,11 +409,11 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
     assetCommentResolve: (args) => call('chat-stream:asset-comment-resolve', args || {}),
     assetReviewSet: (args) => call('chat-stream:asset-review-set', args || {}),
     assetCommentsSendToChat: (args) => call('chat-stream:asset-comments-send-to-chat', args || {}),
-    assetPopOut: (args) => call('chat-stream:asset-pop-out', args || {}),
-    assetDock: (args) => call('chat-stream:asset-dock', args || {}),
+    assetPopOut: (args) => popouts ? popouts.openAsset(args || {}) : call('chat-stream:asset-pop-out', args || {}),
+    assetDock: (args) => popouts ? popouts.dockAsset(args || {}) : call('chat-stream:asset-dock', args || {}),
     chatPopoutContext: () => chatPopoutContext,
-    chatPopOut: (args) => call('chat-stream:chat-pop-out', args || {}),
-    chatDock: (args) => call('chat-stream:chat-dock', args || {}),
+    chatPopOut: (args) => popouts ? popouts.openChat(args || {}) : call('chat-stream:chat-pop-out', args || {}),
+    chatDock: (args) => popouts ? popouts.dockChat(args || {}) : call('chat-stream:chat-dock', args || {}),
 
     perfRecord: (event, details) => { try { fire('perf-telemetry:record', { event, details: details || null }); } catch (_) {} },
     perfState: () => call('perf-telemetry:state'),
@@ -439,9 +443,12 @@ function buildCc(transport, { clipboard, chatPopoutContext, reload = () => windo
     onAssignSlot: (callback) => on('assign-slot', (slot, sessionName, hostId) => callback(slot, sessionName, hostId || 'local')),
     onAction: (callback) => on('action', (action, sessionName, extra) => callback(action, sessionName, extra)),
     onChatStreamFrame: (callback) => on('chat-stream:frame', (frame) => callback(frame)),
-    onAssetPopoutInit: (callback) => on('asset-popout:init', (payload) => callback(payload)),
-    onAssetDock: (callback) => on('asset:dock', (payload) => callback(payload)),
-    onChatPopoutDock: (callback) => on('chat:popout-dock', (payload) => callback(payload)),
+    onAssetPopoutInit: (callback) => {
+      on('asset-popout:init', (payload) => callback(payload));
+      if (popouts && assetPopoutContext) callback(assetPopoutContext);
+    },
+    onAssetDock: (callback) => popouts ? popouts.onAssetDock(callback) : on('asset:dock', (payload) => callback(payload)),
+    onChatPopoutDock: (callback) => popouts ? popouts.onChatDock(callback) : on('chat:popout-dock', (payload) => callback(payload)),
   };
 }
 
@@ -469,6 +476,11 @@ function installWebCc({
   if (!config) throw new Error('window.__PENTACLE_CONFIG__ is missing — the page was not served by the Pentacle web host');
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const transport = createTransport({ url: `${scheme}//${location.host}/cc`, logger });
+  const chatPopoutContext = chatPopoutContextFromSearch(location.search);
+  const assetPopoutContext = parseAssetContext(location.search);
+  const popouts = createBrowserPopouts({ win: window, location, chatPopoutContext,
+    assetPopoutContext, toast: showWebToast });
+  window.PentacleWebPopoutBridge = popouts;
   window.HOST = buildHost(config);
   // Capture where a context menu is requested (capture phase, so it runs before
   // app.js's own contextmenu handler calls showContextMenu).
@@ -480,7 +492,9 @@ function installWebCc({
   }
   window.cc = buildCc(transport, {
     clipboard,
-    chatPopoutContext: chatPopoutContextFromSearch(location.search),
+    chatPopoutContext,
+    assetPopoutContext,
+    popouts,
     config,
   });
   return transport;

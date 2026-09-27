@@ -34,7 +34,7 @@ async function runInstalled() {
     await page.waitFor(`document.querySelector('.session-item[data-stream-id=${JSON.stringify(expected.sourceStreamId)}]')`, { timeoutMs: 15000 });
     const binding = await page.eval('window.__PENTACLE_CONFIG__.features.assistantDirectTarget');
     assert.deepEqual(binding, expected);
-    const current = await page.eval(`window.PentacleChatStore?.snapshot?.()?.sessions?.find(s=>s.stream_id===${JSON.stringify(expected.streamId)})`);
+    const current = await page.eval(`window.PentacleChatStore?.state?.sessions?.find(s=>s.stream_id===${JSON.stringify(expected.streamId)})`);
     assert.equal(current?.session_generation, expected.generation);
     assert.equal(current?.online, true);
     for (const theme of ['dark', 'light']) for (const width of [1600, 850]) {
@@ -241,16 +241,9 @@ async function run() {
     assert.equal(largeReload.sha, largeImage.sha);
     steps.push({ name: 'multi-chunk PNG event ingested and exact media restored after browser reload', ok: true,
       size: largeImage.size, sha: largeImage.sha, reload: largeReload });
-    await page.waitFor("!!document.querySelector('#cell-0 .slot-chat-reply-btn[data-reply-message-id=\"direct-event-1\"]')", { timeoutMs: 5000 });
-    await page.click('#cell-0 .slot-chat-reply-btn[data-reply-message-id="direct-event-1"]');
-    assert.equal(await page.eval("document.querySelector('#cell-0 .slot-chat-reply-preview')?.hidden"), false);
-    await page.type('#cell-0 .slot-chat-compose-input', 'Disposable reply');
-    await page.click('#cell-0 .slot-chat-compose-send');
-    await page.waitFor("document.querySelector('#cell-0 .slot-chat-list')?.textContent.includes('Echo: Disposable reply')", { timeoutMs: 10000 });
-    const replySend = daemon.requests.filter(r => r.type === 'send').at(-1);
-    assert.equal(replySend.session_name, 'live');
-    assert.equal(replySend.reply_to_message_id, 'direct-event-1');
-    steps.push({ name: 'reply metadata follows the ordinary target wire route', ok: true });
+    assert.equal(await page.eval("!!document.querySelector('#cell-0 .slot-chat-reply-btn[data-reply-message-id=\"direct-event-1\"]')"), false);
+    assert.equal(await page.eval("/Waiting for Bart|First reply|Answer complete/.test(document.querySelector('#cell-0 .slot-chat-list')?.textContent || '')"), false);
+    steps.push({ name: 'Bart assistant rows render no Reply button or progress/latency labels', ok: true });
     daemon.setPaneQuestion({ question_key: 'pane-direct', header: 'Disposable', prompt: 'Confirm route',
       options: [{ index: 1, label: 'Yes' }] });
     await page.waitFor("window.PentacleChatStore?.getQuestion('mock-host:live')?.question_key === 'pane-direct'", { timeoutMs: 5000 });

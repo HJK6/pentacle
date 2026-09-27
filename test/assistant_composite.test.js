@@ -211,11 +211,11 @@ test('desktop composite composer sends exact input and identity through real IPC
   }
 });
 
-test('clicking a question-bound desktop reply preserves both IDs through composer, IPC and retry', async t => {
+test('Bart assistant rows render no Reply button; a question-bound reply still preserves both IDs through composer, IPC and retry', async t => {
   const h = await wireRenderer(t);
-  const button = h.dom.window.document.querySelector('.slot-chat-reply-btn');
-  assert.ok(button);
-  button.click();
+  assert.match(h.dom.window.document.querySelector('.slot-chat-list').textContent, /Choose the next step/);
+  assert.equal(h.dom.window.document.querySelector('.slot-chat-reply-btn[data-reply-message-id="message-question"]'), null);
+  vm.runInContext("state.slotReplies[0] = { reply_to_message_id: 'message-question', reply_to_question_id: 'question-bound', preview: 'Choose the next step' }; renderSlotReply(0)", h.context);
   vm.runInContext("state.slotChatRefs[0].inputEl.value = 'Yes'", h.context);
   await vm.runInContext('sendChatComposer(0)', h.context);
   await new Promise(setImmediate);

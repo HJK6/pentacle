@@ -19,12 +19,13 @@ function store() {
   return controller;
 }
 
-test('explicit reply uses the retained message identity and escapes the rendered body', () => {
+test('assistant messages render without a Reply control and escape the rendered body', () => {
   const controller = store();
   const detail = controller.selectSessionDetail(streamId);
   const dom = new JSDOM(renderTranscriptTimelineHtml(detail, undefined, { allowReplies: true }));
   assert.equal(dom.window.document.querySelector('script'), null);
-  assert.equal(dom.window.document.querySelector<HTMLButtonElement>('.slot-chat-reply-btn')?.dataset.replyMessageId, 'message-1');
+  assert.match(dom.window.document.body.textContent || '', /A question/);
+  assert.equal(dom.window.document.querySelector('.slot-chat-reply-btn'), null);
   assert.equal(renderTranscriptTimelineHtml(detail).includes('slot-chat-reply-btn'), false);
   dom.window.close();
 });

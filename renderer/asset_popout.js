@@ -192,7 +192,11 @@ function init(args) {
 if (typeof document !== 'undefined' && typeof window !== 'undefined') {
   document.getElementById('asset-popout-dock')?.addEventListener('click', async () => {
     if (!state.item || !window.cc?.assetDock) return;
-    await window.cc.assetDock({ ...state.args, stream_id: state.streamId, asset_id: state.item.asset_id, asset: state.item });
+    const reply = await window.cc.assetDock({ ...state.args, stream_id: state.streamId, asset_id: state.item.asset_id, asset: state.item });
+    if (reply?.ok === false && reply.error !== 'opener_unavailable') {
+      const meta = document.getElementById('asset-popout-meta');
+      if (meta) meta.textContent = 'Could not dock this asset. It remains open here.';
+    }
   });
 
   window.cc?.onAssetPopoutInit?.((payload) => init(payload));
@@ -221,6 +225,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     state.body = null;
     refresh().catch(() => render());
   });
+  window.PentacleWebPopoutBridge?.announceReady();
 }
 
 if (typeof module !== 'undefined') {

@@ -22,7 +22,7 @@ const extraSessions = [1, 2].map(index => ({ ...target,
   session_name: `history-extra-${index}`, stream_id: `mock-host:history-extra-${index}`,
   display_name: `Disposable history extra ${index}` }));
 
-async function startDaemon({ artifactsDir }) {
+async function startDaemon({ artifactsDir, includeReport = false }) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await new Promise(resolve => server.once('listening', resolve));
   const authDir = path.join(artifactsDir, 'fixture-auth');
@@ -35,6 +35,7 @@ async function startDaemon({ artifactsDir }) {
   fs.writeFileSync(configFile, `const base = require(${JSON.stringify(baseConfig)});\nmodule.exports = { ...base, features: { ...base.features, assistantDirectTarget: ${JSON.stringify({ sourceStreamId: sourceId, streamId: targetId, generation })} } };\n`);
   const requests = [];
   const events = [];
+  const assistantEvents = [];
   const noiseEvents = [];
   const extraEvents = new Map(extraSessions.map(session => [session.stream_id, []]));
   let historyPressure = false;
@@ -42,6 +43,15 @@ async function startDaemon({ artifactsDir }) {
   const blobs = new Map();
   let durableQuestion = null;
   let targetHistoryReplyDelayMs = 0;
+  const reportBody = JSON.stringify({ schema_version: 1, title: 'Disposable popout report', sections: [{
+    id: 'report-section', title: 'Findings', status: 'in_progress', blocks: [{
+      id: 'report-block', type: 'para', runs: [{ type: 'text', text: 'Disposable report body for popout proof.' }],
+    }],
+  }] });
+  const report = { asset_id: 'disposable-report', title: 'Disposable popout report',
+    content_type: 'report', review_status: 'pending_review', updated_at: '2026-09-26T00:00:00Z',
+    session_key: { host: target.host, session_name: target.session_name, stream_id: targetId } };
+  const comments = [];
   let seq = 0;
   function event(kind, text, extra = {}) {
     seq++;
@@ -52,19 +62,45 @@ async function startDaemon({ artifactsDir }) {
   events.push(event('ASSIST_TEXT', 'Existing disposable transcript'));
   const send = (socket, frame) => socket.send(JSON.stringify(frame));
   const sessions = () => historyPressure ? [source, target, noise, ...extraSessions] : [source, target];
+  const snapshotEvents = () => historyPressure
+    ? [...events, ...noiseEvents, ...[...extraEvents.values()].flat()]
+      .sort((a, b) => a.daemon_seq - b.daemon_seq).slice(-500)
+    : [];
   const inventory = () => { for (const socket of server.clients) send(socket, { type: 'snapshot', sessions: sessions(),
-    events: [], schedules: [], notifications: durableQuestion ? [durableQuestion] : [] }); };
+    events: snapshotEvents(), schedules: [], notifications: durableQuestion ? [durableQuestion] : [] }); };
   server.on('connection', socket => {
     send(socket, { type: 'welcome', protocol: 2 });
     socket.on('message', data => {
       const msg = JSON.parse(data.toString());
       requests.push(msg);
       if (msg.type === 'hello') {
-        send(socket, { type: 'snapshot', sessions: sessions(), events: [], schedules: [],
+        send(socket, { type: 'snapshot', sessions: sessions(), events: snapshotEvents(), schedules: [],
           notifications: durableQuestion ? [durableQuestion] : [], capabilities: { assistant_composite_v1: true } });
+        if (includeReport) send(socket, { type: 'asset.update', ...report });
+      } else if (msg.type === 'asset.list') {
+        send(socket, { type: 'asset.list.ok', request_id: msg.request_id,
+          assets: includeReport ? [{ ...report }] : [] });
+      } else if (msg.type === 'asset.get' && includeReport) {
+        send(socket, { type: 'asset.get.ok', request_id: msg.request_id,
+          asset: { ...report, body: reportBody } });
+      } else if (msg.type === 'asset.comments.list' && includeReport) {
+        send(socket, { type: 'asset.comments.list.ok', request_id: msg.request_id, comments: comments.slice() });
+      } else if (msg.type === 'asset.comment.add' && includeReport) {
+        const comment = { comment_id: `comment-${comments.length + 1}`, section_id: msg.section_id,
+          block_id: msg.block_id, body: msg.body, excerpt: msg.excerpt || '',
+          author: 'disposable@proof', created_at: new Date().toISOString(), resolved: false };
+        comments.push(comment);
+        send(socket, { type: 'asset.comment.add.ok', request_id: msg.request_id, comment });
+        for (const client of server.clients) send(client, { type: 'asset.update', ...report });
+      } else if (msg.type === 'asset.review.set' && includeReport) {
+        report.review_status = msg.review_status;
+        report.updated_at = '2026-09-26T00:01:00Z';
+        send(socket, { type: 'asset.review.set.ok', request_id: msg.request_id, asset: { ...report } });
+        for (const client of server.clients) send(client, { type: 'asset.update', ...report });
       } else if (msg.type === 'request_stream_events') {
         const reply = () => send(socket, { type: 'request_stream_events.ok', request_id: msg.request_id,
-          stream_id: msg.stream_id, events: msg.stream_id === targetId ? events : msg.stream_id === noiseId ? noiseEvents : extraEvents.get(msg.stream_id) || [], has_more: false });
+          stream_id: msg.stream_id, events: msg.stream_id === targetId ? events : msg.stream_id === sourceId ? assistantEvents
+            : msg.stream_id === noiseId ? noiseEvents : extraEvents.get(msg.stream_id) || [], has_more: false });
         if (msg.stream_id === targetId && targetHistoryReplyDelayMs > 0) setTimeout(reply, targetHistoryReplyDelayMs);
         else reply();
       } else if (msg.type === 'upload_blob_init') {
@@ -124,6 +160,11 @@ async function startDaemon({ artifactsDir }) {
     });
   });
   return { configFile, requests, events, noiseEvents, extraSessions, sourceId, targetId, noiseId, generation,
+    report, reportBody, comments,
+    seedAssistantHistory(text) {
+      if (requests.length) throw new Error('seed assistant history before the web host connects');
+      assistantEvents.push(event('ASSIST_TEXT', text, source));
+    },
     seedHistoryPressure({ targetRows = 205, noiseRows = 430 } = {}) {
       if (requests.length) throw new Error('seed history before the web host connects');
       historyPressure = true;

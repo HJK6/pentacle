@@ -7,11 +7,13 @@ separate chat-core checkout.
 
 ## Before starting
 
-Choose desktop, mobile, or both. The daemon runs on the computer where your
-coding agents work; the desktop and phone are clients of that daemon. Start
-with one host named `local` and one working provider. Add other hosts later.
+Set up Pentacle Web (the recommended client), mobile, or both. The daemon runs
+on the computer where your coding agents work; Pentacle Web (a browser/PWA
+served by the Node web host on that computer) and the phone are clients of that
+daemon. The Electron desktop app is deprecated; do not set it up for new users. Start with one host named `local` and one
+working provider. Add other hosts later.
 
-The local desktop recipe supports macOS and Linux. An iPhone build needs a Mac
+The daemon and web host run on macOS and Linux. An iPhone build needs a Mac
 with Xcode. Use an existing authenticated Claude or Codex CLI, or let the agent
 install/configure one and request the account login when needed. Phone signing,
 trust and unlock actions may require the owner. These are setup prerequisites,
@@ -28,16 +30,19 @@ not tasks the agent should pretend it completed.
    Node.js 22.12+, Python 3.11+, tmux, dependencies and provider paths. Use a
    private workspace outside this checkout. For mobile-only use, the daemon
    needs the Python dependencies, tmux and provider CLI; installing or running
-   the Electron desktop is optional.
+   the Electron desktop is not needed.
 3. **Configure one consistent host.** Use `--local-host local`, `local` in client
    host lists, the real provider executable paths, and the real transcript
    directory. Store the database/config/credentials outside the public repo.
    Start the documented daemon command in a persistent terminal or service and
    record how to stop and restart it.
-4. **Set up the desktop if requested.** Issue its credential and launch it using
-   the README commands. Keep `features.chatUi: false`: structured desktop Chat
-   is experimental. The normal session surface is the terminal.
-   Read [desktop configuration](docs/desktop_config.md). For multiple hosts,
+4. **Set up Pentacle Web.** Issue its daemon credential, build it with
+   `npm run build:web` and serve it with `node server` as in the README (behind `tailscale serve` with identity auth for
+   remote use — see [server/README.md](server/README.md)); open the URL in a
+   browser or install it as a PWA. The Electron desktop app is deprecated (no
+   upgrades); set it up only if the owner explicitly asks for it. Keep `features.chatUi: false`:
+   structured Chat is experimental. The normal session surface is the terminal.
+   Read [config reference](docs/desktop_config.md). For multiple hosts,
    populate hostNames/hostColors and exact chatStream.hostMap aliases; verify
    the local badge. The public checkout has no runnable mic service entrypoint yet; configure an
    independently installed, running mic endpoint before enabling features.mic,
