@@ -24,14 +24,21 @@ Exercise reconnect, delayed replies, duplicate frames, daemon restart, log rotat
 
 ## Chat history states
 
-`renderer/chat_events_lazy.js` tracks the actual history request independently
-from websocket connectivity. Before success, an empty transcript says Loading
-messages; only a successful empty reply permits No messages yet. Cached rows
-remain visible while syncing or reconnecting. A failed request retains the rows
-and draft and exposes Retry; repainting does not start a retry loop.
+`renderer/chat_events_lazy.js` tracks history requests independently from
+websocket connectivity. Failed fetches and completed fetches that leave no
+transcript rows retry after 1, 2, 4, 8 and 16 seconds while the stream remains in
+an active chat slot and the host is connected. Recovery shows “Loading
+messages…”, including above durable answered-question groups. Cached rows and
+the draft remain visible while syncing, recovering or reconnecting.
 
-Each attempt has a distinct identity. Disconnect invalidates old attempts, and
-reconnect fetches each active chat stream once. A late result cannot overwrite a
-new attempt. Successful zero-row replies still notify the renderer, so loading
-ends even when there is no event frame to repaint the view. Transport loss does
-not imply turn completion or message delivery.
+After the retry budget, a successful empty fetch shows “No messages yet.” and
+a failed fetch shows “Messages could not be loaded.” Both offer Retry, which
+starts a fresh budget. See [Lazy history recovery](desktop_chat_ui_shared_core.md#lazy-history-recovery).
+
+Each attempt has a distinct identity. Leaving the stream's chat slots,
+disconnecting or replacing the load invalidates stale retry work; a successful
+load with rows ends recovery. Reconnect fetches active chat streams again. A
+late result cannot overwrite a new attempt. Successful zero-row replies still
+notify the renderer, so bounded recovery continues even without an event frame
+to repaint the view. Transport loss does not imply turn completion or message
+delivery.

@@ -15,7 +15,7 @@ answerModule._compile(esbuild.buildSync({ entryPoints: [answerModule.id], bundle
 const { buildPentacleQuestionAnswerText } = answerModule.exports;
 
 
-function installRenderer({ dismissResult, questionOverride, assistantRole = '', initialSessions = [], popoutContext = null } = {}) {
+function installRenderer({ dismissResult, questionOverride, assistantRole = '', initialSessions = [], popoutContext = null, selectSessionDetail = null, renderTranscriptTimelineHtml = null, requestStreamEvents = null, setTimeout: setTimer = null } = {}) {
   const html = fs.readFileSync(path.join(root, 'renderer', 'index.html'), 'utf8');
   const dom = new JSDOM(html, { url: 'http://pentacle.test/renderer/index.html' });
   const dismissCalls = [];
@@ -57,7 +57,8 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
     buildPentacleQuestionAnswerText,
   };
   dom.window.PentacleChatStore = {
-    selectSessionDetail(streamId) {
+    selectSessionDetail(streamId, options) {
+      if (selectSessionDetail) return selectSessionDetail(streamId, options);
       return {
         streamId,
         title: 'Race Fixture',
@@ -77,7 +78,8 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
     },
   };
   dom.window.PentacleChatView = {
-    renderTranscriptTimelineHtml() {
+    renderTranscriptTimelineHtml(...args) {
+      if (renderTranscriptTimelineHtml) return renderTranscriptTimelineHtml(...args);
       return '<article class="slot-chat-row"><div class="slot-chat-assistant-card">Ready</div></article>';
     },
   };
@@ -90,7 +92,7 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
     listChatSessions: async () => ({ ok: true, active: [], trashed: [] }),
     getLimits: async () => [],
     getMachineStats: async () => ({}),
-    requestStreamEvents: async () => ({ ok: true, events: [] }),
+    requestStreamEvents: requestStreamEvents || (async () => ({ ok: true, events: [] })),
     chatDismissQuestion: async (hostId, sessionName, options) => {
       dismissCalls.push({ hostId, sessionName, options });
       return dismissResult || { ok: false, error_code: 'stale_question', error: 'stale' };
@@ -144,10 +146,10 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
     },
     setInterval: () => 0,
     clearInterval() {},
-    setTimeout: (fn) => {
+    setTimeout: setTimer || ((fn) => {
       fn();
       return 0;
-    },
+    }),
     clearTimeout() {},
     window: dom.window,
     __dirname: path.join(root, 'renderer'),

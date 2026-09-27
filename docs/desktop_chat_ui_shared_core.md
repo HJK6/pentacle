@@ -39,6 +39,12 @@ Reply buttons are an opt-in transcript affordance. The renderer suppresses them 
 
 The latest user row derives a receipt caption from its correlated durable echo (see the send-receipt design note): a committed-but-unconfirmed receipt reads Sent once the echo has bound, never sticking at Sending. An attachment send's server echo is the daemon's agent-facing wrapper text (`Look at the image file at <path>, then respond…`), not the operator caption; the reducer correlates that wrapper to the optimistic row by its embedded attachment keys and keeps the operator caption as the rendered text across the live, snapshot, and duplicate-replay reconcile paths, so one caption bubble renders rather than a second wrapper row.
 
+### Lazy history recovery
+
+A chat slot fetches recent history on demand. A failed fetch or a completed fetch that leaves no transcript rows retries after 1, 2, 4, 8 and 16 seconds while the slot remains on that stream and the host is connected. Switching streams, leaving chat, disconnecting or a successful load with rows cancels stale work; reconnect loads the active slots again. Retry starts a new budget.
+
+The slot shows “Loading messages…” while retries remain. After the budget, a successful empty fetch shows “No messages yet.” and a failed fetch shows “Messages could not be loaded.”; both offer Retry. This status remains visible above durable answered-question groups until ordinary transcript rows arrive. Diagnostic console records use subsystem `chat_history` and the transcript-collapse bug reference.
+
 ## Status and navigation
 
 The sidebar orders rows by open question, working state, recent activity, and stable stream id. Status cards render only fields supplied by the daemon. Missing optional fields produce no placeholder claims. The status view exposes a return path to the transcript and a separate update-history region.
