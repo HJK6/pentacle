@@ -8,6 +8,8 @@ export const PENTACLE_MESSAGE_ENVELOPE_RENDER_POLICIES = {
   notification_answer: 'structured_card',
   child_session_closed: 'structured_card',
   child_inactivity_threshold: 'structured_card',
+  tree_idle: 'structured_card',
+  lane_digest: 'structured_card',
   child_report_ready: 'structured_card',
   claude_pasted_content: 'chat_prose',
 } as const;
@@ -556,6 +558,31 @@ function interpretTaggedMessageEnvelope(
       const trigger = stringValue(envelope.trigger_at) || messageEnvelopeField(text, 'trigger_at') || 'an unknown time';
       const body = messageEnvelopeBody(text) || `Child session ${child} reached an inactivity threshold at ${trigger}.`;
       return interpreted(event, 'daemon-notice', 'bubble:agent', 'agent', 'Daemon', body, false, 'Daemon message-envelope tag selects the compact lifecycle row.');
+    }
+    case 'tree_idle': {
+      const lane = stringValue(envelope.lane_stream_id) || 'unknown lane';
+      const seats = Number.isInteger(envelope.open_seats) ? Number(envelope.open_seats) : 0;
+      const idle = Number.isInteger(envelope.oldest_idle_s) ? Number(envelope.oldest_idle_s) : 0;
+      const reports = Number.isInteger(envelope.open_terminal_reports) ? Number(envelope.open_terminal_reports) : 0;
+      const body = `Lane ${lane} is idle across ${seats} open seats (oldest ${Math.floor(idle / 60)} min); ${reports} open terminal reports.`;
+      return interpreted(event, 'daemon-notice', 'bubble:agent', 'agent', 'Daemon', body, false, 'Daemon tree-idle notice.');
+    }
+    case 'lane_digest': {
+      const lanes = Array.isArray(envelope.lanes) ? envelope.lanes : [];
+      const lines = lanes.map((value) => {
+        if (!value || typeof value !== 'object') return '';
+        const lane = value as Record<string, unknown>;
+        const name = stringValue(lane.title) || stringValue(lane.stream_id) || 'unknown lane';
+        const role = stringValue(lane.role) || 'lane';
+        const state = lane.working === true ? 'working' : lane.working === false ? 'idle' : 'unknown';
+        const descendants = Number.isInteger(lane.open_descendants) ? Number(lane.open_descendants) : 0;
+        const reports = Number.isInteger(lane.open_terminal_reports) ? Number(lane.open_terminal_reports) : 0;
+        const age = Number.isInteger(lane.status_age_s) ? `${Math.floor(Number(lane.status_age_s) / 60)}m card` : 'no card';
+        const eta = stringValue(lane.eta_at);
+        const overrun = typeof lane.eta_overrun_pct === 'number' ? ` (${lane.eta_overrun_pct}% over)` : '';
+        return `${name} [${role}, ${state}, ${descendants} descendants, ${reports} open reports, ${age}]${eta ? ` ETA ${eta}${overrun}` : ''}`;
+      }).filter(Boolean);
+      return interpreted(event, 'daemon-notice', 'bubble:agent', 'agent', 'Daemon', `Fleet digest\n${lines.join('\n')}`, false, 'Daemon lane digest notice.');
     }
     case 'child_report_ready': {
       const summary = messageEnvelopeField(text, 'summary') || stringValue(envelope.summary) || 'Child report ready.';

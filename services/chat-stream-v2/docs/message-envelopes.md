@@ -26,6 +26,8 @@ Version-one kinds and policies are:
 | `notification_answer` | `structured_card` | Compact operator-answer row |
 | `child_session_closed` | `structured_card` | Daemon lifecycle row |
 | `child_inactivity_threshold` | `structured_card` | Daemon inactivity row |
+| `tree_idle` | `structured_card` | Whole-lane idle notice for the direct-primary root |
+| `lane_digest` | `structured_card` | Change-only periodic lane digest for the direct-primary root |
 | `child_report_ready` | `structured_card` | Compact child-report row |
 | `claude_pasted_content` | `chat_prose` | Lane-A authenticated wrapper, re-exported from `provider_wrappers.py` |
 

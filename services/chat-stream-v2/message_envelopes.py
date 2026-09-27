@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
+import json
 import logging
 import re
 from typing import Any, Callable
@@ -163,6 +164,49 @@ def _match_child_inactivity_threshold(text: str, **_: Any) -> dict[str, Any] | N
     }
 
 
+def _build_fleet_notice(kind: str, *, notice_id: object, **fields: Any) -> str:
+    return f"{_notice_marker(notice_id)}\n[{kind}]\n{json.dumps(fields, sort_keys=True, separators=(',', ':'))}"
+
+
+def _match_fleet_notice(kind: str, text: str) -> dict[str, Any] | None:
+    match = re.fullmatch(
+        rf"\[pentacle-notice:(?P<id>{_D2_NOTICE})\]\n\[{kind}\]\n(?P<json>\{{[^\r\n]+\}})",
+        str(text or ""),
+    )
+    if not match:
+        return None
+    try:
+        fields = json.loads(match["json"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(fields, dict):
+        return None
+    if kind == "tree_idle":
+        if (not isinstance(fields.get("lane_stream_id"), str)
+                or not all(isinstance(fields.get(key), int) and not isinstance(fields[key], bool)
+                           and fields[key] >= 0 for key in ("open_seats", "oldest_idle_s", "open_terminal_reports"))):
+            return None
+    elif not isinstance(fields.get("lanes"), list) or not _valid_utc_timestamp(str(fields.get("evaluated_at") or "")):
+        return None
+    return {**fields, "kind": kind, "id": match["id"]}
+
+
+def _build_tree_idle(**fields: Any) -> str:
+    return _build_fleet_notice("tree_idle", **fields)
+
+
+def _match_tree_idle(text: str, **_: Any) -> dict[str, Any] | None:
+    return _match_fleet_notice("tree_idle", text)
+
+
+def _build_lane_digest(**fields: Any) -> str:
+    return _build_fleet_notice("lane_digest", **fields)
+
+
+def _match_lane_digest(text: str, **_: Any) -> dict[str, Any] | None:
+    return _match_fleet_notice("lane_digest", text)
+
+
 def _report_notice_id(report_id: object) -> str:
     digest = hashlib.sha256(str(report_id or "").encode("utf-8")).hexdigest()
     return f"child-report-ready-v2-{digest}"
@@ -283,6 +327,8 @@ MESSAGE_ENVELOPES = (
     MessageEnvelopeEntry("notification_answer", _build_notification_answer, _match_notification_answer, "structured_card"),
     MessageEnvelopeEntry("child_session_closed", _build_child_session_closed, _match_child_session_closed, "structured_card"),
     MessageEnvelopeEntry("child_inactivity_threshold", _build_child_inactivity_threshold, _match_child_inactivity_threshold, "structured_card"),
+    MessageEnvelopeEntry("tree_idle", _build_tree_idle, _match_tree_idle, "structured_card"),
+    MessageEnvelopeEntry("lane_digest", _build_lane_digest, _match_lane_digest, "structured_card"),
     MessageEnvelopeEntry("child_report_ready", _build_child_report_ready, _match_child_report_ready, "structured_card"),
     MessageEnvelopeEntry("claude_pasted_content", _build_claude_pasted_content, _match_claude_pasted_content, "chat_prose"),
 )

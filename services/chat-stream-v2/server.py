@@ -1966,7 +1966,7 @@ class Server:
 
     async def _on_status_card(self, msg: dict[str, Any]) -> dict[str, Any]:
         host, name = await self.sessions.resolve(msg)
-        fields = {k: msg[k] for k in ("goal", "plan", "step_done", "update", "handoff_planned") if k in msg}
+        fields = {k: msg[k] for k in ("goal", "plan", "step_done", "update", "handoff_planned", "eta") if k in msg}
         session = await self.sessions.set_status_card(host, name, fields)
         return {"type": "status_card.ok", "session": session}
 

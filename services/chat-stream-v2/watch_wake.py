@@ -4,10 +4,20 @@ from __future__ import annotations
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime
 import hashlib
+import json
+import os
 import re
 import time
 
 from outbound_notices import NoticeDecision
+
+
+def _fleet_observation_known(row):
+    """Distinguish a captured idle state from inventory's boot-time false default."""
+    generation = str(row.get("session_generation") or "")
+    if not generation or not isinstance(row.get("working"), bool):
+        return False
+    return row.get("capture_generation") == generation and row.get("capture_liveness") == "idle"
 
 
 def registration_payload(kind, message, now):
@@ -61,10 +71,11 @@ def registration_payload(kind, message, now):
 
 
 class WatchWake:
-    def __init__(self, store, sessions, outbound=None, *, clock=time.time):
+    def __init__(self, store, sessions, outbound=None, *, clock=time.time, root_binding=None):
         self.store, self.sessions, self.clock = store, sessions, clock
+        self.root_binding = root_binding
         if outbound is not None:
-            for kind in ("watch", "wake", "wake_urgent", "report", "reconciler"):
+            for kind in ("watch", "wake", "wake_urgent", "report", "reconciler", "tree_idle", "lane_digest"):
                 outbound.register_kind(kind, guard=self.delivery_guard, lock_factory=self.delivery_locks)
 
     def wire_handlers(self):
@@ -107,12 +118,14 @@ class WatchWake:
             return {"type": f"{kind}.error", "ok": False, "error_code": str(exc), "request_id": message.get("request_id")}
 
     async def tick(self):
-        observations = {
-            f"{r['host']}:{r['session_name']}": r
-            for r in self.sessions.list_open()
-            if str(r.get("provider") or "") != "composite"
-        }
-        await self.store.evaluate_watch_wake(observations, now=self.clock())
+        observations = {}
+        for row in self.sessions.list_open():
+            if str(row.get("provider") or "") == "composite":
+                continue
+            observation = {**row, "_fleet_observed": _fleet_observation_known(row)}
+            observations[f"{row['host']}:{row['session_name']}"] = observation
+        binding = self.root_binding() if callable(self.root_binding) else None
+        await self.store.evaluate_watch_wake(observations, now=self.clock(), root_binding=binding)
 
     @asynccontextmanager
     async def delivery_locks(self, row):
@@ -124,6 +137,29 @@ class WatchWake:
             yield
 
     async def delivery_guard(self, row):
+        if row.get("kind") in ("tree_idle", "lane_digest"):
+            binding = self.root_binding() if callable(self.root_binding) else None
+            metadata = row.get("metadata")
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+            env = "PENTACLE_TREE_IDLE_S" if row["kind"] == "tree_idle" else "PENTACLE_LANE_DIGEST_S"
+            if (not binding or tuple(binding) != (row.get("recipient_stream_id"), (metadata or {}).get("root_generation"))
+                    or os.environ.get(env) == "0"):
+                return NoticeDecision("terminal", "fleet_root_rebound_or_disabled", "use current root generation")
+            host, _, name = row["recipient_stream_id"].partition(":")
+            root = await self.store.fetch_session(host, name)
+            if (not root or root.get("status") != "open"
+                    or root.get("session_generation") != binding[1]
+                    or root.get("offline_since_ts") or root.get("presumed_dead_at")
+                    or root.get("pane_status") == "pane_dead"):
+                return NoticeDecision("terminal", "fleet_root_unavailable", "wait for current live root")
+            if root.get("pane_status") != "pane_alive":
+                return NoticeDecision.retry("fleet_root_unverified", "wait for a live pane observation")
+            live_root = self.sessions.get(row["recipient_stream_id"]) or {}
+            if (live_root.get("session_generation") != binding[1]
+                    or live_root.get("online") is not True
+                    or live_root.get("pane_status") != "pane_alive"):
+                return NoticeDecision.retry("fleet_root_unverified", "wait for a live pane observation")
         if not await self.store.watch_notice_valid(row["notice_id"]):
             return NoticeDecision("terminal", "watch_lifecycle_retired", "register work in the current generation")
         return None

@@ -2868,10 +2868,12 @@ def status(args: argparse.Namespace) -> int:
         fields["update"] = args.update
     if args.handoff_planned is not None:
         fields["handoff_planned"] = args.handoff_planned
+    if args.eta is not None:
+        fields["eta"] = args.eta
     if not fields:
         print(
             "agent-orch status: validation failed: no_fields "
-            "(pass at least one of --goal/--plan/--step-done/--update/--handoff-planned)",
+            "(pass at least one of --goal/--plan/--step-done/--update/--handoff-planned/--eta)",
             file=sys.stderr,
         )
         return 2
@@ -5314,6 +5316,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="mark 1-based plan step N done; repeat the flag or pass a comma-list",
     )
     status_parser.add_argument("--update", default=None, help="one-line latest update (<=300 chars)")
+    status_parser.add_argument("--eta", default=None, help="future ISO-8601 timestamp, positive duration (m/h/d), or none to clear")
     status_parser.add_argument(
         "--handoff-planned",
         dest="handoff_planned",

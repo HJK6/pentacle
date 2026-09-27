@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -34,6 +35,21 @@ WATCH_WAKE_DDL = (
     """CREATE TABLE IF NOT EXISTS v2_watch_cancellations (
         owner TEXT NOT NULL, owner_generation TEXT NOT NULL, request_id TEXT NOT NULL,
         kind TEXT NOT NULL, target TEXT NOT NULL, PRIMARY KEY(owner, owner_generation, request_id))""",
+    """CREATE TABLE IF NOT EXISTS v2_fleet_seat_idle (
+        stream_id TEXT NOT NULL, generation TEXT NOT NULL, idle_since REAL,
+        last_activity REAL, last_working_at REAL, working INTEGER,
+        PRIMARY KEY(stream_id, generation))""",
+    """CREATE TABLE IF NOT EXISTS v2_fleet_lane_state (
+        root TEXT NOT NULL, root_generation TEXT NOT NULL,
+        lane TEXT NOT NULL, lane_generation TEXT NOT NULL,
+        episode INTEGER NOT NULL, fired INTEGER NOT NULL,
+        PRIMARY KEY(root, root_generation, lane, lane_generation))""",
+    """CREATE TABLE IF NOT EXISTS v2_fleet_digest_state (
+        root TEXT NOT NULL, root_generation TEXT NOT NULL,
+        next_due REAL NOT NULL, last_hash TEXT, sequence INTEGER NOT NULL,
+        PRIMARY KEY(root, root_generation))""",
+    """CREATE TABLE IF NOT EXISTS v2_fleet_switch_state (
+        kind TEXT PRIMARY KEY, enabled INTEGER NOT NULL, epoch INTEGER NOT NULL)""",
 )
 D2_KINDS = ("watch", "wake", "wake_urgent")
 
@@ -361,7 +377,7 @@ class _WatchWakeStoreMixin:
             return all(_notice_valid_conn(conn, f) for f in facts)
         return await self.submit(op)
 
-    async def evaluate_watch_wake(self, observations, *, now=None):
+    async def evaluate_watch_wake(self, observations, *, now=None, root_binding=None):
         stamp = time.time() if now is None else now
         def op(conn):
             with conn:
@@ -371,6 +387,7 @@ class _WatchWakeStoreMixin:
                 count = 0
                 for row in conn.execute("SELECT * FROM v2_watch_wake WHERE state='active'").fetchall():
                     count += _evaluate_conn(conn, row, observations.get(row["child"], {}), stamp)
+                count += _evaluate_fleet_conn(conn, observations, root_binding, stamp)
                 return count
         return await self.submit(op)
 
@@ -462,4 +479,271 @@ def _evaluate_conn(conn, row, observation, now):
             count += 1
         row = conn.execute("SELECT * FROM v2_watch_wake WHERE id=?", (row["id"],)).fetchone()
         _consume(conn, row, trigger, nid, episode)
+    return count
+
+
+def _fleet_interval(name, default):
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(0, value)
+
+
+def _fleet_seat_idle(conn, sid, generation, observation, now):
+    previous = conn.execute(
+        "SELECT * FROM v2_fleet_seat_idle WHERE stream_id=? AND generation=?",
+        (sid, generation),
+    ).fetchone()
+    valid = (observation.get("session_generation") == generation
+             and observation.get("_fleet_observed", True) is True)
+    working = observation.get("working") if valid else None
+    if working not in (True, False):
+        working = None
+    activity = observation.get("genuine_activity_at")
+    if not (valid and observation.get("genuine_activity_generation") == generation
+            and isinstance(activity, (int, float)) and not isinstance(activity, bool)
+            and math.isfinite(activity) and 0 < activity <= now):
+        activity = None
+    working_at = observation.get("watch_working_at")
+    if not (valid and isinstance(working_at, (int, float)) and not isinstance(working_at, bool)
+            and math.isfinite(working_at) and 0 < working_at <= now):
+        working_at = None
+    old_activity = previous["last_activity"] if previous else None
+    old_working_at = previous["last_working_at"] if previous else None
+    old_working = previous["working"] if previous else None
+    changed = bool(previous and (
+        (activity is not None and activity > (old_activity or 0))
+        or (working_at is not None and working_at > (old_working_at or 0))
+        or (working is not None and int(working) != old_working)
+        or (working is None and old_working is not None)
+    ))
+    idle_since = previous["idle_since"] if previous and not changed else None
+    if working is False and idle_since is None:
+        idle_since = now
+    if working is not False:
+        idle_since = None
+    conn.execute(
+        """INSERT INTO v2_fleet_seat_idle
+           (stream_id,generation,idle_since,last_activity,last_working_at,working)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(stream_id,generation) DO UPDATE SET
+             idle_since=excluded.idle_since,last_activity=excluded.last_activity,
+             last_working_at=excluded.last_working_at,working=excluded.working""",
+        (sid, generation, idle_since,
+         max(activity or 0, old_activity or 0) or None,
+         max(working_at or 0, old_working_at or 0) or None,
+         None if working is None else int(working)),
+    )
+    return idle_since, changed
+
+
+def _fleet_overrun(card, now):
+    try:
+        start = datetime.fromisoformat(card["eta_set_at"].replace("Z", "+00:00")).timestamp()
+        eta = datetime.fromisoformat(card["eta_at"].replace("Z", "+00:00")).timestamp()
+        if eta <= start:
+            return None
+        return max(0.0, 100.0 * (now - eta) / (eta - start))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def _fleet_age(timestamp, now):
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        return max(0, int(now - datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _fleet_reports(conn, members):
+    counts = {sid: 0 for sid in members}
+    for report in conn.execute(
+        "SELECT report_id,from_stream_id,session_generation FROM v2_reports WHERE status IN ('done','error','aborted')"
+    ):
+        member = members.get(report["from_stream_id"])
+        if member and report["session_generation"] == member["session_generation"]:
+            counts[report["from_stream_id"]] += 1
+    return counts
+
+
+def _fleet_members(children, lane_sid):
+    found, stack = [], [lane_sid]
+    seen = set()
+    while stack:
+        sid = stack.pop()
+        if sid in seen:
+            continue
+        seen.add(sid)
+        found.append(sid)
+        stack.extend(children.get(sid, ()))
+    return found
+
+
+def _evaluate_fleet_conn(conn, observations, root_binding, now):
+    idle_s = _fleet_interval("PENTACLE_TREE_IDLE_S", 1200)
+    digest_s = _fleet_interval("PENTACLE_LANE_DIGEST_S", 1800)
+    epochs = {}
+    for kind, enabled in (("tree_idle", idle_s), ("lane_digest", digest_s)):
+        previous = conn.execute("SELECT enabled,epoch FROM v2_fleet_switch_state WHERE kind=?", (kind,)).fetchone()
+        epoch = (previous["epoch"] if previous else 0) + int(bool(previous and previous["enabled"] and not enabled))
+        epochs[kind] = epoch
+        conn.execute(
+            """INSERT INTO v2_fleet_switch_state VALUES (?,?,?)
+               ON CONFLICT(kind) DO UPDATE SET enabled=excluded.enabled,epoch=excluded.epoch""",
+            (kind, int(bool(enabled)), epoch),
+        )
+        if enabled == 0:
+            conn.execute(
+                """UPDATE v2_outbound_notices SET terminal_at=?,terminal_reason='fleet_disabled'
+                   WHERE kind=? AND delivered_at IS NULL AND terminal_at IS NULL""",
+                (_stamp(now), kind),
+            )
+            if kind == "tree_idle":
+                conn.execute("DELETE FROM v2_fleet_lane_state")
+            else:
+                conn.execute("DELETE FROM v2_fleet_digest_state")
+    if (not isinstance(root_binding, (tuple, list)) or len(root_binding) != 2
+            or not all(isinstance(value, str) and value for value in root_binding)):
+        conn.execute("DELETE FROM v2_fleet_seat_idle")
+        return 0
+    root_sid, root_gen = root_binding
+    rows = conn.execute(
+        """SELECT s.*,g.generation AS session_generation FROM sessions s
+           JOIN v2_session_generations g USING(host,session_name) WHERE s.status='open'"""
+    ).fetchall()
+    members = {f"{r['host']}:{r['session_name']}": dict(r) for r in rows}
+    root = members.get(root_sid)
+    root_live = observations.get(root_sid, {})
+    if (root is None or root["session_generation"] != root_gen
+            or root.get("offline_since_ts") or root.get("presumed_dead_at")
+            or root.get("pane_status") != "pane_alive"
+            or root_live.get("session_generation") != root_gen
+            or root_live.get("online") is not True
+            or root_live.get("pane_status") != "pane_alive"):
+        # An unobserved root interval cannot certify continuous descendant idle.
+        conn.execute("DELETE FROM v2_fleet_seat_idle")
+        return 0
+    children = {}
+    for sid, row in members.items():
+        children.setdefault(row.get("parent_stream_id"), []).append(sid)
+    lanes = sorted(children.get(root_sid, ()))
+    if not lanes:
+        # Keep the monotonic notice sequence for this root generation. Clearing
+        # the material hash makes the next lane set a fresh digest episode.
+        if digest_s:
+            conn.execute(
+                """UPDATE v2_fleet_digest_state SET next_due=?,last_hash=NULL
+                   WHERE root=? AND root_generation=?""",
+                (now + digest_s, root_sid, root_gen),
+            )
+        return 0
+    report_counts = _fleet_reports(conn, members)
+    seat_states = {}
+    for lane_sid in lanes:
+        for sid in _fleet_members(children, lane_sid):
+            if sid not in seat_states:
+                row = members[sid]
+                seat_states[sid] = _fleet_seat_idle(
+                    conn, sid, row["session_generation"], observations.get(sid, {}), now,
+                )
+    count = 0
+    digest_lanes = []
+    render_lanes = []
+    for lane_sid in lanes:
+        lane = members[lane_sid]
+        subtree = _fleet_members(children, lane_sid)
+        idle_baselines = [seat_states[sid][0] for sid in subtree]
+        report_count = sum(report_counts[sid] for sid in subtree)
+        card = json.loads(lane["status_card"]) if lane.get("status_card") else {}
+        overrun = _fleet_overrun(card, now)
+        observation = observations.get(lane_sid, {})
+        working = (observation.get("working") if
+                   observation.get("session_generation") == lane["session_generation"]
+                   and observation.get("_fleet_observed", True) is True else None)
+        facts = {
+            "stream_id": lane_sid, "generation": lane["session_generation"],
+            "title": lane.get("title"), "role": lane.get("role"),
+            "status_updated_at": card.get("updated_at"),
+            "working": working if working in (True, False) else None,
+            "open_descendants": len(subtree) - 1,
+            "open_terminal_reports": report_count,
+            "eta_at": card.get("eta_at"), "eta_set_at": card.get("eta_set_at"),
+            "eta_overrun_50": overrun is not None and overrun >= 50.0,
+        }
+        digest_lanes.append(facts)
+        render_lanes.append({
+            **facts,
+            "status_age_s": _fleet_age(card.get("updated_at"), now),
+            "idle_age_s": int(now - seat_states[lane_sid][0]) if seat_states[lane_sid][0] is not None else None,
+            "eta_overrun_pct": round(overrun, 1) if overrun is not None else None,
+        })
+        if idle_s == 0 or lane.get("role") not in ("lead", "nexus"):
+            continue
+        prior = conn.execute(
+            """SELECT episode,fired FROM v2_fleet_lane_state
+               WHERE root=? AND root_generation=? AND lane=? AND lane_generation=?""",
+            (root_sid, root_gen, lane_sid, lane["session_generation"]),
+        ).fetchone()
+        episode = (prior["episode"] if prior else 0) + int(bool(prior and any(seat_states[sid][1] for sid in subtree)))
+        fired = int(prior["fired"]) if prior and episode == prior["episode"] else 0
+        qualified = all(value is not None for value in idle_baselines) and now >= max(idle_baselines) + idle_s
+        if qualified and not fired:
+            nid = _id("tree_idle", epochs["tree_idle"], root_sid, root_gen,
+                      lane_sid, lane["session_generation"], episode)
+            body = build_message_envelope(
+                "tree_idle", notice_id=nid, lane_stream_id=lane_sid,
+                open_seats=len(subtree), oldest_idle_s=int(now - min(idle_baselines)),
+                open_terminal_reports=report_count,
+            )
+            _insert_outbound_notice_conn(
+                conn, notice_id=nid, tell_id=nid, kind="tree_idle", dedupe_key=nid,
+                recipient_stream_id=root_sid, source_stream_id=lane_sid, episode_id=str(episode),
+                body=body, created_at=_stamp(now),
+                metadata={"root_generation": root_gen, "lane_generation": lane["session_generation"]},
+            )
+            fired = 1
+            count += 1
+        conn.execute(
+            """INSERT INTO v2_fleet_lane_state VALUES (?,?,?,?,?,?)
+               ON CONFLICT(root,root_generation,lane,lane_generation)
+               DO UPDATE SET episode=excluded.episode,fired=excluded.fired""",
+            (root_sid, root_gen, lane_sid, lane["session_generation"], episode, fired),
+        )
+    if digest_s == 0:
+        return count
+    state = conn.execute(
+        "SELECT * FROM v2_fleet_digest_state WHERE root=? AND root_generation=?",
+        (root_sid, root_gen),
+    ).fetchone()
+    if state is None:
+        conn.execute("INSERT INTO v2_fleet_digest_state VALUES (?,?,?,?,?)",
+                     (root_sid, root_gen, now + digest_s, None, 0))
+        return count
+    if now < state["next_due"]:
+        return count
+    facts = _json(digest_lanes)
+    digest = hashlib.sha256(facts.encode()).hexdigest()
+    sequence = state["sequence"]
+    if digest != state["last_hash"]:
+        sequence += 1
+        nid = _id("lane_digest", epochs["lane_digest"], root_sid, root_gen, sequence)
+        body = build_message_envelope(
+            "lane_digest", notice_id=nid, lanes=render_lanes,
+            evaluated_at=_stamp(now),
+        )
+        _insert_outbound_notice_conn(
+            conn, notice_id=nid, tell_id=nid, kind="lane_digest", dedupe_key=nid,
+            recipient_stream_id=root_sid, source_stream_id=None, episode_id=str(sequence),
+            body=body, created_at=_stamp(now), metadata={"root_generation": root_gen},
+        )
+        count += 1
+    conn.execute(
+        "UPDATE v2_fleet_digest_state SET next_due=?,last_hash=?,sequence=? WHERE root=? AND root_generation=?",
+        (now + digest_s, digest if digest != state["last_hash"] else state["last_hash"],
+         sequence, root_sid, root_gen),
+    )
     return count

@@ -524,7 +524,14 @@ async def run(args: argparse.Namespace) -> int:
     )
     server.handlers.update(event_push.wire_handlers())
     from watch_wake import WatchWake, run_reconcile_callbacks
-    watch_wake = WatchWake(store, sessions, outbound)
+    watch_wake = WatchWake(
+        store, sessions, outbound,
+        root_binding=lambda: (
+            (assistant_composite.config.direct_primary_stream_id,
+             assistant_composite.config.direct_primary_generation)
+            if assistant_composite.config.direct_primary else None
+        ),
+    )
     server.watch_wake = watch_wake
     server.handlers.update(watch_wake.wire_handlers())
 

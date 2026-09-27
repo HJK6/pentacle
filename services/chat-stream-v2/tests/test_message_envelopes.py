@@ -46,12 +46,16 @@ def test_registry_entries_are_immutable_and_have_render_policy() -> None:
         "notification_answer",
         "child_session_closed",
         "child_inactivity_threshold",
+        "tree_idle",
+        "lane_digest",
         "child_report_ready",
         "claude_pasted_content",
     }
     policies = {entry.kind: entry.render_policy for entry in MESSAGE_ENVELOPES}
     assert policies == {
-        case["kind"]: case["render_policy"] for case in FIXTURE["cases"]
+        **{case["kind"]: case["render_policy"] for case in FIXTURE["cases"]},
+        "tree_idle": "structured_card",
+        "lane_digest": "structured_card",
     }
     assert set(policies.values()) <= {
         "chat_prose", "structured_card", "persisted_only", "internal",

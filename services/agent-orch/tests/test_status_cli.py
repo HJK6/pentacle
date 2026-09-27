@@ -15,6 +15,7 @@ def _args(**overrides):
         "step_done": None,
         "update": None,
         "handoff_planned": None,
+        "eta": None,
         "timeout": 1.0,
     }
     data.update(overrides)
@@ -36,6 +37,7 @@ def test_status_parser_accepts_each_flag():
             "--step-done", "1",
             "--update", "milestone",
             "--handoff-planned",
+            "--eta", "45m",
         ]
     )
     assert args.goal == "Ship the card"
@@ -43,6 +45,7 @@ def test_status_parser_accepts_each_flag():
     assert args.step_done == [[1]]
     assert args.update == "milestone"
     assert args.handoff_planned is True
+    assert args.eta == "45m"
     assert cli.build_parser().parse_args(["status", "--no-handoff-planned"]).handoff_planned is False
 
 
@@ -151,4 +154,3 @@ def test_status_transport_error_exit_codes(monkeypatch, capsys, tmp_path):
         monkeypatch.setattr(cli, "status_card_once", fake_status_card_once)
         assert cli.status(_args(goal="g")) == expected
         capsys.readouterr()
-

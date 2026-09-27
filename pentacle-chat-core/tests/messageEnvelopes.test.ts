@@ -85,6 +85,33 @@ test('tagged child-session close renders as the existing daemon activity row', (
   assert.equal(interpreted.text, item.expected_display);
 });
 
+test('fleet notices render as clean daemon cards', () => {
+  const tree = interpretPentacleEvent(event({
+    text: '[pentacle-notice:d2:' + 'c'.repeat(64) + ']\n[tree_idle]\n{}',
+    message_envelope: {
+      schema_version: 1, kind: 'tree_idle', id: 'd2:' + 'c'.repeat(64),
+      lane_stream_id: 'hosta:lead', open_seats: 2, oldest_idle_s: 1200,
+      open_terminal_reports: 1,
+    },
+  }));
+  assert.equal(tree.caseId, 'daemon-notice');
+  assert.equal(tree.hidden, false);
+  assert.match(tree.text, /hosta:lead.*20 min.*1 open terminal reports/);
+  const digest = interpretPentacleEvent(event({
+    text: '[pentacle-notice:d2:' + 'd'.repeat(64) + ']\n[lane_digest]\n{}',
+    message_envelope: {
+      schema_version: 1, kind: 'lane_digest', id: 'd2:' + 'd'.repeat(64),
+      evaluated_at: '2026-09-27T05:00:00Z',
+      lanes: [{ stream_id: 'hosta:lead', title: 'Lead lane', role: 'lead',
+        working: false, open_descendants: 1, open_terminal_reports: 0,
+        status_age_s: 900, eta_at: '2026-09-27T04:00:00Z', eta_overrun_pct: 50 }],
+    },
+  }));
+  assert.equal(digest.caseId, 'daemon-notice');
+  assert.equal(digest.hidden, false);
+  assert.match(digest.text, /Lead lane.*15m card.*50% over/);
+});
+
 test('tagged notification answer keeps its compact answer row', () => {
   const item = fixture.cases.find((candidate: any) => candidate.key === 'notification-answer');
   const interpreted = interpretPentacleEvent(event({

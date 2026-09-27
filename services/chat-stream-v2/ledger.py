@@ -32,7 +32,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -93,7 +93,7 @@ STEP_TEXT_MAX_CHARS = 200
 PLAN_MAX_STEPS = 20
 UPDATES_MAX = 50
 STEP_PENDING, STEP_ACTIVE, STEP_DONE = "pending", "active", "done"
-_CARD_FIELDS = ("goal", "plan", "step_done", "update", "handoff_planned")
+_CARD_FIELDS = ("goal", "plan", "step_done", "update", "handoff_planned", "eta")
 _AC_CHECKBOX_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\[([ xX])\]")
 _AC_CLAIM_TIMEOUT_S = 8.0
 
@@ -260,6 +260,29 @@ def apply_status_card_update(current: dict | None, fields: dict, *, now_iso: str
         if not isinstance(fields["handoff_planned"], bool):
             raise StatusCardError("empty_field", "handoff_planned must be a boolean")
         card["handoff_planned"] = fields["handoff_planned"]
+    if "eta" in fields:
+        raw = fields["eta"]
+        if raw == "none":
+            card["eta_at"] = None
+            card["eta_set_at"] = None
+        else:
+            if not isinstance(raw, str):
+                raise StatusCardError("invalid_eta", "eta must be a timestamp, duration, or none")
+            now = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+            duration = re.fullmatch(r"([1-9][0-9]*)([mhd])", raw)
+            try:
+                if duration:
+                    eta = now + timedelta(seconds=int(duration[1]) * {"m": 60, "h": 3600, "d": 86400}[duration[2]])
+                elif re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)", raw):
+                    eta = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                else:
+                    raise ValueError("invalid eta")
+                if eta.tzinfo is None or eta <= now:
+                    raise ValueError("eta must be future")
+                card["eta_at"] = eta.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                card["eta_set_at"] = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            except (OverflowError, ValueError) as exc:
+                raise StatusCardError("invalid_eta", "eta must be a future timezone-aware timestamp or positive m/h/d duration") from exc
 
     card["updated_at"] = now_iso
     return card
