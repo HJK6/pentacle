@@ -46,6 +46,7 @@ from store_assistant_binding import (
     ASSISTANT_REBIND_AUDIT_INDEX_DDL, ASSISTANT_HANDOFF_PROOF_DDL,
     AssistantBindingStoreMixin,
 )
+from assistant_lane_rulings import RULING_REQUESTS_DDL, BART_LANE_OWNERSHIP_DDL, RULING_AUDIT_DDL
 from store_qa import QaStoreMixin
 from store_exchange import ExchangeStoreMixin
 
@@ -1432,6 +1433,9 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             conn.execute(ASSISTANT_REBIND_AUDIT_DDL)
             conn.execute(ASSISTANT_REBIND_AUDIT_INDEX_DDL)
             conn.execute(ASSISTANT_HANDOFF_PROOF_DDL)
+            conn.execute(RULING_REQUESTS_DDL)
+            conn.execute(BART_LANE_OWNERSHIP_DDL)
+            conn.execute(RULING_AUDIT_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
             conn.execute(ASSISTANT_COMPOSITE_LANES_DDL)

@@ -1637,6 +1637,26 @@ def assistant_rebind(args: argparse.Namespace) -> int:
     return _assistant_call(args, payload)
 
 
+def assistant_authority(args: argparse.Namespace) -> int:
+    value = "disabled" if args.disable else args.set
+    payload: dict[str, object] = {
+        "type": "assistant.authority", "request_id": args.request_id or f"assistant-authority-{uuid.uuid4()}",
+        "action": "set" if value is not None else "read",
+    }
+    if value is not None:
+        payload["value"] = value
+    return _assistant_call(args, payload)
+
+
+def assistant_ruling(args: argparse.Namespace) -> int:
+    payload: dict[str, object] = {
+        "type": "assistant.ruling", "request_id": args.request_id,
+        "ruling_request_id": args.ruling_request_id, "ruling": args.ruling,
+        "reason": args.reason or "", "conditions": args.conditions or "",
+    }
+    return _assistant_call(args, payload)
+
+
 def _park_rpc(args: argparse.Namespace, *, command: str) -> int:
     config = load_config()
     from_stream_id = args.from_stream_id or discover_leader_stream_id_short(config)
@@ -4979,6 +4999,25 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_rebind_parser.add_argument("--expected-revision", type=int)
     assistant_rebind_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_rebind_parser.set_defaults(func=assistant_rebind)
+    assistant_authority_parser = assistant_sub.add_parser(
+        "authority", help="read or hot-rebind the independent Bart lane ruling authority",
+    )
+    authority_change = assistant_authority_parser.add_mutually_exclusive_group()
+    authority_change.add_argument("--set", metavar="STREAM_ID")
+    authority_change.add_argument("--disable", action="store_true")
+    assistant_authority_parser.add_argument("--request-id")
+    assistant_authority_parser.add_argument("--timeout", type=float, default=30.0)
+    assistant_authority_parser.set_defaults(func=assistant_authority)
+    assistant_ruling_parser = assistant_sub.add_parser(
+        "ruling", help="answer one generation-bound Bart lane ruling request",
+    )
+    assistant_ruling_parser.add_argument("--ruling-request-id", required=True)
+    assistant_ruling_parser.add_argument("--request-id", required=True)
+    assistant_ruling_parser.add_argument("--ruling", choices=("approve", "revise", "deny"), required=True)
+    assistant_ruling_parser.add_argument("--reason")
+    assistant_ruling_parser.add_argument("--conditions")
+    assistant_ruling_parser.add_argument("--timeout", type=float, default=30.0)
+    assistant_ruling_parser.set_defaults(func=assistant_ruling)
 
     park_parser = subparsers.add_parser("park")
     park_parser.add_argument("stream_id")

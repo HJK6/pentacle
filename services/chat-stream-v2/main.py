@@ -648,6 +648,8 @@ async def run(args: argparse.Namespace) -> int:
     # Reconciliation has settled the inventory and every interrupted intent, so
     # a new spawn can no longer race it: open the spawn gate (QA #18).
     server.spawn_ready.set()
+    if assistant_config.enabled and server.lane_rulings is not None:
+        await server.lane_rulings.start()
     await lifted  # both are fast; ensure done before the background tasks below
 
     # 3. Background tasks start last, each under the loop rules
@@ -765,6 +767,8 @@ async def run(args: argparse.Namespace) -> int:
     if tasks:
         await asyncio.wait(tasks, timeout=5)
     await assistant_composite.stop()
+    if server.lane_rulings is not None:
+        await server.lane_rulings.stop()
     await server.close()
     await notify.stop()
     await assets.stop()

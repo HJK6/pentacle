@@ -83,6 +83,7 @@ class AssistantCompositeConfig:
     luna_stream_id: str = ""
     direct_primary_stream_id: str = ""
     direct_primary_generation: str = ""
+    authority_stream_id: str = ""
     mirror_enabled_default: bool = True
     title: str = "Assistant"
 
@@ -125,6 +126,9 @@ class AssistantCompositeConfig:
         if enabled and not direct_requested and (not backend_ids["PENTACLE_ASSISTANT_ASTRA_STREAM_ID"]
                         or not backend_ids["PENTACLE_ASSISTANT_LUNA_STREAM_ID"]):
             raise ValueError("assistant_backend_stream_ids_required")
+        authority_stream = str(values.get("PENTACLE_ASSISTANT_AUTHORITY_STREAM_ID") or "").strip()
+        if authority_stream and not _STREAM_ID_RE.fullmatch(authority_stream):
+            raise ValueError("assistant_authority_stream_id_invalid")
         return cls(
             enabled=enabled,
             stream_id=stream_id,
@@ -135,6 +139,7 @@ class AssistantCompositeConfig:
             luna_stream_id="" if direct_requested else backend_ids["PENTACLE_ASSISTANT_LUNA_STREAM_ID"],
             direct_primary_stream_id=direct_stream,
             direct_primary_generation=direct_generation,
+            authority_stream_id=authority_stream,
             mirror_enabled_default=_env_bool(values, "PENTACLE_ASSISTANT_MIRROR_ENABLED", True),
             title=str(values.get("PENTACLE_ASSISTANT_COMPOSITE_TITLE") or "Assistant").strip()[:120] or "Assistant",
         )
@@ -224,6 +229,7 @@ class AssistantComposite:
         self._worker: asyncio.Task[None] | None = None
         self._worker_lock = asyncio.Lock()
         self._binding_lock = asyncio.Lock()
+        self.ruling_hook: Callable[..., Awaitable[dict[str, Any] | None]] | None = None
         self._dispatch_tasks: set[asyncio.Task[None]] = set()
         self._owner = f"assistant-router-{uuid.uuid4().hex[:12]}"
         self._activity_lock = asyncio.Lock()
@@ -1351,6 +1357,15 @@ class AssistantComposite:
             if not backend_generation or current_generation != backend_generation:
                 raise ValueError("assistant_lane_bind_target_generation_invalid")
         await self._authorize_operation(operation, lane_id, payload, actor_stream_id)
+        if (operation in {"lane.admit", "lane.close"} and self.config.direct_primary
+                and self.ruling_hook is not None):
+            ruling_hold = await self.ruling_hook(
+                msg, actor_stream_id=str(actor_stream_id or ""),
+                actor_generation=actor_generation, operation=operation,
+                lane_id=str(lane_id or ""), expected_lane_version=expected_version,
+            )
+            if ruling_hold is not None:
+                return ruling_hold
         if operation in {"question.open", "question.cancel"}:
             if self.question_operation is None:
                 raise ValueError("assistant_question_adapter_unavailable")

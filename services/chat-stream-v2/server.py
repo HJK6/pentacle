@@ -61,6 +61,7 @@ from seat_token_telemetry import (
 from sessions import VerbError, _finish_despite_cancel, with_bootstrap_state
 from store import STREAM_TOKEN_HASH_VERSION, role_source_for
 from machine_stats import validate_machine_stats
+from assistant_lane_rulings import AssistantLaneRulings
 
 log = logging.getLogger("chat_streamd_v2.server")
 
@@ -337,6 +338,7 @@ class Server:
         # Attached by main after the durable store is available.  Keeping it
         # optional makes old deployments and focused unit servers unchanged.
         self.assistant_composite: Any = None
+        self.lane_rulings = AssistantLaneRulings(self) if store is not None else None
         #: The peer probe pool. When present, `hello`/`snapshot` serves its live
         #: hosts dict (local entry + every peer's binary reachability); absent,
         #: the snapshot carries the local-only entry (unit tests).
@@ -476,6 +478,8 @@ class Server:
             "assistant.operation": self._on_assistant_operation,
             "assistant.binding": self._on_assistant_binding,
             "assistant.rebind": self._on_assistant_rebind,
+            "assistant.authority": self._on_assistant_authority,
+            "assistant.ruling": self._on_assistant_ruling,
             "send_image": self._on_send_image,
             "send.receipt.get": self._on_send_receipt_get,
             "ledger_get": self._on_ledger_get,
@@ -1946,6 +1950,7 @@ class Server:
             "send_frames": dict(SEND_FRAMES_NOT_IMPLEMENTED),
             "existing_report": existing_report,
             "close_audit": close_audit,
+            "lane_ruling": (await self.lane_rulings.latest_for_target(stream_id)) if self.lane_rulings else None,
             "deferred_reap": await self.store.get_deferred_reap(stream_id),
         }
 
@@ -1978,9 +1983,20 @@ class Server:
         # table (QA #18). Only spawn waits; the gate is open outside the boot
         # window, so this is a no-op for every steady-state spawn.
         await self.spawn_ready.wait()
+        if self.lane_rulings is not None:
+            try:
+                pending = await self.lane_rulings.request_spawn(msg)
+            except ValueError as exc:
+                raise VerbError(str(exc), str(exc)) from exc
+            if pending is not None:
+                return pending
         return await self.spawnctl.spawn(msg, self.local_host)
 
     async def _on_await_spawn(self, msg: dict[str, Any]) -> dict[str, Any]:
+        if self.lane_rulings is not None:
+            ruling = await self.lane_rulings.await_spawn(msg)
+            if ruling is not None:
+                return ruling
         return await self.spawnctl.await_spawn(msg)
 
     async def _on_spawn_cancel(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -1998,7 +2014,10 @@ class Server:
 
     async def _on_spawn_unfreeze(self, msg: dict[str, Any]) -> dict[str, Any]:
         host = str(msg.get("host") or self.local_host).strip()
-        return await self.spawnctl.clear_spawn_freeze(host)
+        receipt = await self.spawnctl.clear_spawn_freeze(host)
+        if self.lane_rulings is not None:
+            await self.lane_rulings.tick()
+        return receipt
 
     async def _on_reparent(self, msg: dict[str, Any]) -> dict[str, Any]:
         host, name = await self.sessions.resolve(msg)
@@ -2320,6 +2339,8 @@ class Server:
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if composite is None or not auth.get("token_verified"):
             raise VerbError("assistant_operation_unauthorized", "assistant.operation requires a verified backend stream token")
+        if self.lane_rulings is not None:
+            composite.ruling_hook = self.lane_rulings.request_composite
         try:
             return await composite.operation(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
         except ValueError as exc:
@@ -2342,6 +2363,35 @@ class Server:
             raise VerbError("assistant_rebind_unauthorized", "assistant.rebind requires a verified stream token")
         try:
             return await composite.rebind(msg, actor_stream_id=str(auth["stream_id"]))
+        except ValueError as exc:
+            raise VerbError(str(exc), str(exc)) from exc
+
+    async def _on_assistant_authority(self, msg: dict[str, Any]) -> dict[str, Any]:
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if self.lane_rulings is None or not (auth.get("token_verified") or auth.get("operator_authenticated")):
+            raise VerbError("assistant_authority_unauthorized", "assistant.authority requires authentication")
+        action = str(msg.get("action") or "read")
+        try:
+            if action == "read":
+                return {"type": "assistant.authority.ok", **await self.lane_rulings.binding()}
+            if action != "set" or not auth.get("token_verified"):
+                raise ValueError("assistant_authority_unauthorized")
+            return await self.lane_rulings.configure(
+                str(msg.get("value") or ""), actor_stream_id=str(auth.get("stream_id") or ""),
+                actor_generation=str(auth.get("session_generation") or ""),
+            )
+        except ValueError as exc:
+            raise VerbError(str(exc), str(exc)) from exc
+
+    async def _on_assistant_ruling(self, msg: dict[str, Any]) -> dict[str, Any]:
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if self.lane_rulings is None or not auth.get("token_verified"):
+            raise VerbError("assistant_ruling_unauthorized", "assistant.ruling requires a verified stream token")
+        try:
+            return await self.lane_rulings.ruling(
+                msg, actor_stream_id=str(auth.get("stream_id") or ""),
+                actor_generation=str(auth.get("session_generation") or ""),
+            )
         except ValueError as exc:
             raise VerbError(str(exc), str(exc)) from exc
 
@@ -2642,6 +2692,19 @@ class Server:
                 report_id=str(msg.get("report_id") or f"close:{target_stream_id}"),
                 from_stream_id=target_stream_id,
             )
+        if self.lane_rulings is not None and msg.get("_ruling_release") is not self.lane_rulings:
+            target_row = await self.store.fetch_session(host, name)
+            target_generation = str((target_row or {}).get("session_generation") or "")
+            if target_generation:
+                try:
+                    ruling_hold = await self.lane_rulings.request_close(
+                        msg, target_stream_id=target_stream_id,
+                        target_generation=target_generation, auth=auth,
+                    )
+                except ValueError as exc:
+                    raise VerbError(str(exc), str(exc)) from exc
+                if ruling_hold is not None:
+                    return ruling_hold
         defer_if_working = bool(msg.get("defer_if_working"))
         if expired_self_close:
             actor_kind, auth_kind = "expired_self", "expired"

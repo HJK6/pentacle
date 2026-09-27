@@ -1676,7 +1676,8 @@ async def assistant_once(config: Config, payload: dict[str, Any], *, timeout: fl
     # in that hello, never as extra fields in the publication/operation body.
     from_stream_id = _resolved_rpc_from_stream_id()
     verb = str(payload.get("type") or "")
-    if verb not in {"assistant.publish", "assistant.operation", "assistant.binding", "assistant.rebind"}:
+    if verb not in {"assistant.publish", "assistant.operation", "assistant.binding", "assistant.rebind",
+                    "assistant.authority", "assistant.ruling"}:
         raise ValueError("assistant_verb_invalid")
     prefix = verb
     payload.setdefault("request_id", f"assistant-{uuid.uuid4()}")

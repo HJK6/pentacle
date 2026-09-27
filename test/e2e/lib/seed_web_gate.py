@@ -27,7 +27,9 @@ import sys
 _SERVICE_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "services", "chat-stream-v2"
 )
-sys.path.insert(0, os.path.abspath(_SERVICE_DIR))
+_SERVICE_DIR = os.path.abspath(_SERVICE_DIR)
+sys.path.insert(0, _SERVICE_DIR)
+sys.path.insert(0, os.path.dirname(_SERVICE_DIR))
 
 from store import Store  # noqa: E402
 from ingest import _identity_key  # noqa: E402

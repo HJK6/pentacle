@@ -37,6 +37,8 @@ NOTICE_KIND_LANE_DIGEST = "lane_digest"
 # inbox or routing queue.
 NOTICE_KIND_ASSISTANT_COMPOSITE_AUTHORITY = "assistant_composite_authority"
 NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST = "assistant_composite_authority_request"
+NOTICE_KIND_ASSISTANT_LANE_RULING = "assistant_lane_ruling_request"
+NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT = "assistant_lane_ruling_result"
 # Object identity cannot be supplied by a JSON wire caller.
 ASSISTANT_AUTHORITY_REQUEST_TOKEN = object()
 
@@ -52,6 +54,8 @@ _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_STATUS_CARD_COMBINED,
     NOTICE_KIND_ASSISTANT_COMPOSITE_AUTHORITY,
     NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST,
+    NOTICE_KIND_ASSISTANT_LANE_RULING,
+    NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT,
 })
 
 _TERMINAL_CODES = frozenset({
@@ -307,12 +311,15 @@ class OutboundNoticeQueue:
                 metadata = row.get("metadata") or "{}"
                 metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
                 message["_notification_answer_generation"] = metadata["producer_session_generation"]
-            if kind == NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST:
+            if kind in {NOTICE_KIND_ASSISTANT_AUTHORITY_REQUEST, NOTICE_KIND_ASSISTANT_LANE_RULING,
+                        NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT}:
                 import json
                 metadata = row.get("metadata") or "{}"
                 metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
                 message["_assistant_authority_request_token"] = ASSISTANT_AUTHORITY_REQUEST_TOKEN
                 message["_assistant_authority_request_generation"] = metadata["authority_generation"]
+                if kind == NOTICE_KIND_ASSISTANT_LANE_RULING:
+                    message["_assistant_lane_ruling_request_id"] = metadata["ruling_request_id"]
             deliver_notice = getattr(self.comms, "deliver_outbound_notice", None)
             if callable(deliver_notice):
                 reply = await deliver_notice(
