@@ -285,10 +285,9 @@ async def run(args: argparse.Namespace) -> int:
         # dispatch/correlation values come from durable daemon state, never a
         # model-generated reply id.  Attachments travel through the existing
         # send materializer unchanged.
-        if assistant_config.direct_primary:
+        if route_payload.get("admission_mode") == "direct_primary":
             target_generation = str(route.get("route_target_generation") or "")
-            if (target != assistant_config.direct_primary_stream_id
-                    or target_generation != assistant_config.direct_primary_generation):
+            if not target or not target_generation:
                 return {"delivery": "failed", "reason": "assistant_direct_generation_conflict"}
             envelope = route_payload.get("direct_envelope")
             if not isinstance(envelope, dict) or (
@@ -367,7 +366,8 @@ async def run(args: argparse.Namespace) -> int:
             "request_id": dispatch_id,
             "optimistic_id": dispatch_id,
             "from_stream_id": assistant_config.stream_id,
-            "_assistant_expected_generation": str(route.get("route_target_generation") or "") if assistant_config.direct_primary else None,
+            "_assistant_expected_generation": str(route.get("route_target_generation") or "")
+            if route_payload.get("admission_mode") == "direct_primary" else None,
         })
 
     assistant_composite = AssistantComposite(
@@ -451,6 +451,10 @@ async def run(args: argparse.Namespace) -> int:
             )
         except Exception:  # noqa: BLE001 - close truth is already durable
             log.exception("close resolver (question expiry) failed stream=%s", stream_id)
+        try:
+            await assistant_composite.target_closed(stream_id, session_generation)
+        except Exception:  # noqa: BLE001 - close truth is already durable
+            log.exception("close resolver (assistant route) failed stream=%s", stream_id)
         return results
 
     sessions.set_awaiter_resolver(_on_producer_close)
@@ -461,9 +465,9 @@ async def run(args: argparse.Namespace) -> int:
         broadcast=server.broadcast,
         inventory_emitter=inventory_emitter,
         assistant_backend_binding=(
-            lambda stream_id, generation: assistant_config.enabled and bool(generation) and stream_id in {
-                assistant_config.astra_stream_id,
-                assistant_config.luna_stream_id,
+            lambda stream_id, generation: assistant_composite.config.enabled and bool(generation) and stream_id in {
+                assistant_composite.config.astra_stream_id,
+                assistant_composite.config.luna_stream_id,
             }
         ),
     )
@@ -583,6 +587,8 @@ async def run(args: argparse.Namespace) -> int:
     #    Verbs arriving before their store is up park on a bounded readiness gate
     #    (never error); `hello`'s snapshot tolerates an unopened store.
     store.start()
+    if assistant_config.enabled:
+        await assistant_composite.load_binding()
     if store.schedule_schema_health == "ok":
         window_schedule.mark_store_ready()
     else:

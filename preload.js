@@ -213,6 +213,7 @@ window.cc = {
   get0dteStats: (traderId) => ipcRenderer.invoke('dashboard:0dte-stats', traderId),
   list0dteTraders: () => ipcRenderer.invoke('dashboard:0dte-list-traders'),
   getChatStreamState: () => ipcRenderer.invoke('chat-stream:get-state'),
+  getAssistantBinding: () => ipcRenderer.invoke('chat-stream:assistant-binding'),
   listUiReviewArtifacts: () => ipcRenderer.invoke('ui-review:list-artifacts'),
 
   // Context menu

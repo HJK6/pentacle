@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -213,6 +213,7 @@ class AssistantComposite:
         publication_attachments: Callable[..., Awaitable[list[dict[str, Any]]]] | None = None,
     ) -> None:
         self.store = store
+        self.env_config = config
         self.config = config
         self.router = router
         self.dispatch = dispatch
@@ -222,6 +223,7 @@ class AssistantComposite:
         self.publication_attachments = publication_attachments
         self._worker: asyncio.Task[None] | None = None
         self._worker_lock = asyncio.Lock()
+        self._binding_lock = asyncio.Lock()
         self._dispatch_tasks: set[asyncio.Task[None]] = set()
         self._owner = f"assistant-router-{uuid.uuid4().hex[:12]}"
         self._activity_lock = asyncio.Lock()
@@ -233,6 +235,77 @@ class AssistantComposite:
 
     def is_stream(self, stream_id: object) -> bool:
         return self.enabled and str(stream_id or "") == self.config.stream_id
+
+    def _env_binding(self) -> dict[str, str]:
+        return {"stream_id": self.env_config.direct_primary_stream_id,
+                "generation": self.env_config.direct_primary_generation}
+
+    def _apply_binding(self, binding: dict[str, Any]) -> None:
+        stream = str(binding.get("stream_id") or "")
+        generation = str(binding.get("generation") or "")
+        if bool(stream) != bool(generation) or (stream and (
+            not _STREAM_ID_RE.fullmatch(stream)
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", generation)
+        )):
+            raise ValueError("assistant_binding_corrupt")
+        self.config = replace(
+            self.env_config, astra_stream_id=stream if stream else self.env_config.astra_stream_id,
+            direct_primary_stream_id=stream, direct_primary_generation=generation,
+        )
+
+    async def load_binding(self) -> dict[str, Any]:
+        binding = await self.store.get_assistant_binding(env_binding=self._env_binding())
+        self._apply_binding(binding)
+        return binding
+
+    async def binding(self) -> dict[str, Any]:
+        return {"type": "assistant.binding.ok", **await self.store.get_assistant_binding(
+            env_binding=self._env_binding(),
+        )}
+
+    async def rebind(self, msg: dict[str, Any], *, actor_stream_id: str | None) -> dict[str, Any]:
+        if not self.enabled or not self.env_config.direct_primary:
+            raise ValueError("assistant_direct_binding_unconfigured")
+        request_id = str(msg.get("request_id") or "").strip()
+        if not request_id or len(request_id) > 200:
+            raise ValueError("assistant_rebind_request_id_invalid")
+        expected_revision = msg.get("expected_revision")
+        if not isinstance(expected_revision, int) or expected_revision < 0:
+            raise ValueError("assistant_rebind_expected_revision_required")
+        actor = str(actor_stream_id or "")
+        auth = msg.get("_auth_context") or {}
+        actor_generation = str(auth.get("session_generation") or "")
+        if not actor_generation:
+            host, separator, name = actor.partition(":")
+            row = await self.store.fetch_session(host, name) if separator else None
+            actor_generation = str((row or {}).get("session_generation") or "")
+        clear = msg.get("clear") is True
+        async with self._binding_lock:
+            receipt = await self.store.rebind_assistant(
+                env_binding=self._env_binding(), actor_stream_id=actor,
+                actor_generation=actor_generation,
+                target_stream_id=None if clear else str(msg.get("target_stream_id") or ""),
+                target_generation=None if clear else str(msg.get("target_generation") or ""),
+                request_id=request_id, expected_revision=expected_revision, clear=clear,
+            )
+            if not receipt.get("duplicate"):
+                self._apply_binding(receipt["new_binding"])
+                log.info("assistant direct rebind actor=%s request=%s old=%s new=%s",
+                         actor, request_id, receipt["old_binding"], receipt["new_binding"])
+                if self.broadcast is not None:
+                    await self.broadcast({"type": "assistant.binding.changed",
+                                          **receipt["new_binding"]})
+            return receipt
+
+    async def target_closed(self, stream_id: str, generation: str | None) -> None:
+        if not generation:
+            return
+        changed = await self.store.fail_closed_assistant_routes(
+            stream_id=self.config.stream_id, target_stream_id=stream_id,
+            target_generation=generation,
+        )
+        if changed:
+            await self.refresh_activity()
 
     def is_backend_stream(self, stream_id: object) -> bool:
         """Whether a target is one of this composite's hidden backend seats."""
@@ -405,6 +478,10 @@ class AssistantComposite:
 
     async def accept_input(self, msg: dict[str, Any], *, operator_principal: str | None = None) -> dict[str, Any]:
         """Accept literal operator input once and wake the routing consumer."""
+        async with self._binding_lock:
+            return await self._accept_input_locked(msg, operator_principal=operator_principal)
+
+    async def _accept_input_locked(self, msg: dict[str, Any], *, operator_principal: str | None = None) -> dict[str, Any]:
         if not self.enabled:
             raise ValueError("assistant_composite_disabled")
         body = msg.get("text") if "text" in msg else msg.get("message")
@@ -653,36 +730,39 @@ class AssistantComposite:
             admission = json.loads(str(route.get("route_json") or "{}"))
         except (TypeError, ValueError):
             admission = {}
-        if isinstance(admission, dict) and admission.get("admission_mode") == "direct_primary" and not self.config.direct_primary:
-            await self._update_route(
-                str(route["route_id"]), routing_state="routing_failed",
-                error_code="assistant_direct_binding_removed",
-            )
-            return
-        if self.config.direct_primary:
-            try:
-                generation = await self._direct_target_generation()
-                dispatch_id = "assistant-direct-" + uuid.uuid4().hex
-                direct_envelope = direct_dispatch_envelope(
-                    self.config, route, dispatch_id=dispatch_id,
-                    target=self.config.direct_primary_stream_id, generation=generation,
-                )
-                updated = await self._update_route(
-                    str(route["route_id"]), routing_state="resolved", delivery_state="intent",
-                    dispatch_id=dispatch_id,
-                    route_target=self.config.direct_primary_stream_id,
-                    route_target_generation=generation,
-                    route_payload={"schema_version": "assistant-direct/v1", "admission_mode": "direct_primary",
-                                   "disposition": "conversation", "lane_id": None,
-                                   "depends_on_message_id": None, "reason": "configured_direct_primary",
-                                   "direct_envelope": direct_envelope},
-                )
-                if updated is not None:
-                    self._start_dispatch(updated)
-            except ValueError as exc:
-                await self._update_route(
-                    str(route["route_id"]), routing_state="routing_failed", error_code=str(exc),
-                )
+        if isinstance(admission, dict) and admission.get("admission_mode") == "direct_primary":
+            # This lock serializes route resolution with rebind. The store's
+            # BEGIN IMMEDIATE commits each resolved route or new pin in order.
+            async with self._binding_lock:
+                if not self.config.direct_primary:
+                    await self._update_route(
+                        str(route["route_id"]), routing_state="routing_failed",
+                        error_code="assistant_direct_binding_removed",
+                    )
+                    return
+                try:
+                    generation = await self._direct_target_generation()
+                    dispatch_id = "assistant-direct-" + uuid.uuid4().hex
+                    direct_envelope = direct_dispatch_envelope(
+                        self.config, route, dispatch_id=dispatch_id,
+                        target=self.config.direct_primary_stream_id, generation=generation,
+                    )
+                    updated = await self._update_route(
+                        str(route["route_id"]), routing_state="resolved", delivery_state="intent",
+                        dispatch_id=dispatch_id,
+                        route_target=self.config.direct_primary_stream_id,
+                        route_target_generation=generation,
+                        route_payload={"schema_version": "assistant-direct/v1", "admission_mode": "direct_primary",
+                                       "disposition": "conversation", "lane_id": None,
+                                       "depends_on_message_id": None, "reason": "configured_direct_primary",
+                                       "direct_envelope": direct_envelope},
+                    )
+                    if updated is not None:
+                        self._start_dispatch(updated)
+                except ValueError as exc:
+                    await self._update_route(
+                        str(route["route_id"]), routing_state="routing_failed", error_code=str(exc),
+                    )
             return
         try:
             if self.router is None:
@@ -1021,6 +1101,7 @@ class AssistantComposite:
             await self._update_route(
                 str(route["route_id"]), routing_state=str(route["routing_state"]),
                 expected_dispatch_id=str(route["dispatch_id"]), expected_routing_state=str(route["routing_state"]),
+                expected_delivery_state="intent",
                 delivery_state="uncertain", error_code="assistant_dispatch_unconfigured",
             )
             return
@@ -1030,6 +1111,7 @@ class AssistantComposite:
             await self._update_route(
                 str(route["route_id"]), routing_state=str(route["routing_state"]),
                 expected_dispatch_id=str(route["dispatch_id"]), expected_routing_state=str(route["routing_state"]),
+                expected_delivery_state="intent",
                 delivery_state="uncertain", error_code=f"dispatch_exception:{type(exc).__name__}",
             )
             return
@@ -1053,6 +1135,7 @@ class AssistantComposite:
         await self._update_route(
             str(route["route_id"]), routing_state=str(route["routing_state"]),
             expected_dispatch_id=str(route["dispatch_id"]), expected_routing_state=str(route["routing_state"]),
+            expected_delivery_state="intent",
             delivery_state=state,
             error_code=failure_code if state == "failed" else "dispatch_receipt_ambiguous" if state == "uncertain" else None,
         )
@@ -1090,14 +1173,19 @@ class AssistantComposite:
                 or response_state is not None and kind == "question"
                 or response_state == "acknowledged" and kind == "result"):
             raise ValueError("assistant_publish_response_state_invalid")
-        if self.config.direct_primary and kind == "prose" and (
+        route = await self.store.find_assistant_composite_route_by_dispatch(dispatch_id)
+        try:
+            route_payload = json.loads(str((route or {}).get("route_json") or "{}"))
+        except (TypeError, ValueError):
+            route_payload = {}
+        direct_route = route_payload.get("admission_mode") == "direct_primary"
+        if direct_route and kind == "prose" and (
             response_state != "final" or publication_key != "publish:" + dispatch_id
         ):
             raise ValueError("assistant_direct_publication_identity_invalid")
-        route = await self.store.find_assistant_composite_route_by_dispatch(dispatch_id)
         if route is None or not await self._is_current_dispatch_actor(
             route, str(actor_stream_id or ""),
-            allow_authority=kind != "question" and not self.config.direct_primary,
+            allow_authority=kind != "question" and not direct_route,
         ):
             raise ValueError("assistant_publish_provenance_unverified")
         if route["routing_state"] != "resolved":
@@ -1160,10 +1248,10 @@ class AssistantComposite:
             canonical_payload=canonical_payload, event=event,
             actor_stream_id=actor_stream_id, actor_generation=actor_generation,
             authority_stream_id=self.config.astra_stream_id
-            if kind != "question" and not self.config.direct_primary else None,
-            direct_target_stream_id=self.config.direct_primary_stream_id if self.config.direct_primary else None,
-            direct_target_generation=self.config.direct_primary_generation if self.config.direct_primary else None,
-            direct_single_final=self.config.direct_primary,
+            if kind != "question" and not direct_route else None,
+            direct_target_stream_id=str(route.get("route_target") or "") if direct_route else None,
+            direct_target_generation=str(route.get("route_target_generation") or "") if direct_route else None,
+            direct_single_final=direct_route,
         )
         await self.refresh_activity()
         if not stored.get("duplicate") and self.broadcast is not None:
@@ -1368,11 +1456,11 @@ class AssistantComposite:
         expected_generation = str(route.get("route_target_generation") or "")
         if not actor or not target or not expected_generation:
             return False
-        if self.config.direct_primary and (
-            actor != self.config.direct_primary_stream_id
-            or target != actor
-            or expected_generation != self.config.direct_primary_generation
-        ):
+        try:
+            route_payload = json.loads(str(route.get("route_json") or "{}"))
+        except (TypeError, ValueError):
+            route_payload = {}
+        if route_payload.get("admission_mode") == "direct_primary" and actor != target:
             return False
         host, separator, session_name = actor.partition(":")
         if not separator or not host or not session_name:

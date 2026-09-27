@@ -781,6 +781,12 @@ try {
     return this.sendCommand(payload, 'assistant.lifecycle', { requestId: crypto.randomUUID() });
   }
 
+  async assistantBinding() {
+    return this.sendCommand({ type: 'assistant.binding' }, 'assistant.binding', {
+      timeoutMs: 5000,
+    });
+  }
+
   async requestStreamEvents({ streamId, limit, beforeDaemonSeq, chunkLimit } = {}) {
     const stream_id = String(streamId || '');
     if (!stream_id) {

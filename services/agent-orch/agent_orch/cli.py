@@ -1603,6 +1603,40 @@ def assistant_operation(args: argparse.Namespace) -> int:
     return _assistant_call(args, payload)
 
 
+def assistant_binding(args: argparse.Namespace) -> int:
+    return _assistant_call(args, {
+        "type": "assistant.binding", "request_id": f"assistant-binding-{uuid.uuid4()}",
+    })
+
+
+def assistant_rebind(args: argparse.Namespace) -> int:
+    expected_revision = args.expected_revision
+    if expected_revision is None:
+        try:
+            current = asyncio.run(assistant_once(load_config(), {
+                "type": "assistant.binding",
+                "request_id": f"assistant-binding-{uuid.uuid4()}",
+            }, timeout=args.timeout))
+        except Exception as exc:
+            response, exit_code, message = _direct_rpc_transport_error("assistant.binding", None, exc)
+            _print_response(response)
+            print(f"agent-orch assistant: {message}", file=sys.stderr)
+            return exit_code
+        expected_revision = current.get("revision")
+        if not isinstance(expected_revision, int):
+            _print_response(current)
+            return 1
+    payload: dict[str, object] = {
+        "type": "assistant.rebind", "request_id": args.request_id,
+        "expected_revision": expected_revision, "clear": bool(args.clear),
+    }
+    if args.target:
+        payload["target_stream_id"] = args.target
+    if args.generation:
+        payload["target_generation"] = args.generation
+    return _assistant_call(args, payload)
+
+
 def _park_rpc(args: argparse.Namespace, *, command: str) -> int:
     config = load_config()
     from_stream_id = args.from_stream_id or discover_leader_stream_id_short(config)
@@ -4927,6 +4961,22 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_operation_parser.add_argument("--payload", required=True)
     assistant_operation_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_operation_parser.set_defaults(func=assistant_operation)
+    assistant_binding_parser = assistant_sub.add_parser(
+        "binding", help="read the daemon's effective direct-primary binding",
+    )
+    assistant_binding_parser.add_argument("--timeout", type=float, default=30.0)
+    assistant_binding_parser.set_defaults(func=assistant_binding)
+    assistant_rebind_parser = assistant_sub.add_parser(
+        "rebind", help="atomically change the authenticated direct-primary binding",
+    )
+    rebind_destination = assistant_rebind_parser.add_mutually_exclusive_group(required=True)
+    rebind_destination.add_argument("--target")
+    rebind_destination.add_argument("--clear", action="store_true")
+    assistant_rebind_parser.add_argument("--generation")
+    assistant_rebind_parser.add_argument("--request-id", required=True)
+    assistant_rebind_parser.add_argument("--expected-revision", type=int)
+    assistant_rebind_parser.add_argument("--timeout", type=float, default=30.0)
+    assistant_rebind_parser.set_defaults(func=assistant_rebind)
 
     park_parser = subparsers.add_parser("park")
     park_parser.add_argument("stream_id")

@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createWakeDelivery } = require('../renderer/wake_delivery');
-const row = (id='bart:current', extra={}) => ({ stream_id:id, host:'bart', role:'assistant', ...extra });
+const row = (id='bart:current', extra={}) => ({ stream_id:id, host:'bart', role:'assistant', status:'open', pane_status:'pane_alive', ...extra });
 function fixture() {
   const f = { config:{features:{mic:true,assistantRole:'assistant'},mic:{wakeTargetHost:'bart'},chatStream:{}},
     status:{mode:'on',wake:{enabled:true,generation:'one',pending_count:1}},
@@ -121,4 +121,65 @@ test('explicit handoff during claim holds capture and sends once to successor',a
  const f=pinnedFixture();const original=f.api;
  f.api=async(...args)=>{const r=await original(...args);if(args[1]==='/wake/claim')f.state.sessions=[row('bart:direct',{closed_at:'closed'}),row('bart:new',{role:'lead',handoff_from_stream_id:'bart:direct'})];return r;};
  await f.helper.tick(f.status);assert.equal(f.sends.length,0);f.status.wake.pending_count=0;await f.helper.tick(f.status);await f.helper.tick(f.status);assert.deepEqual(f.sends,[['bart:new','hello']]);assert.equal(f.apiCalls.filter(p=>p==='/wake/claim').length,1);
+});
+
+test('already-open wake client follows unrelated durable rebind while old target remains open',async()=>{
+ const f=pinnedFixture();
+ f.state.sessions=[
+   row('bart:direct',{role:'lead',session_generation:'gen-a'}),
+   row('bart:unrelated',{role:'lead',session_generation:'gen-b'}),
+ ];
+ let binding={ok:true,source:'env',stream_id:'bart:direct',generation:'gen-a',revision:0};
+ f.helper=createWakeDelivery({config:f.config,getState:async()=>structuredClone(f.state),
+   getBinding:async()=>binding,api:(...args)=>f.api(...args),
+   sendTurn:(...args)=>f.sends.push(args),onStatus:text=>f.notes.push(text)});
+ await f.helper.tick(f.status);
+ assert.deepEqual(f.sends,[['bart:direct','hello']]);
+ f.claims.push({id:'second',generation:'one',text:'after rebind'});
+ binding={ok:true,source:'durable',stream_id:'bart:unrelated',generation:'gen-b',revision:1};
+ await f.helper.tick(f.status);
+ assert.deepEqual(f.sends,[['bart:direct','hello'],['bart:unrelated','after rebind']]);
+});
+
+test('durable binding waits when its matching generation has a dead pane',async()=>{
+ const f=pinnedFixture();
+ f.state.sessions=[row('bart:direct',{session_generation:'gen-a',pane_status:'pane_dead'})];
+ f.helper=createWakeDelivery({config:f.config,getState:async()=>structuredClone(f.state),
+   getBinding:async()=>({ok:true,source:'durable',stream_id:'bart:direct',generation:'gen-a',revision:1}),
+   api:(...args)=>f.api(...args),sendTurn:(...args)=>f.sends.push(args),onStatus:text=>f.notes.push(text)});
+ await f.helper.tick(f.status);
+ assert.equal(f.apiCalls.length,0);
+ assert.equal(f.sends.length,0);
+});
+
+test('binding lookup failure holds wake instead of using stale local pin',async()=>{
+ const f=pinnedFixture();
+ f.helper=createWakeDelivery({config:f.config,getState:async()=>structuredClone(f.state),
+   getBinding:async()=>({ok:false,error_code:'assistant_binding_lookup_failed'}),
+   api:(...args)=>f.api(...args),sendTurn:(...args)=>f.sends.push(args),
+   onStatus:text=>f.notes.push(text)});
+ await f.helper.tick(f.status);
+ assert.deepEqual(f.sends,[]);
+ assert.equal(f.apiCalls.includes('/wake/claim'),false);
+});
+
+test('explicit unconfigured and older daemon fallback work without a local pin',async()=>{
+ for(const result of [{ok:true,source:'unconfigured'}, {ok:false,error_code:'unsupported_in_v2'}]){
+   const f=fixture();
+   f.helper=createWakeDelivery({config:f.config,getState:async()=>structuredClone(f.state),
+     getBinding:async()=>result,api:(...args)=>f.api(...args),
+     sendTurn:(...args)=>f.sends.push(args)});
+   await f.helper.tick(f.status);
+   assert.deepEqual(f.sends,[['bart:current','hello']]);
+ }
+});
+
+test('bound generation mismatch holds wake',async()=>{
+ const f=pinnedFixture();
+ f.state.sessions[0].session_generation='old';
+ f.helper=createWakeDelivery({config:f.config,getState:async()=>structuredClone(f.state),
+   getBinding:async()=>({ok:true,source:'durable',stream_id:'bart:direct',generation:'new'}),
+   api:(...args)=>f.api(...args),sendTurn:(...args)=>f.sends.push(args)});
+ await f.helper.tick(f.status);
+ assert.deepEqual(f.sends,[]);
 });

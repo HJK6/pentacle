@@ -474,6 +474,8 @@ class Server:
             "transcribe_blob": self._on_transcribe_blob,
             "assistant.publish": self._on_assistant_publish,
             "assistant.operation": self._on_assistant_operation,
+            "assistant.binding": self._on_assistant_binding,
+            "assistant.rebind": self._on_assistant_rebind,
             "send_image": self._on_send_image,
             "send.receipt.get": self._on_send_receipt_get,
             "ledger_get": self._on_ledger_get,
@@ -2320,6 +2322,26 @@ class Server:
             raise VerbError("assistant_operation_unauthorized", "assistant.operation requires a verified backend stream token")
         try:
             return await composite.operation(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
+        except ValueError as exc:
+            raise VerbError(str(exc), str(exc)) from exc
+
+    async def _on_assistant_binding(self, msg: dict[str, Any]) -> dict[str, Any]:
+        composite = self.assistant_composite
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if composite is None or not (auth.get("operator_authenticated") or auth.get("token_verified")):
+            raise VerbError("assistant_binding_unauthorized", "assistant.binding requires authenticated access")
+        try:
+            return await composite.binding()
+        except ValueError as exc:
+            raise VerbError(str(exc), str(exc)) from exc
+
+    async def _on_assistant_rebind(self, msg: dict[str, Any]) -> dict[str, Any]:
+        composite = self.assistant_composite
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if composite is None or not auth.get("token_verified") or not auth.get("stream_id"):
+            raise VerbError("assistant_rebind_unauthorized", "assistant.rebind requires a verified stream token")
+        try:
+            return await composite.rebind(msg, actor_stream_id=str(auth["stream_id"]))
         except ValueError as exc:
             raise VerbError(str(exc), str(exc)) from exc
 

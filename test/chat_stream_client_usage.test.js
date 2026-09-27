@@ -114,6 +114,23 @@ test('renderer state pull does not expose the shared partial event cache as a co
   assert.equal(client.snapshot().events.length, 2, 'internal bounded cache is retained for its own consumers');
 });
 
+test('wake binding IPC reads a fresh daemon RPC result with generation', async (t) => {
+  const { createCcHandlers, createCollector } = require('../main/cc_handlers');
+  const { client, ws } = openClient();
+  t.after(() => client.destroy());
+  sendFrame(ws, { type: 'snapshot', events: [], sessions: [] });
+  const collector = createCollector();
+  createCcHandlers({ CONFIG: { chatStream: {} }, chatStreamClient: client, harness: true }).register(collector);
+  const pending = collector.table['chat-stream:assistant-binding'].handler();
+  const request = ws.sent.find((frame) => frame.type === 'assistant.binding');
+  assert.ok(request?.request_id);
+  sendFrame(ws, { type: 'assistant.binding.ok', request_id: request.request_id,
+    source: 'durable', stream_id: 'thoth:current', generation: 'gen-2', revision: 2 });
+  assert.deepEqual(await pending, { ok: true, type: 'assistant.binding.ok',
+    request_id: request.request_id, source: 'durable', stream_id: 'thoth:current',
+    generation: 'gen-2', revision: 2 });
+});
+
 test('image upload frames obey the daemon one MiB decoded chunk limit', async (t) => {
   const { client, ws } = openClient();
   t.after(() => client.destroy());

@@ -158,6 +158,13 @@ function createCcHandlers({
     target.handle('get-build', () => ({ buildId }));
 
     target.handle('chat-stream:get-state', () => chatStreamClient.snapshot({ includeEvents: false }));
+    target.handle('chat-stream:assistant-binding', async () => {
+      try { return { ok: true, ...await chatStreamClient.assistantBinding() }; }
+      catch (error) {
+        return { ok: false, error_code: error?.error_code || error?.code || 'assistant_binding_lookup_failed',
+          error: normalizeChatStreamError(error) };
+      }
+    });
     target.handle('chat-stream:spawn-catalog', () => command(async () => ({ catalog: await chatStreamClient.getSpawnCatalog() })));
     target.handle('chat-stream:spawn', async (_event, request, legacyHostId) => {
       const input = request && typeof request === 'object' ? request : { provider: request, host: legacyHostId };

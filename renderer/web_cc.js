@@ -430,6 +430,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
     get0dteStats: (traderId) => call('dashboard:0dte-stats', traderId),
     list0dteTraders: () => call('dashboard:0dte-list-traders'),
     getChatStreamState: () => call('chat-stream:get-state'),
+    getAssistantBinding: () => call('chat-stream:assistant-binding'),
     listUiReviewArtifacts: () => call('ui-review:list-artifacts'),
 
     // The desktop pops a native menu; the browser renders an HTML one that

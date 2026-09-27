@@ -7705,6 +7705,7 @@ CFG_READY.then((cfg) => {
     wakeDelivery = createWakeDelivery({
       config: CONFIG,
       getState: () => window.PentacleChatStore?.sendTurn ? window.cc.getChatStreamState() : null,
+      getBinding: () => window.cc.getAssistantBinding(),
       api: micApi,
       spawnAgent: (request) => window.cc.chatSpawnV2(request),
       getSpawnCatalog: () => window.cc.chatSpawnCatalog(),

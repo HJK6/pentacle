@@ -4,7 +4,7 @@ const { prepareVoiceSpawn, spawnOutcome } = require('./voice_action_delivery');
 
 // Reuse the main client's full-snapshot handshake and existing correlated chat
 // lifecycle. A claim owns one utterance; sendTurn must only create one request.
-function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSpawnCatalog, onStatus = () => {} }) {
+function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawnAgent, getSpawnCatalog, onStatus = () => {} }) {
   let busy = false;
   let held = null;
   let epoch = 0;
@@ -14,11 +14,35 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
   let note = '';
   const role = () => configuredAssistantRole(config.features);
   const pinnedIdentity = () => typeof config.mic?.wakeTargetStreamId === 'string' && config.mic.wakeTargetStreamId.trim();
-  const enabled = () => config.features?.mic === true && (!!role() || !!pinnedIdentity())
-    && typeof config.mic?.wakeTargetHost === 'string' && !!config.mic.wakeTargetHost
+  const enabled = () => config.features?.mic === true && (!!role() || !!pinnedIdentity() || typeof getBinding === 'function')
+    && (!!config.mic?.wakeTargetHost || typeof getBinding === 'function')
     && config.chatStream?.snapshot !== false;
-  const target = (state) => {
+  const binding = async () => {
+    if (typeof getBinding !== 'function') return { source: 'unsupported' };
+    try {
+      const result = await getBinding();
+      if (result?.ok === false && result.error_code === 'unsupported_in_v2') return { source: 'unsupported' };
+      if (result?.ok === false || !['durable', 'env', 'unconfigured'].includes(result?.source)) {
+        return { source: 'error' };
+      }
+      return result;
+    } catch (error) {
+      return error?.error_code === 'unsupported_in_v2' ? { source: 'unsupported' } : { source: 'error' };
+    }
+  };
+  const target = (state, effectiveBinding) => {
     if (!state?.connected || !Array.isArray(state.sessions)) return null;
+    if (effectiveBinding?.source === 'error') return null;
+    if (effectiveBinding?.source === 'durable' || effectiveBinding?.source === 'env') {
+      const streamId = effectiveBinding.stream_id;
+      const generation = effectiveBinding.generation;
+      if (!streamId || !generation) return null;
+      const matches = state.sessions.filter(s => s.stream_id === streamId
+        && s.session_generation === generation && s.status === 'open'
+        && !s.closed_at && s.pane_status === 'pane_alive');
+      return matches.length === 1 ? streamId : null;
+    }
+    if (effectiveBinding?.source !== 'unconfigured' && effectiveBinding?.source !== 'unsupported') return null;
     const root = pinnedIdentity();
     if (root) {
       // These rows come from the authenticated daemon snapshot. Titles and
@@ -46,11 +70,13 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
         }
       }
       const matches = state.sessions.filter(s => lineage.has(s.stream_id)
-        && s.host === config.mic.wakeTargetHost && s.status !== 'closed' && !s.closed_at);
+        && s.host === config.mic.wakeTargetHost && s.status === 'open'
+        && !s.closed_at && s.pane_status === 'pane_alive');
       return matches.length === 1 ? matches[0].stream_id : null;
     }
     const matches = state.sessions.filter(s => s.role === role()
-      && s.host === config.mic.wakeTargetHost && s.status !== 'closed' && !s.closed_at && s.stream_id);
+      && s.host === config.mic.wakeTargetHost && s.status === 'open'
+      && !s.closed_at && s.pane_status === 'pane_alive' && s.stream_id);
     return matches.length === 1 ? matches[0].stream_id : null;
   };
   function cancel() {
@@ -91,7 +117,8 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
     const valid = () => epoch === current && !muted;
     try {
       const initialState = await getState();
-      const initialTarget = target(initialState);
+      const initialBinding = await binding();
+      const initialTarget = target(initialState, initialBinding);
       if (!valid()) return;
       if (!held && !status.wake.pending_count) {
         note = initialTarget ? '' : 'No wake target: connect a unique current assistant.';
@@ -148,7 +175,9 @@ function createWakeDelivery({ config, getState, api, sendTurn, spawnAgent, getSp
         await api('POST', '/actions/outcome', { id: capture.id, generation: capture.generation, outcome, receipt });
         return;
       }
-      const latestTarget = target(await getState());
+      const latestState = await getState();
+      const latestBinding = await binding();
+      const latestTarget = target(latestState, latestBinding);
       if (!valid()) return;
       if (!latestTarget || latestTarget !== initialTarget) {
         note = 'Wake message waiting for the current assistant.';

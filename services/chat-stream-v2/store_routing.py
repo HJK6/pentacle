@@ -913,6 +913,7 @@ class _RoutingStoreMixin:
         error_code: str | None = None,
         expected_dispatch_id: str | None = None,
         expected_routing_state: str | None = None,
+        expected_delivery_state: str | None = None,
     ) -> dict[str, Any] | None:
         allowed_routing = {
             "queued", "classifying", "fallback_dispatched", "deferred", "resolved", "routing_failed",
@@ -932,7 +933,8 @@ class _RoutingStoreMixin:
                     conn.commit()
                     return None
                 if (expected_dispatch_id is not None and row["dispatch_id"] != expected_dispatch_id
-                        or expected_routing_state is not None and row["routing_state"] != expected_routing_state):
+                        or expected_routing_state is not None and row["routing_state"] != expected_routing_state
+                        or expected_delivery_state is not None and row["delivery_state"] != expected_delivery_state):
                     conn.commit()
                     return None
                 existing = dict(row)

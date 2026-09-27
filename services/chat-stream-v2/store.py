@@ -41,6 +41,11 @@ import store_exchange
 import store_usage
 import store_qa
 import store_lifecycle_authority as lifecycle_authority
+from store_assistant_binding import (
+    ASSISTANT_BINDING_DDL, ASSISTANT_REBIND_AUDIT_DDL,
+    ASSISTANT_REBIND_AUDIT_INDEX_DDL, ASSISTANT_HANDOFF_PROOF_DDL,
+    AssistantBindingStoreMixin,
+)
 from store_qa import QaStoreMixin
 from store_exchange import ExchangeStoreMixin
 
@@ -1289,7 +1294,7 @@ class QAAttestationUnverified(RuntimeError):
 from store_watch_wake import _WatchWakeStoreMixin, WATCH_WAKE_DDL, install_default_conn, lifecycle_watch_conn, report_watch_conn
 
 
-class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin):
+class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000) -> None:
@@ -1423,6 +1428,10 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                 conn.execute("ALTER TABLE v2_outbound_notices ADD COLUMN proof_binding TEXT")
             conn.execute(OUTBOUND_NOTICE_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DDL)
+            conn.execute(ASSISTANT_BINDING_DDL)
+            conn.execute(ASSISTANT_REBIND_AUDIT_DDL)
+            conn.execute(ASSISTANT_REBIND_AUDIT_INDEX_DDL)
+            conn.execute(ASSISTANT_HANDOFF_PROOF_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
             conn.execute(ASSISTANT_COMPOSITE_LANES_DDL)
@@ -1986,6 +1995,24 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                 "VALUES (?,?,?) ON CONFLICT(host, session_name) DO UPDATE SET generation=excluded.generation",
                 (host, session_name, generation),
             )
+            if generation_changed and cols.get("handoff_from_stream_id"):
+                predecessor = str(cols["handoff_from_stream_id"])
+                source_host, separator, source_name = predecessor.partition(":")
+                if separator and predecessor != stream_id:
+                    source = conn.execute(
+                        "SELECT g.generation FROM sessions s "
+                        "JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
+                        "WHERE s.host=? AND s.session_name=? AND s.status='open' "
+                        "AND s.closed_at IS NULL AND s.pane_status='pane_alive'",
+                        (source_host, source_name),
+                    ).fetchone()
+                    if source and source["generation"]:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO v2_assistant_direct_handoff_proofs "
+                            "(successor_stream_id,successor_generation,predecessor_stream_id,"
+                            "predecessor_generation,created_at) VALUES (?,?,?,?,?)",
+                            (stream_id, generation, predecessor, source["generation"], iso_now()),
+                        )
             if spawn_request_id is not None:
                 reservation = _spawn_reservation(conn, host, session_name, spawn_request_id)
                 intent = json.loads(reservation.get("payload") or "{}")
