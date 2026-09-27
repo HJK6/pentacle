@@ -12,7 +12,7 @@ PATTERN = re.compile("|".join(["host" + suffix for suffix in "abc"] + ["ab" + "r
 
 # CGNAT / Tailscale range 100.64/10 (second octet 64-127): a concrete
 # tailnet address must never ship in the public tree. The residue check missed a
-# real one (server/README.md, a daffodil deploy example) — this makes it a guard.
+# real one (server/README.md, a deployment example) — this makes it a guard.
 # Bounded by non-digit/non-dot on both sides so it never fires inside a larger
 # number, and second octet 64-127 excludes 100.0-63 / 100.128-255.
 CGNAT_PATTERN = re.compile(
