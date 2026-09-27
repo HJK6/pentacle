@@ -132,13 +132,18 @@ test('a composite popout bootstrap cannot allocate a terminal', async (t) => {
 });
 
 // Exercise the shipped renderer bundle -> preload -> shared IPC -> socket payload.
-async function wireRenderer(t, compositeMode = true) {
+async function wireRenderer(t, compositeMode = true, {
+  streamId = STREAM,
+  messageKind = 'ASSIST_TEXT',
+  messageId = 'message-question',
+  messageText = 'Choose the next step',
+} = {}) {
   const fs = require('node:fs');
   const path = require('node:path');
   const esbuild = require('esbuild');
   const { createCcHandlers, createCollector } = require('../main/cc_handlers');
   const h = await renderer(t);
-  const session = { ...composite, stream_id: STREAM, session_name: 'claude-hostc-race' };
+  const session = { ...composite, stream_id: streamId, session_name: 'claude-hostc-race' };
   if (!compositeMode) { session.session_kind = 'agent'; session.provider = 'codex'; session.capabilities = {}; }
   vm.runInContext(`state.chatStream.sessions = [${JSON.stringify(session)}]`, h.context);
   const client = new clientSingleton.constructor();
@@ -174,9 +179,9 @@ async function wireRenderer(t, compositeMode = true) {
   for (const name of ['PentacleChatStore', 'PentacleChatView', 'PentacleChatCore']) h.dom.window[name] = h.context[name];
   const store = h.dom.window.PentacleChatStore;
   store.applyFrame({ type: 'snapshot', connected: true, sessions: [session], events: [{
-    ...session, session_id: session.session_name, kind: 'ASSIST_TEXT', daemon_seq: 1,
-    timestamp: new Date().toISOString(), message_id: 'message-question',
-    reply_to_question_id: 'question-bound', text: 'Choose the next step',
+    ...session, session_id: session.session_name, kind: messageKind, daemon_seq: 1,
+    timestamp: new Date().toISOString(), message_id: messageId,
+    reply_to_question_id: 'question-bound', text: messageText,
   }] });
   vm.runInContext('renderSlotChat(0)', h.context);
   return { ...h, store, wires };
@@ -229,6 +234,29 @@ test('Bart assistant rows render no Reply button; a question-bound reply still p
   assert.notEqual(h.wires[1].request_id, h.wires[0].request_id);
   assert.equal(h.wires[1].reply_to_message_id, 'message-question');
   assert.equal(h.wires[1].reply_to_question_id, 'question-bound');
+});
+
+test('renderSlotChat hides operator Reply only for the canonical Bart stream', async t => {
+  const bart = await wireRenderer(t, true, {
+    streamId: 'bart:assistant', messageKind: 'USER',
+    messageId: 'bart-operator-1', messageText: 'Hello Bart',
+  });
+  const bartRow = bart.dom.window.document.querySelector('.slot-chat-row.is-user');
+  assert.ok(bartRow, 'canonical Bart operator message is rendered');
+  assert.match(bartRow.textContent || '', /Hello Bart/);
+  assert.equal(bartRow.querySelector('.slot-chat-reply-btn'), null);
+  assert.doesNotMatch(bartRow.textContent || '', /\bReply\b/);
+
+  const other = await wireRenderer(t, true, {
+    streamId: 'hostc:bart-general', messageKind: 'USER',
+    messageId: 'other-operator-1', messageText: 'Hello from another chat',
+  });
+  const otherRow = other.dom.window.document.querySelector('.slot-chat-row.is-user');
+  assert.ok(otherRow, 'other composite operator message is rendered');
+  assert.match(otherRow.textContent || '', /Hello from another chat/);
+  const reply = otherRow.querySelector('.slot-chat-reply-btn');
+  assert.ok(reply, 'generic opted-in composite retains its Reply control');
+  assert.equal(reply.getAttribute('data-reply-message-id'), 'other-operator-1');
 });
 
 test('composite attachment-only retries keep the blob envelope and logical message ID', async t => {

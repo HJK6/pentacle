@@ -95,6 +95,7 @@ function installRenderer() {
     Buffer,
     console,
     document: dom.window.document,
+    getComputedStyle: (element) => dom.window.getComputedStyle(element),
     global: dom.window,
     localStorage: dom.window.localStorage,
     Node: dom.window.Node,

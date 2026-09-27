@@ -108,7 +108,8 @@ const DESIGN_THEME_VARS = {
 // deep slot state at startup, so changing them only takes full effect after a
 // reload.
 const SETTINGS_FLAGS = [
-  { key: 'chatUi',     label: 'Chat UI (experimental)', desc: 'Opt-in structured chat view. Not production-ready; terminals are the default.', live: false },
+  // Chat view is always enabled now; the enable/disable toggle was removed and
+  // replaced by the "Default view" chooser (built in setupSettingsPanel).
   { key: 'dashboards', label: 'Dashboards / Widgets', desc: 'The Dashboards view and its widget panels.',                    live: true  },
   { key: 'mic',        label: 'Microphone',          desc: 'Mic panel and per-slot voice record. Requires the mic server.', live: false },
   { key: 'usage',      label: 'Usage bars',          desc: 'Provider usage meters in the sidebar. Requires chat_streamd.',  live: false },
@@ -328,13 +329,38 @@ function computeSlotChatContentDigest(items) {
   return { rowCount: rows.length, kinds, lastRowDigest };
 }
 
-// Merge persisted overrides over the config feature defaults up front.
-(function applySettingsOverrides() {
+// One-time migration for the removed `chatUi` enable/disable flag. Chat view is
+// always enabled now, so a saved `chatUi:false` must NOT hide chat — instead it
+// carries the user's intent forward as a Terminal-first default view. Runs once:
+// after it sets defaultChatView it drops the stale chatUi override so it cannot
+// re-fire. A saved `chatUi:true` (or unset) leaves the Chat-first default.
+function migrateRemovedChatUiSetting() {
+  const record = loadSettingsRecord();
+  const features = record.features;
+  if (!features || typeof features !== 'object') return;
+  if (!('chatUi' in features)) return;
+  if (typeof features.defaultChatView !== 'boolean' && features.chatUi === false) {
+    saveSettingsOverride('defaultChatView', false);
+  }
+  const after = loadSettingsRecord();
+  if (after.features && 'chatUi' in after.features) {
+    delete after.features.chatUi;
+    saveSettingsRecord(after);
+  }
+}
+
+// Merge persisted overrides over the config feature defaults up front. Covers
+// the SETTINGS_FLAGS toggles plus the standalone `defaultChatView` chooser.
+function applyFeatureOverrides() {
   const overrides = loadSettingsOverrides();
   for (const { key } of SETTINGS_FLAGS) {
     if (typeof overrides[key] === 'boolean') CONFIG.features[key] = overrides[key];
   }
-})();
+  if (typeof overrides.defaultChatView === 'boolean') CONFIG.features.defaultChatView = overrides.defaultChatView;
+}
+
+migrateRemovedChatUiSetting();
+applyFeatureOverrides();
 
 // Renderer no longer holds an API URL — server.py is gone, all session
 // management happens via chat_streamd over IPC (window.cc.list/trash/etc).
@@ -356,10 +382,9 @@ const CFG_READY = (async () => {
     const cfg = await window.cc.getConfig();
     if (cfg) {
       Object.assign(CONFIG, cfg);
-      const overrides = loadSettingsOverrides();
-      for (const { key } of SETTINGS_FLAGS) {
-        if (typeof overrides[key] === 'boolean') CONFIG.features[key] = overrides[key];
-      }
+      // Re-apply persisted overrides on top of the freshly-loaded config so the
+      // toggles and the default-view chooser survive the getConfig() merge.
+      applyFeatureOverrides();
     }
     IS_CLIENT = !!(cfg && cfg.isClient);
     HOST_IDS = Array.isArray(cfg && cfg.hostIds) && cfg.hostIds.length ? cfg.hostIds : ['local'];
@@ -483,8 +508,20 @@ Object.defineProperty(state, 'sessions', {
 const SLOT_BUFFER_LIMIT = 120000;
 const CHAT_STREAM_LIMIT = CONFIG.chatStream?.recentLimit || 5000;
 
+// Chat view is always enabled: the old opt-in `features.chatUi` toggle was
+// removed (operator request). Kept as a function so the many call-sites stay
+// intact; it now always returns true. The default landing view (Chat vs
+// Terminal) is chosen separately — see defaultChatViewMode().
 function chatUiEnabled() {
-  return CONFIG.features?.chatUi === true;
+  return true;
+}
+
+// The view a freshly-attached (non-composite) session lands on. Defaults to
+// Chat; the operator can switch the default to Terminal via the "Default view"
+// setting (persisted as features.defaultChatView === false). Composite/assistant
+// slots always open in Chat regardless of this setting.
+function defaultChatViewMode() {
+  return CONFIG.features?.defaultChatView === false ? 'terminal' : 'chat';
 }
 
 function notificationRecordFromPayload(payload) {
@@ -2329,6 +2366,9 @@ function renderSlotAttachmentTray(slot) {
     card.appendChild(remove);
     refs.attachmentTrayEl.appendChild(card);
   }
+  // Attachments need the full-width (expanded) composer; re-evaluate the layout
+  // so adding/removing images expands or shrinks the compose bar accordingly.
+  refs.syncComposerLayout?.();
 }
 
 async function uploadSlotAttachments(slot) {
@@ -2620,8 +2660,24 @@ function ensureSlotChatSurface(slot) {
   }
   chatMount.appendChild(chatShell);
 
+  // Compact-first composer: the default is a single row [+] [input] [mic] with
+  // no blank space above. It switches to the stacked (is-expanded) layout only
+  // when the draft no longer fits one line, or an attachment/reply preview needs
+  // the full width, and shrinks back once it fits again. The wrap decision is
+  // ALWAYS measured at the narrower compact width (is-expanded removed first),
+  // so widening the input in the expanded layout can never bounce it back —
+  // no oscillation at the boundary.
   const autoSize = () => {
-    inputEl.style.height = '';
+    composeEl.classList.remove('is-expanded');
+    inputEl.style.height = 'auto';
+    const cs = getComputedStyle(inputEl);
+    const lineH = parseFloat(cs.lineHeight) || 22;
+    const padV = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const oneLineMax = lineH + padV + 4; // tolerance for sub-pixel rounding
+    const hasAttachments = slotAttachmentDrafts(slot).length > 0;
+    const wraps = inputEl.value.includes('\n') || inputEl.scrollHeight > oneLineMax;
+    if (wraps || hasAttachments) composeEl.classList.add('is-expanded');
+    inputEl.style.height = 'auto';
     const h = Math.min(inputEl.scrollHeight, 220);
     inputEl.style.height = `${h}px`;
     inputEl.style.overflowY = inputEl.scrollHeight > 220 ? 'auto' : 'hidden';
@@ -2711,7 +2767,7 @@ function ensureSlotChatSurface(slot) {
   shell.appendChild(statusMount);
   container.appendChild(shell);
 
-	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, dockEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, micEl, menuEl, inputEl, sendEl };
+	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, dockEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, micEl, menuEl, inputEl, sendEl, syncComposerLayout: autoSize };
   return state.slotChatRefs[slot];
 }
 
@@ -2763,10 +2819,13 @@ function maybeRestoreReturnedToPromptDraft(slot, streamId) {
     state.slotDraftTouched[slot] = true;
     if (refs?.inputEl) {
       refs.inputEl.value = draft.text;
-      refs.inputEl.style.height = '';
-      const h = Math.min(refs.inputEl.scrollHeight, 220);
-      refs.inputEl.style.height = `${h}px`;
-      refs.inputEl.style.overflowY = refs.inputEl.scrollHeight > 220 ? 'auto' : 'hidden';
+      if (refs.syncComposerLayout) refs.syncComposerLayout();
+      else {
+        refs.inputEl.style.height = '';
+        const h = Math.min(refs.inputEl.scrollHeight, 220);
+        refs.inputEl.style.height = `${h}px`;
+        refs.inputEl.style.overflowY = refs.inputEl.scrollHeight > 220 ? 'auto' : 'hidden';
+      }
     }
     setSlotSendError(slot, '');
     state.returnedPromptDrafts[key] = 'restored';
@@ -3353,7 +3412,7 @@ function renderSlotChat(slot) {
   const renderedTranscript = (detail && window.PentacleChatView
     ? window.PentacleChatView.renderTranscriptTimelineHtml(detail, chrome, {
       showTurnDuration,
-      allowReplies: isCompositeSlot(slot) || !!session.assistantDirect,
+      allowReplies: streamId !== 'bart:assistant' && (isCompositeSlot(slot) || !!session.assistantDirect),
       resolvedQuestions: resolvedQuestionsForStream(streamId),
     })
     : '') || '';
@@ -3695,10 +3754,13 @@ function renderSlotChat(slot) {
   );
   if (refs.inputEl && refs.inputEl !== document.activeElement && refs.inputEl.value !== composerValue) {
     refs.inputEl.value = composerValue;
-    refs.inputEl.style.height = '';
-    const h = Math.min(refs.inputEl.scrollHeight, 220);
-    refs.inputEl.style.height = `${h}px`;
-    refs.inputEl.style.overflowY = refs.inputEl.scrollHeight > 220 ? 'auto' : 'hidden';
+    if (refs.syncComposerLayout) refs.syncComposerLayout();
+    else {
+      refs.inputEl.style.height = '';
+      const h = Math.min(refs.inputEl.scrollHeight, 220);
+      refs.inputEl.style.height = `${h}px`;
+      refs.inputEl.style.overflowY = refs.inputEl.scrollHeight > 220 ? 'auto' : 'hidden';
+    }
   }
   refs.inputEl?.classList.toggle('is-remote-draft', !!remoteDraft && !state.slotDraftTouched[slot]);
   refs.inputEl?.classList.toggle('is-remote-pending', !!remotePending && !state.slotDraftTouched[slot]);
@@ -3953,7 +4015,7 @@ async function sendChatComposer(slot) {
           clearSlotAttachments(slot);
           if (inputEl) {
             inputEl.value = '';
-            inputEl.style.height = '';
+            refs?.syncComposerLayout?.();
           }
           renderSlotChat(slot);
         }
@@ -3975,7 +4037,7 @@ async function sendChatComposer(slot) {
       state.slotDraftTouched[slot] = true;
       if (inputEl) {
         inputEl.value = '';
-        inputEl.style.height = '';
+        refs?.syncComposerLayout?.();
       }
     },
   });
@@ -4040,7 +4102,7 @@ async function sendComposerQuestionAnswer(slot, streamId, text, inputEl, attachm
       if (streamId && state.questionDrafts) delete state.questionDrafts[streamId];
       if (inputEl) {
         inputEl.value = '';
-        inputEl.style.height = '';
+        refs?.syncComposerLayout?.();
       }
       renderSlotChat(slot);
       return true;
@@ -4168,10 +4230,12 @@ function ensureSlotModeToggle(slot) {
   const group = document.createElement('div');
   group.className = 'cell-view-toggle-group';
   group.style.cssText = 'display:flex;gap:4px;margin-right:4px;';
+  // Pill order: Status, Chat, Terminal (Chat sits next to Status as the default
+  // view). Reordered from the legacy Status/Terminal/Chat per operator request.
   group.innerHTML = `
     <button class="cell-view-toggle" data-slot="${slot}" data-mode="status" title="Session status view" aria-label="Session status view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Status</button>
-    <button class="cell-view-toggle" data-slot="${slot}" data-mode="terminal" title="Terminal view" aria-label="Terminal view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Terminal</button>
-    <button class="cell-view-toggle" data-slot="${slot}" data-mode="chat" title="Chat view" aria-label="Chat view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Chat</button>`;
+    <button class="cell-view-toggle" data-slot="${slot}" data-mode="chat" title="Chat view" aria-label="Chat view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Chat</button>
+    <button class="cell-view-toggle" data-slot="${slot}" data-mode="terminal" title="Terminal view" aria-label="Terminal view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Terminal</button>`;
   actions.prepend(group);
   group.querySelectorAll('.cell-view-toggle').forEach((btn) => {
     btn.addEventListener('click', (e) => {
@@ -4813,11 +4877,12 @@ function activateSidebarRow(el, defaultHostId) {
     updateSlotViewMode(slot, 'chat');
     return;
   }
-  // Ordinary open (primary-action 'status') and any default: land on Terminal.
-  // A fresh attach/replacement resets the slot to Terminal in attachSession
-  // (state.slotViewModes[slot] = 'terminal'); re-selecting an already-attached
-  // slot leaves its explicit in-session Chat/Status/Terminal toggle untouched.
-  // Status stays reachable through the per-cell view toggle.
+  // Ordinary open (primary-action 'status') and any default: land on the
+  // configured default view. A fresh attach/replacement sets the slot to
+  // defaultChatViewMode() in attachSession (Chat unless the operator chose
+  // Terminal); re-selecting an already-attached slot leaves its explicit
+  // in-session Chat/Status/Terminal toggle untouched. Status stays reachable
+  // through the per-cell view toggle.
 }
 
 // firstUnreadReportForStream returns the {assetId, assetKey} of the newest
@@ -4905,7 +4970,7 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   state.slotBuffers[slot] = '';
   state.slotDrafts[slot] = '';
   state.slotDraftTouched[slot] = false;
-  state.slotViewModes[slot] = isCompositeSlot(slot) ? 'chat' : 'terminal';
+  state.slotViewModes[slot] = isCompositeSlot(slot) ? 'chat' : defaultChatViewMode();
   fetchSlotAssetSnapshot(slot, gen);
   ensureSlotAssetTabs(slot);
 
@@ -7490,6 +7555,38 @@ function setupSettingsPanel() {
     { value: 'comfortable', label: 'Comfortable' },
     { value: 'compact', label: 'Compact' },
   ]);
+
+  // Default view chooser (replaces the removed "Chat UI" enable/disable toggle).
+  // Chat view is always available; this only picks what a newly-opened session
+  // lands on. Applies live (next session open) — no reload needed. Stored as
+  // features.defaultChatView (true = Chat). Not a `data-setting` row, so the
+  // appearance re-sync on open() leaves it alone; it stays correct because only
+  // its own clicks mutate the value.
+  (function buildDefaultViewRow() {
+    const row = document.createElement('div');
+    row.className = 'settings-row settings-row-segmented';
+    row.id = 'settings-default-view-row';
+    row.innerHTML =
+      `<div class="settings-row-text">
+        <div class="settings-row-label">Default view</div>
+        <div class="settings-row-desc">Which view a newly-opened session lands on. Chat view is always available.</div>
+      </div>
+      <div class="settings-segment" role="group" aria-label="Default view">
+        <button class="settings-segment-btn" type="button" data-value="chat" aria-pressed="false">Chat</button>
+        <button class="settings-segment-btn" type="button" data-value="terminal" aria-pressed="false">Terminal</button>
+      </div>`;
+    row.querySelectorAll('.settings-segment-btn').forEach((button) => {
+      button.addEventListener('click', () => {
+        const toChat = button.dataset.value === 'chat';
+        CONFIG.features.defaultChatView = toChat;
+        saveSettingsOverride('defaultChatView', toChat);
+        setSegment(row, toChat ? 'chat' : 'terminal');
+        window.PentacleHarness?.emit?.('settings:toggle', { data: { key: 'defaultChatView', value: toChat } });
+      });
+    });
+    setSegment(row, defaultChatViewMode());
+    list.appendChild(row);
+  })();
 
   // Build the feature rows once; switch state is re-synced from CONFIG.features on open.
   for (const flag of SETTINGS_FLAGS) {
