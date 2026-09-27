@@ -9,6 +9,32 @@ DISALLOWED_INPUT_NAMES = (
 )
 
 
+def refresh_audio_backend():
+    """Re-enumerate the CoreAudio/PortAudio device list from scratch.
+
+    PortAudio caches the device object table (CoreAudio AudioObjectIDs) at
+    Pa_Initialize, which for the long-running mic-server happens once at process
+    start. When the audio topology changes afterwards -- the USB mic is
+    replugged, the default input is switched, the login session relogs, or
+    coreaudiod restarts -- those cached IDs go stale. Opening an InputStream
+    then fails against dead objects: AUHAL logs ``err='!obj'``
+    (kAudioHardwareBadObjectError) and ``err='-10851'``
+    (kAudioUnitErr_InvalidPropertyValue), which sounddevice surfaces as
+    ``PaErrorCode -9986`` (paInternalError). Note that ``sd.query_devices()``
+    keeps returning the stale (but plausible-looking) list, so device
+    *resolution* still succeeds while the *open* fails.
+
+    Terminating and re-initializing PortAudio rebuilds the table against the
+    current HAL state. Best-effort: on failure we log and fall through, letting
+    resolve/open surface any genuine device error with a clear message.
+    """
+    try:
+        sd._terminate()
+        sd._initialize()
+    except Exception as exc:  # pragma: no cover - defensive; probe-verified path
+        print(f"[mic] audio backend refresh failed: {exc}")
+
+
 def resolve_mic_device(preferred_device_name=None):
     """Return structured device selection details for health reporting."""
     preferred = (
