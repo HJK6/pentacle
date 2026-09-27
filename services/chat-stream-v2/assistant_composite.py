@@ -83,6 +83,7 @@ class AssistantCompositeConfig:
     luna_stream_id: str = ""
     direct_primary_stream_id: str = ""
     direct_primary_generation: str = ""
+    mirror_enabled_default: bool = True
     title: str = "Assistant"
 
     @property
@@ -134,6 +135,7 @@ class AssistantCompositeConfig:
             luna_stream_id="" if direct_requested else backend_ids["PENTACLE_ASSISTANT_LUNA_STREAM_ID"],
             direct_primary_stream_id=direct_stream,
             direct_primary_generation=direct_generation,
+            mirror_enabled_default=_env_bool(values, "PENTACLE_ASSISTANT_MIRROR_ENABLED", True),
             title=str(values.get("PENTACLE_ASSISTANT_COMPOSITE_TITLE") or "Assistant").strip()[:120] or "Assistant",
         )
 
@@ -313,6 +315,13 @@ class AssistantComposite:
         row = await self.store.ensure_assistant_composite_projection(
             stream_id=self.config.stream_id, title=self.config.title,
         )
+        if self.config.direct_primary:
+            await self.store.configure_assistant_mirror(
+                composite_stream_id=self.config.stream_id,
+                source_stream_id=self.config.direct_primary_stream_id,
+                source_generation=self.config.direct_primary_generation,
+                enabled_default=self.config.mirror_enabled_default,
+            )
         # The shared sessions schema stays untouched; these public fields are
         # projected on the existing inventory/events transport.
         await self.refresh_activity(broadcast=False)

@@ -1309,6 +1309,9 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
         self._ready = threading.Event()
         self._start_error: BaseException | None = None
         self._columns: set[str] = set()
+        # Written and read on the store thread after the composite projection
+        # is ready. None keeps every non-direct deployment unchanged.
+        self._assistant_mirror_binding: tuple[str, str, str, bool] | None = None
         self._init_routing_integrity_state()
 
     @property
@@ -1612,6 +1615,158 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
             row = conn.execute("SELECT v FROM kv WHERE k = ?", (key,)).fetchone()
             return None if row is None else row[0]
 
+        return await self.submit(_op)
+
+    async def configure_assistant_mirror(
+        self, *, composite_stream_id: str, source_stream_id: str,
+        source_generation: str, enabled_default: bool,
+    ) -> None:
+        """Install the daemon's trusted direct-primary mirror binding."""
+        def _op(_conn: sqlite3.Connection) -> None:
+            self._assistant_mirror_binding = (
+                composite_stream_id, source_stream_id, source_generation, enabled_default,
+            )
+        await self.submit(_op)
+
+    def _assistant_mirror_state_conn(self, conn: sqlite3.Connection) -> dict[str, Any]:
+        binding = self._assistant_mirror_binding
+        if binding is None:
+            return {"enabled": False, "source": "unbound", "binding": None}
+        override = conn.execute("SELECT v FROM kv WHERE k='assistant.mirror.enabled'").fetchone()
+        if override is None:
+            enabled, source = binding[3], "env"
+        else:
+            normalized = str(override[0]).strip().lower()
+            enabled = normalized in {"1", "true", "on"}
+            source = "kv" if normalized in {"1", "true", "on", "0", "false", "off"} else "kv_invalid"
+        return {
+            "enabled": enabled, "source": source,
+            "binding": {"composite_stream_id": binding[0],
+                        "source_stream_id": binding[1], "source_generation": binding[2]},
+        }
+
+    async def assistant_mirror_state(self) -> dict[str, Any]:
+        return await self.submit(self._assistant_mirror_state_conn)
+
+    def _mirror_source_event_conn(
+        self, conn: sqlite3.Connection, *, source_stream_id: str,
+        source_event: dict[str, Any], source_event_id: int, recorded_at: float,
+    ) -> None:
+        """Project an admitted source event in its ingest transaction only."""
+        binding = self._assistant_mirror_binding
+        if binding is None or source_stream_id != binding[1]:
+            return
+        if not self._assistant_mirror_state_conn(conn)["enabled"]:
+            return
+        if source_event.get("kind") != "ASSIST_TEXT" or source_event.get("attachments"):
+            return
+        body = source_event.get("text")
+        if not isinstance(body, str) or not body.strip() or re.fullmatch(r"[❯›⏺•●◦]", body.strip()):
+            return
+        host, separator, name = source_stream_id.partition(":")
+        if not separator:
+            return
+        source = conn.execute(
+            "SELECT s.status,g.generation FROM sessions s "
+            "JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
+            "WHERE s.host=? AND s.session_name=?", (host, name),
+        ).fetchone()
+        if source is None or source["status"] != "open" or source["generation"] != binding[2]:
+            return
+        composite_host, _, composite_name = binding[0].partition(":")
+        composite = conn.execute(
+            "SELECT created_at FROM sessions WHERE host=? AND session_name=? "
+            "AND status='open' AND provider='composite'", (composite_host, composite_name),
+        ).fetchone()
+        if composite is None:
+            raise ValueError("assistant_mirror_projection_unavailable")
+        # A direct intent is durable before any provider input. Suppress through
+        # all ambiguous delivery states, including a held receipt, until the
+        # matching final publication or a proven no-submit failure.
+        open_route = conn.execute(
+            "SELECT 1 FROM v2_assistant_composite_routes r "
+            "WHERE r.stream_id=? AND r.routing_state='resolved' "
+            "AND r.route_target=? AND r.route_target_generation=? "
+            "AND r.dispatch_id IS NOT NULL "
+            "AND r.delivery_state IN ('intent','committed_pending','uncertain','landed') "
+            "AND json_extract(r.route_json,'$.admission_mode')='direct_primary' "
+            "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p "
+            "WHERE p.stream_id=r.stream_id AND p.dispatch_id=r.dispatch_id "
+            "AND p.publish_kind='prose' "
+            "AND json_extract(p.canonical_payload_json,'$.response_state')='final') "
+            "LIMIT 1", (binding[0], source_stream_id, binding[2]),
+        ).fetchone()
+        if open_route is not None:
+            return
+        recent = conn.execute(
+            "SELECT p.created_at FROM v2_assistant_composite_publications p "
+            "JOIN v2_assistant_composite_routes r ON r.dispatch_id=p.dispatch_id "
+            "WHERE p.stream_id=? AND p.publish_kind='prose' "
+            "AND r.route_target=? AND r.route_target_generation=? "
+            "AND json_extract(p.canonical_payload_json,'$.response_state')='final' "
+            "AND json_extract(p.canonical_payload_json,'$.message')=? "
+            "ORDER BY p.event_id DESC LIMIT 1",
+            (binding[0], source_stream_id, binding[2], body),
+        ).fetchone()
+        if recent is not None:
+            published_at = datetime.fromisoformat(str(recent["created_at"]).replace("Z", "+00:00")).timestamp()
+            if 0 <= recorded_at - published_at < 120:
+                return
+        origin = {"stream_id": source_stream_id, "generation": binding[2],
+                  "event_id": source_event_id, "event_ts": source_event.get("timestamp")}
+        publication_key = f"mirror:{source_event_id}"
+        canonical_payload = {
+            "composite_stream_id": binding[0], "dispatch_id": "",
+            "reply_to_message_id": None, "reply_to_question_id": None,
+            "publish_kind": "status", "message": body,
+            "attachment_ids": [], "evidence_refs": [], "mirrored_from": origin,
+        }
+        canonical_json = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        event = {
+            "stream_id": binding[0], "provider": "composite", "kind": "ASSIST_TEXT",
+            "text": body, "message_id": "publication:" + publication_key,
+            "reply_to_message_id": None, "reply_to_question_id": None,
+            "publish_kind": "status", "attachments": [],
+            "timestamp": source_event.get("timestamp"),
+            "raw": {"assistant_composite": True, "publish_kind": "status",
+                    "dispatch_id": "", "mirrored_from": origin,
+                    "attachment_ids": [], "evidence_refs": []},
+        }
+        event_json = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        cur = conn.execute(
+            "INSERT INTO session_event_tail(stream_id,session_created_at,event_key,event_json,"
+            "event_ts,recorded_at,identity) VALUES (?,?,?,?,?,?,?)",
+            (binding[0], composite["created_at"], hashlib.sha256(event_json.encode()).hexdigest(),
+             event_json, source_event.get("timestamp"), recorded_at,
+             "assistant-mirror:" + publication_key),
+        )
+        conn.execute(
+            "INSERT INTO v2_assistant_composite_publications(publication_key,stream_id,payload_digest,"
+            "canonical_payload_json,dispatch_id,reply_to_message_id,reply_to_question_id,publish_kind,"
+            "attachment_ids_json,evidence_refs_json,event_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (publication_key, binding[0], hashlib.sha256(canonical_json.encode()).hexdigest(),
+             canonical_json, "", None, None, "status", "[]", "[]", int(cur.lastrowid),
+             _routing_iso_now()),
+        )
+        log.info(
+            "assistant mirror committed source_event_id=%s canonical_event_id=%s",
+            source_event_id, int(cur.lastrowid),
+            extra={"subsystem": "assistant_mirror",
+                   "bug_ref": "pentacle__bart_chat_prose_mirror_2026_09"},
+        )
+
+    async def assistant_mirror_event_for_source(self, source_event_id: int) -> dict[str, Any] | None:
+        """Return the committed canonical row for the live broadcaster."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT t.event_id,t.event_json FROM v2_assistant_composite_publications p "
+                "JOIN session_event_tail t ON t.event_id=p.event_id "
+                "WHERE p.publication_key=? AND p.publish_kind='status' AND p.dispatch_id=''",
+                (f"mirror:{source_event_id}",),
+            ).fetchone()
+            if row is None:
+                return None
+            return dict(json.loads(row["event_json"])) | {"daemon_seq": int(row["event_id"])}
         return await self.submit(_op)
 
     # -- event.push target pin ------------------------------------------------
@@ -4104,7 +4259,14 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, _Rout
                             json.loads(event_json).get("timestamp"), recorded_at, identity,
                         ),
                     )
-                    inserted.append(int(cur.lastrowid) if cur.rowcount > 0 else None)
+                    source_id = int(cur.lastrowid) if cur.rowcount > 0 else None
+                    if source_id is not None and lifecycle is not None:
+                        self._mirror_source_event_conn(
+                            conn, source_stream_id=stream_id,
+                            source_event=json.loads(event_json), source_event_id=source_id,
+                            recorded_at=recorded_at,
+                        )
+                    inserted.append(source_id)
                 conn.commit()
                 return inserted
             except BaseException:

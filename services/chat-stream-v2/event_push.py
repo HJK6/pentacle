@@ -48,7 +48,7 @@ import re
 import time
 from typing import Any, Awaitable, Callable, Mapping
 
-from ingest import _identity_key, codex_source_pane_pid, validate_event_payload
+from ingest import _identity_key, broadcast_assistant_mirror, codex_source_pane_pid, validate_event_payload
 from machine_stats import WIRE_VERSION as STATS_WIRE_VERSION, validate_machine_stats
 from store import ENTRY_DROPPED
 
@@ -580,6 +580,7 @@ class EventPush:
                         "type": "chat.event",
                         "event": projected[projected_index],
                     })
+                    await broadcast_assistant_mirror(self.store, self.broadcast, seq)
                     projected_index += 1
         except Exception as exc:  # noqa: BLE001 - never acknowledge a failed push
             log.warning("event.push broadcast failed host=%s: %s", host, exc)
