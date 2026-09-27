@@ -309,6 +309,7 @@ test('chatHistoryStatus never leaves a row-less view without a status line while
   assert.deepEqual(chatHistoryStatus({ connected: false, load: loaded, hasRows: true, hasRendered: true }), { message: 'Reconnecting…', retry: false });
   assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'error' }, hasRows: false, hasRendered: true }), { message: 'Loading messages…', retry: false });
   assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'loading' }, hasRows: true, hasRendered: true }), { message: 'Syncing messages…', retry: false });
+  assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'loading', attempt: 1 }, hasRows: true, hasRendered: true }), { message: 'Loading messages…', retry: false });
   assert.deepEqual(chatHistoryStatus({ connected: true, load: undefined, hasRows: false, hasRendered: false }), { message: 'Loading messages…', retry: false });
   assert.deepEqual(chatHistoryStatus({ connected: true, load: loaded, hasRows: true, hasRendered: true }), { message: '', retry: false });
   assert.deepEqual(chatHistoryStatus({ connected: true, load: loaded, hasRows: false, hasRendered: true }), { message: 'Loading messages…', retry: false });

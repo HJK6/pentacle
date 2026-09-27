@@ -85,7 +85,7 @@ function chatHistoryStatus({ connected, load, hasRows, hasRendered }) {
   if (load?.status === 'error') return load.exhausted
     ? { message: 'Messages could not be loaded.', retry: true }
     : { message: 'Loading messages…', retry: false };
-  if (load?.status !== 'loaded') return { message: hasRows && hasRendered ? 'Syncing messages…' : 'Loading messages…', retry: false };
+  if (load?.status !== 'loaded') return { message: !load?.attempt && hasRows && hasRendered ? 'Syncing messages…' : 'Loading messages…', retry: false };
   if (hasRows) return { message: '', retry: false };
   return load.exhausted
     ? { message: 'No messages yet.', retry: true }
