@@ -272,6 +272,14 @@ local timezone. A probe that cannot reach its CLI exits non-zero, recording
 row's prior value are retained. A silent/hung probe is bounded by the
 collector's 75s per-probe subprocess timeout (same `provider_error` result).
 
+The Claude probe launches the CLI in `PENTACLE_USAGE_CWD` (the deploy pins it to
+the release checkout; it defaults to `$HOME`, never the launchd process cwd `/`).
+That directory must be a **trusted** Claude workspace for the account: the probe
+never auto-accepts the trust dialog, so an untrusted cwd records `provider_error`
+with a message naming the cwd — `cwd '<dir>' is not a trusted Claude workspace;
+trust it once ..., or point PENTACLE_USAGE_CWD at an already-trusted folder`. An
+account relog can drop a directory's trust; re-trust it or repoint the variable.
+
 ## Per-chat voice messages
 
 With the compatible mic service configured, the per-chat mic button captures a message until a standalone `over` utterance or a second button click. Manual stop requires a service that drains pending audio/transcription before returning `/copy/stop`. The service must clear `on_last_copied` on every `/copy/start`; `/status` supplies the completed text when `on_listener_state` leaves `CAPTURING`.

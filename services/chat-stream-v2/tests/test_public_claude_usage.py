@@ -53,6 +53,37 @@ def test_trust_prompt_is_not_accepted_and_cleanup_still_runs():
     assert not any("send-keys" in c for c in calls)
 
 
+def test_trust_error_names_the_configured_cwd_and_the_remedy():
+    def run(command, **kwargs):
+        return SimpleNamespace(stdout="Quick safety check: Yes, I trust this folder", returncode=0)
+
+    with pytest.raises(RuntimeError) as exc:
+        probe.collect(claude="claude", tmux="tmux", cwd="/opt/probe-home", run=run, sleep=lambda _: None)
+    message = str(exc.value)
+    assert "/opt/probe-home" in message          # operator-configured cwd surfaced for diagnosis
+    assert "PENTACLE_USAGE_CWD" in message        # remedy: repoint at a trusted folder
+    assert "trust" in message                     # remedy also covers re-trusting that folder
+
+
+def test_login_prompt_is_distinct_from_trust():
+    def run(command, **kwargs):
+        return SimpleNamespace(stdout="Please sign in to continue", returncode=0)
+
+    with pytest.raises(RuntimeError, match="logged in"):
+        probe.collect(claude="claude", tmux="tmux", cwd="/tmp", run=run, sleep=lambda _: None)
+
+
+def test_default_cwd_is_home_not_process_cwd(monkeypatch):
+    # isolated_tmux_env / conftest does not clear this, so an inherited value would
+    # pollute the assertion; clear it to check the fallback.
+    monkeypatch.delenv("PENTACLE_USAGE_CWD", raising=False)
+    from pathlib import Path
+    assert probe.default_cwd() == str(Path.home())
+    assert probe.default_cwd() != "/"
+    monkeypatch.setenv("PENTACLE_USAGE_CWD", "/srv/trusted-workspace")
+    assert probe.default_cwd() == "/srv/trusted-workspace"
+
+
 def test_skip_codex_uses_no_update_instead_of_missing_helper(monkeypatch, tmp_path):
     import collect_usage_state
     seen = {}

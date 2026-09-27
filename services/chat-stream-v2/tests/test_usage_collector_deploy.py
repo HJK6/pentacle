@@ -23,6 +23,10 @@ def test_collector_template_renders_the_activated_v2_checkout(tmp_path: Path) ->
     assert rendered["EnvironmentVariables"]["PATH"].startswith(
         str(repo / "services/chat-stream-v2/deploy/usage-probe-bin") + ":"
     )
+    # The probe must run in a real per-host project dir, never the launchd cwd "/",
+    # so a redeploy keeps the trusted-workspace fix instead of reverting to the
+    # untrusted root that produced the "usage probe failed (RuntimeError)" banner.
+    assert rendered["EnvironmentVariables"]["PENTACLE_USAGE_CWD"] == str(repo)
 
 
 def test_collector_template_requires_release_checkout_placeholders(tmp_path: Path) -> None:

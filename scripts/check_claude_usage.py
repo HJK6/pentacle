@@ -62,8 +62,18 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
         sent = False
         while monotonic() < deadline:
             screen = call("capture-pane", "-p", "-t", "probe", "-S", "-150").stdout
-            if re.search(r"trust (?:the |these )?files|trust this (?:folder|workspace)|sign in to continue", screen, re.I):
-                raise RuntimeError("Claude needs login or workspace trust; complete it interactively first")
+            if re.search(r"sign in to continue|log ?in to continue", screen, re.I):
+                raise RuntimeError("Claude CLI is not logged in; run it once interactively and sign in")
+            if re.search(r"trust (?:the |these )?files|trust this (?:folder|workspace)", screen, re.I):
+                # Never auto-accept the trust dialog (deliberate security contract).
+                # ``cwd`` is an operator-configured path (PENTACLE_USAGE_CWD or the
+                # default home), never provider terminal capture, so naming it in
+                # the error is safe and makes the health banner actionable.
+                raise RuntimeError(
+                    f"cwd {cwd!r} is not a trusted Claude workspace; trust it once "
+                    f"(open the Claude CLI there and accept), or point PENTACLE_USAGE_CWD "
+                    f"at an already-trusted folder"
+                )
             if not sent and re.search(r"(?m)^\s*[❯>]", screen):
                 call("send-keys", "-t", "probe", "-l", "/usage")
                 call("send-keys", "-t", "probe", "Enter")
@@ -79,21 +89,40 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
         call("kill-server", check=False)
 
 
+def default_cwd() -> str:
+    """Directory the probe launches the Claude CLI in.
+
+    Never inherit the process cwd: under launchd that is ``/``, which is not a
+    trusted Claude workspace, so the probe would hit the trust dialog and fail.
+    Prefer the explicit ``PENTACLE_USAGE_CWD``; otherwise fall back to the user's
+    home as a sane per-user default. The chosen directory must be trusted once
+    for the account (the probe never auto-accepts the trust dialog).
+    """
+    configured = os.environ.get("PENTACLE_USAGE_CWD")
+    return configured if configured else str(Path.home())
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="collector-compatible JSON output")
     parser.add_argument("--local-fallback", action="store_true", help="compatibility flag; this probe is always local")
     parser.add_argument("--claude", default=os.environ.get("PENTACLE_USAGE_CLAUDE_BIN", "claude"))
     parser.add_argument("--tmux", default=os.environ.get("PENTACLE_USAGE_TMUX_BIN", "tmux"))
-    parser.add_argument("--cwd", default=os.environ.get("PENTACLE_USAGE_CWD", str(Path.cwd())))
+    parser.add_argument("--cwd", default=default_cwd())
     args = parser.parse_args()
     claude, tmux = shutil.which(args.claude), shutil.which(args.tmux)
     if not claude or not tmux:
         parser.exit(1, "Claude and tmux must be installed and available to this process\n")
     try:
         result = collect(claude=claude, tmux=tmux, cwd=args.cwd)
-    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
-        # Avoid echoing provider terminal content, paths or credentials into health UI.
+    except RuntimeError as exc:
+        # collect() raises only our own sanitized strings (never provider terminal
+        # capture); surfacing them — including the operator-configured cwd — makes
+        # the health banner actionable instead of an opaque "(RuntimeError)".
+        print(f"Claude usage unavailable: {exc}", file=sys.stderr)
+        return 1
+    except (OSError, subprocess.SubprocessError) as exc:
+        # These can carry system paths/errno detail; keep the generic sanitized line.
         print(f"Claude usage unavailable ({type(exc).__name__}); check login, trusted cwd and /usage labels", file=sys.stderr)
         return 1
     print(json.dumps(result))
