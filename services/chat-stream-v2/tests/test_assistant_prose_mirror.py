@@ -23,6 +23,15 @@ def _config(generation: str) -> AssistantCompositeConfig:
     })
 
 
+def _config_for(stream_id: str, generation: str) -> AssistantCompositeConfig:
+    return AssistantCompositeConfig.from_env({
+        "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+        "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": ASSISTANT,
+        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": stream_id,
+        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": generation,
+    })
+
+
 def _source_event(text: str = "A proactive milestone") -> dict:
     return {
         "stream_id": ROOT,
@@ -222,7 +231,8 @@ def test_kv_disable_invalid_value_and_nonprose_are_excluded():
                 "enabled": False, "source": "kv",
                 "binding": {"composite_stream_id": ASSISTANT,
                             "source_stream_id": ROOT,
-                            "source_generation": root["session_generation"]},
+                            "source_generation": root["session_generation"],
+                            "source_binding": "env"},
             }
             await _append(store, "while disabled")
             await store.put("assistant.mirror.enabled", "invalid")
@@ -506,6 +516,158 @@ def test_inspect_readback_exposes_effective_toggle_and_binding():
             })
             assert after["session"]["assistant_mirror"]["enabled"] is False
             assert after["session"]["assistant_mirror"]["source"] == "kv"
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(_go())
+
+
+async def _set_durable_binding(store: Store, stream_id: str, generation: str):
+    """Seed the committed durable rebind state (what a hot rebind leaves behind).
+
+    The rebind verb, its authorization and audit are tested by the hot-rebind
+    lane; here we only need the post-commit binding row to prove the mirror
+    admission follows it without a restart or reconfigure.
+    """
+    def _op(conn):
+        conn.execute(
+            "INSERT INTO v2_assistant_direct_binding(id,stream_id,generation,revision,updated_at) "
+            "VALUES(1,?,?,1,?) ON CONFLICT(id) DO UPDATE SET "
+            "stream_id=excluded.stream_id,generation=excluded.generation,"
+            "revision=excluded.revision,updated_at=excluded.updated_at",
+            (stream_id, generation, "2026-09-27T12:45:33.000Z"),
+        )
+        conn.commit()
+    await store.submit(_op)
+
+
+async def _append_from(store: Store, stream_id: str, pane_pid: str, text: str, identity: str):
+    event = {**_source_event(text), "stream_id": stream_id,
+             "raw": {"source_session_identity": "fixture-session", "message_id": identity}}
+    result = await store.append_session_events_lifecycle_cas(
+        [{"stream_id": stream_id, "event": event, "identity": identity,
+          "lifecycle": await store.fetch_open_session_lifecycle(stream_id, pane_pid=pane_pid)}], limit=20,
+    )
+    assert result is not None
+    return result[0]
+
+
+def test_durable_hot_rebind_moves_mirror_source_without_restart():
+    """A no-restart durable rebind must carry the mirror to the new seat."""
+    async def _go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            # Startup binds the mirror to the env source seat A.
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            composite = AssistantComposite(store, config=_config(root["session_generation"]))
+            await composite.ensure_projection()
+
+            # A new front-desk seat B is opened and the daemon is hot-rebound to
+            # it via the durable binding table -- no restart, no reconfigure.
+            newseat = await store.open_session("fixture-newdesk", "visible", provider="codex", pane_pid="5252")
+            await _set_durable_binding(store, "fixture-newdesk:visible", newseat["session_generation"])
+
+            # B's dispatch-free prose now mirrors, with B's effective provenance.
+            b_id = await _append_from(store, "fixture-newdesk:visible", "5252",
+                                      "update from the rebound desk", "b-line")
+            rows = await _answer_rows(store)
+            assert [row["text"] for row in rows] == ["update from the rebound desk"]
+            assert rows[-1]["raw"]["mirrored_from"] == {
+                "stream_id": "fixture-newdesk:visible",
+                "generation": newseat["session_generation"],
+                "event_id": b_id,
+                "event_ts": "2026-09-27T05:00:00.000Z",
+            }
+
+            # The retired env-pinned seat A no longer mirrors after the rebind.
+            await _append(store, "stale line from the old desk", identity="a-line")
+            assert [row["text"] for row in await _answer_rows(store)] == ["update from the rebound desk"]
+
+            # Readback reflects the live durable source.
+            state = await store.assistant_mirror_state()
+            assert state["binding"]["source_stream_id"] == "fixture-newdesk:visible"
+            assert state["binding"]["source_generation"] == newseat["session_generation"]
+            assert state["binding"]["source_binding"] == "durable"
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(_go())
+
+
+def test_dispatched_reply_under_durable_binding_suppresses_and_publishes_once():
+    """When the effective source is the durable-bound seat, a dispatched reply
+    still suppresses the source line and leaves exactly one published row: the
+    open-route suppression and 120s dedupe joins must key on the effective
+    (durable) generation, not the startup env pair."""
+    async def _go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            desk = await store.open_session("fixture-newdesk", "visible", provider="codex", pane_pid="5252")
+            # Routing and the mirror are bound to seat B through the durable table.
+            await _set_durable_binding(store, "fixture-newdesk:visible", desk["session_generation"])
+            release = asyncio.Future()
+            async def dispatch(_route):
+                return await release
+            composite = AssistantComposite(
+                store, config=_config_for("fixture-newdesk:visible", desk["session_generation"]),
+                dispatch=dispatch)
+            await composite.ensure_projection()
+            assert (await store.assistant_mirror_state())["binding"]["source_binding"] == "durable"
+
+            route = await _route_for(composite, store, "question-1")
+            assert route["route_target"] == "fixture-newdesk:visible"
+            assert route["route_target_generation"] == desk["session_generation"]
+            assert route["delivery_state"] == "intent"
+
+            # The dispatched reply arrives from B while the dispatch is open.
+            assert await _append_from(store, "fixture-newdesk:visible", "5252", "The direct answer", "b-reply")
+            assert await _answer_rows(store) == []
+
+            release.set_result({"delivery": "landed"})
+            published = await composite.publish({
+                "request_id": "publish:" + route["dispatch_id"],
+                "composite_stream_id": ASSISTANT, "dispatch_id": route["dispatch_id"],
+                "reply_to_message_id": "question-1", "reply_to_question_id": None,
+                "publish_kind": "prose", "response_state": "final",
+                "message": "The direct answer", "attachment_ids": [], "evidence_refs": [],
+            }, actor_stream_id="fixture-newdesk:visible")
+            assert published["publication_key"] == "publish:" + route["dispatch_id"]
+            rows = await _answer_rows(store)
+            assert len(rows) == 1
+            assert rows[0]["text"] == "The direct answer" and rows[0]["publish_kind"] == "prose"
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(_go())
+
+
+def test_corrupt_durable_binding_fails_closed_without_breaking_ingest():
+    """A malformed durable row suppresses the mirror but never breaks ingest."""
+    async def _go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            composite = AssistantComposite(store, config=_config(root["session_generation"]))
+            await composite.ensure_projection()
+
+            # A partial durable row (stream present, generation blank) is corrupt.
+            def _corrupt(conn):
+                conn.execute(
+                    "INSERT INTO v2_assistant_direct_binding(id,stream_id,generation,revision,updated_at) "
+                    "VALUES(1,?,?,1,?)", ("fixture-root:visible", "", "2026-09-27T12:45:33.000Z"),
+                )
+                conn.commit()
+            await store.submit(_corrupt)
+
+            # Source ingest still commits; nothing mirrors (fail closed).
+            src_id = await _append(store, "line during corrupt binding", identity="corrupt-line")
+            assert isinstance(src_id, int)
+            assert await _answer_rows(store) == []
+            state = await store.assistant_mirror_state()
+            assert state["binding"]["source_binding"] == "unavailable"
             await composite.stop()
         finally:
             store.stop()
