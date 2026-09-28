@@ -265,7 +265,8 @@ def test_deferred_retry_preserves_definitive_close_fences(change, tmp_path):
                     action="lifecycle.designate", target_stream_id=ROOT,
                     target_generation=original["requester_generation"], expected_revision=0,
                     reason="test manager designation")
-                await ceremony.approve(pending["challenge"])
+                opened = await ceremony.call("consent.open", intent_id=pending["intent"]["request_id"], key_id=ceremony.key_id)
+                await ceremony.approve(opened["challenge"])
                 expected_error = "close_live_children"
             env.tmux.text = "ready\n"
             await env.sessions.refresh()
