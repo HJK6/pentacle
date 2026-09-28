@@ -7,11 +7,11 @@ import sys
 
 import pytest
 
-import test_live_window as live
+import tmux_isolation as isolation
 from tools import run_gate
 
 
-def test_live_fixture_clears_ambient_socket_and_uses_explicit_namespace(tmp_path, monkeypatch):
+def test_public_fixture_clears_ambient_socket_and_uses_explicit_namespace(tmp_path, monkeypatch):
     receipt = tmp_path / 'tmux-calls.jsonl'
     fake = tmp_path / 'fake-tmux'
     fake.write_text(f'#!{sys.executable}\nimport json, os, sys\n'
@@ -19,25 +19,16 @@ def test_live_fixture_clears_ambient_socket_and_uses_explicit_namespace(tmp_path
                     'f.write(json.dumps({"argv": sys.argv[1:], "TMUX": os.environ.get("TMUX")}) + "\\n")\n')
     fake.chmod(0o755)
     monkeypatch.setenv('TMUX', '/operator/socket,123,0')
-    monkeypatch.setattr(live.shutil, 'which', lambda _: str(fake))
-    daemon_env = {}
-    class FakeDaemon:
-        def __init__(self, *args, **kwargs):
-            self.kwargs = kwargs
-        def start(self):
-            daemon_env.update(os.environ)
-            daemon_env.update(self.kwargs['extra_env'])
-        def stop(self):
-            pass
-    monkeypatch.setattr(live, 'Daemon', FakeDaemon)
-    fixture = live.isolated_live_window_server.__wrapped__(tmp_path, monkeypatch)
-    next(fixture)
-    with pytest.raises(StopIteration):
-        next(fixture)
+    monkeypatch.setattr(isolation.shutil, 'which', lambda _: str(fake))
+    wrapper, socket = isolation.isolate_tmux(tmp_path, monkeypatch)
+    assert 'TMUX' not in os.environ
+    subprocess.run([wrapper, 'new-session', '-d', '-s', 'synthetic'], check=True)
+    subprocess.run([wrapper, 'kill-server'], check=True)
     calls = [json.loads(line) for line in receipt.read_text().splitlines()]
-    assert 'TMUX' not in daemon_env
     assert calls and all(call['TMUX'] is None for call in calls)
     assert all(call['argv'][0] in ('-L', '-S') for call in calls)
+    assert calls[0]['argv'][1] == calls[1]['argv'][1]
+    assert calls[0]['argv'][1].startswith('pentacle-test-')
 
 
 @pytest.mark.parametrize('tier', ['unit', 'smoke', 'soak'])
