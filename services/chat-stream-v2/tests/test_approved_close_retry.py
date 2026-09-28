@@ -222,7 +222,7 @@ def test_busy_or_unknown_capture_stays_actionable_without_killing(capture_ok, te
 
 @pytest.mark.parametrize("change", ["generation", "reopened", "missing_report", "changed_report",
                                   "requester_generation", "unauthorized", "protected", "live_children"])
-def test_deferred_retry_preserves_definitive_close_fences(change):
+def test_deferred_retry_preserves_definitive_close_fences(change, tmp_path):
     async def go():
         async with journey() as env:
             await env.request()
@@ -258,12 +258,14 @@ def test_deferred_retry_preserves_definitive_close_fences(change):
                 # unchanged; reparenting forces ordinary manager admission.
                 await env.store.update_session(HOST, "lane", parent_stream_id=None)
                 await env.store.open_session(HOST, "child", parent_stream_id=TARGET)
-                await env.server._on_assistant_lifecycle({
-                    "action": "designate", "target_stream_id": ROOT,
-                    "target_generation": original["requester_generation"], "expected_revision": 0,
-                    "reason": "test manager designation", "request_id": "designate",
-                    "_auth_context": {"operator_authenticated": True, "operator_principal": "operator:test"},
-                })
+                from test_consent import Ceremony
+                ceremony = Ceremony(env, tmp_path)
+                await ceremony.enroll()
+                pending = await ceremony.call("consent.request",
+                    action="lifecycle.designate", target_stream_id=ROOT,
+                    target_generation=original["requester_generation"], expected_revision=0,
+                    reason="test manager designation")
+                await ceremony.approve(pending["challenge"])
                 expected_error = "close_live_children"
             env.tmux.text = "ready\n"
             await env.sessions.refresh()
