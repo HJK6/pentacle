@@ -638,7 +638,8 @@ class ProducerTransport:
             raise ValueError("await outside retained admission")
         if verb == "await_report" and (body.get("msg_id") != 0 or not self.owned(body.get("stream_id"))):
             raise ValueError("await outside owned worker")
-        if verb == "close" and not self.owned(f"{body.get('host')}:{body.get('session_name')}", body.get("expected_generation")):
+        if verb == "close" and (not body.get("expected_generation") or not self.owned(
+                f"{body.get('host')}:{body.get('session_name')}", body["expected_generation"])):
             raise ValueError("close outside generation ownership")
         if verb == "assistant.binding" and body:
             raise ValueError("binding read has no mutable fields")

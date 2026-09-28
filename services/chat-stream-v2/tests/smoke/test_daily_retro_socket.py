@@ -224,6 +224,13 @@ def test_unattended_auth_allowlist_and_generation_cleanup(daily_retro_surface):
             assert stale["type"] == "close.already_closed" and stale["session"]["session_generation"] != "old-generation" and not s.killed
             assert (await s.store.fetch_session("fixture", "worker"))["status"] == "open"
             retro.atomic(path, {"stream_id": "fixture:worker", "generation": s.rows["worker"]["session_generation"]})
+            for generation in (None, "", "stale"):
+                payload = {"type": "close", "host": "fixture", "session_name": "worker", "reason": "report_terminate"}
+                if generation is not None:
+                    payload["expected_generation"] = generation
+                with pytest.raises(ValueError, match="generation ownership"):
+                    await transport.call(payload)
+            assert not s.killed and (await s.store.fetch_session("fixture", "worker"))["status"] == "open"
             closed = await transport.close_once(None, "fixture:worker", expected_generation=s.rows["worker"]["session_generation"])
             assert closed["type"] == "close.ok" and closed["session"]["status"] == "closed"
             with pytest.raises(ValueError, match="retained REPORT"):
