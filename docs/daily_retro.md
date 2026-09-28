@@ -11,6 +11,9 @@ The producer reuses `tools/live_window` operator authentication, as the schedule
 fleet-smoke tool does. Its allowlist permits only owned spawn/await/close and
 current-binding reads plus exact retained REPORT send/receipt operations. Both
 workers self-close on terminal reports; cleanup passes their recorded generations.
+Each report wait uses calls of at most 900 seconds within one 3,600-second
+deadline. A bounded RPC timeout waits again for the same owned report; it never
+admits another worker. The total deadline also bounds a stalled transport.
 Questions and work review run only as the open current assistant generation with
 seat credentials. The bound assistant may be hidden behind its operator composite.
 The daemon admits its ordinary durable `prompt.ask` only when the authenticated

@@ -382,6 +382,96 @@ def test_worker_and_delivery_restart(config, monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("quiet", [False, True])
+def test_worker_survives_rpc_wait_cap_without_another_admission(config, monkeypatch, quiet):
+    clock = [0.0]
+    monkeypatch.setattr(retro, "monotonic", lambda: clock[0], raising=False)
+    class CappedWait(Transport):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+        async def await_report_once(self, config, stream, msg_id, **kwargs):
+            self.calls.append((stream, msg_id, kwargs["timeout"]))
+            if len(self.calls) <= 2:
+                clock[0] += 900
+                return {"type": "await_report.timeout", "ok": False, "stream_id": stream,
+                        "msg_id": msg_id, "reason": "await_timeout"}
+            return await super().await_report_once(config, stream, msg_id, **kwargs)
+    async def run():
+        rpc = CappedWait()
+        if quiet:
+            settings, baseline = history_fixture(config, count=1)
+            assert (await retro.Pipeline(settings, rpc).history_run(baseline, 1, no_deliver=True))["prepared"]
+        else:
+            source(config.memory_root, "one")
+            assert (await retro.Pipeline(config, rpc).run(at()))["delivered"]
+        assert len(rpc.spawns) == len(rpc.closed) == 2
+        assert len(rpc.calls) == 4
+        assert len({stream for stream, _, _ in rpc.calls[:3]}) == 1
+        assert all(msg == 0 and 0 < timeout <= 900 for _, msg, timeout in rpc.calls)
+        assert len(rpc.sent) == (0 if quiet else 1)
+    asyncio.run(run())
+
+
+def test_worker_report_deadline_bounds_repeated_timeout_and_cleanup(config, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(retro, "monotonic", lambda: clock[0], raising=False)
+    class NeverReports(Transport):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+        async def await_report_once(self, config, stream, msg_id, **kwargs):
+            self.calls.append((stream, kwargs["timeout"]))
+            clock[0] += min(kwargs["timeout"], 900) + 1
+            return {"type": "await_report.timeout", "ok": False, "stream_id": stream,
+                    "msg_id": msg_id, "reason": "await_timeout"}
+    async def run():
+        settings, baseline = history_fixture(config, count=1)
+        rpc = NeverReports()
+        with pytest.raises(RuntimeError, match="worker report deadline exceeded"):
+            await retro.Pipeline(settings, rpc).history_run(baseline, 1, no_deliver=True)
+        assert [timeout for _, timeout in rpc.calls] == [900, 900, 900, 897]
+        assert len({stream for stream, _ in rpc.calls}) == 1
+        assert len(rpc.spawns) == len(rpc.closed) == 1 and not rpc.sent
+        assert clock[0] == 3601
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reply_type,reply_stream", [("await_report.error", None), ("await_report.timeout", "fixture:foreign")])
+def test_worker_retries_only_owned_timeout(config, monkeypatch, reply_type, reply_stream):
+    monkeypatch.setattr(retro, "monotonic", lambda: 0, raising=False)
+    class InvalidWait(Transport):
+        calls = 0
+        async def await_report_once(self, config, stream, msg_id, **kwargs):
+            self.calls += 1
+            assert self.calls == 1
+            return {"type": reply_type, "ok": False, "stream_id": reply_stream or stream,
+                    "msg_id": msg_id, "reason": "fixture_failure"}
+    async def run():
+        settings, baseline = history_fixture(config, count=1)
+        rpc = InvalidWait()
+        with pytest.raises(RuntimeError):
+            await retro.Pipeline(settings, rpc).history_run(baseline, 1, no_deliver=True)
+        assert rpc.calls == len(rpc.spawns) == len(rpc.closed) == 1 and not rpc.sent
+    asyncio.run(run())
+
+
+def test_worker_total_deadline_includes_stalled_transport(config, monkeypatch):
+    ticks = iter([0, 3599.99])
+    monkeypatch.setattr(retro, "monotonic", lambda: next(ticks))
+    class StalledWait(Transport):
+        async def await_report_once(self, config, stream, msg_id, **kwargs):
+            await asyncio.sleep(1)
+            pytest.fail("transport outlived the total report deadline")
+    async def run():
+        settings, baseline = history_fixture(config, count=1)
+        rpc = StalledWait()
+        with pytest.raises(RuntimeError, match="worker report deadline exceeded"):
+            await retro.Pipeline(settings, rpc).history_run(baseline, 1, no_deliver=True)
+        assert len(rpc.spawns) == len(rpc.closed) == 1 and not rpc.sent
+    asyncio.run(run())
+
+
 def test_pending_generation_and_stale_answer(config, monkeypatch):
     async def run():
         source(config.memory_root, "one")

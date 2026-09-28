@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+from time import monotonic
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -650,8 +651,22 @@ class Pipeline:
                 raise RuntimeError(f"{name} admission indeterminate; exact intent retained")
         if not stage.get("generation"):
             raise RuntimeError("owned generation unproven; cleanup and new admission blocked")
-        response = await self.rpc.await_report_once(self.config, stage["stream_id"], 0,
-                                                    include_details=True, include_extras=True, timeout=3600)
+        deadline = monotonic() + 3600
+        while True:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise RuntimeError("worker report deadline exceeded")
+            try:
+                response = await asyncio.wait_for(
+                    self.rpc.await_report_once(self.config, stage["stream_id"], 0,
+                                               include_details=True, include_extras=True,
+                                               timeout=min(900, remaining)), timeout=remaining)
+            except TimeoutError as exc:
+                raise RuntimeError("worker report deadline exceeded") from exc
+            if response.get("type") != "await_report.timeout":
+                break
+            if response.get("stream_id") != stage["stream_id"] or response.get("msg_id") != 0:
+                checked(response, "await_report.ok")
         if response.get("result_kind") == "closed_without_report" or (response.get("result_kind") == "report" and not response.get("ok")):
             stage.update(failed=True, failure=response)
             atomic(receipt_path, stage)
