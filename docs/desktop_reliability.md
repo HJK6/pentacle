@@ -47,3 +47,34 @@ late result cannot overwrite a new attempt. Successful zero-row replies still
 notify the renderer, so bounded recovery continues even without an event frame
 to repaint the view. Transport loss does not imply turn completion or message
 delivery.
+
+Attached chat-mode streams use the shared cache's existing focused pin, so
+traffic from other streams cannot evict their loaded transcript. Leaving chat
+mode or detaching the last pane releases the pin; inactive streams remain
+subject to the weighted cache budget. Detaching also invalidates the stream's
+lazy-load marker, so reopening fetches authoritative history again. A durable
+answer group or a synthetic last-message summary alone does not count as loaded
+message history.
+
+A long-lived web page checks the served build on reconnect and at the existing
+ten-minute polling interval. A different known build rehydrates the open chat
+slots through the reconnect snapshot/backfill path once per observed build.
+Concurrent reconnect/update recovery shares one resync; a failed state read
+retries on the next check. Unsent composer text and image attachments stay in
+the page. The refresh icon remains available to load new client code.
+
+The isolated browser regression is `test/e2e/web_chat_history_retention_gate.cjs`:
+run it after `npm run build:web` with:
+
+```sh
+PENTACLE_TEST_BROWSER=/path/to/chrome node test/e2e/web_chat_history_retention_gate.cjs /temporary/evidence
+```
+
+The hermetic CLI `test/e2e/web_gate.js` includes this check
+in the existing Public checks workflow. It uses a loopback fixture daemon and
+actual Chrome/CDP, forces reconnect and unrelated-stream cache pressure, checks
+reopen/reload, and advertises changed builds to the old page while preserving
+an unsent draft/image. Its retry probe fails one state read. JSON/screenshots,
+asset/config/harness hashes and cleanup receipts bind the result. No live
+provider or operator stream is contacted. The ten-minute poll is accelerated
+only in the harness, identically for baseline and candidate.

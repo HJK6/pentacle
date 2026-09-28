@@ -415,7 +415,18 @@ function allocateReportDir(now = () => new Date(), root = path.join(__dirname, '
 }
 
 if (require.main === module) {
-  run(parseArgs(process.argv.slice(2))).then((code) => process.exit(code));
+  const args = parseArgs(process.argv.slice(2));
+  run(args).then(code => {
+    if (code === 0 && !args.profile) {
+      try {
+        execFileSync(process.execPath, [path.join(__dirname, 'web_chat_history_retention_gate.cjs'),
+          path.join(allocateReportDir(), 'history-retention')], {
+          stdio: 'inherit', env: { ...process.env, PENTACLE_TEST_BROWSER: resolveChrome() },
+        });
+      } catch (error) { console.error('History retention gate failed:', error.message); code = 1; }
+    }
+    process.exit(code);
+  });
 }
 
 module.exports = { run, parseArgs, FIXTURE, startDaemon, writeProfile, freePort, onceExit, stopOwnedProcess, allocateReportDir };

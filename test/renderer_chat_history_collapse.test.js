@@ -130,3 +130,13 @@ test('a failed load retries while cached rows remain and ends with an error', as
   assert.match(listText(dom), /Messages could not be loaded/);
   assert.ok(dom.window.document.querySelector('.slot-chat-history-retry'));
 });
+
+test('a last-answer summary fallback does not masquerade as loaded message history', async () => {
+  const { context, dom, calls, timers } = fixture({
+    initialRows: [{ id: 'fallback:' + STREAM, eventCase: 'agent-question-answer', displayRule: 'activity:question', text: 'Operator answered: Yes' }],
+  });
+  await mount(context); vmRender(context);
+  assert.match(dom.window.document.querySelector('.slot-chat-history-state')?.textContent || '', /Loading messages/);
+  runDueTimers(timers, context); await flush(); await flush();
+  assert.ok(calls.length > 1, 'missing message history is re-requested despite the synthetic answer');
+});
