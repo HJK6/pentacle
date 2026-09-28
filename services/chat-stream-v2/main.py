@@ -422,6 +422,8 @@ async def run(args: argparse.Namespace) -> int:
         notice_store=store,
     )
     server.notify = notify
+    notify.consent_snapshot = store.consent_notifications
+    spawnctl.consent_notify = notify
     server.handlers.update(notify.wire_handlers())
 
     # D3 (daemon_updates_2026_09): a producer's confirmed-dead close or
@@ -655,6 +657,11 @@ async def run(args: argparse.Namespace) -> int:
     # 3. Background tasks start last, each under the loop rules
     #    (cadence, per-pass cap, backoff, kill switch).
     tasks: list[asyncio.Task] = []
+    try:
+        tasks.append(await server.start_consent())
+    except (OSError, ValueError) as exc:
+        log.error("consent initialization failed: %s", type(exc).__name__,
+                  extra={"subsystem": "consent", "bug_ref": "mobile_faceid_privileged_consent_2026_09"})
     tasks.append(asyncio.create_task(
         _run_machine_stats(server, args.local_host), name="machine-stats"))
     if not args.disable_window_schedule and window_schedule.schema_health == "ok":

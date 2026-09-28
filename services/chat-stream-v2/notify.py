@@ -1268,6 +1268,8 @@ class Notify:
                 record = await self._db.call('get_notification', nid)
                 if record is not None:
                     records.append(await self._serialize(record))
+            if getattr(self, 'consent_snapshot', None):
+                records.extend(r for r in await self.consent_snapshot() if r['notification_id'] in ids)
             return {'type': 'notification.list.ok', 'request_id': request_id, 'notifications': records}
         states = msg.get("states") if isinstance(msg.get("states"), list) else None
         raw_limit = msg.get("limit")
@@ -1280,6 +1282,9 @@ class Notify:
                  else DEFAULT_NOTIFICATION_LIST_LIMIT)
         records = [await self._serialize(r)
                    for r in await self._db.call("list_notifications", states=states, limit=limit)]
+        if getattr(self, 'consent_snapshot', None) and limit > 0:
+            consent_records = [r for r in await self.consent_snapshot() if not states or r['state'] in states]
+            records = (consent_records + records)[:limit]
         return {"type": "notification.list.ok", "request_id": request_id, "notifications": records}
 
     async def _notif_resolve(self, msg: dict, request_id: str) -> dict:

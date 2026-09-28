@@ -32,3 +32,15 @@ one-time code; satellite routes independently verify the configured push secret
 before writes. These exceptions do not grant UI subscriptions or operator authority.
 The explicitly configured system-producer credential can use RPC mode, without
 receiving an inventory subscription.
+
+## Phone approval keys
+
+Lifecycle approval is separate from operator socket authentication. An operator-confirmed P-256 key signs the daemon's stored, expiring challenge. The daemon proves possession of that enrolled key, not remote hardware or biometric attestation. The iPhone implementation uses Secure Enclave with `biometryCurrentSet` and `privateKeyUsage`, accessible only with a device passcode set on that device. It offers no passcode fallback; changing enrolled Face ID invalidates the key.
+
+Enrollment appears only when the current operator-authenticated mobile connection receives `snapshot.capabilities.consent_enrollment_v1: true`. The daemon advertises it after the consent tables, registry, expiry loop and local-admin admission initialize successfully. Unsupported hosts, failed initialization, disconnects and connections awaiting a fresh snapshot stay **Not active yet**. Existing key states remain visible; signing in again does not require another enrollment. This readiness hint grants no authority.
+
+From a loopback daemon-host shell, run `agent-orch consent-key enroll-code`. In the already operator-enrolled Pentacle iPhone app, open Settings → Approval key and enter that one-use code. Face ID signs the enrollment transcript. Read the displayed fingerprint and type `agent-orch consent-key confirm <fingerprint>` on the same host. Until confirmation the key cannot approve. A replacement retires the previous active key only when confirmed. Codes and pending keys expire after ten minutes. The daemon stores code hashes, never the plaintext code. `consent_key.prepare` and `consent_key.enroll` are mobile-only daemon verbs, not host CLI commands; web clients, agent seats and local-admin callers cannot enroll a phone key.
+
+`agent-orch consent-key list` inspects keys; `agent-orch consent-key revoke <fingerprint>` disables a lost or invalidated key. Also revoke a lost phone's operator credential using the existing operator-auth CLI. Every consent transition reads current credential and key state; cached socket authentication is insufficient. Loss of an approval key does not revoke an existing lifecycle grant.
+
+For urgent authority reduction without a phone, use `agent-orch lifecycle revoke --emergency --reason <why>` on the daemon host. Admission requires the actual loopback peer and the daemon-user-only `~/.config/pentacle-stream/local-admin.token` (0600). The CLI reads this token without displaying it. OS user, PID and executable in the audit are explicitly caller claims. There is no emergency designation or agent self-enrollment. The daemon-user shell remains the existing trust root; this mechanism does not defend against daemon-host compromise.

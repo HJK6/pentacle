@@ -1,8 +1,7 @@
 """Operator-designated fleet lifecycle authority (Store worker only).
 
-One durable manager grant names an existing session generation. Only an
-authenticated operator designates, replaces or revokes it; only the current
-holder, proving its own current generation, transfers it. Eligibility is
+One durable manager grant names an existing session generation. Only a verified phone-consent context designates, replaces or revokes it;
+a local emergency context may revoke. Discretionary transfer is disabled. Eligibility is
 re-read inside the same transaction as the mutation. Every recognized attempt
 is audited with the server-verified actor, never a caller claim.
 
@@ -61,6 +60,10 @@ def initialize(conn: sqlite3.Connection) -> None:
         old_revision INTEGER, new_revision INTEGER, prior_stream_id TEXT,
         prior_generation TEXT, reason TEXT, request_id TEXT,
         result TEXT NOT NULL, refusal_code TEXT, created_at REAL NOT NULL)""")
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(v2_lifecycle_authority_audit)")}
+    for column in ("consent_id", "caller_claims"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE v2_lifecycle_authority_audit ADD COLUMN {column} TEXT")
     conn.execute("""CREATE INDEX IF NOT EXISTS ix_v2_lifecycle_authority_audit_target
         ON v2_lifecycle_authority_audit (target_stream_id, created_at)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS v2_assistant_handoff_receipts (
@@ -147,7 +150,7 @@ def audit(conn: sqlite3.Connection, **fields: Any) -> None:
     fields["request_id"] = scrub(fields.get("request_id"), MAX_REQUEST_ID) if verified else None
     cols = ("action", "actor_kind", "actor_identity", "actor_generation", "target_stream_id",
             "target_generation", "old_revision", "new_revision", "prior_stream_id",
-            "prior_generation", "reason", "request_id", "result", "refusal_code")
+            "prior_generation", "reason", "request_id", "result", "refusal_code", "consent_id", "caller_claims")
     values = [fields.get(c) for c in cols]
     conn.execute(f"INSERT INTO v2_lifecycle_authority_audit ({','.join(cols)}, created_at) "
                  f"VALUES ({','.join('?' * len(cols))}, ?)", (*values, time.time()))
@@ -169,7 +172,7 @@ def _actor(auth: dict[str, Any]) -> tuple[str, str | None, str | None]:
 
 def mutate(conn: sqlite3.Connection, msg: dict[str, Any], auth: dict[str, Any],
            protected_role: str) -> dict[str, Any]:
-    """Apply one designate/transfer/revoke atomically; raise AuthorityError on refusal.
+    """Apply one consented designate/revoke atomically; raise AuthorityError on refusal.
 
     The caller commits; on refusal the audit row is committed without mutation.
     """
@@ -185,7 +188,12 @@ def mutate(conn: sqlite3.Connection, msg: dict[str, Any], auth: dict[str, Any],
     # Retry identity is the verified principal (operator credential, or seat
     # stream plus generation), independent of whether it still holds the grant.
     replay_key = str(identity) if actor_kind == "operator" else f"seat:{identity}:{actor_generation or ''}"
-    base = dict(action=action, actor_kind=actor_kind, actor_identity=identity,
+    base = dict(action="emergency_revoke" if auth.get("_emergency_verified") else action,
+                consent_id=auth.get("_consent_id"),
+                caller_claims=json.dumps({k: scrub((msg.get("caller_claims") or {}).get(k), 256)
+                                          for k in ("os_user", "pid", "executable")}, sort_keys=True)
+                if auth.get("_emergency_verified") and isinstance(msg.get("caller_claims"), dict) else None,
+                actor_kind=actor_kind, actor_identity=identity,
                 actor_generation=actor_generation, target_stream_id=target or None,
                 target_generation=target_generation or None, old_revision=grant["revision"],
                 prior_stream_id=grant["stream_id"], prior_generation=grant["session_generation"],
@@ -195,6 +203,13 @@ def mutate(conn: sqlite3.Connection, msg: dict[str, Any], auth: dict[str, Any],
         audit(conn, **base, result="refused", refusal_code=code)
         raise AuthorityError(code)
 
+    if action not in ACTIONS:
+        refuse("authority_action_invalid")
+    if action == "transfer":
+        refuse("authority_transfer_disabled")
+    if action in {"designate", "revoke"} and not auth.get("_consent_id"):
+        if not (action == "revoke" and auth.get("_emergency_verified")):
+            refuse("consent_required")
     if not request_id or len(request_id) > MAX_REQUEST_ID:
         refuse("authority_request_id_required")
     if not reason or len(reason) > MAX_REASON:
@@ -211,16 +226,12 @@ def mutate(conn: sqlite3.Connection, msg: dict[str, Any], auth: dict[str, Any],
             return {**json.loads(prior[1]), "replayed": True}
     if action in {"designate", "revoke"} and actor_kind != "operator":
         refuse("authority_operator_required")
-    if action == "transfer" and actor_kind != "manager":
-        refuse("authority_holder_required")
     expected = msg.get("expected_revision")
     if not isinstance(expected, int) or isinstance(expected, bool) or expected != grant["revision"]:
         refuse("authority_revision_conflict")
-    if action in {"designate", "transfer"}:
+    if action == "designate":
         if not target or not target_generation:
             refuse("authority_target_required")
-        if action == "transfer" and target == identity:
-            refuse("authority_target_is_holder")
         code = eligible(conn, target, target_generation, protected_role)
         if code:
             refuse(code)
@@ -257,6 +268,14 @@ def carry_on_handoff(conn: sqlite3.Connection, source: str, source_generation: s
                 target_generation=successor_generation, old_revision=grant["revision"],
                 prior_stream_id=source, prior_generation=source_generation,
                 reason="protected assistant handoff", request_id=None)
+    if _generation(conn, source) != source_generation:
+        audit(conn, **base, result="refused", refusal_code="authority_source_generation_mismatch")
+        return None
+    source_row, successor_row = _session(conn, source), _session(conn, successor)
+    if (not protected_role or (source_row or {}).get("role") != protected_role
+            or (successor_row or {}).get("role") != protected_role):
+        audit(conn, **base, result="refused", refusal_code="authority_handoff_role_mismatch")
+        return None
     code = eligible(conn, successor, successor_generation, protected_role)
     if code:
         audit(conn, **base, result="refused", refusal_code=code)

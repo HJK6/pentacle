@@ -2,10 +2,13 @@
 # services/chat-stream-v2/requirements.txt on 2026-09-02. Local agent-orch source
 # is imported via PYTHONPATH, so this lock contains only third-party wheels.
 PyYAML==6.0.3
+pycparser==3.0
 Pygments==2.20.0
 attrs==26.1.0
 boto3==1.43.83
 botocore==1.43.83
+cffi==2.1.1
+cryptography==50.0.1
 certifi==2026.7.22
 charset-normalizer==3.5.1
 execnet==2.1.2

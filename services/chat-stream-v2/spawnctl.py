@@ -3040,6 +3040,14 @@ class SpawnCtl:
         if moved:
             log.info("handoff carried lifecycle authority %s -> %s revision=%s",
                      handoff_from, successor_stream_id, moved["revision"])
+            notify = getattr(self, "consent_notify", None)
+            if notify is not None:
+                mode = "scheduled" if (msg.get("_auth_context") or {}).get("service_actor") == "daemon:scheduler" else "live"
+                await notify.notification({"type": "notification.create", "producer": "lifecycle.continuity",
+                    "title": "Lifecycle manager continued",
+                    "body": f"Lifecycle manager continued to {successor_stream_id} ({mode})",
+                    "severity": "info", "actions": [],
+                    "dedup_key": f"lifecycle-carry:{moved['revision']}"})
 
     # -- reservation identity probes (spec §D1) ------------------------------
 
