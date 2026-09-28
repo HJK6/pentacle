@@ -88,7 +88,7 @@ class Transport:
     """Faultable RPC counterpart; independent socket tests use the real daemon."""
     def __init__(self):
         self.spawns, self.sent, self.closed, self.questions = {}, {}, [], {}
-        self.binding = {"stream_id": "fixture:bart", "session_generation": "g1"}
+        self.binding = {"stream_id": "fixture:reviewer", "session_generation": "g1"}
         self.interrupt_send = False
         self.interrupt_ask = False
 
@@ -169,7 +169,7 @@ def test_worker_and_delivery_restart(config, monkeypatch):
         assert len(rpc.spawns) == 2 and len(rpc.sent) == 2
         assert all(generation == stream.split(":", 1)[1] for stream, generation in rpc.closed)
         final = retro.read(config.state_root / "runs/2026-09-28/astra.json")
-        monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:bart")
+        monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
         result = {"packet_hash": final["packet_hash"], "dispositions": []}
         review = await pipeline.record_review("2026-09-28", result)
         assert await pipeline.record_review("2026-09-28", result) == review
@@ -183,7 +183,7 @@ def test_pending_generation_and_stale_answer(config, monkeypatch):
         source(config.memory_root, "one")
         rpc = Transport()
         pipeline = retro.Pipeline(config, rpc)
-        monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:bart")
+        monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
         rpc.interrupt_ask = True
         with pytest.raises(ConnectionError):
             await pipeline.decision("spec_one", proposal())
@@ -278,7 +278,7 @@ def test_worker_crash_report_retention_and_stale_cleanup(config):
 def test_authorized_work_and_review_require_durable_version(config, monkeypatch):
     async def run():
         source(config.memory_root, "one")
-        monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:bart")
+        monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
         rpc = Transport()
         pipeline = retro.Pipeline(config, rpc)
         authorized = {k: v for k, v in proposal().items() if k not in {"title", "body", "options"}}

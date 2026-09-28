@@ -2,8 +2,8 @@
 
 The launchd producer runs at 05:00 America/Chicago. It freezes eligible terminal
 retros, commissions one Codex GPT-6 Sol/medium draft and one GPT-6 Astra/high
-finalization, then sends a retained REPORT notice to the current Bart binding.
-Bart reviews immediately, records dispositions, and uses normal work records for
+finalization, then sends a retained REPORT notice to the current assistant binding.
+assistant reviews immediately, records dispositions, and uses normal work records for
 decisions and observed outcomes. Quiet days produce no operator chat message.
 Historical backfill is a separate bounded, explicitly approved scope.
 
@@ -11,7 +11,7 @@ The producer reuses `tools/live_window` operator authentication, as the schedule
 fleet-smoke tool does. Its allowlist permits only owned spawn/await/close and
 current-binding reads plus exact retained REPORT send/receipt operations. Both
 workers self-close on terminal reports; cleanup passes their recorded generations.
-Questions and work review run only as the visible current Bart with seat credentials.
+Questions and work review run only as the visible current assistant with seat credentials.
 
 Local JSON configuration (absolute paths; keep credentials outside source):
 
@@ -44,7 +44,7 @@ does nothing; authorized activation uses `--on-demand`. Install only when
 `/etc/localtime` resolves America/Chicago. Render the plist's interpreter, release,
 config and log paths as absolute values; lint and read back its 05:00 calendar.
 
-Bart reads the retained `astra.json`, verifies evidence and chooses one disposition
+assistant reads the retained `astra.json`, verifies evidence and chooses one disposition
 per candidate. A review result file contains `packet_hash` and `dispositions`, each
 with `id`, `disposition` and `reason`. Allowed dispositions: resolved, duplicate,
 no_change, investigate, authorized, propose, defer. Action/investigation/defer also
@@ -64,13 +64,13 @@ the version hash, question attempts and answer provenance inside that work spec.
 Approval remains authorization until an observed success or honest blocker is
 recorded there through the normal delivery process.
 
-Before asking, Bart reconciles all prior questions. Existing live questions remain
+Before asking, assistant reconciles all prior questions. Existing live questions remain
 live across a hot rebind. After expiry, one current-generation question replaces
 the old question. Answered old-generation rows are recovered; stale-version answers
 never authorize changed scope. Unknown status or inability to retire an old live
 question blocks a new ask. Intent commits before ask, making response-loss retries
 idempotent. Silence never grants authority. Re-run `decision` for each still-open
-normal work proposal after Bart replacement, using the stored proposal fields.
+normal work proposal after assistant replacement, using the stored proposal fields.
 
 Focused isolated validation:
 
@@ -82,7 +82,7 @@ python -m pytest services/agent-orch/tests/test_close_generation.py services/age
 `daily_retro_surface` runs a real socket server and stores on a temporary port,
 with separate credentials/tree/state and `fixture-chat:assistant`. Only provider/
 tmux is a counterpart. Synthetic questions never touch the production daemon or
-`bart:assistant`. The fixture proves answer/version recovery, quiet delivery,
+the production assistant surface. The fixture proves answer/version recovery, quiet delivery,
 authorization allowlist, replacement preservation and observed fixture outcomes.
 
 The separately gated real-worker rehearsal uses six source fixtures in
@@ -100,7 +100,7 @@ This reads originals through real Sol/Astra reports. A declared fixture mutation
 omits the serious shortlist entry and inserts a small evidence gap in the repeated
 case; the original report and every disposition remain retained. Astra must recover
 the serious insight, group the repeated issue, correct the gap and retain substantial
-uncertainty. Delivery and Bart helper review stay on the isolated Codex/provider
+uncertainty. Delivery and assistant helper review stay on the isolated Codex/provider
 counterpart. It is distinct from real production first-run delivery and review.
 
 Release staging requires a fresh immutable SHA directory:
@@ -122,7 +122,7 @@ Hash extracted bytes, pin interpreter/dependencies, save previous label/plist/co
 identities, and obtain the runtime-window owner's GATE before landing or activation.
 Use one batched window: owned test label bootstrap/print/kickstart/bootout, isolated
 installed rehearsal, production label bootstrap/calendar readback, initial real
-on-demand run, separate Bart review/decision-ready latency and cleanup receipts.
+on-demand run, separate assistant review/decision-ready latency and cleanup receipts.
 Do not restart the daemon. Reject moved preimages.
 
 Rollback bootouts only `com.pentacle.daily-retro`, restores the exact previous

@@ -83,7 +83,7 @@ def daily_retro_surface(tmp_path, monkeypatch):
             await composite.ensure_projection()
             server.assistant_composite = composite
             port = await server.bind()
-            assert port != 7791 and CHAT != "bart:assistant"
+            assert port != 7791 and CHAT.startswith("fixture-")
             url = f"ws://127.0.0.1:{port}"
             monkeypatch.setenv("AGENT_ORCH_WS_URL", url)
             monkeypatch.delenv("AGENT_ORCH_STREAM_TOKEN_FILE", raising=False)
@@ -293,7 +293,7 @@ def test_real_worker_rehearsal(daily_retro_surface, monkeypatch, tmp_path):
                                                "state_root": str(s.settings.state_root), "ws_url": s.settings.ws_url,
                                                "token_path": str(s.settings.token_path), "host": "fixture", "isolated": True}))
 
-            async def bart_counterpart(plan):
+            async def assistant_counterpart(plan):
                 assert plan.display_text.startswith("REPORT daily-retro ready"), plan.display_text
                 roots = list((s.settings.state_root / "runs").glob("*/astra.json"))
                 assert len(roots) == 1
@@ -305,7 +305,7 @@ def test_real_worker_rehearsal(daily_retro_surface, monkeypatch, tmp_path):
                 s.delivered.append(plan.display_text)
                 return True, 1, False, "codex", None
 
-            monkeypatch.setattr(s.comms, "_attempt_send_delivery", bart_counterpart)
+            monkeypatch.setattr(s.comms, "_attempt_send_delivery", assistant_counterpart)
             tool = Path(os.environ.get("DAILY_RETRO_TOOL", retro.__file__)).resolve()
             expected = os.environ.get("DAILY_RETRO_TOOL_SHA256")
             if expected:

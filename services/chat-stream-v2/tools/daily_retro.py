@@ -86,7 +86,6 @@ class Settings:
     host: str
     isolated: bool = False
     config_path: Path | None = None
-    sink: dict | None = None
 
     @classmethod
     def load(cls, path):
@@ -105,11 +104,10 @@ class Settings:
         memory, state = Path(data["memory_root"]).resolve(), Path(data["state_root"]).resolve()
         if state == memory or memory in state.parents:
             raise ValueError("state must live outside shared memory")
-        sink = data.get("sink")
-        if sink and (not data.get("isolated") or sink.get("stream_id") == "bart:assistant"):
-            raise ValueError("fixed sink permitted only on an isolated test surface")
+        if data.get("sink"):
+            raise ValueError("fixed sink bypass is unsupported; resolve the current binding")
         return cls(memory, state, data["ws_url"], Path(data["token_path"]), data["host"],
-                   bool(data.get("isolated")), path, sink)
+                   bool(data.get("isolated")), path)
 
     def rpc(self):
         return Config(self.ws_url, self.token_path.read_text().strip(), self.host,
@@ -278,12 +276,10 @@ class Pipeline:
         self.settings, self.rpc, self.config = settings, rpc, settings.rpc()
 
     async def binding(self):
-        if self.settings.sink:
-            return self.settings.sink
         binding = checked(await self.rpc.assistant_once(self.config, {"type": "assistant.binding"}), "assistant.binding.ok")
         binding["session_generation"] = binding.get("generation") or binding.get("session_generation")
         if not binding.get("stream_id") or not binding.get("session_generation"):
-            raise RuntimeError("current Bart binding unavailable")
+            raise RuntimeError("current assistant binding unavailable")
         return binding
 
     async def worker(self, manifest, name, prior=None):
@@ -298,7 +294,7 @@ class Pipeline:
         elif stage.get("failed"):
             attempt = stage["attempt"] + 1
             if attempt > 2:
-                raise RuntimeError(f"{name} recovery budget exhausted; retained for Bart")
+                raise RuntimeError(f"{name} recovery budget exhausted; retained for assistant")
             history = read(root / f"{name}-attempts.json", [])
             history.append(stage)
             atomic(root / f"{name}-attempts.json", history)
@@ -440,11 +436,11 @@ class Pipeline:
         binding = await self.binding()
         actor = os.environ.get("PENTACLE_STREAM_ID") or os.environ.get("AGENT_ORCH_STREAM_ID")
         if actor != binding["stream_id"]:
-            raise RuntimeError("only CURRENT Bart may ingest or prepare decisions")
+            raise RuntimeError("only CURRENT assistant may ingest or prepare decisions")
         inspected = checked(await self.rpc.inspect_stream_once(self.config, actor), "inspect_stream.ok")
         row = inspected.get("session") or {}
         if row.get("visibility") not in {"visible", "default"} or row.get("status") != "open" or row.get("session_generation") != binding["session_generation"]:
-            raise RuntimeError("visible current Bart generation required")
+            raise RuntimeError("visible current assistant generation required")
         return binding
 
     async def record_review(self, run_id, result):
@@ -459,10 +455,10 @@ class Pipeline:
             rows = result.get("dispositions", [])
             candidates = {c["id"] for c in final["packet"]["candidates"]}
             if len(rows) != len(candidates) or {r.get("id") for r in rows} != candidates:
-                raise ValueError("one Bart disposition per recommendation required")
+                raise ValueError("one assistant disposition per recommendation required")
             for row in rows:
                 if row.get("disposition") not in DISPOSITIONS or not row.get("reason"):
-                    raise ValueError("explicit Bart disposition/reason required")
+                    raise ValueError("explicit assistant disposition/reason required")
                 if row["disposition"] in {"investigate", "authorized", "propose", "defer"}:
                     path = work_path(self.settings, row.get("work_id"))
                     records = proposals(path.read_text())
@@ -705,9 +701,9 @@ class ProducerTransport:
 
 
 async def rehearse(settings, workers, evidence_dir):
-    """Real worker reports, restricted to a running isolated Bart counterpart."""
-    if not settings.isolated or settings.sink or settings.memory_root == workers.memory_root:
-        raise ValueError("rehearsal requires separate fixture memory and isolated current-Bart endpoint")
+    """Real worker reports, restricted to a running isolated assistant counterpart."""
+    if not settings.isolated or settings.memory_root == workers.memory_root:
+        raise ValueError("rehearsal requires separate fixture memory and isolated current-assistant endpoint")
     worker_settings = replace(workers, memory_root=settings.memory_root, state_root=settings.state_root)
     owned = ProducerTransport(worker_settings)
     delivery = ProducerTransport(settings)
@@ -755,7 +751,7 @@ async def rehearse(settings, workers, evidence_dir):
                        "tool_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                        "isolated_url": settings.ws_url, "workers_url": workers.ws_url,
                        "review": read(settings.state_root / "runs" / manifest["run_id"] / "review.json"),
-                       "scope": "real Sol/Astra; isolated Codex Bart/provider counterpart, synthetic questions excluded"}
+                       "scope": "real Sol/Astra; isolated Codex assistant/provider counterpart, synthetic questions excluded"}
             atomic(Path(evidence_dir) / "rehearsal.json", receipt)
             return receipt
         finally:
