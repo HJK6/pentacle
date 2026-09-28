@@ -579,3 +579,339 @@ def test_sol_missing_or_fabricated_originals_are_rejected(citations):
     packet['candidates'][0]['citations'] = citations
     with pytest.raises(ValueError):
         retro.validate_packet(packet, manifest)
+
+
+class HistoryTransport(Transport):
+    def __init__(self, reasons=None, keep_final=True):
+        super().__init__()
+        self.reasons = ['no_owning_work'] if reasons is None else reasons
+        self.keep_final = keep_final
+        self.report_calls = 0
+        self.fail = False
+
+    async def await_report_once(self, config, stream, msg_id, **kwargs):
+        self.report_calls += 1
+        if self.fail:
+            raise ConnectionError('fixture worker unavailable')
+        payload = self.spawns[stream.split(':', 1)[1]]
+        path = re.search(r'Read immutable input JSON (.*?);', payload['initial_prompt'])[1]
+        inp = retro.read(Path(path))
+        manifest = inp['collection']
+        if manifest.get('phase') == 'history-final':
+            catalogue = manifest['consolidation']['catalogue']
+            selections = []
+            for row in catalogue:
+                candidate = json.loads(json.dumps(row['candidate']))
+                candidate['bart_attention'] = {'reasons': ['uncertain'] if self.keep_final else [],
+                                              'rationale': 'current verified relevance' if self.keep_final else 'verified retired subject'}
+                selections.append({'alias_id': row['alias_id'], 'disposition': 'keep' if self.keep_final else 'drop',
+                                   'reason': 'current evidence inspected', 'candidate': candidate})
+            packet = {'run_id': manifest['run_id'], 'input_digest': retro.digest(catalogue), 'selections': selections}
+        else:
+            refs = [s['id'] for s in manifest['sources']]
+            c = {'id': 'same-issue', 'problem': 'Shared failure', 'consequence': 'Work is lost',
+                 'citations': refs, 'prior_occurrences': 'known historical issue',
+                 'existing': 'spec_existing remains an unassigned triage backlog',
+                 'action': 'Assign the existing bounded repair', 'benefit': 'preserved work',
+                 'effort': 'small', 'risk': 'small', 'uncertainty': 'explicit', 'owner': 'unassigned',
+                 'decision': 'new bounded grant required', 'finding_key': 'shared-failure',
+                 'bart_attention': {'reasons': self.reasons, 'rationale': 'current state verified'}}
+            packet = {'run_id': manifest['run_id'], 'dispositions': [
+                {'id': s['id'], 'fingerprint': s['fingerprint'], 'reason': 'explicit issue disposition'}
+                for s in manifest['sources']], 'candidates': [c]}
+        return {'type': 'await_report.ok', 'ok': True, 'result_kind': 'report',
+                'report': {'report_id': inp['report_id'], 'effective_model': payload['model'],
+                           'effective_effort': payload['effort'], 'extras': {'daily_retro': packet}}}
+
+
+def prepared_history(config, count=43, reasons=None):
+    history, baseline = history_fixture(config, count=count)
+    rpc = HistoryTransport(reasons)
+    pipeline = retro.Pipeline(history, rpc)
+    inventory = retro.history_collect(history, baseline, 1)
+    for n in range(1, inventory['history']['batches'] + 1):
+        assert asyncio.run(pipeline.history_run(baseline, n, no_deliver=True))['delivered'] == []
+    return history, baseline, rpc, pipeline
+
+
+def test_history_quiet_pair_context_and_replay(config):
+    history, baseline, rpc, pipeline = prepared_history(config)
+    inv, done = retro.completed_history(history, baseline)
+    assert len(rpc.spawns) == 4 and len(rpc.closed) == 4 and not rpc.sent
+    second = Path(done[2]['root'])
+    context = retro.read(second / 'history-context.json')
+    assert context['findings'][0]['alias']['run_id'] == done[1]['manifest']['run_id']
+    assert context['inputs'][0]['packet_hash'] == done[1]['final']['packet_hash']
+    assert 'skip renewed detailed investigation' in next(iter(rpc.spawns.values()))['initial_prompt']
+    assert asyncio.run(pipeline.history_run(baseline, 2, no_deliver=True))['prepared']
+    assert len(rpc.spawns) == 4
+    with pytest.raises(ValueError, match='mode conflict'):
+        asyncio.run(pipeline.history_run(baseline, 2))
+    assert not rpc.sent
+
+
+@pytest.mark.parametrize('reason', sorted(retro.ATTENTION))
+def test_checkpoint_linked_work_attention_survives_and_counts(config, reason):
+    history, baseline, rpc, pipeline = prepared_history(config, reasons=[reason])
+    before = {p: p.read_bytes() for p in (history.state_root / 'runs').glob('history-*/astra.json')}
+    result = asyncio.run(pipeline.history_consolidate(baseline, [2, 1]))
+    assert len(rpc.sent) == 1
+    packet = retro.read(history.state_root / 'runs' / result['run_id'] / 'astra.json')['packet']
+    assert packet['counts']['originals'] == 43
+    assert packet['counts']['candidate_occurrences'] == 2
+    assert packet['counts']['surfaced_occurrences'] == 2
+    assert packet['counts']['surfaced_candidates'] == (2 if reason in retro.CHANGED else 1)
+    assert all(c['bart_attention']['reasons'] == [reason] for c in packet['candidates'])
+    assert set(ref for c in packet['candidates'] for ref in c['citations']) == {s['id'] for s in retro.read(history.state_root/'history.json')['sources']}
+    assert asyncio.run(pipeline.history_consolidate(baseline, [1, 2])) == result
+    assert len(rpc.sent) == 1
+    assert {p: p.read_bytes() for p in before} == before
+    with pytest.raises(ValueError, match='overlapping'):
+        asyncio.run(pipeline.history_consolidate(baseline, [1]))
+
+
+def test_quiet_checkpoint_final_empty_once_and_final_replay(config):
+    history, baseline, rpc, pipeline = prepared_history(config, reasons=[])
+    result = asyncio.run(pipeline.history_consolidate(baseline, [1, 2]))
+    assert result['quiet'] and not rpc.sent
+    assert asyncio.run(pipeline.history_consolidate(baseline, [2, 1])) == result
+    rpc.keep_final = False
+    final = asyncio.run(pipeline.history_consolidate(baseline, final=True))
+    assert not final['quiet'] and final['counts']['surfaced_candidates'] == 0
+    assert len(rpc.spawns) == 5 and len(rpc.closed) == 5 and len(rpc.sent) == 1
+    assert asyncio.run(pipeline.history_consolidate(baseline, final=True)) == final
+    assert len(rpc.spawns) == 5 and len(rpc.sent) == 1
+
+
+def test_checkpoint_only_new_versions_and_final_comprehensive(config):
+    history, baseline, rpc, pipeline = prepared_history(config)
+    first = asyncio.run(pipeline.history_consolidate(baseline, [1]))
+    second = asyncio.run(pipeline.history_consolidate(baseline, [2]))
+    assert first['counts']['surfaced_candidates'] == 1 and second['quiet']
+    assert len(rpc.sent) == 1
+    final = asyncio.run(pipeline.history_consolidate(baseline, final=True))
+    assert final['counts']['candidate_occurrences'] == 2 and final['counts']['surfaced_candidates'] == 1
+    assert len(rpc.spawns) == 5 and len(rpc.sent) == 2
+
+
+@pytest.mark.parametrize('damage', ['hash', 'report', 'model', 'cleanup', 'manifest', 'raw_report'])
+def test_consolidation_refuses_edited_inputs_before_mutation(config, damage):
+    history, baseline, rpc, pipeline = prepared_history(config, count=1)
+    inv = retro.read(history.state_root/'history.json')
+    root = history.state_root/'runs'/f"history-{inv['inventory_digest'][:16]}-0001"
+    p = root/'astra.json'
+    stage = retro.read(p)
+    if damage == 'hash': stage['packet_hash'] = 'wrong'
+    elif damage == 'report': stage['report']['report_id'] = 'wrong'
+    elif damage == 'model': stage['report']['effective_model'] = 'gpt-6-luna'
+    elif damage == 'cleanup': stage['cleanup']['session']['session_generation'] = 'wrong'
+    elif damage == 'raw_report':
+        stage['packet']['candidates'][0]['action'] = 'invented action'
+        stage['packet_hash'] = retro.digest(stage['packet'])
+    else:
+        p = root/'collection.json'; stage = retro.read(p); stage['sources'][0]['fingerprint'] = 'wrong'
+    retro.atomic(p, stage)
+    before = {p: p.read_bytes() for p in history.state_root.rglob('*') if p.is_file()}
+    with pytest.raises(ValueError):
+        asyncio.run(pipeline.history_consolidate(baseline, [1]))
+    assert before == {p: p.read_bytes() for p in history.state_root.rglob('*') if p.is_file()}
+    assert len(rpc.spawns) == 2 and not rpc.sent
+
+
+@pytest.mark.parametrize('batches', [[], [1, 1], [0], [99], [1, 2, 3, 4, 5, 6], ['1'], [True]])
+def test_consolidation_membership_bounds(config, batches):
+    history, baseline, rpc, pipeline = prepared_history(config, count=1)
+    with pytest.raises(ValueError):
+        asyncio.run(pipeline.history_consolidate(baseline, batches))
+    assert not rpc.sent and len(rpc.spawns) == 2
+
+
+def test_serial_skip_and_incomplete_final_refusal(config):
+    history, baseline = history_fixture(config)
+    retro.history_collect(history, baseline, 1)
+    rpc = HistoryTransport()
+    pipeline = retro.Pipeline(history, rpc)
+    with pytest.raises(ValueError, match='preceding'):
+        asyncio.run(pipeline.history_run(baseline, 2, no_deliver=True))
+    assert not rpc.spawns
+    asyncio.run(pipeline.history_run(baseline, 1, no_deliver=True))
+    with pytest.raises(ValueError, match='complete history'):
+        asyncio.run(pipeline.history_consolidate(baseline, final=True))
+    assert len(rpc.spawns) == 2 and not rpc.sent
+
+
+def test_no_deliver_failure_has_no_notice(config):
+    history, baseline = history_fixture(config, count=1)
+    rpc = HistoryTransport(); rpc.fail = True
+    with pytest.raises(ConnectionError):
+        asyncio.run(retro.Pipeline(history, rpc).history_run(baseline, 1, no_deliver=True))
+    assert not rpc.sent and len(rpc.spawns) == 1
+
+
+def test_checkpoint_crash_replacement_review_replay(config, monkeypatch):
+    history, baseline, rpc, pipeline = prepared_history(config, count=1)
+    rpc.interrupt_send = True
+    with pytest.raises(ConnectionError):
+        asyncio.run(pipeline.history_consolidate(baseline, [1]))
+    result = asyncio.run(pipeline.history_consolidate(baseline, [1]))
+    assert len(rpc.sent) == 1
+    rpc.binding = {'stream_id': 'fixture:replacement', 'session_generation': 'g2'}
+    assert asyncio.run(pipeline.history_consolidate(baseline, [1])) == result
+    assert len(rpc.sent) == 2
+    monkeypatch.setenv('PENTACLE_STREAM_ID', 'fixture:reviewer')
+    with pytest.raises(RuntimeError, match='CURRENT'):
+        asyncio.run(pipeline.record_review(result['run_id'], {}))
+    monkeypatch.setenv('PENTACLE_STREAM_ID', 'fixture:replacement')
+    packet = retro.read(history.state_root/'runs'/result['run_id']/'astra.json')['packet']
+    review = {'packet_hash': result['packet_hash'], 'dispositions': [
+        {'id': c['id'], 'disposition': 'no_change', 'reason': 'verified fixture'} for c in packet['candidates']]}
+    asyncio.run(pipeline.record_review(result['run_id'], review))
+    rpc.binding = {'stream_id': 'fixture:third', 'session_generation': 'g3'}
+    asyncio.run(pipeline.history_consolidate(baseline, [1]))
+    assert len(rpc.sent) == 2 and len(rpc.spawns) == 2 and not rpc.questions
+
+
+@pytest.mark.parametrize('damage', ['omit', 'invent', 'digest', 'citation', 'drop_relevant'])
+def test_final_selection_validation(config, damage):
+    history, baseline, rpc, pipeline = prepared_history(config, count=1)
+    original = rpc.await_report_once
+    async def damaged(*args, **kwargs):
+        response = await original(*args, **kwargs)
+        packet = response['report']['extras']['daily_retro']
+        if 'selections' in packet:
+            if damage == 'omit': packet['selections'] = []
+            elif damage == 'invent': packet['selections'][0]['alias_id'] = 'invented'
+            elif damage == 'digest': packet['input_digest'] = 'wrong'
+            elif damage == 'citation': packet['selections'][0]['candidate']['citations'] = ['spec_fabricated']
+            else: packet['selections'][0]['disposition'] = 'drop'
+        return response
+    rpc.await_report_once = damaged
+    with pytest.raises(ValueError):
+        asyncio.run(pipeline.history_consolidate(baseline, final=True))
+    assert len(rpc.spawns) == 3 and len(rpc.closed) == 3 and not rpc.sent
+
+
+def test_final_recovers_wrong_quiet_checkpoint(config):
+    history, baseline, rpc, pipeline = prepared_history(config, count=1, reasons=[])
+    assert asyncio.run(pipeline.history_consolidate(baseline, [1]))['quiet']
+    result = asyncio.run(pipeline.history_consolidate(baseline, final=True))
+    assert result['counts']['surfaced_candidates'] == 1 and len(rpc.sent) == 1
+    assert len(rpc.spawns) == 3
+
+
+@pytest.mark.parametrize('damage', ['context', 'compiled', 'catalogue'])
+def test_consolidation_frozen_state_tampering(config, damage):
+    history, baseline, rpc, pipeline = prepared_history(config, count=1)
+    result = asyncio.run(pipeline.history_consolidate(baseline, [1]))
+    root = history.state_root/'runs'/result['run_id']
+    if damage == 'compiled':
+        p=root/'astra.json'; value=retro.read(p); value['packet']['counts']['originals']=999
+    else:
+        p=root/'collection.json'; value=retro.read(p)
+        if damage == 'context': value['consolidation']['context']['work_root']='invented'
+        else: value['consolidation']['catalogue'][0]['candidate']['action']='invented'
+    retro.atomic(p,value)
+    with pytest.raises(ValueError):
+        asyncio.run(pipeline.history_consolidate(baseline,[1]))
+    assert len(rpc.sent)==1 and len(rpc.spawns)==2
+
+
+def test_history_cumulative_context_tamper_refuses_replay(config):
+    history, baseline, rpc, pipeline=prepared_history(config,count=1)
+    inv=retro.read(history.state_root/'history.json')
+    root=history.state_root/'runs'/f"history-{inv['inventory_digest'][:16]}-0001"
+    p=root/'history-context.json'; value=retro.read(p);value['findings']=[{'invented':'issue'}];retro.atomic(p,value)
+    with pytest.raises(ValueError,match='context'):
+        asyncio.run(pipeline.history_run(baseline,1,no_deliver=True))
+    assert len(rpc.spawns)==2 and not rpc.sent
+
+
+def test_checkpoint_action_survives_final_without_recommission(config,monkeypatch):
+    history,baseline,rpc,pipeline=prepared_history(config,count=1)
+    checkpoint=asyncio.run(pipeline.history_consolidate(baseline,[1]))
+    p=history.state_root/'runs'/checkpoint['run_id']/'astra.json'; packet=retro.read(p)['packet']
+    monkeypatch.setenv('PENTACLE_STREAM_ID','fixture:reviewer')
+    review={'packet_hash':checkpoint['packet_hash'],'dispositions':[
+        {'id':c['id'],'disposition':'no_change','reason':'exact fixture previously reviewed'} for c in packet['candidates']]}
+    asyncio.run(pipeline.record_review(checkpoint['run_id'],review))
+    final=asyncio.run(pipeline.history_consolidate(baseline,final=True))
+    packet=retro.read(history.state_root/'runs'/final['run_id']/'astra.json')['packet']
+    assert packet['candidates'][0]['prior_reviews']==review['dispositions']
+    assert 'do not recommission' in list(rpc.sent.values())[-1]['payload']['text']
+
+
+def test_final_compact_alias_selection_preserves_candidate(config):
+    history,baseline,rpc,pipeline=prepared_history(config,count=1)
+    original=rpc.await_report_once
+    async def compact(*args,**kwargs):
+        response=await original(*args,**kwargs)
+        packet=response['report']['extras']['daily_retro']
+        if 'selections' in packet:
+            for row in packet['selections']:
+                row['bart_attention']=row.pop('candidate')['bart_attention']
+        return response
+    rpc.await_report_once=compact
+    result=asyncio.run(pipeline.history_consolidate(baseline,final=True))
+    assert result['counts']['surfaced_candidates']==1 and len(rpc.spawns)==3
+
+
+def test_history_invalid_annotation_closes_owned_generation_without_retry(config):
+    history,baseline=history_fixture(config,count=1)
+    rpc=HistoryTransport(['invented-reason']);pipeline=retro.Pipeline(history,rpc)
+    with pytest.raises(ValueError,match='annotation'):
+        asyncio.run(pipeline.history_run(baseline,1,no_deliver=True))
+    assert len(rpc.spawns)==1 and len(rpc.closed)==1 and not rpc.sent
+    with pytest.raises(RuntimeError,match='parent ruling'):
+        asyncio.run(pipeline.history_run(baseline,1,no_deliver=True))
+    assert len(rpc.spawns)==1
+
+
+@pytest.mark.parametrize('changed_field', ['owner','action','decision','existing','uncertainty','prior_occurrences'])
+def test_same_finding_key_does_not_dedup_substantive_change(config,changed_field):
+    history,baseline,rpc,pipeline=prepared_history(config)
+    catalogue=retro.history_catalogue(retro.completed_history(history,baseline)[1])
+    a=catalogue[0];b=json.loads(json.dumps(a))
+    b['candidate'][changed_field]='changed current evidence'
+    assert retro.finding(b['candidate'],b['alias'])['version'] != a['version']
+
+
+def test_pending_checkpoint_delivery_blocks_next_group(config):
+    history,baseline,rpc,pipeline=prepared_history(config)
+    original=rpc.send_once
+    async def pending(config,payload):
+        return {'state':'queued'}
+    rpc.send_once=pending
+    with pytest.raises(RuntimeError,match='pending'):
+        asyncio.run(pipeline.history_consolidate(baseline,[1]))
+    with pytest.raises(RuntimeError,match='unresolved'):
+        asyncio.run(pipeline.history_consolidate(baseline,[2]))
+    rpc.send_once=original
+    asyncio.run(pipeline.history_consolidate(baseline,[1]))
+    assert asyncio.run(pipeline.history_consolidate(baseline,[2]))['quiet']
+    assert len(rpc.spawns)==4
+
+
+def test_final_cleanup_failure_blocks_delivery_then_replay_cleans(config):
+    history,baseline,rpc,pipeline=prepared_history(config,count=1)
+    original=rpc.close_once
+    async def fail_final(config,stream,**kwargs):
+        if 'final-astra' in stream:
+            return {'type':'close.error'}
+        return await original(config,stream,**kwargs)
+    rpc.close_once=fail_final
+    with pytest.raises(RuntimeError,match='cleanup'):
+        asyncio.run(pipeline.history_consolidate(baseline,final=True))
+    assert len(rpc.spawns)==3 and not rpc.sent
+    rpc.close_once=original
+    result=asyncio.run(pipeline.history_consolidate(baseline,final=True))
+    assert result['counts']['surfaced_candidates']==1 and len(rpc.spawns)==3 and len(rpc.sent)==1
+
+
+def test_compiled_packet_and_hash_cannot_replace_frozen_inputs(config):
+    history,baseline,rpc,pipeline=prepared_history(config,count=1)
+    result=asyncio.run(pipeline.history_consolidate(baseline,[1]))
+    p=history.state_root/'runs'/result['run_id']/'astra.json';stage=retro.read(p)
+    stage['packet']['candidates'][0]['action']='invented';stage['packet_hash']=retro.digest(stage['packet']);retro.atomic(p,stage)
+    with pytest.raises(ValueError,match='immutable inputs'):
+        asyncio.run(pipeline.history_consolidate(baseline,[1]))
+    assert len(rpc.sent)==1

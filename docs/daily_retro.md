@@ -175,7 +175,73 @@ baseline, config, interpreter, source and release hashes before execution; use
 the reviewed checkout explicitly for both remote checks and archives. Capture
 actual tokens (including incompleteness), latency, new versus already tracked
 recommendations, delivery and owned-generation cleanup. After the pilot, the
-owner decides the remaining batches and a proposed consolidated NEW-only Bart
-review about every ten batches. That consolidation is outside the pilot tool.
+owner decides whether to continue the remaining batches. Authorized serial
+continuation and selective checkpoint/final consolidation are described below.
 Rollback only owned history config/generations; retain its evidence and protect
 the active daily timer/state. No daemon restart or calendar bootstrap is needed.
+
+## Serial historical continuation
+
+After an explicit continuation grant, prepare each remaining batch sequentially:
+
+```sh
+python services/chat-stream-v2/tools/daily_retro.py history-run --config HISTORY_CONFIG --baseline DAILY_COLLECTION_JSON --batch N --no-deliver
+```
+
+This pins a cumulative snapshot of prior validated findings, reviews and work
+references. Both workers read every original, but avoid renewed investigation of
+an equivalent unchanged finding. Recurrence, changed evidence, ownership gaps,
+revised actions and new grant needs remain eligible. Finding versions are
+computed from substantive content; a matching issue label or work link alone
+cannot suppress a changed recommendation. Full original dispositions and all
+candidates/citations stay in the private per-batch packets.
+
+Quiet preparation performs no delivery or binding RPC, including on failure.
+It retains local failure evidence, closes only its recorded worker generations
+and stops. Report the blocker to the runtime owner; failed worker recovery needs
+an explicit owner ruling. Repeating completed preparation admits no new workers.
+A run pinned to this mode cannot later send an individual packet.
+
+At an authorized checkpoint (up to five newly prepared batches):
+
+```sh
+python services/chat-stream-v2/tools/daily_retro.py history-consolidate --config HISTORY_CONFIG --baseline DAILY_COLLECTION_JSON --batches 2,3,4,5,6
+```
+
+The compiler sends one REPORT only when new relevant finding versions exist.
+Already surfaced unchanged versions are counts-only; changed occurrences survive.
+An empty checkpoint is retained privately and sends nothing. Deprecated, retired,
+shipped/resolved and accepted owned unchanged subjects are excluded only on
+current evidence. An unassigned triage backlog is not executing ownership.
+Ambiguity and recurrence/evidence/ownership/action/grant exceptions remain visible.
+Checkpoint selection uses the preceding Astra annotations; it adds no model pass.
+Partial checkpoint overlap or an unresolved preceding delivery refuses.
+
+When the entire frozen inventory is complete, including previously reviewed runs:
+
+```sh
+python services/chat-stream-v2/tools/daily_retro.py history-consolidate --config HISTORY_CONFIG --baseline DAILY_COLLECTION_JSON --final
+```
+
+One additional self-closing Astra/high reviews the full findings catalogue,
+original/disposition references, prior reviews and current work. Its complete
+keep/drop alias audit remains retained. Compilation preserves every original
+source disposition and citation. One comprehensive REPORT reaches the current
+assistant, even when it contains only counts. Prior checkpoint reviews remain
+linked; the final report never grants another commission for the same action.
+
+Synthetic `history-consolidated-<digest64>` runs use the same `record-review`
+helper and exact packet-hash/current-generation/proposal checks. They do not
+fabricate per-batch assistant reviews. Replay uses retained reports and immutable
+delivery keys; pending sends reconcile their receipts. An unreviewed report can
+be delivered once to a replacement current generation; reviewed replay is a
+no-op. Final replay does not commission another Astra pass.
+
+Keep the daily label, plist, calendar, configuration, state and daemon untouched.
+Historical execution uses a separately pinned immutable release/interpreter.
+Respect the granted serial window and any daily exclusion band, leaving enough
+time to close owned generations before either ends. Stop on an unresolved worker,
+cleanup, input or delivery failure. Retain the exact packets and raw usage,
+including incomplete counters, coverage, checkpoint yield and cleanup receipts.
+Do not run an older delivery-only tool on new quiet-mode state during rollback;
+that could send the private per-batch packets individually.

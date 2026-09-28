@@ -435,3 +435,53 @@ def test_real_worker_rehearsal(daily_retro_surface, monkeypatch, tmp_path):
                                                             "assistant_visibility": "hidden",
                                                             "synthetic_production_questions": 0, "composite_messages": 0})
     asyncio.run(run())
+
+
+def test_serial_history_checkpoint_final_real_hidden_binding(daily_retro_surface):
+    from test_daily_retro import HistoryTransport, source
+    async def run():
+        async with daily_retro_surface() as s:
+            for n in range(43):
+                source(s.settings.memory_root, f'old{n:03}', day='2026-08-01')
+            source(s.settings.memory_root,'recent')
+            daily=retro.collect(s.settings,retro.datetime.fromisoformat('2026-09-28T05:00:00-05:00'))
+            baseline=s.settings.state_root/'runs'/daily['run_id']/'collection.json'
+            protected={p:p.read_bytes() for p in s.settings.state_root.rglob('*.json')}
+            history=retro.replace(s.settings,state_root=s.settings.state_root.parent/'serial-history')
+            delivery=retro.ProducerTransport(history)
+            class Counterpart(HistoryTransport):
+                async def assistant_once(self,config,payload):
+                    return await delivery.assistant_once(config,payload)
+                async def send_receipt_once(self,config,target,key):
+                    return await delivery.send_receipt_once(config,target,key)
+                async def send_once(self,config,payload):
+                    return await delivery.send_once(config,payload)
+                async def inspect_stream_once(self,config,actor):
+                    return await retro.wsclient.inspect_stream_once(config,actor)
+            rpc=Counterpart();pipeline=retro.Pipeline(history,rpc)
+            for n in (1,2):
+                assert (await pipeline.history_run(baseline,n,no_deliver=True))['prepared']
+            assert not s.delivered and len(rpc.spawns)==4 and len(rpc.closed)==4
+            checkpoint=await pipeline.history_consolidate(baseline,[1,2])
+            assert len(s.delivered)==1 and s.rows['a']['visibility']=='hidden'
+            assert await pipeline.history_consolidate(baseline,[2,1])==checkpoint
+            assert len(s.delivered)==1
+            await s.bind_b()
+            assert await pipeline.history_consolidate(baseline,[1,2])==checkpoint
+            assert len(s.delivered)==2
+            p=history.state_root/'runs'/checkpoint['run_id']/'astra.json';packet=retro.read(p)['packet']
+            result={'packet_hash':checkpoint['packet_hash'],'dispositions':[
+                {'id':c['id'],'disposition':'no_change','reason':'isolated current-owner review'} for c in packet['candidates']]}
+            await pipeline.record_review(checkpoint['run_id'],result)
+            await pipeline.history_consolidate(baseline,[1,2])
+            assert len(s.delivered)==2
+            final=await pipeline.history_consolidate(baseline,final=True)
+            assert len(rpc.spawns)==5 and len(rpc.closed)==5 and len(s.delivered)==3
+            assert (await pipeline.history_consolidate(baseline,final=True))==final
+            assert len(s.delivered)==3
+            packet=retro.read(history.state_root/'runs'/final['run_id']/'astra.json')['packet']
+            assert packet['counts']['originals']==43 and packet['candidates'][0]['prior_reviews']==result['dispositions']
+            assert {p:p.read_bytes() for p in s.settings.state_root.rglob('*.json')}==protected
+            assert not await s.notify._db.call('list_agent_questions')
+            assert not await s.store.fetch_session_event_tail(CHAT,limit=20)
+    asyncio.run(run())

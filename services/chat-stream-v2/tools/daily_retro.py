@@ -29,6 +29,9 @@ from tools.live_window import authenticated_operator_connection  # noqa: E402
 
 ZONE = ZoneInfo("America/Chicago")
 DISPOSITIONS = {"resolved", "duplicate", "no_change", "investigate", "authorized", "propose", "defer"}
+STAGES = ("sol", "astra", "final-astra")
+ATTENTION = {"no_owning_work", "new_grant", "recurrence", "changed_evidence", "ownership_gap", "revised_action", "uncertain"}
+CHANGED = {"recurrence", "changed_evidence", "ownership_gap", "revised_action"}
 PROPOSAL_START = "<!-- daily-retro-proposals -->"
 PROPOSAL_END = "<!-- /daily-retro-proposals -->"
 
@@ -352,8 +355,214 @@ def validate_packet(packet, manifest):
     return packet
 
 
+def finding(candidate, alias, legacy=False):
+    """Compile identity; model-provided keys never establish equivalence."""
+    candidate = json.loads(json.dumps(candidate))
+    attention = candidate.get("bart_attention")
+    if attention is None and legacy:
+        attention = {"reasons": ["uncertain"], "rationale": "Legacy packet requires current relevance review."}
+    if (not isinstance(attention, dict) or not isinstance(attention.get("reasons"), list)
+            or any(not isinstance(r, str) or r not in ATTENTION for r in attention["reasons"])
+            or not isinstance(attention.get("rationale"), str) or not attention["rationale"].strip()):
+        raise ValueError("invalid history attention annotation")
+    attention = {"reasons": sorted(set(attention["reasons"])), "rationale": attention["rationale"]}
+    candidate["bart_attention"] = attention
+    key = candidate.get("finding_key", "legacy-" + digest(candidate["problem"])[:24])
+    if not isinstance(key, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,119}", key):
+        raise ValueError("invalid finding key")
+    content = {k: v for k, v in candidate.items() if k not in {"id", "citations", "finding_key", "finding_version"}}
+    # A changed occurrence must never disappear behind an earlier recommendation.
+    if CHANGED & set(attention["reasons"]):
+        content["occurrence"] = alias
+    version = digest(content)
+    candidate.update(finding_key=key, finding_version=version)
+    return {"alias": alias, "candidate": candidate, "version": version}
+
+
+def completed_history(settings, baseline_path):
+    """Read and validate retained originals/reports before any admission or write."""
+    history_baseline(settings, baseline_path)
+    inventory = read(settings.state_root / "history.json")
+    if not inventory or inventory.get("inventory_digest") != digest({k: v for k, v in inventory.items() if k != "inventory_digest"}):
+        raise ValueError("valid frozen history inventory required")
+    if inventory.get("baseline_sha256") != hashlib.sha256(Path(baseline_path).read_bytes()).hexdigest():
+        raise ValueError("historical baseline conflict")
+    originals = {s["id"]: s for s in inventory["sources"]}
+    completed = {}
+    for number, ids in enumerate(inventory["batches"], 1):
+        run_id = f"history-{inventory['inventory_digest'][:16]}-{number:04}"
+        root = settings.state_root / "runs" / run_id
+        manifest = read(root / "collection.json")
+        if manifest is None:
+            continue
+        if (manifest.get("run_id") != run_id or manifest.get("phase") != "history"
+                or manifest.get("history", {}).get("inventory_digest") != inventory["inventory_digest"]
+                or manifest["history"].get("batch") != number
+                or manifest.get("sources") != [originals[i] for i in ids]):
+            raise ValueError("edited or stale historical manifest")
+        stages = [read(root / f"{name}.json", {}) for name in ("sol", "astra")]
+        if not all(s.get("packet") for s in stages):
+            continue
+        for name, stage in zip(("sol", "astra"), stages):
+            report = stage.get("report", {})
+            model, effort = ("gpt-6-sol", "medium") if name == "sol" else ("gpt-6-astra", "high")
+            if (stage.get("packet_hash") != digest(stage["packet"])
+                    or report.get("effective_model") != model or report.get("effective_effort") != effort
+                    or report.get("report_id") != stage.get("report_id")
+                    or not stage.get("generation") or not stage.get("stream_id") or not stage.get("closed")
+                    or not stage.get("cleanup", {}).get("session", {}).get("status") == "closed"
+                    or stage["cleanup"]["session"].get("session_generation") != stage["generation"]):
+                raise ValueError("history packet/report/model/hash/cleanup proof invalid")
+            validate_packet(stage["packet"], manifest)
+            inp = read(root / f"{name}-input-{stage.get('attempt')}.json")
+            if not inp or inp.get("report_id") != stage["report_id"] or inp["collection"].get("sources") != manifest["sources"]:
+                raise ValueError("history report input provenance invalid")
+            validator = validate_history_packet if inp["collection"].get("cumulative_context") else validate_packet
+            expected = validator(report.get("extras", {}).get("daily_retro", {}), manifest)
+            expected["collection"] = inp["collection"]
+            if expected != stage["packet"]:
+                raise ValueError("history packet differs from retained worker report")
+        mode = read(root / "history-mode.json")
+        review = read(root / "review.json")
+        if mode is None and review is None:
+            raise ValueError("unreviewed legacy history is not a consolidation input")
+        if mode is not None and mode.get("no_deliver") is not True:
+            raise ValueError("unknown history delivery mode")
+        if mode:
+            context_path = root / "history-context.json"
+            if (mode.get("context_path") != str(context_path) or not context_path.exists()
+                    or hashlib.sha256(context_path.read_bytes()).hexdigest() != mode.get("context_sha256")):
+                raise ValueError("edited cumulative context")
+        if review and review.get("result", {}).get("packet_hash") != stages[1]["packet_hash"]:
+            raise ValueError("history review hash mismatch")
+        completed[number] = {"manifest": manifest, "final": stages[1], "review": review,
+                             "mode": mode, "root": str(root)}
+    return inventory, completed
+
+
+def history_checkpoints(settings):
+    for path in sorted((settings.state_root / "runs").glob("history-consolidated-*/collection.json")):
+        manifest = read(path)
+        if manifest.get("consolidation", {}).get("mode") == "checkpoint":
+            yield path.parent, manifest
+
+
+def history_catalogue(completed):
+    entries = []
+    for number, run in sorted(completed.items()):
+        stage = run["final"]
+        for candidate in stage["packet"]["candidates"]:
+            alias = {"run_id": run["manifest"]["run_id"], "candidate_id": candidate["id"], "packet_hash": stage["packet_hash"]}
+            row = finding(candidate, alias, legacy=run["mode"] is None)
+            row["alias_id"] = digest(alias)
+            row["prior_review"] = next((r for r in (run["review"] or {}).get("result", {}).get("dispositions", [])
+                                       if r["id"] == candidate["id"]), None)
+            entries.append(row)
+    return entries
+
+
+def history_context(settings, inventory, completed):
+    entries = history_catalogue(completed)
+    checkpoints = []
+    for root, manifest in history_checkpoints(settings):
+        final = read(root / "astra.json")
+        if not final or final.get("packet_hash") != digest(final["packet"]):
+            raise ValueError("incomplete or edited prior checkpoint")
+        review = read(root / "review.json")
+        if review and review.get("result", {}).get("packet_hash") != final["packet_hash"]:
+            raise ValueError("checkpoint review hash mismatch")
+        checkpoints.append({"run_id": manifest["run_id"], "packet_hash": final["packet_hash"],
+                            "review": review, "quiet": not final["packet"]["candidates"]})
+    return {"inventory_digest": inventory["inventory_digest"], "findings": entries,
+            "inputs": [{"run_id": r["manifest"]["run_id"], "packet_hash": r["final"]["packet_hash"],
+                        "packet_path": str(Path(r["root"]) / "astra.json"), "review": r["review"]}
+                       for _, r in sorted(completed.items())], "checkpoints": checkpoints,
+            "work_root": str(settings.memory_root / "work")}
+
+
+def validate_history_packet(packet, manifest):
+    packet = validate_packet(packet, manifest)
+    for c in packet["candidates"]:
+        compiled = finding(c, {"run_id": manifest["run_id"], "candidate_id": c["id"]})
+        c.update(compiled["candidate"])
+    return packet
+
+
+def validate_final_selection(packet, manifest):
+    catalogue = manifest["consolidation"]["catalogue"]
+    if packet.get("run_id") != manifest["run_id"] or packet.get("input_digest") != digest(catalogue):
+        raise ValueError("final selection identity/input digest mismatch")
+    rows = packet.get("selections")
+    aliases = {r["alias_id"]: r for r in catalogue}
+    if (not isinstance(rows, list) or len(rows) != len(aliases)
+            or {r.get("alias_id") for r in rows} != set(aliases)):
+        raise ValueError("one final selection per retained alias required")
+    packet = json.loads(json.dumps(packet))
+    for row in packet["selections"]:
+        if row.get("disposition") not in {"keep", "drop"} or not row.get("reason"):
+            raise ValueError("final keep/drop reason required")
+        candidate = json.loads(json.dumps(row.get("candidate", aliases[row["alias_id"]]["candidate"])))
+        if "bart_attention" in row:
+            candidate["bart_attention"] = row["bart_attention"]
+        original = aliases[row["alias_id"]]["candidate"]
+        if (candidate.get("id") != original["id"] or candidate.get("citations") != original["citations"]
+                or candidate.get("evidence_citations", []) != original.get("evidence_citations", [])):
+            raise ValueError("final selection invented alias or citation")
+        checked_candidate = finding(candidate, aliases[row["alias_id"]]["alias"])["candidate"]
+        if row["disposition"] == "drop" and checked_candidate["bart_attention"]["reasons"]:
+            raise ValueError("cannot drop a relevant or uncertain final finding")
+        if row["disposition"] == "keep" and not checked_candidate["bart_attention"]["reasons"]:
+            raise ValueError("final keep requires relevance rationale")
+        row["candidate"] = checked_candidate
+    return packet
+
+
+def compile_history_packet(manifest, completed, selections=None):
+    catalogue = manifest["consolidation"]["catalogue"]
+    selected = {r["alias_id"]: r for r in selections["selections"]} if selections else {}
+    already = set(manifest["consolidation"]["already_reported"])
+    groups, audit = {}, []
+    for entry in catalogue:
+        row = selected.get(entry["alias_id"])
+        candidate = row["candidate"] if row else entry["candidate"]
+        version = finding(candidate, entry["alias"])["version"]
+        eligible = bool(candidate["bart_attention"]["reasons"])
+        include = row["disposition"] == "keep" if row else eligible and version not in already
+        audit.append({**entry, "selected": include, "final_selection": row,
+                      "reason": row["reason"] if row else candidate["bart_attention"]["rationale"]})
+        if include:
+            group = groups.setdefault(version, {**candidate, "id": version, "finding_version": version,
+                                               "citations": [], "aliases": [], "prior_reviews": []})
+            group["citations"] = sorted(set(group["citations"] + candidate["citations"]))
+            group["aliases"].append(entry["alias"])
+            if entry["prior_review"]:
+                group["prior_reviews"].append(entry["prior_review"])
+            for checkpoint in manifest["consolidation"]["context"]["checkpoints"]:
+                for review in (checkpoint["review"] or {}).get("result", {}).get("dispositions", []):
+                    if review["id"] == entry["version"] and review not in group["prior_reviews"]:
+                        group["prior_reviews"].append(review)
+    dispositions, evidence = [], {}
+    for _, run in sorted(completed.items()):
+        packet = run["final"]["packet"]
+        dispositions.extend(packet["dispositions"])
+        for key, value in packet.get("evidence_sources", {}).items():
+            if key in evidence and evidence[key] != value:
+                # Original per-batch evidence is still authoritative and reachable via aliases.
+                continue
+            evidence[key] = value
+    packet = {"run_id": manifest["run_id"], "dispositions": dispositions,
+              "candidates": [groups[k] for k in sorted(groups)], "evidence_sources": evidence,
+              "audit": audit, "counts": {"originals": len(dispositions), "candidate_occurrences": len(catalogue),
+                  "surfaced_occurrences": sum(r["selected"] for r in audit), "surfaced_candidates": len(groups),
+                  "retained_only_candidates": sum(not r["selected"] for r in audit)}}
+    return validate_packet(packet, manifest)
+
+
 def worker_collection(manifest, path):
     """Keep historical enrollment bookkeeping out of the analytical input."""
+    if manifest.get("consolidation"):
+        return {"run_id": manifest["run_id"], "phase": "history-final", "manifest_path": str(path),
+                "sources_count": len(manifest["sources"]), "consolidation": manifest["consolidation"]}
     return {**{k: v for k, v in manifest.items() if k != "baseline"},
             "baseline_exclusions": {"count": len(manifest["baseline"]), "reviewed": False,
                                     "path": str(path), "manifest_hash": digest(manifest)}}
@@ -366,9 +575,20 @@ def worker_prompt(settings, manifest, stage, input_path):
             "Read EVERY original and ALL Sol dispositions/draft, including no-action. Detect omitted insights and evidence gaps. "
             "Correct small gaps directly, flag substantial uncertainty without returning to Sol, finalize other decisions.")
     report_id = read(input_path)["report_id"]
+    if stage == "final-astra":
+        return f"""Final historical relevance/dedupe review; Codex gpt-6-astra/high, READ ONLY.
+Read immutable input JSON {input_path}; memory root {settings.memory_root}. This is a findings review, not a repeated original investigation. Read the complete catalogue in collection.consolidation and prior reviews. Verify current relevant work/decisions; retained per-batch paths/hashes give every original/disposition for targeted verification. No edits, questions, new lanes, delivery or improvement execution. One report self-closes your generation.
+For every alias_id return exactly one keep/drop selection with reason and current bart_attention. The original candidate is retained by reference; include a full candidate override ONLY when action, current existing/owner/decision or evidence requires correction. Retain all citation IDs/evidence_citations and candidate id. Drop deprecated, retired, shipped/resolved or already-owned unchanged subjects ONLY with verified evidence. KEEP recurrence, changed_evidence, ownership_gap, revised_action, new_grant, no_owning_work or uncertain cases even on linked/shipped work. An existing work link or triage backlog alone cannot suppress. Empty bart_attention.reasons requires a verified unchanged/excluded subject; include rationale. Full audit preserves dropped findings. Finding versions are computed by producer; do not invent hashes.
+Return agent-orch report --msg-id 0 --status done --report-id {report_id} --result JSON (ReportPayloadV1 summary/findings/next_action/extras). extras.daily_retro={{run_id:"{manifest['run_id']}",input_digest:"{digest(manifest['consolidation']['catalogue'])}",selections:[{{alias_id,disposition:"keep"|"drop",reason,bart_attention,candidate(optional override)}}]}}. No omitted/invented aliases. Prior checkpoint actions are historical custody, never a new commission. Preserve recurrence/changed evidence and genuine uncertainty.
+"""
+    history_duty = ""
+    if manifest.get("cumulative_context"):
+        context = manifest["cumulative_context"]
+        history_duty = f"""\nHistorical serial context: read {context['path']} (SHA256 {context['sha256']}); all prior findings, source hashes, reviews and work references are retained there. Read every new original for coverage, but skip renewed detailed investigation of an equivalent unchanged known finding; disposition cites prior finding key/version and current original. A new recurrence/evidence/owner/action/grant is a new version and must be evaluated. A known issue alone is not proof of deprecation. No silent truncation.
+Each candidate adds finding_key (stable lowercase issue label <=120 chars) and bart_attention={{reasons:[no_owning_work|new_grant|recurrence|changed_evidence|ownership_gap|revised_action|uncertain],rationale}}. Producer computes finding_version. Drop deprecated/retired/shipped/resolved/currently accepted owned unchanged subjects by empty reasons ONLY with current evidence in existing/owner/action/decision/rationale. Keep every exception even on existing work; unassigned triage is not an executing owner. Ambiguous relevance remains uncertain. Existing-work link alone never suppresses. Keep all candidates/full source dispositions, including unchanged exclusions, in this private packet; producer selects checkpoint relevance.\n"""
     return f"""Daily retrospective {stage} pass, run {manifest['run_id']}; {model}/{effort}, Codex only.
 {duty}
-Read immutable input JSON {input_path}; memory root {settings.memory_root}. Look up only relevant normal work records and bounded recent packets under {settings.state_root}/runs for recurrence/prior decisions. Respect existing standing grants.
+Read immutable input JSON {input_path}; memory root {settings.memory_root}. Look up only relevant normal work records and bounded recent packets under {settings.state_root}/runs for recurrence/prior decisions. Respect existing standing grants.{history_duty}
 READ ONLY: no edits, questions, publication, new lanes or feedback pass. No authority to execute improvements. Your terminal report self-closes this generation; producer owns only fenced cleanup.
 Return one durable report: agent-orch report --msg-id 0 --status done --report-id {report_id} --result JSON. ReportPayloadV1 summary/findings/next_action/extras; extras.daily_retro is the packet object.
 Packet: run_id; dispositions [{{id,fingerprint,reason}}] EXACTLY once for each original, including no-action; candidates unique prioritized [{{id,problem,consequence,citations:[source IDs],prior_occurrences,existing,action,benefit,effort,risk,uncertainty,owner,decision}}]. decision describes exact needed grant/recommended option/meaningful alternatives, or existing authorization/no decision. Candidates.citations contain ONLY IDs from collection.sources; put verification labels, file paths and related-work references in evidence_sources/evidence_citations or existing, never in original citations. Each recommendation needs at least one collected original ID. Existing fields name authoritative fixes/rules/work and current state. No-new sources is an explicit successful empty packet; coverage gaps never imply all-clear. Preserve prior materially changed recommendations/actions needing attention. Keep front concise, no silent source truncation.
@@ -442,7 +662,14 @@ class Pipeline:
             raise RuntimeError("worker report model/effort mismatch")
         if report.get("report_id") != stage["report_id"]:
             raise RuntimeError("unexpected worker report identity")
-        packet = validate_packet(report.get("extras", {}).get("daily_retro", {}), manifest)
+        validator = (validate_final_selection if name == "final-astra" else
+                     validate_history_packet if manifest.get("cumulative_context") else validate_packet)
+        try:
+            packet = validator(report.get("extras", {}).get("daily_retro", {}), manifest)
+        except Exception:
+            stage.update(failed=True, failure="invalid terminal packet", report=report)
+            atomic(receipt_path, stage)
+            raise
         packet = {**packet, "collection": worker_collection(manifest, root / "collection.json")}
         stage.update(packet=packet, packet_hash=digest(packet), report=report, completed_at=now_iso())
         atomic(receipt_path, stage)
@@ -464,8 +691,15 @@ class Pipeline:
             if failure:
                 body = f"REPORT daily-retro failure {manifest['run_id']}: {failure}. Retained state: {root}. Retry with existing producer; no operator notification for routine retries."
             else:
+                summary = ""
+                if manifest.get("consolidation"):
+                    packet = final["packet"]
+                    summary = (f" mode={manifest['consolidation']['mode']} counts={encoded(packet['counts']).decode()} "
+                               f"relevant={encoded([{'id': c['id'], 'problem': c['problem'], 'action': c['action'], 'attention': c['bart_attention'], 'citations': c['citations'], 'prior_reviews': c.get('prior_reviews', [])} for c in packet['candidates']]).decode()}. "
+                               "Previously reviewed versions retain their work/decision custody; do not recommission them. ")
                 body = (f"REPORT daily-retro ready run={manifest['run_id']} report_id={final['report']['report_id']} "
                         f"packet_hash={final['packet_hash']} path={root / 'astra.json'}. "
+                        f"{summary}"
                         f"Ingest once and review now under the accepted daily retro contract. Record every disposition with "
                         f"{Path(__file__).resolve()} record-review --config {self.settings.config_path} --run-id {manifest['run_id']} --result RESULT_JSON. "
                         "Use normal work proposal records and decision helper to recover still-open decisions after generation replacement. "
@@ -490,12 +724,12 @@ class Pipeline:
             raise RuntimeError("delivery pending; exact target/body/key retained")
         return record
 
-    async def cleanup(self, manifest):
+    async def cleanup(self, manifest, force=False):
         root = self.settings.state_root / "runs" / manifest["run_id"]
-        for name in ("sol", "astra"):
+        for name in STAGES:
             path = root / f"{name}.json"
             stage = read(path, {})
-            if stage.get("closed") or not stage.get("generation") or not (stage.get("packet") or stage.get("failed")):
+            if stage.get("closed") or not stage.get("generation") or not (force or stage.get("packet") or stage.get("failed")):
                 continue
             result = await self.rpc.close_once(self.config, stage["stream_id"],
                                                expected_generation=stage["generation"], reason="report_terminate")
@@ -541,12 +775,151 @@ class Pipeline:
         finally:
             await self.cleanup(manifest)
 
-    async def history_run(self, baseline_path, batch):
+    async def history_run(self, baseline_path, batch, no_deliver=False):
         history_baseline(self.settings, baseline_path)
+        if no_deliver and (self.settings.state_root / "history.json").exists():
+            completed_history(self.settings, baseline_path)
         with locked(self.settings.state_root / "run.lock"):
             manifest = history_collect(self.settings, baseline_path, batch)
+            root = self.settings.state_root / "runs" / manifest["run_id"]
+            mode = read(root / "history-mode.json")
+            if mode and not no_deliver:
+                raise ValueError("history delivery mode conflict")
+            if no_deliver:
+                inventory, completed = completed_history(self.settings, baseline_path)
+                if batch in completed:
+                    return {"prepared": [] if completed[batch]["review"] else [manifest["run_id"]], "delivered": []}
+                if any(n not in completed for n in range(1, batch)):
+                    raise ValueError("serial history requires preceding batches completed")
+                if any(read(root / f"{stage}.json") for stage in STAGES) and mode is None:
+                    raise ValueError("history delivery mode conflict")
+                if mode is None:
+                    context = history_context(self.settings, inventory, completed)
+                    context_path = root / "history-context.json"
+                    atomic(context_path, context)
+                    mode = {"no_deliver": True, "context_sha256": hashlib.sha256(context_path.read_bytes()).hexdigest(),
+                            "context_path": str(context_path)}
+                    atomic(root / "history-mode.json", mode)
+                context_path = root / "history-context.json"
+                if (mode.get("no_deliver") is not True or mode.get("context_path") != str(context_path)
+                        or not context_path.exists() or hashlib.sha256(context_path.read_bytes()).hexdigest() != mode.get("context_sha256")):
+                    raise ValueError("edited cumulative context")
+                for prior in read(context_path)["inputs"]:
+                    packet = read(Path(prior["packet_path"]))
+                    if not packet or packet.get("packet_hash") != prior["packet_hash"] or digest(packet["packet"]) != prior["packet_hash"]:
+                        raise ValueError("edited cumulative packet provenance")
+                manifest = {**manifest, "cumulative_context": {"path": str(context_path), "sha256": mode["context_sha256"]}}
+                if any(read(root / f"{name}.json", {}).get("failed") for name in STAGES):
+                    raise RuntimeError("historical worker recovery requires parent ruling")
+                try:
+                    sol = await self.worker(manifest, "sol")
+                    await self.worker(manifest, "astra", sol["packet"])
+                except Exception as exc:
+                    atomic(root / "failure.json", {"at": now_iso(), "error": str(exc)})
+                    raise
+                finally:
+                    await self.cleanup(manifest, force=True)
+                completed_history(self.settings, baseline_path)
+                return {"prepared": [manifest["run_id"]], "delivered": []}
             delivered = await self.run_manifest(manifest)
             return {"delivered": [manifest["run_id"]] if delivered else []}
+
+    async def history_consolidate(self, baseline_path, batches=None, final=False):
+        inventory, completed = completed_history(self.settings, baseline_path)
+        if final:
+            if batches is not None or set(completed) != set(range(1, len(inventory["batches"]) + 1)):
+                raise ValueError("final consolidation requires complete history inventory")
+            numbers = sorted(completed)
+        else:
+            if (not isinstance(batches, list) or not 1 <= len(batches) <= 5
+                    or any(type(n) is not int for n in batches) or len(set(batches)) != len(batches)):
+                raise ValueError("one to five unique batch numbers required")
+            numbers = sorted(batches)
+            if any(n not in completed or completed[n]["mode"] is None or completed[n]["review"] for n in numbers):
+                raise ValueError("checkpoint requires completed no-deliver batches")
+        chosen = {n: completed[n] for n in numbers}
+        members = [{"run_id": r["manifest"]["run_id"], "packet_hash": r["final"]["packet_hash"]} for _, r in sorted(chosen.items())]
+        mode = "final" if final else "checkpoint"
+        run_id = "history-consolidated-" + digest([self.settings.namespace, inventory["inventory_digest"], mode, members])
+        root = self.settings.state_root / "runs" / run_id
+        with locked(self.settings.state_root / "run.lock"):
+            existing = read(root / "collection.json")
+            reported = set()
+            for prior_root, prior_manifest in history_checkpoints(self.settings):
+                if prior_manifest["run_id"] == run_id:
+                    continue
+                if not final and set(numbers) & set(prior_manifest["consolidation"]["batches"]):
+                    raise ValueError("overlapping history checkpoint")
+                stage = read(prior_root / "astra.json")
+                if not stage or stage.get("packet_hash") != digest(stage["packet"]):
+                    raise ValueError("incomplete or edited prior checkpoint")
+                delivery = read(prior_root / "delivery.json", {"attempts": []})
+                if stage["packet"]["candidates"] and not any(a.get("confirmed") for a in delivery["attempts"]):
+                    raise RuntimeError("prior checkpoint delivery unresolved")
+                reported.update(c["finding_version"] for c in stage["packet"]["candidates"])
+            if existing:
+                manifest = existing
+                expected_catalogue = history_catalogue(chosen)
+                catalogue = manifest.get("consolidation", {}).get("catalogue", [])
+                if (manifest.get("run_id") != run_id or manifest.get("phase") != "history-consolidated"
+                        or manifest["consolidation"].get("members") != members
+                        or manifest["consolidation"].get("mode") != mode
+                        or manifest["consolidation"].get("batches") != numbers
+                        or manifest.get("sources") != [s for _, r in sorted(chosen.items()) for s in r["manifest"]["sources"]]
+                        or [{k: v for k, v in row.items() if k != "prior_review"} for row in catalogue] !=
+                           [{k: v for k, v in row.items() if k != "prior_review"} for row in expected_catalogue]):
+                    raise ValueError("edited consolidation membership")
+            else:
+                context = history_context(self.settings, inventory, completed)
+                manifest = {"run_id": run_id, "phase": "history-consolidated", "baseline": {},
+                            "collected_at": inventory["collected_at"],
+                            "sources": [s for _, r in sorted(chosen.items()) for s in r["manifest"]["sources"]],
+                            "consolidation": {"mode": mode, "batches": numbers, "members": members,
+                                "catalogue": history_catalogue(chosen), "already_reported": sorted(reported),
+                                "context": context, "context_digest": digest(context)}}
+                atomic(root / "collection.json", manifest)
+            if digest(manifest["consolidation"]["context"]) != manifest["consolidation"]["context_digest"]:
+                raise ValueError("edited consolidation context")
+            compiled = read(root / "astra.json")
+            if compiled:
+                if compiled.get("packet_hash") != digest(compiled["packet"]):
+                    raise ValueError("edited compiled history packet")
+                validate_packet(compiled["packet"], manifest)
+                selection = None
+                if final:
+                    retained = read(root / "final-astra.json", {})
+                    report = retained.get("report", {})
+                    if (report.get("report_id") != retained.get("report_id")
+                            or report.get("effective_model") != "gpt-6-astra" or report.get("effective_effort") != "high"
+                            or retained.get("packet_hash") != digest(retained.get("packet"))):
+                        raise ValueError("final report/model/hash proof invalid")
+                    selection = validate_final_selection(report.get("extras", {}).get("daily_retro", {}), manifest)
+                    selection["collection"] = worker_collection(manifest, root / "collection.json")
+                    if selection != retained["packet"] or compiled["report"] != report:
+                        raise ValueError("compiled final differs from retained worker report")
+                if compiled["packet"] != compile_history_packet(manifest, chosen, selection):
+                    raise ValueError("compiled packet differs from immutable inputs")
+            else:
+                selection = None
+                try:
+                    if final:
+                        if read(root / "final-astra.json", {}).get("failed"):
+                            raise RuntimeError("final worker recovery requires parent ruling")
+                        selection = await self.worker(manifest, "final-astra")
+                    packet = compile_history_packet(manifest, chosen, selection["packet"] if selection else None)
+                    compiled = {"packet": packet, "packet_hash": digest(packet), "producer": "history-consolidation",
+                                "report": selection["report"] if selection else {
+                                    "report_id": "history-checkpoint-" + digest(members), "kind": "deterministic-compilation",
+                                    "source_report_ids": [r["final"]["report_id"] for _, r in sorted(chosen.items())]}}
+                    atomic(root / "astra.json", compiled)
+                finally:
+                    await self.cleanup(manifest, force=True)
+            # A compiled receipt may survive interruption before owned cleanup.
+            await self.cleanup(manifest, force=True)
+            if final or compiled["packet"]["candidates"]:
+                await self.deliver(manifest, compiled)
+            return {"run_id": run_id, "packet_hash": compiled["packet_hash"], "counts": compiled["packet"]["counts"],
+                    "quiet": not final and not compiled["packet"]["candidates"]}
 
     async def actor(self):
         binding = await self.binding()
@@ -561,7 +934,7 @@ class Pipeline:
 
     async def record_review(self, run_id, result):
         binding = await self.actor()
-        if not re.fullmatch(r"(?:\d{4}-\d{2}-\d{2}|history-[0-9a-f]{16}-\d{4})", run_id):
+        if not re.fullmatch(r"(?:\d{4}-\d{2}-\d{2}|history-[0-9a-f]{16}-\d{4}|history-consolidated-[0-9a-f]{64})", run_id):
             raise ValueError("invalid run ID")
         root = self.settings.state_root / "runs" / run_id
         with locked(root / "review.lock"):
@@ -766,7 +1139,7 @@ class ProducerTransport:
         self.settings = settings
 
     def stages(self):
-        for name in ("sol", "astra"):
+        for name in STAGES:
             for path in (self.settings.state_root / "runs").glob(f"*/{name}.json"):
                 yield read(path)
 
@@ -909,12 +1282,19 @@ async def rehearse(settings, workers, evidence_dir):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("collect", "run", "record-review", "decision", "rehearse", "history-collect", "history-run"):
+    for name in ("collect", "run", "record-review", "decision", "rehearse", "history-collect", "history-run", "history-consolidate"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--config", required=True)
         if name.startswith("history-"):
             cmd.add_argument("--baseline", required=True)
-            cmd.add_argument("--batch", required=True, type=int)
+            if name == "history-consolidate":
+                group = cmd.add_mutually_exclusive_group(required=True)
+                group.add_argument("--batches", help="comma-separated completed batch numbers, one to five")
+                group.add_argument("--final", action="store_true", help="one final Astra review of the complete inventory")
+            else:
+                cmd.add_argument("--batch", required=True, type=int)
+                if name == "history-run":
+                    cmd.add_argument("--no-deliver", action="store_true", help="retain serial-context packets without any delivery")
         elif name == "collect":
             cmd.add_argument("--now", required=True)
         elif name == "run":
@@ -938,11 +1318,14 @@ def main():
     elif args.command == "rehearse":
         result = asyncio.run(rehearse(settings, Settings.load(args.workers_config), args.evidence_dir))
     else:
-        pipeline = Pipeline(settings, ProducerTransport(settings)) if args.command in {"run", "history-run"} else Pipeline(settings)
+        pipeline = Pipeline(settings, ProducerTransport(settings)) if args.command in {"run", "history-run", "history-consolidate"} else Pipeline(settings)
         if args.command == "run":
             result = asyncio.run(pipeline.run(on_demand=args.on_demand))
         elif args.command == "history-run":
-            result = asyncio.run(pipeline.history_run(args.baseline, args.batch))
+            result = asyncio.run(pipeline.history_run(args.baseline, args.batch, no_deliver=args.no_deliver))
+        elif args.command == "history-consolidate":
+            batches = [int(n) for n in args.batches.split(",")] if args.batches else None
+            result = asyncio.run(pipeline.history_consolidate(args.baseline, batches, final=args.final))
         elif args.command == "record-review":
             result = asyncio.run(pipeline.record_review(args.run_id, read(Path(args.result))))
         else:
