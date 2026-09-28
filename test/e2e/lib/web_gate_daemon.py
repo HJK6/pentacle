@@ -10,10 +10,32 @@ import runpy
 import sys
 
 ROOT = Path(__file__).resolve().parents[3]
+scratch = Path(sys.argv[1]).resolve()
+owned_home = scratch / 'home'
+owned_home.mkdir(mode=0o700, exist_ok=True)
+
+
+def _expand_owned_home(value):
+    raw = os.fspath(value)
+    if raw == '~':
+        return str(owned_home)
+    if raw.startswith('~/'):
+        return str(owned_home / raw[2:])
+    if raw.startswith('~'):
+        raise ValueError('named-user home expansion refused')
+    return raw
+
+
+# Redirect both process-local resolvers before any candidate module imports.
+# Consent initialization must never read or create the real host admin token.
+Path.home = classmethod(lambda cls: owned_home)
+os.path.expanduser = _expand_owned_home
 sys.path[:0] = [str(ROOT / 'services'), str(ROOT / 'services/chat-stream-v2')]
 from _shared import operator_auth
+import local_admin
 
-scratch = Path(sys.argv[1])
+assert local_admin.DEFAULT_PATH.resolve().is_relative_to(scratch)
+
 auth_dir = scratch / 'operator-auth'
 auth_dir.mkdir(mode=0o700, exist_ok=True)
 registry_path = auth_dir / 'registry.json'

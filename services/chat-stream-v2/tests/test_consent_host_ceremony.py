@@ -86,6 +86,31 @@ def test_isolated_cli_host_ceremony(tmp_path):
     print(json.dumps({**receipt, 'temporary_root_removed': True}, sort_keys=True))
 
 
+def test_web_gate_daemon_redirects_both_home_resolvers_before_import(tmp_path):
+    repo = Path(__file__).resolve().parents[3]
+    script = '''
+import sys, runpy, pathlib, os
+scratch = pathlib.Path(sys.argv[1]).resolve()
+fixture = sys.argv[2]
+sys.argv = [fixture, str(scratch), '--issue']
+runpy.run_path(fixture, run_name='__main__')
+import local_admin
+assert local_admin.DEFAULT_PATH.resolve().is_relative_to(scratch)
+assert pathlib.Path('~/.agent-orch/config.json').expanduser().resolve().is_relative_to(scratch)
+assert not local_admin.DEFAULT_PATH.exists()
+try:
+    os.path.expanduser('~unknown/config')
+except ValueError:
+    pass
+else:
+    raise AssertionError('named-user expansion must fail closed')
+'''
+    result = subprocess.run([sys.executable, '-I', '-c', script, str(tmp_path),
+                             str(repo / 'test/e2e/lib/web_gate_daemon.py')],
+                            env=_owned_env(tmp_path), capture_output=True, text=True, timeout=8)
+    assert result.returncode == 0, result.stderr
+
+
 async def _ceremony(root: Path):
     import asyncio
     import hashlib
