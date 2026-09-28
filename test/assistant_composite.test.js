@@ -12,17 +12,17 @@ const clientSingleton = require('../main/chat_stream_client');
 const { filterSidebarSessions, projectChatStreamSessionsToDesktop } = require('../renderer/sidebar_filter');
 
 const composite = {
-  host: 'hostc', session_name: 'bart', stream_id: 'hostc:bart',
+  host: 'hostc', session_name: 'assistant', stream_id: 'hostc:assistant',
   session_kind: 'assistant_composite', provider: 'composite',
   capabilities: { pane: false, terminal: false, assistant_composite_v1: true },
 };
 
 test('composite protection uses daemon metadata without a private role alias', () => {
   assert.equal(isConfiguredAssistant(composite, ''), true);
-  assert.equal(isConfiguredAssistant({ title: 'Bart', provider: 'composite' }, ''), false);
+  assert.equal(isConfiguredAssistant({ title: 'Nova', provider: 'composite' }, ''), false);
   assert.equal(isProtectedAssistantRename({ chatStream: { hostMap: { local: 'hostc' } } },
-    { sessions: [composite] }, 'local', 'bart'), true);
-  assert.equal(isProtectedAssistantRename({}, { sessions: [composite] }, 'other', 'bart'), false);
+    { sessions: [composite] }, 'local', 'assistant'), true);
+  assert.equal(isProtectedAssistantRename({}, { sessions: [composite] }, 'other', 'assistant'), false);
 });
 
 test('inventory projection retains composite identity and never exposes backend rows', () => {
@@ -31,7 +31,7 @@ test('inventory projection retains composite identity and never exposes backend 
     { ...composite, session_name: 'hidden', session_kind: 'assistant_backend', visibility: 'default' },
     { session_name: 'ordinary', visibility: 'default' },
   ], () => 'local');
-  assert.deepEqual(filterSidebarSessions(rows).map(row => row.name), ['bart', 'ordinary']);
+  assert.deepEqual(filterSidebarSessions(rows).map(row => row.name), ['assistant', 'ordinary']);
   assert.equal(rows[0].session_kind, 'assistant_composite');
   assert.equal(rows[0].capabilities.terminal, false);
 });
@@ -42,7 +42,7 @@ test('terminal IPC rejects a composite before looking up a pane', async () => {
   const stop = registerTerminalIpc({ handle: (k, fn) => handlers.set(k, fn), on() {} },
     { chatStream: { hostMap: { local: 'hostc' } } }, { snapshot: () => ({ sessions: [composite] }) },
     { execute: async () => { lookups++; throw new Error('unexpected pane lookup'); } });
-  await assert.rejects(handlers.get('pty:create')({ sender: { id: 1, isDestroyed: () => false } }, 0, 'bart'), /chat.only|no terminal/i);
+  await assert.rejects(handlers.get('pty:create')({ sender: { id: 1, isDestroyed: () => false } }, 0, 'assistant'), /chat.only|no terminal/i);
   assert.equal(lookups, 0);
   stop();
 });
@@ -53,7 +53,7 @@ test('client advertises composite support and preserves explicit reply binding',
   assert.equal(client._helloPayload({}, { kind: 'v1' }).capabilities?.assistant_composite_v1, true);
   client.noteInteraction = () => {};
   client.sendCommand = async (payload) => payload;
-  const payload = await client.sendMessage({ host: 'hostc', sessionName: 'bart', text: 'Yes',
+  const payload = await client.sendMessage({ host: 'hostc', sessionName: 'assistant', text: 'Yes',
     replyToMessageId: 'message-1', replyToQuestionId: 'question-2' });
   assert.equal(payload.reply_to_message_id, 'message-1');
   assert.equal(payload.reply_to_question_id, 'question-2');
@@ -105,12 +105,12 @@ test('composite slot stays chat-only across mode changes, disconnection and atta
   vm.runInContext("state.chatStream.connected = false; updateSlotViewMode(0, 'status')", h.context);
   assert.equal(vm.runInContext('state.slotViewModes[0]', h.context), 'chat');
   // The real attach path must return before creating any xterm/PTY, not merely hide it.
-  await vm.runInContext("attachSession(0, 'claude-hostc-race', 'Bart', 'local')", h.context);
+  await vm.runInContext("attachSession(0, 'claude-hostc-race', 'Nova', 'local')", h.context);
   assert.equal(vm.runInContext('state.slotViewModes[0]', h.context), 'chat');
   assert.equal(vm.runInContext('!!state.terminals[0]', h.context), false);
 });
 
-test('an open question does not consume an unrelated Bart composer message', async (t) => {
+test('an open question does not consume an unrelated Nova composer message', async (t) => {
   const h = await renderer(t);
   vm.runInContext("state.slotChatRefs[0].inputEl.value = 'Also, plan the new website';", h.context);
   await vm.runInContext('sendChatComposer(0)', h.context);
@@ -122,7 +122,7 @@ test('an open question does not consume an unrelated Bart composer message', asy
 test('a composite popout bootstrap cannot allocate a terminal', async (t) => {
   const h = installRenderer({ initialSessions: [composite], popoutContext: {
     stream_id: composite.stream_id, host: composite.host, desktop_host: 'local',
-    session_name: composite.session_name, title: 'Bart',
+    session_name: composite.session_name, title: 'Nova',
   } });
   t.after(() => h.dom.window.close());
   await new Promise(setImmediate);
@@ -216,7 +216,7 @@ test('desktop composite composer sends exact input and identity through real IPC
   }
 });
 
-test('Bart assistant rows render no Reply button; a question-bound reply still preserves both IDs through composer, IPC and retry', async t => {
+test('Nova assistant rows render no Reply button; a question-bound reply still preserves both IDs through composer, IPC and retry', async t => {
   const h = await wireRenderer(t);
   assert.match(h.dom.window.document.querySelector('.slot-chat-list').textContent, /Choose the next step/);
   assert.equal(h.dom.window.document.querySelector('.slot-chat-reply-btn[data-reply-message-id="message-question"]'), null);
@@ -236,27 +236,27 @@ test('Bart assistant rows render no Reply button; a question-bound reply still p
   assert.equal(h.wires[1].reply_to_question_id, 'question-bound');
 });
 
-test('renderSlotChat hides operator Reply only for the canonical Bart stream', async t => {
-  const bart = await wireRenderer(t, true, {
-    streamId: 'bart:assistant', messageKind: 'USER',
-    messageId: 'bart-operator-1', messageText: 'Hello Bart',
+test('renderSlotChat hides operator Reply by composite metadata for configured assistant identities', async t => {
+  const assistant = await wireRenderer(t, true, {
+    streamId: 'assistant:assistant', messageKind: 'USER',
+    messageId: 'assistant-operator-1', messageText: 'Hello Nova',
   });
-  const bartRow = bart.dom.window.document.querySelector('.slot-chat-row.is-user');
-  assert.ok(bartRow, 'canonical Bart operator message is rendered');
-  assert.match(bartRow.textContent || '', /Hello Bart/);
-  assert.equal(bartRow.querySelector('.slot-chat-reply-btn'), null);
-  assert.doesNotMatch(bartRow.textContent || '', /\bReply\b/);
+  const assistantRow = assistant.dom.window.document.querySelector('.slot-chat-row.is-user');
+  assert.ok(assistantRow, 'canonical Nova operator message is rendered');
+  assert.match(assistantRow.textContent || '', /Hello Nova/);
+  assert.equal(assistantRow.querySelector('.slot-chat-reply-btn'), null);
+  assert.doesNotMatch(assistantRow.textContent || '', /\bReply\b/);
 
   const other = await wireRenderer(t, true, {
-    streamId: 'hostc:bart-general', messageKind: 'USER',
+    streamId: 'hostc:assistant-general', messageKind: 'USER',
     messageId: 'other-operator-1', messageText: 'Hello from another chat',
   });
   const otherRow = other.dom.window.document.querySelector('.slot-chat-row.is-user');
   assert.ok(otherRow, 'other composite operator message is rendered');
   assert.match(otherRow.textContent || '', /Hello from another chat/);
-  const reply = otherRow.querySelector('.slot-chat-reply-btn');
-  assert.ok(reply, 'generic opted-in composite retains its Reply control');
-  assert.equal(reply.getAttribute('data-reply-message-id'), 'other-operator-1');
+  assert.equal(otherRow.querySelector('.slot-chat-reply-btn'), null,
+    'generic configured composite has the same semantic Reply policy');
+  assert.doesNotMatch(otherRow.textContent || '', /\bReply\b/);
 });
 
 test('composite attachment-only retries keep the blob envelope and logical message ID', async t => {

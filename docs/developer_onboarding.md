@@ -111,6 +111,11 @@ npm test
 python3 services/chat-stream-v2/tools/run_gate.py unit
 ```
 
+Use the activated environment from step 4, or its explicit `.venv-dev/bin/python`.
+For the standard Web gate, run `npm run build:web` then
+`node test/e2e/web_gate.js --python .venv-dev/bin/python`; the system Python
+may not have the installed daemon dependencies.
+
 Evidence should contain only synthetic fixture ids, result summaries, and the candidate identifier. Remove temporary stores after the run.
 
 The [own-assistant gate](../test/e2e/own_assistant_bootstrap_gate.py) invokes the actual bootstrap with fresh state/registry, unique tmux socket, native-format provider counterpart, candidate publish CLI and real Chrome browser. After dependencies and the Web build:

@@ -130,7 +130,7 @@ def test_frozen_fixture_covers_native_providers_and_redaction() -> None:
 def test_manifest_schema_is_exact_and_candidate_bound() -> None:
     schema = json.loads(MANIFEST_SCHEMA.read_text(encoding="utf-8"))
     assert schema["schema"] == "pentacle.usage-accounting.stage1"
-    assert schema["schema_version"] == 1
+    assert schema["schema_version"] == 2
     assert schema["required"] == [
         "schema", "schema_version", "candidate_sha", "base_sha", "selector",
         "overlay", "runtime", "pin", "streams", "receipts",
@@ -140,9 +140,10 @@ def test_manifest_schema_is_exact_and_candidate_bound() -> None:
         "services/chat-stream-v2/tests/test_event_push.py",
         "services/chat-stream-v2/tests/test_usage_telemetry.py",
     ]
-    assert schema["properties"]["runtime"]["properties"]["satellites"]["required"] == [
-        "worker-one", "worker-two",
-    ]
+    satellites = schema["properties"]["runtime"]["properties"]["satellites"]
+    assert "required" not in satellites  # Expected hosts come from the external contract.
+    assert satellites["additionalProperties"] == {"$ref": "#/$defs/satellite"}
+    assert satellites["propertyNames"]["pattern"] == "^[a-z][a-z0-9_-]*$"
     assert schema["properties"]["streams"]["items"]["$ref"] == "#/$defs/stream"
 
 
