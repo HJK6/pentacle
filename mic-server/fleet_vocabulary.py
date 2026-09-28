@@ -9,7 +9,7 @@ Config (env), applied ONLY to the upload route so the live wake/content path kee
 its no-content-bias rule:
 - ``MIC_VOCABULARY_FILE``: a text file whose contents become the ``initial_prompt``
   (the fleet names, e.g. "Bartimaeus, Bart, Samplehost, Thirdhost, Otherhost, Pentacle,
-  Altum, Daffodil, Triforce, Nexus, Astra, Luna, Sol, Opus, Fable").
+  Altum, ExampleClient, Triforce, Nexus, Astra, Luna, Sol, Opus, Fable").
 - ``MIC_NAME_CORRECTIONS``: a JSON object mapping a known mis-transcription variant
   to its canonical fleet name. Replacement is whole-word and case-insensitive and
   applies ONLY to listed variants, never inside a longer word — so a decoy phrase
