@@ -757,6 +757,26 @@ def test_history_evidence_conflicting_labels_remain_available(config):
     assert all(value in packet['evidence_sources'].values() for value in sources)
 
 
+@pytest.mark.parametrize('shape', ['list', 'mapping'])
+def test_history_evidence_qualified_key_collision_preserves_each_proof(config, shape):
+    history, baseline, rpc, pipeline = prepared_history(config)
+    result = asyncio.run(pipeline.history_consolidate(baseline, [1, 2]))
+    manifest = retro.read(history.state_root / 'runs' / result['run_id'] / 'collection.json')
+    _, completed = retro.completed_history(history, baseline)
+    first = {'id': 'E1', 'proof': 'first'}
+    last = {'id': 'E1', 'proof': 'second'}
+    qualified = f"{completed[2]['manifest']['run_id']}:E1:{retro.digest(last)}"
+    occupied = {'id': qualified, 'proof': 'preexisting qualified key'}
+    completed[1]['final']['packet']['evidence_sources'] = (
+        [first, occupied] if shape == 'list' else {'E1': first, qualified: occupied})
+    completed[2]['final']['packet']['evidence_sources'] = (
+        [last] if shape == 'list' else {'E1': last})
+    original = json.loads(json.dumps(completed))
+    packet = retro.compile_history_packet(manifest, completed)
+    assert all(value in packet['evidence_sources'].values() for value in [first, occupied, last])
+    assert json.loads(json.dumps(completed)) == original
+
+
 def test_history_quiet_pair_context_and_replay(config):
     history, baseline, rpc, pipeline = prepared_history(config)
     inv, done = retro.completed_history(history, baseline)
