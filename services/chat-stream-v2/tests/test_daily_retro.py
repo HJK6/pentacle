@@ -168,6 +168,52 @@ def proposal():
             "owner": "fixture:owner", "checkpoint": "2026-09-29", "success_measure": "output matches fixture"}
 
 
+def test_rehearsal_and_daily_worker_identities_are_separate(config):
+    from dataclasses import replace
+    from spawnctl import SpawnCtl
+    from store import Store
+
+    async def run():
+        store = Store(str(config.state_root.parent / "admission.db"))
+        store.start()
+        try:
+            class Admission(Transport):
+                async def spawn_once(self, rpc_config, payload):
+                    claim = await store.atomic_claim_or_replay(
+                        config.host, f"worker-{len(self.spawns)}", idempotency_key=payload["idempotency_key"],
+                        request_payload_hash=SpawnCtl._spawn_payload_hash(payload), ttl_s=60,
+                        request_id=payload["request_id"], nonce="fixture", owner_instance_id="fixture")
+                    assert claim["status"] == "claimed", claim["status"]
+                    return await super().spawn_once(rpc_config, payload)
+
+            rpc = Admission()
+            daily = replace(config, state_root=config.state_root.parent / "daily-state")
+            first = await retro.Pipeline(config, rpc).worker(retro.collect(config, at()), "sol")
+            second = await retro.Pipeline(daily, rpc).worker(retro.collect(daily, at()), "sol")
+            assert len(rpc.spawns) == 2 and first["report_id"] != second["report_id"]
+            assert await retro.Pipeline(config, rpc).worker(retro.collect(config, at()), "sol") == first
+            assert len(rpc.spawns) == 2
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_delivery_identities_are_separate_between_state_roots(config):
+    from dataclasses import replace
+
+    async def run():
+        rpc = Transport()
+        daily = replace(config, state_root=config.state_root.parent / "daily-state")
+        for number, settings in enumerate((config, daily)):
+            manifest = retro.collect(settings, at())
+            final = {"report": {"report_id": f"packet-{number}"}, "packet_hash": f"hash-{number}"}
+            await retro.Pipeline(settings, rpc).deliver(manifest, final)
+            await retro.Pipeline(settings, rpc).deliver(manifest, final)
+        assert len(rpc.sent) == 2
+        assert {f"report_id=packet-{n}" in row["payload"]["text"] for n, row in enumerate(rpc.sent.values())} == {True}
+    asyncio.run(run())
+
+
 def test_worker_and_delivery_restart(config, monkeypatch):
     async def run():
         source(config.memory_root, "one", body="No lessons.")

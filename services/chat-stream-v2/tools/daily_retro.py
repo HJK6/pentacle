@@ -113,6 +113,10 @@ class Settings:
         return Config(self.ws_url, self.token_path.read_text().strip(), self.host,
                       self.state_root, self.memory_root)
 
+    @property
+    def namespace(self):
+        return digest([self.host, str(self.state_root)])[:16]
+
 
 def timer_due(stamp):
     if stamp.utcoffset() is None:
@@ -303,10 +307,10 @@ class Pipeline:
             attempt = stage["attempt"]
         if not stage:
             input_path = root / f"{name}-input-{attempt}.json"
-            report_id = f"daily-retro-{name}-{manifest['run_id']}-{attempt}"
+            report_id = f"daily-retro-{self.settings.namespace}-{name}-{manifest['run_id']}-{attempt}"
             atomic(input_path, {"collection": worker_collection(manifest, root / "collection.json"),
                                 "sol": prior, "report_id": report_id})
-            key = f"daily-retro-{manifest['run_id']}-{name}-{attempt}"
+            key = f"daily-retro-{self.settings.namespace}-{manifest['run_id']}-{name}-{attempt}"
             stage = {"attempt": attempt, "created_at": now_iso(), "report_id": report_id,
                      "payload": {"host": self.settings.host, "provider": "codex", "model": model,
                                  "effort": effort, "visibility": "hidden", "role": "worker", "cwd": str(self.settings.memory_root),
@@ -356,7 +360,7 @@ class Pipeline:
         if attempt and attempt.get("confirmed"):
             return record
         if not attempt:
-            key = "daily-retro-" + digest([manifest["run_id"], target, generation, bool(failure)])[:32]
+            key = "daily-retro-" + digest([self.settings.namespace, manifest["run_id"], target, generation, bool(failure)])[:32]
             if failure:
                 body = f"REPORT daily-retro failure {manifest['run_id']}: {failure}. Retained state: {root}. Retry with existing producer; no operator notification for routine retries."
             else:
