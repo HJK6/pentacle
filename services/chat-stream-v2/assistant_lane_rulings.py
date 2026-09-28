@@ -273,6 +273,10 @@ class AssistantLaneRulings:
         if not requester or not generation:
             raise ValueError("assistant_lane_close_requester_unverified")
         message = self._safe_intent(msg)
+        expected = message.get("expected_generation")
+        if expected is not None and (not isinstance(expected, str) or expected.strip() != target_generation):
+            raise ValueError("lifecycle_generation_mismatch")
+        message["expected_generation"] = target_generation
         key = str(message.get("request_id") or "")
         if not key:
             raise ValueError("assistant_ruling_close_key_required")
@@ -283,13 +287,19 @@ class AssistantLaneRulings:
                 ("session_close:" + key,),
             ).fetchone()))
             prior_intent = json.loads(prior["intent_json"]) if prior else {}
+            prior_safe = self._safe_intent(prior_intent)
+            if prior:
+                # Legacy intents omitted the wire fence, but their reservation
+                # already bound a generation. Normalize only for comparison;
+                # never rewrite the durable intent or its digest on replay.
+                prior_safe.setdefault("expected_generation", prior["target_generation"])
             report = await self.store.find_report(target_stream_id, statuses=("done", "error", "aborted"),
                                                   session_generation=target_generation)
             replay_waiver = isinstance(prior_intent.get("_ruling_report_waiver"), dict)
             if replay_waiver:
                 if (prior["requester_stream_id"] != requester or prior["requester_generation"] != generation
                         or prior["target_stream_id"] != target_stream_id or prior["target_generation"] != target_generation
-                        or self._safe_intent(prior_intent) != message):
+                        or prior_safe != message):
                     raise ValueError("assistant_ruling_request_key_conflict")
                 message = prior_intent
             if report is None or replay_waiver:
@@ -307,6 +317,8 @@ class AssistantLaneRulings:
                     "qa_verdict": report.get("qa_verdict"), "residuals": report.get("next_action"),
                     "digest": _digest(report),
                 }
+                if prior and "expected_generation" not in prior_intent and expected is None:
+                    message.pop("expected_generation")
             request = await self._create(
                 action="session_close", key="session_close:" + key, intent=message,
                 requester=requester, requester_generation=generation, binding=binding,
@@ -676,7 +688,9 @@ class AssistantLaneRulings:
                 elif current["action"] == "session_close":
                     target_host, _, target_name = current["target_stream_id"].partition(":")
                     target = await self.store.fetch_session(target_host, target_name)
-                    if (target is None or target.get("session_generation") != current["target_generation"]):
+                    expected = intent.get("expected_generation", current["target_generation"])
+                    if (expected != current["target_generation"] or target is None
+                            or target.get("session_generation") != expected):
                         await self._mark(rid, "approved_but_not_closed", {"error": "target_generation_changed"})
                         return
                     if isinstance(intent.get("_ruling_report_waiver"), dict):
@@ -693,7 +707,7 @@ class AssistantLaneRulings:
                         if report is None or report.get("report_id") != intent.get("_ruling_report", {}).get("report_id"):
                             await self._mark(rid, "approved_but_not_closed", {"error": "report_fence_moved"})
                             return
-                    intent["expected_generation"] = current["target_generation"]
+                    intent.setdefault("expected_generation", expected)
                     intent["_ruling_release"] = self
                     result = await self.server._on_close(intent)
                     if result.get("type") == "close.deferred":

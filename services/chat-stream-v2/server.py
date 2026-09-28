@@ -2752,6 +2752,10 @@ class Server:
         if self.lane_rulings is not None and msg.get("_ruling_release") is not self.lane_rulings:
             target_row = await self.store.fetch_session(host, name)
             target_generation = str((target_row or {}).get("session_generation") or "")
+            if target_generation and manager_generation is not None and target_generation != manager_generation:
+                await self._manager_audit("close", msg, auth, target_stream_id, target_generation,
+                                          result="refused", refusal_code="lifecycle_generation_mismatch")
+                raise VerbError("lifecycle_generation_mismatch", "manager target generation changed before ruling")
             if target_generation:
                 try:
                     ruling_hold = await self.lane_rulings.request_close(

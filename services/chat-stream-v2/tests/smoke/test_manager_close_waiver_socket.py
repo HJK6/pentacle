@@ -60,10 +60,10 @@ async def daemon(tmp_path, *, lane_owned=False):
             frames = [json.loads(await socket.recv()) for _ in range(2)]
             assert any(frame["type"] == "snapshot" for frame in frames)
 
-            async def close(name):
+            async def close(name, **extra):
                 request = {"type": "close", "host": HOST, "session_name": name,
                            "from_stream_id": MANAGER, "stream_token": token,
-                           "request_id": "close-" + name, "reason": REASON}
+                           "request_id": "close-" + name, "reason": REASON, **extra}
                 await socket.send(json.dumps(request))
                 async with asyncio.timeout(10):
                     while True:
@@ -150,4 +150,24 @@ def test_manager_closes_reported_missing_pane_without_false_reap(tmp_path):
             assert reply["reap_status"] == "unknown", reply
             assert (await store.fetch_session(HOST, "target"))["status"] == "closed"
             assert not await tmux.has_session("target")
+    asyncio.run(run())
+
+
+def test_lane_stale_generation_refuses_before_ruling_or_kill(tmp_path):
+    async def run():
+        async with daemon(tmp_path, lane_owned=True) as (store, sessions, tmux, close):
+            await tmux.new_session("target", COMMAND)
+            target = await sessions.open(HOST, "target", provider="codex")
+            rulings = close.lane_rulings
+            await rulings._record_ownership({
+                "requester_stream_id": MANAGER,
+                "requester_generation": (await store.fetch_session(HOST, "manager"))["session_generation"],
+                "ruling_request_id": "fixture-admission",
+            }, HOST + ":target", target["session_generation"])
+            reply = await close("target", expected_generation="prior-generation")
+            await rulings.stop()
+            assert reply["type"] == "close.error" and reply["error_code"] == "lifecycle_generation_mismatch", reply
+            assert await tmux.has_session("target")
+            assert (await store.fetch_session(HOST, "target"))["status"] == "open"
+            assert await store.submit(lambda c: c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 0
     asyncio.run(run())

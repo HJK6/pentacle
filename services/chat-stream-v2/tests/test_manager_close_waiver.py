@@ -383,3 +383,118 @@ def test_operator_lane_close_without_report_does_not_use_manager_waiver():
             assert not any(r["action"].startswith("manager_close")
                            for r in await env.store.lifecycle_authority_audit_rows(limit=50))
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("direct_parent", [False, True])
+@pytest.mark.parametrize("reported", [False, True])
+def test_lane_rejects_stale_generation_before_reserving_ruling(direct_parent, reported):
+    async def run():
+        async with journey() as env:
+            manager = await lane_manager(env, direct_parent=direct_parent)
+            if reported:
+                await env.report()
+            with pytest.raises(VerbError) as error:
+                await env.server._on_close({"host": LANE_HOST, "session_name": "lane",
+                    "request_id": "stale-lane", "reason": "Retire exact acceptance generation",
+                    "expected_generation": "prior-generation", "_auth_context": manager})
+            assert error.value.code == "lifecycle_generation_mismatch"
+            assert env.tmux.kills == 0
+            assert (await env.store.fetch_session(LANE_HOST, "lane"))["status"] == "open"
+            assert await env.store.submit(lambda c: c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 0
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stored", ["prior-generation", None])
+@pytest.mark.parametrize("release", ["approve", "timeout"])
+@pytest.mark.parametrize("reported", [False, True])
+def test_legacy_lane_intent_preserves_generation_on_restart(stored, release, reported, tmp_path):
+    from assistant_lane_rulings import _canonical, _digest
+    from test_approved_close_retry import Journey
+    async def run():
+        async with journey(tmp_path / "sessions.db") as env:
+            await lane_manager(env)
+            if reported:
+                await env.report()
+            create = env.rulings._create
+
+            async def legacy_create(**fields):
+                intent = fields["intent"]
+                if stored is None:
+                    intent.pop("expected_generation", None)
+                else:
+                    intent["expected_generation"] = stored
+                return await create(**fields)
+
+            # Model the old writer before reservation/notice, keeping the
+            # durable digest and outbound notice consistent with that writer.
+            env.rulings._create = legacy_create
+            await env.request()
+            env.rulings._create = create
+            original = await env.row()
+            intent = json.loads(original["intent_json"])
+            restarted = Journey(env.store, env.tmux, env.config)
+            restarted.rid = env.rid
+            try:
+                if stored is None:
+                    assert (await restarted.request())["ruling_request_id"] == env.rid
+                if release == "approve":
+                    await restarted.approve()
+                else:
+                    await env.store.submit(lambda c: c.execute(
+                        "UPDATE v2_assistant_lane_rulings SET deadline=0 WHERE ruling_request_id=?", (env.rid,)))
+                    await restarted.rulings.tick()
+                row = await restarted.row()
+                assert row["intent_json"] == _canonical(intent)
+                assert row["intent_digest"] == _digest(intent)
+                if stored is None:
+                    assert row["state"] == "done" and env.tmux.kills == 1
+                else:
+                    assert row["state"] in {"approved_but_not_closed", "release_blocked"}
+                    assert json.loads(row["outcome_json"])["error"] == "target_generation_changed"
+                    assert env.tmux.kills == 0
+                    assert (await env.store.fetch_session(LANE_HOST, "lane"))["status"] == "open"
+            finally:
+                await restarted.rulings.stop()
+    asyncio.run(run())
+
+
+def test_lane_omitted_generation_is_frozen_and_explicit_retry_matches():
+    async def run():
+        async with journey() as env:
+            manager = await lane_manager(env)
+            await env.request()
+            row = await env.row()
+            assert json.loads(row["intent_json"])["expected_generation"] == row["target_generation"]
+            reply = await env.server._on_close({"type": "close", "host": LANE_HOST, "session_name": "lane",
+                "request_id": "close-lane", "reason": "accepted lane finished", "defer_if_working": True,
+                "expected_generation": row["target_generation"], "_auth_context": manager})
+            await env.rulings.stop()
+            assert reply["ruling_request_id"] == env.rid
+            assert (await env.row())["intent_json"] == row["intent_json"]
+    asyncio.run(run())
+
+
+def test_manager_generation_change_before_ruling_does_not_rebind_intent():
+    async def run():
+        async with journey() as env:
+            manager = await lane_manager(env)
+            fetch = env.store.fetch_session
+            reads = 0
+
+            async def changing_fetch(host, name):
+                nonlocal reads
+                if (host, name) == (LANE_HOST, "lane"):
+                    reads += 1
+                    if reads == 2:
+                        await env.store.open_session(host, name, session_generation="replacement")
+                return await fetch(host, name)
+
+            env.store.fetch_session = changing_fetch
+            with pytest.raises(VerbError) as error:
+                await env.server._on_close({"host": LANE_HOST, "session_name": "lane",
+                    "request_id": "generation-race", "reason": "Retire exact acceptance generation",
+                    "_auth_context": manager})
+            assert error.value.code == "lifecycle_generation_mismatch"
+            assert env.tmux.kills == 0
+            assert await env.store.submit(lambda c: c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 0
+    asyncio.run(run())
