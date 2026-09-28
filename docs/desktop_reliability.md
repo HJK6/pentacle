@@ -54,7 +54,8 @@ mode or detaching the last pane releases the pin; inactive streams remain
 subject to the weighted cache budget. Detaching also invalidates the stream's
 lazy-load marker, so reopening fetches authoritative history again. A durable
 answer group or a synthetic last-message summary alone does not count as loaded
-message history.
+message history, even when answers exceed the visible window. An ordinary row
+elsewhere in retained history counts as loaded without widening the painted window.
 
 A long-lived web page checks the served build on reconnect and at the existing
 ten-minute polling interval. A different known build rehydrates the open chat

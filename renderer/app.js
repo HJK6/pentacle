@@ -1021,8 +1021,13 @@ function ensureChatEventsLoaded(streamId, retry = false) {
 
 // Rows the store holds for a slot's stream, before synthesized durable answers.
 function chatDetailHasRows(detail) {
-  return !!detail && ((detail.remainingCount || 0) > 0 || (detail.transcriptItems || []).some(item =>
-    !String(item?.id || '').startsWith('fallback:') && item?.eventCase !== 'agent-question-answer'));
+  const hasOrdinaryRow = candidate => (candidate?.transcriptItems || []).some(item =>
+    !String(item?.id || '').startsWith('fallback:') && item?.eventCase !== 'agent-question-answer');
+  if (hasOrdinaryRow(detail)) return true;
+  if (!(detail?.remainingCount > 0)) return false;
+  // Hidden rows may themselves be answers. Inspect retained history only when
+  // the visible window has no ordinary row; never emit render telemetry here.
+  return hasOrdinaryRow(selectSlotSessionDetail(detail.streamId, showTurnDurationEnabled(), false, 'all'));
 }
 
 function syncChatHistoryPins() {
