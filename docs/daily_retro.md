@@ -68,6 +68,8 @@ and `body`, options (`label`/`value`/optional `description`), accepting `owner`,
 `checkpoint` and `success_measure`. A non-question disposition uses `disposition`.
 Include the authority reference when work is already authorized. The helper stores
 the version hash, question attempts and answer provenance inside that work spec.
+The helper locks `state_root/locks/<work_id>.lock`, outside shared memory, and
+checks the `spec.md` byte preimage before each update so concurrent edits survive.
 Approval remains authorization until an observed success or honest blocker is
 recorded there through the normal delivery process.
 

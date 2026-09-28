@@ -362,6 +362,44 @@ def test_authorized_work_and_review_require_durable_version(config, monkeypatch)
     asyncio.run(run())
 
 
+def test_decision_lock_stays_in_private_state(config, monkeypatch):
+    async def run():
+        path = source(config.memory_root, "one")
+        monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+        rpc = Transport()
+        authorized = {**proposal(), "disposition": "authorized", "authority": "Existing fixture grant"}
+        pipeline = retro.Pipeline(config, rpc)
+        before = {p for p in config.memory_root.rglob("*")}
+        record = await pipeline.decision("spec_one", authorized)
+        assert record["state"] == "authorized" and not rpc.questions
+        assert {p for p in config.memory_root.rglob("*")} == before
+        assert (config.state_root / "locks/spec_one.lock").is_file()
+        assert retro.proposals(path.read_text())[authorized["id"]]["version"] == record["version"]
+        with retro.locked(config.state_root / "locks/spec_one.lock"):
+            with pytest.raises(BlockingIOError):
+                await pipeline.decision("spec_one", authorized)
+        assert await pipeline.decision("spec_one", authorized) == record
+    asyncio.run(run())
+
+
+def test_decision_spec_compare_and_swap_preserves_concurrent_edit(config, monkeypatch):
+    async def run():
+        path = source(config.memory_root, "one")
+        monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+        original_save = retro.save_proposals
+        concurrent = path.read_bytes() + b"\n## Concurrent note\nKeep this edit.\n"
+        def moved(work, preimage, records):
+            work.write_bytes(concurrent)
+            return original_save(work, preimage, records)
+        monkeypatch.setattr(retro, "save_proposals", moved)
+        authorized = {**proposal(), "disposition": "authorized", "authority": "Existing fixture grant"}
+        rpc = Transport()
+        with pytest.raises(RuntimeError, match="preimage moved"):
+            await retro.Pipeline(config, rpc).decision("spec_one", authorized)
+        assert path.read_bytes() == concurrent and not rpc.questions
+    asyncio.run(run())
+
+
 def sol_shaped_packet():
     """Citation/evidence structure from the first real analytical rehearsal."""
     candidate = {k: 'bounded fixture finding' for k in ('id', 'problem', 'consequence', 'prior_occurrences', 'existing', 'action', 'benefit', 'effort', 'risk', 'uncertainty', 'owner', 'decision')}

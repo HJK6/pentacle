@@ -533,7 +533,7 @@ class Pipeline:
         if disposition in {"authorized", "investigate"} and not proposal.get("authority"):
             raise ValueError("existing authority reference required")
         version = digest({k: proposal.get(k) for k in ("scope", "title", "body", "options")})
-        with locked(path.parent / ".daily-retro.lock"):
+        with locked(self.settings.state_root / "locks" / f"{work_id}.lock"):
             preimage = path.read_bytes()
             text = preimage.decode()
             records = proposals(text)
