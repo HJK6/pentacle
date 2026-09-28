@@ -12,6 +12,54 @@ python3 services/chat-stream-v2/tools/run_gate.py unit
 
 For a websocket smoke check, start a daemon on an ephemeral loopback port with temporary session and notification stores, then exercise `welcome`, `hello`, `list_sessions`, `spawn`, `send`, and `close`. The test should use a fake provider executable that writes deterministic output to a disposable tmux session.
 
+## Recorded ingress probe rehearsal
+
+`services/chat-stream-v2/tools/provider_wrapper_probe.py` retains the existing
+fleet smoke ownership and nonce checks. Its `assert_provider_source` oracle
+accepts a native one-line USER only with the exact provider record UUID and
+source/display text. XML-wrapped content still requires the strict grammar,
+retained raw content and exact provider source. An absent satellite optional
+raw field is not permission to omit the actual source record.
+
+The reused L4 native AX oracle is
+`services/chat-stream-v2/tools/mobile_probe_oracle.py`. A shown Read card must
+have the exact daemon tool-use card identity and the renderer's
+`Tool result. Read <owned-path>` label. Hidden mode must omit tool cards.
+Navigation identity, compact answer, metadata exclusion, and loaded image
+controls remain required. Positive operator controls additionally require
+native non-meta provider USER records and a PNG image block for the attachment;
+daemon attachment metadata or caption text alone cannot pass.
+
+Run the focused harness controls with:
+
+```bash
+python3 -m pytest services/chat-stream-v2/tests/test_provider_wrapper_probe.py services/chat-stream-v2/tests/test_provider_wrappers.py
+```
+
+Replay recorded source/events and saved AX captures with malformed UUID,
+display, XML, route, authentication, navigation and card controls before any
+live window. Keep fixture remapping and mocked UI results explicitly separate
+from recorded inputs. A dry-run must intercept subprocess calls in imported
+L4 helpers too; deny native/browser transports and allow only the exact offline
+shared-model invocation. Reuse the existing L2/L4 client helpers rather than
+creating another measurement harness.
+
+Live provider probes require a coordinator's resource window and any required
+test-target exception. The initial prompt declares every step, including the
+useful finite foreground scratch pytest job; queued journeys require
+`--foreground-job 'HOST=python3 /absolute/scratch/job.py probe'`. No wait-only
+busy task is used. The oracle checks foreground tool parameters, pending
+pytest descendants in the owned pane ancestry, and absence of a tool result
+immediately before resolving the notification.
+
+Bind the harness source commit separately from the observed running daemon
+artifact/PID. Replay cannot pass live typed-coordinate, actual PNG,
+idle hidden/shown mobile, web, queued-mobile or closed-session visual cells.
+The recorded work-item matrix owns their individual status and prerequisites.
+Finally cleanup must report exact expected/closed seats and browsers and
+expected/revoked credentials, including when capture or CDP close fails.
+Keep raw receipts and host configuration outside the public source tree.
+
 ## Renderer walk
 
 The renderer walk may use a browser automation client or a DOM test. Seed one synthetic session, wait for the sidebar row, send a fixed prompt, and assert both the state update and the rendered transcript row. A telemetry counter alone is not render evidence.
