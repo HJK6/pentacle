@@ -29,6 +29,8 @@ backoff on failure, kill switch `--disable-notification-expiry`.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import asyncio
 import functools
 import json
@@ -768,7 +770,11 @@ class Notify:
         try:
             await self._await_ready()
             if verb == "prompt.ask":
-                return await self._prompt_ask(msg, request_id)
+                # Ask admission cannot slip behind a handoff's transfer/close.
+                producer = str((msg.get("envelope") or {}).get("producer_stream_id") or "") if isinstance(msg.get("envelope"), dict) else ""
+                lock = getattr(self._sessions, "_lifecycle_lock", None)
+                async with lock(*self._sessions.split(producer)) if callable(lock) and ":" in producer else nullcontext():
+                    return await self._prompt_ask(msg, request_id)
             if verb == "prompt.status":
                 qid = str(msg.get("question_id") or "")
                 question = await self._db.call("get_agent_question", qid)
@@ -1077,7 +1083,8 @@ class Notify:
         try:
             record = await self._db.call("resolve_notification", nid, action_kind="resolved",
                                          by=actor_provenance["by"], actor_provenance=actor_provenance,
-                                         selections=[], text=text, note=note, v2_answer_delivery=self._answer_owner(question))
+                                         selections=[], text=text, note=note, v2_answer_delivery=self._answer_owner(question),
+                                         expected_question_owner=(question["producer_stream_id"], question.get("producer_session_generation")))
         except NotificationTerminalState:
             return await self._db.call("get_agent_question", qid), None, True
         replayed = bool(record.get("_resolution_replayed"))
@@ -1125,6 +1132,7 @@ class Notify:
             record = await self._db.call(
                 "resolve_notification", nid, action_kind=action_kind, by=actor_provenance["by"],
                 actor_provenance=actor_provenance, choice=choice,
+                expected_question_owner=(question["producer_stream_id"], question.get("producer_session_generation")),
                 v2_answer_delivery=owner, selections=selections, custom_text=custom_text, note=note,
                 action_id=str(action.get("action_id") or "") if action and action.get("action_id") else None,
                 label=str(action.get("label") or "") if action and action.get("label") else None,
@@ -1153,7 +1161,8 @@ class Notify:
         try:
             record = await self._db.call(
                 "resolve_notification", nid, action_kind="resolved", by=actor_provenance["by"],
-                actor_provenance=actor_provenance, note=note
+                actor_provenance=actor_provenance, note=note,
+                expected_question_owner=(question["producer_stream_id"], question.get("producer_session_generation")),
             )
         except NotificationTerminalState:
             q = await self._db.call("get_agent_question", qid)
@@ -1536,6 +1545,16 @@ class Notify:
         for nid in nids:
             await self._broadcast_notification_by_id(nid)
         return nids
+
+    async def transfer_questions_for_handoff(self, source: dict, successor: dict) -> int:
+        """Caller retains the source/successor lifecycle locks through close."""
+        await self._await_ready()
+        nids = await self._db.call("transfer_open_questions_for_handoff",
+            source["stream_id"], source["session_generation"],
+            successor["stream_id"], successor["session_generation"])
+        for nid in nids:
+            await self._broadcast_notification_by_id(nid)
+        return len(nids)
 
     async def _expire_if_stale(self, question: dict | None) -> dict | None:
         """If an open question's asker is gone/replaced, expire the pair and

@@ -85,7 +85,9 @@ def test_post_step_reparent_failure_is_rejected_by_installed_proof_oracle(monkey
                 injected.append(args);raise RuntimeError('injected post-step reparent failure')
             monkeypatch.setattr(sessions,'reparent_children',fail_reparent)
             ctl=SpawnCtl(store,sessions,tmux=sessions.tmux)
-            await ctl._finish_handoff({'handoff_from_stream_id':HOST+':source'},HOST+':successor')
+            disposition = await ctl._finish_handoff({'handoff_from_stream_id':HOST+':source'},HOST+':successor')
+            assert disposition['state'] == 'incomplete' and disposition['stage'] == 'children'
+            assert (await store.fetch_session(HOST, 'source'))['status'] == 'open'
             assert injected==[(HOST+':source',HOST+':successor')]
             rows={}
             for name in ('source','successor','witness'):

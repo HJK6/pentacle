@@ -3305,6 +3305,24 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
 
         return await self.submit(_op)
 
+    async def record_handoff_outcome(self, host: str, session_name: str, request_id: str,
+                                     disposition: dict[str, Any]) -> bool:
+        """Attach post-step truth to this request's existing delivered receipt."""
+        def op(conn: sqlite3.Connection) -> bool:
+            row = conn.execute("SELECT delivery_receipt FROM v2_spawn_outcomes"
+                               " WHERE host=? AND session_name=? AND request_id=?",
+                               (host, session_name, request_id)).fetchone()
+            if row is None:
+                return False
+            receipt = json.loads(row[0] or "{}")
+            receipt["handoff"] = disposition
+            conn.execute("UPDATE v2_spawn_outcomes SET delivery_receipt=?"
+                         " WHERE host=? AND session_name=? AND request_id=?",
+                         (json.dumps(receipt), host, session_name, request_id))
+            conn.commit()
+            return True
+        return await self.submit(op)
+
     async def cancel_reservation_fenced(
         self, host: str, session_name: str, request_id: str,
     ) -> dict[str, Any]:

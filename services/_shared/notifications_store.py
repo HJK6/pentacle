@@ -1701,6 +1701,62 @@ class NotificationStore:
         )
         return transitioned
 
+    def transfer_open_questions_for_handoff(
+        self, source: str, source_generation: str, successor: str, successor_generation: str,
+    ) -> list[str]:
+        """Move ordinary OPEN question/card pairs atomically, preserving identity.
+
+        Terminal answers and generation-bound approval/proxy authority never move.
+        The caller holds both seats' lifecycle fences until predecessor retirement.
+        """
+        if not all((source, source_generation, successor, successor_generation)) or source == successor:
+            raise InvalidNotification("handoff requires distinct generation-bound seats")
+        moved: list[str] = []
+        with self._lock:
+            self._require_open()
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._conn.execute(
+                    "SELECT q.question_id,q.notification_id,q.producer_session_generation,q.envelope,"
+                    " n.answer_to_stream_id FROM agent_questions q JOIN notifications n"
+                    " ON n.notification_id=q.notification_id"
+                    " WHERE q.producer_stream_id=? AND q.state=? AND n.state=?",
+                    (source, QUESTION_STATE_OPEN, STATE_OPEN),
+                ).fetchall()
+                for row in rows:
+                    envelope = json.loads(row["envelope"])
+                    generation = row["producer_session_generation"] or envelope.get("producer_session_generation")
+                    if generation and generation != source_generation:
+                        continue
+                    context = envelope.get("context")
+                    if isinstance(context, str):
+                        try:
+                            context = json.loads(context)
+                        except ValueError:
+                            context = None
+                    if (envelope.get("_assistant_composite_question_proxy") is True
+                            or isinstance(context, dict) and context.get("schema") == "HandoffModelChangeApprovalV1"):
+                        continue
+                    if row["answer_to_stream_id"] != source:
+                        raise InvalidNotification("handoff question/card owner mismatch")
+                    envelope.setdefault("_handoff_origin", {
+                        "producer_stream_id": source, "producer_session_generation": generation,
+                    })
+                    envelope.update(producer_stream_id=successor, producer_session_generation=successor_generation)
+                    self._conn.execute(
+                        "UPDATE agent_questions SET producer_stream_id=?,producer_session_generation=?,envelope=?"
+                        " WHERE question_id=?",
+                        (successor, successor_generation, json.dumps(envelope), row["question_id"]),
+                    )
+                    self._conn.execute("UPDATE notifications SET answer_to_stream_id=? WHERE notification_id=?",
+                                       (successor, row["notification_id"]))
+                    moved.append(row["notification_id"])
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        return moved
+
     def expire_open_questions_for_producer(
         self,
         producer_stream_id: str,
@@ -1889,6 +1945,7 @@ class NotificationStore:
         effective_spawn_spec: dict[str, Any] | None = None,
         actor_provenance: dict[str, Any] | None = None,
         v2_answer_delivery: dict[str, Any] | None = None,
+        expected_question_owner: tuple[str, str | None] | None = None,
         now: str | None = None,
     ) -> dict:
         """Resolve an ``open`` notification via an operator/system action.
@@ -1982,6 +2039,13 @@ class NotificationStore:
                 if row["state"] == STATE_RUNNING and existing_intent == requested_intent:
                     raise NotificationResolutionInProgress(notification_id)
                 raise NotificationResolutionConflict(notification_id)
+            if expected_question_owner is not None:
+                current = self._conn.execute(
+                    "SELECT producer_stream_id,producer_session_generation FROM agent_questions WHERE notification_id=?",
+                    (notification_id,),
+                ).fetchone()
+                if current is None or tuple(current) != expected_question_owner:
+                    raise InvalidNotification("question ownership changed; retry against the current owner")
             question: dict[str, Any] | None = None
             normalized_answer: dict[str, Any] | None = None
             if selections is not None or text is not None or custom_text is not None or (

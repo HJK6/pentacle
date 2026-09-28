@@ -2896,12 +2896,7 @@ class Server:
             code = "lifecycle_generation_mismatch"
         if code is None:
             children = await self.sessions._live_children(sid)
-            pending = []
-            for reservation in await self.store.reservations(include_expired=True):
-                raw = reservation.get("payload")
-                intent = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
-                if str((intent.get("open_fields") or {}).get("parent_stream_id") or "") == sid:
-                    pending.append(reservation)
+            pending = await self.sessions._pending_child_spawns(sid)
             code = await self.sessions.assistant.manager_fences(
                 target, generation, msg, children=children, pending_spawns=pending)
         if code is None and await self.store.find_report(

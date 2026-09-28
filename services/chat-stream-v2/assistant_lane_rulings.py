@@ -682,7 +682,9 @@ class AssistantLaneRulings:
                     return
                 failed_state = ("approved_but_not_closed" if current["action"] in {"session_close", "composite_close"}
                                 and current["state"] == "approved" else "release_blocked")
-                await self._mark(rid, failed_state, {"error": str(exc)[:300]})
+                await self._mark(rid, failed_state, {"error": str(exc)[:300],
+                    "error_code": getattr(exc, "code", "release_failed"),
+                    **getattr(exc, "extra", {})})
                 return
             await self._mark(rid, "done", result)
 
