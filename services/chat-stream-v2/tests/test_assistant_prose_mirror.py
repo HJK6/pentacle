@@ -721,13 +721,13 @@ def test_published_dispatch_final_with_different_markdown_is_not_mirrored():
     asyncio.run(_go())
 
 
-async def _normalized_turn_event(store, *, provider, kind, text, identity, session="turn-session", final=False, legacy=False, timestamp=None):
+async def _normalized_turn_event(store, *, provider, kind, text, identity, session="turn-session", final=False, legacy=False, timestamp=None, sidechain=False):
     from claude_jsonl_norm import normalize_claude_jsonl_record
     from codex_rollout_norm import normalize_codex_rollout_record
     stamp = timestamp or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     if provider == "claude":
         record = {"type": "assistant" if kind == "ASSIST_TEXT" else "user", "uuid": identity,
-                  "sessionId": session, "timestamp": stamp,
+                  "sessionId": session, "timestamp": stamp, "isSidechain": sidechain,
                   "message": {"role": "assistant" if kind == "ASSIST_TEXT" else "user",
                               "id": identity, "stop_reason": "end_turn" if final else "tool_use",
                               "content": [{"type": "text", "text": text}]}}
@@ -747,6 +747,47 @@ async def _normalized_turn_event(store, *, provider, kind, text, identity, sessi
          "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}
     ], limit=100)
     return result[0]
+
+
+def test_sidechain_final_does_not_fence_primary_published_turn():
+    import json
+
+    async def _go():
+        store = Store(":memory:")
+        store.start()
+        composite = None
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="claude", pane_pid="4242")
+            async def dispatch(_route):
+                return {"delivery": "landed"}
+            composite = AssistantComposite(store, config=_config(root["session_generation"]), dispatch=dispatch)
+            await composite.ensure_projection()
+            route = await _route_for(composite, store, "sidechain-question")
+            envelope = json.loads(route["route_json"])["direct_envelope"]["wire_body"]
+            await _normalized_turn_event(store, provider="claude", kind="USER", text=envelope, identity="primary-user")
+            await composite.publish({
+                "request_id": "publish:" + route["dispatch_id"], "composite_stream_id": ASSISTANT,
+                "dispatch_id": route["dispatch_id"], "reply_to_message_id": "sidechain-question",
+                "publish_kind": "prose", "response_state": "final", "message": "**Published answer**",
+                "attachment_ids": [], "evidence_refs": [],
+            }, actor_stream_id=ROOT)
+            # Preserve sidechain ingestion/fallback; its provider final is not a primary boundary.
+            side = await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT",
+                text="**Published answer**", identity="sidechain-final", final=True, sidechain=True)
+            seq = await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT",
+                text="Primary answer with different formatting", identity="primary-final", final=True)
+            assert await store.assistant_mirror_event_for_source(seq) is None
+            assert len(await _answer_rows(store)) == 1
+            assert side is not None and seq is not None  # source transcript preserved
+            next_seq = await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT",
+                text="**Published answer**", identity="ordinary-final", final=True)
+            assert await store.assistant_mirror_event_for_source(next_seq) is not None
+            assert len(await _answer_rows(store)) == 2
+        finally:
+            if composite is not None:
+                await composite.stop()
+            store.stop()
+    asyncio.run(_go())
 
 
 def test_structured_dispatch_turn_correlation_and_next_non_dispatch_reply():

@@ -1773,6 +1773,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
                 "AND json_extract(event_json,'$.raw.source_session_identity')=? "
                 "AND COALESCE(json_extract(event_json,'$.raw.jsonl_record_uuid'),'')<>? "
                 "AND json_extract(event_json,'$.kind')='ASSIST_TEXT' "
+                "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
                 "AND NOT ((COALESCE(json_extract(event_json,'$.raw.transport'),'')='claude-jsonl' "
                 "AND COALESCE(json_extract(event_json,'$.raw.stop_reason'),'')='tool_use') "
                 "OR (COALESCE(json_extract(event_json,'$.raw.transport'),'')='codex-rollout' "

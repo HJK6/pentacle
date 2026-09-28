@@ -127,7 +127,7 @@ USER envelope and the same dispatch already has a final prose publication. It
 checks the source stream, current generation, session lifecycle and transcript
 identity. Claude `end_turn` and Codex `final_answer` delimit turns; separate text
 blocks from one provider record share that boundary. Classified commentary and
-tool-use text do not end the turn. Legacy assistant rows without classification
+tool-use text and sidechain finals do not end the primary turn. Legacy assistant rows without classification
 metadata conservatively fence the search during an upgrade.
 
 This correlation does not depend on identical answer text, publication age, or
