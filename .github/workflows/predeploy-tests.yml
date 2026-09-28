@@ -16,12 +16,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: sudo apt-get update && sudo apt-get install -y tmux lsof zsh
+      - run: sudo apt-get update && sudo apt-get install -y tmux lsof zsh ffmpeg
       - run: npm ci
       - run: npm run prestart
       - run: npm test
       - run: python3 scripts/test_check_public_residue.py
       - run: python3 scripts/check_public_residue.py
+      - name: Portable microphone contracts
+        run: |
+          python3 -m pip install pytest==8.4.2 numpy==2.5.3 scipy==1.18.1
+          PYTHONPATH=mic-server python3 -m pytest mic-server/test
+      - name: Bounded dashboard dependency
+        working-directory: vendor/dashboard-library
+        run: |
+          npm run build
+          npm run check:dist
+          npm test
       - run: python -m pip install -r services/chat-stream-v2/requirements.txt -e services/agent-orch
       - name: Install Chrome for the web E2E gate
         run: |

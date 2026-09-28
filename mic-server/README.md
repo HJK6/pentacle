@@ -1,46 +1,13 @@
-# Optional local microphone service (contract)
+# Optional local microphone service
 
-This directory documents a privacy-minimized, loopback-only microphone adapter.
-It is optional and is disabled unless explicitly enabled by the local
-configuration.
+Public source includes `mic_server.py`, the listener/meeting modules and configured local-action helpers. Source publication does not enable or restart a microphone service. The server starts in off mode; device/model provisioning and runtime activation are separate operator-controlled steps.
 
-## Principles
+The default bind is loopback `127.0.0.1:7780`. `MIC_BIND_HOST` is configurable, but the public local adapter contract uses loopback; sensitive routes reject non-loopback clients. This source does not provision authentication for exposing the service. Point the desktop/web `micServerUrl` at the configured service and enable `features.mic` only when the intended service is ready. See [desktop configuration](../docs/desktop_config.md).
 
-- Bind to `127.0.0.1` by default.
-- Keep captured text and audio state in memory only.
-- Do not upload audio, copy it to a remote host, or write transcripts by default.
-- Expose a small status and mode API so a desktop client can show consent state.
-- Treat every mode change as an explicit user action.
+`GET /status` reports mode, recognition and audio health. `POST /mode/on` and `/mode/off` change capture state; calibration and meeting operations use their existing handlers. Meeting mode writes transcripts under the local `transcripts/` directory. Calibration, recordings, vocabulary, transcripts and launcher receipts are local data and remain ignored. Rolling audio retention is disabled unless `MIC_AUDIO_BUFFER_DIR` is explicitly configured; its keep operation preserves selected audio and feedback locally.
 
-## Run
+Local host-directed actions require comma-separated single-word host labels in `MIC_LOCAL_ACTIONS_HOSTS`. `MIC_LOCAL_ACTIONS_DEFAULT_HOST`, when set, must belong to that list. Missing host configuration cannot silently select a machine. `MIC_LOCAL_ACTIONS` enables the optional router; `MIC_LOCAL_ACTIONS_WAKE=shared` shares Bart's wake, while `separate` uses the product wake “Hey Pentacle”. Bart/Bartimaeus remains the assistant identity.
 
-This repository ships the contract and the helper modules (`audio_device.py`,
-`clipboard.py`), not a server entrypoint. Run a service that implements the
-API below, bound to `127.0.0.1:7780` (the client default), and point the
-desktop or web host at it with `micServerUrl` (see
-[desktop configuration](../docs/desktop_config.md)). Keep `features.mic`
-disabled until that service answers `GET /status`. No non-loopback bind is
-supported by the public contract.
+Speech requires an absolute `MIC_VOICE_SPEAKER_SCRIPT` in both modes. `MIC_VOICE_SPEAKER_MODE=local` also requires an executable local file. SSH mode requires `MIC_VOICE_SPEAKER_SSH` and uses remote `python3`; the caller provisions the script/interpreter. Text travels as stdin JSON, with bounded deadlines and a matching completion receipt. No private script or interpreter fallback is shipped.
 
-## Minimal API
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/status` | Current mode and capture health |
-| `POST` | `/mode/on` | Begin an explicitly requested local mode |
-| `POST` | `/mode/off` | Stop capture and clear in-memory state |
-| `POST` | `/calibrate/start` | Begin a local calibration sample |
-| `POST` | `/calibrate/stop` | End calibration and discard the sample |
-
-POST bodies are JSON. A successful response has the shape
-`{"ok": true, "mode": "on"}`; failures use
-`{"ok": false, "error": "..." }`. The service rejects requests from
-non-loopback clients.
-
-## Data handling
-
-The public adapter should report only coarse health fields such as
-`stream_open`, `selected_device`, and `health_state`. It should not expose
-audio payloads or personal text through its status response. If a downstream
-application wants to save data, it must ask for consent and document its own
-retention policy separately.
+The standard listener needs caller-provisioned audio and ASR dependencies. MLX AppleASR imports lazily and is optional; portable tests fake hardware/model/process boundaries and do not download models. Platform launcher/recovery files are source tools requiring explicit template/output/plist inputs; publishing them is not installation or signing proof.

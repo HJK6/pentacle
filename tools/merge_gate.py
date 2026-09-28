@@ -20,7 +20,7 @@ ORIGIN_RE = re.compile(
     r"^(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)"
     r"(HJK6/(?:pentacle|pentacle-private))(?:\.git)?$"
 )
-PUBLIC_WORKFLOW_SHA256 = "92e5b508dfd16921d6aad6a7df49bd90dc2295eab9821cc5b817e3d58302bc0f"
+PUBLIC_WORKFLOW_SHA256 = "401ac4338e921171d7037966d1b671b8feb42722cff395952bc7034e60767104"
 WORKFLOWS = {
     "HJK6/pentacle": (".github/workflows/predeploy-tests.yml", "Public checks"),
     "HJK6/pentacle-private": (".github/workflows/chat-stream-v2-smoke.yml", "chat-stream-v2-smoke"),
@@ -30,6 +30,7 @@ PUBLIC_REQUIRED_STEPS = frozenset({
     "Run python3 scripts/test_check_public_residue.py",
     "Run python3 scripts/check_public_residue.py",
     "Source integrity after Chrome install",
+    "Portable microphone contracts", "Bounded dashboard dependency",
     "Web mode E2E gate",
     "Daemon and CLI checks",
     "Source integrity at gate end",

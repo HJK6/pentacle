@@ -5,6 +5,7 @@ const path = require('path');
 const { closedChatSlot } = require('./closed_chat_scenario');
 const { questionFreeText } = require('./question_free_text_scenario');
 const { runGridSplit } = require('./grid_split_scenario');
+const { publicChatRendererContracts } = require('./public_chat_renderer_contracts');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
 // page (window.cc over the websocket) and a chat-stream-v2 daemon. web_gate.js
@@ -442,6 +443,7 @@ const SCENARIOS = [
   ['coloured-host-glyphs', colouredHostGlyphs],
   ['slot-attach-type-resize-kill', slotAttachTypeResizeKill],
   ['chat-transcript-paint', chatTranscriptPaint],
+  ['public-chat-renderer-contracts', publicChatRendererContracts],
   // Runs before closed-chat-slot (which retires the seeded fixture) and reloads
   // the page at both ends, so it neither depends on nor disturbs its neighbours.
   ['slot-survives-cc-reconnect', slotSurvivesCcReconnect],

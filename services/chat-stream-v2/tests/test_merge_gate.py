@@ -23,10 +23,11 @@ OLD = "a" * 40
 CANDIDATE = "b" * 40
 TAG_OBJECT = "c" * 40
 WORKFLOW_TEXT = "name: Public checks\non:\n  push:\njobs:\n  checks:\n    steps:\n      - run: npm test\n"
-EXPECTED_PUBLIC_SHA256 = "92e5b508dfd16921d6aad6a7df49bd90dc2295eab9821cc5b817e3d58302bc0f"
+EXPECTED_PUBLIC_SHA256 = "401ac4338e921171d7037966d1b671b8feb42722cff395952bc7034e60767104"
 EXPECTED_PUBLIC_STEPS = {
     "Run npm test", "Run python3 scripts/test_check_public_residue.py",
     "Run python3 scripts/check_public_residue.py", "Source integrity after Chrome install",
+    "Portable microphone contracts", "Bounded dashboard dependency",
     "Web mode E2E gate", "Daemon and CLI checks", "Source integrity at gate end",
 }
 EXISTING_ANNOTATION = "\n".join((
@@ -402,3 +403,17 @@ def test_verify_tag_refuses_annotation_for_a_different_candidate(monkeypatch: py
     monkeypatch.setattr(merge_gate, "_command", command)
     with pytest.raises(merge_gate.GateError, match="does not bind"):
         merge_gate.verify_tag(CANDIDATE)
+
+
+@pytest.mark.parametrize("required", ["Portable microphone contracts", "Bounded dashboard dependency"])
+@pytest.mark.parametrize("change", ["missing", "skipped", "failed"])
+def test_portable_candidate_coverage_cannot_be_omitted(monkeypatch, required, change):
+    _, _, jobs, calls = _fake_evidence(monkeypatch)
+    steps = jobs["jobs"][0]["steps"]
+    if change == "missing":
+        steps[:] = [step for step in steps if step["name"] != required]
+    else:
+        next(step for step in steps if step["name"] == required)["conclusion"] = change
+    with pytest.raises(merge_gate.GateError, match=required):
+        merge_gate.promote(CANDIDATE, 123)
+    assert not any(call[:2] == ["git", "push"] for call in calls)

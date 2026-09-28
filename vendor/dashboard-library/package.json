@@ -1,0 +1,13 @@
+{
+  "name": "pentacle-dashboard-library",
+  "version": "0.1.0",
+  "description": "Bounded optional Pentacle dashboard definitions",
+  "private": true,
+  "main": "dist/dashboard-library.js",
+  "scripts": {
+    "build": "node build.js",
+    "check:dist": "node scripts/check-dist.js",
+    "test": "node --test tests/public_boards.test.js"
+  },
+  "license": "UNLICENSED"
+}

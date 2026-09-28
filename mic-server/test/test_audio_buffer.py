@@ -239,3 +239,100 @@ def test_failed_copy_removes_only_own_partial_saved_files(tmp_path, monkeypatch)
         assert existing.exists()
     finally:
         buffer.close()
+
+
+def test_raw_callback_records_during_finalization_and_off_flushes(tmp_path, monkeypatch):
+    import audio_buffer
+    from .test_listener_lifecycle import install_listener_import_fakes, import_fresh_module
+    install_listener_import_fakes(monkeypatch)
+    buffer = audio_buffer.AudioBuffer(tmp_path)
+    monkeypatch.setattr(audio_buffer, 'get_audio_buffer', lambda: buffer)
+    module = import_fresh_module('always_on')
+    listener = module.AlwaysOnListener()
+    monkeypatch.setattr(listener, '_emit_callback_health', lambda *args: None)
+    listener.running = True
+    listener._finishing_capture = True
+    try:
+        listener._audio_callback(np.full((480, 1), .25, dtype=np.float32), 480, None, None)
+        listener.stop()
+        files = list(buffer.rolling.glob('*.wav'))
+        assert len(files) == 1
+        with wave.open(str(files[0])) as audio:
+            assert audio.getframerate() == 48000 and audio.getnframes() == 480
+            assert set(np.frombuffer(audio.readframes(480), dtype='<i2')) == {8192}
+        listener._audio_callback(np.zeros((480, 1)), 480, None, None)
+        assert buffer.seen_frames == 480
+        assert buffer.worker.is_alive()
+    finally:
+        buffer.close()
+
+
+def test_single_thread_http_off_and_status_work_during_copy(tmp_path, monkeypatch):
+    import audio_buffer
+    import mic_server
+    import threading
+    from http.server import HTTPServer
+    from urllib.request import Request, urlopen
+    buffer = audio_buffer.AudioBuffer(tmp_path, sample_rate=4)
+    entered, release = threading.Event(), threading.Event()
+    original = audio_buffer.shutil.copyfile
+    def blocked(*args):
+        entered.set()
+        assert release.wait(5)
+        return original(*args)
+    monkeypatch.setattr(audio_buffer.shutil, 'copyfile', blocked)
+    monkeypatch.setattr(mic_server, 'get_audio_buffer', lambda: buffer)
+    monkeypatch.setattr(mic_server, 'stop_all', lambda: None)
+    monkeypatch.setattr(mic_server, 'always_on_listener', None)
+    monkeypatch.setattr(mic_server, 'state', dict(mic_server.state, mode='off', last_error=None))
+    server = HTTPServer(('127.0.0.1', 0), mic_server.MicHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    def request(path, body=None):
+        req = Request(f'http://127.0.0.1:{server.server_port}'+path,
+                      data=None if body is None else json.dumps(body).encode(),
+                      headers={'Content-Type': 'application/json'})
+        with urlopen(req, timeout=1) as response:
+            return response.status, json.load(response)
+    try:
+        buffer.submit(np.zeros(4), started_at=100)
+        status, admitted = request('/audio/keep', {'start': 100, 'end': 101})
+        assert status == 202 and entered.wait(1)
+        assert request('/status')[1]['audio_buffer']['keep']['state'] == 'running'
+        assert request('/mode/off', {})[0] == 200
+        assert request('/status')[1]['mode'] == 'off'
+        release.set()
+        wait_for(lambda: buffer.snapshot()['keep']['state'] == 'complete')
+        assert buffer.snapshot()['keep']['id'] == admitted['id']
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(2)
+        buffer.close()
+
+
+def test_disabled_default_and_cli_rejects_ambiguous_ranges(monkeypatch):
+    import audio_buffer
+    import audio_buffer_cli
+    monkeypatch.delenv('MIC_AUDIO_BUFFER_DIR', raising=False)
+    assert audio_buffer.get_audio_buffer() is None
+    for args in [['keep'], ['keep', '--last-seconds', '-1'], ['keep', '--start', '2026-09-12T13:00:00']]:
+        with pytest.raises(SystemExit):
+            audio_buffer_cli.main(args)
+
+
+def test_cli_waits_for_its_single_job_and_prints_saved_path(monkeypatch, capsys):
+    import audio_buffer_cli as cli
+    calls = []
+    def request(path, body=None):
+        calls.append((path, body))
+        if path == '/audio/keep':
+            assert body['end']-body['start'] == 60
+            return {'id': 'one'}
+        return {'audio_buffer': {'keep': {'id': 'one', 'state': 'complete', 'result': {'directory': '/local/saved/one'}}}}
+    monkeypatch.setattr(cli, 'request', request)
+    cli.main(['keep', '--last-seconds', '60', '--feedback', 'missed wake'])
+    assert '/local/saved/one' in capsys.readouterr().out
+    assert sum(path == '/audio/keep' for path, _ in calls) == 1
+
