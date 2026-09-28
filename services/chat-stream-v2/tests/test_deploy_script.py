@@ -552,5 +552,5 @@ def test_post_activation_smoke_uses_installed_machine_file(
         assert errors[configuration] in stamp["fleet_smoke"]["detail"]
         code, output, error = _run_main(monkeypatch, capsys, stamp=stamp)
         assert code == deploy_mod.EXIT_FLEET_SMOKE_FAILED == 6
-        assert "Do NOT retry" in error
+        assert "do NOT retry the deploy" in error
         assert json.loads(output)["daemon_runtime_readback"]["pid"] == 999

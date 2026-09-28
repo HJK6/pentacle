@@ -1117,8 +1117,14 @@ def _apply_post_activation(
                 **last_observed,
             }
             if runtime_confirmed:
+                # Full smoke follows installed configuration, independent of caller overrides.
+                machines_file = _launchd_environment(service.launchd_label).get("PENTACLE_MACHINES_FILE", "")
                 smoke = runner(
                     (
+                        "/usr/bin/env",
+                        "-u", "PENTACLE_MACHINES_JSON",
+                        "-u", "PENTACLE_SMOKE_HOSTS",
+                        f"PENTACLE_MACHINES_FILE={machines_file}",
                         str(_venv_python(repo, service)),
                         str(repo / "services/chat-stream-v2/tools/spawn_fleet_smoke.py"),
                     ),
