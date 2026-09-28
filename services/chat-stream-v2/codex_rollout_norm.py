@@ -147,7 +147,9 @@ def normalize_codex_rollout_record(
         if not text.strip():
             return []
         if role == "assistant":
-            return _stamp_jsonl_event_identity([make("ASSIST_TEXT", text)], record_uuid)
+            return _stamp_jsonl_event_identity(
+                [make("ASSIST_TEXT", text, {"phase": payload.get("phase")})], record_uuid,
+            )
         if role == "developer":
             # Injected instruction blocks. Never a turn — see module docstring.
             return _stamp_jsonl_event_identity(

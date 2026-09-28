@@ -1019,3 +1019,31 @@ def test_other_dispatch_publication_does_not_suppress_released_turn():
         finally:
             store.stop()
     asyncio.run(_go())
+
+
+def test_unknown_turn_metadata_preserves_dispatch_free_ingest():
+    async def _go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="claude", pane_pid="4242")
+            composite = AssistantComposite(store, config=_config(root["session_generation"]))
+            await composite.ensure_projection()
+            for i, raw in enumerate((None, [], "unstructured", {
+                "transport": "claude-jsonl", "stop_reason": "end_turn",
+                "source_session_identity": ["invalid-type"], "jsonl_record_uuid": "record",
+            }, {
+                "transport": "codex-rollout", "phase": "final_answer",
+                "source_session_identity": "session", "jsonl_record_uuid": {"invalid": "type"},
+            })):
+                event = {**_source_event(f"Unknown metadata reply {i}"), "raw": raw}
+                seqs = await store.append_session_events_lifecycle_cas([
+                    {"stream_id": ROOT, "event": event, "identity": f"unknown:{i}",
+                     "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}
+                ], limit=20)
+                assert seqs[0] and await store.assistant_mirror_event_for_source(seqs[0]) is not None
+            assert len(await _answer_rows(store)) == 5
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(_go())

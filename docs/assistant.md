@@ -113,3 +113,32 @@ request one explicit completion notice with its durable report ID. Routine
 progress should remain in the owner's visible chat unless a supported
 composite publication binding exists. No duplicate owner or reparenting is
 needed solely for presentation.
+
+## Direct reply mirroring
+
+A direct-primary dispatch publishes its final answer through `assistant publish`
+with the dispatch's fixed request key and `response_state=final`. Publish the
+exact answer, preserving Markdown and whitespace. The canonical prose event is
+the authoritative reply; the shared transcript renderer handles its Markdown.
+
+The source transcript remains intact. In the same ingest transaction, the store
+omits a mirrored final when that source turn contains the route's exact frozen
+USER envelope and the same dispatch already has a final prose publication. It
+checks the source stream, current generation, session lifecycle and transcript
+identity. Claude `end_turn` and Codex `final_answer` delimit turns; separate text
+blocks from one provider record share that boundary. Classified commentary and
+tool-use text do not end the turn. Legacy assistant rows without classification
+metadata conservatively fence the search during an upgrade.
+
+This correlation does not depend on identical answer text, publication age, or
+whether publication preceded source transcript ingestion. A following ordinary
+final still mirrors, even when it repeats the published answer. Active direct
+routes retain prepublication suppression through ambiguous delivery; a proven
+failed delivery releases it. Unclassified events retain the existing short-lived
+exact-text fallback. Existing historical duplicate events are not rewritten.
+
+Focused coverage is in `tests/test_assistant_prose_mirror.py` and
+`tests/test_codex_rollout_norm.py` under `services/chat-stream-v2`, including an
+isolated authenticated WebSocket journey. Renderer coverage is in
+`test/shared_transcript_view.test.ts`. Tests use isolated streams/databases and
+never send dispatch probes to a configured live assistant.

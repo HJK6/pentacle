@@ -1721,7 +1721,7 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
         if not separator:
             return
         source = conn.execute(
-            "SELECT s.status,g.generation FROM sessions s "
+            "SELECT s.status,s.created_at,g.generation FROM sessions s "
             "JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
             "WHERE s.host=? AND s.session_name=?", (host, name),
         ).fetchone()
@@ -1752,7 +1752,64 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
         ).fetchone()
         if open_route is not None:
             return
-        recent = conn.execute(
+        raw = source_event.get("raw")
+        raw = raw if isinstance(raw, dict) else {}
+        transcript = raw.get("source_session_identity")
+        record = raw.get("jsonl_record_uuid")
+        structured_final = bool(isinstance(transcript, str) and transcript
+                               and isinstance(record, str) and record
+                               and not raw.get("is_sidechain") and (
+            raw.get("transport") == "claude-jsonl" and raw.get("stop_reason") == "end_turn"
+            or raw.get("transport") == "codex-rollout" and raw.get("phase") == "final_answer"
+        ))
+        if structured_final:
+            # Ingest order belongs to the source transcript; canonical publication
+            # can precede even its USER row. A sibling block in this same provider
+            # record is not a previous turn. Unknown legacy assistant rows fence
+            # the search too, preventing old dispatches crossing a metadata upgrade.
+            boundary = conn.execute(
+                "SELECT event_id FROM session_event_tail WHERE stream_id=? "
+                "AND session_created_at=? AND event_id<? "
+                "AND json_extract(event_json,'$.raw.source_session_identity')=? "
+                "AND COALESCE(json_extract(event_json,'$.raw.jsonl_record_uuid'),'')<>? "
+                "AND json_extract(event_json,'$.kind')='ASSIST_TEXT' "
+                "AND NOT ((COALESCE(json_extract(event_json,'$.raw.transport'),'')='claude-jsonl' "
+                "AND COALESCE(json_extract(event_json,'$.raw.stop_reason'),'')='tool_use') "
+                "OR (COALESCE(json_extract(event_json,'$.raw.transport'),'')='codex-rollout' "
+                "AND COALESCE(json_extract(event_json,'$.raw.phase'),'')='commentary')) "
+                "ORDER BY event_id DESC LIMIT 1",
+                (source_stream_id, source["created_at"], source_event_id, transcript, record),
+            ).fetchone()
+            published_turn = conn.execute(
+                "SELECT r.dispatch_id FROM v2_assistant_composite_routes r "
+                "JOIN v2_assistant_composite_publications p "
+                "ON p.stream_id=r.stream_id AND p.dispatch_id=r.dispatch_id "
+                "JOIN session_event_tail u ON u.stream_id=r.route_target "
+                "AND json_extract(u.event_json,'$.text')="
+                "json_extract(r.route_json,'$.direct_envelope.wire_body') "
+                "WHERE r.stream_id=? AND r.route_target=? AND r.route_target_generation=? "
+                "AND r.routing_state='resolved' "
+                "AND json_extract(r.route_json,'$.admission_mode')='direct_primary' "
+                "AND p.publish_kind='prose' "
+                "AND json_extract(p.canonical_payload_json,'$.response_state')='final' "
+                "AND u.session_created_at=? AND u.event_id>? AND u.event_id<? "
+                "AND json_extract(u.event_json,'$.kind')='USER' "
+                "AND json_extract(u.event_json,'$.raw.source_session_identity')=? "
+                "AND COALESCE(json_extract(u.event_json,'$.raw.is_sidechain'),0)=0 LIMIT 1",
+                (binding[0], source_stream_id, source_generation, source["created_at"],
+                 boundary["event_id"] if boundary else 0, source_event_id, transcript),
+            ).fetchone()
+            if published_turn is not None:
+                log.info(
+                    "assistant mirror skipped published turn source_event_id=%s dispatch_id=%s",
+                    source_event_id, published_turn["dispatch_id"],
+                    extra={"subsystem": "assistant_mirror",
+                           "bug_ref": "pentacle__bart_reply_dedup_2026_09"},
+                )
+                return
+        # Keep the old fallback for unclassified events only. A known ordinary
+        # final must remain visible even when its text equals a recent publication.
+        recent = None if structured_final else conn.execute(
             "SELECT p.created_at FROM v2_assistant_composite_publications p "
             "JOIN v2_assistant_composite_routes r ON r.dispatch_id=p.dispatch_id "
             "WHERE p.stream_id=? AND p.publish_kind='prose' "
