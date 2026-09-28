@@ -4,7 +4,7 @@
 // icon shows only when both are known and they differ (an up-to-date or freshly
 // opened window, where own === served, never shows it). Full show/hide/click and
 // the live one-stale/one-fresh proof are covered by the headless web gate + live
-// Thoth proof (see spec Validation).
+// Runtime proof (see spec Validation).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
