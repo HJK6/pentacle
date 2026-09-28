@@ -170,3 +170,29 @@ def test_mobile_read_label_is_bound_to_exact_card(tmp_path):
         path.write_text(json.dumps(rows))
         with pytest.raises(AssertionError):
             mobile.validate(tmp_path, expected, model)
+
+
+def test_mobile_unloaded_nonempty_control_remains_a_refusal(tmp_path):
+    expected = {'stream': 'host:owned', 'provider_marker': 'PROBE_READ', 'meta_text': 'META_TEXT',
+                'notice_seq': 10, 'notification_id': 'owned-notice', 'read_use_ids': [11],
+                'owned_read_path': '/tmp/owned.png'}
+    model = {'views': [{}, {'detail': {'transcriptItems': [
+        {'id': '12', 'kind': 'TOOL_RESULT', 'text': 'nonempty result', 'displayRule': 'tool-result'}]}}]}
+    common = [{'AXLabel': 'PROBE_READ'}, {'AXLabel': 'Operator answered: Done'}]
+    for mode in ['hidden', 'shown']:
+        directory = tmp_path / ('mobile-' + mode); directory.mkdir()
+        (directory / 'navigation-identity.json').write_text(json.dumps({
+            'stream': expected['stream'], 'provider_marker': 'PROBE_READ',
+            'marker_visible': True, 'session_header_visible': True}))
+        rows = common + ([{'AXLabel': 'Tool result. Read /tmp/owned.png',
+                           'AXUniqueId': 'tool-result-card-11'},
+                          {'AXLabel': 'Load 5 earlier messages'}] if mode == 'shown' else [])
+        (directory / 'screen.ax.json').write_text(json.dumps(rows))
+    with pytest.raises(AssertionError, match='HARNESS_ERROR: mobile history not loaded'):
+        mobile.validate(tmp_path, expected, model)
+    path = tmp_path / 'mobile-shown/screen.ax.json'; rows = json.loads(path.read_text())
+    path.write_text(json.dumps(rows[:-1]))
+    with pytest.raises(AssertionError, match='PRODUCT_FAIL: mobile nonempty result card identity absent'):
+        mobile.validate(tmp_path, expected, model)
+    path.write_text(json.dumps(rows + [{'AXUniqueId': 'tool-result-card-12', 'AXLabel': 'Tool result. nonempty result'}]))
+    assert len(mobile.validate(tmp_path, expected, model)) == 2

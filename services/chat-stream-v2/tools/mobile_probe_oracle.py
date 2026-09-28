@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Assert captured native AX identities against authoritative daemon/model evidence."""
-import json,pathlib
+import json,pathlib,re
 LITERAL='[Image: original 1x1, displayed at 1x1. Multiply coordinates by 1 to map to original image.]'
 def validate(directory,expected,model):
     receipts=[]
@@ -22,6 +22,8 @@ def validate(directory,expected,model):
             assert actual_read_labels,'PRODUCT_FAIL: mobile owned Read tool invocation absent in shown preference'
             cards=[str(i['id']) for i in model['views'][1]['detail']['transcriptItems'] if i.get('kind')=='TOOL_RESULT' and i.get('text','').strip() and i.get('displayRule') not in ('activity:code-block','activity:question')]
             assert cards,'HARNESS_ERROR: no nonempty result positive control available'
+            if not any('tool-result-card-'+i in ids for i in cards) and any(re.search(r'\bLoad \d+ earlier messages\b', label) for label in labels):
+                raise AssertionError('HARNESS_ERROR: mobile history not loaded for nonempty result control')
             assert any('tool-result-card-'+i in ids for i in cards),'PRODUCT_FAIL: mobile nonempty result card identity absent in shown preference'
         else:
             assert not actual_read_labels,'PRODUCT_FAIL: mobile owned Read tool invocation leaked into hidden preference'
