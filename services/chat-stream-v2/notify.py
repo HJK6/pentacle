@@ -302,6 +302,7 @@ class Notify:
         sessions: Any = None,
         notice_store: Any = None,
         outbound: Any = None,
+        assistant_binding: Any = None,
     ) -> None:
         self._db = _StoreThread(db_path)
         self._comms = comms
@@ -309,6 +310,7 @@ class Notify:
         self._sessions = sessions
         self._notice_store = notice_store
         self._outbound = outbound
+        self._assistant_binding = assistant_binding
         self._answer_recovery_after = ""
         if outbound is not None:
             outbound.register_kind(NOTICE_KIND_NOTIFICATION_ANSWER, guard=self._answer_delivery_guard,
@@ -828,8 +830,8 @@ class Notify:
             return self._prompt_error(request_id, "stream_ownership_unverified",
                                       question_id=question_id,
                                       message="prompt.ask requires a verified producer stream token")
-        # Eligibility: only an OPEN, operator-visible seat may ask the operator.
-        # Hidden/subagent seats are told to ask their parent (by a normal tell).
+        # An open visible seat or the authenticated current assistant may ask.
+        # Other hidden/subagent seats must ask their parent by a normal tell.
         # Rechecked here under the current session inventory before creation.
         generation: str | None = None
         if self._sessions is not None:
@@ -842,19 +844,24 @@ class Notify:
                                           question_id=question_id,
                                           message="producer session is not open")
             generation = _nullable_text(row.get("session_generation")) or None
-            # Whitelist the operator-visible classes; every other visibility
-            # (hidden, subagent, nested, or any future/unknown value) must ask
-            # its parent rather than the operator.
+            # Other visibility classes require current-binding authentication.
             visibility = str(row.get("visibility") or "")
             if visibility not in ("default", "visible") and not assistant_proxy:
-                parent = _nullable_text(row.get("parent_stream_id")) or None
-                message = (
-                    "only an operator-visible seat may ask; ask your parent by a normal tell"
-                    if parent else
-                    "only an operator-visible seat may ask, and no parent is registered"
+                binding = await self._assistant_binding() if self._assistant_binding else {}
+                bound_assistant = bool(
+                    generation and isinstance(binding, dict)
+                    and binding.get("stream_id") == producer
+                    and auth.get("session_generation") == generation == binding.get("generation")
                 )
-                return self._prompt_error(request_id, "ask_parent", question_id=question_id,
-                                          parent_stream_id=parent, message=message)
+                if not bound_assistant:
+                    parent = _nullable_text(row.get("parent_stream_id")) or None
+                    message = (
+                        "only an operator-visible seat may ask; ask your parent by a normal tell"
+                        if parent else
+                        "only an operator-visible seat may ask, and no parent is registered"
+                    )
+                    return self._prompt_error(request_id, "ask_parent", question_id=question_id,
+                                              parent_stream_id=parent, message=message)
         if generation is not None:
             envelope = {**envelope, "producer_session_generation": generation}
 

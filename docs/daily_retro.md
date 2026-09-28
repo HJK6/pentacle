@@ -11,7 +11,11 @@ The producer reuses `tools/live_window` operator authentication, as the schedule
 fleet-smoke tool does. Its allowlist permits only owned spawn/await/close and
 current-binding reads plus exact retained REPORT send/receipt operations. Both
 workers self-close on terminal reports; cleanup passes their recorded generations.
-Questions and work review run only as the visible current assistant with seat credentials.
+Questions and work review run only as the open current assistant generation with
+seat credentials. The bound assistant may be hidden behind its operator composite.
+The daemon admits its ordinary durable `prompt.ask` only when the authenticated
+stream, session generation and current binding all agree. Other hidden seats
+still ask their parent; this path grants no consent or execution authority.
 
 Local JSON configuration (absolute paths; keep credentials outside source):
 
@@ -43,6 +47,9 @@ RunAtLoad catches missed executions after 05:00. Before 05:00 a timer invocation
 does nothing; authorized activation uses `--on-demand`. Install only when
 `/etc/localtime` resolves America/Chicago. Render the plist's interpreter, release,
 config and log paths as absolute values; lint and read back its 05:00 calendar.
+Use a durable service interpreter or the release's own virtual environment;
+record its resolved path, executable hash and dependency versions. Scratch output
+or temporary virtual environments must not appear in the production plist.
 
 assistant reads the retained `astra.json`, verifies evidence and chooses one disposition
 per candidate. A review result file contains `packet_hash` and `dispositions`, each
@@ -71,6 +78,10 @@ never authorize changed scope. Unknown status or inability to retire an old live
 question blocks a new ask. Intent commits before ask, making response-loss retries
 idempotent. Silence never grants authority. Re-run `decision` for each still-open
 normal work proposal after assistant replacement, using the stored proposal fields.
+Before that daemon admission is deployed, a refused hidden ask retains the entire
+proposal/version as `ask_blocked` and sends one durable REPORT to the bound assistant.
+Repeated calls reconcile that REPORT without retrying the question. Once the daemon
+is live, explicitly resume with `decision --retry-blocked`; silence never authorizes work.
 
 Focused isolated validation:
 
@@ -121,8 +132,9 @@ git archive "$RETRO_CANDIDATE" \
 Hash extracted bytes, pin interpreter/dependencies, save previous label/plist/config
 identities, and obtain the runtime-window owner's GATE before landing or activation.
 Use one batched window: owned test label bootstrap/print/kickstart/bootout, isolated
-installed rehearsal, production label bootstrap/calendar readback, initial real
-on-demand run, separate assistant review/decision-ready latency and cleanup receipts.
+installed rehearsal, initial real on-demand run and assistant review, then production
+label bootstrap/calendar readback. Retain separate delivery/decision-ready latency
+and cleanup receipts.
 Do not restart the daemon. Reject moved preimages.
 
 Rollback bootouts only `com.pentacle.daily-retro`, restores the exact previous

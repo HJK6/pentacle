@@ -454,8 +454,8 @@ class Pipeline:
             raise RuntimeError("only CURRENT assistant may ingest or prepare decisions")
         inspected = checked(await self.rpc.inspect_stream_once(self.config, actor), "inspect_stream.ok")
         row = inspected.get("session") or {}
-        if row.get("visibility") not in {"visible", "default"} or row.get("status") != "open" or row.get("session_generation") != binding["session_generation"]:
-            raise RuntimeError("visible current assistant generation required")
+        if row.get("status") != "open" or row.get("session_generation") != binding["session_generation"]:
+            raise RuntimeError("open current assistant generation required")
         return binding
 
     async def record_review(self, run_id, result):
@@ -491,7 +491,30 @@ class Pipeline:
             atomic(root / "review.json", receipt)
             return receipt
 
-    async def decision(self, work_id, proposal):
+    async def _blocked_report(self, path, preimage, records, record, attempt):
+        notice = attempt.get("blocked_report")
+        if notice is None:
+            target = attempt["producer"]
+            host, session = target.split(":", 1)
+            key = "retro-blocked-" + digest([self.settings.namespace, str(path), attempt["question_id"]])[:32]
+            notice = {"target": target, "request_id": key, "payload": {
+                "host": host, "session_name": session, "request_id": key, "optimistic_id": key,
+                "text": f"REPORT daily-retro decision blocked proposal={record['id']} version={record['version']} state=ask_blocked reason=ask_parent path={path}. No authorization or retry loop; after the current-assistant prompt admission is live, resume explicitly with decision --retry-blocked."}}
+            attempt["blocked_report"] = notice
+        records[record["id"]] = record
+        preimage = save_proposals(path, preimage, records)
+        if notice.get("confirmed"):
+            return record
+        receipts = checked(await self.rpc.send_receipt_once(self.config, notice["target"], notice["request_id"]), "send.receipt.get.ok")
+        landed = next((r for r in receipts.get("receipts", []) if r.get("delivery") == "landed" or r.get("state") == "landed"), None)
+        response = landed or await self.rpc.send_once(self.config, dict(notice["payload"]))
+        notice.update(receipt=response, confirmed=response.get("delivery") == "landed" or response.get("state") == "landed")
+        save_proposals(path, preimage, records)
+        if not notice["confirmed"]:
+            raise RuntimeError("blocked decision REPORT pending; exact notice retained")
+        return record
+
+    async def decision(self, work_id, proposal, *, retry_blocked=False):
         binding = await self.actor()
         path = work_path(self.settings, work_id)
         identity = proposal.get("id")
@@ -522,7 +545,7 @@ class Pipeline:
             live, answers = [], []
             for attempt in attempts:
                 status = await self.rpc.prompt_status_once(self.config, attempt["question_id"])
-                if status.get("type") == "prompt.error" and status.get("error_code") == "question_not_found" and attempt.get("state") == "intent":
+                if status.get("type") == "prompt.error" and status.get("error_code") == "question_not_found" and attempt.get("state") in {"intent", "blocked"}:
                     attempt["observed_state"] = "absent"
                     continue
                 checked(status, "prompt.status.ok")
@@ -556,6 +579,10 @@ class Pipeline:
             elif live:
                 record.update(state="pending")
                 record.pop("answer", None)
+            elif disposition == "propose" and old_version == version and record.get("state") == "ask_blocked" and not retry_blocked and any(
+                    a.get("state") == "blocked" and a["version"] == version for a in attempts):
+                attempt = next(a for a in reversed(attempts) if a.get("state") == "blocked" and a["version"] == version)
+                return await self._blocked_report(path, preimage, records, record, attempt)
             elif old_version == version and record.get("state") in {"rejected", "deferred", "authorized", "shipped"}:
                 pass
             elif proposal.get("disposition") in {"resolved", "duplicate", "no_change", "authorized", "investigate", "defer"}:
@@ -579,6 +606,10 @@ class Pipeline:
                 reply = await self.rpc.prompt_ask_once(self.config, {"type": "prompt.ask", "envelope": envelope,
                                                        "actions": prompt_protocol.notification_actions(envelope),
                                                        "request_id": question_id})
+                if reply.get("type") == "prompt.error" and reply.get("error_code") == "ask_parent":
+                    attempt.update(state="blocked", refusal=reply, blocked_at=now_iso())
+                    record.update(state="ask_blocked")
+                    return await self._blocked_report(path, preimage, records, record, attempt)
                 checked(reply, "prompt.ask.ok")
                 attempt.update(state="asked", receipt=reply, asked_at=now_iso())
             records[identity] = record
@@ -790,6 +821,7 @@ def main():
         elif name == "decision":
             cmd.add_argument("--work-id", required=True)
             cmd.add_argument("--proposal", required=True, help="JSON file path")
+            cmd.add_argument("--retry-blocked", action="store_true", help="Resume one blocked ask after daemon admission is live")
         else:
             cmd.add_argument("--workers-config", required=True)
             cmd.add_argument("--evidence-dir", required=True)
@@ -806,7 +838,7 @@ def main():
         elif args.command == "record-review":
             result = asyncio.run(pipeline.record_review(args.run_id, read(Path(args.result))))
         else:
-            result = asyncio.run(pipeline.decision(args.work_id, read(Path(args.proposal))))
+            result = asyncio.run(pipeline.decision(args.work_id, read(Path(args.proposal)), retry_blocked=args.retry_blocked))
     print(json.dumps(result, ensure_ascii=False))
 
 

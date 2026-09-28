@@ -420,6 +420,7 @@ async def run(args: argparse.Namespace) -> int:
         broadcast=server.broadcast,
         sessions=sessions,
         notice_store=store,
+        assistant_binding=assistant_composite.binding if assistant_composite.enabled else None,
     )
     server.notify = notify
     notify.consent_snapshot = server._consent_notifications_for_msg
