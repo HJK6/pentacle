@@ -339,6 +339,9 @@ def test_prepared_journey_uses_saved_action_and_cleans_owned_image(monkeypatch, 
     phase = {'resolved': False, 'image': None, 'timed': None}
     def host_command(host, *argv):
         host_commands.append(argv)
+        if len(argv) > 2 and argv[2] == probe.FOREGROUND_PROCESS:
+            return json.dumps({'pending_foreground_processes': [{
+                'owned_pane_in_ancestry': True, 'descendants': [{'command': 'python3 -m pytest tests'}]}]})
         return ''
     def rpc(payload, prefix):
         requests.append(payload)
@@ -346,17 +349,18 @@ def test_prepared_journey_uses_saved_action_and_cleans_owned_image(monkeypatch, 
         if kind == 'request_stream_events':
             return {'events': list(rows)}
         if kind == 'list_sessions':
-            return {'active': [{'stream_id': STREAM, 'working': False}]}
+            return {'active': [{'stream_id': STREAM, 'working': False, 'pane_pid': 123}]}
         if kind == 'prompt.status':
             return {'question': {'question_id': payload['question_id'], 'notification_id': notification['notification_id']}}
         if kind == 'notification.list':
             return {'notifications': [notification]}
         if kind == 'send':
-            if 'sleep 45;' in payload['text']:
-                timed = payload['text'].split('command now: ')[1].split('. After')[0]
+            if 'declared finite scratch validation command now:' in payload['text']:
+                timed = 'python3 /scratch/job.py probe'
                 phase['timed'] = timed
                 rows.append({'kind': 'TOOL_USE', 'raw': {'tool_name': 'Bash',
-                    'tool_input': {'command': timed}, 'tool_use_id': 'timed-tool'}, 'daemon_seq': 1})
+                    'tool_input': {'command': timed, 'timeout': 240000, 'run_in_background': False},
+                    'tool_use_id': 'timed-tool'}, 'daemon_seq': 1})
             if 'Use Read on exactly' in payload['text']:
                 image = payload['text'].split('exactly ')[1].split('. Then')[0]
                 phase['image'] = image
@@ -383,7 +387,7 @@ def test_prepared_journey_uses_saved_action_and_cleans_owned_image(monkeypatch, 
     monkeypatch.setattr(probe, '_host_command', host_command)
     monkeypatch.setattr(probe, '_owned_source_records', lambda host, sid: source)
     result = probe.notification_journey(HOST, STREAM, queued=queued, rpc=rpc,
-        wait_event=lambda *args: None, timeout=1)
+        wait_event=lambda *args: None, timeout=1, foreground_job='python3 /scratch/job.py probe')
     resolves = [r for r in requests if r['type'] == 'notification.resolve']
     assert len(resolves) == 1
     assert resolves[0]['action_id'] == 'saved-done-action'

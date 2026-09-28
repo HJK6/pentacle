@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -31,6 +33,7 @@ class OwnedImageCleanupError(RuntimeError):
 
 def assert_wrapper_receipt(
     receipt: dict, events: list[dict], *, stream_id: str, body: str, watermark: int,
+    source_record: dict | None = None,
 ) -> dict:
     """Independent oracle: assistant replies alone cannot satisfy this gate."""
     assert receipt.get("submission_confirmed") is True, "tell submission not confirmed"
@@ -41,7 +44,10 @@ def assert_wrapper_receipt(
     )]
     assert len(matches) == 1, "expected one post-watermark USER with exact display text"
     event = matches[0]
-    _assert_wrapper_event(event, body=body)
+    if source_record is None:
+        _assert_wrapper_event(event, body=body)
+    else:
+        assert_provider_source(event, body=body, record=source_record)
     return event
 
 
@@ -58,6 +64,124 @@ def _assert_wrapper_event(event: dict, *, body: str) -> None:
     )
     compact_raw = expected_raw[2:-1]
     assert (event.get("raw") or {}).get("provider_content") in (expected_raw, compact_raw), "raw envelope not retained"
+
+
+def assert_provider_source(event: dict, *, body: str, record: dict) -> dict:
+    """L2 oracle: native one-line source or the unchanged strict XML grammar."""
+    raw = event.get('raw') or {}
+    assert record.get('uuid') and record['uuid'] == raw.get('jsonl_record_uuid'), 'source/event UUID mismatch'
+    assert record.get('type') in ('user', 'attachment') and not record.get('isMeta'), 'source is not operator content'
+    container = record.get('attachment') if record['type'] == 'attachment' else record.get('message')
+    assert isinstance(container, dict), 'source content container missing'
+    if record['type'] == 'attachment':
+        assert container.get('type') == 'queued_command' and (container.get('origin') or {}).get('kind') == 'human', 'queued source is not human operator content'
+    else:
+        assert container.get('role', 'user') == 'user', 'source message role is not user'
+    content = container.get('prompt', container.get('content'))
+    if isinstance(content, list):
+        assert all(isinstance(block, dict) for block in content), 'malformed source blocks'
+        content = ''.join(block.get('text', '') for block in content if block.get('type') == 'text')
+    assert isinstance(content, str), 'owned source content is not text'
+    assert event.get('text') == body, 'source/body/display mismatch'
+    if '<pasted_content' in content or '</pasted_content' in content:
+        _assert_wrapper_event(event, body=body)
+        assert content == raw.get('provider_content'), 'actual XML source differs from retained provider content'
+        mode = 'strict-XML'
+    else:
+        assert '\n' not in body and '\r' not in body, 'plain-source exception is one-line only'
+        assert content == body, 'plain source/body/display mismatch'
+        if 'envelope_source' in raw:
+            assert raw['envelope_source'] == body, 'retained envelope/body mismatch'
+        assert not event.get('provider_wrapper'), 'plain source unexpectedly annotated as wrapper'
+        mode = 'native-one-line'
+    return {'mode': mode, 'daemon_seq': event.get('daemon_seq'), 'source_uuid': record['uuid'],
+            'source_sha256': hashlib.sha256(content.encode()).hexdigest()}
+
+
+# Existing L2/L4 process oracle: bind the pending pytest descendant to the owned pane.
+FOREGROUND_PROCESS = r'''import subprocess,json,sys,shlex; job,pane=sys.argv[1:]; rows=[]
+for line in subprocess.check_output(['ps','-axo','pid=,ppid=,stat=,args='],text=True).splitlines():
+ p=line.strip().split(None,3)
+ if len(p)==4:rows.append({'pid':int(p[0]),'ppid':int(p[1]),'state':p[2],'command':p[3]})
+byid={r['pid']:r for r in rows}; found=[]
+for r in rows:
+ try:a=shlex.split(r['command'])
+ except ValueError:continue
+ if len(a)==3 and a[1]==job and a[2]=='probe':
+  chain=[];cur=r
+  for _ in range(30):
+   chain.append(cur['pid'])
+   if cur['ppid'] not in byid:break
+   cur=byid[cur['ppid']]
+  descendants=[]
+  for candidate in rows:
+   cur=candidate
+   for _ in range(30):
+    if cur['ppid']==r['pid']:descendants.append(candidate);break
+    if cur['ppid'] not in byid:break
+    cur=byid[cur['ppid']]
+  found.append(dict(r,ancestor_pids=chain,owned_pane_in_ancestry=int(pane) in chain,descendants=descendants))
+print(json.dumps({'job_path':job,'pane_pid':int(pane),'pending_foreground_processes':found}))'''
+
+def initial_probe_prompt(seed: str, *, foreground_job: str | None = None) -> str:
+    """Declare the entire finite probe contract before any later instruction."""
+    job = (f'Run the useful finite scratch validation command {foreground_job} with Bash in the '
+           'foreground, timeout=240000 and run_in_background=false when instructed. '
+           if foreground_job else 'The idle cell has no foreground validation task. ')
+    return ('You are a disposable Pentacle ingress PRODUCT-TEST-TARGET. No production edits. '
+            'This initial contract authorizes all following finite steps: readiness and tell nonce replies; '
+            'create the disposable notification question using the supplied exact command; process its '
+            'authenticated operator answer; ' + job +
+            'use Read on the supplied owned PNG and reply with its marker; accept typed literal image '
+            'coordinate text and an actual PNG attachment as operator content and acknowledge their supplied '
+            'markers. Follow-up instructions supply exact paths, question ids and nonces for these steps. '
+            'Do not invent additional work. ' + seed)
+
+
+def finite_job_path(command: str) -> str:
+    """Accept the existing scratch job invocation, never a wait/busy substitute."""
+    argv = shlex.split(command)
+    if len(argv) != 3 or Path(argv[0]).name not in ('python3', 'python3.13') or argv[2] != 'probe':
+        raise RuntimeError('HARNESS_ERROR: expected python3 <finite-scratch-job.py> probe')
+    if not Path(argv[1]).is_absolute() or not argv[1].endswith('.py'):
+        raise RuntimeError('HARNESS_ERROR: finite scratch job must name an absolute Python script')
+    return argv[1]
+
+
+def assert_operator_controls(events: list[dict], records: list[dict], *, stream: str,
+                             literal: str, caption: str) -> list[dict]:
+    """L4 positive controls need native operator source, including real image blocks."""
+    proofs = []
+    for body in (literal, caption):
+        matches = [event for event in events if event.get('stream_id') == stream
+                   and event.get('kind') == 'USER' and event.get('provider') == 'claude'
+                   and event.get('text') == body]
+        assert len(matches) == 1, 'expected exactly one owned operator control'
+        event = matches[0]
+        sources = [record for record in records if record.get('uuid') ==
+                   (event.get('raw') or {}).get('jsonl_record_uuid')]
+        assert len(sources) == 1, 'operator control source UUID missing or ambiguous'
+        record = sources[0]
+        assert record.get('type') == 'user' and (record.get('message') or {}).get('role') == 'user', 'control is not native operator USER'
+        proof = assert_provider_source(event, body=body, record=record)
+        content = record['message']['content']
+        image_blocks = [block for block in content if isinstance(block, dict) and block.get('type') == 'image'] if isinstance(content, list) else []
+        if body == caption:
+            assert event.get('attachments') and image_blocks, 'real PNG attachment absent from daemon/provider control'
+            hashes = []
+            for block in image_blocks:
+                source = block.get('source') or {}
+                assert source.get('type') == 'base64' and source.get('media_type') == 'image/png', 'provider control image is not a base64 PNG'
+                try:
+                    image = base64.b64decode(source.get('data', ''), validate=True)
+                except (binascii.Error, ValueError, TypeError) as exc:
+                    raise AssertionError('malformed provider PNG control') from exc
+                assert image.startswith(b'\x89PNG\r\n\x1a\n'), 'provider control bytes are not PNG'
+                hashes.append(hashlib.sha256(image).hexdigest())
+            proof['provider_png_sha256'] = hashes
+        proofs.append({**proof, 'daemon_event_id': event['daemon_seq'], 'native_operator_user': True,
+                       'image_blocks': len(image_blocks)})
+    return proofs
 
 
 def _host_command(host: str, *argv: str) -> str:
@@ -113,9 +237,13 @@ def assert_notification_journey(events: list[dict], notification: dict, *, strea
 
 
 def notification_journey(host: str, stream: str, *, queued: bool, rpc, wait_event,
-                         timeout: float, evidence: dict | None = None) -> dict:
+                         timeout: float, evidence: dict | None = None,
+                         foreground_job: str | None = None) -> dict:
     """Create and resolve only this seat's disposable question, once."""
     result = evidence if evidence is not None else {}
+    if queued and not foreground_job:
+        raise RuntimeError('HARNESS_ERROR: queued cell requires an upfront-declared finite scratch job')
+    job_path = finite_job_path(foreground_job) if queued else None
     nonce = uuid.uuid4().hex
     qid, marker = 'q-wrapper-' + nonce, 'PENTACLE_ASKED_' + nonce
     def events():
@@ -153,17 +281,36 @@ def notification_journey(host: str, stream: str, *, queued: bool, rpc, wait_even
             return next(r for r in inventory['active'] if r['stream_id'] == stream)
         until(seat, lambda row: row.get('working') is False)
     if queued:
-        timed_command = f'sleep 45; printf {nonce}'
+        timed_command = foreground_job
         rpc({'type': 'send', 'host': host, 'session_name': stream.partition(':')[2],
-             'text': f'Run this exact harmless Bash command now: {timed_command}. After it completes, do nothing else.',
+             'text': f'Run the declared finite scratch validation command now: {timed_command}. '
+                     'Use Bash in the foreground with timeout=240000 and run_in_background=false. '
+                     'After it completes, report the result briefly and process the queued operator answer normally.',
              'optimistic_id': uuid.uuid4().hex}, 'send')
         active = until(events, lambda rows: any(e.get('kind') == 'TOOL_USE'
+            and (e.get('raw') or {}).get('tool_name') == 'Bash'
             and (e.get('raw') or {}).get('tool_input', {}).get('command') == timed_command for e in rows))
         busy_tool = next(e for e in active if e.get('kind') == 'TOOL_USE'
+            and (e.get('raw') or {}).get('tool_name') == 'Bash'
             and (e.get('raw') or {}).get('tool_input', {}).get('command') == timed_command)
+        tool_input = busy_tool['raw']['tool_input']
+        assert int(tool_input.get('timeout', 0)) >= 180000 and tool_input.get('run_in_background', False) is False, 'finite foreground tool contract mismatch'
         assert not any(e.get('kind') == 'TOOL_RESULT' and (e.get('raw') or {}).get('tool_use_id') ==
                        busy_tool['raw']['tool_use_id'] for e in active), 'timed tool already completed'
+        inventory = rpc({'type': 'list_sessions'}, 'list_sessions')
+        seat = next(row for row in inventory['active'] if row['stream_id'] == stream)
+        proof = json.loads(_host_command(host, 'python3', '-c', FOREGROUND_PROCESS, job_path, str(seat['pane_pid'])))
+        pending = proof['pending_foreground_processes']
+        if not pending or not all(row['owned_pane_in_ancestry'] for row in pending) or not any(
+            'pytest' in child['command'] for row in pending for child in row['descendants']
+        ):
+            raise RuntimeError('HARNESS_ERROR: owned pending finite scratch pytest process absent')
+        result['foreground_job'] = {'command': foreground_job, 'job_path': job_path,
+                                    'pre_resolve_process_proof': proof, 'active_tool': busy_tool}
     before = events()
+    if queued:
+        assert not any(e.get('kind') == 'TOOL_RESULT' and (e.get('raw') or {}).get('tool_use_id') ==
+                       busy_tool['raw']['tool_use_id'] for e in before), 'foreground task completed before resolve'
     watermark = max((int(e.get('daemon_seq', 0)) for e in before), default=0)
     result.update(watermark=watermark, busy_tool=busy_tool)
     resolved = rpc({'type': 'notification.resolve', 'notification_id': nid,
@@ -177,6 +324,7 @@ def notification_journey(host: str, stream: str, *, queued: bool, rpc, wait_even
     source_id = event.get('session_id')
     source = _owned_source_records(host, source_id)
     record = next(r for r in source if r.get('uuid') == event['raw']['jsonl_record_uuid'])
+    result['source_proof'] = assert_provider_source(event, body=event['text'], record=record)
     result.update(event=event, source_record=record, source_record_sha256=hashlib.sha256(
         json.dumps(record, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
     if queued:
@@ -247,6 +395,11 @@ def probe_cell(host: str, mode: str, args, output: Path) -> dict:
     closed: list[str] = []
     registered: list[str] = []
     try:
+        jobs = getattr(args, 'foreground_jobs', {})
+        if args.journeys and mode == 'promptless':
+            if host not in jobs:
+                raise RuntimeError('HARNESS_ERROR: queued cell has no declared finite scratch job')
+            finite_job_path(jobs[host])
         with smoke._operator_connection(args.url, args.token_path, args.timeout, registry) as (
             rpc, wait_ready, wait_event, register_owned, close_owned,
         ):
@@ -295,8 +448,15 @@ def probe_cell(host: str, mode: str, args, output: Path) -> dict:
                         break
                     assert now < deadline, "post-watermark USER ingest deadline exceeded"
                     time.sleep(min(0.1, deadline - now))
+                matched = next(event for event in replay['events'] if event.get('stream_id') == stream
+                    and event.get('provider') == 'claude' and event.get('kind') == 'USER'
+                    and event.get('text') == body and int(event.get('daemon_seq', 0)) > watermark)
+                source = _owned_source_records(host, matched['session_id'])
+                record = next(r for r in source if r.get('uuid') == matched['raw']['jsonl_record_uuid'])
+                evidence['wrapper_source_record'] = record
                 evidence["wrapper_event"] = assert_wrapper_receipt(
                     receipt, replay["events"], stream_id=stream, body=body, watermark=watermark,
+                    source_record=record,
                 )
                 inventory = rpc({"type": "list_sessions"}, "list_sessions")
                 row = next(r for r in inventory["active"] if r["stream_id"] == stream)
@@ -308,14 +468,21 @@ def probe_cell(host: str, mode: str, args, output: Path) -> dict:
                 if args.journeys:
                     notification_journey(host, stream, queued=(mode == 'promptless'),
                         rpc=capture_rpc, wait_event=wait_event, timeout=args.timeout,
-                        evidence=evidence.setdefault('journey', {}))
+                        evidence=evidence.setdefault('journey', {}),
+                        foreground_job=getattr(args, 'foreground_jobs', {}).get(host))
                 metrics["provider_wrapper"] = {"passed": True}
                 return metrics
+
+            def prepare(payload):
+                payload['initial_prompt'] = initial_probe_prompt(
+                    payload.get('initial_prompt', 'Reply exactly PENTACLE_PROBE_READY and await the declared steps.'),
+                    foreground_job=getattr(args, 'foreground_jobs', {}).get(host))
+                register_owned.prepare_owned_spawn(payload)
 
             evidence["cell"] = smoke.run_cell(
                 host, "claude", mode, rpc=capture_rpc, wait_ready=wait_ready, wait_event=wait_event,
                 verify_teardown=close, register_owned=register, close_owned=close,
-                prepare_owned_spawn=register_owned.prepare_owned_spawn, validate_session=validate,
+                prepare_owned_spawn=prepare, validate_session=validate,
                 rescue_teardown=lambda stream: smoke._rescue_teardown(
                     args.url, args.token_path, args.timeout, stream, registry),
             )
@@ -354,7 +521,21 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=smoke.DEFAULT_TIMEOUT)
     parser.add_argument("--journeys", action="store_true",
                         help="Also run idle/queued notification and owned-image Read cells in the runtime window")
+    parser.add_argument('--foreground-job', action='append', default=[], metavar='HOST=COMMAND',
+                        help='Upfront-declared existing finite scratch pytest job for each queued host')
     args = parser.parse_args()
+    args.foreground_jobs = {}
+    for declaration in args.foreground_job:
+        host, separator, command = declaration.partition('=')
+        if not separator or host not in args.hosts or host in args.foreground_jobs:
+            parser.error('foreground-job must uniquely declare a selected HOST=COMMAND')
+        try:
+            finite_job_path(command)
+        except RuntimeError as exc:
+            parser.error(str(exc))
+        args.foreground_jobs[host] = command
+    if args.journeys and set(args.foreground_jobs) != set(args.hosts):
+        parser.error('journeys requires a finite foreground-job declaration for every selected host')
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
     result = {"runtime": runtime_binding(args.runtime_checkout, args.candidate_sha, args.daemon_pid), "cells": []}
     for host in args.hosts:
