@@ -335,4 +335,3 @@ def test_cli_waits_for_its_single_job_and_prints_saved_path(monkeypatch, capsys)
     cli.main(['keep', '--last-seconds', '60', '--feedback', 'missed wake'])
     assert '/local/saved/one' in capsys.readouterr().out
     assert sum(path == '/audio/keep' for path, _ in calls) == 1
-
