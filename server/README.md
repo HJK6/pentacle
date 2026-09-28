@@ -381,3 +381,5 @@ The hermetic web gate also creates two isolated durable questions, self-closes o
 seeded chat, and checks slot/portal retirement with survivor preservation. Fixture
 self-tokens stay in private scratch files and are removed with the isolated daemon.
 The destructive fixture scenario is skipped for external `--profile` runs.
+
+Daemon summary inventories contain active sessions and omit persistence lifecycle fields. The host's `ChatStreamClient.snapshot()` materializes `status: 'open'` only when the wire row has no status property; explicit values, including `null` or `closed`, remain intact. Strict consumers such as microphone wake delivery can use that known active membership without treating bootstrap `state` as lifecycle or changing the daemon wire contract.

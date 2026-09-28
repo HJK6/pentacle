@@ -189,7 +189,10 @@ class ChatStreamClient {
       // Chat views fetch their own history with requestStreamEvents instead.
       events: includeEvents ? this._events.slice(-500) : [],
       drafts: { ...this._drafts },
-      sessions: this._sessions.slice(),
+      // Inventories contain active sessions. Summary wire rows omit persistence
+      // status; preserve any explicit value, including null or closed.
+      sessions: this._sessions.map(session => session && typeof session === 'object'
+        && !Object.hasOwn(session, 'status') ? { ...session, status: 'open' } : session),
       capabilities: { ...this._capabilities },
       schedules: this._schedules.slice(),
       limits: validatedLimits(this._limits),
