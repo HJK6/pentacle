@@ -3661,9 +3661,10 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
                     result = consent.key_operation(conn, verb, msg, auth, credentials)
                 else:
                     result = consent.transition(conn, verb, msg, auth, credentials, snapshot_at, protected_role)
+                refusal_code = "consent_pending_exists" if result.get("code") == "consent_pending_exists" else None
                 consent.audit(conn, verb, msg.get("challenge_id"),
                               {"identity": auth.get("operator_principal") or auth.get("stream_id")},
-                              snapshot_at, "applied")
+                              snapshot_at, "refused" if refusal_code else "applied", refusal_code)
             except (consent.ConsentError, lifecycle_authority.AuthorityError) as exc:
                 consent.audit(conn, verb, msg.get("challenge_id"),
                               {"identity": auth.get("operator_principal") or auth.get("stream_id")},

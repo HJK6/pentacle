@@ -45,6 +45,7 @@ import qa_dispatch
 import store_lifecycle_authority as lifecycle_authority
 
 import asyncio
+from contextlib import nullcontext
 import tmux_transport
 import hashlib
 import json
@@ -3017,23 +3018,35 @@ class SpawnCtl:
             except Exception:  # noqa: BLE001 - a reparent failure never fails the handoff
                 log.exception("handoff child reparent failed")
         src_host, src_name = handoff_from.split(":", 1)
-        source = await self.store.fetch_session(src_host, src_name)
+        policy = getattr(self.sessions, "assistant", None)
         try:
-            closed = await self.sessions.close(src_host, src_name, reason="handed_off", close_kind="handed_off")
+            async with policy.authority_lock if policy else nullcontext():
+                source = await self.store.fetch_session(src_host, src_name)
+                source_generation = str((source or {}).get("session_generation") or "")
+                auth = msg.get("_auth_context") or {}
+                scheduled = auth.get("service_actor") == "daemon:scheduler"
+                carry_allowed = not scheduled or (
+                    auth.get("token_verified") and auth.get("stream_id") == handoff_from
+                    and bool(source_generation) and auth.get("session_generation") == source_generation)
+                if scheduled and carry_allowed:
+                    grant = await self.store.lifecycle_authority_current()
+                    carry_allowed = (grant["stream_id"] == handoff_from
+                        and grant["session_generation"] == auth["session_generation"])
+                # Check the schedule's admitting generation before retiring the
+                # source, under the same lock that serializes grant changes.
+                closed = await self.sessions.close(src_host, src_name, reason="handed_off",
+                    close_kind="handed_off", expected_generation=source_generation)
+                if (policy is None or not policy.protects(source) or not carry_allowed
+                        or closed.get("failed") or closed.get("stale_generation") or closed.get("already_closed")):
+                    return
+                succ_host, succ_name = successor_stream_id.split(":", 1)
+                successor = await self.store.fetch_session(succ_host, succ_name)
+                moved = await self.store.lifecycle_authority_carry_on_handoff(
+                    handoff_from, source_generation, successor_stream_id,
+                    str((successor or {}).get("session_generation") or ""), policy.role)
         except VerbError as exc:
             log.info("handoff close of %s: %s", handoff_from, exc.code)
             return
-        policy = getattr(self.sessions, "assistant", None)
-        if (policy is None or not policy.protects(source) or closed.get("failed")
-                or closed.get("stale_generation") or closed.get("already_closed")):
-            return
-        succ_host, succ_name = successor_stream_id.split(":", 1)
-        successor = await self.store.fetch_session(succ_host, succ_name)
-        try:
-            async with policy.authority_lock:
-                moved = await self.store.lifecycle_authority_carry_on_handoff(
-                    handoff_from, str(source.get("session_generation") or ""), successor_stream_id,
-                    str((successor or {}).get("session_generation") or ""), policy.role)
         except Exception:  # noqa: BLE001 - authority stays with no one rather than failing the handoff
             log.exception("handoff lifecycle authority carry failed")
             return

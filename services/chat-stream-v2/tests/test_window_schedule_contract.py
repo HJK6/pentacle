@@ -624,6 +624,25 @@ def test_scheduled_handoff_preserves_source_and_intent(tmp_path) -> None:
         store.stop()
 
 
+@pytest.mark.parametrize('binding', ['current', 'legacy', 'mismatched'])
+def test_scheduled_handoff_uses_admission_owner_generation_not_reopened_owner(tmp_path, binding) -> None:
+    store, sessions, _comms, spawn, surface = harness(tmp_path)
+    try:
+        sessions.rows['hosta:requester']['session_generation'] = 'G1'
+        owner_auth = auth('hosta:requester')
+        if binding != 'legacy':
+            owner_auth['session_generation'] = 'G1' if binding == 'current' else 'stale'
+        inserted = schedule_insert(surface, handoff=True,
+            handoff_from_stream_id='hosta:requester', _auth_context=owner_auth)
+        # Dispatch must use the admission receipt, even after owner reopening.
+        sessions.rows['hosta:requester']['session_generation'] = 'G2'
+        run(surface._fire_schedule(inserted['schedule']['schedule_id']))
+        fired_auth = spawn.calls[0]['_auth_context']
+        assert fired_auth.get('session_generation') == ('G1' if binding == 'current' else None)
+    finally:
+        store.stop()
+
+
 @pytest.mark.parametrize(
     ("create_values", "row_key", "spawn_key", "expected"),
     [

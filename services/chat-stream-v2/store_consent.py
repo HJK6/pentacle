@@ -136,6 +136,7 @@ def view(row: dict) -> dict:
     result['challenge_bytes'] = encode(challenge_bytes(row))
     if row.get('lifecycle_receipt'):
         result['receipt'] = json.loads(row['lifecycle_receipt'])
+        result['approved_by_key_id'] = row['approved_by_key_id']
     return result
 
 

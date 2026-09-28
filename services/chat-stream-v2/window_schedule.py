@@ -404,6 +404,10 @@ class WindowSchedule:
         # Objective resolution is lineage-aware and needs the parent, computed below.
         request_id = _valid_uuid(msg.get("request_id"))
         kind, actor, seat = await self._actor(msg)
+        auth = msg.get("_auth_context") or {}
+        owner_generation = str(auth.get("session_generation") or "")
+        if kind != "seat" or owner_generation != str((seat or {}).get("session_generation") or ""):
+            owner_generation = ""
         if msg.get("agent_orch_attestation") is not None:
             raise VerbError("unsupported_configuration", "installation attestations are unsupported")
         if msg.get("initial_prompt_blob_sha"):
@@ -585,7 +589,8 @@ class WindowSchedule:
                 self._insert_receipt_tx(
                     conn, request_id=request_id, phase="row_committed", surface="schedule",
                     verb=verb, actor_kind=kind, actor_id=actor, payload_sha=digest,
-                    target_id=str(prior["schedule_id"]), measured={"state": prior["state"], "generation": prior["generation"]},
+                    target_id=str(prior["schedule_id"]), measured={"state": prior["state"], "generation": prior["generation"],
+                        "owner_session_generation": owner_generation or None},
                     result=result, measured_at=timestamp,
                 )
                 conn.commit()
@@ -859,6 +864,17 @@ class WindowSchedule:
                 prompt = base64.b64decode(str(schedule["prompt_b64"]), validate=True).decode("utf-8")
             except (ValueError, UnicodeDecodeError):
                 oracle_error = "invalid_prompt"
+        # Retain the admitting generation rather than resolving today's owner.
+        # Legacy schedules or missing admission receipts may fire, but cannot
+        # confer lifecycle authority during their handoff.
+        admission_receipt = await self._get_receipt(schedule["request_id"], "row_committed")
+        owner_generation = None
+        if (admission_receipt and admission_receipt["surface"] == "schedule"
+                and admission_receipt["verb"] == "schedule.insert"
+                and admission_receipt["actor_kind"] == "seat"
+                and admission_receipt["actor_id"] == schedule.get("owner_stream_id")
+                and admission_receipt["target_id"] == schedule_id):
+            owner_generation = _decode(admission_receipt.get("measured_state_json"), {}).get("owner_session_generation")
         spawn_msg = {
             # The durable schedule was owner-authorized at admission; this
             # internal identity is never accepted from a client payload.
@@ -866,6 +882,7 @@ class WindowSchedule:
                 "service_authenticated": True, "service_actor": "daemon:scheduler",
                 "token_verified": bool(schedule.get("owner_stream_id")),
                 "stream_id": schedule.get("owner_stream_id"),
+                "session_generation": owner_generation,
             },
             "type": "spawn", "request_id": dispatch["spawn_request_id"],
             "idempotency_key": dispatch["spawn_key"], "host": schedule["target_host"],

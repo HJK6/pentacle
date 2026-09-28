@@ -150,6 +150,9 @@ def test_cross_requester_supersede_and_cancel_are_refused(tmp_path):
         first = await c.request(requester)
         other = await c.request(stranger)
         assert first['challenge_id'] == other['challenge_id']
+        audit = await env.store.submit(lambda conn: conn.execute(
+            'SELECT result,refusal_code FROM v2_consent_audit ORDER BY id DESC LIMIT 1').fetchone())
+        assert tuple(audit) == ('refused', 'consent_pending_exists')
         await refused(c.call('consent.cancel', stranger, challenge_id=first['challenge_id']), 'consent_requester_required')
         next_challenge = await c.request(requester)
         assert next_challenge['challenge_id'] != first['challenge_id']
@@ -505,7 +508,8 @@ def test_real_handoff_finish_emits_informational_continuity_card(tmp_path, monke
             async def notification(self, msg):
                 records.append(msg)
         ctl.consent_notify = Notify()
-        auth = (await env.seat('bart')) if mode == 'live' else c.auth if mode == 'operator' else {'service_authenticated': True, 'service_actor': 'daemon:scheduler'}
+        auth = (await env.seat('bart')) if mode == 'live' else c.auth if mode == 'operator' else {
+            **(await env.seat('bart')), 'service_authenticated': True, 'service_actor': 'daemon:scheduler'}
         await ctl._finish_handoff({'handoff_from_stream_id': 'node-a:bart', 'reparent_children': False,
             '_auth_context': auth}, 'node-a:successor')
         assert (await env.grant())['stream_id'] == 'node-a:successor'
@@ -548,6 +552,11 @@ def test_real_socket_signed_designation_and_revoked_live_deny(tmp_path):
                 signature = c.sign(consent.decode(ch['challenge_bytes']))
                 approved = await rpc('consent.approve', challenge_id=ch['challenge_id'], key_id=c.key_id, signature=signature)
                 assert approved['receipt']['consent_id'] == ch['challenge_id']
+                # The phone's receipt predicate needs both the signer and receipt
+                # from the actual stored view, rather than a test-only reply.
+                assert approved['challenge']['state'] == 'approved'
+                assert approved['challenge']['approved_by_key_id'] == c.key_id
+                assert approved['challenge']['receipt']['consent_id'] == ch['challenge_id']
                 assert (await env.grant())['revision'] == 1
                 pending = await rpc('consent.request', action='lifecycle.revoke', expected_revision=1, reason='Wire revoke test')
                 c.registry.revoke(c.cid)
@@ -556,6 +565,80 @@ def test_real_socket_signed_designation_and_revoked_live_deny(tmp_path):
                 assert (await env.grant())['revision'] == 1
         finally:
             await env.server.close()
+    scenario(check)
+
+
+@pytest.mark.parametrize('binding', ['stale', 'legacy'])
+def test_scheduled_handoff_never_carries_unbound_or_prior_generation(tmp_path, monkeypatch, binding):
+    from spawnctl import SpawnCtl
+    monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'assistant')
+    async def check(env):
+        c = Ceremony(env, tmp_path)
+        await env.open('bart', role='assistant')
+        admitted_generation = await env.gen('bart')
+        await env.sessions.close('node-a', 'bart', close_kind='handed_off', reason='End G1')
+        await env.open('bart', role='assistant')
+        assert await env.gen('bart') != admitted_generation
+        await env.open('successor', role='assistant')
+        await c.enroll()
+        await c.approve(await c.request())
+        before = await env.grant()
+        auth = {'service_authenticated': True, 'service_actor': 'daemon:scheduler',
+                'token_verified': True, 'stream_id': 'node-a:bart'}
+        if binding == 'stale':
+            auth['session_generation'] = admitted_generation
+        ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
+        await ctl._finish_handoff({'handoff_from_stream_id': 'node-a:bart',
+            'reparent_children': False, '_auth_context': auth}, 'node-a:successor')
+        assert await env.grant() == before
+        assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'closed'
+    scenario(check)
+
+
+@pytest.mark.parametrize('reopen', [False, True])
+def test_real_schedule_admission_dispatch_and_carry_generation_boundary(tmp_path, monkeypatch, reopen):
+    import uuid
+    from spawnctl import SpawnCtl
+    from window_schedule import WindowSchedule
+    from test_window_schedule_contract import FakeSpawn, future_time, SPEC
+    monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'assistant')
+    async def check(env):
+        c = Ceremony(env, tmp_path)
+        fields = {'role': 'assistant', 'spec_ids': [SPEC], 'spec_binding_provenance': [{
+            'spec_id': SPEC, 'provenance': 'spawn_explicit', 'granting_principal': 'operator:fixture',
+            'granted_at': '2026-09-28T00:00:00Z'}]}
+        await env.open('bart', **fields)
+        admitted_generation = await env.gen('bart')
+        await c.enroll()
+        await c.approve(await c.request())
+        ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
+        native = FakeSpawn()
+        async def finish(msg, _host):
+            native.calls.append(msg)
+            await ctl._finish_handoff(msg, 'node-a:successor')
+            return {'type': 'spawn.ok', 'stream_id': 'node-a:successor'}
+        native.spawn = finish
+        surface = WindowSchedule(env.store, env.sessions, None, native, local_host='node-a')
+        surface.mark_store_ready()
+        inserted = await surface.schedule_insert({'type': 'schedule.insert', 'request_id': str(uuid.uuid4()),
+            'from_stream_id': 'node-a:bart', '_auth_context': await env.seat('bart'),
+            'handoff': True, 'handoff_from_stream_id': 'node-a:bart', 'role': 'assistant',
+            'spec_ids': [SPEC], 'objective': 'Continue the approved manager',
+            'fires_at_utc': future_time(), 'reparent_children': False})
+        if reopen:
+            await env.sessions.close('node-a', 'bart', close_kind='handed_off', reason='End G1')
+            await env.open('bart', **fields)
+            await c.approve(await c.request())  # independent phone grant for G2
+        await env.open('successor', role='assistant')
+        before = await env.grant()
+        await surface._fire_schedule(inserted['schedule']['schedule_id'])
+        assert native.calls[0]['_auth_context']['session_generation'] == admitted_generation
+        after = await env.grant()
+        if reopen:
+            assert after == before
+        else:
+            assert after['stream_id'] == 'node-a:successor'
+            assert after['revision'] == before['revision'] + 1
     scenario(check)
 
 
@@ -605,6 +688,122 @@ def test_key_revoke_waits_for_approved_commit_and_never_clears_grant(tmp_path, m
             await asyncio.gather(approving, *([revoking] if revoking else []))
         assert (await env.grant())['revision'] == 1
         await refused(c.request(), 'consent_no_active_key')
+    scenario(check)
+
+
+@pytest.mark.parametrize('first', ['approve', 'supersede'])
+def test_approve_vs_authorized_supersede_barrier(tmp_path, monkeypatch, first):
+    import asyncio
+    import threading
+    async def check(env):
+        c = Ceremony(env, tmp_path)
+        await env.open('bart', role='lead')
+        await c.enroll()
+        ch = await c.request()
+        entered, release, second_entered = threading.Event(), threading.Event(), threading.Event()
+        original_transition = consent.transition
+        first_verb = 'consent.approve' if first == 'approve' else 'consent.request'
+        def barrier(*args, **kwargs):
+            result = original_transition(*args, **kwargs)
+            if args[1] == first_verb:
+                entered.set()
+                assert release.wait(5)
+            return result
+        monkeypatch.setattr(consent, 'transition', barrier)
+        original_operation = env.store.consent_operation
+        async def observe(verb, *args, **kwargs):
+            if verb != first_verb:
+                second_entered.set()
+            return await original_operation(verb, *args, **kwargs)
+        monkeypatch.setattr(env.store, 'consent_operation', observe)
+        async def supersede():
+            return await c.call('consent.request', action='lifecycle.designate',
+                target_stream_id=ch['target_stream_id'], target_generation=ch['target_generation'],
+                expected_revision=ch['expected_revision'], reason='Authorized replacement')
+        first_task = asyncio.create_task(c.approve(ch) if first == 'approve' else supersede())
+        second_task = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            second_task = asyncio.create_task(supersede() if first == 'approve' else c.approve(ch))
+            await asyncio.sleep(0.02)
+            assert not second_entered.is_set()  # blocked at authority_lock, not merely Store's queue
+            assert not second_task.done()
+        finally:
+            release.set()
+            results = await asyncio.gather(first_task, *([second_task] if second_task else []), return_exceptions=True)
+        assert isinstance(results[0], dict)
+        assert isinstance(results[1], VerbError)
+        assert results[1].code == ('authority_revision_conflict' if first == 'approve' else 'consent_conflict')
+        status = await c.call('consent.status', challenge_id=ch['challenge_id'])
+        assert status['challenge']['state'] == ('approved' if first == 'approve' else 'superseded')
+        assert (await env.grant())['revision'] == (1 if first == 'approve' else 0)
+    scenario(check)
+
+
+@pytest.mark.parametrize('first', ['approve', 'expiry'])
+def test_approve_vs_expiry_barrier(tmp_path, monkeypatch, first):
+    import asyncio
+    import threading
+    async def check(env):
+        c = Ceremony(env, tmp_path)
+        await env.open('bart', role='lead')
+        await c.enroll()
+        ch = await c.request()
+        entered, release, second_entered = threading.Event(), threading.Event(), threading.Event()
+        original_transition, original_load = consent.transition, c.registry.load
+        if first == 'approve':
+            def barrier(*args, **kwargs):
+                result = original_transition(*args, **kwargs)
+                if args[1] == 'consent.approve':
+                    entered.set()
+                    assert release.wait(5)
+                return result
+            monkeypatch.setattr(consent, 'transition', barrier)
+        else:
+            def barrier_load(*args, **kwargs):
+                result = original_load(*args, **kwargs)
+                entered.set()
+                assert release.wait(5)
+                return result
+            monkeypatch.setattr(c.registry, 'load', barrier_load)
+            monkeypatch.setattr(consent.time, 'time', lambda: ch['expires_at'] + 1)
+        original_operation, original_expire = env.store.consent_operation, env.store.consent_expire
+        async def observe_operation(*args, **kwargs):
+            if first == 'expiry':
+                second_entered.set()
+            return await original_operation(*args, **kwargs)
+        async def observe_expire(*args, **kwargs):
+            if first == 'approve':
+                second_entered.set()
+            return await original_expire(*args, **kwargs)
+        monkeypatch.setattr(env.store, 'consent_operation', observe_operation)
+        monkeypatch.setattr(env.store, 'consent_expire', observe_expire)
+        async def expire():
+            # Same lock and Store operation as the daemon expiry loop.
+            async with env.sessions.assistant.authority_lock:
+                return await env.store.consent_expire(c.registry)
+        first_task = asyncio.create_task(c.approve(ch) if first == 'approve' else expire())
+        second_task = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            if first == 'approve':
+                # Approval has verified and mutated but has not committed yet.
+                monkeypatch.setattr(consent.time, 'time', lambda: ch['expires_at'] + 1)
+            second_task = asyncio.create_task(expire() if first == 'approve' else c.approve(ch))
+            await asyncio.sleep(0.02)
+            assert not second_entered.is_set()
+            assert not second_task.done()
+        finally:
+            release.set()
+            results = await asyncio.gather(first_task, *([second_task] if second_task else []), return_exceptions=True)
+        if first == 'approve':
+            assert isinstance(results[0], dict) and results[1] == []
+        else:
+            assert len(results[0]) == 1
+            assert isinstance(results[1], VerbError) and results[1].code == 'consent_conflict'
+        status = await c.call('consent.status', challenge_id=ch['challenge_id'])
+        assert status['challenge']['state'] == ('approved' if first == 'approve' else 'expired')
+        assert (await env.grant())['revision'] == (1 if first == 'approve' else 0)
     scenario(check)
 
 
