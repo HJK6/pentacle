@@ -57,6 +57,18 @@ the standard `unsupported_in_v2` response.
 | `agent-orch list` | Fetch the current daemon snapshot and print visible sessions as JSON. Direct snapshots include subagents. |
 | `agent-orch ssh <ssh args...>` | Thin passthrough to `ssh(1)` with `-o SendEnv=PENTACLE_STREAM_ID AGENT_ORCH_STREAM_ID AGENT_ORCH_STREAM_TOKEN_FILE AGENT_ORCH_STREAM_TOKEN` prepended, so the running session's leader stream id and private token-file path propagate across the SSH hop (the legacy token name remains for pre-file sessions). Dispatched via a pre-argparse `sys.argv` intercept so leading ssh flags (`-i`, `-v`, `-h`, `-p`, `-J`, `--`) pass through verbatim, then exec'd via `os.execvp("ssh", ...)`. The sshd side must accept those env names — see `deploy/README.md` for the matching `AcceptEnv` drop-in (redeploy on every host before enabling ownership enforcement). |
 
+The current operator-designated lifecycle manager may close an unrelated seat
+without a terminal report by supplying an explicit `--reason`; the CLI supplies
+a request id. The daemon records `manager_close_report_waived` before admission,
+with the verified holder and target generations, grant revision and reason, then
+records the close outcome separately. Protected seats, open direct children and
+pending child spawns still refuse; live panes require fresh idle capture.
+A local missing pane requires positive `gone` evidence. An initially unreachable
+peer records retirement intent and a generation-fenced deferred reap, with process
+death unverified. For a seat subject to external lane rulings, only the report
+prerequisite is waived: approval and the existing timeout/release behavior remain,
+and release rechecks the current manager grant. Manager reparent behavior is unchanged.
+
 `agent-orch list` carries `requested_model`, `requested_effort`, `effective_model`,
 `effective_effort`, and `routing_integrity` on every row. `model` and `effort` are
 backward-compatible aliases for the requested tuple. Use `inspect` for the authoritative

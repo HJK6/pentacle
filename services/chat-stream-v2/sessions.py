@@ -1500,9 +1500,19 @@ class Sessions:
         if requires_hidden and str((row or {}).get("visibility") or "default") != "hidden":
             return self._visibility_fenced_result(row)
         pane_live = bool(self.tmux) and await self.tmux.has_session(session_name)
+        manager_gone = False
+        if close_kind == "manager_close" and not pane_live:
+            probe = getattr(self.tmux, "session_state", None)
+            try:
+                state = await probe(session_name) if callable(probe) else "unreachable"
+            except Exception:  # no logical close on uncertain local transport
+                state = "unreachable"
+            if state not in {"alive", "gone"}:
+                return self._close_failed(row, "local_liveness_unproven")
+            pane_live, manager_gone = state == "alive", state == "gone"
         if row is None and not pane_live:
             raise VerbError("unknown_session", "Unknown session")
-        if (requires_idle or defer_if_working) and not operator_override:
+        if (requires_idle or defer_if_working) and not operator_override and not manager_gone:
             await self._probe_capture_liveness(host, session_name, row)
             if not self._capture_is_idle(sid, row):
                 # The client's `defer_if_working` guard means "do not kill a busy
@@ -1929,7 +1939,19 @@ class Sessions:
         # the authoritative row is no longer hidden. Refuse, never kill.
         if requires_hidden and str((row or {}).get("visibility") or "default") != "hidden":
             return self._visibility_fenced_result(row)
-        if (requires_idle or defer_if_working) and not operator_override:
+        manager_close = close_kind == "manager_close"
+        manager_gone = False
+        if manager_close:
+            if not await self.hosts.probe_once(host):
+                return await self._close_offline_locked(row, reason, expected_generation, attribution)
+            try:
+                state = await self.hosts.tmux_for(host).session_state(session_name)
+            except VerbError:
+                return self._close_failed(row, "ssh_unreachable")
+            if state not in {"alive", "gone"}:
+                return self._close_failed(row, "ssh_unreachable")
+            manager_gone = state == "gone"
+        if (requires_idle or defer_if_working) and not operator_override and not manager_gone:
             await self._probe_capture_liveness(host, session_name, row)
             if not self._capture_is_idle(sid, row):
                 # Same guard as the local arm: defer a busy seat, fence a reap.
@@ -1948,15 +1970,15 @@ class Sessions:
         # Fast path: one bounded probe fails an offline host in ~probe_timeout
         # rather than waiting out the per-call tmux timeout. `session_state`
         # below is still the correctness guard for a host that drops mid-close.
-        if not await self.hosts.probe_once(host):
+        if not manager_close and not await self.hosts.probe_once(host):
             if operator_confirm and row is not None:
                 return await self._close_offline_locked(row, reason, expected_generation, attribution)
             return self._close_failed(row, "ssh_unreachable")
         tmux = self.hosts.tmux_for(host)
         identity_reader = getattr(tmux, "pane_identity", None)
         pane_lease: dict[str, Any] | None = None
-        confirmed_gone = False
-        for attempt in range(REMOTE_CLOSE_RETRY_ATTEMPTS):
+        confirmed_gone = manager_gone
+        for attempt in range(0 if manager_gone else REMOTE_CLOSE_RETRY_ATTEMPTS):
             try:
                 state = await tmux.session_state(session_name)
                 if state == "unreachable":

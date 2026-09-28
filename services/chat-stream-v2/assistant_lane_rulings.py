@@ -18,6 +18,7 @@ import uuid
 from typing import Any
 
 from store_assistant_binding import _seat_conn
+from store_lifecycle_authority import MAX_REASON, scrub
 from _shared.spawn_objective import resolve_objective
 
 
@@ -182,7 +183,8 @@ class AssistantLaneRulings:
     @staticmethod
     def _safe_intent(msg: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in msg.items()
-                if key not in {"stream_token", "_auth_context", "_ruling_release"}}
+                if key not in {"stream_token", "_auth_context", "_ruling_release",
+                               "_ruling_report", "_ruling_report_waiver"}}
 
     async def request_spawn(self, msg: dict[str, Any]) -> dict[str, Any] | None:
         composite = self._composite()
@@ -266,28 +268,50 @@ class AssistantLaneRulings:
         binding = await self.binding()
         if binding["state"] in {"disabled", "unconfigured", "same_primary"}:
             return None
-        report = await self.store.find_report(target_stream_id, statuses=("done", "error", "aborted"),
-                                              session_generation=target_generation)
-        if report is None:
-            raise ValueError("assistant_lane_close_report_required")
         requester = str(auth.get("stream_id") or "")
         generation = str(auth.get("session_generation") or "")
         if not requester or not generation:
             raise ValueError("assistant_lane_close_requester_unverified")
         message = self._safe_intent(msg)
-        message["_ruling_report"] = {
-            "report_id": report.get("report_id"), "summary": str(report.get("summary") or "")[:1200],
-            "qa_verdict": report.get("qa_verdict"), "residuals": report.get("next_action"),
-            "digest": _digest(report),
-        }
         key = str(message.get("request_id") or "")
         if not key:
             raise ValueError("assistant_ruling_close_key_required")
-        request = await self._create(
-            action="session_close", key="session_close:" + key, intent=message,
-            requester=requester, requester_generation=generation, binding=binding,
-            target=target_stream_id, target_generation=target_generation,
-        )
+        policy = self.server.sessions.assistant
+        async with policy.authority_lock:
+            prior = await self.store.submit(lambda conn: _row(conn.execute(
+                "SELECT * FROM v2_assistant_lane_rulings WHERE request_key=?",
+                ("session_close:" + key,),
+            ).fetchone()))
+            prior_intent = json.loads(prior["intent_json"]) if prior else {}
+            report = await self.store.find_report(target_stream_id, statuses=("done", "error", "aborted"),
+                                                  session_generation=target_generation)
+            replay_waiver = isinstance(prior_intent.get("_ruling_report_waiver"), dict)
+            if replay_waiver:
+                if (prior["requester_stream_id"] != requester or prior["requester_generation"] != generation
+                        or prior["target_stream_id"] != target_stream_id or prior["target_generation"] != target_generation
+                        or self._safe_intent(prior_intent) != message):
+                    raise ValueError("assistant_ruling_request_key_conflict")
+                message = prior_intent
+            if report is None or replay_waiver:
+                if not await policy.manager_holds(auth):
+                    raise ValueError("assistant_lane_close_report_required")
+                if code := policy.manager_request_code(msg):
+                    raise ValueError(code)
+                message["_ruling_report_waiver"] = {
+                    "manager_stream_id": requester, "manager_generation": generation,
+                    "target_generation": target_generation, "reason": scrub(msg["reason"], MAX_REASON),
+                }
+            else:
+                message["_ruling_report"] = {
+                    "report_id": report.get("report_id"), "summary": str(report.get("summary") or "")[:1200],
+                    "qa_verdict": report.get("qa_verdict"), "residuals": report.get("next_action"),
+                    "digest": _digest(report),
+                }
+            request = await self._create(
+                action="session_close", key="session_close:" + key, intent=message,
+                requester=requester, requester_generation=generation, binding=binding,
+                target=target_stream_id, target_generation=target_generation,
+            )
         if request["state"] == "bypassed":
             return None
         if request["state"] == "done" and request.get("outcome_json"):
@@ -402,6 +426,9 @@ class AssistantLaneRulings:
                      target_generation, prior_link or None, now, now + self.sla_s, "pending"),
                 )
                 self._audit_conn(conn, request_id, "request", requester, requester_generation, action)
+                if isinstance(intent.get("_ruling_report_waiver"), dict):
+                    self._audit_conn(conn, request_id, "report_prerequisite_waived", requester,
+                                     requester_generation, scrub(intent.get("reason"), 500) or "")
                 return dict(conn.execute(
                     "SELECT * FROM v2_assistant_lane_rulings WHERE ruling_request_id=?", (request_id,)
                 ).fetchone())
@@ -464,7 +491,7 @@ class AssistantLaneRulings:
     async def _enqueue_notice(self, request: dict[str, Any]) -> None:
         rid = request["ruling_request_id"]
         intent = json.loads(request["intent_json"])
-        fields = {key: intent.get(key) for key in ("objective", "provider", "model", "effort", "spec_id", "role", "budget", "eta", "_ruling_report")
+        fields = {key: intent.get(key) for key in ("objective", "provider", "model", "effort", "spec_id", "role", "budget", "eta", "_ruling_report", "_ruling_report_waiver")
                   if intent.get(key) is not None}
         if request["action"] == "spawn":
             fields["acceptance"] = _acceptance_brief(intent)
@@ -652,13 +679,20 @@ class AssistantLaneRulings:
                     if (target is None or target.get("session_generation") != current["target_generation"]):
                         await self._mark(rid, "approved_but_not_closed", {"error": "target_generation_changed"})
                         return
-                    report = await self.store.find_report(
-                        current["target_stream_id"], statuses=("done", "error", "aborted"),
-                        session_generation=current["target_generation"],
-                    )
-                    if report is None or report.get("report_id") != intent.get("_ruling_report", {}).get("report_id"):
-                        await self._mark(rid, "approved_but_not_closed", {"error": "report_fence_moved"})
-                        return
+                    if isinstance(intent.get("_ruling_report_waiver"), dict):
+                        policy = self.server.sessions.assistant
+                        if (not await policy.manager_holds(intent["_auth_context"])
+                                or policy.manager_request_code(intent)):
+                            await self._mark(rid, "approved_but_not_closed", {"error": "manager_waiver_authority_lost"})
+                            return
+                    else:
+                        report = await self.store.find_report(
+                            current["target_stream_id"], statuses=("done", "error", "aborted"),
+                            session_generation=current["target_generation"],
+                        )
+                        if report is None or report.get("report_id") != intent.get("_ruling_report", {}).get("report_id"):
+                            await self._mark(rid, "approved_but_not_closed", {"error": "report_fence_moved"})
+                            return
                     intent["expected_generation"] = current["target_generation"]
                     intent["_ruling_release"] = self
                     result = await self.server._on_close(intent)

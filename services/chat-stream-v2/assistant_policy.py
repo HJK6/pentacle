@@ -123,13 +123,15 @@ class AssistantPolicy:
             return "lifecycle_request_id_required"
         return None
 
-    async def manager_fences(self, target_row, generation, msg, *, children, pending_spawns):
+    async def manager_fences(self, target_row, generation, msg, *, children, pending_spawns,
+                             allow_unavailable=False):
         """Refusal code for a manager close of a non-child, or None."""
         code = self.manager_request_code(msg)
         if code:
             return code
         if (target_row is None or str(target_row.get("status") or "") != "open"
-                or target_row.get("offline_since_ts") or target_row.get("presumed_dead_at")):
+                or (not allow_unavailable and
+                    (target_row.get("offline_since_ts") or target_row.get("presumed_dead_at")))):
             return "lifecycle_target_unavailable"
         if self.protects(target_row):
             return "close_protected"

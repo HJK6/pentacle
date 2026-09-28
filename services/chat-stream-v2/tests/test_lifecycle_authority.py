@@ -469,13 +469,9 @@ def test_ordinary_lead_denied_until_designated_then_closes_reported_non_child(mo
 
 
 @pytest.mark.parametrize("case,code", [
-    ("unreported", "lifecycle_report_required"),
-    ("progress_only", "lifecycle_report_required"),
-    ("prior_generation_report", "lifecycle_report_required"),
     ("live_child", "close_live_children"),
     ("pending_spawn", "close_pending_spawn"),
     ("default_reason", "lifecycle_reason_required"),
-    ("offline", "lifecycle_target_unavailable"),
     ("revoked", "authority_transfer_disabled"),
 ])
 def test_manager_close_negative_controls_refuse_before_kill(monkeypatch, case, code):
@@ -483,13 +479,8 @@ def test_manager_close_negative_controls_refuse_before_kill(monkeypatch, case, c
 
     async def check(env: Env):
         manager = await _manager(env)
-        await env.open("fixture", role="worker", offline_since_ts=1 if case == "offline" else None)
-        if case == "progress_only":
-            await env.report("fixture", status="progress")
-        elif case == "prior_generation_report":
-            await env.report("fixture", generation="older-generation")
-        elif case != "unreported":
-            await env.report("fixture")
+        await env.open("fixture", role="worker")
+        await env.report("fixture")
         if case == "live_child":
             await env.open("child", role="worker", parent_stream_id="node-a:fixture")
         if case == "pending_spawn":
@@ -530,13 +521,15 @@ def test_manager_close_of_protected_or_working_target_refuses(monkeypatch):
 
 
 @pytest.mark.parametrize("race", ["revoke", "child_spawn", "reopen"])
-def test_fences_rechecked_under_lifecycle_lock(monkeypatch, race):
+@pytest.mark.parametrize("reported", [True, False])
+def test_fences_rechecked_under_lifecycle_lock(monkeypatch, race, reported):
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
 
     async def check(env: Env):
         manager = await _manager(env)
         await env.open("fixture", role="worker")
-        await env.report("fixture")
+        if reported:
+            await env.report("fixture")
         lock = env.sessions._lifecycle_lock(HOST, "fixture")
         await lock.acquire()
         task = asyncio.create_task(env.server._on_close(_close(manager, "fixture")))
@@ -853,14 +846,16 @@ def _no_effect_after_authority_change(rows: list[dict], manager_action: str) -> 
 
 
 @pytest.mark.parametrize("change", ["revoke", "replace"])
-def test_authority_change_is_linearized_with_manager_close(monkeypatch, change):
+@pytest.mark.parametrize("reported", [True, False])
+def test_authority_change_is_linearized_with_manager_close(monkeypatch, change, reported):
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
 
     async def check(env: Env):
         manager = await _manager(env)
         await env.open("lead2", role="lead")
         await env.open("fixture", role="worker")
-        await env.report("fixture")
+        if reported:
+            await env.report("fixture")
 
         async def authority():
             if change == "revoke":
@@ -1030,9 +1025,9 @@ def test_manager_refusal_cancelled_after_audit_stays_refused(monkeypatch):
 
     async def check(env: Env):
         manager = await _manager(env)
-        await env.open("fixture", role="worker")  # unreported: refused by the fences
+        await env.open("fixture", role="worker")
         committed, resume = _pause_after(env, "lifecycle_authority_audit", lambda *a, **k: k.get("result") == "refused")
-        task = asyncio.create_task(env.server._on_close(_close(manager, "fixture")))
+        task = asyncio.create_task(env.server._on_close(_close(manager, "fixture", reason="manual")))
         await committed.wait()
         task.cancel()
         for _ in range(5):
@@ -1043,7 +1038,7 @@ def test_manager_refusal_cancelled_after_audit_stays_refused(monkeypatch):
         assert (await env.store.fetch_session(HOST, "fixture"))["status"] == "open"
         assert env.tmux.killed == []
         rows = [r for r in await env.audit() if r["action"] == "manager_close"]
-        assert [(r["result"], r["refusal_code"]) for r in rows] == [("refused", "lifecycle_report_required")]
+        assert [(r["result"], r["refusal_code"]) for r in rows] == [("refused", "lifecycle_reason_required")]
 
     scenario(check)
 
