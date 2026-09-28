@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Meeting Transcript</title>
+  <style>
+    :root {
+      --bg: #0c1310;
+      --bg2: #121e18;
+      --fg: #b5ccba;
+      --fg-dim: #4d6e56;
+      --red: #f47067;
+      --green: #56d364;
+      --border: #1e3928;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      -webkit-app-region: drag;
+    }
+    .header {
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    .rec-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--red);
+      animation: pulse 1.5s infinite;
+    }
+    .rec-dot.stopped { background: var(--fg-dim); animation: none; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+    .header-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--fg);
+      flex: 1;
+    }
+    .header-timer {
+      font-size: 12px;
+      color: var(--fg-dim);
+      font-variant-numeric: tabular-nums;
+    }
+    .transcript {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 16px;
+      -webkit-app-region: no-drag;
+    }
+    .transcript::-webkit-scrollbar { width: 6px; }
+    .transcript::-webkit-scrollbar-track { background: transparent; }
+    .transcript::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .line {
+      padding: 4px 0;
+      font-size: 13px;
+      line-height: 1.5;
+      border-bottom: 1px solid rgba(30, 57, 40, 0.3);
+    }
+    .partial {
+      color: var(--fg-dim);
+      font-style: italic;
+      padding: 4px 0;
+      font-size: 13px;
+    }
+    .status-bar {
+      padding: 8px 16px;
+      border-top: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--fg-dim);
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="rec-dot" id="rec-dot"></div>
+    <div class="header-title">Meeting Transcript</div>
+    <div class="header-timer" id="timer">00:00</div>
+  </div>
+  <div class="transcript" id="transcript"></div>
+  <div class="status-bar" id="status-bar">Listening...</div>
+
+  <script>
+    const MIC_API = 'http://127.0.0.1:7780';
+    let lastIdx = 0;
+    let autoScroll = true;
+
+    const transcriptEl = document.getElementById('transcript');
+    const timerEl = document.getElementById('timer');
+    const statusBar = document.getElementById('status-bar');
+    const recDot = document.getElementById('rec-dot');
+
+    // Auto-scroll unless user scrolled up
+    transcriptEl.addEventListener('scroll', () => {
+      const atBottom = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight < 40;
+      autoScroll = atBottom;
+    });
+
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    async function poll() {
+      try {
+        const r = await fetch(MIC_API + '/status');
+        const data = await r.json();
+
+        // Timer
+        if (data.meeting_active && data.duration) {
+          const mins = Math.floor(data.duration / 60);
+          const secs = Math.floor(data.duration % 60);
+          timerEl.textContent = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
+          recDot.className = 'rec-dot';
+          statusBar.textContent = `Recording — ${data.transcript_count} lines`;
+        } else if (data.on_listener_state !== 'MEETING') {
+          recDot.className = 'rec-dot stopped';
+          statusBar.textContent = 'Meeting ended';
+        }
+
+        // Fetch new transcript lines
+        const tr = await fetch(MIC_API + `/transcript/since/${lastIdx}`);
+        const tData = await tr.json();
+
+        if (tData.lines && tData.lines.length > 0) {
+          // Remove old partial
+          const oldPartial = transcriptEl.querySelector('.partial');
+          if (oldPartial) oldPartial.remove();
+
+          for (const line of tData.lines) {
+            const div = document.createElement('div');
+            div.className = 'line';
+            div.textContent = line;
+            transcriptEl.appendChild(div);
+          }
+          lastIdx = tData.total;
+        }
+
+        // Update partial
+        let partialEl = transcriptEl.querySelector('.partial');
+        if (tData.partial) {
+          if (!partialEl) {
+            partialEl = document.createElement('div');
+            partialEl.className = 'partial';
+            transcriptEl.appendChild(partialEl);
+          }
+          partialEl.textContent = '\u25B8 ' + tData.partial;
+        } else if (partialEl) {
+          partialEl.remove();
+        }
+
+        if (autoScroll) {
+          transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        }
+      } catch (e) {
+        statusBar.textContent = 'Connection lost';
+      }
+    }
+
+    poll();
+    setInterval(poll, 1000);
+  </script>
+</body>
+</html>

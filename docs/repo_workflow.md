@@ -74,3 +74,5 @@ activation window: fast-forward its checkout, run
 `/api/config` without a cookie (401) and the daemon connection. Record the SHA
 and PID of what is actually running; a checkout at the right commit is not a
 deployment. Documentation and guard-only changes do not require a runtime restart.
+
+Historical private exclusions are reviewed by content; ordinary source and portable tests move through the same public gates. See [Public source boundary](public_boundary.md) for the shipped batch and retained private inputs.

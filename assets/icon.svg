@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Background circle -->
+  <circle cx="512" cy="512" r="480" fill="#0c1310"/>
+  <!-- Outer ring -->
+  <circle cx="512" cy="512" r="480" fill="none" stroke="#3fb950" stroke-width="8"/>
+  <!-- Inner ring -->
+  <circle cx="512" cy="512" r="400" fill="none" stroke="#3fb950" stroke-opacity="0.7" stroke-width="4"/>
+  <!-- Pentagram star - connecting every other vertex -->
+  <polygon points="512,172 635,628 310,348 714,348 389,628"
+           fill="none" stroke="#3fb950" stroke-width="6" stroke-linejoin="round"/>
+  <!-- Glow dots at vertices -->
+  <circle cx="512" cy="172" r="8" fill="#56d364" opacity="0.8"/>
+  <circle cx="635" cy="628" r="8" fill="#56d364" opacity="0.8"/>
+  <circle cx="310" cy="348" r="8" fill="#56d364" opacity="0.8"/>
+  <circle cx="714" cy="348" r="8" fill="#56d364" opacity="0.8"/>
+  <circle cx="389" cy="628" r="8" fill="#56d364" opacity="0.8"/>
+  <!-- Center dot -->
+  <circle cx="512" cy="440" r="10" fill="#3fb950" opacity="0.8"/>
+</svg>
