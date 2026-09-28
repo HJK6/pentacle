@@ -662,6 +662,12 @@ class AssistantLaneRulings:
                     intent["expected_generation"] = current["target_generation"]
                     intent["_ruling_release"] = self
                     result = await self.server._on_close(intent)
+                    if result.get("type") == "close.deferred":
+                        # Safe deferral is still actionable. The existing tick
+                        # retries this state through all ordinary close fences.
+                        if current.get("outcome_json") != _canonical(result):
+                            await self._mark(rid, current["state"], result)
+                        return
                     if result.get("type") not in {"close.ok", "close.already_closed"}:
                         await self._mark(rid, "approved_but_not_closed" if current["state"] == "approved" else "release_blocked", result)
                         return

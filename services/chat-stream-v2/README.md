@@ -64,6 +64,15 @@ its turn. Installed mobile clients that lack selected-generation propagation
 receive `generation_required` for remote targets until their separate client
 release; this daemon release does not claim mobile remote interrupt support.
 
+## Approved close deferral
+
+An approved lane close that returns `close.deferred` stays actionable in the
+existing durable ruling loop. Each retry uses the ordinary close path and its
+generation, report, requester and liveness fences. Once capture proves idle,
+the original request closes exactly once, including after a daemon restart.
+Definitive refusals remain terminal. The existing 600-second unruled deadline
+policy is unchanged.
+
 ## Tests and supported integrations
 
 ```sh
