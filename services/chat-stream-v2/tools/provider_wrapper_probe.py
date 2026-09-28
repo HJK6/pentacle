@@ -491,11 +491,14 @@ def probe_cell(host: str, mode: str, args, output: Path) -> dict:
         # run_cell preserves the predicate exception as the cause.
         cause = exc
         cleanup_failure = False
-        while cause.__cause__ is not None:
-            cleanup_failure |= isinstance(cause, OwnedImageCleanupError)
+        while True:
+            cleanup_failure |= isinstance(cause, OwnedImageCleanupError) or str(cause).startswith('CLEANUP_FAIL:')
+            if cause.__cause__ is None:
+                break
             cause = cause.__cause__
         evidence.update(outcome="FAIL", classification=(
             "CLEANUP_FAIL" if cleanup_failure or str(exc).startswith("teardown:") else
+            "HARNESS_ERROR" if str(cause).startswith('HARNESS_ERROR:') else
             "PRODUCT_FAIL" if isinstance(cause, AssertionError) else "HARNESS_ERROR"
         ), error=str(exc))
     finally:

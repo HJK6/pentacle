@@ -2,11 +2,26 @@
 import base64
 import copy
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from tools import provider_wrapper_probe as probe
 from tools import mobile_probe_oracle as mobile
+
+
+@pytest.mark.parametrize('error,classification', [
+    (probe.OwnedImageCleanupError('owned image cleanup failed'), 'CLEANUP_FAIL'),
+    (AssertionError('HARNESS_ERROR: navigation identity unavailable'), 'HARNESS_ERROR'),
+    (AssertionError('PRODUCT_FAIL: actual operator content missing'), 'PRODUCT_FAIL'),
+])
+def test_failure_classification_preserves_first_failed_predicate(monkeypatch, tmp_path, error, classification):
+    def connection(*args): raise error
+    monkeypatch.setattr(probe.smoke, '_operator_connection', connection)
+    result = probe.probe_cell('host', 'prompted', SimpleNamespace(
+        journeys=False, url='unused', token_path='unused', timeout=1), tmp_path)
+    assert result['classification'] == classification
+    assert result['cleanup']['expected_count'] == result['cleanup']['closed_count'] == 0
 
 
 def test_native_source_requires_exact_record_and_display():
