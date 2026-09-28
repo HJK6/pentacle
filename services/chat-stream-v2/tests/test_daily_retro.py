@@ -46,6 +46,19 @@ def test_first_enrollment_retry_late_and_changed(config):
     assert {s["id"] for s in following["sources"]} == {"spec_late", "spec_old"}
 
 
+@pytest.mark.parametrize("status", ["completed", "deprecated"])
+def test_first_enrollment_uses_current_terminal_status_date(config, status):
+    current_day, older_day = "2026-09-27", "2026-07-08"
+    path = source(config.memory_root, "terminal", day=current_day if status == "completed" else older_day,
+                  status=status)
+    deprecated_day = current_day if status == "deprecated" else older_day
+    path.write_text(path.read_text().replace("\n---\n\n## Retro", f"\ndeprecated_at: '{deprecated_day}'\n---\n\n## Retro"))
+    manifest = retro.collect(config, at())
+    assert [s["id"] for s in manifest["sources"]] == ["spec_terminal"]
+    assert manifest["sources"][0]["terminal_date"] == current_day
+    assert not manifest["baseline"]
+
+
 def test_move_unrelated_edit_missing_and_overflow(config):
     path = source(config.memory_root, "one")
     missing = source(config.memory_root, "missing", body="")

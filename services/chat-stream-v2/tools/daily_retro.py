@@ -153,7 +153,7 @@ def scan(settings):
                 body = re.sub(r"^##\s+Retro\b\s*[:—-]?\s*", "", original, count=1, flags=re.IGNORECASE).strip()
                 if not body:
                     raise ValueError("empty Retro")
-                raw_day = meta.get("completed_at") or meta.get("deprecated_at") or meta.get("closed_at") or meta.get("updated_at")
+                raw_day = meta.get(f"{meta['status']}_at") or meta.get("closed_at") or meta.get("updated_at")
                 day = None
                 if raw_day:
                     terminal = datetime.fromisoformat(str(raw_day).replace("Z", "+00:00"))
