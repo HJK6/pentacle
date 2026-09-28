@@ -12,6 +12,66 @@ from sessions import VerbError
 from test_lifecycle_authority import scenario
 
 
+@pytest.mark.parametrize('effect', ['offer', 'intent'])
+def test_maintenance_audit_failure_rolls_back_before_unrelated_commit(tmp_path, monkeypatch, effect):
+    async def check(env):
+        a, _ = await setup(env, tmp_path)
+        if effect == 'offer':
+            request = await a.offer()
+            table, idcol, rid, verb = 'v2_consent_offers', 'offer_id', request['offer_id'], 'consent_key.expire'
+        else:
+            await a.enroll()
+            await env.open('bart', role='lead')
+            request = (await a.call('consent.request', action='lifecycle.designate', target_stream_id='node-a:bart',
+                target_generation=await env.gen('bart'), expected_revision=0, reason='Maintenance atomicity'))['intent']
+            table, idcol, rid, verb = 'v2_consent_intents', 'request_id', request['request_id'], 'consent.expire'
+            await a.call('consent.open', intent_id=rid, key_id=a.key_id)
+        def expire(conn):
+            conn.execute(f'UPDATE {table} SET data=json_set(data,"$.expires_at",0) WHERE {idcol}=?', (rid,))
+            conn.commit()
+        await env.store.submit(expire)
+        original = consent.audit
+        def failed(conn, called, *args, **kwargs):
+            if called == verb:
+                raise RuntimeError('synthetic maintenance audit failure')
+            return original(conn, called, *args, **kwargs)
+        monkeypatch.setattr(consent, 'audit', failed)
+        with pytest.raises(RuntimeError, match='maintenance audit failure'):
+            await env.store.consent_expire(a.registry)
+        assert not await env.store.submit(lambda conn: conn.in_transaction)
+        await env.store.lifecycle_authority_current()
+        assert await env.store.submit(lambda conn: conn.execute(f'SELECT state FROM {table} WHERE {idcol}=?', (rid,)).fetchone()[0]) == 'pending'
+        assert await env.store.submit(lambda conn: conn.execute('SELECT COUNT(*) FROM v2_consent_audit WHERE verb=?', (verb,)).fetchone()[0]) == 0
+        if effect == 'intent':
+            assert await env.store.submit(lambda conn: conn.execute("SELECT COUNT(*) FROM v2_consent_challenges WHERE state='pending'").fetchone()[0]) == 1
+        monkeypatch.setattr(consent, 'audit', original)
+        await env.store.consent_expire(a.registry)
+        assert await env.store.submit(lambda conn: conn.execute(f'SELECT state FROM {table} WHERE {idcol}=?', (rid,)).fetchone()[0]) == 'expired'
+        assert await env.store.submit(lambda conn: conn.execute('SELECT COUNT(*) FROM v2_consent_audit WHERE verb=?', (verb,)).fetchone()[0]) == 1
+    scenario(check)
+
+
+def test_conflicting_reply_audit_failure_rolls_back_security_notice(tmp_path, monkeypatch):
+    async def check(env):
+        a, _ = await setup(env, tmp_path)
+        opened, fields, result = await a.enroll()
+        other = Phone(env, a.registry, a.cid)
+        original = consent.audit
+        def failed(conn, verb, *args, **kwargs):
+            if verb == 'consent_key.accept':
+                raise RuntimeError('synthetic refusal audit failure')
+            return original(conn, verb, *args, **kwargs)
+        monkeypatch.setattr(consent, 'audit', failed)
+        conflict = {**fields, 'spki': other.spki, 'signature': other.sign(consent.offer_bytes(opened, other.spki))}
+        with pytest.raises(RuntimeError, match='refusal audit failure'):
+            await a.call('consent_key.accept', **conflict)
+        assert not await env.store.submit(lambda conn: conn.in_transaction)
+        await env.store.lifecycle_authority_current()
+        assert await env.store.submit(lambda conn: conn.execute('SELECT COUNT(*) FROM v2_consent_security_notices').fetchone()[0]) == 0
+        assert (await a.call('consent_key.status', offer_id=opened['offer_id']))['offer']['accepted_key_id'] == result['receipt']['key_id']
+    scenario(check)
+
+
 class Phone:
     def __init__(self, env, registry, cid):
         self.env, self.registry, self.cid = env, registry, cid

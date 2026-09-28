@@ -3661,36 +3661,41 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
 
     async def consent_expire(self, registry: Any, protected_role='assistant') -> list[dict[str, Any]]:
         def _op(conn):
-            from _shared import operator_auth
-            import store_consent_offers as offers
-            import store_consent_intents as intents
-            with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + ".lock")):
-                credentials = dict(registry.load().credentials)
-                now = time.time()
-            changed = []
-            for raw, in conn.execute("SELECT data FROM v2_consent_offers WHERE state='pending'").fetchall():
-                row = json.loads(raw)
-                state = 'expired' if row['expires_at'] <= now else None
-                if not state:
-                    try: offers.valid_binding(conn, row, credentials)
-                    except consent.ConsentError: state = 'superseded'
-                if state:
-                    row['state'] = state; offers.save(conn, row)
-                    consent.audit(conn, 'consent_key.expire', row['offer_id'], {'kind': 'server'}, now, state)
-                    changed.append(offers.notification(offers.view(conn, row)))
-            for raw, in conn.execute("SELECT data FROM v2_consent_intents WHERE state='pending'").fetchall():
-                row = json.loads(raw)
-                state = 'expired' if row['expires_at'] <= now else None
-                if not state:
-                    try: intents.validate_parent(conn, row, credentials, protected_role)
-                    except consent.ConsentError: state = 'superseded'
-                if state:
-                    intents.terminal(conn, row, state)
-                    consent.audit(conn, 'consent.expire', row['request_id'], {'kind': 'server'}, now, state)
-                    changed.append(intents.notification(intents.view(row)))
-            conn.execute("UPDATE v2_consent_challenges SET state='expired' WHERE state='pending' AND expires_at<=?", (now,))
-            conn.commit()
-            return changed
+            try:
+                from _shared import operator_auth
+                import store_consent_offers as offers
+                import store_consent_intents as intents
+                with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + ".lock")):
+                    credentials = dict(registry.load().credentials)
+                    now = time.time()
+                conn.execute("BEGIN IMMEDIATE")
+                changed = []
+                for raw, in conn.execute("SELECT data FROM v2_consent_offers WHERE state='pending'").fetchall():
+                    row = json.loads(raw)
+                    state = 'expired' if row['expires_at'] <= now else None
+                    if not state:
+                        try: offers.valid_binding(conn, row, credentials)
+                        except consent.ConsentError: state = 'superseded'
+                    if state:
+                        row['state'] = state; offers.save(conn, row)
+                        consent.audit(conn, 'consent_key.expire', row['offer_id'], {'kind': 'server'}, now, state)
+                        changed.append(offers.notification(offers.view(conn, row)))
+                for raw, in conn.execute("SELECT data FROM v2_consent_intents WHERE state='pending'").fetchall():
+                    row = json.loads(raw)
+                    state = 'expired' if row['expires_at'] <= now else None
+                    if not state:
+                        try: intents.validate_parent(conn, row, credentials, protected_role)
+                        except consent.ConsentError: state = 'superseded'
+                    if state:
+                        intents.terminal(conn, row, state)
+                        consent.audit(conn, 'consent.expire', row['request_id'], {'kind': 'server'}, now, state)
+                        changed.append(intents.notification(intents.view(row)))
+                conn.execute("UPDATE v2_consent_challenges SET state='expired' WHERE state='pending' AND expires_at<=?", (now,))
+                conn.commit()
+                return changed
+            except BaseException:
+                conn.rollback()
+                raise
         return await self.submit(_op)
 
     async def consent_push_due(self, registry, protected_role):
@@ -3718,45 +3723,46 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
         Refusals commit only their audit (and an admitted expiry), never a grant.
         """
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
-            from _shared import operator_auth
-            snapshot_at = time.time()
             try:
-                with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + ".lock")):
-                    credentials = dict(registry.load().credentials)
-                    snapshot_at = time.time()
-                conn.execute("BEGIN IMMEDIATE")
-                conn.execute("SAVEPOINT consent_effect")
-                if verb.startswith("consent_key."):
-                    result = consent.key_operation(conn, verb, msg, auth, credentials, snapshot_at)
-                else:
-                    result = consent.transition(conn, verb, msg, auth, credentials, snapshot_at, protected_role)
-                conn.execute("RELEASE consent_effect")
-                refusal_code = "consent_pending_exists" if result.get("code") == "consent_pending_exists" else None
-                consent.audit(conn, verb, msg.get("challenge_id") or msg.get("offer_id") or msg.get("intent_id") or (result.get("offer") or {}).get("offer_id") or (result.get("intent") or {}).get("request_id"),
-                              {"identity": auth.get("operator_principal") or auth.get("stream_id")},
-                              snapshot_at, "refused" if refusal_code else "applied", refusal_code)
-            except (consent.ConsentError, lifecycle_authority.AuthorityError) as exc:
-                conn.execute("ROLLBACK TO consent_effect")
-                conn.execute("RELEASE consent_effect")
-                if getattr(exc, 'security_notice', None):
-                    oid, cid = exc.security_notice
-                    conn.execute('INSERT OR IGNORE INTO v2_consent_security_notices VALUES (?,?,?)', (oid, cid, time.time()))
-                consent.audit(conn, verb, msg.get("challenge_id") or msg.get("offer_id") or msg.get("intent_id"),
-                              {"identity": auth.get("operator_principal") or auth.get("stream_id")},
-                              snapshot_at, "refused", exc.code)
+                from _shared import operator_auth
+                snapshot_at = time.time()
+                try:
+                    with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + ".lock")):
+                        credentials = dict(registry.load().credentials)
+                        snapshot_at = time.time()
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("SAVEPOINT consent_effect")
+                    if verb.startswith("consent_key."):
+                        result = consent.key_operation(conn, verb, msg, auth, credentials, snapshot_at)
+                    else:
+                        result = consent.transition(conn, verb, msg, auth, credentials, snapshot_at, protected_role)
+                    conn.execute("RELEASE consent_effect")
+                    refusal_code = "consent_pending_exists" if result.get("code") == "consent_pending_exists" else None
+                    consent.audit(conn, verb, msg.get("challenge_id") or msg.get("offer_id") or msg.get("intent_id") or (result.get("offer") or {}).get("offer_id") or (result.get("intent") or {}).get("request_id"),
+                                  {"identity": auth.get("operator_principal") or auth.get("stream_id")},
+                                  snapshot_at, "refused" if refusal_code else "applied", refusal_code)
+                except (consent.ConsentError, lifecycle_authority.AuthorityError) as exc:
+                    conn.execute("ROLLBACK TO consent_effect")
+                    conn.execute("RELEASE consent_effect")
+                    if getattr(exc, 'security_notice', None):
+                        oid, cid = exc.security_notice
+                        conn.execute('INSERT OR IGNORE INTO v2_consent_security_notices VALUES (?,?,?)', (oid, cid, time.time()))
+                    consent.audit(conn, verb, msg.get("challenge_id") or msg.get("offer_id") or msg.get("intent_id"),
+                                  {"identity": auth.get("operator_principal") or auth.get("stream_id")},
+                                  snapshot_at, "refused", exc.code)
+                    conn.commit()
+                    raise
+                except operator_auth.OperatorRegistryUnavailable as exc:
+                    conn.rollback()
+                    consent.audit(conn, verb, msg.get("challenge_id"), {}, snapshot_at,
+                                  "refused", "consent_registry_unavailable")
+                    conn.commit()
+                    raise consent.ConsentError("consent_registry_unavailable") from exc
                 conn.commit()
-                raise
-            except operator_auth.OperatorRegistryUnavailable as exc:
-                conn.rollback()
-                consent.audit(conn, verb, msg.get("challenge_id"), {}, snapshot_at,
-                              "refused", "consent_registry_unavailable")
-                conn.commit()
-                raise consent.ConsentError("consent_registry_unavailable") from exc
+                return result
             except BaseException:
                 conn.rollback()
                 raise
-            conn.commit()
-            return result
         return await self.submit(_op)
 
     async def consent_approve_and_mutate(self, msg: dict[str, Any], auth: dict[str, Any],
