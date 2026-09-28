@@ -203,6 +203,43 @@ def test_eligibility_visible_ok_hidden_ask_parent_forged_rejected(tmp_path):
     _run(go())
 
 
+def test_hidden_current_binding_requires_authenticated_generation(tmp_path):
+    async def go():
+        bound, other = "hosta:v2-lead", "hosta:v2-worker"
+        sessions = _FakeSessions({stream: {"visibility": "hidden", "status": "open", "session_generation": "g1"}
+                                  for stream in (bound, other)})
+        binding = {"stream_id": bound, "generation": "g1"}
+        async def current_binding():
+            return dict(binding)
+        notify = _notify(tmp_path, sessions=sessions)
+        notify._assistant_binding = current_binding
+        await notify.start()
+        try:
+            for qid, stream, auth_generation, binding_generation in (
+                ("q-other", other, "g1", "g1"),
+                ("q-stale-auth", bound, "g0", "g1"),
+                ("q-stale-binding", bound, "g1", "g0"),
+                ("q-missing-generation", bound, None, "g1"),
+            ):
+                binding["generation"] = binding_generation
+                request = _ask(qid, producer=stream)
+                request["_auth_context"]["session_generation"] = auth_generation
+                assert (await notify.prompt(request))["error_code"] == "ask_parent"
+                assert await notify._db.call("get_agent_question", qid) is None
+            binding["generation"] = "g1"
+            request = _ask("q-current-hidden", producer=bound)
+            request["_auth_context"]["session_generation"] = "g1"
+            first = await notify.prompt(request)
+            assert first["type"] == "prompt.ask.ok"
+            repeated = await notify.prompt(request)
+            assert repeated["question"]["question_id"] == first["question"]["question_id"]
+            notification = await notify._db.call("get_notification", first["question"]["notification_id"])
+            assert notification["producer"] == "agent_question.v1"
+        finally:
+            await notify.stop()
+    _run(go())
+
+
 def test_generation_replacement_cannot_reuse_a_question_id(tmp_path):
     async def go():
         rows = {"hosta:v2-lead": {"visibility": "visible", "status": "open",

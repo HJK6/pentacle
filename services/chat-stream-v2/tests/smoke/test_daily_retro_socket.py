@@ -37,7 +37,7 @@ def daily_retro_surface(tmp_path, monkeypatch):
             rows = {}
             for name in ("a", "b", "worker"):
                 rows[name] = await store.open_session("fixture", name, provider="codex", role="assistant" if name != "worker" else "worker",
-                                                     visibility="visible" if name != "worker" else "hidden", pane_status="pane_alive",
+                                                     visibility="hidden", pane_status="pane_alive",
                                                      effective_model="gpt-6-sol", effective_effort="medium")
                 await store.grant_stream_token("fixture", name, hashlib.sha256(f"token-{name}".encode()).hexdigest(), STREAM_TOKEN_HASH_VERSION)
             sessions = Sessions(store, local_host="fixture")
@@ -81,6 +81,7 @@ def daily_retro_surface(tmp_path, monkeypatch):
             composite = AssistantComposite(store, config=composite_config)
             await composite.load_binding()
             await composite.ensure_projection()
+            notify._assistant_binding = composite.binding
             server.assistant_composite = composite
             port = await server.bind()
             assert port != 7791 and CHAT.startswith("fixture-")
@@ -183,6 +184,55 @@ def test_answer_before_close_and_material_scope_change(daily_retro_surface):
     asyncio.run(run())
 
 
+def test_hidden_bound_assistant_decision_and_review(daily_retro_surface, monkeypatch):
+    async def run():
+        async with daily_retro_surface() as s:
+            assert s.rows["a"]["visibility"] == "hidden"
+            pipeline = retro.Pipeline(s.settings)
+            proposal = {**fixture_proposal(), "disposition": "no_change"}
+            assert (await pipeline.decision("spec_fixture", proposal))["state"] == "no_change"
+            manifest = retro.collect(s.settings, retro.datetime.fromisoformat("2026-09-28T05:00:00-05:00"))
+            packet = {"run_id": manifest["run_id"], "dispositions": [], "candidates": []}
+            retro.atomic(s.settings.state_root / "runs" / manifest["run_id"] / "astra.json",
+                         {"packet": packet, "packet_hash": retro.digest(packet)})
+            result = {"packet_hash": retro.digest(packet), "dispositions": []}
+            assert (await pipeline.record_review(manifest["run_id"], result))["actor"]["stream_id"] == A
+            assert not await s.notify._db.call("list_agent_questions")
+            monkeypatch.setenv("PENTACLE_STREAM_ID", B)
+            with pytest.raises(RuntimeError, match="only CURRENT assistant"):
+                await pipeline.record_review(manifest["run_id"], result)
+    asyncio.run(run())
+
+
+def test_old_daemon_proposal_blocks_durably_without_ask_loop(daily_retro_surface, monkeypatch):
+    async def run():
+        async with daily_retro_surface() as s:
+            binding_reader = s.notify._assistant_binding
+            s.notify._assistant_binding = None  # Installed pre-admission daemon.
+            original = retro.wsclient.prompt_ask_once
+            calls = []
+            async def counted(*args, **kwargs):
+                calls.append(1)
+                return await original(*args, **kwargs)
+            monkeypatch.setattr(retro.wsclient, "prompt_ask_once", counted)
+            pipeline = retro.Pipeline(s.settings)
+            blocked = await pipeline.decision("spec_fixture", fixture_proposal())
+            assert blocked["state"] == "ask_blocked"
+            assert retro.proposals(s.work.read_text())[blocked["id"]] == blocked
+            assert len(s.delivered) == 1 and s.delivered[0].startswith("REPORT daily-retro decision blocked")
+            repeated = await pipeline.decision("spec_fixture", fixture_proposal())
+            assert repeated["state"] == "ask_blocked" and repeated["version"] == blocked["version"]
+            s.notify._assistant_binding = binding_reader
+            assert (await pipeline.decision("spec_fixture", fixture_proposal()))["state"] == "ask_blocked"
+            assert len(calls) == 1 and len(s.delivered) == 1
+            assert not await s.notify._db.call("list_agent_questions")
+            resumed = await pipeline.decision("spec_fixture", fixture_proposal(), retry_blocked=True)
+            assert resumed["state"] == "pending" and len(calls) == 2
+            assert len(resumed["attempts"]) == 1 and len(s.delivered) == 1
+            assert not await s.store.fetch_session_event_tail(CHAT, limit=20)
+    asyncio.run(run())
+
+
 def test_current_delivery_receipt_and_quiet_review(daily_retro_surface):
     async def run():
         async with daily_retro_surface() as s:
@@ -281,6 +331,7 @@ def test_real_worker_rehearsal(daily_retro_surface, monkeypatch, tmp_path):
     """Opt-in only: never post synthetic questions to the real worker endpoint."""
     async def run():
         async with daily_retro_surface() as s:
+            assert s.rows["a"]["visibility"] == "hidden"
             fixtures_path = Path(__file__).parents[1] / "fixtures/daily_retro_sources.json"
             fixtures = json.loads(fixtures_path.read_text())
             day = (retro.datetime.now(retro.timezone.utc).astimezone(retro.ZONE).date() - retro.timedelta(days=1)).isoformat()
@@ -339,5 +390,6 @@ def test_real_worker_rehearsal(daily_retro_surface, monkeypatch, tmp_path):
             retro.atomic(evidence / "fixture-receipt.json", {"fixtures_sha256": hashlib.sha256(fixtures_path.read_bytes()).hexdigest(),
                                                             "tool_sha256": hashlib.sha256(tool.read_bytes()).hexdigest(),
                                                             "sources": len(fixtures["retros"]), "workers": len(stages), "cleanup_closed": 2,
+                                                            "assistant_visibility": "hidden",
                                                             "synthetic_production_questions": 0, "composite_messages": 0})
     asyncio.run(run())
