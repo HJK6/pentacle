@@ -556,7 +556,11 @@ def compile_history_packet(manifest, completed, selections=None):
         for key, value in sources:
             if key in evidence and evidence[key] != value:
                 # Labels are batch-local; retain conflicting proofs without rewriting citations.
-                key = f"{run['manifest']['run_id']}:{key}:{digest(value)}"
+                qualified = f"{run['manifest']['run_id']}:{key}:{digest(value)}"
+                key, suffix = qualified, 1
+                while key in evidence and evidence[key] != value:
+                    key = f"{qualified}:{suffix}"
+                    suffix += 1
             evidence[key] = value
     packet = {"run_id": manifest["run_id"], "dispositions": dispositions,
               "candidates": [groups[k] for k in sorted(groups)], "evidence_sources": evidence,
