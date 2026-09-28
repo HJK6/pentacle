@@ -111,7 +111,9 @@ def test_sweep_closes_hidden_seat_with_report_when_parent_closed() -> None:
             )
             await sessions.refresh()
             await _seed_terminal_report(sessions, store, "hosta:worker-b")
-            await sessions.close("hosta", "leader-b", "test")
+            # These registry-only seats have no process. Model confirmed death;
+            # a requested close now correctly refuses an open child.
+            await sessions.mark_closed("hosta", "leader-b", "fixture process death")
             assert (await store.fetch_session("hosta", "leader-b"))["status"] == "closed"
 
             counters = await reconciler.reconcile_once()
@@ -189,7 +191,7 @@ def test_sweep_spares_seat_without_terminal_report() -> None:
                 visibility="hidden", self_close_on_completion=True,
             )
             await sessions.refresh()
-            await sessions.close("hosta", "leader-d", "test")
+            await sessions.mark_closed("hosta", "leader-d", "fixture process death")
 
             counters = await reconciler.reconcile_once()
 
@@ -338,7 +340,7 @@ def test_sweep_spares_visible_seat() -> None:
             )
             await sessions.refresh()
             await _seed_terminal_report(sessions, store, "hosta:worker-f")
-            await sessions.close("hosta", "leader-f", "test")
+            await sessions.mark_closed("hosta", "leader-f", "fixture process death")
 
             counters = await reconciler.reconcile_once()
 

@@ -720,9 +720,11 @@ def test_close_reports_live_direct_child() -> None:
                 HOST, "child", visibility="hidden", parent_stream_id=f"{HOST}:parent",
             )
             await sessions.refresh()
-            result = await sessions.close(HOST, "parent")
-            assert result["failed"] is False
-            assert result["live_children"] == [{
+            with pytest.raises(VerbError) as refused:
+                await sessions.close(HOST, "parent")
+            assert refused.value.code == "close_live_children"
+            assert tmux.kills == 0
+            assert refused.value.extra["live_children"] == [{
                 "stream_id": f"{HOST}:child",
                 "host": HOST,
                 "status": "open",
@@ -769,8 +771,11 @@ def test_close_reports_cross_host_child() -> None:
                 "hostb", "child", visibility="hidden", parent_stream_id=f"{HOST}:parent",
             )
             await sessions.refresh()
-            result = await sessions.close(HOST, "parent")
-            assert result["live_children"] == [{
+            with pytest.raises(VerbError) as refused:
+                await sessions.close(HOST, "parent")
+            assert refused.value.code == "close_live_children"
+            assert tmux.kills == 0
+            assert refused.value.extra["live_children"] == [{
                 "stream_id": "hostb:child",
                 "host": "hostb",
                 "status": "open",
@@ -794,10 +799,12 @@ def test_close_does_not_mutate_live_child() -> None:
                 HOST, "child", visibility="hidden", parent_stream_id=f"{HOST}:parent",
             )
             await sessions.refresh()
-            result = await sessions.close(HOST, "parent")
+            with pytest.raises(VerbError) as refused:
+                await sessions.close(HOST, "parent")
             child = await store.fetch_session(HOST, "child")
-            assert result["live_children"]
+            assert refused.value.extra["live_children"]
             assert child is not None and child["status"] == "open"
+            assert (await store.fetch_session(HOST, "parent"))["status"] == "open"
         finally:
             store.stop()
 
