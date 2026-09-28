@@ -588,15 +588,20 @@ def test_scheduled_handoff_never_carries_unbound_or_prior_generation(tmp_path, m
         if binding == 'stale':
             auth['session_generation'] = admitted_generation
         ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
-        await ctl._finish_handoff({'handoff_from_stream_id': 'node-a:bart',
-            'reparent_children': False, '_auth_context': auth}, 'node-a:successor')
+        await env.open('child', parent_stream_id='node-a:bart')
+        killed = list(env.tmux.killed)
+        await refused(ctl._finish_handoff({'handoff_from_stream_id': 'node-a:bart',
+            'reparent_children': True, '_auth_context': auth}, 'node-a:successor'),
+            'stale_owner_generation')
         assert await env.grant() == before
-        assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'closed'
+        assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'open'
+        assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:bart'
+        assert env.tmux.killed == killed
     scenario(check)
 
 
-@pytest.mark.parametrize('reopen', [False, True])
-def test_real_schedule_admission_dispatch_and_carry_generation_boundary(tmp_path, monkeypatch, reopen):
+@pytest.mark.parametrize('binding', ['current', 'stale', 'missing'])
+def test_real_schedule_admission_dispatch_and_carry_generation_boundary(tmp_path, monkeypatch, binding):
     import uuid
     from spawnctl import SpawnCtl
     from window_schedule import WindowSchedule
@@ -615,6 +620,7 @@ def test_real_schedule_admission_dispatch_and_carry_generation_boundary(tmp_path
         native = FakeSpawn()
         async def finish(msg, _host):
             native.calls.append(msg)
+            await env.open('successor', role='assistant')
             await ctl._finish_handoff(msg, 'node-a:successor')
             return {'type': 'spawn.ok', 'stream_id': 'node-a:successor'}
         native.spawn = finish
@@ -625,18 +631,35 @@ def test_real_schedule_admission_dispatch_and_carry_generation_boundary(tmp_path
             'handoff': True, 'handoff_from_stream_id': 'node-a:bart', 'role': 'assistant',
             'spec_ids': [SPEC], 'objective': 'Continue the approved manager',
             'fires_at_utc': future_time(), 'reparent_children': False})
-        if reopen:
+        if binding == 'stale':
             await env.sessions.close('node-a', 'bart', close_kind='handed_off', reason='End G1')
             await env.open('bart', **fields)
             await c.approve(await c.request())  # independent phone grant for G2
-        await env.open('successor', role='assistant')
+        if binding == 'missing':
+            await env.store.submit(lambda conn: (conn.execute(
+                "UPDATE v2_operation_receipts SET measured_state_json='{}' WHERE request_id=? AND phase='row_committed'",
+                (inserted['schedule']['request_id'],)), conn.commit()))
+        await env.open('child', parent_stream_id='node-a:bart')
         before = await env.grant()
-        await surface._fire_schedule(inserted['schedule']['schedule_id'])
-        assert native.calls[0]['_auth_context']['session_generation'] == admitted_generation
-        after = await env.grant()
-        if reopen:
-            assert after == before
+        killed = list(env.tmux.killed)
+        sid = inserted['schedule']['schedule_id']
+        if binding == 'current':
+            await surface._fire_schedule(sid)
         else:
+            await refused(surface._fire_schedule(sid), 'failed')
+        after = await env.grant()
+        if binding != 'current':
+            assert native.calls == []
+            assert await env.store.fetch_session('node-a', 'successor') is None
+            assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'open'
+            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:bart'
+            assert env.tmux.killed == killed
+            assert after == before
+            row = await env.store.submit(lambda conn: dict(conn.execute(
+                'SELECT * FROM v2_schedules WHERE schedule_id=?', (sid,)).fetchone()))
+            assert row['state'] == 'failed' and row['last_error_code'] == 'stale_owner_generation'
+        else:
+            assert native.calls[0]['_auth_context']['session_generation'] == admitted_generation
             assert after['stream_id'] == 'node-a:successor'
             assert after['revision'] == before['revision'] + 1
     scenario(check)
@@ -859,4 +882,175 @@ def test_failed_consent_initialization_never_advertises_readiness(tmp_path, monk
         frames = await env.server._on_hello({'client': 'pentacle-mobile', '_client_websocket': peer})
         snapshot = next(frame for frame in frames if frame['type'] == 'snapshot')
         assert 'consent_enrollment_v1' not in snapshot['capabilities']
+    scenario(check)
+
+
+@pytest.mark.parametrize('change_point', ['before_spawn', 'during_spawn'])
+def test_scheduled_handoff_generation_fence_barrier(tmp_path, monkeypatch, change_point):
+    """The real guarded-spawn boundary owns the generation through retirement."""
+    import asyncio
+    from spawnctl import SpawnCtl
+    monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'assistant')
+    async def check(env):
+        c = Ceremony(env, tmp_path)
+        await env.open('bart', role='assistant')
+        await env.open('child', parent_stream_id='node-a:bart')
+        await c.enroll()
+        await c.approve(await c.request())
+        before = await env.grant()
+        auth = {**await env.seat('bart'), 'service_authenticated': True,
+                'service_actor': 'daemon:scheduler'}
+        msg = {'handoff': True, 'handoff_from_stream_id': 'node-a:bart',
+               'role': 'assistant', '_auth_context': auth, 'reparent_children': True}
+        ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
+        entered, release = asyncio.Event(), asyncio.Event()
+        boots = []
+        async def boot_then_finish(_msg, _host, **_kwargs):
+            entered.set()
+            await release.wait()
+            boots.append('successor')
+            await env.open('successor', role='assistant')
+            await ctl._finish_handoff(_msg, 'node-a:successor')
+            return {'type': 'spawn.ok', 'stream_id': 'node-a:successor'}
+        monkeypatch.setattr(ctl, '_spawn_resume_guarded', boot_then_finish)
+        async def reopen():
+            await env.sessions.close('node-a', 'bart', close_kind='handed_off',
+                                     expected_generation=auth['session_generation'])
+            return await env.sessions.open('node-a', 'bart', role='assistant')
+        if change_point == 'before_spawn':
+            # FIRE's earlier read can race with a new generation. Guarded spawn
+            # must re-read under the lifecycle lock before any boot effect.
+            await reopen()
+            killed = list(env.tmux.killed)
+            release.set()
+            await refused(ctl._spawn_guarded(msg, 'node-a'), 'stale_owner_generation')
+            assert boots == []
+            assert await env.store.fetch_session('node-a', 'successor') is None
+            assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'open'
+            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:bart'
+            assert env.tmux.killed == killed
+            assert await env.grant() == before
+            return
+        handoff = asyncio.create_task(ctl._spawn_guarded(msg, 'node-a'))
+        writer = None
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            writer = asyncio.create_task(reopen())
+            try:
+                await asyncio.wait_for(asyncio.shield(writer), .1)
+            except asyncio.TimeoutError:
+                pass
+            assert not writer.done(), 'generation writer crossed the handoff fence'
+            assert await env.gen('bart') == auth['session_generation']
+            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:bart'
+            assert await env.grant() == before
+            assert boots == []
+        finally:
+            release.set()
+            await asyncio.gather(handoff, *([writer] if writer else []), return_exceptions=True)
+        assert handoff.result()['type'] == 'spawn.ok'
+        assert writer.result()['session_generation'] != auth['session_generation']
+        assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'open'
+        assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:successor'
+        assert env.tmux.killed == ['bart']  # only admitted G1 was retired
+        assert (await env.grant())['stream_id'] == 'node-a:successor'
+        assert (await env.grant())['revision'] == before['revision'] + 1
+    scenario(check)
+
+
+@pytest.mark.parametrize('grant_state', ['none', 'revoked', 'replaced'])
+def test_same_generation_scheduled_handoff_never_revives_old_authority(tmp_path, monkeypatch, grant_state):
+    from spawnctl import SpawnCtl
+    monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'assistant')
+    async def check(env):
+        c = Ceremony(env, tmp_path)
+        await env.open('bart', role='assistant')
+        await env.open('successor', role='assistant')
+        if grant_state != 'none':
+            await c.enroll()
+            await c.approve(await c.request())
+            if grant_state == 'revoked':
+                pending = await c.call('consent.request', action='lifecycle.revoke',
+                    expected_revision=(await env.grant())['revision'], reason='Revoke before handoff')
+            else:
+                await env.open('other', role='lead')
+                pending = await c.call('consent.request', action='lifecycle.designate',
+                    target_stream_id='node-a:other', target_generation=await env.gen('other'),
+                    expected_revision=(await env.grant())['revision'], reason='Replace before handoff')
+            await c.approve(pending['challenge'])
+        before = await env.grant()
+        auth = {**await env.seat('bart'), 'service_authenticated': True,
+                'service_actor': 'daemon:scheduler'}
+        ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
+        await ctl._finish_handoff({'handoff_from_stream_id': 'node-a:bart',
+            '_auth_context': auth, 'reparent_children': False}, 'node-a:successor')
+        assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'closed'
+        assert await env.grant() == before
+    scenario(check)
+
+
+def test_scheduled_handoff_real_spawn_serializes_generation_through_finish(tmp_path, monkeypatch):
+    import asyncio
+    from spawnctl import SpawnCtl
+    from test_lifecycle_authority import IdleTmux
+    monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'assistant')
+    class BootTmux(IdleTmux):
+        created = 0
+        async def new_session(self, name, command, cwd=None, env=None):
+            self.created += 1
+            self.live.add(name)
+        async def capture(self, name):
+            return 'READY'
+        async def session_state(self, name):
+            return 'alive' if name in self.live else 'gone'
+    async def check(env):
+        env.tmux = env.sessions.tmux = BootTmux()
+        await env.open('bart', role='assistant', provider='claude',
+            effective_model='claude-opus-4-8', effective_effort='high')
+        await env.open('child', parent_stream_id='node-a:bart')
+        c = Ceremony(env, tmp_path)
+        await c.enroll()
+        await c.approve(await c.request())
+        auth = {**await env.seat('bart'), 'service_authenticated': True,
+                'service_actor': 'daemon:scheduler'}
+        ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = ctl._spawn_fenced
+        async def barrier(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original(*args, **kwargs)
+        monkeypatch.setattr(ctl, '_spawn_fenced', barrier)
+        msg = {'handoff': True, 'handoff_from_stream_id': 'node-a:bart', 'role': 'assistant',
+            'command': 'stub', 'ready_marker': 'READY', 'request_id': 'scheduled-native-boundary',
+            'objective': 'Exercise generation-bound scheduled boot', '_auth_context': auth}
+        handoff = asyncio.create_task(ctl._spawn_guarded(msg, 'node-a'))
+        async def reopen():
+            await env.sessions.close('node-a', 'bart', close_kind='handed_off',
+                expected_generation=auth['session_generation'])
+            return await env.sessions.open('node-a', 'bart', role='assistant')
+        writer = None
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            writer = asyncio.create_task(reopen())
+            try:
+                await asyncio.wait_for(asyncio.shield(writer), .1)
+            except asyncio.TimeoutError:
+                pass
+            assert not writer.done(), 'generation changed between admission and native boot'
+            assert env.tmux.created == 0
+            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:bart'
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(handoff, *([writer] if writer else []),
+                return_exceptions=True), 5)
+        reply = handoff.result()
+        assert reply['type'] == 'spawn.ok'
+        assert env.tmux.created == 1
+        assert env.tmux.killed == ['bart']
+        assert writer.result()['session_generation'] != auth['session_generation']
+        assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'open'
+        assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == reply['stream_id']
+        assert (await env.grant())['stream_id'] == reply['stream_id']
+        assert not ctl._handoff_fences
     scenario(check)

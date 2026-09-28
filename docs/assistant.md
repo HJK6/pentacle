@@ -22,7 +22,7 @@ The current assistant may use its verified token for `spawn --handoff`, preservi
 
 Ordinary operator, self, idle-reap and sweep closes are protected. Only internal `handed_off` and `spawn_rollback` close kinds bypass protection; a client-supplied `close_kind` cannot authorize deletion. Confirmed pane death leaves the protected row open with death evidence so its existing client entry remains available for recovery. Recovery is explicit; there is no new automatic restart loop. A daemon restart reconstructs the same session and pending-intent state.
 
-Existing owner-authorized scheduled handoffs can provide a future continuation. Assistant authority is checked at schedule admission; internal dispatch uses the scheduler's trusted identity. Track the accepted schedule receipt and keep obsolete wakeups cancelled. A locally hosted model alone does not provide offline phone access.
+Existing owner-authorized scheduled handoffs can provide a future continuation. Assistant authority is checked at schedule admission; internal dispatch uses the scheduler's trusted identity. At fire, a protected handoff requires the owner generation recorded at admission; an obsolete or unbound schedule fails as `stale_owner_generation` before launching a successor. The daemon holds that generation's lifecycle fence through boot and retirement. Track the accepted schedule receipt and keep obsolete wakeups canceled. A locally hosted model alone does not provide offline phone access.
 
 ## Fleet lifecycle authority
 

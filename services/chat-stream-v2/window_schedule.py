@@ -865,8 +865,7 @@ class WindowSchedule:
             except (ValueError, UnicodeDecodeError):
                 oracle_error = "invalid_prompt"
         # Retain the admitting generation rather than resolving today's owner.
-        # Legacy schedules or missing admission receipts may fire, but cannot
-        # confer lifecycle authority during their handoff.
+        # Protected handoffs without that binding fail before dispatch.
         admission_receipt = await self._get_receipt(schedule["request_id"], "row_committed")
         owner_generation = None
         if (admission_receipt and admission_receipt["surface"] == "schedule"
@@ -875,6 +874,16 @@ class WindowSchedule:
                 and admission_receipt["actor_id"] == schedule.get("owner_stream_id")
                 and admission_receipt["target_id"] == schedule_id):
             owner_generation = _decode(admission_receipt.get("measured_state_json"), {}).get("owner_session_generation")
+        source_id = str(schedule.get("handoff_from_stream_id") or "")
+        policy = getattr(self.sessions, "assistant", None)
+        source = (await self.store.fetch_session(*source_id.split(":", 1))
+                  if policy and ":" in source_id else None)
+        if (source_id and policy and (policy.protects(source)
+                or (policy.role and schedule.get("role") == policy.role))):
+            if (not owner_generation or source_id != schedule.get("owner_stream_id")
+                    or not source or source.get("status") != "open"
+                    or source.get("session_generation") != owner_generation):
+                oracle_error = "stale_owner_generation"
         spawn_msg = {
             # The durable schedule was owner-authorized at admission; this
             # internal identity is never accepted from a client payload.

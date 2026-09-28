@@ -628,17 +628,28 @@ def test_scheduled_handoff_preserves_source_and_intent(tmp_path) -> None:
 def test_scheduled_handoff_uses_admission_owner_generation_not_reopened_owner(tmp_path, binding) -> None:
     store, sessions, _comms, spawn, surface = harness(tmp_path)
     try:
-        sessions.rows['hosta:requester']['session_generation'] = 'G1'
+        from assistant_policy import AssistantPolicy
+        sessions.assistant = AssistantPolicy(store, 'hosta')
+        sessions.assistant.role = 'assistant'
+        sessions.rows['hosta:requester'].update(role='assistant', session_generation='G1')
         owner_auth = auth('hosta:requester')
         if binding != 'legacy':
             owner_auth['session_generation'] = 'G1' if binding == 'current' else 'stale'
         inserted = schedule_insert(surface, handoff=True,
-            handoff_from_stream_id='hosta:requester', _auth_context=owner_auth)
+            handoff_from_stream_id='hosta:requester', role='assistant', _auth_context=owner_auth)
         # Dispatch must use the admission receipt, even after owner reopening.
         sessions.rows['hosta:requester']['session_generation'] = 'G2'
-        run(surface._fire_schedule(inserted['schedule']['schedule_id']))
-        fired_auth = spawn.calls[0]['_auth_context']
-        assert fired_auth.get('session_generation') == ('G1' if binding == 'current' else None)
+        run(store.open_session('hosta', 'requester', role='assistant', session_generation='G2'))
+        with pytest.raises(VerbError) as failed:
+            run(surface._fire_schedule(inserted['schedule']['schedule_id']))
+        assert failed.value.code == 'failed'
+        assert failed.value.extra['spawn']['error_code'] == 'stale_owner_generation'
+        assert spawn.calls == []
+        assert sessions.rows['hosta:requester']['status'] == 'open'
+        row = run(store.submit(lambda conn: dict(conn.execute(
+            'SELECT * FROM v2_schedules WHERE schedule_id=?', (inserted['schedule']['schedule_id'],)).fetchone())))
+        assert row['state'] == 'failed'
+        assert row['last_error_code'] == 'stale_owner_generation'
     finally:
         store.stop()
 

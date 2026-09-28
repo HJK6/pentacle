@@ -276,6 +276,8 @@ class SpawnCtl:
         #: obligation. The task remains owned here until it records a terminal
         #: delivered/failed outcome and cleans up any pane it created.
         self._background_spawns: set[asyncio.Task[Any]] = set()
+        # Task-owned source fences cannot be supplied in a client payload.
+        self._handoff_fences: dict[asyncio.Task[Any], tuple[str, str]] = {}
         self._codex_boot_semaphores: dict[str, asyncio.Semaphore] = {}
         # Serialize the complete admission lifecycle for one native Claude
         # identity. Different idempotency keys must not race into two v2 rows
@@ -1342,6 +1344,24 @@ class SpawnCtl:
         if policy is None:
             return await self._spawn_resume_guarded(msg, local_host, admission=admission)
         async with policy.spawn(msg, str(msg.get("host") or local_host).strip()):
+            source_id = str(msg.get("handoff_from_stream_id") or "")
+            auth = msg.get("_auth_context") or {}
+            source = (await self.store.fetch_session(*source_id.split(":", 1))
+                      if ":" in source_id else None)
+            if (msg.get("handoff") and auth.get("service_actor") == "daemon:scheduler"
+                    and (policy.protects(source) or (policy.role and msg.get("role") == policy.role))):
+                # Protected spawn serialization is already held. Take authority
+                # before lifecycle, then retain both through boot and retirement.
+                host, name = source_id.split(":", 1)
+                async with policy.authority_lock, self.sessions._lifecycle_lock(host, name):
+                    source = await self.store.fetch_session(host, name)
+                    generation = self._scheduled_handoff_generation(msg, source, policy)
+                    task = asyncio.current_task()
+                    self._handoff_fences[task] = (source_id, generation)
+                    try:
+                        return await self._spawn_resume_guarded(msg, local_host, admission=admission)
+                    finally:
+                        self._handoff_fences.pop(task, None)
             return await self._spawn_resume_guarded(msg, local_host, admission=admission)
 
     async def _spawn_resume_guarded(
@@ -2999,55 +3019,87 @@ class SpawnCtl:
             host, key, source_id, str(auth.get("session_generation") or ""),
             str(source["token_hash"]), lifecycle_authority.logical_payload_hash(msg), name)
 
+    @staticmethod
+    def _scheduled_handoff_generation(msg, source, policy):
+        """Require the immutable admitting generation for protected schedules."""
+        auth = msg.get("_auth_context") or {}
+        source_id = str(msg.get("handoff_from_stream_id") or "")
+        if (auth.get("service_actor") != "daemon:scheduler" or policy is None
+                or not (policy.protects(source) or (policy.role and msg.get("role") == policy.role))):
+            return None
+        generation = auth.get("session_generation")
+        if (not generation or not auth.get("token_verified")
+                or auth.get("stream_id") != source_id or not source
+                or source.get("status") != "open"
+                or source.get("session_generation") != generation):
+            raise VerbError("stale_owner_generation", "Scheduled handoff owner generation changed or is unbound")
+        return str(generation)
+
     async def _finish_handoff(self, msg: dict[str, Any], successor_stream_id: str) -> None:
-        """Post-boot handoff steps, best-effort and non-raising: the successor is
-        already live and returned, so neither failing here fails the spawn.
-        Re-parent the retiring leader's direct children to the successor
-        (v1 default; `--no-reparent-children` opts out), THEN close the retiring
-        session via the normal close path.  Parentage is central metadata, so
-        children on configured SSH peers are moved in the same operation."""
+        """Retire the admitted source; protected schedule fences remain held.
+
+        Ordinary post-boot failures remain best-effort. A stale scheduled owner
+        raises before retirement or reparenting so spawn's attributable rollback
+        handles only the successor it created.
+        """
         handoff_from = str(msg.get("handoff_from_stream_id") or "").strip()
         if not handoff_from or ":" not in handoff_from:
             return
-        if bool(msg.get("reparent_children", True)):
-            try:
-                moved = await self.sessions.reparent_children(handoff_from, successor_stream_id)
-                if moved:
-                    log.info("handoff reparented %d child(ren) %s -> %s",
-                             moved, handoff_from, successor_stream_id)
-            except Exception:  # noqa: BLE001 - a reparent failure never fails the handoff
-                log.exception("handoff child reparent failed")
         src_host, src_name = handoff_from.split(":", 1)
         policy = getattr(self.sessions, "assistant", None)
+        held = self._handoff_fences.get(asyncio.current_task())
+        fenced = bool(held and held[0] == handoff_from)
         try:
-            async with policy.authority_lock if policy else nullcontext():
+            async with policy.authority_lock if policy and not fenced else nullcontext():
                 source = await self.store.fetch_session(src_host, src_name)
-                source_generation = str((source or {}).get("session_generation") or "")
-                auth = msg.get("_auth_context") or {}
-                scheduled = auth.get("service_actor") == "daemon:scheduler"
-                carry_allowed = not scheduled or (
-                    auth.get("token_verified") and auth.get("stream_id") == handoff_from
-                    and bool(source_generation) and auth.get("session_generation") == source_generation)
-                if scheduled and carry_allowed:
-                    grant = await self.store.lifecycle_authority_current()
-                    carry_allowed = (grant["stream_id"] == handoff_from
-                        and grant["session_generation"] == auth["session_generation"])
-                # Check the schedule's admitting generation before retiring the
-                # source, under the same lock that serializes grant changes.
-                closed = await self.sessions.close(src_host, src_name, reason="handed_off",
-                    close_kind="handed_off", expected_generation=source_generation)
-                if (policy is None or not policy.protects(source) or not carry_allowed
-                        or closed.get("failed") or closed.get("stale_generation") or closed.get("already_closed")):
-                    return
-                succ_host, succ_name = successor_stream_id.split(":", 1)
-                successor = await self.store.fetch_session(succ_host, succ_name)
-                moved = await self.store.lifecycle_authority_carry_on_handoff(
-                    handoff_from, source_generation, successor_stream_id,
-                    str((successor or {}).get("session_generation") or ""), policy.role)
+                admitted_generation = self._scheduled_handoff_generation(msg, source, policy)
+                async with (self.sessions._lifecycle_lock(src_host, src_name)
+                            if admitted_generation and not fenced else nullcontext()):
+                    source = await self.store.fetch_session(src_host, src_name)
+                    # Re-read after acquiring the source fence, before any effect.
+                    admitted_generation = self._scheduled_handoff_generation(msg, source, policy)
+                    if fenced and admitted_generation != held[1]:
+                        raise VerbError("stale_owner_generation", "Scheduled handoff admission binding changed")
+                    source_generation = admitted_generation or str((source or {}).get("session_generation") or "")
+                    if bool(msg.get("reparent_children", True)):
+                        try:
+                            moved_children = await self.sessions.reparent_children(handoff_from, successor_stream_id)
+                            if moved_children:
+                                log.info("handoff reparented %d child(ren) %s -> %s",
+                                         moved_children, handoff_from, successor_stream_id)
+                        except Exception:  # ordinary metadata failure remains best-effort
+                            log.exception("handoff child reparent failed")
+                    auth = msg.get("_auth_context") or {}
+                    scheduled = auth.get("service_actor") == "daemon:scheduler"
+                    carry_allowed = not scheduled or bool(admitted_generation)
+                    if scheduled and carry_allowed:
+                        grant = await self.store.lifecycle_authority_current()
+                        carry_allowed = (grant["stream_id"] == handoff_from
+                            and grant["session_generation"] == admitted_generation)
+                    if admitted_generation:
+                        # _spawn_guarded owns this non-reentrant lifecycle lock.
+                        self.sessions.assistant.guard_close(source, "handed_off")
+                        closed = await self.sessions._close_locked(src_host, src_name, reason="handed_off",
+                            close_kind="handed_off", expected_generation=admitted_generation)
+                    else:
+                        closed = await self.sessions.close(src_host, src_name, reason="handed_off",
+                            close_kind="handed_off", expected_generation=source_generation)
+                    if closed.get("stale_generation") and admitted_generation:
+                        raise VerbError("stale_owner_generation", "Scheduled handoff owner generation changed")
+                    if (policy is None or not policy.protects(source) or not carry_allowed
+                            or closed.get("failed") or closed.get("stale_generation") or closed.get("already_closed")):
+                        return
+                    succ_host, succ_name = successor_stream_id.split(":", 1)
+                    successor = await self.store.fetch_session(succ_host, succ_name)
+                    moved = await self.store.lifecycle_authority_carry_on_handoff(
+                        handoff_from, source_generation, successor_stream_id,
+                        str((successor or {}).get("session_generation") or ""), policy.role)
         except VerbError as exc:
+            if exc.code == "stale_owner_generation":
+                raise
             log.info("handoff close of %s: %s", handoff_from, exc.code)
             return
-        except Exception:  # noqa: BLE001 - authority stays with no one rather than failing the handoff
+        except Exception:  # authority stays with no one rather than failing ordinary handoff
             log.exception("handoff lifecycle authority carry failed")
             return
         if moved:
