@@ -918,8 +918,9 @@ def test_scheduled_handoff_generation_fence_barrier(tmp_path, monkeypatch, chang
             if change_point == 'before_spawn':
                 # A confirmed process death can leave children; requested close
                 # now refuses them. Keep this generation-race fixture truthful.
-                await env.tmux.kill_session('bart')
-                await env.sessions.mark_closed('node-a', 'bart', reason='fixture process death',
+                source_host, source_name = env.sessions.split(auth['stream_id'])
+                await env.tmux.kill_session(source_name)
+                await env.sessions.mark_closed(source_host, source_name, reason='fixture process death',
                                                expected_generation=auth['session_generation'])
             else:
                 await env.sessions.close('node-a', 'bart', close_kind='handed_off',
