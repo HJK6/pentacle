@@ -1514,6 +1514,7 @@ class SpawnCtl:
                         "stream_id": f"{host}:{recorded_name}",
                         "session": session,
                         "initial_prompt_delivery": receipt,
+                        **({"handoff": receipt["handoff"]} if "handoff" in receipt else {}),
                         "replayed": True,
                         **admitted,
                     }
@@ -1779,19 +1780,27 @@ class SpawnCtl:
                 delivery_receipt=delivery_receipt,
                 native_initial_prompt=native_initial_prompt,
             )
-            recorded = await self.store.record_spawn_intent(
-                host, name,
-                {
-                    "open_fields": open_flds,
-                    "brief": brief,
-                    "delivery_receipt": delivery_receipt,
-                    "operator_initiated_top_level": (
-                        not open_flds.get("parent_stream_id")
-                        and not open_flds.get("handoff_from_stream_id")
-                        and bool((msg.get("_auth_context") or {}).get("operator_authenticated"))
-                    ),
-                }, request_id=request_id, nonce=nonce,
-            )
+            # Graph admission ends before boot. A winning parent close makes
+            # this request refuse before a pane; a winning intent blocks close.
+            async with self.sessions._graph_lock:
+                parent_id = str(open_flds.get("parent_stream_id") or "")
+                if parent_id:
+                    parent = await self.store.fetch_session(*self.sessions.split(parent_id))
+                    if parent is None or parent.get("status") != "open":
+                        raise VerbError("spawn_parent_closed", f"{parent_id} is not an open parent")
+                recorded = await self.store.record_spawn_intent(
+                    host, name,
+                    {
+                        "open_fields": open_flds,
+                        "brief": brief,
+                        "delivery_receipt": delivery_receipt,
+                        "operator_initiated_top_level": (
+                            not open_flds.get("parent_stream_id")
+                            and not open_flds.get("handoff_from_stream_id")
+                            and bool((msg.get("_auth_context") or {}).get("operator_authenticated"))
+                        ),
+                    }, request_id=request_id, nonce=nonce,
+                )
             if not recorded:
                 raise VerbError("spawn_fence_lost", "spawn intent reservation expired or was cancelled")
             # From here the reservation carries a durable spawn intent — the
@@ -1904,12 +1913,19 @@ class SpawnCtl:
                     created[0] = False
                     await asyncio.sleep(0.25 * (attempt + 1))
                     continue
-                # Handoff post-steps (item 2), only after the successor is boot-ready
-                # + persisted + brief delivered. The successor is already live, so
-                # reparent/close are kept best-effort at this boundary; the metadata
-                # move itself is central-store-only and covers every host.
+                # Admission is complete; partial post-steps must preserve the
+                # live successor and replay honestly, never enter spawn rollback.
                 if msg.get("handoff"):
-                    await self._finish_handoff(msg, f"{host}:{name}")
+                    disposition = await self._finish_handoff(msg, f"{host}:{name}")
+                    try:
+                        if not await self.store.record_handoff_outcome(host, name, request_id, disposition):
+                            raise RuntimeError("handoff receipt request fence moved")
+                    except Exception:
+                        log.exception("handoff disposition persistence failed")
+                        disposition = {**disposition, "state": "indeterminate", "stage": "receipt",
+                                       "error_code": "handoff_receipt_unconfirmed"}
+                    reply["initial_prompt_delivery"]["handoff"] = disposition
+                    reply["handoff"] = disposition
                 return reply
             raise RuntimeError("prompt spawn retry loop exhausted without an outcome")
         except Exception as exc:
@@ -2746,6 +2762,10 @@ class SpawnCtl:
         # (rpc_delivery_determinism lane). Derived from `msg` here since this
         # runs inside `_spawn_fenced`.
         _idem_key = str(msg.get("idempotency_key") or request_id).strip()
+        if msg.get("handoff"):
+            receipt["handoff"] = {"state": "pending", "stage": "post_steps",
+                                  "predecessor": msg.get("handoff_from_stream_id"),
+                                  "successor": f"{host}:{name}"}
         await self.store.set_spawn_outcome(
             host, name, "delivered", request_id=request_id,
             reason=receipt["state"], delivery_evidence=evidence,
@@ -3035,84 +3055,91 @@ class SpawnCtl:
             raise VerbError("stale_owner_generation", "Scheduled handoff owner generation changed or is unbound")
         return str(generation)
 
-    async def _finish_handoff(self, msg: dict[str, Any], successor_stream_id: str) -> None:
-        """Retire the admitted source; protected schedule fences remain held.
+    async def _finish_handoff(self, msg: dict[str, Any], successor_stream_id: str) -> dict[str, Any]:
+        """Stop at the first failed post-step; keep the admitted successor.
 
-        Ordinary post-boot failures remain best-effort. A stale scheduled owner
-        raises before retirement or reparenting so spawn's attributable rollback
-        handles only the successor it created.
+        Scheduled stale-owner rejection retains its pre-effect rollback contract.
+        Other failures are durable partial outcomes, recovered explicitly through
+        existing reparent/close authority rather than another successor spawn.
         """
         handoff_from = str(msg.get("handoff_from_stream_id") or "").strip()
-        if not handoff_from or ":" not in handoff_from:
-            return
+        result: dict[str, Any] = {"state": "incomplete", "predecessor": handoff_from,
+                                 "successor": successor_stream_id, "children_moved": 0, "prompts_moved": 0}
+        if ":" not in handoff_from:
+            return {**result, "stage": "source", "error_code": "handoff_source_unknown"}
         src_host, src_name = handoff_from.split(":", 1)
         policy = getattr(self.sessions, "assistant", None)
         held = self._handoff_fences.get(asyncio.current_task())
         fenced = bool(held and held[0] == handoff_from)
+        stage = "source"
         try:
             async with policy.authority_lock if policy and not fenced else nullcontext():
-                source = await self.store.fetch_session(src_host, src_name)
-                admitted_generation = self._scheduled_handoff_generation(msg, source, policy)
-                async with (self.sessions._lifecycle_lock(src_host, src_name)
-                            if admitted_generation and not fenced else nullcontext()):
+                async with self.sessions._lifecycle_lock(src_host, src_name) if not fenced else nullcontext():
                     source = await self.store.fetch_session(src_host, src_name)
-                    # Re-read after acquiring the source fence, before any effect.
                     admitted_generation = self._scheduled_handoff_generation(msg, source, policy)
                     if fenced and admitted_generation != held[1]:
                         raise VerbError("stale_owner_generation", "Scheduled handoff admission binding changed")
-                    source_generation = admitted_generation or str((source or {}).get("session_generation") or "")
+                    if source is None or source.get("status") != "open":
+                        raise VerbError("handoff_source_closed", "Handoff source is no longer open")
+                    source_generation = admitted_generation or self.sessions._row_generation(source)
+                    stage = "children"
                     if bool(msg.get("reparent_children", True)):
-                        try:
-                            moved_children = await self.sessions.reparent_children(handoff_from, successor_stream_id)
-                            if moved_children:
-                                log.info("handoff reparented %d child(ren) %s -> %s",
-                                         moved_children, handoff_from, successor_stream_id)
-                        except Exception:  # ordinary metadata failure remains best-effort
-                            log.exception("handoff child reparent failed")
-                    auth = msg.get("_auth_context") or {}
-                    scheduled = auth.get("service_actor") == "daemon:scheduler"
-                    carry_allowed = not scheduled or bool(admitted_generation)
-                    if scheduled and carry_allowed:
-                        grant = await self.store.lifecycle_authority_current()
-                        carry_allowed = (grant["stream_id"] == handoff_from
-                            and grant["session_generation"] == admitted_generation)
-                    if admitted_generation:
-                        # _spawn_guarded owns this non-reentrant lifecycle lock.
+                        result["children_moved"] = None  # a partial exception leaves the count unknown
+                        result["children_moved"] = await self.sessions.reparent_children(handoff_from, successor_stream_id)
+                    succ_host, succ_name = self.sessions.split(successor_stream_id)
+                    # Retain the live successor's generation through ownership
+                    # transfer and retirement; acquire lifecycle before graph.
+                    async with self.sessions._lifecycle_lock(succ_host, succ_name), self.sessions._graph_lock:
+                        successor = await self.store.fetch_session(succ_host, succ_name)
+                        if successor is None or successor.get("status") != "open":
+                            raise VerbError("handoff_successor_closed", "Handoff successor is no longer open")
+                        await self.sessions._guard_child_preservation(handoff_from)
+                        stage = "prompts"
+                        notify = getattr(self, "consent_notify", None)
+                        if notify is not None:
+                            result["prompts_moved"] = None
+                            result["prompts_moved"] = await notify.transfer_questions_for_handoff(source, successor)
+                        stage = "source_close"
                         self.sessions.assistant.guard_close(source, "handed_off")
                         closed = await self.sessions._close_locked(src_host, src_name, reason="handed_off",
-                            close_kind="handed_off", expected_generation=admitted_generation)
-                    else:
-                        closed = await self.sessions.close(src_host, src_name, reason="handed_off",
                             close_kind="handed_off", expected_generation=source_generation)
-                    if closed.get("stale_generation") and admitted_generation:
-                        raise VerbError("stale_owner_generation", "Scheduled handoff owner generation changed")
-                    if (policy is None or not policy.protects(source) or not carry_allowed
-                            or closed.get("failed") or closed.get("stale_generation") or closed.get("already_closed")):
-                        return
-                    succ_host, succ_name = successor_stream_id.split(":", 1)
-                    successor = await self.store.fetch_session(succ_host, succ_name)
-                    moved = await self.store.lifecycle_authority_carry_on_handoff(
-                        handoff_from, source_generation, successor_stream_id,
-                        str((successor or {}).get("session_generation") or ""), policy.role)
-        except VerbError as exc:
-            if exc.code == "stale_owner_generation":
+                        if closed.get("stale_generation") and admitted_generation:
+                            raise VerbError("stale_owner_generation", "Scheduled handoff owner generation changed")
+                        if any(closed.get(key) for key in ("failed", "stale_generation", "already_closed")):
+                            raise VerbError("handoff_source_not_closed", str(closed.get("reason") or "Source retirement not confirmed"))
+                        stage = "authority_carry"
+                        auth = msg.get("_auth_context") or {}
+                        scheduled = auth.get("service_actor") == "daemon:scheduler"
+                        carry_allowed = not scheduled or bool(admitted_generation)
+                        if scheduled and carry_allowed:
+                            grant = await self.store.lifecycle_authority_current()
+                            carry_allowed = (grant["stream_id"] == handoff_from
+                                and grant["session_generation"] == admitted_generation)
+                        if policy and policy.protects(source) and carry_allowed:
+                            moved = await self.store.lifecycle_authority_carry_on_handoff(
+                                handoff_from, str(source.get("session_generation") or ""), successor_stream_id,
+                                str(successor.get("session_generation") or ""), policy.role)
+                            if moved and notify is not None:
+                                await notify.notification({"type": "notification.create", "producer": "lifecycle.continuity",
+                                    "title": "Lifecycle manager continued",
+                                    "body": f"Lifecycle manager continued to {successor_stream_id} ({'scheduled' if scheduled else 'live'})",
+                                    "severity": "info", "actions": [],
+                                    "dedup_key": f"lifecycle-carry:{moved['revision']}"})
+        except Exception as exc:
+            if getattr(exc, "code", "") == "stale_owner_generation":
                 raise
-            log.info("handoff close of %s: %s", handoff_from, exc.code)
-            return
-        except Exception:  # authority stays with no one rather than failing ordinary handoff
-            log.exception("handoff lifecycle authority carry failed")
-            return
-        if moved:
-            log.info("handoff carried lifecycle authority %s -> %s revision=%s",
-                     handoff_from, successor_stream_id, moved["revision"])
-            notify = getattr(self, "consent_notify", None)
-            if notify is not None:
-                mode = "scheduled" if (msg.get("_auth_context") or {}).get("service_actor") == "daemon:scheduler" else "live"
-                await notify.notification({"type": "notification.create", "producer": "lifecycle.continuity",
-                    "title": "Lifecycle manager continued",
-                    "body": f"Lifecycle manager continued to {successor_stream_id} ({mode})",
-                    "severity": "info", "actions": [],
-                    "dedup_key": f"lifecycle-carry:{moved['revision']}"})
+            result.update(stage=stage, error_code=getattr(exc, "code", "handoff_post_step_failed"),
+                          error=str(exc)[:300], **getattr(exc, "extra", {}))
+            result["next_action"] = "Inspect successor and partial ownership; reparent remaining children, then explicitly close predecessor"
+            log.warning("handoff incomplete predecessor=%s successor=%s stage=%s code=%s",
+                        handoff_from, successor_stream_id, stage, result["error_code"],
+                        extra={"subsystem": "lifecycle", "bug_ref": "handoff_post_steps_atomicity_2026_09"})
+            return result
+        result.update(state="complete", stage="complete")
+        log.info("handoff complete predecessor=%s successor=%s children=%s prompts=%s",
+                 handoff_from, successor_stream_id, result["children_moved"], result["prompts_moved"],
+                 extra={"subsystem": "lifecycle", "bug_ref": "handoff_post_steps_atomicity_2026_09"})
+        return result
 
     # -- reservation identity probes (spec §D1) ------------------------------
 
@@ -4322,6 +4349,8 @@ class SpawnCtl:
                 "idempotency_key": oc.get("idempotency_key"),
                 "request_payload_hash": oc.get("request_payload_hash"),
                 "updated_at": oc.get("updated_at"),
+                **({"handoff": oc["delivery_receipt"]["handoff"]}
+                   if isinstance(oc.get("delivery_receipt"), dict) and "handoff" in oc["delivery_receipt"] else {}),
             }
             for oc in resolved["outcomes"]
         ]
@@ -4395,6 +4424,8 @@ class SpawnCtl:
         }
         if isinstance(outcome.get("delivery_receipt"), dict):
             base["initial_prompt_delivery"] = outcome["delivery_receipt"]
+            if "handoff" in outcome["delivery_receipt"]:
+                base["handoff"] = outcome["delivery_receipt"]["handoff"]
         queue_handle = (
             outcome["delivery_receipt"].get("queue_handle")
             if isinstance(outcome.get("delivery_receipt"), dict) else None

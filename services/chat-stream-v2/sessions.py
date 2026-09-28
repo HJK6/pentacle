@@ -317,6 +317,28 @@ class Sessions:
             })
         return sorted(result, key=lambda item: item["stream_id"])
 
+    async def _pending_child_spawns(self, parent_stream_id: str) -> list[dict[str, Any]]:
+        pending = []
+        for reservation in await self.store.reservations(include_expired=True):
+            raw = reservation.get("payload")
+            intent = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
+            if (intent.get("open_fields") or {}).get("parent_stream_id") == parent_stream_id:
+                pending.append({"stream_id": f"{reservation['host']}:{reservation['session_name']}",
+                                "request_id": reservation.get("request_id")})
+        return pending
+
+    async def _guard_child_preservation(self, parent_stream_id: str) -> None:
+        """Called with the graph lock held, before any requested termination."""
+        children = await self._live_children(parent_stream_id)
+        pending = await self._pending_child_spawns(parent_stream_id)
+        if children or pending:
+            code = "close_live_children" if children else "close_pending_spawn"
+            log.info("close refused stream=%s code=%s children=%s pending=%s",
+                     parent_stream_id, code, children, pending,
+                     extra={"subsystem": "lifecycle", "bug_ref": "close_child_preservation_guard_2026_09"})
+            raise VerbError(code, "Close or explicitly reparent direct children first; settle pending child spawns",
+                            live_children=children, pending_spawns=pending)
+
     def _capture_liveness(self, stream_id: str, row: dict[str, Any] | None) -> str | None:
         """Prefer the live observer overlay over the durable session copy."""
         for candidate in (self._inv.get(stream_id), row):
@@ -922,12 +944,12 @@ class Sessions:
         if not new_parent_host or not new_parent_name or new_parent_stream_id == worker_stream_id:
             raise VerbError("invalid_request", "new parent must be a different stream")
 
-        worker = self._inv.get(worker_stream_id) or await self.store.fetch_session(host, session_name)
+        worker = await self.store.fetch_session(host, session_name)
         if worker is None or str(worker.get("status") or "open") != "open":
             raise VerbError("reparent_worker_not_found", f"{worker_stream_id} is not an open worker")
         old_parent_stream_id = str(worker.get("parent_stream_id") or "").strip() or None
 
-        parent = self._inv.get(new_parent_stream_id) or await self.store.fetch_session(
+        parent = await self.store.fetch_session(
             new_parent_host, new_parent_name
         )
         if parent is None or str(parent.get("status") or "open") != "open":
@@ -1087,6 +1109,13 @@ class Sessions:
         so the move is a pure `parent_stream_id` reassignment — no per-pane RPC
         and no same-host restriction. Returns the count moved, including rows
         owned by a configured SSH peer."""
+        async with self._graph_lock:
+            parent = await self.store.fetch_session(*self.split(new_parent_stream_id))
+            if parent is None or parent.get("status") != "open":
+                raise VerbError("reparent_target_closed", f"{new_parent_stream_id} is not an open parent")
+            return await self._reparent_children_locked(old_parent_stream_id, new_parent_stream_id)
+
+    async def _reparent_children_locked(self, old_parent_stream_id: str, new_parent_stream_id: str) -> int:
         moved = 0
         for child in await self.store.children_of(old_parent_stream_id):
             if child.get("stream_id") == new_parent_stream_id:
@@ -1359,27 +1388,25 @@ class Sessions:
         async with self._lifecycle_lock(host, session_name):
             row = await self.store.fetch_session(host, session_name)
             self.assistant.guard_close(row, close_kind)
-            if admission_guard is not None:
-                # Hold the graph lock from admission through the kill so no
-                # child can be reparented under the target in between.
-                async with self._graph_lock:
+            # Admission and termination share the same graph fence as reparent
+            # and child intent recording. Stale/closed targets keep their existing
+            # outcomes; a child guard never authorizes killing a newer generation.
+            async with self._graph_lock:
+                if admission_guard is not None:
                     await admission_guard(row)
-                    return await self._close_locked(
-                        host, session_name, reason,
-                        expected_generation=expected_generation, close_kind=close_kind,
-                        requires_idle=requires_idle, requires_hidden=requires_hidden,
-                        operator_override=operator_override,
-                        operator_confirm=operator_confirm,
-                        defer_if_working=defer_if_working, attribution=attribution,
-                    )
-            return await self._close_locked(
-                host, session_name, reason,
-                expected_generation=expected_generation, close_kind=close_kind,
-                requires_idle=requires_idle, requires_hidden=requires_hidden,
-                operator_override=operator_override,
-                operator_confirm=operator_confirm,
-                defer_if_working=defer_if_working, attribution=attribution,
-            )
+                if row and row.get("status") == "open":
+                    if expected_generation is not None and self._row_generation(row) != expected_generation:
+                        return await self._stale_close_result(sid, row)
+                if row is None or row.get("status") == "open":
+                    await self._guard_child_preservation(sid)
+                return await self._close_locked(
+                    host, session_name, reason,
+                    expected_generation=expected_generation, close_kind=close_kind,
+                    requires_idle=requires_idle, requires_hidden=requires_hidden,
+                    operator_override=operator_override,
+                    operator_confirm=operator_confirm,
+                    defer_if_working=defer_if_working, attribution=attribution,
+                )
 
     async def reap_idle(
         self,

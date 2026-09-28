@@ -498,6 +498,8 @@ def test_real_handoff_finish_emits_informational_continuity_card(tmp_path, monke
         ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
         records = []
         class Notify:
+            async def transfer_questions_for_handoff(self, source, successor):
+                return 0
             async def notification(self, msg):
                 records.append(msg)
         ctl.consent_notify = Notify()
@@ -625,7 +627,7 @@ def test_real_schedule_admission_dispatch_and_carry_generation_boundary(tmp_path
             'from_stream_id': 'node-a:bart', '_auth_context': await env.seat('bart'),
             'handoff': True, 'handoff_from_stream_id': 'node-a:bart', 'role': 'assistant',
             'spec_ids': [SPEC], 'objective': 'Continue the approved manager',
-            'fires_at_utc': future_time(), 'reparent_children': False})
+            'fires_at_utc': future_time(), 'reparent_children': True})
         if binding == 'stale':
             await env.sessions.close('node-a', 'bart', close_kind='handed_off', reason='End G1')
             await env.open('bart', **fields)
@@ -913,8 +915,15 @@ def test_scheduled_handoff_generation_fence_barrier(tmp_path, monkeypatch, chang
             return {'type': 'spawn.ok', 'stream_id': 'node-a:successor'}
         monkeypatch.setattr(ctl, '_spawn_resume_guarded', boot_then_finish)
         async def reopen():
-            await env.sessions.close('node-a', 'bart', close_kind='handed_off',
-                                     expected_generation=auth['session_generation'])
+            if change_point == 'before_spawn':
+                # A confirmed process death can leave children; requested close
+                # now refuses them. Keep this generation-race fixture truthful.
+                await env.tmux.kill_session('bart')
+                await env.sessions.mark_closed('node-a', 'bart', reason='fixture process death',
+                                               expected_generation=auth['session_generation'])
+            else:
+                await env.sessions.close('node-a', 'bart', close_kind='handed_off',
+                                         expected_generation=auth['session_generation'])
             return await env.sessions.open('node-a', 'bart', role='assistant')
         if change_point == 'before_spawn':
             # FIRE's earlier read can race with a new generation. Guarded spawn
