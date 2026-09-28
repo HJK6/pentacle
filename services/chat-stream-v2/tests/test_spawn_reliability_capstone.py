@@ -437,6 +437,7 @@ def test_bare_spawn_send_report_terminate_closes_the_row() -> None:
             tmux = _BareReportTmux()
             sessions = Sessions(store, tmux=tmux, local_host=HOST)
             spawnctl = SpawnCtl(store, sessions, tmux=tmux)
+            await sessions.open(HOST, "leader")
             spawned = await spawnctl.spawn(
                 {"objective": "Exercise the existing spawn contract",
                     "command": "stub",
@@ -496,6 +497,7 @@ def test_negative_spawn_flag_survives_cli_resolution_and_persists_false() -> Non
             tmux = _BareReportTmux()
             sessions = Sessions(store, tmux=tmux, local_host=HOST)
             spawnctl = SpawnCtl(store, sessions, tmux=tmux)
+            await sessions.open(HOST, "leader")
             args = SimpleNamespace(self_close_on_completion=False)
             resolved = agent_orch_cli._resolve_self_close_on_completion(
                 args, visibility="hidden", parent=f"{HOST}:leader", handoff=False

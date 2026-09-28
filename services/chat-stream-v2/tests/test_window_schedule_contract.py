@@ -42,6 +42,7 @@ def release_attestation(release_id: str = "active") -> dict:
 
 class FakeSessions:
     def __init__(self) -> None:
+        self._graph_lock = asyncio.Lock()
         provenance = [{"kind": "explicit", "spec_id": SPEC}]
         self.rows = {
             stream_id: {
@@ -56,6 +57,8 @@ class FakeSessions:
 
     def get(self, stream_id: str):
         return self.rows.get(stream_id)
+
+    split = staticmethod(Sessions.split)
 
 
 class FakeComms:
@@ -813,6 +816,7 @@ def test_remote_scheduled_fire_routes_profile_tmux_prompt_and_child_token_to_pee
     )
     surface.mark_store_ready()
     try:
+        run(store.open_session("hosta", "requester"))
         inserted = schedule_insert(
             surface,
             provider="claude",
