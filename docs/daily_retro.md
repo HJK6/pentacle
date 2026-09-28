@@ -120,10 +120,13 @@ Release staging requires a fresh immutable SHA directory:
 
 ```bash
 set -euo pipefail
+: "${RETRO_CHECKOUT:?reviewed public checkout required}"
+: "${RETRO_CANDIDATE:?approved full SHA required}"
+: "${RETRO_RELEASE:?fresh release path required}"
 test ! -e "$RETRO_RELEASE"
 test ! -L "$RETRO_RELEASE"
 install -d -m 0755 "$RETRO_RELEASE"
-git archive "$RETRO_CANDIDATE" \
+git -C "$RETRO_CHECKOUT" archive "$RETRO_CANDIDATE" \
   services/chat-stream-v2/tools/daily_retro.py \
   services/chat-stream-v2/tools/live_window services/_shared/operator_auth.py \
   services/agent-orch/agent_orch \
@@ -143,3 +146,36 @@ Rollback bootouts only `com.pentacle.daily-retro`, restores the exact previous
 plist/config/release pointer, and bootstraps the old label only if it existed.
 Otherwise verify it absent. Keep manifests/decisions intact. Public rollback is
 a reviewed revert through ordinary gates, never a force push.
+
+## Explicit historical pilot
+
+History uses a separately gated private config and state root. Keep the daily
+config, timer and state unchanged. `history-collect --config HISTORY_CONFIG
+--baseline DAILY_COLLECTION_JSON --batch 1` freezes only the initial daily
+baseline originals, verifies every fingerprint and selects one deterministic
+batch of at most 40 sources and 65,536 original UTF-8 bytes. Missing, changed,
+malformed or oversized originals refuse the whole intake. The private
+baseline must be a dated daily collection with its matching enrollment projection;
+history state containing daily enrollment records, or nested within them, refuses
+even when the supplied baseline was copied to another directory. The private
+`history.json` retains complete originals, the baseline file SHA, inventory
+digest and all batch boundaries. Replay uses this snapshot, refuses conflicting
+baseline bytes, and checks the full collection manifest before worker admission.
+
+`history-run` with the same arguments processes only that selected batch through
+the existing Sol/medium, Astra/high, durable current-Bart report and fenced
+cleanup path. Its `history-<digest16>-<batch4>` identity and separate state root
+keep worker/report/delivery keys distinct from daily runs. The current assistant
+records its actual packet review with the same `record-review` helper and run ID.
+Reviewed batches are no-ops; no next batch is automatically admitted and no
+per-batch Bart review barrier is added.
+
+Source landing and ONE installed pilot need separate parent gates. Pin the
+baseline, config, interpreter, source and release hashes before execution; use
+the reviewed checkout explicitly for both remote checks and archives. Capture
+actual tokens (including incompleteness), latency, new versus already tracked
+recommendations, delivery and owned-generation cleanup. After the pilot, the
+owner decides the remaining batches and a proposed consolidated NEW-only Bart
+review about every ten batches. That consolidation is outside the pilot tool.
+Rollback only owned history config/generations; retain its evidence and protect
+the active daily timer/state. No daemon restart or calendar bootstrap is needed.

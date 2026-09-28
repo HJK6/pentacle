@@ -223,6 +223,95 @@ def collect(settings, stamp, *, max_sources=40, max_bytes=65536):
         return manifest
 
 
+def history_baseline(settings, baseline_path):
+    """Prove the namespace and enrollment using reads only, before creating a lock."""
+    baseline_path = Path(baseline_path).resolve()
+    if (baseline_path.name != "collection.json" or baseline_path.parent.parent.name != "runs"
+            or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", baseline_path.parent.name)):
+        raise ValueError("daily baseline collection path required")
+    daily_state = baseline_path.parents[2]
+    state = settings.state_root.resolve()
+    if state == daily_state or daily_state in state.parents or state in daily_state.parents:
+        raise ValueError("history requires a separate state namespace")
+    # A copied baseline path must not disguise a real daily namespace as history.
+    for parent in (state, *state.parents):
+        if (parent / "index.json").exists() or any(
+                re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", p.parent.name)
+                for p in (parent / "runs").glob("*/collection.json")):
+            raise ValueError("history requires a separate state namespace")
+    baseline = read(baseline_path)
+    if (baseline.get("run_id") != baseline_path.parent.name or baseline.get("phase") == "history"
+            or read(daily_state / "index.json") != rebuild_index(replace(settings, state_root=daily_state))):
+        raise ValueError("daily baseline enrollment proof required")
+    return baseline_path, baseline
+
+
+def freeze_history(settings, baseline_path):
+    """Snapshot an explicit daily baseline, without enrolling it in daily state."""
+    baseline_path, baseline = history_baseline(settings, baseline_path)
+    baseline_sha = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
+    path = settings.state_root / "history.json"
+    inventory = read(path)
+    if inventory is not None:
+        if inventory.get("baseline_sha256") != baseline_sha:
+            raise ValueError("historical baseline conflict")
+        if inventory.get("inventory_digest") != digest({k: v for k, v in inventory.items() if k != "inventory_digest"}):
+            raise ValueError("historical inventory digest mismatch")
+        return inventory
+    entries = baseline.get("baseline")
+    if not isinstance(entries, dict) or not entries or set(entries) & {s["id"] for s in baseline["sources"]}:
+        raise ValueError("explicit nonempty historical baseline required")
+    current, _ = scan(settings)
+    originals, batches, batch, size = [], [], [], 0
+    for identity, entry in sorted(entries.items()):
+        source = current.get(identity)
+        if not source or entry.get("reviewed") is not False or source["fingerprint"] != entry.get("fingerprint"):
+            raise ValueError(f"missing, malformed or changed historical original: {identity}")
+        source_size = len(source["original"].encode())
+        if source_size > 65536:
+            raise ValueError(f"oversized historical original: {identity}")
+        if len(batch) == 40 or size + source_size > 65536:
+            batches.append(batch)
+            batch, size = [], 0
+        originals.append(source)
+        batch.append(identity)
+        size += source_size
+    if batch:
+        batches.append(batch)
+    inventory = {"phase": "history", "baseline_path": str(baseline_path), "baseline_sha256": baseline_sha,
+                 "collected_at": now_iso(), "sources": originals, "batches": batches}
+    inventory["inventory_digest"] = digest(inventory)
+    atomic(path, inventory)
+    return inventory
+
+
+def history_collect(settings, baseline_path, batch):
+    history_baseline(settings, baseline_path)  # Refusal must not create paths in daily state.
+    with locked(settings.state_root / "collect.lock"):
+        inventory = freeze_history(settings, baseline_path)
+        if type(batch) is not int or not 1 <= batch <= len(inventory["batches"]):
+            raise ValueError("historical batch out of range")
+        inventory_digest = inventory["inventory_digest"]
+        originals = {s["id"]: s for s in inventory["sources"]}
+        selected = [originals[identity] for identity in inventory["batches"][batch - 1]]
+        run_id = f"history-{inventory_digest[:16]}-{batch:04}"
+        manifest = {"run_id": run_id, "phase": "history", "timezone": ZONE.key, "window": None,
+                    "cutoff": inventory["collected_at"], "collected_at": inventory["collected_at"],
+                    "sources": selected, "baseline": {}, "gaps": [], "deferred": [],
+                    "history": {"inventory_path": str(settings.state_root / "history.json"),
+                                "inventory_digest": inventory_digest, "batch": batch,
+                                "batches": len(inventory["batches"]), "originals": len(originals)},
+                    "coverage": {"readable_retros": len(originals), "selected": len(selected),
+                                 "baseline_not_reviewed": 0, "gaps": 0, "deferred": 0}}
+        path = settings.state_root / "runs" / run_id / "collection.json"
+        if path.exists():
+            if read(path) != manifest:
+                raise ValueError("edited or stale historical manifest")
+        else:
+            atomic(path, manifest)
+        return manifest
+
+
 def checked(response, kind):
     if response.get("type") != kind or response.get("ok") is False:
         raise RuntimeError(f"{kind}: {response.get('error_code') or response.get('reason') or response.get('type')}")
@@ -428,24 +517,36 @@ class Pipeline:
             completed = []
             for path in sorted((self.settings.state_root / "runs").glob("*/collection.json")):
                 manifest = read(path)
-                if (path.parent / "review.json").exists():
-                    await self.cleanup(manifest)
-                    continue
-                try:
-                    sol = await self.worker(manifest, "sol")
-                    astra = await self.worker(manifest, "astra", sol["packet"])
-                    await self.deliver(manifest, astra)
+                if await self.run_manifest(manifest):
                     completed.append(manifest["run_id"])
-                except Exception as exc:
-                    atomic(path.parent / "failure.json", {"at": now_iso(), "error": str(exc)})
-                    try:
-                        await self.deliver(manifest, failure=str(exc))
-                    except Exception as delivery_error:
-                        atomic(path.parent / "failure-notice-error.json", {"error": str(delivery_error)})
-                    raise
-                finally:
-                    await self.cleanup(manifest)
             return {"delivered": completed}
+
+    async def run_manifest(self, manifest):
+        root = self.settings.state_root / "runs" / manifest["run_id"]
+        if (root / "review.json").exists():
+            await self.cleanup(manifest)
+            return False
+        try:
+            sol = await self.worker(manifest, "sol")
+            astra = await self.worker(manifest, "astra", sol["packet"])
+            await self.deliver(manifest, astra)
+            return True
+        except Exception as exc:
+            atomic(root / "failure.json", {"at": now_iso(), "error": str(exc)})
+            try:
+                await self.deliver(manifest, failure=str(exc))
+            except Exception as delivery_error:
+                atomic(root / "failure-notice-error.json", {"error": str(delivery_error)})
+            raise
+        finally:
+            await self.cleanup(manifest)
+
+    async def history_run(self, baseline_path, batch):
+        history_baseline(self.settings, baseline_path)
+        with locked(self.settings.state_root / "run.lock"):
+            manifest = history_collect(self.settings, baseline_path, batch)
+            delivered = await self.run_manifest(manifest)
+            return {"delivered": [manifest["run_id"]] if delivered else []}
 
     async def actor(self):
         binding = await self.binding()
@@ -460,7 +561,7 @@ class Pipeline:
 
     async def record_review(self, run_id, result):
         binding = await self.actor()
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", run_id):
+        if not re.fullmatch(r"(?:\d{4}-\d{2}-\d{2}|history-[0-9a-f]{16}-\d{4})", run_id):
             raise ValueError("invalid run ID")
         root = self.settings.state_root / "runs" / run_id
         with locked(root / "review.lock"):
@@ -808,10 +909,13 @@ async def rehearse(settings, workers, evidence_dir):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("collect", "run", "record-review", "decision", "rehearse"):
+    for name in ("collect", "run", "record-review", "decision", "rehearse", "history-collect", "history-run"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--config", required=True)
-        if name == "collect":
+        if name.startswith("history-"):
+            cmd.add_argument("--baseline", required=True)
+            cmd.add_argument("--batch", required=True, type=int)
+        elif name == "collect":
             cmd.add_argument("--now", required=True)
         elif name == "run":
             cmd.add_argument("--on-demand", action="store_true")
@@ -829,12 +933,16 @@ def main():
     settings = Settings.load(args.config)
     if args.command == "collect":
         result = collect(settings, datetime.fromisoformat(args.now))
+    elif args.command == "history-collect":
+        result = history_collect(settings, args.baseline, args.batch)
     elif args.command == "rehearse":
         result = asyncio.run(rehearse(settings, Settings.load(args.workers_config), args.evidence_dir))
     else:
-        pipeline = Pipeline(settings, ProducerTransport(settings)) if args.command == "run" else Pipeline(settings)
+        pipeline = Pipeline(settings, ProducerTransport(settings)) if args.command in {"run", "history-run"} else Pipeline(settings)
         if args.command == "run":
             result = asyncio.run(pipeline.run(on_demand=args.on_demand))
+        elif args.command == "history-run":
+            result = asyncio.run(pipeline.history_run(args.baseline, args.batch))
         elif args.command == "record-review":
             result = asyncio.run(pipeline.record_review(args.run_id, read(Path(args.result))))
         else:

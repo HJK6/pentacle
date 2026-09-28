@@ -1,5 +1,6 @@
 """Daily enrollment and restart invariants on an isolated source tree."""
 from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 import asyncio
 import json
@@ -95,6 +96,150 @@ def test_timer_guard_and_duplicate_ids(config):
     b.write_text(b.read_text().replace("spec_b", "spec_a"))
     manifest = retro.collect(config, at())
     assert manifest["gaps"] and not manifest["sources"]
+
+
+def history_fixture(config, count=43, body="Historical lesson."):
+    for n in range(count):
+        source(config.memory_root, f"old{n:03}", body=body, day="2026-08-01")
+    source(config.memory_root, "recent")
+    daily = retro.collect(config, at())
+    assert [s["id"] for s in daily["sources"]] == ["spec_recent"]
+    baseline = config.state_root / "runs" / daily["run_id"] / "collection.json"
+    return replace(config, state_root=config.state_root.parent / "history-state"), baseline
+
+
+def test_history_all_originals_bounded_and_stable(config):
+    history, baseline = history_fixture(config)
+    daily_before = {p: p.read_bytes() for p in config.state_root.rglob("*.json")}
+    first = retro.history_collect(history, baseline, 1)
+    second = retro.history_collect(history, baseline, 2)
+    assert len(first["sources"]) == 40 and len(second["sources"]) == 3
+    assert {s["id"] for s in first["sources"] + second["sources"]} == {
+        f"spec_old{n:03}" for n in range(43)}
+    assert first["phase"] == "history" and first["baseline"] == {} and first["window"] is None
+    saved = (history.state_root / "runs" / first["run_id"] / "collection.json").read_bytes()
+    assert retro.history_collect(history, baseline, 1) == first
+    assert (history.state_root / "runs" / first["run_id"] / "collection.json").read_bytes() == saved
+    assert history.namespace != config.namespace
+    assert {p: p.read_bytes() for p in config.state_root.rglob("*.json")} == daily_before
+    inventory = retro.read(history.state_root / "history.json")
+    assert inventory["baseline_sha256"] == retro.hashlib.sha256(baseline.read_bytes()).hexdigest()
+    assert len(inventory["sources"]) == 43
+
+
+def test_history_byte_bound_preserves_full_original(config):
+    history, baseline = history_fixture(config, count=3, body="é" * 16000)
+    batches = [retro.history_collect(history, baseline, n) for n in (1, 2)]
+    assert [len(m["sources"]) for m in batches] == [2, 1]
+    for manifest in batches:
+        assert sum(len(s["original"].encode()) for s in manifest["sources"]) <= 65536
+        assert all(s["original"] == "## Retro\n" + "é" * 16000 for s in manifest["sources"])
+
+
+@pytest.mark.parametrize("damage", ["missing", "changed", "malformed", "oversized"])
+def test_history_refuses_partial_or_changed_intake(config, damage):
+    history, baseline = history_fixture(config, count=2, body="x" * (65536 if damage == "oversized" else 10))
+    path = config.memory_root / "work/completed/old000/spec.md"
+    if damage == "missing":
+        path.unlink()
+    elif damage == "changed":
+        path.write_text(path.read_text() + "changed original")
+    elif damage == "malformed":
+        path.write_text(path.read_text().replace("## Retro", "## Notes"))
+    with pytest.raises(ValueError):
+        retro.history_collect(history, baseline, 1)
+    assert not (history.state_root / "history.json").exists()
+    assert not list((history.state_root / "runs").glob("*/collection.json"))
+
+
+def test_history_baseline_conflict_and_namespace_refusal(config):
+    history, baseline = history_fixture(config, count=1)
+    retro.history_collect(history, baseline, 1)
+    baseline.write_text(baseline.read_text() + "\n")
+    with pytest.raises(ValueError, match="baseline"):
+        retro.history_collect(history, baseline, 1)
+    for state in (config.state_root, config.state_root / "history", config.state_root.parent):
+        with pytest.raises(ValueError, match="separate"):
+            retro.history_collect(replace(history, state_root=state), baseline, 1)
+
+
+@pytest.mark.parametrize("copy_index", [False, True])
+def test_history_copied_baseline_cannot_admit_daily_state(config, copy_index):
+    history, baseline = history_fixture(config, count=1)
+    copied = config.state_root.parent / "not-daily/runs/2026-09-28/collection.json"
+    copied.parent.mkdir(parents=True)
+    copied.write_bytes(baseline.read_bytes())
+    if copy_index:
+        (copied.parents[2] / "index.json").write_bytes((config.state_root / "index.json").read_bytes())
+    before = {p: p.read_bytes() for p in config.state_root.rglob("*.json")}
+    with pytest.raises(ValueError):
+        retro.history_collect(replace(history, state_root=config.state_root), copied, 1)
+    assert {p: p.read_bytes() for p in config.state_root.rglob("*.json")} == before
+    if not copy_index:
+        with pytest.raises(ValueError, match="baseline"):
+            retro.history_collect(history, copied, 1)
+
+
+@pytest.mark.parametrize("entry", ["collect", "run"])
+def test_history_namespace_refusal_creates_no_paths(config, entry):
+    history, baseline = history_fixture(config, count=1)
+    def inventory():
+        return {str(p.relative_to(config.state_root)): None if p.is_dir() else p.read_bytes()
+                for p in config.state_root.rglob("*")}
+    before = inventory()
+    unsafe = replace(history, state_root=config.state_root / "phase2/state")
+    with pytest.raises(ValueError, match="separate"):
+        if entry == "collect":
+            retro.history_collect(unsafe, baseline, 1)
+        else:
+            asyncio.run(retro.Pipeline(unsafe, Transport()).history_run(baseline, 1))
+    assert inventory() == before
+
+
+@pytest.mark.parametrize("batch", [0, -1, 2, "../escape", True])
+def test_history_batch_range_and_traversal(config, batch):
+    history, baseline = history_fixture(config, count=1)
+    with pytest.raises(ValueError):
+        retro.history_collect(history, baseline, batch)
+
+
+@pytest.mark.parametrize("damage", ["original", "phase", "digest", "order", "batch"])
+def test_history_edited_manifest_refused_before_admission(config, damage):
+    history, baseline = history_fixture(config, count=2)
+    manifest = retro.history_collect(history, baseline, 1)
+    if damage == "original":
+        manifest["sources"][0]["original"] = "Invented original"
+    elif damage == "phase":
+        manifest["phase"] = "daily"
+    elif damage == "digest":
+        manifest["history"]["inventory_digest"] = "stale"
+    elif damage == "order":
+        manifest["sources"].reverse()
+    else:
+        manifest["history"]["batch"] = 2
+    retro.atomic(history.state_root / "runs" / manifest["run_id"] / "collection.json", manifest)
+    rpc = Transport()
+    with pytest.raises(ValueError, match="manifest"):
+        asyncio.run(retro.Pipeline(history, rpc).history_run(baseline, 1))
+    assert not rpc.spawns and not rpc.sent and not rpc.closed
+
+
+def test_history_review_replay_uses_only_requested_batch(config, monkeypatch):
+    history, baseline = history_fixture(config)
+    first = retro.history_collect(history, baseline, 1)
+    second = retro.history_collect(history, baseline, 2)
+    rpc = Transport()
+    pipeline = retro.Pipeline(history, rpc)
+    assert asyncio.run(pipeline.history_run(baseline, 1)) == {"delivered": [first["run_id"]]}
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    final = retro.read(history.state_root / "runs" / first["run_id"] / "astra.json")
+    review = {"packet_hash": final["packet_hash"], "dispositions": []}
+    asyncio.run(pipeline.record_review(first["run_id"], review))
+    assert asyncio.run(pipeline.history_run(baseline, 1)) == {"delivered": []}
+    assert len(rpc.spawns) == 2 and len(rpc.sent) == 1 and len(rpc.closed) == 2
+    assert not (history.state_root / "runs" / second["run_id"] / "sol.json").exists()
+    with pytest.raises(ValueError, match="invalid run ID"):
+        asyncio.run(pipeline.record_review("history-../escape", review))
 
 
 class Transport:

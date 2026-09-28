@@ -261,6 +261,44 @@ def test_current_delivery_receipt_and_quiet_review(daily_retro_surface):
     asyncio.run(run())
 
 
+def test_history_hidden_binding_once_and_immutable_replay(daily_retro_surface):
+    async def run():
+        async with daily_retro_surface() as s:
+            original = s.settings.memory_root / "work/completed/old/spec.md"
+            original.parent.mkdir(parents=True)
+            original.write_text("---\nid: spec_old\ntype: spec\nstatus: completed\ncompleted_at: '2026-08-01'\n---\n\n## Retro\nRetained historical original.\n")
+            daily = retro.collect(s.settings, retro.datetime.fromisoformat("2026-09-28T05:00:00-05:00"))
+            baseline = s.settings.state_root / "runs" / daily["run_id"] / "collection.json"
+            daily_before = {p: p.read_bytes() for p in s.settings.state_root.rglob("*.json")}
+            history = retro.replace(s.settings, state_root=s.settings.state_root.parent / "phase2")
+            manifest = retro.history_collect(history, baseline, 1)
+            root = history.state_root / "runs" / manifest["run_id"]
+            packet = {"run_id": manifest["run_id"], "dispositions": [
+                {"id": row["id"], "fingerprint": row["fingerprint"], "reason": "Already tracked"}
+                for row in manifest["sources"]], "candidates": []}
+            final = {"packet": packet, "packet_hash": retro.digest(packet),
+                     "report": {"report_id": "fixture-history-report"}, "closed": True}
+            # Seeded reports avoid production workers; admission is covered by the unit transport.
+            for stage in ("sol", "astra"):
+                retro.atomic(root / f"{stage}.json", final)
+            pipeline = retro.Pipeline(history)
+            for _ in range(2):
+                assert await pipeline.history_run(baseline, 1) == {"delivered": [manifest["run_id"]]}
+            assert len(s.delivered) == 1 and s.rows["a"]["visibility"] == "hidden"
+            receipt = await pipeline.record_review(manifest["run_id"], {"packet_hash": final["packet_hash"], "dispositions": []})
+            assert receipt["actor"]["stream_id"] == A
+            assert await pipeline.history_run(baseline, 1) == {"delivered": []}
+            manifest["sources"][0]["fingerprint"] = "stale"
+            retro.atomic(root / "collection.json", manifest)
+            with pytest.raises(ValueError, match="manifest"):
+                await pipeline.history_run(baseline, 1)
+            assert len(s.delivered) == 1
+            assert {p: p.read_bytes() for p in s.settings.state_root.rglob("*.json")} == daily_before
+            assert not await s.notify._db.call("list_agent_questions")
+            assert not await s.store.fetch_session_event_tail(CHAT, limit=20)
+    asyncio.run(run())
+
+
 def test_unattended_auth_allowlist_and_generation_cleanup(daily_retro_surface):
     async def run():
         async with daily_retro_surface() as s:
