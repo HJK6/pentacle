@@ -207,6 +207,11 @@ A run pinned to this mode cannot later send an individual packet.
 
 At an authorized checkpoint (up to five newly prepared batches):
 
+Checkpoint and final compilation accept retained `evidence_sources` mappings or
+lists. List entries keep their original IDs and contents; conflicting batch-local
+labels are also retained under qualified keys. Raw worker packets and candidate
+citations remain unchanged during compilation and replay.
+
 ```sh
 python services/chat-stream-v2/tools/daily_retro.py history-consolidate --config HISTORY_CONFIG --baseline DAILY_COLLECTION_JSON --batches 2,3,4,5,6
 ```
