@@ -146,9 +146,9 @@ def test_ask_and_handoff_share_source_lifecycle_fence(tmp_path, monkeypatch, ask
 @pytest.mark.parametrize("transfer_first", [True, False])
 def test_mutation_racing_transfer_uses_current_owner(tmp_path, monkeypatch, mutation, transfer_first):
     async def run():
-        async with fixture(tmp_path) as (notify, queue, comms, provider, sessions, store):
-            source = await sessions.open("hosta", "source", provider="codex", visibility="visible")
-            successor = sessions.get("hosta:v2-test")
+        async with fixture(tmp_path, host="fixture-handoff") as (notify, queue, comms, provider, sessions, store):
+            source = await sessions.open(provider.host, "source", provider="codex", visibility="visible")
+            successor = sessions.get(provider.host + ":v2-test")
             assert (await notify.prompt(_ask("q-mutation", producer=source["stream_id"])))["type"] == "prompt.ask.ok"
             request = {"type": "prompt." + mutation, "question_id": "q-mutation", "selections": ["yes"],
                        "_auth_context": {"token_verified": True, "stream_id": source["stream_id"]},
