@@ -718,3 +718,17 @@ test('notice rows (bare and pasted_content-wrapped) between ordinary rows never 
   const firstAnswers = html.indexOf('slot-chat-v3-answers');
   assert.ok(firstAnswers > html.indexOf('ORDINARY-A1') && firstAnswers < html.indexOf('ORDINARY-A2'));
 });
+
+test('composite published prose preserves markdown in one assistant card', () => {
+  const html = renderTranscriptItemHtml(assistantItem({
+    provider: 'composite', publishKind: 'prose',
+    messageId: 'publication:publish:fixture-dispatch',
+    text: '**One answer**\n\n- A list item\n\n`code`',
+  }), CHROME);
+  const { container } = newDom();
+  container.innerHTML = html;
+  assert.equal(container.querySelectorAll('.slot-chat-assistant-card').length, 1);
+  assert.equal(container.querySelector('strong')?.textContent, 'One answer');
+  assert.equal(container.querySelector('li')?.textContent, 'A list item');
+  assert.equal(container.querySelector('code')?.textContent, 'code');
+});

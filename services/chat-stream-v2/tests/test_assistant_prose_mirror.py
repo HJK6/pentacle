@@ -672,3 +672,350 @@ def test_corrupt_durable_binding_fails_closed_without_breaking_ingest():
         finally:
             store.stop()
     asyncio.run(_go())
+
+
+def test_published_dispatch_final_with_different_markdown_is_not_mirrored():
+    """Replay the installed journey on an isolated composite, with real normalization."""
+    from claude_jsonl_norm import normalize_claude_jsonl_record
+
+    async def _go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="claude", pane_pid="4242")
+            async def dispatch(_route):
+                return {"delivery": "landed"}
+            composite = AssistantComposite(store, config=_config(root["session_generation"]), dispatch=dispatch)
+            await composite.ensure_projection()
+            route = await _route_for(composite, store, "markdown-question")
+            import json
+            envelope = json.loads(route["route_json"])["direct_envelope"]["wire_body"]
+            async def ingest(record):
+                event = normalize_claude_jsonl_record(record, host="fixture-root", session_name="visible")[0]
+                seqs = await store.append_session_events_lifecycle_cas([
+                    {"stream_id": ROOT, "event": event, "identity": record["uuid"],
+                     "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}
+                ], limit=50)
+                return seqs[0]
+            await ingest({"type": "user", "uuid": "dispatch-user", "sessionId": "fixture-transcript",
+                          "timestamp": "2026-09-28T15:42:09.423Z",
+                          "message": {"role": "user", "content": envelope}})
+            published = await composite.publish({
+                "request_id": "publish:" + route["dispatch_id"], "composite_stream_id": ASSISTANT,
+                "dispatch_id": route["dispatch_id"], "reply_to_message_id": "markdown-question",
+                "reply_to_question_id": None, "publish_kind": "prose", "response_state": "final",
+                "message": "**Published answer**", "attachment_ids": [], "evidence_refs": [],
+            }, actor_stream_id=ROOT)
+            seq = await ingest({"type": "assistant", "uuid": "dispatch-final", "parentUuid": "dispatch-user",
+                                "sessionId": "fixture-transcript", "timestamp": "2026-09-28T15:42:34.211Z",
+                                "message": {"role": "assistant", "id": "final-message", "stop_reason": "end_turn",
+                                            "content": [{"type": "text", "text": "**Published answer**\n"}]}})
+            rows = await _answer_rows(store)
+            assert len(rows) == 1, [(r["publish_kind"], r["text"]) for r in rows]
+            assert rows[0]["publish_kind"] == "prose" and rows[0]["text"] == "**Published answer**"
+            assert await store.assistant_mirror_event_for_source(seq) is None
+            assert published["publication_key"] == "publish:" + route["dispatch_id"]
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(_go())
+
+
+async def _normalized_turn_event(store, *, provider, kind, text, identity, session="turn-session", final=False, legacy=False, timestamp=None):
+    from claude_jsonl_norm import normalize_claude_jsonl_record
+    from codex_rollout_norm import normalize_codex_rollout_record
+    stamp = timestamp or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    if provider == "claude":
+        record = {"type": "assistant" if kind == "ASSIST_TEXT" else "user", "uuid": identity,
+                  "sessionId": session, "timestamp": stamp,
+                  "message": {"role": "assistant" if kind == "ASSIST_TEXT" else "user",
+                              "id": identity, "stop_reason": "end_turn" if final else "tool_use",
+                              "content": [{"type": "text", "text": text}]}}
+        event = normalize_claude_jsonl_record(record, host="fixture-root", session_name="visible")[0]
+    else:
+        record = {"type": "response_item", "timestamp": stamp,
+                  "payload": {"type": "message", "id": identity,
+                              "role": "assistant" if kind == "ASSIST_TEXT" else "user",
+                              "phase": "final_answer" if final else "commentary",
+                              "content": [{"type": "output_text" if kind == "ASSIST_TEXT" else "input_text", "text": text}]}}
+        event = normalize_codex_rollout_record(record, host="fixture-root", session_name="visible", session_id=session)[0]
+    if legacy:
+        event["raw"].pop("phase", None)
+        event["raw"].pop("stop_reason", None)
+    result = await store.append_session_events_lifecycle_cas([
+        {"stream_id": ROOT, "event": event, "identity": identity,
+         "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}
+    ], limit=100)
+    return result[0]
+
+
+def test_structured_dispatch_turn_correlation_and_next_non_dispatch_reply():
+    import json
+
+    async def _go():
+        for provider in ("claude", "codex"):
+            store = Store(":memory:")
+            store.start()
+            try:
+                root = await store.open_session("fixture-root", "visible", provider=provider, pane_pid="4242")
+                async def dispatch(_route):
+                    return {"delivery": "landed"}
+                composite = AssistantComposite(store, config=_config(root["session_generation"]), dispatch=dispatch)
+                await composite.ensure_projection()
+                # A prior final must delimit this turn even if its ingestion lagged publication.
+                await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="Earlier proactive reply",
+                                             identity="previous-final", final=True)
+                route = await _route_for(composite, store, "turn-question")
+                envelope = json.loads(route["route_json"])["direct_envelope"]["wire_body"]
+                await _normalized_turn_event(store, provider=provider, kind="USER", text=envelope, identity="turn-user")
+                payload = {"request_id": "publish:" + route["dispatch_id"], "composite_stream_id": ASSISTANT,
+                           "dispatch_id": route["dispatch_id"], "reply_to_message_id": "turn-question",
+                           "reply_to_question_id": None, "publish_kind": "prose", "response_state": "final",
+                           "message": "**The answer**", "attachment_ids": [], "evidence_refs": []}
+                # Classified commentary is not a final/legacy turn boundary.
+                await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="Working on the answer",
+                                             identity="turn-commentary", final=False)
+                await composite.publish(payload, actor_stream_id=ROOT)
+                assert (await composite.publish(payload, actor_stream_id=ROOT))["duplicate"] is True
+                # Other input in this same provider turn must not hide the dispatch identity.
+                await _normalized_turn_event(store, provider=provider, kind="USER", text="Peer context", identity="peer-input")
+                def age_publication(conn):
+                    conn.execute("UPDATE v2_assistant_composite_publications SET created_at=? WHERE dispatch_id=?",
+                                 ((datetime.now(timezone.utc)-timedelta(minutes=10)).isoformat(), route["dispatch_id"]))
+                    conn.commit()
+                await store.submit(age_publication)
+                seq = await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="The answer, formatted differently",
+                                                  identity="turn-final", final=True)
+                assert await store.assistant_mirror_event_for_source(seq) is None
+                assert len(await _answer_rows(store)) == 2  # prior proactive + one publication
+                if provider == "claude":
+                    from claude_jsonl_norm import normalize_claude_jsonl_record
+                    blocks = normalize_claude_jsonl_record({
+                        "type": "assistant", "uuid": "turn-final", "sessionId": "turn-session",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "message": {"id": "turn-final", "stop_reason": "end_turn", "content": [
+                            {"type": "text", "text": "The answer, formatted differently"},
+                            {"type": "text", "text": "Second block from the same final"},
+                        ]},
+                    }, host="fixture-root", session_name="visible")
+                    seqs = await store.append_session_events_lifecycle_cas([
+                        {"stream_id": ROOT, "event": blocks[1], "identity": "turn-final-block-1",
+                         "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}
+                    ], limit=100)
+                    assert await store.assistant_mirror_event_for_source(seqs[0]) is None
+                    assert len(await _answer_rows(store)) == 2
+                def fresh_publication(conn):
+                    conn.execute("UPDATE v2_assistant_composite_publications SET created_at=? WHERE dispatch_id=?",
+                                 (datetime.now(timezone.utc).isoformat(), route["dispatch_id"]))
+                    conn.commit()
+                await store.submit(fresh_publication)
+                # No new USER is needed: a new final boundary alone ends the published turn.
+                seq = await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="**The answer**",
+                                                  identity="non-dispatch-final", final=True)
+                assert await store.assistant_mirror_event_for_source(seq) is not None
+                assert len(await _answer_rows(store)) == 3
+                # Replay does not broadcast or insert another answer.
+                assert await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="**The answer**",
+                                                    identity="non-dispatch-final", final=True) is None
+                # The old envelope in another transcript cannot suppress this transcript's final.
+                seq = await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="New transcript final",
+                                                  identity="foreign-final", session="other-transcript", final=True)
+                assert await store.assistant_mirror_event_for_source(seq) is not None
+                await composite.stop()
+            finally:
+                store.stop()
+    asyncio.run(_go())
+
+
+def test_isolated_socket_publishes_one_markdown_reply_and_keeps_next_mirror(tmp_path, isolated_tmux_env):
+    """Exercise publication authentication, mirror broadcasting and history on a real socket."""
+    import hashlib
+    import json
+    import websockets
+    from server import Server
+    from sessions import Sessions
+    from store import STREAM_TOKEN_HASH_VERSION
+    from ingest import broadcast_assistant_mirror
+
+    async def _go():
+        store = Store(str(tmp_path / "isolated-replies.db"))
+        store.start()
+        server = composite = None
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="claude", pane_pid="4242")
+            token = "isolated-reply-token"
+            await store.grant_stream_token("fixture-root", "visible", hashlib.sha256(token.encode()).hexdigest(),
+                                           STREAM_TOKEN_HASH_VERSION)
+            async def dispatch(_route):
+                return {"delivery": "landed"}
+            composite = AssistantComposite(store, config=_config(root["session_generation"]), dispatch=dispatch)
+            await composite.ensure_projection()
+            sessions = Sessions(store, local_host="fixture-chat")
+            await sessions.refresh()
+            server = Server(host="127.0.0.1", port=0, store=store, sessions=sessions, local_host="fixture-chat")
+            server.assistant_composite = composite
+            composite.broadcast = server.broadcast
+            port = await server.bind()
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as socket:
+                assert json.loads(await socket.recv())["type"] == "welcome"
+                await socket.send(json.dumps({"type": "hello", "client": "isolated-reply-proof",
+                                              "stream_token": token, "from_stream_id": ROOT,
+                                              "capabilities": {"assistant_composite_v1": True}}))
+                hello_frames = [json.loads(await socket.recv()) for _ in range(2)]
+                assert any(frame["type"] == "snapshot" for frame in hello_frames)
+                canonical_pushes = []
+                async def rpc(payload):
+                    await socket.send(json.dumps(payload))
+                    async with asyncio.timeout(3):
+                        while True:
+                            frame = json.loads(await socket.recv())
+                            if frame.get("type") == "chat.event" and frame.get("event", {}).get("stream_id") == ASSISTANT:
+                                canonical_pushes.append(frame["event"])
+                            if frame.get("request_id") == payload["request_id"]:
+                                return frame
+                route = await _route_for(composite, store, "socket-question")
+                envelope = json.loads(route["route_json"])["direct_envelope"]["wire_body"]
+                await _normalized_turn_event(store, provider="claude", kind="USER", text=envelope, identity="socket-user")
+                payload = {"type": "assistant.publish", "request_id": "publish:" + route["dispatch_id"],
+                           "composite_stream_id": ASSISTANT, "dispatch_id": route["dispatch_id"],
+                           "reply_to_message_id": "socket-question", "publish_kind": "prose", "response_state": "final",
+                           "message": "**One answer**\n\n- A list item\n\n`code`", "attachment_ids": [], "evidence_refs": []}
+                assert (await rpc(payload))["type"] == "assistant.publish.ok"
+                assert (await rpc(payload))["type"] == "assistant.publish.ok"
+                seq = await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Different final formatting",
+                                                  identity="socket-final", final=True)
+                await broadcast_assistant_mirror(store, server.broadcast, seq)
+                # A barrier drains all earlier socket pushes, proving no duplicate broadcast.
+                await rpc({"type": "assistant.binding", "request_id": "after-final"})
+                assert len([e for e in canonical_pushes if e["kind"] == "ASSIST_TEXT"]) == 1
+                assert len(await _answer_rows(store)) == 1
+                assert (await _answer_rows(store))[0]["text"] == payload["message"]
+                seq = await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Next proactive reply",
+                                                  identity="socket-proactive", final=True)
+                await broadcast_assistant_mirror(store, server.broadcast, seq)
+                await rpc({"type": "assistant.binding", "request_id": "after-proactive"})
+                assert [e["text"] for e in canonical_pushes if e["kind"] == "ASSIST_TEXT"] == [payload["message"], "Next proactive reply"]
+                assert len(await _answer_rows(store)) == 2
+        finally:
+            if composite is not None:
+                await composite.stop()
+            if server is not None:
+                await server.close()
+            store.stop()
+    asyncio.run(_go())
+
+
+def test_legacy_final_fences_old_dispatch_after_phase_upgrade():
+    import json
+
+    async def _go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            async def dispatch(_route):
+                return {"delivery": "landed"}
+            composite = AssistantComposite(store, config=_config(root["session_generation"]), dispatch=dispatch)
+            await composite.ensure_projection()
+            route = await _route_for(composite, store, "legacy-question")
+            envelope = json.loads(route["route_json"])["direct_envelope"]["wire_body"]
+            await _normalized_turn_event(store, provider="codex", kind="USER", text=envelope, identity="legacy-user")
+            await composite.publish({
+                "request_id": "publish:" + route["dispatch_id"], "composite_stream_id": ASSISTANT,
+                "dispatch_id": route["dispatch_id"], "reply_to_message_id": "legacy-question",
+                "publish_kind": "prose", "response_state": "final", "message": "Legacy reply",
+                "attachment_ids": [], "evidence_refs": [],
+            }, actor_stream_id=ROOT)
+            await _normalized_turn_event(store, provider="codex", kind="ASSIST_TEXT", text="Legacy reply",
+                                         identity="legacy-final", final=True, legacy=True)
+            seq = await _normalized_turn_event(store, provider="codex", kind="ASSIST_TEXT", text="First upgraded proactive reply",
+                                              identity="upgraded-final", final=True)
+            assert await store.assistant_mirror_event_for_source(seq) is not None
+            assert [r["text"] for r in await _answer_rows(store)] == ["Legacy reply", "First upgraded proactive reply"]
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(_go())
+
+
+def test_publication_precedes_delayed_source_transcript_rows():
+    import json
+
+    async def _go():
+        for provider in ("claude", "codex"):
+            store = Store(":memory:")
+            store.start()
+            try:
+                root = await store.open_session("fixture-root", "visible", provider=provider, pane_pid="4242")
+                async def dispatch(_route):
+                    return {"delivery": "landed"}
+                composite = AssistantComposite(store, config=_config(root["session_generation"]), dispatch=dispatch)
+                await composite.ensure_projection()
+                route = await _route_for(composite, store, "late-question")
+                user_stamp = datetime.now(timezone.utc).isoformat()
+                prior_stamp = (datetime.now(timezone.utc)-timedelta(minutes=10)).isoformat()
+                await composite.publish({
+                    "request_id": "publish:" + route["dispatch_id"], "composite_stream_id": ASSISTANT,
+                    "dispatch_id": route["dispatch_id"], "reply_to_message_id": "late-question",
+                    "publish_kind": "prose", "response_state": "final", "message": "**Late answer**",
+                    "attachment_ids": [], "evidence_refs": [],
+                }, actor_stream_id=ROOT)
+                # Even an earlier turn's source final can arrive after the canonical publication.
+                await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="Earlier source reply",
+                                             identity="late-previous-final", final=True, timestamp=prior_stamp)
+                envelope = json.loads(route["route_json"])["direct_envelope"]["wire_body"]
+                await _normalized_turn_event(store, provider=provider, kind="USER", text=envelope, identity="late-user", timestamp=user_stamp)
+                seq = await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="Late answer with different formatting",
+                                                  identity="late-final", final=True)
+                assert await store.assistant_mirror_event_for_source(seq) is None
+                rows = await _answer_rows(store)
+                assert len(rows) == 2 and {r["text"] for r in rows} == {"**Late answer**", "Earlier source reply"}
+                assert [r["text"] for r in rows if r["publish_kind"] == "prose"] == ["**Late answer**"]
+                source_rows = await store.fetch_session_event_tail(ROOT, limit=100)
+                assert any(r["daemon_seq"] == seq and r["text"] == "Late answer with different formatting" for r in source_rows)
+                seq = await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="Later ordinary reply",
+                                                  identity="late-next-final", final=True)
+                assert await store.assistant_mirror_event_for_source(seq) is not None
+                await composite.stop()
+            finally:
+                store.stop()
+    asyncio.run(_go())
+
+
+def test_other_dispatch_publication_does_not_suppress_released_turn():
+    import json
+
+    async def _go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="claude", pane_pid="4242")
+            async def dispatch(_route):
+                return {"delivery": "failed", "reason": "fixture-no-submit"}
+            composite = AssistantComposite(store, config=_config(root["session_generation"]), dispatch=dispatch)
+            await composite.ensure_projection()
+            a = await _route_for(composite, store, "dispatch-a")
+            await composite.publish({
+                "request_id": "publish:" + a["dispatch_id"], "composite_stream_id": ASSISTANT,
+                "dispatch_id": a["dispatch_id"], "reply_to_message_id": "dispatch-a",
+                "publish_kind": "prose", "response_state": "final", "message": "A's publication",
+                "attachment_ids": [], "evidence_refs": [],
+            }, actor_stream_id=ROOT)
+            b = await _route_for(composite, store, "dispatch-b")
+            for _ in range(100):
+                b = await store.get_assistant_composite_route(stream_id=ASSISTANT, input_identity="dispatch-b")
+                if b["delivery_state"] == "failed":
+                    break
+                await asyncio.sleep(0.01)
+            assert b["delivery_state"] == "failed"  # existing open-route suppression has been released
+            assert a["dispatch_id"] != b["dispatch_id"] and a["route_target_generation"] == b["route_target_generation"]
+            envelope = json.loads(b["route_json"])["direct_envelope"]["wire_body"]
+            await _normalized_turn_event(store, provider="claude", kind="USER", text=envelope, identity="b-user")
+            seq = await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="B's reply without its own publication",
+                                              identity="b-final", final=True)
+            assert await store.assistant_mirror_event_for_source(seq) is not None
+            assert [r["text"] for r in await _answer_rows(store)] == ["A's publication", "B's reply without its own publication"]
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(_go())

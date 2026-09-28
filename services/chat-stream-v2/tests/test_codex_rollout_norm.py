@@ -175,3 +175,15 @@ def test_a_session_opening_with_a_typed_turn_is_not_swallowed() -> None:
     }
     events = normalize_codex_rollout_records([record], host="h", session_name="v2-codex")
     assert [e["kind"] for e in events] == ["USER"], events
+
+
+def test_assistant_phase_is_preserved_for_provider_turn_correlation():
+    from codex_rollout_norm import normalize_codex_rollout_record
+    for phase in ("commentary", "final_answer", None):
+        event = normalize_codex_rollout_record({
+            "type": "response_item", "timestamp": "2026-09-28T12:00:00Z",
+            "payload": {"type": "message", "id": "phase-fixture", "role": "assistant", "phase": phase,
+                        "content": [{"type": "output_text", "text": "A reply"}]},
+        }, host="fixture-root", session_name="visible", session_id="phase-session")[0]
+        assert event["raw"].get("phase") == phase
+        assert event["kind"] == "ASSIST_TEXT"
