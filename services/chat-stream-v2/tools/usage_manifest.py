@@ -25,6 +25,8 @@ SELECTOR = [
 ]
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA64 = re.compile(r"^[0-9a-f]{64}$")
+HOST = re.compile(r"^[a-z][a-z0-9_-]*$")
+STREAM = re.compile(r"^[a-z][a-z0-9_-]*:[A-Za-z0-9_.:-]+$")
 RECEIPT_KEYS = {"path", "sha256"}
 OVERLAY_KEYS = {"test_sha256", "fixture_sha256", "manifest_schema_sha256"}
 
@@ -90,7 +92,36 @@ def _validate_receipt(value: Any, where: str, *, verify_files: bool) -> None:
             raise ManifestError(f"{where}.sha256 does not match {path_text}")
 
 
-def validate(manifest_path: Path, *, repo: Path, verify_files: bool = True) -> dict[str, Any]:
+def _host_list(value: Any, where: str, *, nonempty: bool = False) -> set[str]:
+    if not isinstance(value, list) or (nonempty and not value):
+        raise ManifestError(f"{where} must be an array" + (" (non-empty)" if nonempty else ""))
+    for host in value:
+        _string(host, where, pattern=HOST)
+    if len(value) != len(set(value)):
+        raise ManifestError(f"{where} must contain unique hosts")
+    return set(value)
+
+
+def validate(manifest_path: Path, *, repo: Path, deployment_contract: Path,
+             verify_files: bool = True) -> dict[str, Any]:
+    if deployment_contract.resolve().is_relative_to(repo.resolve()):
+        raise ManifestError("deployment contract must be outside the source checkout")
+    try:
+        contract_bytes = deployment_contract.read_bytes()
+        expected = _required(json.loads(contract_bytes), {
+            "schema", "schema_version", "coordinator_host", "satellite_hosts", "pin_owner", "prechange_hosts",
+        }, "deployment contract")
+    except (OSError, ValueError) as exc:
+        raise ManifestError("cannot read a valid deployment contract") from exc
+    if (expected["schema"] != "pentacle.usage-deployment"
+            or type(expected["schema_version"]) is not int or expected["schema_version"] != 1):
+        raise ManifestError("deployment contract schema/version mismatch")
+    expected_coordinator = _string(expected["coordinator_host"], "deployment.coordinator_host", pattern=HOST)
+    expected_satellites = _host_list(expected["satellite_hosts"], "deployment.satellite_hosts")
+    if expected_coordinator in expected_satellites:
+        raise ManifestError("coordinator cannot also be a satellite")
+    expected_prechange = _host_list(expected["prechange_hosts"], "deployment.prechange_hosts", nonempty=True)
+    expected_owner = _string(expected["pin_owner"], "deployment.pin_owner", pattern=STREAM)
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -99,8 +130,8 @@ def validate(manifest_path: Path, *, repo: Path, verify_files: bool = True) -> d
         "schema", "schema_version", "candidate_sha", "base_sha", "selector",
         "overlay", "runtime", "pin", "streams", "receipts",
     }, "manifest")
-    if top["schema"] != SCHEMA or top["schema_version"] != 1:
-        raise ManifestError("manifest schema/version mismatch")
+    if top["schema"] != SCHEMA or type(top["schema_version"]) is not int or top["schema_version"] != 2:
+        raise ManifestError("manifest schema/version mismatch; migrate to v2 with an external deployment contract")
     candidate = _string(top["candidate_sha"], "candidate_sha", pattern=SHA40)
     _string(top["base_sha"], "base_sha", pattern=SHA40)
     selector = top["selector"]
@@ -124,13 +155,15 @@ def validate(manifest_path: Path, *, repo: Path, verify_files: bool = True) -> d
 
     runtime = _required(top["runtime"], {"coordinator", "satellites"}, "runtime")
     coordinator = _required(runtime["coordinator"], {"host", "pid", "checkout", "sha"}, "runtime.coordinator")
-    _string(coordinator["host"], "runtime.coordinator.host", nonempty=True)
+    _string(coordinator["host"], "runtime.coordinator.host", pattern=HOST)
+    if coordinator["host"] != expected_coordinator:
+        raise ManifestError("runtime coordinator does not match deployment contract")
     _positive_int(coordinator["pid"], "runtime.coordinator.pid")
     _string(coordinator["checkout"], "runtime.coordinator.checkout", nonempty=True)
     if not coordinator["checkout"].startswith("/"):
         raise ManifestError("runtime.coordinator.checkout must be absolute")
     _string(coordinator["sha"], "runtime.coordinator.sha", pattern=SHA40)
-    satellites = _required(runtime["satellites"], {"amaterasu", "merlin"}, "runtime.satellites")
+    satellites = _required(runtime["satellites"], expected_satellites, "runtime.satellites")
     for host, value in satellites.items():
         sat = _required(value, {"checkout_sha", "pid", "event_push_runtime_sha", "observed_at"}, f"runtime.satellites.{host}")
         _string(sat["checkout_sha"], f"runtime.satellites.{host}.checkout_sha", pattern=SHA40)
@@ -139,8 +172,8 @@ def validate(manifest_path: Path, *, repo: Path, verify_files: bool = True) -> d
         _string(sat["observed_at"], f"runtime.satellites.{host}.observed_at", nonempty=True)
 
     pin = _required(top["pin"], {"owner", "mutation_status", "target_sha", "previous_sha"}, "pin")
-    if pin["owner"] != "bart:v2-8f7ce031":
-        raise ManifestError("pin.owner is not Nexus")
+    if pin["owner"] != expected_owner:
+        raise ManifestError("pin.owner does not match deployment contract")
     if pin["mutation_status"] not in {"deferred", "staged", "rolled_back"}:
         raise ManifestError("invalid pin mutation_status")
     for key in ("target_sha", "previous_sha"):
@@ -159,6 +192,8 @@ def validate(manifest_path: Path, *, repo: Path, verify_files: bool = True) -> d
         stream = _required(value, stream_keys, f"streams[{index}]")
         stream_id = _string(stream["stream_id"], f"streams[{index}].stream_id", nonempty=True)
         source_host = _string(stream["authenticated_source_host"], f"streams[{index}].authenticated_source_host", nonempty=True)
+        if source_host not in {expected_coordinator, *expected_satellites}:
+            raise ManifestError(f"streams[{index}] source host is outside the runtime inventory")
         if not stream_id.startswith(f"{source_host}:") or stream_id.removeprefix(f"{source_host}:") == "":
             raise ManifestError(f"streams[{index}] is not bound to its authenticated source host")
         if stream["provider"] not in {"codex", "claude"}:
@@ -177,10 +212,16 @@ def validate(manifest_path: Path, *, repo: Path, verify_files: bool = True) -> d
         if stream["replay_zero_new_records"] and any(item != 0 for item in stream["usage_recorded"]):
             raise ManifestError(f"streams[{index}] claims zero replay writes but records a write")
 
-    receipts = _required(top["receipts"], {"red", "focused", "junit", "prechange_amaterasu", "prechange_bart"}, "receipts")
-    for key, value in receipts.items():
+    receipts = _required(top["receipts"], {"red", "focused", "junit", "prechange"}, "receipts")
+    for key in ("red", "focused", "junit"):
+        value = receipts[key]
         _validate_receipt(value, f"receipts.{key}", verify_files=verify_files)
-    return top
+    prechange = _required(receipts["prechange"], expected_prechange, "receipts.prechange")
+    for host, value in prechange.items():
+        _validate_receipt(value, f"receipts.prechange.{host}", verify_files=verify_files)
+    return {"passed": True, "candidate_sha": candidate,
+            "deployment_contract_sha256": hashlib.sha256(contract_bytes).hexdigest(),
+            "file_checks": verify_files}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -188,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     validate_parser = sub.add_parser("validate")
     validate_parser.add_argument("--manifest", required=True, type=Path)
+    validate_parser.add_argument("--deployment-contract", required=True, type=Path)
     validate_parser.add_argument("--repo", type=Path, default=None)
     validate_parser.add_argument("--no-file-check", action="store_true")
     args = parser.parse_args(argv)
@@ -195,11 +237,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("unknown command")
     repo = args.repo.resolve() if args.repo else Path(__file__).resolve().parents[3]
     try:
-        validate(args.manifest.resolve(), repo=repo, verify_files=not args.no_file_check)
+        receipt = validate(args.manifest.resolve(), repo=repo, deployment_contract=args.deployment_contract.resolve(),
+                           verify_files=not args.no_file_check)
     except ManifestError as exc:
         print(f"usage_manifest: INVALID: {exc}", file=sys.stderr)
         return 2
-    print(f"usage_manifest: VALID {args.manifest.resolve()}")
+    print(json.dumps(receipt, sort_keys=True))
     return 0
 
 

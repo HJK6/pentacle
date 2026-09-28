@@ -28,10 +28,10 @@ test('test_resolve_mic_url_local', () => {
 
 test('test_resolve_mic_url_stream_host', () => {
   const url = resolveMicUrl({
-    chatStream: { url: 'ws://10.0.0.0:7791' },
+    chatStream: { url: 'ws://203.0.113.10:7791' },
     mic: { useStreamHost: true },
   });
-  assert.equal(url, 'http://10.0.0.0:7780');
+  assert.equal(url, 'http://203.0.113.10:7780');
 });
 
 test('test_resolve_mic_url_stream_host_loopback', () => {
@@ -73,13 +73,13 @@ test('test_resolve_mic_url_with_input_rehearsal', () => {
   fs.writeFileSync(configPath, `
 module.exports = {
   features: { mic: true },
-  chatStream: { url: 'ws://10.0.0.0:7791' },
+  chatStream: { url: 'ws://203.0.113.10:7791' },
   mic: { useStreamHost: true, alwaysOnEnabled: false },
 };
 `);
   try {
     const loaded = loadConfig(tmp, {}, 'hostb').config;
-    assert.equal(resolveMicUrl(loaded), 'http://10.0.0.0:7780');
+    assert.equal(resolveMicUrl(loaded), 'http://203.0.113.10:7780');
     assert.equal(shouldSpawnLocalMicServer(loaded), false);
   } finally {
     delete require.cache[require.resolve(configPath)];

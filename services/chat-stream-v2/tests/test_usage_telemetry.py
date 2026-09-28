@@ -14,10 +14,10 @@ from store import Store
 FIXTURE = Path(__file__).parent / "fixtures" / "usage_telemetry_cases.json"
 MANIFEST_SCHEMA = Path(__file__).parent / "fixtures" / "usage_stage1_manifest_schema.json"
 SHARED_SECRET = "secret"
-HOST_SECRET = "amaterasu-host-secret"
+HOST_SECRET = "worker-one-host-secret"
 SATELLITE_SHA = "a" * 40
 SATELLITE_PID = 1234
-STREAM_ID = "amaterasu:v2-codex"
+STREAM_ID = "worker-one:v2-codex"
 SESSION_NAME = "v2-codex"
 GENERATION = "generation-a"
 PANE_PID = "8123"
@@ -40,7 +40,7 @@ def _host_proof(host: str, *, secret: str = HOST_SECRET) -> str:
 def _push(
     records: list[dict],
     *,
-    host: str = "amaterasu",
+    host: str = "worker-one",
     request_id: str = "usage-1",
     generation: str = GENERATION,
     pane_pid: str = PANE_PID,
@@ -82,7 +82,7 @@ async def _setup():
     store = Store(":memory:")
     store.start()
     row = await store.open_session(
-        "amaterasu",
+        "worker-one",
         SESSION_NAME,
         provider="codex",
         pane_pid=PANE_PID,
@@ -98,7 +98,7 @@ async def _setup():
         lambda _frame: asyncio.sleep(0),
         _Alerts(),
         recent_limit=20,
-        host_secrets={"amaterasu": HOST_SECRET},
+        host_secrets={"worker-one": HOST_SECRET},
     )
     ep._secret = lambda: _secret(SHARED_SECRET)
     return store, row, ep
@@ -141,7 +141,7 @@ def test_manifest_schema_is_exact_and_candidate_bound() -> None:
         "services/chat-stream-v2/tests/test_usage_telemetry.py",
     ]
     assert schema["properties"]["runtime"]["properties"]["satellites"]["required"] == [
-        "amaterasu", "merlin",
+        "worker-one", "worker-two",
     ]
     assert schema["properties"]["streams"]["items"]["$ref"] == "#/$defs/stream"
 
@@ -154,7 +154,7 @@ def test_remote_usage_push_authenticates_source_fences_and_replays_by_record() -
             first = await ep.handle_push(_push(records, request_id="usage-1"))
             same_request = await ep.handle_push(_push(records, request_id="usage-1"))
             new_request = await ep.handle_push(_push(records, request_id="usage-2"))
-            usage = (await store.fetch_session("amaterasu", SESSION_NAME))["usage"]
+            usage = (await store.fetch_session("worker-one", SESSION_NAME))["usage"]
             assert first["request_id"] == "usage-1"
             assert first["usage_recorded"] == 1
             assert first["usage_replayed"] == 0
@@ -164,7 +164,7 @@ def test_remote_usage_push_authenticates_source_fences_and_replays_by_record() -
             assert new_request["request_id"] == "usage-2"
             assert new_request["usage_recorded"] == 0
             assert new_request["usage_replayed"] == 1
-            assert usage["collection_host"] == "amaterasu"
+            assert usage["collection_host"] == "worker-one"
             assert usage["session_generation"] == row["session_generation"] == GENERATION
             assert usage["revision"] == 1
             assert usage["tokens"] == _case("codex")["expected_tokens"]
@@ -181,11 +181,11 @@ def test_remote_usage_rejects_host_source_generation_pid_and_provider_changes_wi
             records = _case("codex")["records"]
             accepted = await ep.handle_push(_push(records, request_id="usage-bind"))
             assert accepted["usage_recorded"] == 1
-            before = (await store.fetch_session("amaterasu", SESSION_NAME))["usage"]
+            before = (await store.fetch_session("worker-one", SESSION_NAME))["usage"]
 
             wrong_host = await ep.handle_push(_push(
-                records, host="merlin", request_id="usage-wrong-host",
-                proof=_host_proof("amaterasu"),
+                records, host="worker-two", request_id="usage-wrong-host",
+                proof=_host_proof("worker-one"),
             ))
             wrong_source = await ep.handle_push(_push(
                 records, request_id="usage-wrong-source", source_digest="b" * 64,
@@ -199,7 +199,7 @@ def test_remote_usage_rejects_host_source_generation_pid_and_provider_changes_wi
             wrong_provider = await ep.handle_push(_push(
                 records, request_id="usage-wrong-provider", provider="claude",
             ))
-            after = (await store.fetch_session("amaterasu", SESSION_NAME))["usage"]
+            after = (await store.fetch_session("worker-one", SESSION_NAME))["usage"]
 
             assert wrong_host["error"] == "unauthorized_source_host"
             assert wrong_source["usage_recorded"] == 0
@@ -230,14 +230,14 @@ def test_codex_and_claude_snapshots_preserve_native_fields_and_label_derived_inp
             store.start()
             try:
                 row = await store.open_session(
-                    "amaterasu", f"v2-{case['provider']}", provider=case["provider"],
+                    "worker-one", f"v2-{case['provider']}", provider=case["provider"],
                     session_generation=f"generation-{case['provider']}",
                 )
                 observed = await store.record_usage(
                     row,
                     case["records"],
                     native_session_id=case["native_session_id"],
-                    collection_host="amaterasu",
+                    collection_host="worker-one",
                 )
                 assert observed is not None
                 assert observed["tokens"] == case["expected_tokens"]

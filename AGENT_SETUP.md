@@ -44,8 +44,9 @@ not tasks the agent should pretend it completed.
    structured Chat is experimental. The normal session surface is the terminal.
    Read [config reference](docs/desktop_config.md). For multiple hosts,
    populate hostNames/hostColors and exact chatStream.hostMap aliases; verify
-   the local badge. The public checkout has no runnable mic service entrypoint yet; configure an
-   independently installed, running mic endpoint before enabling features.mic,
+   the local badge. The public [microphone service](mic-server/README.md) includes the runnable
+   `mic-server/mic_server.py` entrypoint and starts with capture off. Keep mic disabled
+   until its devices, models and endpoint are provisioned and verified,
    and enable features.usage only with the daemon limits collector configured.
    Machine-stat cards come from daemon hosts.stats frames (hosts payload); machineStats is ignored.
    Preserve the private overlay and existing saved Settings during upgrades.
@@ -85,3 +86,22 @@ The shared library is public at
 [pentacle-chat-core](https://github.com/HJK6/pentacle-chat-core), but its source
 is already included in both client repositories. Do not fetch a sibling copy
 or change the vendored dependency to make installation work.
+
+## Name and bootstrap your own assistant
+
+Follow the exact [two-phase own-assistant recipe](docs/assistant.md#bootstrap-your-own-assistant)
+after ordinary daemon/provider setup. Run the checked-in wrapper with explicit
+endpoint, owner-only operator credential, physical host label, name,
+provider/model/effort, private workspace and instructions file. Dry-run has no
+mutation. Activation uses authenticated operator spawn, returns the actual ready
+backend stream/generation and writes owner-only config. The owner restarts the
+same daemon/stores and verifies binding before the first input. The wrapper
+never installs or restarts a service.
+
+The name is display identity; `assistant` is the protected role and `local` is
+the physical execution host label. Web/mobile use the host's reachable address
+and matching role, without a legacy assistant alias or a rebuild just to set a
+display title. Mic stays disabled by default; naming a typed assistant does not
+customize the current fixed voice wake. Use [the process kit](process/README.md)
+and [memory discovery](process/MEMORY.md) for private facts, preferences,
+decisions and work; configure daemon and CLI memory roots separately.

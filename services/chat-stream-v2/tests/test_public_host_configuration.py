@@ -68,12 +68,13 @@ def test_collection_ignores_operator_machine_config():
 def test_marker_host_is_opt_in_and_uses_custom_identity(monkeypatch):
     env = dict(os.environ)
     env.pop("PENTACLE_AUTH_CONTEXT_MARKER_HOST", None)
+    service_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     code = "import spawnctl; print(repr(spawnctl.AUTH_CONTEXT_MARKER_HOST))"
-    result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
+    result = subprocess.run([sys.executable, "-c", code], cwd=service_dir, env=env, capture_output=True, text=True, check=True)
     assert result.stdout.strip() == "''"
     env["PENTACLE_AUTH_CONTEXT_MARKER_HOST"] = "travel"
     code = "from spawnctl import SpawnCtl; assert SpawnCtl._uses_auth_context_marker('travel', 'claude'); assert not SpawnCtl._uses_auth_context_marker('office', 'claude'); assert not SpawnCtl._uses_auth_context_marker('travel', 'codex')"
-    subprocess.run([sys.executable, "-c", code], env=env, check=True)
+    subprocess.run([sys.executable, "-c", code], cwd=service_dir, env=env, check=True)
 
 
 def test_pin_rejects_no_satellites_before_opening_store(monkeypatch):
@@ -97,18 +98,20 @@ def test_smoke_plan_uses_explicit_file_and_filters_retired_hosts(monkeypatch, tm
     from tools import spawn_fleet_smoke
     path = tmp_path / "machines.json"
     path.write_text(json.dumps({"machines": [
-        {"name": "thoth", "ssh_target": None},
-        {"name": "bart", "ssh_target": "bart-ssh"},
-        {"name": "merlin", "ssh_target": "merlin-ssh"},
-        {"name": "amaterasu", "ssh_target": "amaterasu-ssh"},
+        {"name": "local", "ssh_target": None},
+        {"name": "retired", "ssh_target": "retired-ssh"},
+        {"name": "worker-one", "ssh_target": "worker-one-ssh"},
+        {"name": "worker-two", "ssh_target": "worker-two-ssh"},
     ]}))
     monkeypatch.setenv("PENTACLE_MACHINES_FILE", str(path))
     monkeypatch.delenv("PENTACLE_MACHINES_JSON", raising=False)
     monkeypatch.delenv("PENTACLE_SMOKE_HOSTS", raising=False)
+    monkeypatch.setenv("PENTACLE_SMOKE_EXCLUDED_HOSTS", "retired")
     plan = spawn_fleet_smoke.smoke_plan()
     assert plan["source"] == str(path)
-    assert plan["hosts"] == ("thoth", "merlin", "amaterasu")
-    assert plan["excluded_absent"] == ("daffodil",)
+    assert plan["hosts"] == ("local", "worker-one", "worker-two")
+    assert plan["excluded_absent"] == ()
+    assert plan["excluded_present"] == ("retired",)
 
     monkeypatch.setenv("PENTACLE_SMOKE_HOSTS", "unknown")
     with pytest.raises(ValueError, match="unknown|configured"):
@@ -126,18 +129,42 @@ def test_smoke_plan_uses_explicit_file_and_filters_retired_hosts(monkeypatch, tm
         spawn_fleet_smoke.smoke_plan()
 
 
-def test_smoke_dry_run_never_enters_connection_or_matrix(monkeypatch, tmp_path, capsys):
+def test_smoke_exclusions_are_explicit_unique_and_configured(monkeypatch, tmp_path):
     from tools import spawn_fleet_smoke
     path = tmp_path / "machines.json"
     path.write_text(json.dumps({"machines": [
-        {"name": "thoth", "ssh_target": None},
-        {"name": "bart", "ssh_target": "bart-ssh"},
-        {"name": "merlin", "ssh_target": "merlin-ssh"},
-        {"name": "amaterasu", "ssh_target": "amaterasu-ssh"},
+        {"name": "local", "ssh_target": None}, {"name": "retired", "ssh_target": "retired-example"},
     ]}))
     monkeypatch.setenv("PENTACLE_MACHINES_FILE", str(path))
     monkeypatch.delenv("PENTACLE_MACHINES_JSON", raising=False)
     monkeypatch.delenv("PENTACLE_SMOKE_HOSTS", raising=False)
+    monkeypatch.delenv("PENTACLE_SMOKE_EXCLUDED_HOSTS", raising=False)
+    assert spawn_fleet_smoke.smoke_plan()["hosts"] == ("local", "retired")
+    monkeypatch.setenv("PENTACLE_SMOKE_EXCLUDED_HOSTS", "retired")
+    assert spawn_fleet_smoke.smoke_plan()["hosts"] == ("local",)
+    for invalid in ("unknown", "retired,retired", "retired,,local", "retired,local"):
+        monkeypatch.setenv("PENTACLE_SMOKE_EXCLUDED_HOSTS", invalid)
+        with pytest.raises(ValueError):
+            spawn_fleet_smoke.smoke_plan()
+    monkeypatch.setenv("PENTACLE_SMOKE_EXCLUDED_HOSTS", "retired")
+    monkeypatch.setenv("PENTACLE_SMOKE_HOSTS", "retired")
+    with pytest.raises(ValueError, match="excluded"):
+        spawn_fleet_smoke.smoke_plan()
+
+
+def test_smoke_dry_run_never_enters_connection_or_matrix(monkeypatch, tmp_path, capsys):
+    from tools import spawn_fleet_smoke
+    path = tmp_path / "machines.json"
+    path.write_text(json.dumps({"machines": [
+        {"name": "local", "ssh_target": None},
+        {"name": "retired", "ssh_target": "retired-ssh"},
+        {"name": "worker-one", "ssh_target": "worker-one-ssh"},
+        {"name": "worker-two", "ssh_target": "worker-two-ssh"},
+    ]}))
+    monkeypatch.setenv("PENTACLE_MACHINES_FILE", str(path))
+    monkeypatch.delenv("PENTACLE_MACHINES_JSON", raising=False)
+    monkeypatch.delenv("PENTACLE_SMOKE_HOSTS", raising=False)
+    monkeypatch.setenv("PENTACLE_SMOKE_EXCLUDED_HOSTS", "retired")
     def forbidden(*_args, **_kwargs):
         pytest.fail("dry run entered a live connection or matrix")
     monkeypatch.setattr(spawn_fleet_smoke, "_operator_connection", forbidden)
@@ -145,7 +172,7 @@ def test_smoke_dry_run_never_enters_connection_or_matrix(monkeypatch, tmp_path, 
     assert spawn_fleet_smoke.main(["--dry-run"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["source"] == str(path)
-    assert result["hosts"] == ["thoth", "merlin", "amaterasu"]
+    assert result["hosts"] == ["local", "worker-one", "worker-two"]
     assert len(result["cells"]) == 12
 
 
@@ -156,14 +183,14 @@ def test_quota_cell_with_failed_teardown_reports_leak():
             return {"type": "spawn_catalog_get.ok", "profiles": {
                 "desktop_manual": {"codex": ("gpt-6-sol", "medium")}},
                 "catalog_version": "test"}
-        return {"stream_id": "thoth:v2-fleet-smoke-codex-example"}
+        return {"stream_id": "local:v2-fleet-smoke-codex-example"}
     def event_timeout(_stream_id, _marker):
         raise TimeoutError("event timeout")
     def close_failure(_stream_id):
         raise RuntimeError("pane remained open")
     with pytest.raises(RuntimeError, match="teardown: pane remained open"):
         spawn_fleet_smoke.run_cell(
-            "thoth", "codex", "prompted", rpc=rpc,
+            "local", "codex", "prompted", rpc=rpc,
             wait_ready=lambda _stream_id: None,
             wait_event=event_timeout,
             verify_teardown=close_failure,

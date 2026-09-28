@@ -2,6 +2,8 @@
 
 This walkthrough runs Pentacle and the chat daemon locally with disposable state. It is suitable for a fresh checkout and does not require a managed service.
 
+For a persistent named assistant, continue with [the executable bootstrap recipe](assistant.md#bootstrap-your-own-assistant). It uses operator challenge/proof authentication and a protected role; the scratch session below is a separate introductory journey.
+
 ## 1. Install prerequisites
 
 Install Node.js, Python 3, tmux, and a provider CLI that can be replaced by a fixture command in tests. Install dependencies from the repository's documented lockfiles.
@@ -27,7 +29,7 @@ Use the daemon's `--help` output as the option authority. A representative loopb
 
 ```bash
 .venv-dev/bin/python services/chat-stream-v2/main.py \
-  --bind 127.0.0.1 --port 7791 --local-host local \
+  --host 127.0.0.1 --port 7791 --local-host local \
   --db /tmp/pentacle-example/stores/sessions.sqlite \
   --notifications-db /tmp/pentacle-example/stores/notifications.sqlite \
   --assets-db /tmp/pentacle-example/stores/assets.sqlite \
@@ -39,7 +41,8 @@ Use the daemon's `--help` output as the option authority. A representative loopb
 Select a local-only machines file explicitly if you already have private fleet
 configuration; see [machine configuration](agent_orchestration_setup.md#machines-file).
 Keep its name and the daemon `--local-host` identical. The example above uses
-`local`. Start with authentication disabled only for local fixture work.
+`local`. Use loopback for scratch work and enroll an operator credential before
+UI use; follow [operator authentication](REMOTE_AUTH.md).
 
 ## 4. Check the CLI
 
@@ -59,7 +62,7 @@ agent-orch list
 agent-orch reconcile status --json
 ```
 
-Create one fixture session, send `hello from fixture`, observe the typed reply, and close it. Use generated request ids when scripting the flow.
+Create one ordinary session through New Chat, send `hello from fixture`, observe the provider reply, and close it. An enrolled operator credential is required to grant the protected assistant role; an ordinary seat token is insufficient. Use generated request ids when scripting the flow.
 
 ## 5. Run the web client
 
@@ -109,6 +112,14 @@ python3 services/chat-stream-v2/tools/run_gate.py unit
 ```
 
 Evidence should contain only synthetic fixture ids, result summaries, and the candidate identifier. Remove temporary stores after the run.
+
+The [own-assistant gate](../test/e2e/own_assistant_bootstrap_gate.py) invokes the actual bootstrap with fresh state/registry, unique tmux socket, native-format provider counterpart, candidate publish CLI and real Chrome browser. After dependencies and the Web build:
+
+```sh
+python3 test/e2e/own_assistant_bootstrap_gate.py --output-dir /tmp/pentacle-own-assistant-proof
+```
+
+The output directory must be fresh. Set `PENTACLE_TEST_BROWSER` to Chrome/Chromium if public detection cannot find it. The gate does not overwrite HOME or CODEX_HOME, inherit caller/production tokens/endpoints, install services or contact paid providers. It checks a correlated visible reply, name, exact backend generation, duplicate publication, stale-generation refusal and restart readback. It owns daemon/web/browser/tmux cleanup and removes plaintext fixture credentials in `finally`; retain raw failure receipts for classification. PASS proves installation mechanics, not provider login, real model availability, physical phone or microphone hardware.
 
 ## 8. Pushing safely
 

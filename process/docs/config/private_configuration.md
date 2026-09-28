@@ -5,7 +5,7 @@ type: config
 status: stable
 canonical: true
 created_at: '2026-09-09'
-updated_at: '2026-09-09'
+updated_at: '2026-09-28'
 source_path: docs/config/private_configuration.md
 tags:
 - pentacle
@@ -22,7 +22,7 @@ The public source and reusable process templates are separate from your private 
 
 Use a private per-user directory such as `~/.config/pentacle-private/` for machine configuration you manage yourself. Restrict access to your account. This is a recommended storage layout, not a claim that every component automatically reads it.
 
-If you separately install the Pentacle desktop application with its supported configuration loader and generic example, set `PENTACLE_CONFIG` to an absolute path to your configuration module. An explicitly configured missing file is an error; it must not silently select another host profile. Start from that installation's generic example; this process bundle does not include the desktop loader or application example. Do not commit your populated copy to the public tree.
+For Pentacle Web with its supported configuration loader, set `PENTACLE_CONFIG` to an absolute path to your configuration module. An explicitly configured missing file is an error; it must not silently select another host profile. Start from that installation's generic example; this process bundle does not include the runtime loader. The Electron desktop application is deprecated. Follow [the own-assistant recipe](../../../docs/assistant.md#bootstrap-your-own-assistant). Do not commit your populated copy to the public tree.
 
 Maintain an explicit mapping for each other consumer: daemon machine and bind settings, agent-orch spec workspace, mobile development/build configuration and optional integrations. Use only that component's supported configuration interface. Mobile configuration is build input; a desktop environment variable does not configure it, and client bundles cannot keep embedded credentials secret.
 
@@ -33,6 +33,8 @@ Store credentials in your platform credential manager, environment supplied at l
 Create your own spec workspace outside the public checkout when work items contain private data. Copy the reusable process kit there and configure each consumer to use it. Keep real specs, receipts, conversations, runtime state and local identity documents private. Public examples use synthetic projects and hosts.
 
 If several machines share the workspace, explicitly choose a synchronization method, catalog writer and Git commit owner. A single-machine setup needs no fleet sync service. Do not copy an existing private memory repository or its Git history into a public export.
+
+`PENTACLE_MEMORY_ROOT` configures the daemon's spec catalog; `AGENT_ORCH_MEMORY_REPO` configures the CLI's memory/role discovery. A local soul describes the execution host's paths/capabilities, independently of assistant name/provider. See [memory authoring](../../MEMORY.md). Store raw evidence externally and keep location+SHA256+scope pointers in the private work item's `_artifacts/`; current source overrides catalogs.
 
 ## Migration
 

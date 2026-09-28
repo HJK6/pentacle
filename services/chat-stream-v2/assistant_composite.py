@@ -84,6 +84,7 @@ class AssistantCompositeConfig:
     direct_primary_stream_id: str = ""
     direct_primary_generation: str = ""
     authority_stream_id: str = ""
+    rebind_authorized_spec_ids: frozenset[str] = frozenset()
     mirror_enabled_default: bool = True
     title: str = "Assistant"
 
@@ -129,6 +130,15 @@ class AssistantCompositeConfig:
         authority_stream = str(values.get("PENTACLE_ASSISTANT_AUTHORITY_STREAM_ID") or "").strip()
         if authority_stream and not _STREAM_ID_RE.fullmatch(authority_stream):
             raise ValueError("assistant_authority_stream_id_invalid")
+        try:
+            authorized_specs = json.loads(values.get("PENTACLE_ASSISTANT_REBIND_AUTHORIZED_SPEC_IDS", "[]"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("assistant_rebind_authorized_specs_invalid") from exc
+        if (not isinstance(authorized_specs, list)
+                or any(not isinstance(item, str) or not re.fullmatch(r"spec_[a-z0-9_]+", item)
+                       for item in authorized_specs)
+                or len(authorized_specs) != len(set(authorized_specs))):
+            raise ValueError("assistant_rebind_authorized_specs_invalid")
         return cls(
             enabled=enabled,
             stream_id=stream_id,
@@ -140,6 +150,7 @@ class AssistantCompositeConfig:
             direct_primary_stream_id=direct_stream,
             direct_primary_generation=direct_generation,
             authority_stream_id=authority_stream,
+            rebind_authorized_spec_ids=frozenset(authorized_specs),
             mirror_enabled_default=_env_bool(values, "PENTACLE_ASSISTANT_MIRROR_ENABLED", True),
             title=str(values.get("PENTACLE_ASSISTANT_COMPOSITE_TITLE") or "Assistant").strip()[:120] or "Assistant",
         )
@@ -166,7 +177,8 @@ def direct_dispatch_envelope(
     )
     original_json = json.dumps(original_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     wire_body = (
-        "[canonical Bart direct dispatch — daemon authored]\n"
+        "[canonical assistant direct dispatch — daemon authored]\n"
+        f"assistant_display_name_json: {json.dumps(config.title)}\n"
         f"origin: {config.stream_id}\n"
         f"dispatch_id: {dispatch_id}\n"
         f"reply_to_message_id: {input_id}\n"
@@ -174,7 +186,7 @@ def direct_dispatch_envelope(
         f"target_stream_id: {target}\n"
         f"target_generation: {generation}\n"
         "Answer the operator's original input below. For this exact dispatch, compose "
-        "your final user-facing answer, then publish it to the canonical Bart chat "
+        "your final user-facing answer, then publish it to the originating assistant composite "
         "before ending your own turn. Publish the exact answer with its Markdown "
         "and whitespace preserved; do not make a separate plain-text version. "
         "Use the same key and payload on a retry; "
@@ -295,6 +307,7 @@ class AssistantComposite:
                 target_stream_id=None if clear else str(msg.get("target_stream_id") or ""),
                 target_generation=None if clear else str(msg.get("target_generation") or ""),
                 request_id=request_id, expected_revision=expected_revision, clear=clear,
+                authorized_spec_ids=self.env_config.rebind_authorized_spec_ids,
             )
             if not receipt.get("duplicate"):
                 self._apply_binding(receipt["new_binding"])
@@ -468,7 +481,7 @@ class AssistantComposite:
         projected = dict(row)
         projected.update({
             "working": bool(self._activity["pending_count"]),
-            "working_label": ("Waiting for Bart" if self._activity["pending_count"] else
+            "working_label": (f"Waiting for {self.config.title}" if self._activity["pending_count"] else
                               "Waiting for you" if self._activity["waiting_for_operator_count"] else None),
             "assistant_activity": self.activity_snapshot(),
             "session_kind": "assistant_composite",

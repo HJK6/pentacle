@@ -12,7 +12,9 @@ import importlib.util
 from contextlib import contextmanager
 import os
 import json
+import hashlib
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -41,7 +43,159 @@ def isolated_git_environment():
         os.environ.update(saved)
 
 
+def _reject(call):
+    try:
+        call()
+    except ValueError:
+        return
+    raise AssertionError("invalid guard input accepted")
+
+
+def _portable_and_semantic_rules():
+    examples = {
+        "private_home_path": "/" + "Users/fixture-person/project",
+        "credential": "AK" + "IA" + "X" * 16,
+        "personal_email": "fixture-person" + "@" + "gmail.com",
+        "private_endpoint": "ws://" + "10.2.3.4:7796",
+    }
+    for rule, value in examples.items():
+        assert rule in cpr._line_rules(value), rule
+    for value in ("/home/example/project", "/Users/<user>/project", "$HOME/project",
+                  "https://203.0.113.10:7796", "ws://127.0.0.1:7796"):
+        assert not cpr._line_rules(value), value
+    semantic = {
+        "fixed_host_exclusions": 'EXCLUDED_HOSTS = {"retired-example"}\n',
+        "fixed_permission_spec": 'RECOVERY = "spec_example__recovery"\ndef authorized(row):\n    return row.get("spec_id") == RECOVERY\n',
+        "fixed_pin_owner": 'if pin["owner"] != "local:lead":\n    raise ValueError()\n',
+        "fixed_satellite_inventory": '_required(runtime["satellites"], {"worker-one"}, "satellites")\n',
+        "fixed_prechange_hosts": '_required(top["receipts"], {"prechange_local"}, "receipts")\n',
+        "fixed_assistant_presentation_id": 'if (streamId === "local:assistant") return false;\n',
+    }
+    for rule, source in semantic.items():
+        name = "runtime.js" if rule.endswith("presentation_id") else "runtime.py"
+        assert any(hit[1] == rule for hit in cpr._semantic_hits(name, source)), rule
+        assert not cpr._semantic_hits("tests/" + name, source), "synthetic test mistaken for runtime"
+    assert not cpr._semantic_hits("runtime.js", 'if (bubbleType === "bubble:assistant") return true;')
+    assert not cpr._semantic_hits("runtime.py", 'record["spec_source"] == "spec_example__note"\n')
+    assert not cpr._semantic_hits("runtime.py", 'EXCLUDED_HOSTS = ()\n_required(runtime["satellites"], configured_hosts, "satellites")\n')
+
+
+def _external_dictionary_and_exceptions():
+    with isolated_git_environment(), tempfile.TemporaryDirectory() as temporary:
+        parent = Path(temporary)
+        root = parent / "checkout"
+        root.mkdir()
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        source = root / "source.txt"
+        source.write_text("clean public example\n")
+        subprocess.run(["git", "-C", str(root), "add", "source.txt"], check=True)
+        allowlist = parent / "allowlist.json"
+        manifest = {"version": 1, "fixtures": {}}
+        allowlist.write_text(json.dumps(manifest))
+        terms = parent / "terms.json"
+        term = "InventedNebulaPerson"
+        terms.write_text(json.dumps([term]))
+
+        def cli():
+            return subprocess.run([sys.executable, str(_mod_path), "--root", str(root),
+                                   "--allowlist", str(allowlist), "--private-terms-file", str(terms)],
+                                  capture_output=True, text=True, check=False)
+
+        clean = cli()
+        assert clean.returncode == 0, clean.stderr
+        receipt = json.loads(clean.stdout)["private_terms"]
+        assert receipt == {"status": "checked", "count": 1,
+                           "sha256": hashlib.sha256(terms.read_bytes()).hexdigest()}
+        assert cpr.check(root, allowlist)["private_terms"]["status"] == "not_run"
+        # Apply a real tracked-file mutation, prove scanner RED, then remove the
+        # same mutation and prove GREEN against the unchanged external input.
+        source.write_text("clean public example\n" + term.swapcase() + "\n")
+        assert term.casefold() in source.read_text().casefold(), "mutation was not applied"
+        red = cli()
+        assert red.returncode == 1, red.stderr
+        result = json.loads(red.stdout)
+        assert result["rule_hits"] == [{"path": "source.txt", "line": 2, "rule": "private_term"}]
+        assert result["raw_match_count"] == result["unexcepted_match_count"] == 1
+        assert term.casefold() not in (red.stdout + red.stderr).casefold(), "dictionary value leaked"
+        source.write_text("clean public example\n")
+        assert cli().returncode == 0
+        assert terms.read_bytes() == json.dumps([term]).encode(), "dictionary changed during proof"
+
+        # The path of a matching tracked file is also private.
+        private_source = root / (term + ".txt")
+        source.rename(private_source)
+        private_source.write_text(term + "\n")
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        private_result = cli()
+        assert private_result.returncode == 1
+        assert term.casefold() not in (private_result.stdout + private_result.stderr).casefold()
+        assert json.loads(private_result.stdout)["rule_hits"][0]["path"].startswith("<private-path:")
+        private_source.unlink()
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        (root / "terms.json").write_text(terms.read_text())
+        _reject(lambda: cpr.check(root, allowlist, root / "terms.json"))
+        for invalid in ([], {}, [""], [1], [term, term.lower()], "invalid"):
+            terms.write_text(json.dumps(invalid))
+            _reject(lambda: cpr.check(root, allowlist, terms))
+        terms.write_text("invalid JSON")
+        assert cli().returncode == 2
+        terms.write_text(json.dumps([term]))
+
+        fixture = root / "tests" / "historical.txt"
+        fixture.parent.mkdir()
+        fixture.write_text(term + "\n")
+        subprocess.run(["git", "-C", str(root), "add", "tests"], check=True)
+        exception = {"path": "tests/historical.txt", "rule": "private_term",
+                     "sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
+                     "reason": "Frozen synthetic fixture under separate normalization work."}
+        manifest["synthetic_exceptions"] = [exception]
+        allowlist.write_text(json.dumps(manifest))
+        accepted = cpr.check(root, allowlist, terms)
+        assert accepted["passed"] and accepted["raw_match_count"] == 1
+        assert accepted["unexcepted_match_count"] == 0 and len(accepted["accepted_synthetic_hits"]) == 1
+        in_checkout = root / "allowlist.json"
+        in_checkout.write_text(allowlist.read_text())
+        _reject(lambda: cpr.check(root, in_checkout, terms))
+        fixture.write_text(fixture.read_text() + "changed\n")
+        _reject(lambda: cpr.check(root, allowlist, terms))
+        fixture.write_text(term + "\n")
+        for rule in ("credential", "fixed_permission_spec", "fixed_pin_owner", "fixed_satellite_inventory"):
+            manifest["synthetic_exceptions"] = [{**exception, "rule": rule}]
+            allowlist.write_text(json.dumps(manifest))
+            _reject(lambda: cpr.check(root, allowlist, terms))
+        manifest["synthetic_exceptions"] = [{**exception, "path": "source.txt"}]
+        allowlist.write_text(json.dumps(manifest))
+        _reject(lambda: cpr.check(root, allowlist, terms))
+        # An old fixture allowlist cannot hide a newly recognized credential.
+        manifest = {"version": 1, "fixtures": {"tests/historical.txt": "Synthetic test."}}
+        fixture.write_text("AK" + "IA" + "X" * 16 + "\n")
+        allowlist.write_text(json.dumps(manifest))
+        assert cpr.check(root, allowlist)["rule_hits"][0]["rule"] == "credential"
+
+        # Each semantic mutation must fail through the actual tracked scanner.
+        fixture.write_text("clean\n")
+        mutations = [
+            ("runtime.py", 'EXCLUDED_HOSTS = {"retired-example"}\n', "fixed_host_exclusions", 1),
+            ("runtime.py", 'def authorized(row):\n    return row["spec_id"] == "spec_example__recovery"\n', "fixed_permission_spec", 2),
+            ("runtime.py", 'if pin["owner"] != "local:lead":\n    raise ValueError()\n', "fixed_pin_owner", 1),
+            ("runtime.py", '_required(runtime["satellites"], {"worker-one"}, "satellites")\n', "fixed_satellite_inventory", 1),
+            ("runtime.py", '_required(top["receipts"], {"prechange_local"}, "receipts")\n', "fixed_prechange_hosts", 1),
+            ("runtime.js", 'if (streamId === "local:assistant") return false;\n', "fixed_assistant_presentation_id", 1),
+        ]
+        for name, mutation, rule, line in mutations:
+            runtime = root / name
+            runtime.write_text(mutation)
+            subprocess.run(["git", "-C", str(root), "add", name], check=True)
+            assert runtime.read_text() == mutation
+            red = cpr.check(root, allowlist)
+            assert red["rule_hits"] == [{"path": name, "line": line, "rule": rule}]
+            runtime.write_text("// clean\n" if name.endswith(".js") else "# clean\n")
+            assert cpr.check(root, allowlist)["passed"]
+
+
 def main() -> int:
+    _portable_and_semantic_rules()
+    _external_dictionary_and_exceptions()
     # In-range (second octet 64-127) must be flagged, anywhere on the line.
     hits = [
         _cgnat(64, "0.0"), _cgnat(64, "0.1"), _cgnat(80, "28.24"),
@@ -100,7 +254,7 @@ def main() -> int:
         else:
             raise AssertionError("unknown profile accepted")
 
-    print("ok - check_public_residue detectors: default web + bounded mobile profile")
+    print("ok - residue guard: portable rules, external dictionary RED/GREEN, frozen exceptions, default web/mobile")
     return 0
 
 

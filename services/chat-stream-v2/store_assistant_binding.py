@@ -46,7 +46,6 @@ CREATE TABLE IF NOT EXISTS v2_assistant_direct_handoff_proofs (
     PRIMARY KEY(successor_stream_id, successor_generation)
 )
 """
-PORTFOLIO_SPEC = "spec_pentacle__bart_portfolio_coordination_2026_09"
 _STREAM_RE = re.compile(r"[a-z][a-z0-9_-]*:[A-Za-z0-9_.:-]+\Z")
 _GENERATION_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
@@ -109,18 +108,21 @@ def _live_seat(row: dict[str, Any] | None, *, target: bool = False) -> None:
         raise ValueError("assistant_rebind_generation_unavailable")
 
 
-def _portfolio_authorized(row: dict[str, Any]) -> bool:
-    if row["parent_stream_id"] or row["visibility"] != "default":
+def _configured_spec_authorized(row: dict[str, Any], authorized_spec_ids: frozenset[str]) -> bool:
+    if not authorized_spec_ids or row["parent_stream_id"] or row["visibility"] != "default":
         return False
     try:
         qualified = json.loads(row["qualified_spec_ids"] or "[]")
         provenance = json.loads(row["spec_binding_provenance"] or "[]")
     except (TypeError, ValueError):
         return False
-    return PORTFOLIO_SPEC in qualified and any(
-        isinstance(item, dict) and item.get("spec_id") == PORTFOLIO_SPEC
+    if not isinstance(qualified, list) or not isinstance(provenance, list):
+        return False
+    matching = authorized_spec_ids.intersection(item for item in qualified if isinstance(item, str))
+    return bool(matching) and any(
+        isinstance(item, dict) and isinstance(item.get("spec_id"), str) and item["spec_id"] in matching
         and item.get("provenance") in {"spawn_explicit", "drive_explicit", "handoff_inherited"}
-        and item.get("granting_principal")
+        and isinstance(item.get("granting_principal"), str) and item["granting_principal"].strip()
         for item in provenance
     )
 
@@ -133,6 +135,7 @@ class AssistantBindingStoreMixin:
         self, *, env_binding: dict[str, str], actor_stream_id: str, actor_generation: str,
         target_stream_id: str | None, target_generation: str | None,
         request_id: str, expected_revision: int, clear: bool = False,
+        authorized_spec_ids: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
         # The revision is a compare-and-swap observation, not caller intent.
         # A retry after a lost reply may observe the newly committed revision.
@@ -173,7 +176,7 @@ class AssistantBindingStoreMixin:
                         "AND predecessor_stream_id=? AND predecessor_generation=?",
                         (actor_stream_id, actor_generation, old["stream_id"], old["generation"]),
                     ).fetchone()
-                    if handoff is None and not _portfolio_authorized(actor):
+                    if handoff is None and not _configured_spec_authorized(actor, authorized_spec_ids):
                         raise ValueError("assistant_rebind_unauthorized")
                 if clear:
                     if old["source"] != "durable":

@@ -481,6 +481,15 @@ function compactIdentifier(value) {
 
 function desktopSessionMatchesStreamSession(streamSession = {}, desktopSession = {}, streamHost = '') {
   const hostMatches = !streamHost || streamSession.host === streamHost;
+  // Explicit stream identity remains authoritative while its roster row loads.
+  // Titles can be shared by the composite assistant and its protected backend.
+  if (desktopSession.streamId) {
+    const idMatches = streamSession.stream_id === desktopSession.streamId;
+    return { hostMatches, idMatches, rank: idMatches ? 3 : 0 };
+  }
+  const name = compactIdentifier(desktopSession.name);
+  const identityMatches = !!name && [streamSession.stream_id, streamSession.session_name]
+    .map(compactIdentifier).includes(name);
   const desktopIds = [
     desktopSession.streamId,
     desktopSession.name,
@@ -495,7 +504,20 @@ function desktopSessionMatchesStreamSession(streamSession = {}, desktopSession =
     streamSession.title,
   ].map(compactIdentifier).filter(Boolean);
   const idMatches = desktopIds.some((candidate) => streamIds.includes(candidate));
-  return { hostMatches, idMatches };
+  return { hostMatches, idMatches, rank: identityMatches ? 2 : idMatches ? 1 : 0 };
+}
+
+function bestDesktopStreamMatch(sessions, desktopSession, streamHost, requireHost) {
+  let best = null;
+  let rank = 0;
+  for (const item of sessions) {
+    const match = desktopSessionMatchesStreamSession(item, desktopSession, streamHost);
+    if ((!requireHost || match.hostMatches) && match.rank > rank) {
+      best = item;
+      rank = match.rank;
+    }
+  }
+  return best;
 }
 
 // Strong match ONLY: host AND id both match. Used as the authoritative
@@ -505,19 +527,14 @@ function desktopSessionMatchesStreamSession(streamSession = {}, desktopSession =
 // bound stream. Returns null when this session's own stream is not-yet-present.
 function findStrongStreamSessionForDesktopSession(streamState = {}, desktopSession = {}, streamHost = '') {
   const sessions = streamState.sessions || [];
-  return (
-    sessions.find((item) => {
-      const match = desktopSessionMatchesStreamSession(item, desktopSession, streamHost);
-      return match.hostMatches && match.idMatches;
-    }) || null
-  );
+  return bestDesktopStreamMatch(sessions, desktopSession, streamHost, true);
 }
 
 function findStreamSessionForDesktopSession(streamState = {}, desktopSession = {}, streamHost = '') {
   const sessions = streamState.sessions || [];
   return (
     findStrongStreamSessionForDesktopSession(streamState, desktopSession, streamHost) ||
-    sessions.find((item) => desktopSessionMatchesStreamSession(item, desktopSession, streamHost).idMatches) ||
+    bestDesktopStreamMatch(sessions, desktopSession, streamHost, false) ||
     null
   );
 }

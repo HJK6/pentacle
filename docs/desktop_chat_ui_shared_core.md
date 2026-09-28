@@ -35,7 +35,7 @@ An optimistic send starts as `queued`, becomes `dispatched` after the transport 
 
 The view receives a bounded window of rows and renders content-bearing DOM elements. A paint proof should assert the row kind and a bounded text prefix, not merely that a transport event arrived. Question controls are generated from the parsed payload, use accessible labels, and submit one deterministic answer object.
 
-Reply buttons are an opt-in transcript affordance. The renderer suppresses them for the canonical `bart:assistant` stream while preserving opted-in behavior on other streams; this presentation rule does not change reply correlation or send semantics.
+Reply buttons are an opt-in transcript affordance. The renderer suppresses them for assistant composites identified by daemon metadata while preserving opted-in behavior on other streams; this presentation rule does not change reply correlation or send semantics.
 
 The latest user row derives a receipt caption from its correlated durable echo (see the send-receipt design note): a committed-but-unconfirmed receipt reads Sent once the echo has bound, never sticking at Sending. An attachment send's server echo is the daemon's agent-facing wrapper text (`Look at the image file at <path>, then respond…`), not the operator caption; the reducer correlates that wrapper to the optimistic row by its embedded attachment keys and keeps the operator caption as the rendered text across the live, snapshot, and duplicate-replay reconcile paths, so one caption bubble renders rather than a second wrapper row.
 

@@ -5,7 +5,7 @@ type: meta
 status: stable
 canonical: true
 created_at: '2026-09-09'
-updated_at: '2026-09-09'
+updated_at: '2026-09-28'
 source_path: README.md
 tags:
 - pentacle
@@ -17,6 +17,8 @@ related: []
 # Set up the full process
 
 Use the bundled workspace for public project work, or copy this `process/` directory to a private location before creating real work items. The templates, schema and tools travel together. No existing team memory, private Git remote or fleet synchronization service is required.
+
+Start at [MEMORY.md](MEMORY.md) for private fact, preference and decision discovery/authoring. Keep the local host soul/config separate from assistant identity, provider/model and task role. Actual instructions, personal records and credentials stay private.
 
 ## Install the workspace tools
 
@@ -42,6 +44,15 @@ The creation, validation and catalog tools use the workspace containing their `s
 .venv/bin/python scripts/search_memory_v2.py 'Example change'
 ```
 
+The explicit command uses `analysis`, `local` and `maintainer`. Defaults also create a valid backlog item with local host/agents owner:
+
+```sh
+.venv/bin/python scripts/new_work_item.py example-app default_change \
+  --title 'Default change' --summary 'A synthetic work-item scaffold.'
+```
+
+Use [the document starter](MEMORY.md#author-catalog-validate-search) for a lightweight personal note. After either kind of creation, regenerate catalogs, run full and `--source-only` validation, then search. Schemas and status sets are unchanged.
+
 Open `work/analysis/example-app__example_change/spec.md`. Fill in the goal, current and target behavior, constraints, acceptance criteria and validation plan. The generated item is a scaffold, not an approved specification. Give an independent reviewer the spec and [QA guidelines](docs/config/qa_guidelines.md); resolve actionable findings before locking the plan and implementing.
 
 Use the [development lifecycle](docs/config/development_process.md) to progress the item. When moving an item to a different status directory, update `status`, `source_path` and `updated_at` in both Markdown files, plus status-bearing body text and the current next action. Keep the stable IDs unchanged. Regenerate and validate the catalogs after changes. At terminal closure also record `completed_at`, the disposition, completed or explicitly waived acceptance criteria and a short retrospective.
@@ -50,7 +61,7 @@ Use the [development lifecycle](docs/config/development_process.md) to progress 
 
 Use the repository's root AGENTS.md as the common entry point. If this workspace lives separately, add a short local instruction telling your agent where it is; do not put a private absolute path into a public AGENTS.md. Load the appropriate file from `agents/` for a lead, QA reviewer, documentation agent or coordinator. One lead with an independent reviewer is enough for a single lane.
 
-Follow [agent orchestration](docs/config/agent_orchestration.md) for ownership, reports, async questions and shared resources. Choose your own provider and model settings. The process can be followed without a running Pentacle daemon; those commands become relevant when using Pentacle's orchestration features.
+Follow [agent orchestration](docs/config/agent_orchestration.md) for ownership, reports, async questions and shared resources. Use the dated model profile with installed provider availability and operator overrides, planner → independent spec QA → lead/Nexus routing and typed reports. The process can be followed without a running Pentacle daemon; those commands become relevant when using Pentacle's orchestration features.
 
 ## Optional Pentacle integration
 

@@ -340,3 +340,24 @@ test('findStrongStreamSessionForDesktopSession requires host AND id (no id-only 
 function escapeRegExp(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+test('assistant identity outranks a backend with the same display title in either roster order', () => {
+  const backend = { stream_id: 'local:backend', host: 'local', session_name: 'backend', display_name: 'Nova' };
+  const composite = { stream_id: 'local:assistant', host: 'local', session_name: 'assistant', display_name: 'Nova' };
+  for (const sessions of [[backend, composite], [composite, backend]]) {
+    const state = { sessions };
+    for (const desktop of [{ name: 'assistant', displayName: 'Nova' },
+      { name: 'assistant', displayName: 'Nova', streamId: composite.stream_id }]) {
+      assert.equal(chatUi.findStrongStreamSessionForDesktopSession(state, desktop, 'local'), composite);
+      assert.equal(chatUi.findStreamSessionForDesktopSession(state, desktop, 'local'), composite);
+    }
+    assert.equal(chatUi.findStreamSessionForDesktopSession(state, { name: 'backend', displayName: 'Nova' }, 'local'), backend);
+  }
+});
+
+test('an explicit missing stream cannot resolve to another session through its display title', () => {
+  const state = { sessions: [{ stream_id: 'local:backend', host: 'local', session_name: 'backend', display_name: 'Nova' }] };
+  const desktop = { streamId: 'local:assistant', name: 'assistant', displayName: 'Nova' };
+  assert.equal(chatUi.findStrongStreamSessionForDesktopSession(state, desktop, 'local'), null);
+  assert.equal(chatUi.findStreamSessionForDesktopSession(state, desktop, 'local'), null);
+});

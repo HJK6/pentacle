@@ -22,7 +22,7 @@
     "title": "Lead baseline",
     "type": "agent-rules",
     "canonical": true,
-    "updated_at": "2026-09-09",
+    "updated_at": "2026-09-28",
     "source_path": "agents/lead_baseline.md",
     "tags": [
       "pentacle",
@@ -39,7 +39,7 @@
     "title": "Coordinator baseline",
     "type": "agent-rules",
     "canonical": true,
-    "updated_at": "2026-09-09",
+    "updated_at": "2026-09-28",
     "source_path": "agents/nexus_baseline.md",
     "tags": [
       "pentacle",
@@ -56,7 +56,7 @@
     "title": "QA baseline",
     "type": "agent-rules",
     "canonical": true,
-    "updated_at": "2026-09-09",
+    "updated_at": "2026-09-28",
     "source_path": "agents/qa_baseline.md",
     "tags": [
       "pentacle",
@@ -73,7 +73,7 @@
     "title": "Agent orchestration",
     "type": "config",
     "canonical": true,
-    "updated_at": "2026-09-09",
+    "updated_at": "2026-09-28",
     "source_path": "docs/config/agent_orchestration.md",
     "tags": [
       "pentacle",
@@ -89,7 +89,7 @@
     "title": "Development process",
     "type": "config",
     "canonical": true,
-    "updated_at": "2026-09-09",
+    "updated_at": "2026-09-28",
     "source_path": "docs/config/development_process.md",
     "tags": [
       "pentacle",
@@ -105,7 +105,7 @@
     "title": "Private configuration",
     "type": "config",
     "canonical": true,
-    "updated_at": "2026-09-09",
+    "updated_at": "2026-09-28",
     "source_path": "docs/config/private_configuration.md",
     "tags": [
       "pentacle",
@@ -132,12 +132,33 @@
     "status": "stable"
   },
   {
+    "id": "meta_memory",
+    "path": "MEMORY.md",
+    "title": "Memory discovery and authoring",
+    "type": "meta",
+    "canonical": true,
+    "updated_at": "2026-09-28",
+    "source_path": "MEMORY.md",
+    "tags": [
+      "memory",
+      "discovery",
+      "authoring"
+    ],
+    "summary": "Discover and author private facts, preferences, decisions and work using this portable kit.",
+    "related": [
+      "meta_readme",
+      "config_private_configuration",
+      "config_development_process"
+    ],
+    "status": "stable"
+  },
+  {
     "id": "meta_readme",
     "path": "README.md",
     "title": "Set up the full process",
     "type": "meta",
     "canonical": true,
-    "updated_at": "2026-09-09",
+    "updated_at": "2026-09-28",
     "source_path": "README.md",
     "tags": [
       "pentacle",

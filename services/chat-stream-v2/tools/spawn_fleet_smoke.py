@@ -47,7 +47,6 @@ from tools.live_window import (  # noqa: E402
 )
 
 
-EXCLUDED_HOSTS = frozenset({"bart", "daffodil"})
 PROVIDERS = ("claude", "codex")
 PROMPT_MODES = ("prompted", "promptless")
 ASSISTANT_KINDS = frozenset({"ASSIST", "ASSIST_TEXT"})
@@ -75,7 +74,13 @@ def smoke_plan() -> dict[str, object]:
         raise FileNotFoundError(f"machine file does not exist: {path}")
     path = path.resolve()
     configured = tuple(machine.name for machine in load_machines({"PENTACLE_MACHINES_FILE": str(path)}))
-    available = tuple(host for host in configured if host not in EXCLUDED_HOSTS)
+    raw_exclusions = os.environ.get("PENTACLE_SMOKE_EXCLUDED_HOSTS", "").strip()
+    excluded = tuple(host.strip() for host in raw_exclusions.split(",")) if raw_exclusions else ()
+    if any(not host for host in excluded) or len(excluded) != len(set(excluded)):
+        raise ValueError("PENTACLE_SMOKE_EXCLUDED_HOSTS must name unique configured hosts")
+    if set(excluded) - set(configured):
+        raise ValueError("PENTACLE_SMOKE_EXCLUDED_HOSTS names unknown hosts")
+    available = tuple(host for host in configured if host not in excluded)
     if not available:
         raise ValueError("machine file contains no smoke execution hosts")
     override = os.environ.get("PENTACLE_SMOKE_HOSTS")
@@ -91,8 +96,9 @@ def smoke_plan() -> dict[str, object]:
     return {
         "source": str(path),
         "hosts": hosts,
-        "excluded_present": tuple(sorted(EXCLUDED_HOSTS.intersection(configured))),
-        "excluded_absent": tuple(sorted(EXCLUDED_HOSTS.difference(configured))),
+        "excluded_present": tuple(sorted(excluded)),
+        "excluded_absent": (),
+        "exclusion_source": "PENTACLE_SMOKE_EXCLUDED_HOSTS" if excluded else "none",
         "cells": tuple((host, provider, mode) for host in hosts
                        for provider in PROVIDERS for mode in PROMPT_MODES),
     }

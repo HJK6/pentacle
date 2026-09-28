@@ -61,8 +61,8 @@ function cookieFrom(setCookie) {
 }
 
 test('--token-path (daemon credential) and --token-file (web login) are distinct flags', () => {
-  const a = parseArgs(['--profile', 'x', '--token-path', '/home/u/.config/pentacle-stream/token', '--token-file', '/tmp/web.token']);
-  assert.equal(a.tokenPath, '/home/u/.config/pentacle-stream/token', 'the daemon credential path is captured');
+  const a = parseArgs(['--profile', 'x', '--token-path', '/home/example/.config/pentacle-stream/token', '--token-file', '/tmp/web.token']);
+  assert.equal(a.tokenPath, '/home/example/.config/pentacle-stream/token', 'the daemon credential path is captured');
   assert.equal(a.tokenFile, '/tmp/web.token', 'the web login token file is separate');
   assert.equal(parseArgs([]).tokenPath, null, 'no daemon credential path by default');
 });

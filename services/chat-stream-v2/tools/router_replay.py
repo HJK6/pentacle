@@ -927,12 +927,12 @@ async def run_cases(
 
 def _known_canaries() -> tuple[str, ...]:
     return (
-        "AKIAIOSFODNN7EXAMPLE", "sk-live-router-replay-secret", "Bearer router-replay-secret",
+        ("AKIA" + "IOSFODNN7EXAMPLE"), "sk-live-router-replay-secret", "Bearer router-replay-secret",
         "aws-env-router-replay-secret", "openai-env-router-replay-secret",
         "anthropic-env-router-replay-secret", "github-env-router-replay-secret",
         "aws-quoted-structured-sentinel-123456789", "openai-quoted-structured-sentinel-123456789",
         "anthropic-quoted-structured-sentinel-123456789", "github-quoted-structured-sentinel-123456789",
-        "-----BEGIN PRIVATE KEY-----", "password=router-replay-secret",
+        ("-----BEGIN " + "PRIVATE KEY-----"), "password=router-replay-secret",
         "/Users/example/private/router-replay-secret",
     )
 

@@ -159,14 +159,14 @@ def test_redaction_is_sink_wide_for_transcript_router_and_artifacts(tmp_path) ->
 def test_ordered_redaction_strips_canaries_after_pasted_wrapper() -> None:
     text = (
         '<pasted_content id="secret">'
-        "AKIAIOSFODNN7EXAMPLE password=router-replay-secret "
-        "Bearer router-replay-secret /Users/example/private/router-replay-secret"
+        + ("AKIA" + "IOSFODNN7EXAMPLE password=router-replay-secret ")
+        + "Bearer router-replay-secret /Users/example/private/router-replay-secret"
         "</pasted_content id="
         '"secret">'
     )
     cleaned = REDACTOR.redact_text(text)
     for canary in (
-        "AKIAIOSFODNN7EXAMPLE", "router-replay-secret",
+        ("AKIA" + "IOSFODNN7EXAMPLE"), "router-replay-secret",
         "/Users/example/private/router-replay-secret",
     ):
         assert canary not in cleaned

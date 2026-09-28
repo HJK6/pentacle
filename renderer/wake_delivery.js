@@ -105,7 +105,7 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
       : status.capture_origin === 'local_action' ? 'Recording local action — say over.'
         : status.capture_origin === 'wake' ? 'Recording for Bart — say over to send.'
         : status.wake.pending_count ? 'Wake message pending.' : status.local_actions?.enabled
-          ? (status.local_actions.wake_policy === 'separate' ? 'Hey Bart for chat; Hey Amaterasu for actions. Say over to finish.' : 'Hey Bart for chat or local actions. Say over to finish.')
+          ? (status.local_actions.wake_policy === 'separate' ? 'Hey Bart for chat; Hey Pentacle for actions. Say over to finish.' : 'Hey Bart for chat or local actions. Say over to finish.')
           : 'Say “Hey Bart” to speak; “over” to send.');
   }
   async function tick(status) {

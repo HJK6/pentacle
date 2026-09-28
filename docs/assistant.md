@@ -8,6 +8,97 @@ Set `PENTACLE_ASSISTANT_ROLE=assistant` in the daemon's private environment to p
 
 Clients pin an exact role match ahead of the normal attention order while retaining its attention indicators. They hide existing delete and rename controls and refuse local deletion and rename attempts. The mobile assistant row does not respond to sideways swipe gestures. Other sessions retain their existing behavior. A mismatched or disabled client may still show a delete action; the enabled daemon remains authoritative and returns `close_protected`. That error is terminal and must not enter a retry loop.
 
+## Bootstrap your own assistant
+
+Run this from a public checkout with its Python dependencies and candidate `agent-orch` installed, tmux and a working provider CLI. The provider account must already be logged in and support your explicit model/effort; check the installed `agent-orch models` catalog as well as your account. The assistant's name (for example Nova), physical host label (`local` here), provider/model and protected task role (`assistant`) are distinct. Keep instructions, process memory, credentials, config and stores outside the checkout. [Agent setup](../AGENT_SETUP.md) covers ordinary installation; this wrapper adds the named protected backend and exact composite configuration.
+
+1. Prepare a private working directory and a compact instructions file. The example paths below are operator-chosen variables, not host defaults. Do not overwrite existing files. Include references to your private `soul.md`, process `MEMORY.md`, active work and commitments; the soul owns local paths/capabilities, while memory owns facts/preferences/decisions. Copy [the process kit](../process/README.md) separately when desired, and configure the daemon's `PENTACLE_MEMORY_ROOT` and CLI's `AGENT_ORCH_MEMORY_REPO` to that copy. Role discovery uses `agents/assistant_baseline.md` in the CLI memory root when you author one privately; the bootstrap passes the explicit instructions file to initial spawn without modifying it.
+
+```sh
+PRIVATE_WORKSPACE="$HOME/pentacle-private/assistant"
+PRIVATE_STATE="$HOME/pentacle-private/state"
+INSTRUCTIONS_FILE="$HOME/pentacle-private/instructions.md"
+OPERATOR_CREDENTIAL="$HOME/pentacle-private/operator.token"
+mkdir -p "$PRIVATE_WORKSPACE" "$PRIVATE_STATE"
+chmod 700 "$PRIVATE_WORKSPACE" "$PRIVATE_STATE"
+# Create your instructions privately, then set these two roots if using the kit:
+# export PENTACLE_MEMORY_ROOT="/absolute/path/to/private-process"
+# export AGENT_ORCH_MEMORY_REPO="$PENTACLE_MEMORY_ROOT"
+```
+
+2. Issue a `pentacle` operator credential using the daemon owner's registry. This registry must be the same one read by the daemon (the default registry is home-local). The command prints secret material, so redirect it into a private file and extract only `code`; never paste/log its output. Run once for a fresh credential destination, preserving any existing enrollment. Use [operator authentication](REMOTE_AUTH.md) for rotation and mobile enrollment.
+
+```sh
+umask 077
+test ! -e "$OPERATOR_CREDENTIAL" && test ! -L "$OPERATOR_CREDENTIAL" || exit 1
+python3 services/chat-stream-v2/tools/operator_auth_cli.py issue \
+  --client-kind pentacle --label 'Own assistant Web' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])' \
+  > "$OPERATOR_CREDENTIAL"
+chmod 600 "$OPERATOR_CREDENTIAL"
+```
+
+3. Start one owner-controlled daemon with role protection on and composite off. Use the correct provider executable, transcript root and private machines file from [orchestration setup](agent_orchestration_setup.md). Keep the machines-file host name equal to `--local-host`; `local` is only a synthetic single-host label. Record the PID, start/stop command and all store/registry paths. A foreground terminal is sufficient; no service installation is needed. This initial phase must not point at a production or existing assistant installation.
+
+```sh
+export PENTACLE_ASSISTANT_ROLE=assistant
+export PENTACLE_ASSISTANT_COMPOSITE_ENABLED=0
+# Leave PENTACLE_ASSISTANT_REBIND_AUTHORIZED_SPEC_IDS unset (default []).
+python3 services/chat-stream-v2/main.py \
+  --host 127.0.0.1 --port 7791 --local-host local \
+  --db "$PRIVATE_STATE/sessions.db" \
+  --notifications-db "$PRIVATE_STATE/notifications.db" \
+  --assets-db "$PRIVATE_STATE/assets.db" --blob-root "$PRIVATE_STATE/blobs" \
+  --spawn-cwd "$PRIVATE_WORKSPACE"
+```
+
+4. In another shell, invoke the actual [bootstrap tool](../tools/bootstrap_assistant.py). All authority-bearing inputs are explicit; it never selects an inherited endpoint or invents an operator CLI flag. It uses the daemon's operator nonce challenge/proof, requests a top-level protected role, and inspects the ready backend's actual stream, generation and effective tuple. It refuses existing outputs/bindings rather than replace an installation. `--dry-run` validates inputs and prints a plan with no network, spawn or file mutation; remove that flag to provision. The tool preserves the instructions and writes `assistant.env`, `assistant-config.json`, `assistant-receipt.json`, `assistant-client.cjs` and a durable `assistant-bootstrap-intent.json` with mode 0600. The intent records the exact request/backend before spawn so an ambiguous failure cannot create a second owner. Partial failure is an inspect/recover action, not permission to blindly spawn again.
+
+```sh
+python3 tools/bootstrap_assistant.py \
+  --url ws://127.0.0.1:7791 --credential-file "$OPERATOR_CREDENTIAL" \
+  --physical-host local --name Nova --provider codex \
+  --model gpt-6-sol --effort medium \
+  --private-workspace "$PRIVATE_WORKSPACE" \
+  --instructions-file "$INSTRUCTIONS_FILE" --dry-run
+```
+
+The machine-readable receipt separates `composite_stream_id` (`local:assistant`) from the returned `backend_stream_id` (`local:assistant-backend-…`), `backend_generation`, `effective_tuple` and `bootstrap_state`. A provider-native ID is not a session generation. The display name is quoted as data; do not construct shell commands from it or use it as authorization.
+
+5. Stop only the recorded daemon PID, retaining the live backend tmux pane. Load the emitted `assistant.env` in the daemon owner's launch environment and restart the exact same daemon command with the **same stores, registry, machines file and backend**. For a managed installation, use its existing owner-authorized restart procedure and feed those variables into that service explicitly; sourcing an interactive shell does not update a service. The wrapper never restarts anything. It leaves exception recovery off; no private work-item name or title grants rebind power.
+
+```sh
+# After stopping only your recorded daemon:
+. "$PRIVATE_WORKSPACE/assistant.env"
+# Repeat the exact daemon command above with unchanged stores/registry.
+# In a separate shell, repeat the bootstrap invocation above using
+# --readback in place of --dry-run. It is read-only and checks exact binding,
+# backend readiness and configured composite title against the receipt.
+```
+
+Readback must show `activation: restart_binding_verified`, the exact returned stream/generation, binding `source` (`env` initially) and `revision` (0 initially). A stale pair fails closed; do not invent a new generation or edit SQLite. The immutable startup setting `PENTACLE_ASSISTANT_REBIND_AUTHORIZED_SPEC_IDS` is a JSON array, default `[]`; malformed values fail startup. An explicit opt-in requires a matching qualified spec with verified grant provenance on a live visible parentless seat. Naming a title/role/spec without that grant gives no privilege. The happy-path recipe leaves this setting unset.
+
+6. Build/serve Pentacle Web using the generated `assistant-client.cjs` as the private config (`PENTACLE_CONFIG` or `--profile`), following [the web host guide](../server/README.md). It carries the same physical host, credential-file path, `features.assistantRole: assistant`, mic off and experimental Chat on so the composite can be selected. Select Nova's `local:assistant` row, send one typed input and see the correlated provider answer in the browser. Queue persistence or `submission_confirmed=false` alone is not a reply. Retain the input/dispatch IDs, backend generation, canonical publication receipt/event and actual effective tuple privately. Have the backend follow the daemon-authored `assistant publish` contract exactly, preserving answer text and IDs on retry.
+
+For Web/mobile away from the daemon machine, loopback is not reachable. Use the physical host's permitted VPN/LAN address in the client endpoint and the documented authenticated listener/access setup; a phone's `localhost` is the phone. The generated client URL is the bootstrap URL; change your private client endpoint deliberately for remote access. Mobile needs its own enrolled credential and matching `assistantRole`, following [mobile setup](https://github.com/HJK6/pentacle-mobile/blob/main/AGENT_SETUP.md). Composite custom title comes from the daemon; no legacy assistant alias or client rebuild is needed to choose the typed name. Provider login, supported account tuple, physical phone/signing and microphone provisioning remain separate installation prerequisites.
+
+The microphone source is available at [mic-server](../mic-server/README.md), but capture and `features.mic` stay off by default. The listener currently uses a fixed built-in assistant wake; changing the typed display name does not change it. Custom natural wake and mobile legacy alias migration are deferred. Do not enable voice merely to validate typed bootstrap.
+
+## Binding readback and recovery
+
+From the current backend's actual issued seat-token environment, `agent-orch assistant binding` reads the effective `stream_id`, `generation`, `source` and `revision`. The owner may hot-rebind with the supported candidate CLI:
+
+```sh
+agent-orch assistant rebind --target "$SUCCESSOR_STREAM" \
+  --generation "$SUCCESSOR_GENERATION" --expected-revision "$BINDING_REVISION" \
+  --request-id "$STABLE_REQUEST_ID"
+agent-orch assistant binding
+```
+
+Only a current binding owner, an authenticated handoff successor, or the narrowly configured exception can mutate it. Revision CAS, exact live generation/tuple and replay fences remain authoritative. `--clear` removes the durable override only when the startup env binding is still usable; it is not a way to repair a stale env pair. Use owner-authorized `agent-orch spawn --handoff` for continuation and inspect its returned successor/retirement evidence, then read back binding. A dead/stale owner requires the existing authenticated operator recovery/handoff journey; do not run the fresh bootstrap again over retained outputs. Inspect request receipts before retries, and keep automatic recovery off.
+
+For reproducible installation evidence, run [the portable first-turn gate](developer_onboarding.md#7-run-validation). It exercises the actual bootstrap, daemon, tmux, native-format counterpart's own candidate publish CLI and real browser, including duplicate publish, stale-generation refusal and restart readback. It does not establish paid-provider login, mobile hardware, microphone or private runtime activation.
+
 ## Activation and context
 
 Use the existing authenticated operator or trusted service spawn interface to create a top-level session on the daemon host with the configured role, chosen provider/model/effort, and private initial instructions. An ordinary agent token cannot grant or remove the protected role. Operator/service role changes use the existing role-set interface. The role does not confer general orchestration authority.

@@ -2116,7 +2116,7 @@ function canonicalChatSessionStateForNameHost(sessionName, hostId) {
   });
   if (strict) return strict;
   // A composite assistant is advertised under its own stream host (for
-  // example bart:assistant) while the desktop sidebar assigns its pane to the
+  // example local:assistant) while the desktop sidebar assigns its pane to the
   // local machine. Resolve only an unambiguous composite by stable daemon
   // metadata; a normal session with the same display name is never eligible.
   const composites = sessions.filter((session) => isCompositeAssistant(session)
@@ -2137,8 +2137,7 @@ function syncSlotAssistantIcon(slot) {
   if (!header) return;
   const session = state.slots[slot];
   const protectedAssistant = session && (session.assistantDirect || isCompositeSlot(slot)
-    || isProtectedAssistantNameHost(session.name, session.hostId)
-    || slotCopyIdStreamId(slot) === 'bart:assistant');
+    || isProtectedAssistantNameHost(session.name, session.hostId));
   if (!protectedAssistant) {
     header.querySelector('.cell-assistant-icon')?.remove();
     return;
@@ -3192,7 +3191,7 @@ function slotCopyIdStreamId(slot) {
   if (!s) return '';
   if (isCompositeAssistant(s)) {
     // The canonical assistant's pane is local, but its daemon-owned stream is
-    // bart:assistant. Resolve it from the current daemon row and fail closed
+    // local:assistant. Resolve it from the current daemon row and fail closed
     // if that row has disappeared; the local pane name is not a chat id.
     const canonical = canonicalChatSessionStateForNameHost(s.name, s.hostId);
     return isCompositeAssistant(canonical) ? sessionSummaryStreamId(canonical) : '';
@@ -3443,7 +3442,7 @@ function renderSlotChat(slot) {
   const renderedTranscript = (detail && window.PentacleChatView
     ? window.PentacleChatView.renderTranscriptTimelineHtml(detail, chrome, {
       showTurnDuration,
-      allowReplies: streamId !== 'bart:assistant' && (isCompositeSlot(slot) || !!session.assistantDirect),
+      allowReplies: !isCompositeSlot(slot) && !!session.assistantDirect,
       resolvedQuestions: resolvedQuestionsForStream(streamId),
     })
     : '') || '';
@@ -5401,7 +5400,7 @@ window.cc.onReconnect?.(() => {
     window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...(snapshot || {}) });
     restoreSlotsAfterReconnect();
   }).catch(() => { /* the next reconnect retries the re-sync */ });
-  // A Thoth web update restarts the host, so every open window reconnects; use
+  // A web update restarts the host, so every open window reconnects; use
   // that edge to check whether the served build now differs from ours.
   checkForWebUpdate();
 });

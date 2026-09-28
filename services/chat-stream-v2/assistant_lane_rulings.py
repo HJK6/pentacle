@@ -1,4 +1,4 @@
-"""Durable, request-scoped final rulings for Bart-owned lanes.
+"""Durable, request-scoped final rulings for assistant-owned lanes.
 
 The host admission freeze is deliberately independent of this state machine.
 An approved intent still passes through the ordinary spawn/close path.
@@ -509,7 +509,7 @@ class AssistantLaneRulings:
             fields["acceptance"] = _acceptance_brief(intent)
         if intent.get("initial_prompt"):
             fields["brief_excerpt"] = str(intent["initial_prompt"])[:1600]
-        body = "[Bart lane ruling request]\n" + _canonical({
+        body = "[Assistant lane ruling request]\n" + _canonical({
             "ruling_request_id": rid, "action": request["action"],
             "target": request["target_stream_id"], "brief": fields,
             "deadline": request["deadline"], "intent_digest": request["intent_digest"],
@@ -595,7 +595,7 @@ class AssistantLaneRulings:
             recipient_stream_id=request["requester_stream_id"],
             tell_id="assistant-lane-ruling-result:" + rid,
             source_stream_id=request["authority_stream_id"],
-            body="[Bart lane ruling] " + _canonical({
+            body="[Assistant lane ruling] " + _canonical({
                 "ruling_request_id": rid, "action": request["action"],
                 "target": request["target_stream_id"], "ruling": request["ruling"],
                 "state": request["state"], "reason": request["reason"],

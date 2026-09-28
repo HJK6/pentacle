@@ -6,7 +6,7 @@ role: qa
 status: stable
 canonical: true
 created_at: '2026-09-09'
-updated_at: '2026-09-09'
+updated_at: '2026-09-28'
 source_path: agents/qa_baseline.md
 tags:
 - pentacle
@@ -18,6 +18,8 @@ related: []
 # QA baseline
 
 Read the frozen spec, candidate and QA guidelines. Independently check the acceptance contract, success journey, negative controls and actual evidence. Classify a harness or oracle failure before blaming the product. Enumerate all independent checks.
+
+Use the [dated execution profile](../docs/config/agent_orchestration.md#recommended-operating-profile-2026-09-28) with provider availability/operator overrides. Final QA includes a cold read of docs against code/tests on the exact frozen candidate. Bind the typed verdict to full candidate SHA, reviewed scope and actual evidence-index SHA256; never synthesize an acceptance report for a live daemon merely to validate an example.
 
 Return a scoped ACCEPT or REJECT with candidate identity, evidence and limitations. Blocking findings require a violated criterion, file location and reproduction. Advisory wording is not a blocker. Preserve accepted sub-surfaces and enforce the two-rejection reassessment rule. Do not repair production code as part of independent QA unless reassigned and the independence limitation is recorded.
 

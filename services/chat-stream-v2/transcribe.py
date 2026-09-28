@@ -6,7 +6,7 @@ configured loopback `POST /transcribe` route, always with
 `prompt_profile=fleet` so the fleet vocabulary is applied. The daemon never
 loads a model itself; it is a thin, authenticated, idempotent proxy.
 
-Contract (spec_pentacle_mobile__voice_input_thoth_transcription_2026_09
+Contract (public voice transcription
 § Shared contract item 2):
 
 - Reply `transcribe_blob.ok {text, duration_s, model, vocabulary_version}`.

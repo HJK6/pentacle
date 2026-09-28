@@ -29,7 +29,7 @@ const REQUEST_ID = 'send-req-1';
 const CREATED_AT = Date.parse('2026-09-11T12:00:00.000Z');
 const CAPTION = 'Fix Cedar Splunk Polling';
 const SHA = 'a3f5c9d2e1b4a6f7c8d9e0a1b2c3d4e5f60718293a4b5c6d7e8f9012345678ab';
-const ATTACHMENT_PATH = `/home/agent/.cache/pentacle-stream/attachments/${SHA}.jpg`;
+const ATTACHMENT_PATH = `/home/example/.cache/pentacle-stream/attachments/${SHA}.jpg`;
 
 function session(overrides: Partial<PentacleSessionSummary> = {}): PentacleSessionSummary {
   return {

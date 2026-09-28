@@ -1793,7 +1793,7 @@ class Comms:
                     if current.get("status") != "open" or current.get("session_generation") != assistant_generation:
                         raise VerbError(
                             "assistant_direct_generation_conflict",
-                            "Direct Bart target generation changed before delivery",
+                            "Direct assistant target generation changed before delivery",
                             phase="not_started",
                         )
                 await self._assert_claude_send_ready(plan.route)

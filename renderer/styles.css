@@ -115,7 +115,7 @@ body {
 
 /* Update-available refresh icon beside Settings
    (spec_pentacle__web_update_available_refresh_icon_2026_09). Hidden unless the
-   window's build differs from what Thoth now serves. */
+   window's build differs from what the host now serves. */
 .web-refresh-btn {
   -webkit-app-region: no-drag;
   background: none;

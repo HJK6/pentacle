@@ -219,7 +219,7 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     return _result(tier, code=code, passed=passed, reason=reason, command=command, timed_out=timed_out, preflight=preflight if tier in {"smoke", "soak"} else None, junit=junit, log=log, counts=counts, soak=soak)
 
 
-def _run_usage_manifest(manifest: Path, evidence: Path) -> dict[str, Any]:
+def _run_usage_manifest(manifest: Path, evidence: Path, deployment_contract: Path) -> dict[str, Any]:
     """Validate the candidate-bound usage receipt as part of a merge gate."""
     command = [
         sys.executable,
@@ -227,6 +227,8 @@ def _run_usage_manifest(manifest: Path, evidence: Path) -> dict[str, Any]:
         "validate",
         "--manifest",
         str(manifest.resolve()),
+        "--deployment-contract",
+        str(deployment_contract.resolve()),
     ]
     log = evidence / "usage-manifest.log"
     try:
@@ -281,7 +283,13 @@ def main() -> int:
         type=Path,
         help="candidate-bound usage manifest to validate as part of a merge gate",
     )
+    parser.add_argument("--usage-deployment-contract", type=Path,
+                        help="external expected owner and host inventory for the usage manifest")
     args = parser.parse_args()
+    if bool(args.usage_manifest) != bool(args.usage_deployment_contract):
+        parser.error("--usage-manifest and --usage-deployment-contract must be supplied together")
+    if args.usage_manifest and args.gate != "merge":
+        parser.error("usage manifest validation requires the merge gate")
     evidence = args.evidence_dir or Path(os.environ.get("V2_GATE_EVIDENCE_DIR") or tempfile.mkdtemp(prefix="pentacle-v2-gate-"))
     evidence.mkdir(parents=True, exist_ok=True)
     basetemp = args.basetemp or evidence / f"pytest-{args.gate}-{os.getpid()}-{uuid.uuid4().hex[:10]}"
@@ -303,7 +311,7 @@ def main() -> int:
             results.append(_result("source_integrity", code=125, passed=False, reason="dirty_worktree", command=["git", "status", "--porcelain", "--untracked-files=all"]))
         else:
             if args.gate == "merge" and args.usage_manifest is not None:
-                results.append(_run_usage_manifest(args.usage_manifest, evidence))
+                results.append(_run_usage_manifest(args.usage_manifest, evidence, args.usage_deployment_contract))
             for tier in tiers:
                 if _TERMINATION_REQUESTED:
                     break

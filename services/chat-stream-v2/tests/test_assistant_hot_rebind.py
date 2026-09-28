@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -13,7 +14,7 @@ CHAT = "fixture-chat:assistant"
 A = "fixture-a:visible"
 B = "fixture-b:visible"
 C = "fixture-c:visible"
-PORTFOLIO_SPEC = "spec_pentacle__bart_portfolio_coordination_2026_09"
+RECOVERY_SPEC = "spec_example__assistant_recovery"
 
 
 async def _seat(store, stream_id, **extra):
@@ -25,12 +26,13 @@ async def _seat(store, stream_id, **extra):
     )
 
 
-def _config(generation):
+def _config(generation, *, recovery=False):
     return AssistantCompositeConfig.from_env({
         "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
         "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": CHAT,
         "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": A,
         "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": generation,
+        "PENTACLE_ASSISTANT_REBIND_AUTHORIZED_SPEC_IDS": json.dumps([RECOVERY_SPEC] if recovery else []),
     })
 
 
@@ -188,7 +190,7 @@ def test_closed_predecessor_cannot_authorize_late_linked_successor(tmp_path):
         store.start()
         try:
             a = await _seat(store, A)
-            composite = AssistantComposite(store, config=_config(a["session_generation"]))
+            composite = AssistantComposite(store, config=_config(a["session_generation"], recovery=True))
             await composite.load_binding()
             await store.update_session("fixture-a", "visible", status="closed",
                                        closed_at="2026-09-27T00:00:00Z", pane_status="pane_dead")
@@ -199,12 +201,12 @@ def test_closed_predecessor_cannot_authorize_late_linked_successor(tmp_path):
             await store.open_session("fixture-c", "visible", provider="codex", role="assistant",
                                      visibility="default", pane_status="pane_alive",
                                      effective_model="gpt-6-sol", effective_effort="high",
-                                     spec_id=PORTFOLIO_SPEC,
-                                     qualified_spec_ids=[PORTFOLIO_SPEC],
-                                     spec_binding_provenance=[{"spec_id": PORTFOLIO_SPEC,
+                                     spec_id=RECOVERY_SPEC,
+                                     qualified_spec_ids=[RECOVERY_SPEC],
+                                     spec_binding_provenance=[{"spec_id": RECOVERY_SPEC,
                                          "provenance": "spawn_explicit", "granting_principal": "operator",
                                          "granted_at": "2026-09-27T00:00:00Z"}])
-            receipt = await composite.rebind(_request("portfolio-after-close", 0, B), actor_stream_id=C)
+            receipt = await composite.rebind(_request("configured_recovery-after-close", 0, B), actor_stream_id=C)
             assert receipt["new_binding"]["stream_id"] == B
         finally:
             store.stop()
@@ -356,42 +358,42 @@ def test_rebind_waits_for_in_progress_input_admission():
     asyncio.run(run())
 
 
-def test_portfolio_actor_recovers_closed_pin_only_with_verified_tag_and_healthy_target():
+def test_configured_recovery_actor_recovers_closed_pin_only_with_verified_tag_and_healthy_target():
     async def run():
         store = Store(":memory:")
         store.start()
         try:
             a, _b = await _seat(store, A), await _seat(store, B)
-            provenance = [{"spec_id": PORTFOLIO_SPEC, "provenance": "spawn_explicit",
+            provenance = [{"spec_id": RECOVERY_SPEC, "provenance": "spawn_explicit",
                            "granting_principal": "operator", "granted_at": "2026-09-27T00:00:00Z"}]
             await store.open_session("fixture-c", "visible", provider="codex", role="assistant",
                                      visibility="default", pane_status="pane_alive",
                                      effective_model="gpt-6-sol", effective_effort="high",
-                                     spec_id=PORTFOLIO_SPEC,
-                                     qualified_spec_ids=[PORTFOLIO_SPEC],
+                                     spec_id=RECOVERY_SPEC,
+                                     qualified_spec_ids=[RECOVERY_SPEC],
                                      spec_binding_provenance=provenance)
             await store.open_session("fixture-d", "hidden", provider="codex", role="assistant",
                                      visibility="hidden", pane_status="pane_alive",
                                      effective_model="gpt-6-sol", effective_effort="high",
-                                     spec_id=PORTFOLIO_SPEC,
-                                     qualified_spec_ids=[PORTFOLIO_SPEC],
+                                     spec_id=RECOVERY_SPEC,
+                                     qualified_spec_ids=[RECOVERY_SPEC],
                                      spec_binding_provenance=provenance)
             await store.open_session("fixture-e", "subagent", provider="codex", role="assistant",
                                      visibility="subagent", pane_status="pane_alive",
                                      effective_model="gpt-6-sol", effective_effort="high",
-                                     qualified_spec_ids=[PORTFOLIO_SPEC],
+                                     qualified_spec_ids=[RECOVERY_SPEC],
                                      spec_binding_provenance=provenance)
-            composite = AssistantComposite(store, config=_config(a["session_generation"]))
+            composite = AssistantComposite(store, config=_config(a["session_generation"], recovery=True))
             await composite.load_binding()
             await store.update_session("fixture-a", "visible", status="closed",
                                        closed_at="2026-09-27T00:00:00Z", pane_status="pane_dead")
             with pytest.raises(ValueError, match="assistant_rebind_unauthorized"):
                 await composite.rebind(_request("wrong-actor", 0, B), actor_stream_id=B)
             with pytest.raises(ValueError, match="assistant_rebind_unauthorized"):
-                await composite.rebind(_request("hidden-portfolio", 0, B),
+                await composite.rebind(_request("hidden-configured_recovery", 0, B),
                                        actor_stream_id="fixture-d:hidden")
             with pytest.raises(ValueError, match="assistant_rebind_unauthorized"):
-                await composite.rebind(_request("subagent-portfolio", 0, B),
+                await composite.rebind(_request("subagent-configured_recovery", 0, B),
                                        actor_stream_id="fixture-e:subagent")
             await store.update_session("fixture-b", "visible", routing_integrity="mismatch")
             with pytest.raises(ValueError, match="assistant_rebind_target_integrity_mismatch"):
@@ -405,7 +407,7 @@ def test_portfolio_actor_recovers_closed_pin_only_with_verified_tag_and_healthy_
             with pytest.raises(ValueError, match="assistant_rebind_target_tuple_unknown"):
                 await composite.rebind(_request("unknown-provider", 0, B), actor_stream_id=C)
             await store.update_session("fixture-b", "visible", provider="codex")
-            receipt = await composite.rebind(_request("portfolio-recovery", 0, B), actor_stream_id=C)
+            receipt = await composite.rebind(_request("configured_recovery-recovery", 0, B), actor_stream_id=C)
             assert receipt["new_binding"]["stream_id"] == B
             assert receipt["new_binding"]["effective_model"] == "gpt-6-sol"
             audits = await store.submit(lambda conn: [row[0] for row in conn.execute(

@@ -31,6 +31,10 @@ Drafted {{date}}. Scope: <single-user | multi-user>, <big-bang | phased>.
 
 - Lookup title: {{title}}
 - Status: {{status}} (frontmatter `status:` must always equal the parent folder name)
+- Development checkout/toplevel: <absolute private checkout path; read back with `git rev-parse --show-toplevel`>
+- Authoritative origin: <full remote URL; read back with `git remote get-url origin`>
+- Branch and base: <branch, base ref and full SHA; read back with `git branch --show-current` and `git merge-base HEAD <base-ref>`>
+- Review candidate: <full 40-hex SHA/content identity and gate evidence SHA256; freeze before final QA>
 - Completion rule: every Acceptance Criteria box checked or annotated `(waived: <reason>)`, then Closure per `docs/config/development_process.md`.
 
 ## Goal
@@ -70,10 +74,9 @@ Drafted {{date}}. Scope: <single-user | multi-user>, <big-bang | phased>.
 #### In Progress
 - [ ] **Development** — implementation matches the spec; scope changes are spec edits, not silent drift.
 - [ ] **Unit tests** — each custom criterion has at least one test asserting observable behavior.
-- [ ] **Code QA** — an independent QA agent reviewed implementation and tests.
+- [ ] **Final QA** — one fresh independent reviewer checked implementation, tests and docs against the frozen candidate and evidence.
 - [ ] **Testing passed** — tests ran on real inputs; output captured.
 - [ ] **Documentation written** — durable design info absorbed into the target repo's `docs/` against the as-shipped diff.
-- [ ] **Doc QA** — a fresh doc QA agent cold-read the docs against the as-shipped diff.
 
 #### Needs QA (only if the validation plan flagged manual QA)
 - [ ] **Manual QA passed** — every checklist item complete or annotated `(waived: <reason>)`.

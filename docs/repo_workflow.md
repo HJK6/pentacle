@@ -54,10 +54,13 @@ Before every public push, run `python3 scripts/check_public_residue.py`, review
 the exact candidate diff for private data, endpoints, local paths and credentials,
 and compare fleet-name hits with public `main` using the existing no-new-hit
 policy. A new hit requires sanitization or a scoped coordinator ruling. The
-residue checker detects anonymizer residue and CGNAT addresses; it does not
-replace private-content review. Its optional fixed mobile synthetic profile
-supports that client's existing symbolic identifiers; default web checks remain
-unchanged. Mobile vendors this reviewed checker with a source hash receipt.
+residue checker detects portable privacy rules and fixed deployment contracts;
+also supply an external private dictionary to check actual private names. Its
+digest/count receipt distinguishes a completed private check from `not_run`.
+See [privacy rules and frozen fixture exceptions](public_release.md#public-identity-and-fixture-policy).
+The guard does not replace private-content review. Its optional fixed mobile
+synthetic profile supports that client's existing symbolic identifiers. Mobile
+vendors its reviewed checker with a source hash receipt.
 
 
 Install the pre-push guard once per clone with an absolute `core.hooksPath`

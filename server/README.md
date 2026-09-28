@@ -77,10 +77,10 @@ tailnet daemon:
 ```bash
 # --token-path is the daemon credential; --token-file is the web login (the
 # routable --bind requires it). Both stay server-side.
-node server --profile daffodil \
+node server --profile workstation \
   --token-path ~/.config/pentacle-stream/token \
   --bind <tailnet-ip> --port 7796 \
-  --token-file ~/.config/pentacle-web/daffodil.token
+  --token-file ~/.config/pentacle-web/workstation.token
 ```
 
 ## HTTP
@@ -213,7 +213,7 @@ refused; re-creating an already-owned slot is a replacement, not a new one.
 Host resolution covers `local`, `remote` (`config.remote`), an explicit
 `config.hosts` map, **and `config.peers`** — each peer becomes an SSH target
 keyed by its id (mirroring the Electron host registry in `hosts.js`), so a
-`peers` profile (e.g. daffodil) is attachable in web mode at parity with the
+`peers` profile (e.g. workstation) is attachable in web mode at parity with the
 desktop. (Live attach to a *production* peer session is out of scope here — the
 smoke rule keeps shared daemons read-only.)
 

@@ -5,7 +5,7 @@ type: config
 status: stable
 canonical: true
 created_at: '2026-09-09'
-updated_at: '2026-09-09'
+updated_at: '2026-09-28'
 source_path: docs/config/development_process.md
 tags:
 - pentacle
@@ -22,9 +22,13 @@ A lead owns a spec from requirements through closure and implements it directly.
 
 For a tiny reversible change, compress the paperwork and review round trips to fit the risk. For meaningful code, build, deployment or workflow changes, record the goal, current behavior, desired behavior, non-goals, constraints, owner, acceptance criteria and validation plan before editing. Choose automated checks by default. Reserve a manual gate for behavior that needs an actual human or external event.
 
+New planned development starts with a planner, independent spec QA, then an execution lead consuming the accepted spec packet and establishing standing authority. A single lead is enough for one lane; an optional Nexus coordinates multiple separately owned lanes. The lead implements directly. Workers may investigate, check environments or independently review. Retain the original planner for event-driven advice on a named decision, rejection, blocker, scope change or elapsed-budget milestone, routed through the owner; do not make it a polling supervisor. Use the [dated execution profile](agent_orchestration.md#recommended-operating-profile-2026-09-28).
+
+Before editing, record and compare intended versus actual checkout toplevel, full authoritative remote URL, branch and base ref/SHA in the spec's Tracking section. Read them back with `git rev-parse --show-toplevel`, `git remote get-url origin`, `git branch --show-current` and `git merge-base HEAD <base-ref>`. Freeze the final full candidate SHA (or content identity before commit), reviewed scope and gate evidence digest for independent final QA. Local identity, runtime configuration and real receipts stay in the private workspace.
+
 ## Spec lifecycle
 
-Each item contains `spec.md` and a short `summary.md` under `work/<status>/<repo>__<topic>/`. Keep frontmatter status and source paths aligned with the directory. Store raw evidence in `_artifacts/`; keep the spec readable, with one current checkpoint rather than an append-only transcript.
+Each item contains `spec.md` and a short `summary.md` under `work/<status>/<repo>__<topic>/`. Keep frontmatter status and source paths aligned with the directory. Keep lightweight evidence pointers in `_artifacts/`, with external raw artifact location and SHA256; private raw logs/assets stay outside the public kit. Keep the spec readable, with one current checkpoint rather than an append-only transcript. [Memory authoring](../../MEMORY.md) describes facts, preferences and decisions separately from work lifecycle.
 
 | Status | Required next outcome |
 | --- | --- |
@@ -54,6 +58,8 @@ Run focused gates during repair and the final required gate on the candidate. Ru
 ## Independent QA and bounded repairs
 
 Use [QA guidelines](qa_guidelines.md) for spec, implementation and documentation review. Freeze the review scope and candidate at dispatch. One valid rejection permits a bounded repair and a review of the repaired surface plus relevant regression checks. Preserve accepted evidence for unchanged inputs. After two valid rejections of the same surface, reassess the diagnosis and record a pivot, corrected scope or different investigative approach before continuing.
+
+One fresh independent final review includes code, tests and a cold read of the as-shipped docs; do not commission a duplicate documentation review of the same candidate. [Typed reports](agent_orchestration.md#typed-completion-reports) bind QA and readiness to actual evidence. A lead's ordinary completion report is not a QA verdict.
 
 Do not make tracker wording a runtime gate or commission a full fresh review for an advisory edit. Evidence reuse requires unchanged relevant artifact, harness, interpreter/toolchain, environment/configuration and tested scope. Source/build proof alone does not prove runtime activation.
 

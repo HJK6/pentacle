@@ -57,11 +57,12 @@ Rejected usage leaves that stream pending and its offset unmoved.
 ## Candidate evidence
 
 The candidate-bound manifest is `_artifacts/usage/stage1/manifest.json` and is
-validated with:
+validated as schema version 2 with an independently supplied deployment contract:
 
 ```sh
 python3 services/chat-stream-v2/tools/usage_manifest.py validate \
-  --manifest _artifacts/usage/stage1/manifest.json
+  --manifest /private/evidence/usage/manifest.json \
+  --deployment-contract /private/config/usage-deployment.json
 ```
 
 The manifest records the candidate/base SHA, exact focused selector, overlay
@@ -69,3 +70,26 @@ digests, coordinator and satellite PID/checkout readbacks, deferred Nexus pin
 status, stream generations/source digests/replay counts, and RED/focused/JUnit
 and prechange receipt hashes. Nexus remains the only owner of the global
 `event_push.target_sha` stage, activation and rollback window.
+
+The contract has schema `pentacle.usage-deployment`, version 1, and exact
+`coordinator_host`, `satellite_hosts`, `pin_owner` and `prechange_hosts` fields.
+Copy `configs/usage_deployment.example.json` outside the source checkout and
+set them for the authorized deployment before gathering the candidate manifest.
+An empty satellite array explicitly supports a single host. The nonempty
+prechange host list names the required historical readbacks; those receipts may
+include an authority host outside the usage runtime inventory. Missing contract,
+unknown/duplicate hosts, changed owner or missing/extra runtime/prechange hosts
+fail validation. Expected identities come from this trusted input, never from
+the candidate manifest itself.
+
+Version 2 changes `runtime.satellites` to a generic host map and groups historical
+receipts under `receipts.prechange[host]`, alongside `red`, `focused` and `junit`.
+Version 1 is refused; migrate all three deployment assumptions together. Runtime
+PID/SHA, exact candidate/overlay digests, authenticated stream-host inventory,
+generation/replay and receipt-file digests remain checked. The JSON validation
+receipt binds the exact deployment-contract SHA256. `--no-file-check` reports
+`file_checks: false` and is structural evidence only.
+
+To include this validation in the daemon merge gate, supply both
+`--usage-manifest` and `--usage-deployment-contract`; neither is needed for an
+ordinary daemon merge gate. Keep real contracts, manifests and receipts private.

@@ -5083,7 +5083,7 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_rebind_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_rebind_parser.set_defaults(func=assistant_rebind)
     assistant_authority_parser = assistant_sub.add_parser(
-        "authority", help="read or hot-rebind the independent Bart lane ruling authority",
+        "authority", help="read or hot-rebind the independent assistant lane ruling authority",
     )
     authority_change = assistant_authority_parser.add_mutually_exclusive_group()
     authority_change.add_argument("--set", metavar="STREAM_ID")
@@ -5092,7 +5092,7 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_authority_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_authority_parser.set_defaults(func=assistant_authority)
     assistant_ruling_parser = assistant_sub.add_parser(
-        "ruling", help="answer one generation-bound Bart lane ruling request",
+        "ruling", help="answer one generation-bound assistant lane ruling request",
     )
     assistant_ruling_parser.add_argument("--ruling-request-id", required=True)
     assistant_ruling_parser.add_argument("--request-id", required=True)
