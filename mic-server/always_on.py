@@ -279,6 +279,9 @@ class AlwaysOnListener:
         self._stop_event = threading.Event()
         self._device_selection = None
         self._health_last_emit = 0.0
+        self._last_callback_monotonic = time.monotonic()
+        self._callback_stall_reopened = False
+        self._callback_watchdog_ready = False
         self._health_flatline_started_at = None
         self._stream_status_reopened = False
         self._flatline_restarted = False
@@ -352,6 +355,9 @@ class AlwaysOnListener:
         self.running = True
         self._stop_event = threading.Event()
         stop_event = self._stop_event
+        self._last_callback_monotonic = time.monotonic()
+        self._callback_stall_reopened = False
+        self._callback_watchdog_ready = False
         self.state = "LISTENING"
         self.captured_texts = []
         self.awake_since = 0
@@ -379,6 +385,7 @@ class AlwaysOnListener:
         self._transcribe_thread.start()
 
         self._open_stream()
+        self._callback_watchdog_ready = True
         self.voice_actions.start()
         self._log("Always-on listener started")
 
@@ -393,10 +400,11 @@ class AlwaysOnListener:
             return
         self.running = False
         self._stop_event.set()
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+        with self._reopen_lock:
+            if self._stream:
+                self._stream.stop()
+                self._stream.close()
+                self._stream = None
         if hasattr(self, '_worker') and self._worker.is_alive():
             self._worker.join(timeout=3)
         if hasattr(self, '_transcribe_thread') and self._transcribe_thread.is_alive():
@@ -411,6 +419,8 @@ class AlwaysOnListener:
     def _audio_callback(self, indata, frames, time_info, status):
         if not self.running:
             return
+        self._last_callback_monotonic = time.monotonic()
+        self._callback_stall_reopened = False
         self._emit_callback_health(indata, status)
         mono48 = indata[:, 0].astype(np.float32)
         if self.audio_buffer:
@@ -527,14 +537,26 @@ class AlwaysOnListener:
             return 0.0, 0.0
         return peak, float(np.sqrt(total / count))
 
-    def _request_reopen(self, reason):
-        threading.Thread(target=self._reopen_stream, args=(reason,), daemon=True).start()
+    def _check_callback_stall(self, stop_event):
+        # A dead callback cannot report its own failure. The existing idle loop
+        # requests one recovery per stall; any fresh frame (even silence) rearms it.
+        if (self.running and self._callback_watchdog_ready
+                and stop_event is self._stop_event and not stop_event.is_set()
+                and not self._callback_stall_reopened
+                and time.monotonic() - self._last_callback_monotonic > 3.0):
+            self._callback_stall_reopened = True
+            self._request_reopen("callbacks_stale", stop_event)
 
-    def _reopen_stream(self, reason):
+    def _request_reopen(self, reason, stop_event=None):
+        stop_event = self._stop_event if stop_event is None else stop_event
+        threading.Thread(target=self._reopen_stream, args=(reason, stop_event), daemon=True).start()
+
+    def _reopen_stream(self, reason, stop_event=None):
+        stop_event = self._stop_event if stop_event is None else stop_event
         if not self.running:
             return
         with self._reopen_lock:
-            if not self.running:
+            if not self.running or stop_event is not self._stop_event or stop_event.is_set():
                 return
             old_stream = self._stream
             self._stream = None
@@ -565,6 +587,7 @@ class AlwaysOnListener:
             try:
                 chunk = self.audio_q.get(timeout=0.5)
             except queue.Empty:
+                self._check_callback_stall(stop_event)
                 if self.state == "AWAKE" and time.time() - self.awake_since > AWAKE_TIMEOUT:
                     self._log("[awake] Timed out (silence) -- back to LISTENING")
                     self.state = "LISTENING"

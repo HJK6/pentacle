@@ -1571,7 +1571,7 @@ class Server:
         columns such as token hashes, transcript paths, or reopen bookkeeping.
         """
         fields = (
-            "stream_id", "host", "session_name", "provider", "display_name",
+            "stream_id", "host", "session_name", "provider", "display_name", "status", "closed_at",
             "last_event_at", "last_text", "last_kind", "draft", "question",
             "pending_peer_messages", "role", "role_source", "phase", "spec_id", "spec_ids",
             "qualified_spec_ids", "spec_binding_provenance", "spec_resolution",

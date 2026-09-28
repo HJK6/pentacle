@@ -199,3 +199,104 @@ def test_asr_load_preserves_model_and_qualified_cpu_thread_count(monkeypatch):
     listener=always_on.AlwaysOnListener();listener.load_models()
     assert listener.whisper_model is model
     assert calls==[(('large-v3',), {'device':'cpu','compute_type':'int8','cpu_threads':8})]
+
+
+def test_missing_callbacks_reopen_once_until_callbacks_resume(monkeypatch):
+    install_listener_import_fakes(monkeypatch)
+    module = import_fresh_module('always_on')
+    listener = module.AlwaysOnListener()
+    listener.running = True
+    listener._callback_watchdog_ready = True
+    listener._last_callback_monotonic = 100.0
+    listener._callback_stall_reopened = False
+    reopened = []
+    monkeypatch.setattr(listener, '_request_reopen', lambda reason, *events: reopened.append(reason))
+    monkeypatch.setattr(module.time, 'monotonic', lambda: 104.0)
+    listener._check_callback_stall(listener._stop_event)
+    listener._check_callback_stall(listener._stop_event)
+    assert reopened == ['callbacks_stale']
+    # Silence is still a callback; resume arms a later, separate stall episode.
+    monkeypatch.setattr(module.time, 'monotonic', lambda: 105.0)
+    listener._audio_callback(module.np.zeros((480, 1)), 480, None, None)
+    monkeypatch.setattr(module.time, 'monotonic', lambda: 109.0)
+    listener._check_callback_stall(listener._stop_event)
+    assert reopened == ['callbacks_stale', 'callbacks_stale']
+    listener._stop_event.set()
+    listener._callback_stall_reopened = False
+    listener._check_callback_stall(listener._stop_event)
+    assert len(reopened) == 2
+
+
+def test_fresh_callbacks_and_retired_capture_epoch_do_not_reopen(monkeypatch):
+    install_listener_import_fakes(monkeypatch)
+    module = import_fresh_module('always_on')
+    listener = module.AlwaysOnListener()
+    listener.running = True
+    listener._callback_watchdog_ready = True
+    listener._last_callback_monotonic = 100.0
+    listener._callback_stall_reopened = False
+    reopened = []
+    monkeypatch.setattr(listener, '_request_reopen', lambda reason, *events: reopened.append(reason))
+    monkeypatch.setattr(module.time, 'monotonic', lambda: 102.0)
+    listener._check_callback_stall(listener._stop_event)
+    assert reopened == []
+    old_event = listener._stop_event
+    listener._stop_event = module.threading.Event()
+    monkeypatch.setattr(module.time, 'monotonic', lambda: 110.0)
+    listener._check_callback_stall(old_event)
+    assert reopened == []
+
+
+def test_idle_process_loop_recovers_callback_cessation(monkeypatch):
+    install_listener_import_fakes(monkeypatch)
+    module = import_fresh_module('always_on')
+    listener = module.AlwaysOnListener()
+    listener.running = True
+    listener._callback_watchdog_ready = True
+    listener._last_callback_monotonic = 100.0
+    listener._callback_stall_reopened = False
+    monkeypatch.setattr(module.time, 'monotonic', lambda: 104.0)
+    reopened = []
+    def reopen(reason, *events):
+        reopened.append(reason)
+        listener._stop_event.set()
+    monkeypatch.setattr(listener, '_request_reopen', reopen)
+    worker = module.threading.Thread(target=listener._process_loop, args=(listener._stop_event,))
+    worker.start()
+    try:
+        worker.join(timeout=2)
+        assert reopened == ['callbacks_stale']
+    finally:
+        listener._stop_event.set()
+        worker.join(timeout=2)
+    assert not worker.is_alive()
+
+
+def test_queued_reopen_cannot_enter_a_new_capture_epoch(monkeypatch):
+    install_listener_import_fakes(monkeypatch)
+    module = import_fresh_module('always_on')
+    listener = module.AlwaysOnListener()
+    listener.running = True
+    queued = []
+    monkeypatch.setattr(module.threading, 'Thread', lambda **kw: SimpleNamespace(
+        start=lambda: queued.append(kw)))
+    listener._request_reopen('callbacks_stale')
+    assert queued[0]['args'][1] is listener._stop_event
+    listener._stop_event = module.threading.Event()
+    opened = []
+    monkeypatch.setattr(listener, '_open_stream', lambda: opened.append(True))
+    queued[0]['target'](*queued[0]['args'])
+    assert opened == []
+
+
+def test_watchdog_waits_for_initial_stream_open(monkeypatch):
+    install_listener_import_fakes(monkeypatch)
+    module = import_fresh_module('always_on')
+    listener = module.AlwaysOnListener()
+    listener.running = True
+    listener._last_callback_monotonic = 100.0
+    monkeypatch.setattr(module.time, 'monotonic', lambda: 110.0)
+    reopened = []
+    monkeypatch.setattr(listener, '_request_reopen', lambda reason, *events: reopened.append(reason))
+    listener._check_callback_stall(listener._stop_event)
+    assert reopened == []

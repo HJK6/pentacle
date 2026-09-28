@@ -230,3 +230,5 @@ proof and the Comms event-proof reader use this shared digest; a caption match
 alone cannot confirm an image prompt. Ingress discards producer-supplied digests,
 and malformed proof metadata cannot fall back to caption equality. Existing
 stream, generation, event-kind and post-watermark proof fences still apply.
+
+Summary-mode session snapshots retain lifecycle `status` and a nonempty `closed_at` alongside generation and pane liveness. Bootstrap `state` describes readiness and does not substitute for lifecycle. Consumers such as microphone wake delivery can therefore validate an exact current binding without accepting rows whose lifecycle is unknown.
