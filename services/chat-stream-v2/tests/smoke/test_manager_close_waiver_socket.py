@@ -9,6 +9,7 @@ import json
 import pytest
 import websockets
 
+from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from server import Server
 from sessions import Sessions
 from store import Store, STREAM_TOKEN_HASH_VERSION
@@ -21,7 +22,7 @@ REASON = "Retire disposable acceptance target without a terminal report"
 
 
 @asynccontextmanager
-async def daemon(tmp_path):
+async def daemon(tmp_path, *, lane_owned=False):
     store = Store(str(tmp_path / "sessions.db"))
     store.start()
     tmux = Tmux()
@@ -42,6 +43,15 @@ async def daemon(tmp_path):
         token = "fixture-manager-token"
         await store.grant_stream_token(HOST, "manager", hashlib.sha256(token.encode()).hexdigest(),
                                        STREAM_TOKEN_HASH_VERSION)
+        if lane_owned:
+            await sessions.open(HOST, "advisor", provider="codex", pane_status="pane_alive")
+            server.assistant_composite = AssistantComposite(store, config=AssistantCompositeConfig.from_env({
+                "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+                "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": HOST + ":assistant",
+                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": MANAGER,
+                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": manager["session_generation"],
+                "PENTACLE_ASSISTANT_AUTHORITY_STREAM_ID": HOST + ":advisor",
+            }))
         port = await server.bind()
         async with websockets.connect(f"ws://127.0.0.1:{port}") as socket:
             assert json.loads(await socket.recv())["type"] == "welcome"
@@ -61,6 +71,7 @@ async def daemon(tmp_path):
                         if frame.get("request_id") == request["request_id"]:
                             return frame
 
+            close.lane_rulings = server.lane_rulings
             yield store, sessions, tmux, close
     finally:
         await server.close()
@@ -91,6 +102,33 @@ def test_manager_closes_unreported_generation_with_waiver_audit(tmp_path, orphan
             assert waiver["target_generation"] == target["session_generation"]
             assert await store.find_report(HOST + ":target", statuses={"done"},
                                            session_generation=target["session_generation"]) is None
+    asyncio.run(run())
+
+
+def test_unreported_lane_close_keeps_external_ruling(tmp_path):
+    async def run():
+        async with daemon(tmp_path, lane_owned=True) as (store, sessions, tmux, close):
+            await tmux.new_session("target", COMMAND)
+            target = await sessions.open(HOST, "target", provider="codex")
+            await sessions.refresh()
+            # Ownership is fixture state; close still crosses the authenticated
+            # daemon socket and the actual external-ruling/report boundary.
+            rulings = close.lane_rulings
+            await rulings._record_ownership({
+                "requester_stream_id": MANAGER,
+                "requester_generation": (await store.fetch_session(HOST, "manager"))["session_generation"],
+                "ruling_request_id": "fixture-lane-admission",
+            }, HOST + ":target", target["session_generation"])
+            reply = await close("target")
+            await rulings.stop()
+            assert reply["type"] == "close.pending_ruling", reply
+            assert await tmux.has_session("target")
+            assert (await store.fetch_session(HOST, "target"))["status"] == "open"
+            ruling = await rulings._fetch(reply["ruling_request_id"])
+            assert ruling["state"] == "pending"
+            assert ruling["authority_stream_id"] == HOST + ":advisor"
+            assert not any(row["action"] == "manager_close" and row["result"] == "applied"
+                           for row in await store.lifecycle_authority_audit_rows(limit=20))
     asyncio.run(run())
 
 
