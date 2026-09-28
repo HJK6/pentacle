@@ -222,13 +222,17 @@ def test_old_daemon_proposal_blocks_durably_without_ask_loop(daily_retro_surface
             assert len(s.delivered) == 1 and s.delivered[0].startswith("REPORT daily-retro decision blocked")
             repeated = await pipeline.decision("spec_fixture", fixture_proposal())
             assert repeated["state"] == "ask_blocked" and repeated["version"] == blocked["version"]
+            await s.bind_b(close_a=True)
+            replaced = await pipeline.decision("spec_fixture", fixture_proposal())
+            assert replaced["state"] == "ask_blocked" and len(replaced["attempts"]) == 1
+            assert len(calls) == 1 and len(s.delivered) == 1
             s.notify._assistant_binding = binding_reader
             assert (await pipeline.decision("spec_fixture", fixture_proposal()))["state"] == "ask_blocked"
             assert len(calls) == 1 and len(s.delivered) == 1
             assert not await s.notify._db.call("list_agent_questions")
             resumed = await pipeline.decision("spec_fixture", fixture_proposal(), retry_blocked=True)
             assert resumed["state"] == "pending" and len(calls) == 2
-            assert len(resumed["attempts"]) == 1 and len(s.delivered) == 1
+            assert len(resumed["attempts"]) == 2 and len(s.delivered) == 1
             assert not await s.store.fetch_session_event_tail(CHAT, limit=20)
     asyncio.run(run())
 

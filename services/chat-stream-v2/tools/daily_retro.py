@@ -580,8 +580,8 @@ class Pipeline:
                 record.update(state="pending")
                 record.pop("answer", None)
             elif disposition == "propose" and old_version == version and record.get("state") == "ask_blocked" and not retry_blocked and any(
-                    a.get("state") == "blocked" and a["generation"] == binding["session_generation"] and a["version"] == version for a in attempts):
-                attempt = next(a for a in reversed(attempts) if a.get("state") == "blocked" and a["generation"] == binding["session_generation"] and a["version"] == version)
+                    a.get("state") == "blocked" and a["version"] == version for a in attempts):
+                attempt = next(a for a in reversed(attempts) if a.get("state") == "blocked" and a["version"] == version)
                 return await self._blocked_report(path, preimage, records, record, attempt)
             elif old_version == version and record.get("state") in {"rejected", "deferred", "authorized", "shipped"}:
                 pass
