@@ -230,6 +230,7 @@ def checked(response, kind):
 
 
 def validate_packet(packet, manifest):
+    packet = json.loads(json.dumps(packet))  # Preserve the immutable raw worker report.
     if packet.get("run_id") != manifest["run_id"]:
         raise ValueError("packet run identity mismatch")
     selected = {s["id"]: s for s in manifest["sources"]}
@@ -247,8 +248,18 @@ def validate_packet(packet, manifest):
     for candidate in candidates:
         if required - candidate.keys() or not candidate["id"] or not candidate["citations"]:
             raise ValueError("incomplete recommendation")
-        if any(c not in selected for c in candidate["citations"]):
-            raise ValueError("recommendation must cite selected source IDs")
+        citations = candidate["citations"]
+        if not isinstance(citations, list) or any(not isinstance(ref, str) for ref in citations):
+            raise ValueError("citation IDs must be strings")
+        originals = [ref for ref in citations if ref in selected]
+        supplemental = [ref for ref in citations if ref not in selected]
+        if not originals or any(ref.startswith("spec_") and ref not in packet.get("evidence_sources", {}) for ref in supplemental):
+            raise ValueError("missing or fabricated collection original ID")
+        if supplemental:
+            candidate["citations"] = originals
+            candidate["evidence_citations"] = list(dict.fromkeys(candidate.get("evidence_citations", []) + supplemental))
+            packet.setdefault("normalization_notes", []).append({"candidate_id": candidate["id"], "evidence_refs": supplemental,
+                "note": "Supplemental references retained as evidence labels; they do not expand original coverage."})
     return packet
 
 
@@ -271,7 +282,7 @@ def worker_prompt(settings, manifest, stage, input_path):
 Read immutable input JSON {input_path}; memory root {settings.memory_root}. Look up only relevant normal work records and bounded recent packets under {settings.state_root}/runs for recurrence/prior decisions. Respect existing standing grants.
 READ ONLY: no edits, questions, publication, new lanes or feedback pass. No authority to execute improvements. Your terminal report self-closes this generation; producer owns only fenced cleanup.
 Return one durable report: agent-orch report --msg-id 0 --status done --report-id {report_id} --result JSON. ReportPayloadV1 summary/findings/next_action/extras; extras.daily_retro is the packet object.
-Packet: run_id; dispositions [{{id,fingerprint,reason}}] EXACTLY once for each original, including no-action; candidates unique prioritized [{{id,problem,consequence,citations:[source IDs],prior_occurrences,existing,action,benefit,effort,risk,uncertainty,owner,decision}}]. decision describes exact needed grant/recommended option/meaningful alternatives, or existing authorization/no decision. Existing fields name authoritative fixes/rules/work and current state. No-new sources is an explicit successful empty packet; coverage gaps never imply all-clear. Preserve prior materially changed recommendations/actions needing attention. Keep front concise, no silent source truncation.
+Packet: run_id; dispositions [{{id,fingerprint,reason}}] EXACTLY once for each original, including no-action; candidates unique prioritized [{{id,problem,consequence,citations:[source IDs],prior_occurrences,existing,action,benefit,effort,risk,uncertainty,owner,decision}}]. decision describes exact needed grant/recommended option/meaningful alternatives, or existing authorization/no decision. Candidates.citations contain ONLY IDs from collection.sources; put verification labels, file paths and related-work references in evidence_sources/evidence_citations or existing, never in original citations. Each recommendation needs at least one collected original ID. Existing fields name authoritative fixes/rules/work and current state. No-new sources is an explicit successful empty packet; coverage gaps never imply all-clear. Preserve prior materially changed recommendations/actions needing attention. Keep front concise, no silent source truncation.
 """
 
 

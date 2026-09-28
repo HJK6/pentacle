@@ -360,3 +360,39 @@ def test_authorized_work_and_review_require_durable_version(config, monkeypatch)
         assert receipt["result"] == result and receipt["collection_to_decision_ready_seconds"] >= 0
         assert not rpc.questions
     asyncio.run(run())
+
+
+def sol_shaped_packet():
+    """Citation/evidence structure from the first real analytical rehearsal."""
+    candidate = {k: 'bounded fixture finding' for k in ('id', 'problem', 'consequence', 'prior_occurrences', 'existing', 'action', 'benefit', 'effort', 'risk', 'uncertainty', 'owner', 'decision')}
+    candidate.update(id='credential_in_report', citations=['spec_fixture_serious', 'fixture_report_tool', 'verification_synthetic_report', 'spec_fixture_existing_owner'])
+    packet = {'run_id': '2026-09-28', 'dispositions': [{'id': 'spec_fixture_serious', 'fingerprint': 'original-fingerprint', 'reason': 'Read and locally reproduced.'}], 'candidates': [candidate],
+              'evidence_sources': {'fixture_report_tool': {'path': 'fixture_tools/report.py', 'finding': 'packet returns credential field'},
+                                   'verification_synthetic_report': {'method': 'synthetic marker probe', 'result': 'marker appears in packet'},
+                                   'spec_fixture_existing_owner': {'path': 'work/in_progress/existing-owner/spec.md', 'finding': 'existing accepting owner'}}}
+    manifest = {'run_id': packet['run_id'], 'sources': [{'id': 'spec_fixture_serious', 'fingerprint': 'original-fingerprint'}]}
+    return packet, manifest
+
+
+@pytest.mark.parametrize("stray_label", [None, "unverified_probe_label"])
+def test_sol_supplemental_evidence_preserves_original_coverage_and_raw_report(stray_label):
+    packet, manifest = sol_shaped_packet()
+    if stray_label:
+        packet["candidates"][0]["citations"].append(stray_label)
+    original = json.loads(json.dumps(packet))
+    normalized = retro.validate_packet(packet, manifest)
+    candidate = normalized['candidates'][0]
+    assert candidate['citations'] == ['spec_fixture_serious']
+    assert candidate['evidence_citations'] == original['candidates'][0]['citations'][1:]
+    assert normalized['normalization_notes']
+    assert normalized['evidence_sources'] == original['evidence_sources']
+    assert packet == original
+    assert retro.validate_packet(normalized, manifest) == normalized
+
+
+@pytest.mark.parametrize('citations', [[], ['fixture_report_tool'], ['spec_fabricated'], ['spec_fixture_serious', 'spec_fabricated']])
+def test_sol_missing_or_fabricated_originals_are_rejected(citations):
+    packet, manifest = sol_shaped_packet()
+    packet['candidates'][0]['citations'] = citations
+    with pytest.raises(ValueError):
+        retro.validate_packet(packet, manifest)
