@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import plistlib
 import subprocess
 import sys
 from pathlib import Path
@@ -467,3 +468,89 @@ def test_apply_post_activation_captures_restart_failure_without_raising(monkeypa
     )
     assert "post_activation_error" in stamp
     assert "daemon_boot_readback" not in stamp
+
+
+@pytest.mark.parametrize("configuration", ["configured", "configured-clean", "configured-json-conflict", "configured-host-subset", "missing-setting", "missing-file", "invalid-json"])
+def test_post_activation_smoke_uses_installed_machine_file(
+    tmp_path, monkeypatch, capsys, configuration
+) -> None:
+    """Execute the real smoke configuration in the spawned child; never acquire fleet cells."""
+    installed_file = tmp_path / "installed machines.json"
+    installed_file.write_text(json.dumps([{"name": "installed", "ssh_target": None}, {"name": "peer", "ssh_target": None}]))
+    ambient_file = tmp_path / "ambient.json"
+    ambient_file.write_text(json.dumps([{"name": "ambient", "ssh_target": None}]))
+    monkeypatch.setenv("PENTACLE_MACHINES_FILE", str(ambient_file))
+    if configuration == "configured-clean":
+        monkeypatch.delenv("PENTACLE_MACHINES_FILE")
+    monkeypatch.delenv("PENTACLE_MACHINES_JSON", raising=False)
+    monkeypatch.delenv("PENTACLE_SMOKE_HOSTS", raising=False)
+    if configuration == "configured-json-conflict":
+        monkeypatch.setenv("PENTACLE_MACHINES_JSON", '[{"name": "ambient"}]')
+    elif configuration == "configured-host-subset":
+        monkeypatch.setenv("PENTACLE_SMOKE_HOSTS", "installed")
+    environment = {"PENTACLE_MACHINES_FILE": str(installed_file)}
+    if configuration == "missing-setting":
+        environment = {}
+    elif configuration == "missing-file":
+        installed_file.unlink()
+    elif configuration == "invalid-json":
+        installed_file.write_text("not JSON")
+    installed_plist = tmp_path / "daemon.plist"
+    installed_plist.write_bytes(plistlib.dumps({"EnvironmentVariables": environment}))
+    monkeypatch.setattr(deploy_mod, "_launchd_plist_path", lambda _label: installed_plist)
+    monkeypatch.setattr(deploy_mod, "_venv_python", lambda *_args: Path(sys.executable))
+    monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda *_args: None)
+    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_args: {"outcome": deploy_mod.SLOW_CONSUMER_PASSED})
+    writes = []
+    monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, stamp: writes.append(dict(stamp)))
+    calls = []
+    smoke_results = []
+    smoke_path = DEPLOY_PATH.parents[3] / "services/chat-stream-v2/tools/spawn_fleet_smoke.py"
+
+    def runner(cmd, cwd):
+        parts = list(cmd)
+        calls.append(parts)
+        if str(smoke_path) in parts:
+            # Retain the actual child environment invocation, substituting only the live-cell
+            # entry point with the script's real smoke_plan (which cannot spawn or connect).
+            index = parts.index(str(smoke_path))
+            parts[index:index + 1] = [
+                "-c", "import json,runpy,sys; from pathlib import Path; sys.path.insert(0,str(Path(sys.argv[1]).parent)); print(json.dumps(runpy.run_path(sys.argv[1])['smoke_plan']()))",
+                str(smoke_path),
+            ]
+            result = subprocess.run(parts, cwd=cwd, text=True, capture_output=True, check=False)
+            smoke_results.append(result)
+            return result
+        return subprocess.CompletedProcess(parts, 0, "", "")
+
+    stamp = {"sha": TARGET_SHA}
+    deploy_mod._apply_post_activation(
+        V2_SERVICE, DEPLOY_PATH.parents[3], TARGET_SHA, stamp,
+        prior_log_size=0, prior_pid=111, reload_launchd=False, runner=runner,
+        verify_boot=_boot_observed,
+        verify_runtime=lambda _sha, _pid: (True, {"sha": TARGET_SHA, "process_state": "running", "pid": 999}),
+    )
+    assert stamp["sha"] == TARGET_SHA
+    assert stamp["daemon_runtime_readback"]["pid"] == 999
+    assert len([cmd for cmd in calls if "kickstart" in cmd]) == 1
+    smoke_calls = [cmd for cmd in calls if str(smoke_path) in cmd]
+    assert len(smoke_calls) == 1
+    assert writes[-1] == stamp
+    if configuration.startswith("configured"):
+        assert stamp["fleet_smoke"]["outcome"] == deploy_mod.FLEET_SMOKE_PASSED
+        plan = json.loads(smoke_results[0].stdout)
+        assert plan["source"] == str(installed_file.resolve())
+        assert plan["hosts"] == ["installed", "peer"]
+        assert len(plan["cells"]) == 8
+        assert {cell[0] for cell in plan["cells"]} == {"installed", "peer"}
+        assert stamp["fleet_smoke"]["outcome"] == deploy_mod.FLEET_SMOKE_PASSED
+        code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
+        assert code == 0
+    else:
+        assert stamp["fleet_smoke"]["outcome"] == deploy_mod.FLEET_SMOKE_FAILED
+        errors = {"missing-setting": "PENTACLE_MACHINES_FILE is required", "missing-file": "machine file does not exist", "invalid-json": "JSONDecodeError"}
+        assert errors[configuration] in stamp["fleet_smoke"]["detail"]
+        code, output, error = _run_main(monkeypatch, capsys, stamp=stamp)
+        assert code == deploy_mod.EXIT_FLEET_SMOKE_FAILED == 6
+        assert "Do NOT retry" in error
+        assert json.loads(output)["daemon_runtime_readback"]["pid"] == 999
