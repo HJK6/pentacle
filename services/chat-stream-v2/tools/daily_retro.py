@@ -1,0 +1,802 @@
+#!/usr/bin/env python3
+"""A bounded daily retro producer using the existing worker/report transport."""
+from __future__ import annotations
+
+import argparse
+import asyncio
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from datetime import datetime, time, timedelta, timezone
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
+
+SERVICES = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(SERVICES / "agent-orch"))
+sys.path.insert(0, str(SERVICES))
+sys.path.insert(0, str(SERVICES / "chat-stream-v2"))
+from agent_orch.config import Config  # noqa: E402
+from agent_orch.triage import parse_frontmatter  # noqa: E402
+from agent_orch import prompt_protocol, wsclient  # noqa: E402
+from tools.live_window import authenticated_operator_connection  # noqa: E402
+
+ZONE = ZoneInfo("America/Chicago")
+DISPOSITIONS = {"resolved", "duplicate", "no_change", "investigate", "authorized", "propose", "defer"}
+PROPOSAL_START = "<!-- daily-retro-proposals -->"
+PROPOSAL_END = "<!-- /daily-retro-proposals -->"
+
+
+def encoded(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def digest(value):
+    return hashlib.sha256(encoded(value)).hexdigest()
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def atomic(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".retro-")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(value if isinstance(value, bytes) else encoded(value) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        folder = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(folder)
+        finally:
+            os.close(folder)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def read(path, default=None):
+    return json.loads(path.read_text()) if path.exists() else default
+
+
+@contextmanager
+def locked(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+@dataclass(frozen=True)
+class Settings:
+    memory_root: Path
+    state_root: Path
+    ws_url: str
+    token_path: Path
+    host: str
+    isolated: bool = False
+    config_path: Path | None = None
+    sink: dict | None = None
+
+    @classmethod
+    def load(cls, path):
+        path = Path(path).resolve()
+        data = read(path)
+        if data.get("timezone") != ZONE.key:
+            raise ValueError("timezone must be America/Chicago")
+        for key in ("memory_root", "state_root", "token_path"):
+            if not Path(data[key]).is_absolute():
+                raise ValueError(f"{key} must be absolute")
+        url = urlparse(data["ws_url"])
+        if url.scheme not in {"ws", "wss"} or not url.hostname or not url.port:
+            raise ValueError("explicit websocket endpoint required")
+        if data.get("isolated") and (url.port == 7791 or url.hostname not in {"localhost", "127.0.0.1"}):
+            raise ValueError("isolated endpoint must be an owned local test port")
+        memory, state = Path(data["memory_root"]).resolve(), Path(data["state_root"]).resolve()
+        if state == memory or memory in state.parents:
+            raise ValueError("state must live outside shared memory")
+        sink = data.get("sink")
+        if sink and (not data.get("isolated") or sink.get("stream_id") == "bart:assistant"):
+            raise ValueError("fixed sink permitted only on an isolated test surface")
+        return cls(memory, state, data["ws_url"], Path(data["token_path"]), data["host"],
+                   bool(data.get("isolated")), path, sink)
+
+    def rpc(self):
+        return Config(self.ws_url, self.token_path.read_text().strip(), self.host,
+                      self.state_root, self.memory_root)
+
+
+def timer_due(stamp):
+    if stamp.utcoffset() is None:
+        raise ValueError("offset-aware timestamp required")
+    return stamp.astimezone(ZONE).time() >= time(5)
+
+
+def scan(settings):
+    sources, gaps, duplicate, seen = {}, [], set(), set()
+    for folder in ("completed", "deprecated"):
+        root = settings.memory_root / "work" / folder
+        if not root.is_dir():
+            gaps.append({"path": str(root), "reason": "terminal directory unavailable"})
+            continue
+        try:
+            paths = sorted(root.rglob("spec.md"))
+        except OSError as exc:
+            gaps.append({"path": str(root), "reason": str(exc)})
+            continue
+        for path in paths:
+            relative = str(path.relative_to(settings.memory_root))
+            try:
+                meta = parse_frontmatter(path)
+                identity = meta.get("id")
+                if not identity or meta.get("status") not in {"completed", "deprecated"}:
+                    raise ValueError("missing stable ID or nonterminal status")
+                if identity in seen or identity in duplicate:
+                    duplicate.add(identity)
+                    sources.pop(identity, None)
+                    raise ValueError(f"duplicate stable ID: {identity}")
+                seen.add(identity)
+                text = path.read_text().replace("\r\n", "\n")
+                match = re.search(r"^##\s+Retro\b[^\n]*\n?(.*?)(?=^#{1,2}\s|\Z)", text,
+                                  re.MULTILINE | re.DOTALL | re.IGNORECASE)
+                if not match:
+                    raise ValueError("missing Retro")
+                original = match.group(0).strip()
+                body = re.sub(r"^##\s+Retro\b\s*[:—-]?\s*", "", original, count=1, flags=re.IGNORECASE).strip()
+                if not body:
+                    raise ValueError("empty Retro")
+                raw_day = meta.get("completed_at") or meta.get("deprecated_at") or meta.get("closed_at") or meta.get("updated_at")
+                day = None
+                if raw_day:
+                    terminal = datetime.fromisoformat(str(raw_day).replace("Z", "+00:00"))
+                    day = (terminal.astimezone(ZONE) if terminal.utcoffset() is not None else terminal).date().isoformat()
+                sources[identity] = {"id": identity, "path": relative, "status": meta["status"],
+                                     "terminal_date": day, "fingerprint": digest(original), "original": original}
+            except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+                gaps.append({"path": relative, "reason": str(exc)})
+    return sources, gaps
+
+
+def rebuild_index(settings):
+    entries = {}
+    manifests = sorted((settings.state_root / "runs").glob("*/collection.json"))
+    for path in manifests:
+        manifest = read(path)
+        entries.update(manifest["baseline"])
+        entries.update({s["id"]: {"fingerprint": s["fingerprint"], "reviewed": False,
+                                 "enrolled_run": manifest["run_id"]} for s in manifest["sources"]})
+    return {"initialized": bool(manifests), "entries": entries}
+
+
+def collect(settings, stamp, *, max_sources=40, max_bytes=65536):
+    if stamp.utcoffset() is None:
+        raise ValueError("offset-aware cutoff required")
+    local = stamp.astimezone(ZONE)
+    run_id = local.date().isoformat()
+    path = settings.state_root / "runs" / run_id / "collection.json"
+    with locked(settings.state_root / "collect.lock"):
+        index = rebuild_index(settings)
+        if path.exists():
+            atomic(settings.state_root / "index.json", index)
+            return read(path)
+        sources, gaps = scan(settings)
+        baseline, selected, deferred, size = {}, [], [], 0
+        previous = local.date() - timedelta(days=1)
+        for identity, source in sorted(sources.items()):
+            prior = index["entries"].get(identity)
+            if prior and prior["fingerprint"] == source["fingerprint"]:
+                continue
+            if not index["initialized"] and (not source["terminal_date"] or source["terminal_date"] < previous.isoformat()):
+                baseline[identity] = {"fingerprint": source["fingerprint"], "reviewed": False,
+                                      "reason": "older or unknown-date initial history"}
+                continue
+            if source["terminal_date"] and source["terminal_date"] > local.date().isoformat():
+                gaps.append({"path": source["path"], "reason": "future terminal date"})
+                continue
+            source_size = len(source["original"].encode())
+            if len(selected) >= max_sources or size + source_size > max_bytes:
+                deferred.append({k: source[k] for k in ("id", "path", "fingerprint")})
+                continue
+            selected.append(source)
+            size += source_size
+        start = datetime.combine(previous, time(), ZONE)
+        end = datetime.combine(local.date(), time(), ZONE)
+        manifest = {"run_id": run_id, "timezone": ZONE.key, "cutoff": stamp.isoformat(), "collected_at": now_iso(),
+                    "window": {"start": start.isoformat(), "end": end.isoformat()},
+                    "sources": selected, "baseline": baseline, "gaps": gaps, "deferred": deferred,
+                    "coverage": {"readable_retros": len(sources), "selected": len(selected),
+                                 "baseline_not_reviewed": len(baseline), "gaps": len(gaps), "deferred": len(deferred)}}
+        atomic(path, manifest)  # This commits enrollment; index is a rebuildable projection.
+        atomic(settings.state_root / "index.json", rebuild_index(settings))
+        return manifest
+
+
+def checked(response, kind):
+    if response.get("type") != kind or response.get("ok") is False:
+        raise RuntimeError(f"{kind}: {response.get('error_code') or response.get('reason') or response.get('type')}")
+    return response
+
+
+def validate_packet(packet, manifest):
+    if packet.get("run_id") != manifest["run_id"]:
+        raise ValueError("packet run identity mismatch")
+    selected = {s["id"]: s for s in manifest["sources"]}
+    rows = packet.get("dispositions", [])
+    if len(rows) != len(selected) or {r.get("id") for r in rows} != set(selected):
+        raise ValueError("one disposition required for every original, including no-action")
+    for row in rows:
+        if row.get("fingerprint") != selected[row["id"]]["fingerprint"] or not row.get("reason"):
+            raise ValueError("disposition must cite the retained original and give a reason")
+    required = {"id", "problem", "consequence", "citations", "prior_occurrences", "existing", "action",
+                "benefit", "effort", "risk", "uncertainty", "owner", "decision"}
+    candidates = packet.get("candidates")
+    if not isinstance(candidates, list) or len({c.get("id") for c in candidates}) != len(candidates):
+        raise ValueError("unique candidate IDs required")
+    for candidate in candidates:
+        if required - candidate.keys() or not candidate["id"] or not candidate["citations"]:
+            raise ValueError("incomplete recommendation")
+        if any(c not in selected for c in candidate["citations"]):
+            raise ValueError("recommendation must cite selected source IDs")
+    return packet
+
+
+def worker_collection(manifest, path):
+    """Keep historical enrollment bookkeeping out of the analytical input."""
+    return {**{k: v for k, v in manifest.items() if k != "baseline"},
+            "baseline_exclusions": {"count": len(manifest["baseline"]), "reviewed": False,
+                                    "path": str(path), "manifest_hash": digest(manifest)}}
+
+
+def worker_prompt(settings, manifest, stage, input_path):
+    model, effort = ("gpt-6-sol", "medium") if stage == "sol" else ("gpt-6-astra", "high")
+    duty = ("Investigate originals, named follow-ups, related current work/rules and prior decisions; group repeated issues. "
+            "Verify current defects rather than treating retros as conclusions. Draft one prioritized packet.") if stage == "sol" else (
+            "Read EVERY original and ALL Sol dispositions/draft, including no-action. Detect omitted insights and evidence gaps. "
+            "Correct small gaps directly, flag substantial uncertainty without returning to Sol, finalize other decisions.")
+    report_id = read(input_path)["report_id"]
+    return f"""Daily retrospective {stage} pass, run {manifest['run_id']}; {model}/{effort}, Codex only.
+{duty}
+Read immutable input JSON {input_path}; memory root {settings.memory_root}. Look up only relevant normal work records and bounded recent packets under {settings.state_root}/runs for recurrence/prior decisions. Respect existing standing grants.
+READ ONLY: no edits, questions, publication, new lanes or feedback pass. No authority to execute improvements. Your terminal report self-closes this generation; producer owns only fenced cleanup.
+Return one durable report: agent-orch report --msg-id 0 --status done --report-id {report_id} --result JSON. ReportPayloadV1 summary/findings/next_action/extras; extras.daily_retro is the packet object.
+Packet: run_id; dispositions [{{id,fingerprint,reason}}] EXACTLY once for each original, including no-action; candidates unique prioritized [{{id,problem,consequence,citations:[source IDs],prior_occurrences,existing,action,benefit,effort,risk,uncertainty,owner,decision}}]. decision describes exact needed grant/recommended option/meaningful alternatives, or existing authorization/no decision. Existing fields name authoritative fixes/rules/work and current state. No-new sources is an explicit successful empty packet; coverage gaps never imply all-clear. Preserve prior materially changed recommendations/actions needing attention. Keep front concise, no silent source truncation.
+"""
+
+
+class Pipeline:
+    def __init__(self, settings, rpc=wsclient):
+        self.settings, self.rpc, self.config = settings, rpc, settings.rpc()
+
+    async def binding(self):
+        if self.settings.sink:
+            return self.settings.sink
+        binding = checked(await self.rpc.assistant_once(self.config, {"type": "assistant.binding"}), "assistant.binding.ok")
+        binding["session_generation"] = binding.get("generation") or binding.get("session_generation")
+        if not binding.get("stream_id") or not binding.get("session_generation"):
+            raise RuntimeError("current Bart binding unavailable")
+        return binding
+
+    async def worker(self, manifest, name, prior=None):
+        root = self.settings.state_root / "runs" / manifest["run_id"]
+        receipt_path = root / f"{name}.json"
+        stage = read(receipt_path, {})
+        if stage.get("packet"):
+            return stage
+        model, effort = ("gpt-6-sol", "medium") if name == "sol" else ("gpt-6-astra", "high")
+        if not stage:
+            attempt = 1
+        elif stage.get("failed"):
+            attempt = stage["attempt"] + 1
+            if attempt > 2:
+                raise RuntimeError(f"{name} recovery budget exhausted; retained for Bart")
+            history = read(root / f"{name}-attempts.json", [])
+            history.append(stage)
+            atomic(root / f"{name}-attempts.json", history)
+            stage = {}
+        else:
+            attempt = stage["attempt"]
+        if not stage:
+            input_path = root / f"{name}-input-{attempt}.json"
+            report_id = f"daily-retro-{name}-{manifest['run_id']}-{attempt}"
+            atomic(input_path, {"collection": worker_collection(manifest, root / "collection.json"),
+                                "sol": prior, "report_id": report_id})
+            key = f"daily-retro-{manifest['run_id']}-{name}-{attempt}"
+            stage = {"attempt": attempt, "created_at": now_iso(), "report_id": report_id,
+                     "payload": {"host": self.settings.host, "provider": "codex", "model": model,
+                                 "effort": effort, "visibility": "hidden", "role": "worker", "cwd": str(self.settings.memory_root),
+                                 "self_close_on_completion": True,
+                                 "request_id": key, "idempotency_key": key,
+                                 "initial_prompt": worker_prompt(self.settings, manifest, name, input_path)}}
+            atomic(receipt_path, stage)  # Intent survives interruption before/after admission.
+        if not stage.get("stream_id"):
+            # Repeating the exact spawn key is the existing admission reconciliation contract.
+            admitted = await self.rpc.spawn_once(self.config, dict(stage["payload"]))
+            row = admitted.get("session") or {}
+            stage["admission"] = admitted
+            stage["stream_id"] = admitted.get("stream_id") or row.get("stream_id")
+            stage["generation"] = row.get("session_generation") or admitted.get("session_generation")
+            atomic(receipt_path, stage)
+            if admitted.get("type") != "spawn.ok" or not stage["stream_id"] or not stage["generation"]:
+                raise RuntimeError(f"{name} admission indeterminate; exact intent retained")
+        if not stage.get("generation"):
+            raise RuntimeError("owned generation unproven; cleanup and new admission blocked")
+        response = await self.rpc.await_report_once(self.config, stage["stream_id"], 0,
+                                                    include_details=True, include_extras=True, timeout=3600)
+        if response.get("result_kind") == "closed_without_report" or (response.get("result_kind") == "report" and not response.get("ok")):
+            stage.update(failed=True, failure=response)
+            atomic(receipt_path, stage)
+            raise RuntimeError(f"{name} confirmed failed; recover on next run")
+        checked(response, "await_report.ok")
+        report = response["report"]
+        if report.get("effective_model") != model or report.get("effective_effort") != effort:
+            raise RuntimeError("worker report model/effort mismatch")
+        if report.get("report_id") != stage["report_id"]:
+            raise RuntimeError("unexpected worker report identity")
+        packet = validate_packet(report.get("extras", {}).get("daily_retro", {}), manifest)
+        packet = {**packet, "collection": worker_collection(manifest, root / "collection.json")}
+        stage.update(packet=packet, packet_hash=digest(packet), report=report, completed_at=now_iso())
+        atomic(receipt_path, stage)
+        return stage
+
+    async def deliver(self, manifest, final=None, failure=None):
+        root = self.settings.state_root / "runs" / manifest["run_id"]
+        path = root / ("failure-delivery.json" if failure else "delivery.json")
+        record = read(path, {"attempts": []})
+        if (root / "review.json").exists():
+            return record
+        binding = await self.binding()
+        target, generation = binding["stream_id"], binding["session_generation"]
+        attempt = next((a for a in record["attempts"] if a["target"] == target and a["generation"] == generation), None)
+        if attempt and attempt.get("confirmed"):
+            return record
+        if not attempt:
+            key = "daily-retro-" + digest([manifest["run_id"], target, generation, bool(failure)])[:32]
+            if failure:
+                body = f"REPORT daily-retro failure {manifest['run_id']}: {failure}. Retained state: {root}. Retry with existing producer; no operator notification for routine retries."
+            else:
+                body = (f"REPORT daily-retro ready run={manifest['run_id']} report_id={final['report']['report_id']} "
+                        f"packet_hash={final['packet_hash']} path={root / 'astra.json'}. "
+                        f"Ingest once and review now under the accepted daily retro contract. Record every disposition with "
+                        f"{Path(__file__).resolve()} record-review --config {self.settings.config_path} --run-id {manifest['run_id']} --result RESULT_JSON. "
+                        "Use normal work proposal records and decision helper to recover still-open decisions after generation replacement. "
+                        "Quiet/no-action days: retain review receipt, emit no chat prose or questions. Surface only real decisions via durable prompt ask. No assistant.publish obligation.")
+            host, session = target.split(":", 1)
+            attempt = {"target": target, "generation": generation, "request_id": key,
+                       "payload": {"host": host, "session_name": session, "text": body,
+                                   "request_id": key, "optimistic_id": key}}
+            record["attempts"].append(attempt)
+            atomic(path, record)
+        receipts = await self.rpc.send_receipt_once(self.config, target, attempt["request_id"])
+        if receipts.get("type") != "send.receipt.get.ok":
+            raise RuntimeError("delivery reconciliation unavailable")
+        landed = next((r for r in receipts.get("receipts", []) if r.get("delivery") == "landed" or r.get("state") == "landed"), None)
+        response = landed or await self.rpc.send_once(self.config, dict(attempt["payload"]))
+        attempt["receipt"] = response
+        attempt["confirmed"] = response.get("delivery") == "landed" or response.get("state") == "landed"
+        attempt["at"] = now_iso()
+        attempt["collection_to_delivery_seconds"] = (datetime.fromisoformat(attempt["at"]) - datetime.fromisoformat(manifest["collected_at"])).total_seconds()
+        atomic(path, record)
+        if not attempt["confirmed"]:
+            raise RuntimeError("delivery pending; exact target/body/key retained")
+        return record
+
+    async def cleanup(self, manifest):
+        root = self.settings.state_root / "runs" / manifest["run_id"]
+        for name in ("sol", "astra"):
+            path = root / f"{name}.json"
+            stage = read(path, {})
+            if stage.get("closed") or not stage.get("generation") or not (stage.get("packet") or stage.get("failed")):
+                continue
+            result = await self.rpc.close_once(self.config, stage["stream_id"],
+                                               expected_generation=stage["generation"], reason="report_terminate")
+            stage["cleanup"] = result
+            row = result.get("session") or {}
+            stage["closed"] = (result.get("type") in {"close.ok", "close.already_closed"}
+                               and not result.get("failed") and row.get("status") == "closed"
+                               and row.get("session_generation") == stage["generation"])
+            atomic(path, stage)
+            if not stage["closed"]:
+                raise RuntimeError("generation-owned worker cleanup blocked")
+
+    async def run(self, stamp=None, on_demand=False):
+        stamp = stamp or datetime.now(timezone.utc)
+        if not on_demand and not timer_due(stamp):
+            return {"state": "before_05_local"}
+        with locked(self.settings.state_root / "run.lock"):
+            collect(self.settings, stamp)
+            completed = []
+            for path in sorted((self.settings.state_root / "runs").glob("*/collection.json")):
+                manifest = read(path)
+                if (path.parent / "review.json").exists():
+                    await self.cleanup(manifest)
+                    continue
+                try:
+                    sol = await self.worker(manifest, "sol")
+                    astra = await self.worker(manifest, "astra", sol["packet"])
+                    await self.deliver(manifest, astra)
+                    completed.append(manifest["run_id"])
+                except Exception as exc:
+                    atomic(path.parent / "failure.json", {"at": now_iso(), "error": str(exc)})
+                    try:
+                        await self.deliver(manifest, failure=str(exc))
+                    except Exception as delivery_error:
+                        atomic(path.parent / "failure-notice-error.json", {"error": str(delivery_error)})
+                    raise
+                finally:
+                    await self.cleanup(manifest)
+            return {"delivered": completed}
+
+    async def actor(self):
+        binding = await self.binding()
+        actor = os.environ.get("PENTACLE_STREAM_ID") or os.environ.get("AGENT_ORCH_STREAM_ID")
+        if actor != binding["stream_id"]:
+            raise RuntimeError("only CURRENT Bart may ingest or prepare decisions")
+        inspected = checked(await self.rpc.inspect_stream_once(self.config, actor), "inspect_stream.ok")
+        row = inspected.get("session") or {}
+        if row.get("visibility") not in {"visible", "default"} or row.get("status") != "open" or row.get("session_generation") != binding["session_generation"]:
+            raise RuntimeError("visible current Bart generation required")
+        return binding
+
+    async def record_review(self, run_id, result):
+        binding = await self.actor()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", run_id):
+            raise ValueError("invalid run ID")
+        root = self.settings.state_root / "runs" / run_id
+        with locked(root / "review.lock"):
+            final = read(root / "astra.json")
+            if not final or result.get("packet_hash") != final.get("packet_hash"):
+                raise ValueError("review must bind exact final packet hash")
+            rows = result.get("dispositions", [])
+            candidates = {c["id"] for c in final["packet"]["candidates"]}
+            if len(rows) != len(candidates) or {r.get("id") for r in rows} != candidates:
+                raise ValueError("one Bart disposition per recommendation required")
+            for row in rows:
+                if row.get("disposition") not in DISPOSITIONS or not row.get("reason"):
+                    raise ValueError("explicit Bart disposition/reason required")
+                if row["disposition"] in {"investigate", "authorized", "propose", "defer"}:
+                    path = work_path(self.settings, row.get("work_id"))
+                    records = proposals(path.read_text())
+                    proposal = records.get(row.get("proposal_id"))
+                    if not proposal or proposal.get("version") != row.get("version") or not proposal.get("citations"):
+                        raise ValueError("action needs durable proposal/version/citations in normal work")
+            old = read(root / "review.json")
+            if old:
+                if old["result"] != result:
+                    raise ValueError("run already reviewed; amend normal work rather than repeat ingestion")
+                return old
+            receipt = {"result": result, "actor": binding, "reviewed_at": now_iso(), "decision_ready_at": now_iso()}
+            manifest = read(root / "collection.json")
+            receipt["collection_to_decision_ready_seconds"] = (datetime.fromisoformat(receipt["decision_ready_at"]) - datetime.fromisoformat(manifest["collected_at"])).total_seconds()
+            atomic(root / "review.json", receipt)
+            return receipt
+
+    async def decision(self, work_id, proposal):
+        binding = await self.actor()
+        path = work_path(self.settings, work_id)
+        identity = proposal.get("id")
+        if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", identity):
+            raise ValueError("stable proposal ID required")
+        for field in ("scope", "citations", "owner", "checkpoint", "success_measure"):
+            if not proposal.get(field):
+                raise ValueError(f"proposal requires {field}")
+        disposition = proposal.get("disposition", "propose")
+        if disposition not in DISPOSITIONS:
+            raise ValueError("unknown proposal disposition")
+        if disposition == "propose":
+            for field in ("title", "body", "options"):
+                if not proposal.get(field):
+                    raise ValueError(f"operator decision requires {field}")
+        if disposition in {"authorized", "investigate"} and not proposal.get("authority"):
+            raise ValueError("existing authority reference required")
+        version = digest({k: proposal.get(k) for k in ("scope", "title", "body", "options")})
+        with locked(path.parent / ".daily-retro.lock"):
+            preimage = path.read_bytes()
+            text = preimage.decode()
+            records = proposals(text)
+            record = records.get(identity, {"attempts": []})
+            old_version = record.get("version")
+            attempts = record["attempts"]
+            # Query all historical attempts, including terminal ones: an answer
+            # may have committed before its former generation's final turn.
+            live, answers = [], []
+            for attempt in attempts:
+                status = await self.rpc.prompt_status_once(self.config, attempt["question_id"])
+                if status.get("type") == "prompt.error" and status.get("error_code") == "question_not_found" and attempt.get("state") == "intent":
+                    attempt["observed_state"] = "absent"
+                    continue
+                checked(status, "prompt.status.ok")
+                question = status["question"]
+                attempt["observed_state"] = question["state"]
+                if question["state"] == "answered":
+                    attempt["answer"] = question["answer"]
+                    if attempt["version"] == version:
+                        answers.append(attempt)
+                    else:
+                        attempt["stale_answer_refused"] = True
+                elif question["state"] == "open":
+                    live.append(attempt)
+                elif question["state"] not in {"expired", "cancelled", "canceled"}:
+                    raise RuntimeError("unknown question state; no new ask")
+            if len(live) > 1:
+                raise RuntimeError("multiple live questions; escalate trace before any new ask")
+            if live and live[0]["version"] != version:
+                reply = await self.rpc.prompt_cancel_once(self.config, {"type": "prompt.cancel", "question_id": live[0]["question_id"], "reason": "proposal_scope_changed"})
+                checked(reply, "prompt.cancel.ok")
+                status = checked(await self.rpc.prompt_status_once(self.config, live[0]["question_id"]), "prompt.status.ok")
+                if status["question"]["state"] == "open":
+                    raise RuntimeError("old-version live question cannot be retired")
+                live = []
+            record.update({k: proposal[k] for k in proposal if k not in {"attempts", "answer", "version", "state"}})
+            record["version"] = version
+            if answers:
+                if len({digest(a["answer"]) for a in answers}) != 1:
+                    raise RuntimeError("conflicting current-version answers")
+                record.update(state="answered", answer=answers[-1]["answer"], answer_question_id=answers[-1]["question_id"])
+            elif live:
+                record.update(state="pending")
+                record.pop("answer", None)
+            elif old_version == version and record.get("state") in {"rejected", "deferred", "authorized", "shipped"}:
+                pass
+            elif proposal.get("disposition") in {"resolved", "duplicate", "no_change", "authorized", "investigate", "defer"}:
+                record["state"] = proposal["disposition"]
+                record.pop("answer", None)
+            else:
+                question_id = "retro-q-" + digest([identity, version, binding["session_generation"]])[:48]
+                attempt = next((a for a in attempts if a["question_id"] == question_id), None)
+                if attempt is None:
+                    attempt = {"question_id": question_id, "version": version, "producer": binding["stream_id"],
+                               "generation": binding["session_generation"], "state": "intent"}
+                    attempts.append(attempt)
+                envelope = prompt_protocol.build_envelope(
+                    title=proposal["title"], body=proposal["body"], response_mode="single_choice",
+                    raw_options=[prompt_protocol.PromptOption(**option) for option in proposal["options"]],
+                    question_id=question_id, dedup_key=question_id, producer_stream_id=binding["stream_id"], spec_id=work_id)
+                record.update(state="pending")
+                record.pop("answer", None)
+                records[identity] = record
+                preimage = save_proposals(path, preimage, records)  # Durable intent BEFORE ask.
+                reply = await self.rpc.prompt_ask_once(self.config, {"type": "prompt.ask", "envelope": envelope,
+                                                       "actions": prompt_protocol.notification_actions(envelope),
+                                                       "request_id": question_id})
+                checked(reply, "prompt.ask.ok")
+                attempt.update(state="asked", receipt=reply, asked_at=now_iso())
+            records[identity] = record
+            save_proposals(path, preimage, records)
+            return record
+
+
+def work_path(settings, work_id):
+    if not isinstance(work_id, str) or not re.fullmatch(r"[A-Za-z0-9_:-]+", work_id):
+        raise ValueError("normal work ID required")
+    found = []
+    for path in (settings.memory_root / "work").glob("*/*/spec.md"):
+        try:
+            if parse_frontmatter(path).get("id") == work_id:
+                resolved = path.resolve()
+                if settings.memory_root not in resolved.parents:
+                    raise ValueError("work file escapes memory root")
+                found.append(path)
+        except (OSError, UnicodeError, RuntimeError):
+            continue
+    if len(found) != 1:
+        raise ValueError("normal work ID must resolve exactly once; create with existing triage first")
+    return found[0]
+
+
+def proposals(text):
+    if PROPOSAL_START not in text:
+        return {}
+    block = text.split(PROPOSAL_START, 1)[1].split(PROPOSAL_END, 1)[0].strip()
+    return json.loads(block.removeprefix("```json\n").removesuffix("\n```"))
+
+
+def save_proposals(path, preimage, records):
+    if path.read_bytes() != preimage:
+        raise RuntimeError("work preimage moved; no mutation")
+    text = preimage.decode()
+    block = PROPOSAL_START + "\n```json\n" + encoded(records).decode() + "\n```\n" + PROPOSAL_END
+    if PROPOSAL_START in text:
+        start = text.index(PROPOSAL_START)
+        end = text.index(PROPOSAL_END, start) + len(PROPOSAL_END)
+        text = text[:start] + block + text[end:]
+    else:
+        text += "\n\n" + block + "\n"
+    atomic(path, text.encode())
+    return text.encode()
+
+
+class ProducerTransport:
+    """Existing operator RPCs restricted to owned workers and frozen REPORTs."""
+    ALLOWED = frozenset({"spawn", "await_spawn", "await_report", "close",
+                         "assistant.binding", "send.receipt.get", "send"})
+    def __init__(self, settings):
+        self.settings = settings
+
+    def stages(self):
+        for name in ("sol", "astra"):
+            for path in (self.settings.state_root / "runs").glob(f"*/{name}.json"):
+                yield read(path)
+
+    def owned(self, stream, generation=None):
+        return any(stage.get("stream_id") == stream and stage.get("generation")
+                   and (generation is None or stage["generation"] == generation) for stage in self.stages())
+
+    async def call(self, payload, timeout=30):
+        verb = payload["type"]
+        if verb not in self.ALLOWED:
+            raise ValueError("unattended operator verb outside explicit allowlist")
+        body = {k: v for k, v in payload.items() if k != "type"}
+        if verb == "spawn" and not any(stage.get("payload") == body for stage in self.stages()):
+            raise ValueError("spawn outside retained intent")
+        if verb == "await_spawn" and not any(stage.get("payload", {}).get("request_id") == body.get("spawn_request_id") for stage in self.stages()):
+            raise ValueError("await outside retained admission")
+        if verb == "await_report" and (body.get("msg_id") != 0 or not self.owned(body.get("stream_id"))):
+            raise ValueError("await outside owned worker")
+        if verb == "close" and not self.owned(f"{body.get('host')}:{body.get('session_name')}", body.get("expected_generation")):
+            raise ValueError("close outside generation ownership")
+        if verb == "assistant.binding" and body:
+            raise ValueError("binding read has no mutable fields")
+        if verb == "send" and (not body.get("text", "").startswith("REPORT daily-retro ") or not any(a["payload"] == body for a in self.deliveries())):
+            raise ValueError("send outside retained REPORT")
+        if verb == "send.receipt.get" and not any(a["target"] == body.get("to_stream_id") and a["request_id"] == body.get("request_id") for a in self.deliveries()):
+            raise ValueError("receipt outside retained REPORT")
+        def invoke():
+            with authenticated_operator_connection(self.settings.ws_url, self.settings.token_path, timeout + 2) as connection:
+                return connection.rpc(payload)
+        return await asyncio.to_thread(invoke)
+
+    async def spawn_once(self, config, payload):
+        if not any(stage.get("payload") == payload for stage in self.stages()):
+            raise ValueError("spawn must match retained run intent")
+        if payload.get("provider") != "codex" or not payload.get("self_close_on_completion") or payload.get("parent_stream_id"):
+            raise ValueError("only transient self-closing top-level Codex workers")
+        response = await self.call({**payload, "type": "spawn"}, 180)
+        if response.get("type") == "spawn.ok" and response.get("state") == "starting":
+            response = await self.call({"type": "await_spawn", "spawn_request_id": payload["request_id"],
+                                        "request_id": payload["request_id"] + "-await"}, 180)
+            if response.get("type") == "await_spawn.ok":
+                response = {**response, "type": "spawn.ok"}
+        return response
+
+    async def await_report_once(self, config, stream, msg_id, **kwargs):
+        if not self.owned(stream) or msg_id != 0:
+            raise ValueError("await must target an owned generation's terminal report")
+        return await self.call({"type": "await_report", "stream_id": stream, "msg_id": 0,
+                                "include_details": True, "include_extras": True,
+                                "timeout": kwargs.get("timeout", 30)}, kwargs.get("timeout", 30))
+
+    async def close_once(self, config, stream, **kwargs):
+        generation = kwargs.get("expected_generation")
+        if not generation or not self.owned(stream, generation):
+            raise ValueError("cleanup requires exact retained ownership")
+        host, name = stream.split(":", 1)
+        return await self.call({"type": "close", "host": host, "session_name": name,
+                                "expected_generation": generation, "reason": "report_terminate"})
+
+    def deliveries(self):
+        for name in ("delivery.json", "failure-delivery.json"):
+            for path in (self.settings.state_root / "runs").glob(f"*/{name}"):
+                yield from read(path)["attempts"]
+
+    async def assistant_once(self, config, payload):
+        if payload != {"type": "assistant.binding"}:
+            raise ValueError("producer may only read current binding")
+        return await self.call(payload)
+
+    async def send_once(self, config, payload):
+        if not payload.get("text", "").startswith("REPORT daily-retro ") or not any(a["payload"] == payload for a in self.deliveries()):
+            raise ValueError("send must exactly match retained REPORT target/body/key")
+        return await self.call({**payload, "type": "send"})
+
+    async def send_receipt_once(self, config, target, key):
+        if not any(a["target"] == target and a["request_id"] == key for a in self.deliveries()):
+            raise ValueError("receipt must match retained REPORT attempt")
+        return await self.call({"type": "send.receipt.get", "to_stream_id": target, "request_id": key})
+
+
+async def rehearse(settings, workers, evidence_dir):
+    """Real worker reports, restricted to a running isolated Bart counterpart."""
+    if not settings.isolated or settings.sink or settings.memory_root == workers.memory_root:
+        raise ValueError("rehearsal requires separate fixture memory and isolated current-Bart endpoint")
+    worker_settings = replace(workers, memory_root=settings.memory_root, state_root=settings.state_root)
+    owned = ProducerTransport(worker_settings)
+    delivery = ProducerTransport(settings)
+
+    class RehearsalTransport:
+        spawn_once = owned.spawn_once
+        await_report_once = owned.await_report_once
+        close_once = owned.close_once
+        assistant_once = delivery.assistant_once
+        send_once = delivery.send_once
+        send_receipt_once = delivery.send_receipt_once
+
+    pipeline = Pipeline(replace(settings, host=workers.host), RehearsalTransport())
+    with locked(settings.state_root / "run.lock"):
+        manifest = collect(settings, datetime.now(timezone.utc))
+        required = {"spec_fixture_repeat_a", "spec_fixture_repeat_b", "spec_fixture_serious",
+                    "spec_fixture_fixed", "spec_fixture_owned", "spec_fixture_uncertain"}
+        if {s["id"] for s in manifest["sources"]} != required:
+            raise ValueError("rehearsal must use the six pinned analytical fixtures")
+        try:
+            sol = await pipeline.worker(manifest, "sol")
+            challenge_path = settings.state_root / "runs" / manifest["run_id"] / "challenge.json"
+            challenge = read(challenge_path)
+            if not challenge:
+                draft = json.loads(json.dumps(sol["packet"]))
+                # A declared fixture mutation at the analyst/finalizer seam:
+                # preserve the original report and every source disposition.
+                draft["candidates"] = [c for c in draft["candidates"] if "spec_fixture_serious" not in c["citations"]]
+                for candidate in draft["candidates"]:
+                    if "spec_fixture_repeat_a" in candidate["citations"]:
+                        candidate["consequence"] = "[fixture gap: check original measurable consequence]"
+                challenge = {"sol_original_hash": sol["packet_hash"], "draft": draft,
+                             "scope": "planted shortlist omission and small evidence gap; all dispositions/originals retained"}
+                atomic(challenge_path, challenge)
+            astra = await pipeline.worker(manifest, "astra", challenge["draft"])
+            candidates = astra["packet"]["candidates"]
+            serious = [c for c in candidates if "spec_fixture_serious" in c["citations"]]
+            repeated = [c for c in candidates if {"spec_fixture_repeat_a", "spec_fixture_repeat_b"} <= set(c["citations"])]
+            uncertain = [c for c in candidates if "spec_fixture_uncertain" in c["citations"] and c["uncertainty"]]
+            if not serious or not repeated or not uncertain or any("[fixture gap:" in c["consequence"] for c in repeated):
+                raise RuntimeError("Astra analytical fixture acceptance failed; retain exact reports for QA")
+            await pipeline.deliver(manifest, astra)
+            receipt = {"run_id": manifest["run_id"], "sol_report_id": sol["report"]["report_id"],
+                       "astra_report_id": astra["report"]["report_id"], "challenge_hash": digest(challenge),
+                       "tool_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                       "isolated_url": settings.ws_url, "workers_url": workers.ws_url,
+                       "review": read(settings.state_root / "runs" / manifest["run_id"] / "review.json"),
+                       "scope": "real Sol/Astra; isolated Codex Bart/provider counterpart, synthetic questions excluded"}
+            atomic(Path(evidence_dir) / "rehearsal.json", receipt)
+            return receipt
+        finally:
+            await pipeline.cleanup(manifest)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("collect", "run", "record-review", "decision", "rehearse"):
+        cmd = sub.add_parser(name)
+        cmd.add_argument("--config", required=True)
+        if name == "collect":
+            cmd.add_argument("--now", required=True)
+        elif name == "run":
+            cmd.add_argument("--on-demand", action="store_true")
+        elif name == "record-review":
+            cmd.add_argument("--run-id", required=True)
+            cmd.add_argument("--result", required=True, help="JSON file path")
+        elif name == "decision":
+            cmd.add_argument("--work-id", required=True)
+            cmd.add_argument("--proposal", required=True, help="JSON file path")
+        else:
+            cmd.add_argument("--workers-config", required=True)
+            cmd.add_argument("--evidence-dir", required=True)
+    args = parser.parse_args()
+    settings = Settings.load(args.config)
+    if args.command == "collect":
+        result = collect(settings, datetime.fromisoformat(args.now))
+    elif args.command == "rehearse":
+        result = asyncio.run(rehearse(settings, Settings.load(args.workers_config), args.evidence_dir))
+    else:
+        pipeline = Pipeline(settings, ProducerTransport(settings)) if args.command == "run" else Pipeline(settings)
+        if args.command == "run":
+            result = asyncio.run(pipeline.run(on_demand=args.on_demand))
+        elif args.command == "record-review":
+            result = asyncio.run(pipeline.record_review(args.run_id, read(Path(args.result))))
+        else:
+            result = asyncio.run(pipeline.decision(args.work_id, read(Path(args.proposal))))
+    print(json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
