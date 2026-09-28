@@ -3624,8 +3624,19 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             import store_consent_intents as intents
             if registry is None or not auth:
                 return []
-            with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + ".lock")):
-                credentials = dict(registry.load().credentials)
+            try:
+                with operator_auth.file_lock(registry.path.with_suffix(registry.path.suffix + ".lock")):
+                    credentials = dict(registry.load().credentials)
+            except operator_auth.OperatorRegistryUnavailable:
+                # This optional read surface must not turn registry loss into a
+                # failure of hello or ordinary notifications. Mutation admission
+                # retains its separate registry-required path; never reuse an
+                # earlier credential snapshot to authorize consent projection.
+                now = time.monotonic()
+                if now >= getattr(self, "_consent_projection_warn_after", 0.0):
+                    log.warning("consent projection unavailable: registry unavailable; returning empty set")
+                    self._consent_projection_warn_after = now + 60.0
+                return []
             try:
                 actor = consent.principal(conn, auth, credentials)
             except consent.ConsentError:

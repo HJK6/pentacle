@@ -1730,6 +1730,7 @@ class Server:
             subscribe.get("mode") or "",
         ).lower() != "rpc"
         websocket = msg.get("_client_websocket")
+        consent_ready = True
         if websocket is not None:
             error_code = self._authenticate_operator_hello(websocket, msg)
             if error_code:
@@ -1747,9 +1748,18 @@ class Server:
             self._client_events_mode[websocket] = events_mode
             self._client_assistant_composite_v1[websocket] = self._client_wants_assistant_composite(msg)
             if self.store and self._operator_authenticated(websocket) and self._connection_trust[websocket].client_kind == 'pentacle-mobile':
-                async with self.sessions.assistant.authority_lock:
-                    await self.store.consent_operation('consent.client_support', {'capabilities': msg.get('capabilities', {})},
-                        await self._auth_context(websocket, {}), self.operator_credential_registry, self.sessions.assistant.role)
+                try:
+                    async with self.sessions.assistant.authority_lock:
+                        await self.store.consent_operation('consent.client_support', {'capabilities': msg.get('capabilities', {})},
+                            await self._auth_context(websocket, {}), self.operator_credential_registry, self.sessions.assistant.role)
+                except consent.ConsentError as exc:
+                    if exc.code != "consent_registry_unavailable":
+                        raise
+                    consent_ready = False
+                    now = time.monotonic()
+                    if now >= getattr(self, "_consent_support_warn_after", 0.0):
+                        log.warning("consent capability registration unavailable: registry unavailable")
+                        self._consent_support_warn_after = now + 60.0
         if not snapshot_requested:
             frames = [{
                 "type": "ready", "snapshot": False, "events_mode": events_mode,
@@ -1802,7 +1812,7 @@ class Server:
             "capabilities": {
                 "close_expected_generation": True,
                 **({"consent_enrollment_offer_v1": True, "consent_open_v1": True} if (
-                    self._consent_expiry_task is not None and not self._consent_expiry_task.done()
+                    consent_ready and self._consent_expiry_task is not None and not self._consent_expiry_task.done()
                     and self._operator_authenticated(websocket)
                     and self._connection_trust[websocket].client_kind == "pentacle-mobile"
                     and not (msg.get("_auth_context") or {}).get("token_verified")
