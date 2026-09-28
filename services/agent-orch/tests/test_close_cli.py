@@ -30,6 +30,7 @@ def _close_args(**overrides):
         "caller_stream_id": None,
         "progeny": None,
         "disposition_waived_reason": None,
+        "expected_generation": None,
         "timeout": 5.0,
     }
     data.update(overrides)
@@ -59,6 +60,7 @@ def patched_close(monkeypatch, tmp_path):
         caller_stream_id=None,
         progeny_stream_id=None,
         disposition_waived_reason=None,
+        expected_generation=None,
     ):
         calls.append(
             {
@@ -72,6 +74,7 @@ def patched_close(monkeypatch, tmp_path):
                 "caller_stream_id": caller_stream_id,
                 "progeny_stream_id": progeny_stream_id,
                 "disposition_waived_reason": disposition_waived_reason,
+                "expected_generation": expected_generation,
             }
         )
         if state["raises"] is not None:
@@ -117,6 +120,7 @@ def test_self_close_drives_close_once_with_operator_confirm(patched_close, capsy
     assert call["caller_stream_id"] == "hostb:codex-x"
     assert call["progeny_stream_id"] is None
     assert call["disposition_waived_reason"] is None
+    assert call["expected_generation"] is None
     assert call["reason"] == "manual"
     assert call["timeout"] == 5.0
     assert json.loads(capsys.readouterr().out)["type"] == "close.ok"
@@ -126,6 +130,16 @@ def test_close_passes_disposition_waiver_reason(patched_close):
     rc = cli.close(_close_args(disposition_waived_reason="tracked elsewhere"))
     assert rc == 0
     assert patched_close.calls[0]["disposition_waived_reason"] == "tracked elsewhere"
+
+
+def test_close_parser_forwards_expected_generation(patched_close):
+    args = cli.build_parser().parse_args([
+        "close", "hostb:codex-child", "--reason", "Retire prepared generation",
+        "--expected-generation", "prepared-generation",
+    ])
+    assert cli.close(args) == 0
+    assert patched_close.calls[0]["expected_generation"] == "prepared-generation"
+    assert patched_close.calls[0]["reason"] == "Retire prepared generation"
 
 
 def test_close_already_closed_is_success(patched_close, capsys):

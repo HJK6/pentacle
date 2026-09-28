@@ -3159,6 +3159,7 @@ def close(args: argparse.Namespace) -> int:
                 caller_stream_id=caller_stream_id,
                 progeny_stream_id=getattr(args, "progeny", None),
                 disposition_waived_reason=getattr(args, "disposition_waived_reason", None),
+                expected_generation=getattr(args, "expected_generation", None),
             )
         )
     except ValueError as exc:
@@ -5450,6 +5451,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     close_parser = subparsers.add_parser("close")
     close_parser.add_argument("--reason", default="manual")
+    close_parser.add_argument(
+        "--expected-generation",
+        help="Refuse if the target's current session generation differs from this value.",
+    )
     close_parser.add_argument(
         "--operator-confirm",
         dest="operator_confirm",

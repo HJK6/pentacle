@@ -72,6 +72,7 @@ async def daemon(tmp_path, *, lane_owned=False):
                             return frame
 
             close.lane_rulings = server.lane_rulings
+            close.rpc_url = f"ws://127.0.0.1:{port}"
             yield store, sessions, tmux, close
     finally:
         await server.close()
@@ -170,4 +171,44 @@ def test_lane_stale_generation_refuses_before_ruling_or_kill(tmp_path):
             assert await tmux.has_session("target")
             assert (await store.fetch_session(HOST, "target"))["status"] == "open"
             assert await store.submit(lambda c: c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 0
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("generation", ["stale", "current", "omitted"])
+def test_public_close_cli_fences_reopened_target(tmp_path, monkeypatch, capsys, generation):
+    from agent_orch import cli, wsclient
+    from agent_orch.config import Config
+
+    async def run():
+        async with daemon(tmp_path) as (store, sessions, tmux, close):
+            await tmux.new_session("target", COMMAND)
+            original = await sessions.open(HOST, "target", provider="codex")
+            await store.update_session(HOST, "target", status="closed")
+            await tmux.kill_session("target")
+            await tmux.new_session("target", COMMAND)
+            replacement = await sessions.open(HOST, "target", provider="codex")
+            assert original["session_generation"] != replacement["session_generation"]
+            monkeypatch.setattr(cli, "load_config", lambda: Config(close.rpc_url, "", HOST, tmp_path))
+            monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _: MANAGER)
+            monkeypatch.setattr(wsclient, "_stream_token_from_env", lambda: "fixture-manager-token")
+            monkeypatch.setattr(wsclient, "_stream_token_from_file", lambda *a, **k: "fixture-manager-token")
+            command = ["close", HOST + ":target", "--reason", REASON]
+            if generation != "omitted":
+                expected = original if generation == "stale" else replacement
+                command += ["--expected-generation", expected["session_generation"]]
+            args = cli.build_parser().parse_args(command)
+            # The public handler opens its own authenticated socket; the server
+            # runs on this loop while the synchronous CLI runs in a thread.
+            code = await asyncio.to_thread(cli.close, args)
+            reply = json.loads(capsys.readouterr().out)
+            row = await store.fetch_session(HOST, "target")
+            assert row["session_generation"] == replacement["session_generation"]
+            if generation == "stale":
+                assert code == 1 and reply["error_code"] == "lifecycle_generation_mismatch", reply
+                assert row["status"] == "open" and await tmux.has_session("target")
+                assert not any(r["action"] == "manager_close" and r["result"] == "applied"
+                               for r in await store.lifecycle_authority_audit_rows(limit=20))
+            else:
+                assert code == 0 and reply["type"] == "close.ok", reply
+                assert row["status"] == "closed" and not await tmux.has_session("target")
     asyncio.run(run())

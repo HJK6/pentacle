@@ -59,7 +59,9 @@ the standard `unsupported_in_v2` response.
 
 The current operator-designated lifecycle manager may close an unrelated seat
 without a terminal report by supplying an explicit `--reason`; the CLI supplies
-a request id. The daemon records `manager_close_report_waived` before admission,
+a request id. Use `--expected-generation <saved-generation>` when closing a
+previously prepared target; a replacement generation is refused. The daemon
+records `manager_close_report_waived` before admission,
 with the verified holder and target generations, grant revision and reason, then
 records the close outcome separately. Protected seats, open direct children and
 pending child spawns still refuse; live panes require fresh idle capture.
