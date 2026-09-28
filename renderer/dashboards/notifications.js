@@ -57,6 +57,17 @@ function ensureFiringHistoryDetails(container, notifications) {
   }
 }
 
+function ensureConsentSecurityActions(container, notifications) {
+  if (!container || !Array.isArray(notifications)) return;
+  for (const notification of notifications) {
+    if (notification?.producer !== 'consent.security.v1' || !notification.offer_id) continue;
+    const row=Array.from(container.querySelectorAll('.notification-row')).find(item=>item.dataset.notificationId===notification.notification_id);
+    if (!row || row.querySelector('[data-role="consent-security-review"]')) continue;
+    const button=document.createElement('button');button.dataset.role='consent-security-review';button.textContent='Review setup / host recovery';
+    button.addEventListener('click',()=>window.showApprovalKeyOffer?.(notification.offer_id));row.appendChild(button);
+  }
+}
+
 function mount(container) {
   const TD = sharedBoard();
   let refs;
@@ -80,6 +91,7 @@ function update(refs, data) {
   if (TD && refs && !refs.__fallback) {
     TD.updateBoard(refs, TD.boards.notifications, data);
     ensureFiringHistoryDetails(refs.__pentacleNotificationContainer || refs.container, data && data.notifications);
+    ensureConsentSecurityActions(refs.__pentacleNotificationContainer || refs.container, data && data.notifications);
   }
 }
 

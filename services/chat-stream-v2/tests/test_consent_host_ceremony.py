@@ -187,7 +187,7 @@ async def _ceremony(root: Path):
             sockets.append(ws)
             welcome = json.loads(await ws.recv())
             assert welcome['type'] == 'welcome'  # No readiness before current hello/snapshot.
-            hello = {'type': 'hello', 'client': kind or 'agent-orch'}
+            hello = {'type': 'hello', 'client': kind or 'agent-orch', 'capabilities': {'consent_enrollment_offer_v1': True, 'consent_open_v1': True}}
             if credential:
                 record = registry.load().credentials[credential]
                 proof = operator_auth.make_proof(operator_auth.decode_b64url(record['proof_key']),
@@ -215,101 +215,84 @@ async def _ceremony(root: Path):
             assert result.get('error_code') == code, f'admission: expected {code}, got {result.get("error_code")}'
 
         phone, snapshot = await socket('pentacle-mobile', cid)
-        assert snapshot['capabilities']['consent_enrollment_v1'] is True
+        assert snapshot['capabilities']['consent_enrollment_offer_v1'] is True
         web, snapshot = await socket('pentacle', web_cid)
-        assert 'consent_enrollment_v1' not in snapshot['capabilities']
+        assert 'consent_enrollment_offer_v1' not in snapshot['capabilities']
         seat_ws, snapshot = await socket(seat_auth=True)
-        assert 'consent_enrollment_v1' not in snapshot['capabilities']
+        assert 'consent_enrollment_offer_v1' not in snapshot['capabilities']
         local_ws, snapshot = await socket()
-        assert 'consent_enrollment_v1' not in snapshot['capabilities']
+        assert 'consent_enrollment_offer_v1' not in snapshot['capabilities']
 
-        code = (await cli('consent-key', 'enroll-code'))['code']
-        for ws in (web, seat_ws, local_ws):
-            for verb in ('consent_key.prepare', 'consent_key.enroll'):
-                error(await rpc(ws, verb, code=code, local_admin_token=local_admin.read()),
-                      'consent_principal_invalid' if ws is local_ws else 'consent_mobile_required')
-        cells.append('web/seat/local-admin refused mobile enrollment')
-        for condition in ('expired', 'wrong-purpose'):
-            invalid_code = (await cli('consent-key', 'enroll-code'))['code']
-            digest = hashlib.sha256(invalid_code.encode()).hexdigest()
-            def invalidate(conn):
-                column, value = ('expires_at', 0) if condition == 'expired' else ('purpose', 'other')
-                conn.execute(f'UPDATE v2_consent_enrollment_codes SET {column}=? WHERE code_hash=?', (value, digest))
-                conn.commit()
-            await store.submit(invalidate)
-            for verb in ('consent_key.prepare', 'consent_key.enroll'):
-                error(await rpc(phone, verb, code=invalid_code), 'enrollment_code_invalid')
-        cells.append('expired/wrong-purpose codes refused')
-
-        async def enroll(enrollment_code):
-            private = ec.generate_private_key(ec.SECP256R1())
-            spki = consent.encode(private.public_key().public_bytes(serialization.Encoding.DER,
-                                                                   serialization.PublicFormat.SubjectPublicKeyInfo))
-            prepared = await rpc(phone, 'consent_key.prepare', code=enrollment_code)
-            signature = consent.encode(private.sign(consent.enrollment_bytes(prepared['code_hash'], cid,
-                spki, prepared['nonce']), ec.ECDSA(hashes.SHA256())))
-            key = await rpc(phone, 'consent_key.enroll', code=enrollment_code, spki=spki, signature=signature)
-            assert key['state'] == 'pending_confirm'
-            return private, key
-
-        private, key = await enroll(code)
-        error(await rpc(phone, 'consent_key.prepare', code=code), 'enrollment_code_used')
-        pending = await cli('consent', 'request', 'designate', '--target', 'node-a:bart', '--reason', 'Isolated ceremony',
-                            seat_auth=True, expected=1)
-        error(pending, 'consent_no_active_key')
-        error(await cli('consent-key', 'confirm', '0' * 64, expected=1), 'consent_fingerprint_unknown')
-        assert (await cli('consent-key', 'list'))['keys'][0]['state'] == 'pending_confirm'
-        assert (await cli('consent-key', 'confirm', key['fingerprint']))['state'] == 'active'
-        cells.append('one-use/pending-unusable/phone-fingerprint confirm')
-
-        new_private, replacement = await enroll((await cli('consent-key', 'enroll-code'))['code'])
-        states = {k['key_id']: k['state'] for k in (await cli('consent-key', 'list'))['keys']}
-        assert states[key['key_id']] == 'active' and states[replacement['key_id']] == 'pending_confirm'
-        challenge = (await cli('consent', 'request', 'designate', '--target', 'node-a:bart', '--reason',
-                               'Exact disposable target', seat_auth=True))['challenge']
-        assert challenge['audience_key_ids'] == [key['key_id']]
-
-        async def approve(ch, signing_key, enrolled):
-            signature = consent.encode(signing_key.sign(consent.decode(ch['challenge_bytes']), ec.ECDSA(hashes.SHA256())))
-            result = await rpc(phone, 'consent.approve', challenge_id=ch['challenge_id'], key_id=enrolled['key_id'],
-                               signature=signature)
-            assert result['receipt']['consent_id'] == ch['challenge_id']
+        for ws in (phone, web, seat_ws, local_ws):
+            for verb in ('consent_key.enroll_code', 'consent_key.prepare', 'consent_key.enroll', 'consent_key.confirm'):
+                refused = await rpc(ws, verb, local_admin_token=local_admin.read())
+                assert refused.get('type') in {'error', verb + '.error'}
+                assert refused.get('error_code') in {'unsupported_in_v2'}
+        cells.append('retired bootstrap unsupported on every transport')
+        for ws in (phone, seat_ws):
+            error(await rpc(ws,'consent_key.offer',credential_id=cid,offer_request_id='wrong-issuer'), 'consent_host_operator_required')
+        offer=(await cli('consent-key','offer','--credential',cid))['offer']
+        assert not offer.get('nonce') and not offer.get('challenge_id')
+        error(await rpc(web,'consent_key.status',offer_id=offer['offer_id']), 'consent_mobile_required')
+        error(await rpc(seat_ws,'consent_key.decline',offer_id=offer['offer_id']), 'consent_mobile_required')
+        async def accept(offer):
+            private=ec.generate_private_key(ec.SECP256R1())
+            spki=consent.encode(private.public_key().public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo))
+            opened=(await rpc(phone,'consent_key.open',offer_id=offer['offer_id']))['offer']
+            signature=consent.encode(private.sign(consent.offer_bytes(opened,spki),ec.ECDSA(hashes.SHA256())))
+            fields=dict(offer_id=offer['offer_id'],challenge_id=opened['challenge_id'],spki=spki,signature=signature)
+            result=await rpc(phone,'consent_key.accept',**fields)
+            assert result['offer']['key_state']=='active'
+            assert (await rpc(phone,'consent_key.accept',**fields))['replayed']
+            keys=(await cli('consent-key','list'))['keys']
+            key=next(k for k in keys if k['key_id']==result['receipt']['key_id'])
+            return private,key
+        private,key=await accept(offer)
+        assert (await env.grant())['revision']==0
+        replacement_offer=(await rpc(web,'consent_key.offer',credential_id=cid,offer_request_id='web-replacement'))['offer']
+        assert replacement_offer['expected_prior_key_id']==key['key_id']
+        states={k['key_id']:k['state'] for k in (await cli('consent-key','list'))['keys']}
+        assert states[key['key_id']]=='active'
+        intent=(await cli('consent','request','designate','--target','node-a:bart','--reason','Exact disposable target',seat_auth=True))['intent']
+        assert not intent.get('challenge_bytes') and not intent.get('audience_key_ids')
+        async def open_request(intent,key):
+            return (await rpc(phone,'consent.open',intent_id=intent['request_id'],key_id=key['key_id']))['challenge']
+        async def approve(ch,signing_key,enrolled):
+            signature=consent.encode(signing_key.sign(consent.decode(ch['challenge_bytes']),ec.ECDSA(hashes.SHA256())))
+            result=await rpc(phone,'consent.approve',challenge_id=ch['challenge_id'],key_id=enrolled['key_id'],signature=signature)
+            assert result['receipt']['consent_id']==ch['challenge_id']
             return result
-
-        error(await rpc(phone, 'consent.approve', challenge_id=challenge['challenge_id'],
-                        key_id=replacement['key_id'], signature=consent.encode(b'invalid')), 'consent_key_invalid')
-        assert (await approve(challenge, private, key))['receipt']['revision'] == 1
-        assert (await cli('consent', 'status', challenge['challenge_id'], seat_auth=True))['challenge']['state'] == 'approved'
-        await cli('consent-key', 'confirm', replacement['fingerprint'])
-        states = {k['key_id']: k['state'] for k in (await cli('consent-key', 'list'))['keys']}
-        assert states[key['key_id']] == 'retired' and states[replacement['key_id']] == 'active'
-        cells.append('prior key approves until replacement confirmed')
-        revoke = (await cli('consent', 'request', 'revoke', '--reason', 'Consent reduction', seat_auth=True))['challenge']
-        assert (await approve(revoke, new_private, replacement))['receipt']['revision'] == 2
+        challenge=await open_request(intent,key)
+        assert (await approve(challenge,private,key))['receipt']['revision']==1
+        assert (await cli('consent','status',intent['request_id'],seat_auth=True))['intent']['state']=='approved'
+        new_private,replacement=await accept(replacement_offer)
+        states={k['key_id']:k['state'] for k in (await cli('consent-key','list'))['keys']}
+        assert states[key['key_id']]=='retired' and states[replacement['key_id']]=='active'
+        cells.append('host/web offer; explicit open; atomic activation; old key preserved until acceptance; exact retry')
+        revoke=(await cli('consent','request','revoke','--reason','Consent reduction',seat_auth=True))['intent']
+        assert (await approve(await open_request(revoke,replacement),new_private,replacement))['receipt']['revision']==2
         assert (await env.grant())['stream_id'] is None
-        cells.append('synthetic-signature designate and normal revoke')
-        cancelled = (await cli('consent', 'request', 'designate', '--target', 'node-a:bart', '--reason',
-                               'Cancel rehearsal', seat_auth=True))['challenge']
-        error(await cli('consent', 'deny', cancelled['challenge_id'], seat_auth=True, expected=1), 'consent_audience_required')
-        assert (await cli('consent', 'cancel', cancelled['challenge_id'], seat_auth=True))['challenge']['state'] == 'cancelled'
-        cells.append('CLI status/cancel and seat deny refusal')
+        cancelled=(await cli('consent','request','designate','--target','node-a:bart','--reason','Cancel rehearsal',seat_auth=True))['intent']
+        error(await cli('consent','deny',cancelled['request_id'],seat_auth=True,expected=1),'consent_mobile_required')
+        assert (await cli('consent','cancel',cancelled['request_id'],seat_auth=True))['intent']['state']=='cancelled'
+        cells.append('real CLI status/cancel; seat deny refusal; synthetic-signature normal designate/revoke')
 
         await phone.close()
         phone, snapshot = await socket('pentacle-mobile', cid)
-        assert snapshot['capabilities']['consent_enrollment_v1'] is True
+        assert snapshot['capabilities']['consent_enrollment_offer_v1'] is True
         old_host = Server(store=store, sessions=sessions, local_host='other-host', port=0)
         await old_host.bind()
         servers.append(old_host)
         switched, snapshot = await socket('pentacle-mobile', cid, target=f'ws://127.0.0.1:{old_host.port}')
-        assert 'consent_enrollment_v1' not in snapshot['capabilities']
+        assert 'consent_enrollment_offer_v1' not in snapshot['capabilities']
         await switched.close()
         reconnected, snapshot = await socket('pentacle-mobile', cid)
-        assert snapshot['capabilities']['consent_enrollment_v1'] is True
+        assert snapshot['capabilities']['consent_enrollment_offer_v1'] is True
         cells.append('disconnect/reconnect/host switch fresh snapshots')
 
         designation = (await cli('consent', 'request', 'designate', '--target', 'node-a:bart', '--reason',
-                                  'Emergency reducing proof', seat_auth=True))['challenge']
-        await approve(designation, new_private, replacement)
+                                  'Emergency reducing proof', seat_auth=True))['intent']
+        await approve(await open_request(designation,replacement), new_private, replacement)
         emergency = dict(action='revoke', emergency=True, expected_revision=3, reason='Disposable lost phone')
         error(await rpc(phone, 'assistant.lifecycle', **emergency), 'emergency_local_only')
         error(await rpc(phone, 'assistant.lifecycle', **emergency, local_admin_token='0' * 64), 'emergency_local_only')

@@ -5617,17 +5617,17 @@ async function changeLifecycleAuthority(action, name, hostId) {
     showToast(result?.error || 'Fleet lifecycle authority change failed', { type: 'error' });
     return;
   }
-  const challenge = result?.challenge;
-  if (!challenge || result?.code !== 'consent_pending') {
+  const intent = result?.intent;
+  if (!intent || result?.code !== 'consent_pending') {
     showToast('Phone approval is required; no authority was changed.', { type: 'error' });
     return;
   }
-  showToast('Pending approval on phone. Open Pentacle on the paired iPhone.');
-  while (Date.now() < Number(challenge.expires_at) * 1000 + 2000) {
+  showToast('Pending approval on phone. Open the approval notification.');
+  while (Date.now() < Number(intent.expires_at) * 1000 + 2000) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
-    const status = await window.cc.chatLifecycleAuthority({action: 'consent-status', challengeId: challenge.challenge_id});
+    const status = await window.cc.chatLifecycleAuthority({action: 'consent-status', requestId: intent.request_id});
     if (!status?.ok) { showToast('Approval status unavailable. Check the phone.', {type: 'error'}); return; }
-    const state = status?.challenge?.state;
+    const state = status?.intent?.state;
     if (state === 'pending') continue;
     showToast(state === 'approved' ? 'Phone approval applied.' : `Phone approval ${state || 'ended'}.`);
     return;
@@ -7864,4 +7864,74 @@ CFG_READY.then((cfg) => {
     const section = document.getElementById('mic-section');
     if (section) section.style.display = 'none';
   }
+});
+
+
+// Host progress reads never open a signing challenge or authorize a key.
+async function showApprovalKeyOffer(offerId) {
+  const overlay=document.createElement('div');overlay.className='modal-overlay';
+  const panel=document.createElement('div');panel.className='modal';
+  const title=document.createElement('h3');title.textContent='Approval key setup';
+  const status=document.createElement('p');status.textContent='Reading setup status…';
+  const delivery=document.createElement('p');
+  const cancel=document.createElement('button');cancel.className='sb-btn';cancel.textContent='Cancel pending setup';cancel.hidden=true;
+  const recovery=document.createElement('button');recovery.className='sb-btn';recovery.textContent='Copy host revoke command';recovery.hidden=true;
+  const close=document.createElement('button');close.className='sb-btn';close.textContent='Close';
+  panel.append(title,status,delivery,cancel,recovery,close);overlay.append(panel);document.body.append(overlay);
+  let timer=null,live=true,receipt=null;
+  close.addEventListener('click',()=>{live=false;if(timer)clearTimeout(timer);overlay.remove();});
+  recovery.addEventListener('click',async()=>{
+    if(!receipt?.spki_hash)return;
+    try {await navigator.clipboard.writeText(`agent-orch consent-key revoke ${receipt.spki_hash}`);showToast('Run the copied recovery command on this daemon host.');}
+    catch(_error){showToast('Use consent-key list and revoke from the daemon-host shell.',{type:'error'});}
+  });
+  cancel.addEventListener('click',async()=>{
+    cancel.disabled=true;
+    const result=await window.cc.chatConsentKey({action:'cancel',offerId});
+    if(!result?.ok)showToast(result?.error||'Could not cancel setup',{type:'error'});
+    cancel.disabled=false;await refresh();
+  });
+  async function refresh(){
+    if(!live)return;
+    if(timer){clearTimeout(timer);timer=null;}
+    const result=await window.cc.chatConsentKey({action:'host_status',offerId});
+    if(!live)return;
+    if(!result?.ok){status.textContent=result?.error||'Setup status unavailable.';cancel.hidden=true;return;}
+    const offer=result.offer;receipt=result.receipt;
+    status.textContent=`${offer.label} · ${offer.credential_id} · ${offer.state}${offer.key_state?` · key ${offer.key_state}`:''}`;
+    delivery.textContent=(result.delivery||[]).map(item=>`OS push: ${item.state}${item.reason?` (${item.reason})`:''}`).join('; ')||'OS push status unavailable.';
+    cancel.hidden=offer.state!=='pending';recovery.hidden=!receipt?.spki_hash;
+    if(offer.state==='pending')timer=setTimeout(refresh,2000);
+  }
+  await refresh();return overlay;
+}
+window.showApprovalKeyOffer=showApprovalKeyOffer;
+
+// Setup is an explicit host action; the daemon authorizes issuer and target afresh.
+document.getElementById('approval-key-setup')?.addEventListener('click', async () => {
+  const result=await window.cc.chatConsentKey({action:'devices'});
+  if(!result?.ok){showToast(result?.error||'Could not read phones',{type:'error'});return;}
+  const devices=result.devices||[];
+  const overlay=document.createElement('div');overlay.className='modal-overlay';
+  const panel=document.createElement('div');panel.className='modal';
+  const title=document.createElement('h3');title.textContent='Choose a phone for Approval key setup';panel.append(title);
+  for(const device of devices){
+    const button=document.createElement('button');button.className='sb-btn';
+    button.textContent=`${device.label} · ${device.credential_id} · ${device.online?'online':'offline'}${device.supported?'':' · update required'}`;
+    button.disabled=!device.supported;
+    button.addEventListener('click',async()=>{
+      button.disabled=true;
+      const offered=await window.cc.chatConsentKey({action:'offer',credentialId:device.credential_id});
+      showToast(offered?.ok?'Setup requested on the selected phone.':offered?.error||'Setup unavailable',{type:offered?.ok?'info':'error'});
+      if(offered?.ok){
+        void showApprovalKeyOffer(offered.offer.offer_id);
+        const degraded=(offered.delivery||[]).some(r=>r.state==='unavailable'||r.state==='failed');
+        if(degraded)showToast('OS push unavailable. Check host push configuration.',{type:'error'});
+      }
+      overlay.remove();
+    });panel.append(button);
+  }
+  if(!devices.length){const text=document.createElement('p');text.textContent='No signed-in mobile credentials.';panel.append(text);}
+  const close=document.createElement('button');close.className='sb-btn';close.textContent='Cancel';close.addEventListener('click',()=>overlay.remove());panel.append(close);
+  overlay.append(panel);document.body.append(overlay);
 });

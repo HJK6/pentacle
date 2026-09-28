@@ -388,6 +388,7 @@ class Server:
         self._detached_send_tasks: set[asyncio.Task] = set()
         self._client_queue_warned: set[Any] = set()
         self._client_identities: dict[Any, str] = {}
+        self._consent_sent: dict[Any, dict[str, str]] = {}
         # Per-client hello.subscribe state drives projection of broadcasts and
         # snapshot/list/history reads. Defaults are top-level-only.
         self._client_include_subagents: dict[Any, bool] = {}
@@ -466,8 +467,8 @@ class Server:
             "status_card": self._on_status_card,
             "spawn": self._on_spawn,
             "assistant.lifecycle": self._on_assistant_lifecycle,
-            **{f"consent.{verb}": self._on_consent for verb in ("request", "approve", "deny", "cancel", "status")},
-            **{f"consent_key.{verb}": self._on_consent for verb in ("enroll_code", "prepare", "enroll", "confirm", "revoke", "list")},
+            **{f"consent.{verb}": self._on_consent for verb in ("request", "open", "approve", "deny", "cancel", "status", "push_register", "push_unregister")},
+            **{f"consent_key.{verb}": self._on_consent for verb in ("offer", "devices", "open", "accept", "status", "host_status", "decline", "cancel", "revoke", "list")},
             **{f"coordination.spec_issue.{verb}": self._on_qa_issue for verb in ("adjudicate", "diagnose", "show")},
             "await_spawn": self._on_await_spawn,
             "spawn_cancel": self._on_spawn_cancel,
@@ -729,6 +730,9 @@ class Server:
     async def broadcast(self, frame: dict[str, Any]) -> None:
         """Project a top-level frame for each connected client before enqueue."""
         frame_type = str(frame.get("type") or "")
+        if frame_type == 'notification' and str((frame.get('notification') or {}).get('producer') or '').startswith('consent.'):
+            await self._publish_consent()
+            return
         recipients = self._host_stats_clients if frame_type == "hosts.stats" else self._clients
         if not recipients:
             return
@@ -810,6 +814,7 @@ class Server:
         self._clients.discard(websocket)
         self._client_queue_warned.discard(websocket)
         self._client_identities.pop(websocket, None)
+        self._consent_sent.pop(websocket, None)
         self._client_include_subagents.pop(websocket, None)
         self._client_opened_by_host_ids.pop(websocket, None)
         self._client_exclude_event_types.pop(websocket, None)
@@ -1616,6 +1621,8 @@ class Server:
         exclude_event_types = self._client_exclude_event_types.get(websocket, frozenset())
         if frame_type in exclude_event_types:
             return None
+        if frame_type == 'notification' and str((payload.get('notification') or {}).get('producer') or '').startswith('consent.'):
+            return None
         # Schedules expose prompt previews and lineage. Registration in the
         # broadcast set happens before hello, so recipient eligibility must be
         # connection-bound and fail closed here rather than inferred from the
@@ -1739,6 +1746,10 @@ class Server:
             self._client_exclude_event_types[websocket] = exclude_event_types
             self._client_events_mode[websocket] = events_mode
             self._client_assistant_composite_v1[websocket] = self._client_wants_assistant_composite(msg)
+            if self.store and self._operator_authenticated(websocket) and self._connection_trust[websocket].client_kind == 'pentacle-mobile':
+                async with self.sessions.assistant.authority_lock:
+                    await self.store.consent_operation('consent.client_support', {'capabilities': msg.get('capabilities', {})},
+                        await self._auth_context(websocket, {}), self.operator_credential_registry, self.sessions.assistant.role)
         if not snapshot_requested:
             frames = [{
                 "type": "ready", "snapshot": False, "events_mode": events_mode,
@@ -1784,12 +1795,13 @@ class Server:
         snapshot: dict[str, Any] = {
             "type": "snapshot",
             "events_mode": events_mode,
+            "consent_host_id": self.local_host,
             # A client must not infer this from a version stamp: it needs an
             # explicit wire guarantee before it can safely close a same-name
             # target after a reconnect. Old daemons simply omit this field.
             "capabilities": {
                 "close_expected_generation": True,
-                **({"consent_enrollment_v1": True} if (
+                **({"consent_enrollment_offer_v1": True, "consent_open_v1": True} if (
                     self._consent_expiry_task is not None and not self._consent_expiry_task.done()
                     and self._operator_authenticated(websocket)
                     and self._connection_trust[websocket].client_kind == "pentacle-mobile"
@@ -1802,7 +1814,7 @@ class Server:
             "notifications": (await self.notify.snapshot_notifications(
                 summary=(events_mode == "summary"),
             ) if self.notify else []) + (
-                await self.store.consent_notifications() if self.store else []
+                await self._consent_notifications_for_msg(msg) if self.store else []
             ),
             "updates": [],
             "hosts": hosts,
@@ -2935,6 +2947,10 @@ class Server:
     async def _on_consent(self, msg: dict[str, Any]) -> dict[str, Any]:
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         verb = str(msg.get("type") or "")
+        msg = {**msg, "_daemon_host": self.local_host,
+            '_online_mobile_credentials': [trust.credential_id for peer,trust in self._connection_trust.items()
+                if trust.client_kind == 'pentacle-mobile' and self._operator_authenticated(peer)
+                and self._client_identities.get(peer) == 'pentacle-mobile'] }
         async def finish() -> dict[str, Any]:
             if verb == "consent.approve":
                 result = await self.store.consent_approve_and_mutate(
@@ -2942,8 +2958,11 @@ class Server:
             else:
                 result = await self.store.consent_operation(
                     verb, msg, auth, self.operator_credential_registry, self.sessions.assistant.role)
-            if result.get("challenge"):
-                await self.broadcast({"type": "notification", "notification": consent.notification(result["challenge"])})
+            if result.get('intent') or result.get('offer'):
+                await self._publish_consent()
+            if auth.get('connection_client') != 'pentacle-mobile' or auth.get('token_verified'):
+                if result.get('intent'): result['intent'].pop('audience_key_ids', None)
+                result.pop('challenge', None)
             return {"type": f"{verb}.ok", **result}
         try:
             async with self.sessions.assistant.authority_lock:
@@ -2951,7 +2970,30 @@ class Server:
                 # not release authority_lock while its worker can still commit.
                 return await _finish_despite_cancel(finish())
         except (consent.ConsentError, lifecycle_authority.AuthorityError) as exc:
+            if getattr(exc, 'security_notice', None): await self._publish_consent()
             raise VerbError(exc.code, str(exc)) from exc
+
+    async def _consent_notifications_for_msg(self, msg):
+        websocket = msg.get('_client_websocket')
+        auth = await self._auth_context(websocket, {}) if websocket is not None else msg.get('_auth_context', {})
+        return await self.store.consent_notifications(auth, self.operator_credential_registry)
+
+    async def _publish_consent(self):
+        for websocket in tuple(self._clients):
+            if 'notification' in self._client_exclude_event_types.get(websocket, ()):
+                continue
+            records = await self._consent_notifications_for_msg({'_client_websocket': websocket})
+            sent = self._consent_sent.setdefault(websocket, {})
+            present = {record['notification_id'] for record in records}
+            for stale in set(sent) - present:
+                sent.pop(stale, None)
+            for record in records:
+                identity = record['notification_id']
+                digest = json.dumps(record, sort_keys=True, separators=(',', ':'))
+                if sent.get(identity) != digest:
+                    self._enqueue(websocket, 'notification', _encode_frame({'type': 'notification', 'notification': record}))
+                    sent[identity] = digest
+        await asyncio.sleep(0)
 
     async def start_consent(self) -> asyncio.Task:
         """Advertise enrollment only after every consent startup dependency works."""
@@ -2966,9 +3008,16 @@ class Server:
             await asyncio.sleep(1)
             try:
                 async with self.sessions.assistant.authority_lock:
-                    expired = await _finish_despite_cancel(self.store.consent_expire(self.operator_credential_registry))
-                for record in expired:
-                    await self.broadcast({"type": "notification", "notification": record})
+                    expired = await _finish_despite_cancel(self.store.consent_expire(self.operator_credential_registry, self.sessions.assistant.role))
+                if expired:
+                    await self._publish_consent()
+                # Transport occurs outside authority_lock; no remote I/O holds admission.
+                async with self.sessions.assistant.authority_lock:
+                    jobs = await _finish_despite_cancel(self.store.consent_push_due(self.operator_credential_registry, self.sessions.assistant.role))
+                import consent_push
+                for job in jobs:
+                    outcome = await consent_push.send(job)
+                    await self.store.consent_push_finish(job, outcome)
             except Exception:
                 log.exception("consent expiry failed", extra={"subsystem": "consent", "bug_ref": "mobile_faceid_privileged_consent_2026_09"})
 

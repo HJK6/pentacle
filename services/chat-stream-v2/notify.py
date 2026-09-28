@@ -436,6 +436,8 @@ class Notify:
         records = await self._db.call("list_notifications", states=["open"], limit=limit)
         serialized: list[dict[str, Any]] = []
         for record in records:
+            if str(record.get('producer') or '').startswith('consent.'):
+                continue  # Consent authority is only the credential-projected Store.
             # Do not expose an open question whose asker is gone/replaced; the
             # close hook and background sweep expire it durably out of band.
             if self._sessions is not None and record.get("producer") == "agent_question.v1":
@@ -1207,6 +1209,8 @@ class Notify:
             return self._notif_error(request_id, "notification_store_error", message=str(exc))
 
     async def _notif_create(self, msg: dict, request_id: str) -> dict:
+        if str(msg.get('producer') or '').startswith('consent.'):
+            return self._notif_error(request_id, 'notification_invalid', message='consent producers are reserved')
         # v2 removes investigation routing (spec constraint 3): a warning/critical
         # notification is stored + surfaced, never diverted to a spawner.
         record = await self._db.call(
@@ -1266,10 +1270,10 @@ class Notify:
             records = []
             for nid in dict.fromkeys(ids):
                 record = await self._db.call('get_notification', nid)
-                if record is not None:
+                if record is not None and not str(record.get('producer') or '').startswith('consent.'):
                     records.append(await self._serialize(record))
             if getattr(self, 'consent_snapshot', None):
-                records.extend(r for r in await self.consent_snapshot() if r['notification_id'] in ids)
+                records.extend(r for r in await self.consent_snapshot(msg) if r['notification_id'] in ids)
             return {'type': 'notification.list.ok', 'request_id': request_id, 'notifications': records}
         states = msg.get("states") if isinstance(msg.get("states"), list) else None
         raw_limit = msg.get("limit")
@@ -1281,9 +1285,9 @@ class Notify:
         limit = (int(raw_limit) if isinstance(raw_limit, int) and not isinstance(raw_limit, bool)
                  else DEFAULT_NOTIFICATION_LIST_LIMIT)
         records = [await self._serialize(r)
-                   for r in await self._db.call("list_notifications", states=states, limit=limit)]
+                   for r in await self._db.call("list_notifications", states=states, limit=limit) if not str(r.get("producer") or "").startswith("consent.")]
         if getattr(self, 'consent_snapshot', None) and limit > 0:
-            consent_records = [r for r in await self.consent_snapshot() if not states or r['state'] in states]
+            consent_records = [r for r in await self.consent_snapshot(msg) if not states or r['state'] in states]
             records = (consent_records + records)[:limit]
         return {"type": "notification.list.ok", "request_id": request_id, "notifications": records}
 

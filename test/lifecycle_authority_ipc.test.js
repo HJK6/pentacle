@@ -18,11 +18,11 @@ function withFakeDaemon(replies, fn) {
 
 test('designate binds the freshly read target generation and grant revision', () => withFakeDaemon([
   { type: 'assistant.lifecycle.ok', grant: { revision: 3 }, target: { session_generation: 'g-7', eligible: true } },
-  { type: 'assistant.lifecycle.ok', code: 'consent_pending', challenge: { challenge_id: 'designation-approval' } },
+  { type: 'assistant.lifecycle.ok', code: 'consent_pending', intent: { request_id: 'designation-approval' } },
 ], async (sent) => {
   const reply = await chatStreamClient.lifecycleAuthority({ action: 'designate', targetStreamId: 'node-a:v2-a', reason: 'why' });
   assert.equal(reply.code, 'consent_pending');
-  assert.equal(reply.challenge.challenge_id, 'designation-approval');
+  assert.equal(reply.intent.request_id, 'designation-approval');
   assert.deepEqual(sent[0].payload, { type: 'assistant.lifecycle', action: 'inspect', target_stream_id: 'node-a:v2-a' });
   assert.deepEqual(sent[1].payload, {
     type: 'assistant.lifecycle', action: 'designate', reason: 'why', expected_revision: 3,
@@ -36,23 +36,23 @@ test('designate binds the freshly read target generation and grant revision', ()
 
 test('revoke sends no target and inspect-only stops after the read', () => withFakeDaemon([
   { type: 'assistant.lifecycle.ok', grant: { revision: 5, stream_id: 'node-a:v2-a' } },
-  { type: 'assistant.lifecycle.ok', code: 'consent_pending', challenge: { challenge_id: 'revocation-approval' } },
+  { type: 'assistant.lifecycle.ok', code: 'consent_pending', intent: { request_id: 'revocation-approval' } },
   { type: 'assistant.lifecycle.ok', grant: { revision: 5 } },
 ], async (sent) => {
   const reply = await chatStreamClient.lifecycleAuthority({ action: 'revoke', reason: 'stop' });
   assert.equal(reply.code, 'consent_pending');
-  assert.equal(reply.challenge.challenge_id, 'revocation-approval');
+  assert.equal(reply.intent.request_id, 'revocation-approval');
   assert.deepEqual(sent[1].payload, { type: 'assistant.lifecycle', action: 'revoke', reason: 'stop', expected_revision: 5 });
   await chatStreamClient.lifecycleAuthority({ action: 'inspect' });
   assert.equal(sent.length, 3);
 }));
 
-test('consent status reads the requested challenge without a lifecycle mutation', () => withFakeDaemon([
-  { type: 'consent.status.ok', challenge: { challenge_id: 'approval', state: 'approved' } },
+test('consent status reads the requested intent without a lifecycle mutation', () => withFakeDaemon([
+  { type: 'consent.status.ok', intent: { request_id: 'approval', state: 'approved' } },
 ], async (sent) => {
-  const reply = await chatStreamClient.lifecycleAuthority({ action: 'consent-status', challengeId: 'approval' });
-  assert.equal(reply.challenge.state, 'approved');
-  assert.deepEqual(sent[0].payload, { type: 'consent.status', challenge_id: 'approval' });
+  const reply = await chatStreamClient.lifecycleAuthority({ action: 'consent-status', requestId: 'approval' });
+  assert.equal(reply.intent.state, 'approved');
+  assert.deepEqual(sent[0].payload, { type: 'consent.status', intent_id: 'approval' });
   assert.equal(sent.length, 1);
 }));
 
@@ -64,7 +64,7 @@ assert.ok(rendererStart >= 0 && rendererEnd > rendererStart);
 async function rendererApproval({ action = 'designate', statuses = [], result, confirmed = true } = {}) {
   const calls = [], toasts = [], confirmations = [];
   let now = 1000;
-  const pending = { ok: true, code: 'consent_pending', challenge: { challenge_id: 'approval', expires_at: 10 } };
+  const pending = { ok: true, code: 'consent_pending', intent: { request_id: 'approval', expires_at: 10 } };
   const context = vm.createContext({
     IS_CLIENT: true,
     chatSessionStateForNameHost: () => ({ stream_id: 'node-a:manager' }),
@@ -78,7 +78,7 @@ async function rendererApproval({ action = 'designate', statuses = [], result, c
         if (payload.action === 'inspect') return { ok: true, grant: { stream_id: 'node-a:prior' }, target: { eligible: true, session_generation: 'G1' } };
         if (payload.action === 'consent-status') {
           assert.equal(toasts.some(t => t.message === 'Phone approval applied.'), false);
-          return statuses.shift() || { ok: true, challenge: { state: 'pending' } };
+          return statuses.shift() || { ok: true, intent: { state: 'pending' } };
         }
         return result || pending;
       } },
@@ -91,15 +91,15 @@ async function rendererApproval({ action = 'designate', statuses = [], result, c
 
 for (const action of ['designate', 'revoke']) {
   for (const state of ['approved', 'denied', 'expired']) {
-    test(`renderer pending approval polls the real challenge status: ${action}/${state}`, async () => {
+    test(`renderer pending approval polls the durable intent status: ${action}/${state}`, async () => {
       const flow = await rendererApproval({ action, statuses: [
-        { ok: true, challenge: { state: 'pending' } }, { ok: true, challenge: { state } },
+        { ok: true, intent: { state: 'pending' } }, { ok: true, intent: { state } },
       ] });
       assert.equal(flow.confirmations[0].options.confirmLabel, 'Request approval on phone');
       assert.equal(flow.calls[1].action, action);
       assert.deepEqual(flow.calls.slice(2), [
-        { action: 'consent-status', challengeId: 'approval' },
-        { action: 'consent-status', challengeId: 'approval' },
+        { action: 'consent-status', requestId: 'approval' },
+        { action: 'consent-status', requestId: 'approval' },
       ]);
       assert.match(flow.toasts[0].message, /^Pending approval on phone/);
       assert.equal(flow.toasts.at(-1).message, state === 'approved' ? 'Phone approval applied.' : `Phone approval ${state}.`);

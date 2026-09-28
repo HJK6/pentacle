@@ -758,13 +758,21 @@ try {
     return this.sendCommand(payload, 'close');
   }
 
+  consentKey({action, credentialId, requestId, offerId} = {}) {
+    if (!['devices','offer','host_status','cancel'].includes(action)) throw new Error('Unsupported setup action');
+    const payload={type:`consent_key.${action}`};
+    if(action==='offer') {payload.credential_id=String(credentialId||'');payload.offer_request_id=String(requestId||crypto.randomUUID());}
+    if(action==='host_status'||action==='cancel')payload.offer_id=String(offerId||'');
+    return this.sendCommand(payload,'consent_key',{requestId:crypto.randomUUID()});
+  }
+
   // Operator designate/revoke of fleet lifecycle authority. The daemon derives
   // the actor from this connection's operator credential; the target
   // generation and grant revision are read back fresh and re-checked in the
   // daemon's mutation transaction.
-  async lifecycleAuthority({ action, targetStreamId, reason, challengeId } = {}) {
+  async lifecycleAuthority({ action, targetStreamId, reason, requestId } = {}) {
     if (action === 'consent-status') {
-      return this.sendCommand({type: 'consent.status', challenge_id: String(challengeId || '')}, 'consent.status');
+      return this.sendCommand({type: 'consent.status', intent_id: String(requestId || '')}, 'consent.status');
     }
     const inspect = { type: 'assistant.lifecycle', action: 'inspect' };
     if (targetStreamId) inspect.target_stream_id = String(targetStreamId);

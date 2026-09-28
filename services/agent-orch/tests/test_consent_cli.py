@@ -29,9 +29,10 @@ def test_key_ceremony_uses_local_admin_without_seat(monkeypatch):
         captured.update(verb=verb, fields=fields, options=kwargs)
         return {'type': verb + '.ok'}
     monkeypatch.setattr(cli, 'consent_once', call)
-    args = cli.build_parser().parse_args(['consent-key', 'confirm', 'a'*64])
+    args = cli.build_parser().parse_args(['consent-key', 'offer', '--credential', 'phone-a', '--request-id', 'retry-id'])
     assert args.func(args) == 0
-    assert captured['fields'] == {'local_admin_token': 'test-token', 'fingerprint': 'a'*64}
+    assert captured['verb'] == 'consent_key.offer'
+    assert captured['fields'] == {'local_admin_token': 'test-token', 'credential_id': 'phone-a', 'offer_request_id': 'retry-id'}
     assert captured['options']['from_stream_id'] is None
     assert captured['options']['local_admin'] is True
 

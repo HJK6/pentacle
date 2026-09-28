@@ -422,7 +422,7 @@ async def run(args: argparse.Namespace) -> int:
         notice_store=store,
     )
     server.notify = notify
-    notify.consent_snapshot = store.consent_notifications
+    notify.consent_snapshot = server._consent_notifications_for_msg
     spawnctl.consent_notify = notify
     server.handlers.update(notify.wire_handlers())
 

@@ -51,20 +51,31 @@ class Ceremony:
         return consent.encode(self.private.sign(message, ec.ECDSA(hashes.SHA256())))
 
     async def enroll(self, confirm=True):
-        code = (await self.call('consent_key.enroll_code', self.local))['code']
-        prepared = await self.call('consent_key.prepare', code=code)
-        signature = self.sign(consent.enrollment_bytes(prepared['code_hash'], self.cid, self.spki, prepared['nonce']))
-        key = await self.call('consent_key.enroll', code=code, spki=self.spki, signature=signature)
-        self.key_id = key['key_id']
-        if confirm:
-            await self.call('consent_key.confirm', self.local, fingerprint=key['fingerprint'])
-        return code, key
+        peer = type('Peer', (), {'remote_address': ('127.0.0.1', 1)})()
+        self.env.server._connection_trust[peer] = operator_auth.ConnectionTrust('v2', self.cid, 'pentacle-mobile')
+        self.env.server._client_identities[peer] = 'pentacle-mobile'
+        await self.env.store.consent_operation('consent.client_support', {'capabilities': {
+            'consent_enrollment_offer_v1': True, 'consent_open_v1': True}}, self.auth, self.registry, self.env.sessions.assistant.role)
+        offer = (await self.call('consent_key.offer', self.local, credential_id=self.cid, offer_request_id=str(time.time_ns())))['offer']
+        opened = (await self.call('consent_key.open', offer_id=offer['offer_id']))['offer']
+        if not confirm:
+            return opened, None
+        result = await self.call('consent_key.accept', offer_id=offer['offer_id'], challenge_id=opened['challenge_id'],
+            spki=self.spki, signature=self.sign(consent.offer_bytes(opened, self.spki)))
+        self.key_id = result['receipt']['key_id']
+        keys = (await self.call('consent_key.list', self.local))['keys']
+        return opened, next(key for key in keys if key['key_id'] == self.key_id)
 
     async def request(self, auth=None):
         reply = await self.call('consent.request', auth, action='lifecycle.designate',
             target_stream_id='node-a:bart', target_generation=await self.env.gen('bart'),
             expected_revision=(await self.env.grant())['revision'], reason='Approve this exact manager')
-        return reply['challenge']
+        if reply.get('code') == 'consent_pending_exists':
+            prior = await self.env.store.submit(lambda conn: conn.execute(
+                'SELECT challenge_id FROM v2_consent_intent_challenges WHERE request_id=? AND key_id=? ORDER BY rowid DESC LIMIT 1',
+                (reply['intent']['request_id'], self.key_id)).fetchone())
+            return (await self.call('consent.status', challenge_id=prior[0]))['challenge']
+        return (await self.call('consent.open', intent_id=reply['intent']['request_id'], key_id=self.key_id))['challenge']
 
     async def approve(self, challenge, **extra):
         return await self.call('consent.approve', challenge_id=challenge['challenge_id'],
@@ -96,14 +107,12 @@ def test_transfer_disabled_even_for_authenticated_seat(tmp_path):
     scenario(check)
 
 
-def test_enrollment_confirm_then_signed_designation_and_exact_replay(tmp_path):
+def test_host_offer_then_signed_designation_and_exact_replay(tmp_path):
     async def check(env):
         c = Ceremony(env, tmp_path)
         await env.open('bart', role='lead')
-        code, key = await c.enroll(confirm=False)
-        await refused(c.request(), 'consent_no_active_key')
-        await refused(c.call('consent_key.confirm', c.local, fingerprint='00'*32), 'consent_fingerprint_unknown')
-        await c.call('consent_key.confirm', c.local, fingerprint=key['fingerprint'])
+        offer, key = await c.enroll()
+        await refused(c.call('consent_key.confirm', c.local, fingerprint='00'*32), 'unsupported_verb')
         challenge = await c.request()
         assert challenge['requester']['identity'] == f'operator:{c.cid}'
         assert (await env.grant())['revision'] == 0
@@ -118,7 +127,7 @@ def test_enrollment_confirm_then_signed_designation_and_exact_replay(tmp_path):
         assert replay['replayed'] is True
         assert (await env.grant())['revision'] == 1
         await refused(c.approve(challenge), 'consent_conflict')  # ECDSA signs a different tuple.
-        await refused(c.call('consent_key.enroll', code=code, spki=c.spki, signature=signature), 'enrollment_code_used')
+        await refused(c.call('consent_key.enroll', code='retired', spki=c.spki, signature=signature), 'unsupported_verb')
     scenario(check)
 
 
@@ -151,9 +160,9 @@ def test_cross_requester_supersede_and_cancel_are_refused(tmp_path):
         other = await c.request(stranger)
         assert first['challenge_id'] == other['challenge_id']
         audit = await env.store.submit(lambda conn: conn.execute(
-            'SELECT result,refusal_code FROM v2_consent_audit ORDER BY id DESC LIMIT 1').fetchone())
+            "SELECT result,refusal_code FROM v2_consent_audit WHERE verb='consent.request' ORDER BY id DESC LIMIT 1").fetchone())
         assert tuple(audit) == ('refused', 'consent_pending_exists')
-        await refused(c.call('consent.cancel', stranger, challenge_id=first['challenge_id']), 'consent_requester_required')
+        await refused(c.call('consent.cancel', stranger, challenge_id=first['challenge_id']), 'consent_audience_required')
         next_challenge = await c.request(requester)
         assert next_challenge['challenge_id'] != first['challenge_id']
         assert (await c.call('consent.status', challenge_id=first['challenge_id']))['challenge']['state'] == 'superseded'
@@ -210,13 +219,15 @@ def test_deny_cancel_expiry_and_revoke_key(tmp_path):
         await env.open('bart', role='lead')
         _, key = await c.enroll()
         ch = await c.request()
-        assert (await c.call('consent.deny', challenge_id=ch['challenge_id']))['challenge']['state'] == 'denied'
+        assert (await c.call('consent.deny', challenge_id=ch['challenge_id']))['intent']['state'] == 'denied'
         await refused(c.approve(ch), 'consent_conflict')
         ch = await c.request()
-        assert (await c.call('consent.cancel', challenge_id=ch['challenge_id']))['challenge']['state'] == 'cancelled'
+        assert (await c.call('consent.cancel', challenge_id=ch['challenge_id']))['intent']['state'] == 'cancelled'
         ch = await c.request()
         def expire(conn):
-            conn.execute('UPDATE v2_consent_challenges SET expires_at=? WHERE challenge_id=?', (time.time()-1, ch['challenge_id']))
+            rid=conn.execute('SELECT request_id FROM v2_consent_intent_challenges WHERE challenge_id=?',(ch['challenge_id'],)).fetchone()[0]
+            import store_consent_intents as intents
+            row=intents.load(conn,rid);row['expires_at']=time.time()-1;intents.save(conn,row)
             conn.commit()
         await env.store.submit(expire)
         async with env.sessions.assistant.authority_lock:
@@ -224,7 +235,7 @@ def test_deny_cancel_expiry_and_revoke_key(tmp_path):
         assert rows[0]['consent']['state'] == 'expired'
         ch = await c.request()
         await c.call('consent_key.revoke', c.local, fingerprint=key['fingerprint'])
-        await refused(c.approve(ch), 'consent_audience_required')
+        await refused(c.approve(ch), 'consent_key_invalid')
         assert (await c.call('consent.status', challenge_id=ch['challenge_id']))['challenge']['state'] == 'pending'
         assert (await env.grant())['revision'] == 0
     scenario(check)
@@ -246,7 +257,7 @@ def test_non_audience_approval_and_deny_refused(tmp_path, bad_actor):
             auth = {'operator_authenticated': True, 'operator_principal': f'operator:{cid}', 'connection_client': kind}
         for verb in ('consent.approve', 'consent.deny'):
             await refused(c.call(verb, auth, challenge_id=ch['challenge_id'], key_id=c.key_id,
-                signature=c.sign(consent.decode(ch['challenge_bytes']))), 'consent_audience_required')
+                signature=c.sign(consent.decode(ch['challenge_bytes']))), 'consent_mobile_required' if bad_actor == 'web' else 'consent_audience_required')
         assert (await c.call('consent.status', challenge_id=ch['challenge_id']))['challenge']['state'] == 'pending'
     scenario(check)
 
@@ -299,6 +310,7 @@ def test_file_backed_local_admin_verifies_real_socket_emergency_revoke(tmp_path,
                 proof = operator_auth.make_proof(key, welcome['auth']['operator']['nonce'], c.cid, 'pentacle-mobile')
                 await ws.send(json.dumps({'type': 'hello', 'client': 'pentacle-mobile', 'auth_v2': {
                     'scheme': operator_auth.AUTH_SCHEME, 'credential_id': c.cid, 'proof': proof},
+                    'capabilities': {'consent_enrollment_offer_v1':True,'consent_open_v1':True}, 'capabilities': {'consent_enrollment_offer_v1': True, 'consent_open_v1': True},
                     'subscribe': {'mode': 'rpc', 'snapshot': False}}))
                 assert json.loads(await ws.recv())['type'] == 'ready'
 
@@ -423,48 +435,28 @@ def test_cancelled_approval_holds_authority_lock_until_worker_commit(tmp_path, m
     scenario(check)
 
 
-@pytest.mark.parametrize('condition', ['expired','wrong_purpose','web','seat'])
-def test_enrollment_admission_negative_cells(tmp_path, condition):
+@pytest.mark.parametrize('verb', ['enroll_code','prepare','enroll','confirm'])
+def test_retired_bootstrap_is_unsupported(tmp_path, verb):
     async def check(env):
-        c = Ceremony(env, tmp_path)
-        await env.open('seat', role='lead')
-        code = (await c.call('consent_key.enroll_code', c.local))['code']
-        auth = c.auth
-        if condition == 'web':
-            cid, _ = c.registry.issue('pentacle', label='Web fixture')
-            auth = {'operator_authenticated': True, 'operator_principal': f'operator:{cid}', 'connection_client': 'pentacle'}
-        elif condition == 'seat':
-            auth = await env.seat('seat')
-        else:
-            def invalidate(conn):
-                if condition == 'expired':
-                    conn.execute('UPDATE v2_consent_enrollment_codes SET expires_at=0')
-                else:
-                    conn.execute("UPDATE v2_consent_enrollment_codes SET purpose='other'")
-                conn.commit()
-            await env.store.submit(invalidate)
-        await refused(c.call('consent_key.prepare', auth, code=code), 'consent_mobile_required' if condition in {'web','seat'} else 'enrollment_code_invalid')
+        c=Ceremony(env,tmp_path)
+        await refused(c.call('consent_key.'+verb,c.local,code='retired'), 'unsupported_verb')
     scenario(check)
 
 
-def test_rotation_keeps_prior_active_until_confirmation(tmp_path):
+def test_rotation_keeps_prior_active_until_offer_acceptance(tmp_path):
     async def check(env):
-        c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
-        _, old = await c.enroll()
-        old_private, old_id = c.private, c.key_id
-        c.private = ec.generate_private_key(ec.SECP256R1())
-        c.spki = consent.encode(c.private.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo))
-        _, new = await c.enroll(confirm=False)
-        ch = await c.request()
-        assert ch['audience_key_ids'] == [old_id]
-        await c.call('consent_key.confirm', c.local, fingerprint=new['fingerprint'])
-        await refused(c.call('consent.approve', challenge_id=ch['challenge_id'], key_id=old_id,
-            signature=consent.encode(old_private.sign(consent.decode(ch['challenge_bytes']), ec.ECDSA(hashes.SHA256())))), 'consent_audience_required')
-        ch = await c.request()
-        assert ch['audience_key_ids'] == [new['key_id']]
-        await c.approve(ch)
-        assert (await env.grant())['revision'] == 1
+        c=Ceremony(env,tmp_path);await env.open('bart',role='lead')
+        _,old=await c.enroll();old_private,old_id=c.private,c.key_id
+        c.private=ec.generate_private_key(ec.SECP256R1())
+        c.spki=consent.encode(c.private.public_key().public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo))
+        offer,_=await c.enroll(confirm=False)
+        ch=await c.request();assert ch['audience_key_ids']==[old_id]
+        accepted=await c.call('consent_key.accept',offer_id=offer['offer_id'],challenge_id=offer['challenge_id'],spki=c.spki,signature=c.sign(consent.offer_bytes(offer,c.spki)))
+        c.key_id=accepted['receipt']['key_id']
+        await refused(c.call('consent.approve',challenge_id=ch['challenge_id'],key_id=old_id,
+            signature=consent.encode(old_private.sign(consent.decode(ch['challenge_bytes']),ec.ECDSA(hashes.SHA256())))), 'consent_key_invalid')
+        ch=await c.request();assert ch['audience_key_ids']==[c.key_id]
+        await c.approve(ch);assert (await env.grant())['revision']==1
     scenario(check)
 
 
@@ -480,7 +472,8 @@ def test_handoff_after_revocation_or_replacement_carries_nothing(tmp_path, monke
         source_generation = await env.gen('bart')
         action = 'lifecycle.revoke' if changed == 'revoke' else 'lifecycle.designate'
         ch = (await c.call('consent.request', action=action, target_stream_id='node-a:replacement',
-            target_generation=await env.gen('replacement'), expected_revision=1, reason='Change manager'))['challenge']
+            target_generation=await env.gen('replacement'), expected_revision=1, reason='Change manager'))['intent']
+        ch = (await c.call('consent.open', intent_id=ch['request_id'], key_id=c.key_id))['challenge']
         await c.approve(ch)
         before = await env.grant()
         # All three admitted journeys converge at the same commit-time carry.
@@ -535,6 +528,7 @@ def test_real_socket_signed_designation_and_revoked_live_deny(tmp_path):
                 proof = operator_auth.make_proof(key, welcome['auth']['operator']['nonce'], c.cid, 'pentacle-mobile')
                 await ws.send(json.dumps({'type': 'hello', 'client': 'pentacle-mobile', 'auth_v2': {
                     'scheme': operator_auth.AUTH_SCHEME, 'credential_id': c.cid, 'proof': proof},
+                    'capabilities': {'consent_enrollment_offer_v1': True, 'consent_open_v1': True},
                     'subscribe': {'mode': 'rpc', 'snapshot': False}}))
                 assert json.loads(await ws.recv())['type'] == 'ready'
                 async def rpc(verb, **fields):
@@ -548,7 +542,7 @@ def test_real_socket_signed_designation_and_revoked_live_deny(tmp_path):
                     target_generation=await env.gen('bart'), expected_revision=0, reason='Real wire rehearsal')
                 assert pending['type'] == 'assistant.lifecycle.ok' and pending['code'] == 'consent_pending'
                 assert (await env.grant())['revision'] == 0
-                ch = pending['challenge']
+                ch = (await rpc('consent.open',intent_id=pending['intent']['request_id'],key_id=c.key_id))['challenge']
                 signature = c.sign(consent.decode(ch['challenge_bytes']))
                 approved = await rpc('consent.approve', challenge_id=ch['challenge_id'], key_id=c.key_id, signature=signature)
                 assert approved['receipt']['consent_id'] == ch['challenge_id']
@@ -559,8 +553,9 @@ def test_real_socket_signed_designation_and_revoked_live_deny(tmp_path):
                 assert approved['challenge']['receipt']['consent_id'] == ch['challenge_id']
                 assert (await env.grant())['revision'] == 1
                 pending = await rpc('consent.request', action='lifecycle.revoke', expected_revision=1, reason='Wire revoke test')
+                ch = (await rpc('consent.open', intent_id=pending['intent']['request_id'], key_id=c.key_id))['challenge']
                 c.registry.revoke(c.cid)
-                denied = await rpc('consent.deny', challenge_id=pending['challenge']['challenge_id'])
+                denied = await rpc('consent.deny', challenge_id=ch['challenge_id'])
                 assert denied['error_code'] == 'consent_principal_invalid'
                 assert (await env.grant())['revision'] == 1
         finally:
@@ -675,7 +670,9 @@ def test_two_audience_keys_can_only_commit_one_approval(tmp_path):
         await b.enroll()
         ch = await a.request()
         assert set(ch['audience_key_ids']) == {a.key_id, b.key_id}
-        results = await asyncio.gather(a.approve(ch), b.approve(ch), return_exceptions=True)
+        rid=await env.store.submit(lambda conn:conn.execute('SELECT request_id FROM v2_consent_intent_challenges WHERE challenge_id=?',(ch['challenge_id'],)).fetchone()[0])
+        other=(await b.call('consent.open',intent_id=rid,key_id=b.key_id))['challenge']
+        results = await asyncio.gather(a.approve(ch), b.approve(other), return_exceptions=True)
         assert sum(isinstance(r, dict) for r in results) == 1
         failure = next(r for r in results if isinstance(r, VerbError))
         assert failure.code == 'consent_conflict'
@@ -822,7 +819,7 @@ def test_approve_vs_expiry_barrier(tmp_path, monkeypatch, first):
         if first == 'approve':
             assert isinstance(results[0], dict) and results[1] == []
         else:
-            assert len(results[0]) == 1
+            assert results[0] == []  # signing expiry does not terminalize the durable parent
             assert isinstance(results[1], VerbError) and results[1].code == 'consent_conflict'
         status = await c.call('consent.status', challenge_id=ch['challenge_id'])
         assert status['challenge']['state'] == ('approved' if first == 'approve' else 'expired')
@@ -849,6 +846,7 @@ def test_enrollment_readiness_is_current_mobile_operator_only(tmp_path, monkeypa
         task = await env.server.start_consent() if initialized else None
         peer = type('LoopbackPeer', (), {'remote_address': ('127.0.0.1', 1)})()
         if kind:
+            env.server._client_identities[peer] = kind
             env.server._connection_trust[peer] = operator_auth.ConnectionTrust('v2', c.cid, kind)
         if seat:
             env.server._client_authenticated_streams[peer] = 'node-a:seat'
@@ -856,7 +854,7 @@ def test_enrollment_readiness_is_current_mobile_operator_only(tmp_path, monkeypa
             frames = await env.server._on_hello({'client': kind or 'agent-orch', '_client_websocket': peer,
                 '_auth_context': {'token_verified': seat}, 'subscribe': {'snapshot': True}})
             snapshot = next(frame for frame in frames if frame['type'] == 'snapshot')
-            assert snapshot['capabilities'].get('consent_enrollment_v1') is (True if expected else None)
+            assert snapshot['capabilities'].get('consent_enrollment_offer_v1') is (True if expected else None)
             assert snapshot['capabilities']['close_expected_generation'] is True
         finally:
             if task:
@@ -878,10 +876,11 @@ def test_failed_consent_initialization_never_advertises_readiness(tmp_path, monk
         with pytest.raises(ValueError, match='unsafe local admin token'):
             await env.server.start_consent()
         peer = type('LoopbackPeer', (), {'remote_address': ('127.0.0.1', 1)})()
+        env.server._client_identities[peer] = 'pentacle-mobile'
         env.server._connection_trust[peer] = operator_auth.ConnectionTrust('v2', c.cid, 'pentacle-mobile')
         frames = await env.server._on_hello({'client': 'pentacle-mobile', '_client_websocket': peer})
         snapshot = next(frame for frame in frames if frame['type'] == 'snapshot')
-        assert 'consent_enrollment_v1' not in snapshot['capabilities']
+        assert 'consent_enrollment_offer_v1' not in snapshot['capabilities']
     scenario(check)
 
 
@@ -977,7 +976,7 @@ def test_same_generation_scheduled_handoff_never_revives_old_authority(tmp_path,
                 pending = await c.call('consent.request', action='lifecycle.designate',
                     target_stream_id='node-a:other', target_generation=await env.gen('other'),
                     expected_revision=(await env.grant())['revision'], reason='Replace before handoff')
-            await c.approve(pending['challenge'])
+            await c.approve((await c.call('consent.open',intent_id=pending['intent']['request_id'],key_id=c.key_id))['challenge'])
         before = await env.grant()
         auth = {**await env.seat('bart'), 'service_authenticated': True,
                 'service_actor': 'daemon:scheduler'}

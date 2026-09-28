@@ -373,6 +373,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
     chatClose: (hostId, sessionName, options) => call('chat-stream:close', hostId || 'local', sessionName, options || null),
 
     chatKill: (args) => call('chat-stream:kill', args || {}),
+    chatConsentKey: (args) => call('chat-stream:consent-key', args || {}),
     chatLifecycleAuthority: (args) => call('chat-stream:lifecycle-authority', args || {}),
     requestStreamEvents: (args) => call('chat-stream:request-stream-events', args || {}),
     scheduleGet: (scheduleId) => call('chat-stream:schedule-get', scheduleId),

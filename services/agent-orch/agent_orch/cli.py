@@ -3268,15 +3268,20 @@ def consent_command(args: argparse.Namespace) -> int:
     config = load_config()
     command = args.consent_command
     key_mode = args.consent_family == "consent-key"
-    verb = "consent_key." + command.replace("-", "_") if key_mode else "consent." + command
+    verb = "consent_key." + ("host_status" if command == "status" else command.replace("-", "_")) if key_mode else "consent." + command
     local = key_mode
     caller = None if local else discover_leader_stream_id_short(config)
     fields = {}
     try:
         if local:
             fields["local_admin_token"] = _local_admin_token(config)
-        if key_mode and command in {"confirm", "revoke"}:
+        if key_mode and command == "revoke":
             fields["fingerprint"] = args.fingerprint
+        elif key_mode and command == 'offer':
+            fields['credential_id'] = args.credential
+            fields['offer_request_id'] = args.request_id or str(uuid.uuid4())
+        elif key_mode and command in {'cancel','status'}:
+            fields['offer_id'] = args.offer_id
         elif not key_mode and command == "request":
             inspected = asyncio.run(assistant_lifecycle_once(config,
                 {"action": "inspect", **({"target_stream_id": args.target} if args.target else {})},
@@ -3289,7 +3294,7 @@ def consent_command(args: argparse.Namespace) -> int:
                 target_generation=args.target_generation or (inspected.get("target") or {}).get("session_generation"),
                 expected_revision=args.expected_revision if args.expected_revision is not None else inspected["grant"]["revision"])
         elif not key_mode:
-            fields["challenge_id"] = args.challenge_id
+            fields["intent_id"] = args.request_id
         response = asyncio.run(consent_once(config, verb, fields, timeout=args.timeout,
                                              from_stream_id=caller, local_admin=local))
     except Exception as exc:
@@ -5504,7 +5509,7 @@ def build_parser() -> argparse.ArgumentParser:
     for family in ("consent", "consent-key"):
         group = subparsers.add_parser(family)
         commands = group.add_subparsers(dest="consent_command", required=True)
-        names = ("request", "status", "cancel", "deny") if family == "consent" else ("enroll-code", "list", "confirm", "revoke")
+        names = ("request", "status", "cancel", "deny") if family == "consent" else ("offer", "devices", "list", "status", "cancel", "revoke")
         for name in names:
             command = commands.add_parser(name)
             command.add_argument("--timeout", type=float, default=30.0)
@@ -5516,8 +5521,13 @@ def build_parser() -> argparse.ArgumentParser:
                 command.add_argument("--expected-revision", type=int)
                 command.add_argument("--reason", required=True)
             elif family == "consent":
-                command.add_argument("challenge_id")
-            elif name in {"confirm", "revoke"}:
+                command.add_argument("request_id")
+            elif name == 'offer':
+                command.add_argument('--credential', required=True)
+                command.add_argument('--request-id')
+            elif name in {'cancel','status'}:
+                command.add_argument('offer_id')
+            elif name == "revoke":
                 command.add_argument("fingerprint")
     lifecycle_parser = subparsers.add_parser(
         "lifecycle",
