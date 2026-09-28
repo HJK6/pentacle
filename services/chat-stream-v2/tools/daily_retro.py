@@ -546,10 +546,21 @@ def compile_history_packet(manifest, completed, selections=None):
     for _, run in sorted(completed.items()):
         packet = run["final"]["packet"]
         dispositions.extend(packet["dispositions"])
-        for key, value in packet.get("evidence_sources", {}).items():
+        sources = packet.get("evidence_sources", {})
+        if isinstance(sources, list):
+            sources = ((value.get("id") or f"evidence-{index}", value)
+                       if isinstance(value, dict) else (f"evidence-{index}", value)
+                       for index, value in enumerate(sources))
+        else:
+            sources = sources.items()
+        for key, value in sources:
             if key in evidence and evidence[key] != value:
-                # Original per-batch evidence is still authoritative and reachable via aliases.
-                continue
+                # Labels are batch-local; retain conflicting proofs without rewriting citations.
+                qualified = f"{run['manifest']['run_id']}:{key}:{digest(value)}"
+                key, suffix = qualified, 1
+                while key in evidence and evidence[key] != value:
+                    key = f"{qualified}:{suffix}"
+                    suffix += 1
             evidence[key] = value
     packet = {"run_id": manifest["run_id"], "dispositions": dispositions,
               "candidates": [groups[k] for k in sorted(groups)], "evidence_sources": evidence,

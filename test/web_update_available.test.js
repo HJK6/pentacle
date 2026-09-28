@@ -45,3 +45,36 @@ test('setWebRefreshVisible toggles the titlebar refresh control', () => {
   setWebRefreshVisible(false);
   assert.equal(btn.hidden, true, 'hidden again when up to date');
 });
+
+function recoveryFixture() {
+  let servedId = 'new-build';
+  let recoveries = 0;
+  let fail = false;
+  let release;
+  const context = {
+    document: { getElementById: () => ({ hidden: true }) },
+    window: { __PENTACLE_CONFIG__: { buildId: 'old-build' }, cc: { getBuild: async () => ({ buildId: servedId }) } },
+    console: { info() {} },
+    resyncWebChatState: async () => { recoveries++; if (fail) throw new Error('fixture offline'); if (release) await release; },
+  };
+  vm.runInNewContext('let webRehydratedBuildId = null; let webRehydrationPending = null;\n' +
+    slice('function webUpdateAvailable(') + '\n' + slice('function setWebRefreshVisible(') + '\n' + slice('async function checkForWebUpdate('), context);
+  return { context, recoveries: () => recoveries, setServed: id => { servedId = id; }, setFail: value => { fail = value; }, setPending: promise => { release = promise; } };
+}
+
+test('changed served build automatically rehydrates once, and a later build rehydrates again', async () => {
+  const f = recoveryFixture();
+  await f.context.checkForWebUpdate(); await f.context.checkForWebUpdate();
+  assert.equal(f.recoveries(), 1, 'one recovery per observed build');
+  f.setServed('next-build'); await f.context.checkForWebUpdate();
+  assert.equal(f.recoveries(), 2);
+});
+
+test('failed changed-build rehydration retries, and concurrent checks do not duplicate it', async () => {
+  const f = recoveryFixture(); f.setFail(true);
+  await f.context.checkForWebUpdate(); f.setFail(false);
+  let resolve; f.setPending(new Promise(r => { resolve = r; }));
+  const first = f.context.checkForWebUpdate(); await new Promise(r => setImmediate(r));
+  await f.context.checkForWebUpdate(); resolve(); await first;
+  assert.equal(f.recoveries(), 2, 'failed attempt then one coalesced retry');
+});

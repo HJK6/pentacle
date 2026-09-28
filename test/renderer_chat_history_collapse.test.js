@@ -12,7 +12,7 @@ const { installRenderer, mountRaceSlot, STREAM } = require('./helpers/renderer_c
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const ANSWERS_ONLY = '<details class="slot-chat-v3-answers"><summary>You answered 2 questions</summary></details>';
 
-function fixture({ rowsAfterCall = Infinity, answers = true, initialRows = [], fail = false } = {}) {
+function fixture({ rowsAfterCall = Infinity, answers = true, initialRows = [], fail = false, windowed = false } = {}) {
   const calls = [];
   const timers = [];
   let rows = initialRows;
@@ -22,7 +22,12 @@ function fixture({ rowsAfterCall = Infinity, answers = true, initialRows = [], f
       if (calls.length >= rowsAfterCall) rows = [{ id: 'row-1', displayRule: 'bubble:assistant', text: 'ASSISTANT-TEXT' }];
       return fail ? { ok: false, error: 'temporary history failure' } : { ok: true, count: 0 };
     },
-    selectSessionDetail: (streamId) => ({ streamId, title: 'Race Fixture', providerLabel: 'claude', transcriptItems: rows, remainingCount: 0 }),
+    selectSessionDetail: (streamId, options) => {
+      const visibleCount = options?.visibleCount === 'all' ? rows.length : (options?.visibleCount || 120);
+      return { streamId, title: 'Race Fixture', providerLabel: 'claude',
+        transcriptItems: windowed ? rows.slice(-visibleCount) : rows,
+        remainingCount: windowed ? Math.max(0, rows.length - visibleCount) : 0 };
+    },
     renderTranscriptTimelineHtml: (detail) => (detail.transcriptItems.length
       ? `<article class="slot-chat-row"><div class="slot-chat-assistant-card">ASSISTANT-TEXT</div></article>${answers ? ANSWERS_ONLY : ''}`
       : answers ? ANSWERS_ONLY : ''),
@@ -129,4 +134,37 @@ test('a failed load retries while cached rows remain and ends with an error', as
   assert.match(listText(dom), /ASSISTANT-TEXT/);
   assert.match(listText(dom), /Messages could not be loaded/);
   assert.ok(dom.window.document.querySelector('.slot-chat-history-retry'));
+});
+
+test('a last-answer summary fallback does not masquerade as loaded message history', async () => {
+  const { context, dom, calls, timers } = fixture({
+    initialRows: [{ id: 'fallback:' + STREAM, eventCase: 'agent-question-answer', displayRule: 'activity:question', text: 'Operator answered: Yes' }],
+  });
+  await mount(context); vmRender(context);
+  assert.match(dom.window.document.querySelector('.slot-chat-history-state')?.textContent || '', /Loading messages/);
+  runDueTimers(timers, context); await flush(); await flush();
+  assert.ok(calls.length > 1, 'missing message history is re-requested despite the synthetic answer');
+});
+
+function answerRows(count) {
+  return Array.from({ length: count }, (_, i) => ({ id: 'answer-' + i,
+    eventCase: 'agent-question-answer', displayRule: 'activity:question', text: 'Fixture answer ' + i }));
+}
+
+test('answer-only history larger than the visible window still retries missing messages', async () => {
+  const { context, dom, calls, timers } = fixture({ initialRows: answerRows(240), windowed: true });
+  await mount(context); vmRender(context);
+  assert.match(dom.window.document.querySelector('.slot-chat-history-state')?.textContent || '', /Loading messages/);
+  runDueTimers(timers, context); await flush(); await flush();
+  assert.ok(calls.length > 1, 'hidden answers are not proof of loaded message history');
+});
+
+test('an ordinary retained row outside the visible answer-only window counts as loaded history', async () => {
+  const { context, dom, calls, timers } = fixture({ initialRows: [
+    { id: 'ordinary', displayRule: 'bubble:assistant', text: 'Fixture earlier message' }, ...answerRows(240),
+  ], windowed: true });
+  await mount(context); vmRender(context);
+  assert.equal(dom.window.document.querySelector('.slot-chat-history-state'), null);
+  runDueTimers(timers, context); await flush(); await flush();
+  assert.equal(calls.length, 1, 'retained ordinary message ends recovery');
 });

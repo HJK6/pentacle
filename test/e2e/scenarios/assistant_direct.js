@@ -161,6 +161,8 @@ async function startDaemon({ artifactsDir, includeReport = false }) {
   });
   return { configFile, requests, events, noiseEvents, extraSessions, sourceId, targetId, noiseId, generation,
     report, reportBody, comments,
+    disconnect() { for (const socket of server.clients) socket.terminate(); },
+    emitEvent(row) { for (const socket of server.clients) send(socket, { type: 'chat.event', event: row }); },
     seedAssistantHistory(text) {
       if (requests.length) throw new Error('seed assistant history before the web host connects');
       assistantEvents.push(event('ASSIST_TEXT', text, source));

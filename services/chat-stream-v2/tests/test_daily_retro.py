@@ -672,10 +672,11 @@ def test_sol_missing_or_fabricated_originals_are_rejected(citations):
 
 
 class HistoryTransport(Transport):
-    def __init__(self, reasons=None, keep_final=True):
+    def __init__(self, reasons=None, keep_final=True, evidence_sources=None):
         super().__init__()
         self.reasons = ['no_owning_work'] if reasons is None else reasons
         self.keep_final = keep_final
+        self.evidence_sources = evidence_sources
         self.report_calls = 0
         self.fail = False
 
@@ -709,19 +710,71 @@ class HistoryTransport(Transport):
             packet = {'run_id': manifest['run_id'], 'dispositions': [
                 {'id': s['id'], 'fingerprint': s['fingerprint'], 'reason': 'explicit issue disposition'}
                 for s in manifest['sources']], 'candidates': [c]}
+            if self.evidence_sources is not None:
+                packet['evidence_sources'] = json.loads(json.dumps(self.evidence_sources))
         return {'type': 'await_report.ok', 'ok': True, 'result_kind': 'report',
                 'report': {'report_id': inp['report_id'], 'effective_model': payload['model'],
                            'effective_effort': payload['effort'], 'extras': {'daily_retro': packet}}}
 
 
-def prepared_history(config, count=43, reasons=None):
+def prepared_history(config, count=43, reasons=None, evidence_sources=None):
     history, baseline = history_fixture(config, count=count)
-    rpc = HistoryTransport(reasons)
+    rpc = HistoryTransport(reasons, evidence_sources=evidence_sources)
     pipeline = retro.Pipeline(history, rpc)
     inventory = retro.history_collect(history, baseline, 1)
     for n in range(1, inventory['history']['batches'] + 1):
         assert asyncio.run(pipeline.history_run(baseline, n, no_deliver=True))['delivered'] == []
     return history, baseline, rpc, pipeline
+
+
+@pytest.mark.parametrize('sources', [
+    [{'id': 'E1', 'path': 'current/spec.md', 'verification': 'retained proof'}],
+    {'E1': {'path': 'current/spec.md', 'verification': 'retained proof'}},
+    [{'path': 'current/spec.md'}, 'retained verification label'],
+])
+def test_history_evidence_shapes_checkpoint_final_and_replay(config, sources):
+    history, baseline, rpc, pipeline = prepared_history(config, evidence_sources=sources)
+    before = {p: p.read_bytes() for p in (history.state_root / 'runs').glob('history-*/*.json')}
+    checkpoint = asyncio.run(pipeline.history_consolidate(baseline, [1, 2]))
+    final = asyncio.run(pipeline.history_consolidate(baseline, final=True))
+    for result in (checkpoint, final):
+        packet = retro.read(history.state_root / 'runs' / result['run_id'] / 'astra.json')['packet']
+        expected = list(sources.values()) if isinstance(sources, dict) else sources
+        assert all(value in packet['evidence_sources'].values() for value in expected)
+        assert set(ref for c in packet['candidates'] for ref in c['citations']) == {
+            s['id'] for s in retro.read(history.state_root / 'history.json')['sources']}
+    assert asyncio.run(pipeline.history_consolidate(baseline, [2, 1])) == checkpoint
+    assert asyncio.run(pipeline.history_consolidate(baseline, final=True)) == final
+    assert len(rpc.spawns) == 5 and len(rpc.closed) == 5 and len(rpc.sent) == 2
+    assert {p: p.read_bytes() for p in before} == before
+
+
+def test_history_evidence_conflicting_labels_remain_available(config):
+    sources = [{'id': 'E1', 'proof': 'first'}, {'id': 'E1', 'proof': 'second'}]
+    history, baseline, rpc, pipeline = prepared_history(config, evidence_sources=sources)
+    result = asyncio.run(pipeline.history_consolidate(baseline, [1, 2]))
+    packet = retro.read(history.state_root / 'runs' / result['run_id'] / 'astra.json')['packet']
+    assert all(value in packet['evidence_sources'].values() for value in sources)
+
+
+@pytest.mark.parametrize('shape', ['list', 'mapping'])
+def test_history_evidence_qualified_key_collision_preserves_each_proof(config, shape):
+    history, baseline, rpc, pipeline = prepared_history(config)
+    result = asyncio.run(pipeline.history_consolidate(baseline, [1, 2]))
+    manifest = retro.read(history.state_root / 'runs' / result['run_id'] / 'collection.json')
+    _, completed = retro.completed_history(history, baseline)
+    first = {'id': 'E1', 'proof': 'first'}
+    last = {'id': 'E1', 'proof': 'second'}
+    qualified = f"{completed[2]['manifest']['run_id']}:E1:{retro.digest(last)}"
+    occupied = {'id': qualified, 'proof': 'preexisting qualified key'}
+    completed[1]['final']['packet']['evidence_sources'] = (
+        [first, occupied] if shape == 'list' else {'E1': first, qualified: occupied})
+    completed[2]['final']['packet']['evidence_sources'] = (
+        [last] if shape == 'list' else {'E1': last})
+    original = json.loads(json.dumps(completed))
+    packet = retro.compile_history_packet(manifest, completed)
+    assert all(value in packet['evidence_sources'].values() for value in [first, occupied, last])
+    assert json.loads(json.dumps(completed)) == original
 
 
 def test_history_quiet_pair_context_and_replay(config):

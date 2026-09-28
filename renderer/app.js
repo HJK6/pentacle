@@ -1021,7 +1021,24 @@ function ensureChatEventsLoaded(streamId, retry = false) {
 
 // Rows the store holds for a slot's stream, before synthesized durable answers.
 function chatDetailHasRows(detail) {
-  return !!detail && ((detail.transcriptItems || []).length + (detail.remainingCount || 0)) > 0;
+  const hasOrdinaryRow = candidate => (candidate?.transcriptItems || []).some(item =>
+    !String(item?.id || '').startsWith('fallback:') && item?.eventCase !== 'agent-question-answer');
+  if (hasOrdinaryRow(detail)) return true;
+  if (!(detail?.remainingCount > 0)) return false;
+  // Hidden rows may themselves be answers. Inspect retained history only when
+  // the visible window has no ordinary row; never emit render telemetry here.
+  return hasOrdinaryRow(selectSlotSessionDetail(detail.streamId, showTurnDurationEnabled(), false, 'all'));
+}
+
+function syncChatHistoryPins() {
+  const streams = [];
+  for (let slot = 0; slot < state.slots.length; slot++) {
+    const session = state.slots[slot];
+    if (!session || state.botSlots[slot] || state.slotViewModes[slot] !== 'chat') continue;
+    const streamId = chatSessionStateForSession(session)?.stream_id;
+    if (streamId) streams.push(streamId);
+  }
+  window.PentacleChatStore?.setFocusedChatStreams?.(streams);
 }
 
 function chatStreamStillNeedsHistory(streamId) {
@@ -3283,6 +3300,7 @@ function renderSlotChat(slot) {
     ? 'working'
     : (findSession(session.name, session.hostId)?.working ? 'working' : 'idle');
   const workingLabel = remoteWorkingLabel || recentWorkingLabel(session) || chatUi.extractWorkingTime(remoteSessionState?.last_text || '');
+  syncChatHistoryPins();
   const mode = state.slotViewModes[slot];
   const chatMode = mode === 'chat';
   const assetMode = mode === 'asset';
@@ -5212,6 +5230,14 @@ function detachSlot(slot) {
 
   // Clear state before async/throwing operations
   const hadSlot = !!state.slots[slot];
+  const detachedStreamId = state.slotChatBoundStream[slot];
+  if (detachedStreamId && !state.slots.some((other, index) => index !== slot && other
+    && state.slotViewModes[index] === 'chat' && state.slotChatBoundStream[index] === detachedStreamId)) {
+    // Reopening must fetch daemon history even if only an answer survived in
+    // the cache while the pane was detached. Cancel the old request identity.
+    state.chatStream.eventsLoadedFor.delete(detachedStreamId);
+    delete state.chatStream.historyLoads?.[detachedStreamId];
+  }
   state.slots[slot] = null;
   state.slotReplies[slot] = null;
   state.botSlots[slot] = false;
@@ -5220,6 +5246,7 @@ function detachSlot(slot) {
   state.slotDrafts[slot] = '';
   state.slotDraftTouched[slot] = false;
   state.slotViewModes[slot] = 'terminal';
+  syncChatHistoryPins();
   state.slotActiveAsset[slot] = null;
   state.slotChatRefs[slot] = null;
   state.slotChatLastListHtml[slot] = null;
@@ -5378,30 +5405,34 @@ window.cc.onChatStreamFrame((frame) => {
 // inventory re-syncs. Reset the connection-state version baseline first: the
 // fresh host's state_version namespace restarts at 0, so a lower version would
 // otherwise be rejected as stale by applyVersionedConnectionState.
-window.cc.onReconnect?.(() => {
+let webChatResyncPending = null;
+function resyncWebChatState() {
+  if (webChatResyncPending) return webChatResyncPending;
+  webChatResyncPending = performWebChatResync().finally(() => { webChatResyncPending = null; });
+  return webChatResyncPending;
+}
+
+async function performWebChatResync() {
   state.chatStream.stateVersion = -1;
-  window.cc.getChatStreamState().then((rawSnapshot) => {
-    // Carry forward an open chat slot's session if this (summary) resync
-    // snapshot dropped it, so the store reducer does not evict the open
-    // transcript / disable its composer (see preserveOpenSlotSessionsInSnapshot).
-    // Captured from the store BEFORE we apply anything.
-    const snapshot = preserveOpenSlotSessionsInSnapshot(rawSnapshot, {
-      slots: state.slots,
-      botSlots: state.botSlots,
-      slotViewModes: state.slotViewModes,
-      boundStreams: state.slotChatBoundStream,
-      currentSessions: window.PentacleChatStore?.getState?.()?.sessions
-        || state.chatStream.sessions,
-    });
-    applyChatStreamState(snapshot);
-    if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'limits')) {
-      renderLimits(snapshot.limits, snapshot.limits_health ?? null);
-    }
-    window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...(snapshot || {}) });
-    restoreSlotsAfterReconnect();
-  }).catch(() => { /* the next reconnect retries the re-sync */ });
-  // A web update restarts the host, so every open window reconnects; use
-  // that edge to check whether the served build now differs from ours.
+  const rawSnapshot = await window.cc.getChatStreamState();
+  if (!rawSnapshot?.connected) throw new Error('Chat stream is reconnecting');
+  const snapshot = preserveOpenSlotSessionsInSnapshot(rawSnapshot, {
+    slots: state.slots,
+    botSlots: state.botSlots,
+    slotViewModes: state.slotViewModes,
+    boundStreams: state.slotChatBoundStream,
+    currentSessions: window.PentacleChatStore?.getState?.()?.sessions || state.chatStream.sessions,
+  });
+  applyChatStreamState(snapshot);
+  if (Object.prototype.hasOwnProperty.call(snapshot, 'limits')) {
+    renderLimits(snapshot.limits, snapshot.limits_health ?? null);
+  }
+  window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...snapshot });
+  restoreSlotsAfterReconnect();
+}
+
+window.cc.onReconnect?.(() => {
+  resyncWebChatState().catch(() => { /* the next reconnect retries the resync */ });
   checkForWebUpdate();
 });
 
@@ -5419,6 +5450,8 @@ function setWebRefreshVisible(visible) {
   const btn = document.getElementById('web-refresh-btn');
   if (btn) btn.hidden = !visible;
 }
+let webRehydratedBuildId = null;
+let webRehydrationPending = null;
 async function checkForWebUpdate() {
   // Our OWN build id is the one injected into this page at serve time.
   const injected = window.__PENTACLE_CONFIG__;
@@ -5426,7 +5459,20 @@ async function checkForWebUpdate() {
   if (!ownId || !window.cc || typeof window.cc.getBuild !== 'function') return;
   try {
     const served = await window.cc.getBuild();
-    setWebRefreshVisible(webUpdateAvailable(ownId, served && served.buildId));
+    const servedId = served && served.buildId;
+    const changed = webUpdateAvailable(ownId, servedId);
+    setWebRefreshVisible(changed);
+    if (changed && servedId !== webRehydratedBuildId && !webRehydrationPending) {
+      const recovery = resyncWebChatState();
+      webRehydrationPending = recovery;
+      try {
+        await recovery;
+        webRehydratedBuildId = servedId;
+        console.info('[chat.history]', { subsystem: 'chat_history', bug_ref: 'web_stream_history_recurrence', event: 'build_rehydrated', buildId: servedId });
+      } finally {
+        webRehydrationPending = null;
+      }
+    }
   } catch (_) { /* keep the current state; the next check retries */ }
 }
 (function initWebRefreshControl() {

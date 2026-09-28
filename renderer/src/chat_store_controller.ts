@@ -1,5 +1,6 @@
 import {
   initialPentacleStreamState,
+  mutatePentacleEventBuckets,
   applyPentacleEvent,
   applyFetchedStreamEvents,
   applyPentacleWorkingState,
@@ -279,6 +280,30 @@ export class ChatStoreController {
       return;
     }
     this.workingElapsedAnchors[streamId] = { elapsedMs, receivedAt: this.clock() };
+  }
+
+  private focusedChatStreams = new Set<string>();
+
+  // The desktop has up to four attached chat panes. Reuse the shared cache's
+  // existing focus pin so traffic in other streams cannot evict their history.
+  setFocusedChatStreams(streamIds: readonly string[]): void {
+    const focused = new Set(streamIds.filter(Boolean));
+    let next = this.state;
+    for (const streamId of focused) {
+      if (next.eventBucketsByStream?.[streamId]?.explicitPins?.focused) continue;
+      next = mutatePentacleEventBuckets(next, { type: 'set-pin', streamId, pin: 'focused', pinned: true });
+    }
+    for (const streamId of this.focusedChatStreams) {
+      if (focused.has(streamId) || !next.eventBucketsByStream?.[streamId]?.explicitPins?.focused) continue;
+      next = mutatePentacleEventBuckets(next, { type: 'set-pin', streamId, pin: 'focused', pinned: false });
+    }
+    this.focusedChatStreams = focused;
+    if (next !== this.state) {
+      logTelemetry('chat.history.pins_changed', {
+        subsystem: 'chat_history', bug_ref: 'web_stream_history_recurrence', stream_ids: [...focused],
+      });
+      this.setState(next);
+    }
   }
 
   /** Current immutable read-path state. */
