@@ -2582,6 +2582,7 @@ async def close_once(
     caller_stream_id: str | None = None,
     progeny_stream_id: str | None = None,
     disposition_waived_reason: str | None = None,
+    expected_generation: str | None = None,
 ) -> dict[str, Any]:
     if ":" not in stream_id:
         raise ValueError("invalid_stream_id")
@@ -2612,6 +2613,8 @@ async def close_once(
             payload["progeny_stream_id"] = progeny_stream_id
         if disposition_waived_reason is not None:
             payload["disposition_waived_reason"] = disposition_waived_reason
+        if expected_generation is not None:
+            payload["expected_generation"] = expected_generation
         if (from_stream_id or caller_stream_id) and _stream_token_from_env():
             payload["stream_token"] = _stream_token_from_env()
         await ws.send(

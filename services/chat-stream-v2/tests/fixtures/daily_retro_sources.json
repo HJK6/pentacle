@@ -1,0 +1,15 @@
+{
+  "retros": {
+    "repeat_a": "A fixture deploy omitted the rollback checkpoint. Recovery took two hours. The current deploy guide has no restore probe; the smallest fix is one verified restore step. Evidence: fixture_evidence.json, first outage.",
+    "repeat_b": "A later fixture lane repeated the missing rollback checkpoint, costing another two hours. This is the same unfixed restore-probe gap, not another proposal. Evidence: fixture_evidence.json, second outage.",
+    "serious": "One serious failure: fixture_tools/report.py copies an operator credential into its report packet. This remains unfixed; its current packet(secret) returns the secret. Remove that field and prove reports exclude the credential. Evidence: the current fixture tool. A single occurrence is sufficient for urgent action.",
+    "fixed": "Retry once duplicated a fixture event, but fixture_tools/dedupe.py now returns the retained result for the same key. The current test receipt confirms one physical delivery. Already shipped; no useful new change. Evidence: fixture_evidence.json, dedupe result.",
+    "owned": "A fixture timer used UTC rather than Chicago local dates. Active spec_fixture_existing_owner already owns the fix with a checkpoint and DST success measure. Route evidence to that owner, do not open a duplicate lane.",
+    "uncertain": "A reviewer suspected non-UTF8 files could silently disappear, but no reproduction or current implementation has been found. The substantial missing investigation should be flagged as uncertain and bounded separately; it must not delay other decisions."
+  },
+  "files": {
+    "fixture_tools/report.py": "def packet(secret):\n    return {'secret': secret}\n",
+    "fixture_tools/dedupe.py": "def deliver(key, retained, submit):\n    if key not in retained:\n        retained[key] = submit()\n    return retained[key]\n",
+    "fixture_evidence.json": "{\"first_outage_hours\":2,\"second_outage_hours\":2,\"restore_probe_present\":false,\"dedupe_physical_deliveries\":1}\n"
+  }
+}
