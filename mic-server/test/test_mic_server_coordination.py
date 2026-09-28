@@ -85,6 +85,10 @@ class MicServerTestCase(unittest.TestCase):
         self.popen_entered = None
         self.env = mock.patch.dict(os.environ, {}, clear=True)
         self.env.start()
+        self.audio_module = mock.patch.dict(sys.modules, {
+            'audio_device': SimpleNamespace(refresh_audio_backend=lambda: None),
+        })
+        self.audio_module.start()
         self.find_process = mock.patch("mic_server._find_process", return_value=[])
         self.kill_process = mock.patch("mic_server._kill_process")
         self.popen = mock.patch("subprocess.Popen", side_effect=self._fake_popen)
@@ -1002,10 +1006,9 @@ def test_start_always_on_refreshes_backend_guarded_by_live_meeting_stream(monkey
     proves the device IDs are current. The guard tests the actual stream
     (has_open_stream), not `running`, so a failed meeting open (running=True, no
     stream) still gets the refresh it needs."""
-    import audio_device
-
     order = []
-    monkeypatch.setattr(audio_device, "refresh_audio_backend", lambda: order.append("refresh"))
+    monkeypatch.setitem(sys.modules, 'audio_device',
+                        SimpleNamespace(refresh_audio_backend=lambda: order.append('refresh')))
     monkeypatch.setattr(mic_server, "stop_all", lambda: None)
 
     fake_listener = SimpleNamespace(
