@@ -327,6 +327,105 @@ def _table_bytes(conn: sqlite3.Connection) -> dict[str, tuple[tuple[Any, ...], .
     return result
 
 
+def _file_fixture(path: Path) -> None:
+    source = _database(*_source_rows())
+    destination = sqlite3.connect(path)
+    try:
+        source.backup(destination)
+        destination.execute("PRAGMA journal_mode=WAL")
+        destination.execute("CREATE TABLE competing_writer (value INTEGER)")
+    finally:
+        destination.close()
+        source.close()
+
+
+def test_maintenance_acquires_writer_before_guard_snapshot(tmp_path: Path) -> None:
+    """A daemon commit between guard reads and the first write used to fail
+    immediately with SQLITE_BUSY_SNAPSHOT, bypassing the 30s busy timeout.
+    Instrument only the boundary; the competing connection does real SQLite I/O.
+    """
+    path = tmp_path / "sessions.db"
+    _file_fixture(path)
+    counterpart = sqlite3.connect(path, timeout=0)
+    outcomes: list[str] = []
+
+    class ObservedConnection(sqlite3.Connection):
+        def execute(self, sql: str, parameters=()):
+            if sql.lstrip().startswith("UPDATE session_event_tail") and not outcomes:
+                try:
+                    counterpart.execute("INSERT INTO competing_writer VALUES (1)")
+                    counterpart.commit()
+                    outcomes.append("committed")
+                except sqlite3.OperationalError as exc:
+                    counterpart.rollback()
+                    assert exc.sqlite_errorcode == sqlite3.SQLITE_BUSY
+                    outcomes.append("writer_already_owned")
+            return super().execute(sql, parameters)
+
+    conn = sqlite3.connect(path, timeout=30, factory=ObservedConnection)
+    conn.row_factory = sqlite3.Row
+    try:
+        manifest, _, _ = _freeze(conn)
+        result = apply_manifest(
+            conn, manifest, expected_manifest_sha256=manifest_sha256(manifest),
+            source_jsonl_sha256=manifest["source"]["jsonl_sha256"],
+            preimages_path=tmp_path / "preimages.json",
+        )
+        assert result["status"] == "applied"
+        assert outcomes == ["writer_already_owned"]
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+        assert not conn.in_transaction
+    finally:
+        conn.close()
+        counterpart.close()
+
+
+def test_maintenance_nested_savepoint_does_not_commit_caller(tmp_path: Path) -> None:
+    conn = _database(*_source_rows())
+    try:
+        manifest, _, _ = _freeze(conn)
+        original = _table_bytes(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE sessions SET created_at=created_at")
+        apply_manifest(
+            conn, manifest, expected_manifest_sha256=manifest_sha256(manifest),
+            source_jsonl_sha256=manifest["source"]["jsonl_sha256"],
+            preimages_path=tmp_path / "preimages.json",
+        )
+        assert conn.in_transaction
+        conn.rollback()
+        assert _table_bytes(conn) == original
+    finally:
+        conn.close()
+
+
+def test_maintenance_storage_failure_rolls_back_whole_batch_and_unlocks(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.db"
+    _file_fixture(path)
+    conn = sqlite3.connect(path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        manifest, _, _ = _freeze(conn)
+        conn.execute(
+            "CREATE TRIGGER fail_metadata_delete BEFORE DELETE ON session_event_tail "
+            "WHEN OLD.event_id=9002 BEGIN SELECT RAISE(ABORT,'forced batch failure'); END"
+        )
+        original = _table_bytes(conn)
+        with pytest.raises(sqlite3.IntegrityError, match="forced batch failure"):
+            apply_manifest(
+                conn, manifest, expected_manifest_sha256=manifest_sha256(manifest),
+                source_jsonl_sha256=manifest["source"]["jsonl_sha256"],
+                preimages_path=tmp_path / "preimages.json",
+            )
+        assert not conn.in_transaction
+        assert _table_bytes(conn) == original
+        with sqlite3.connect(path, timeout=0) as contender:
+            contender.execute("BEGIN IMMEDIATE")
+            contender.rollback()
+    finally:
+        conn.close()
+
+
 def test_history_repair_freezes_only_source_proven_rows_and_keeps_identity() -> None:
     source_rows, prompt, notice = _source_rows()
     conn = _database(source_rows, prompt, notice)

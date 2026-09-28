@@ -903,6 +903,11 @@ def _load_preimages(path: Path, manifest_sha: str) -> dict[str, Any] | None:
 
 def _begin_savepoint(conn: sqlite3.Connection, name: str) -> bool:
     outer = conn.in_transaction
+    if not outer:
+        # Own the writer before guard reads establish a WAL snapshot. A deferred
+        # snapshot cannot upgrade after another writer commits, even with the
+        # existing busy timeout. Nested callers retain their transaction policy.
+        conn.execute("BEGIN IMMEDIATE")
     conn.execute(f"SAVEPOINT {name}")
     return outer
 
