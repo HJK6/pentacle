@@ -39,6 +39,7 @@ test('modelLabel uses the explicit desktop catalog map and raw fallback', () => 
   assert.equal(modelLabel('gpt-5.6-terra'), '5.6 Terra');
   assert.equal(modelLabel('gpt-6-astra'), '6 Astra');
   assert.equal(modelLabel('gpt-6-sol'), '6 Sol');
+  assert.equal(modelLabel('gpt-6.1-sol'), '6.1 Sol');
   assert.equal(modelLabel('gpt-6-luna'), '6 Luna');
   assert.equal(modelLabel('gpt-5.6-luna'), '5.6 Luna');
   assert.equal(modelLabel('claude-opus-6'), 'claude-opus-6');

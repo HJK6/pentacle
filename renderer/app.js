@@ -5859,6 +5859,7 @@ function modelLabel(model) {
     'gpt-5.6-sol': '5.6 Sol',
     'gpt-6-astra': '6 Astra',
     'gpt-6-sol': '6 Sol',
+    'gpt-6.1-sol': '6.1 Sol',
     'gpt-6-luna': '6 Luna',
     'gpt-5.6-luna': '5.6 Luna',
     'gpt-5.6-terra': '5.6 Terra',
