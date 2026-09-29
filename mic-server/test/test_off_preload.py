@@ -28,8 +28,9 @@ class OffPreloadTest(unittest.TestCase):
         try:
             with mock.patch.dict(os.environ, {"MIC_SERVER_START_MODE":"off", "MIC_VOCABULARY_FILE":str(vocab_file), "MIC_NAME_CORRECTIONS":""}), \
                  mock.patch.dict(sys.modules, {"always_on":SimpleNamespace(AlwaysOnListener=lambda:listener)}), \
-                 mock.patch.object(mic_server, "HTTPServer") as server, \
+                 mock.patch.object(mic_server, "ThreadingHTTPServer") as server, \
                  mock.patch.object(mic_server, "get_audio_buffer"), \
+                 mock.patch.object(mic_server, "get_service", return_value=SimpleNamespace(start=mock.Mock())), \
                  mock.patch.object(mic_server.signal, "signal"), \
                  mock.patch.object(mic_server.threading, "Thread", InlineThread):
                 mic_server.main()
