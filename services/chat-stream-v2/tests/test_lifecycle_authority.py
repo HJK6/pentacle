@@ -575,8 +575,9 @@ def test_manager_reparent_fences(monkeypatch):
         await env.open("helper", role="assistant")
         await env.open("elsewhere", role="lead")
 
-        def reparent(worker, parent, reason="adopt orphan", auth=manager):
-            return env.server._on_reparent({"stream_id": f"{HOST}:{worker}", "new_parent_stream_id": f"{HOST}:{parent}",
+        async def reparent(worker, parent, reason="adopt orphan", auth=manager):
+            return await env.server._on_reparent({"stream_id": f"{HOST}:{worker}", "new_parent_stream_id": f"{HOST}:{parent}",
+                                            "expected_generation": await env.gen(worker),
                                             "reason": reason, "request_id": f"rp-{worker}-{parent}",
                                             "_auth_context": auth})
 
@@ -608,6 +609,8 @@ def test_manager_reparent_stale_generation_with_closed_cross_host_parent(monkeyp
         await env.sessions.refresh()
         msg = {"stream_id": f"{HOST}:child", "new_parent_stream_id": "node-b:successor",
                "reason": "adopt orphan", "request_id": "adopt-orphan", "_auth_context": manager}
+        await _refused(env.server._on_reparent(msg), "lifecycle_generation_required")
+        assert (await env.store.fetch_session(HOST, "child"))["parent_stream_id"] == f"{HOST}:old"
         await _refused(env.server._on_reparent({**msg, "expected_generation": "stale"}),
                        "lifecycle_generation_mismatch")
         assert (await env.store.fetch_session(HOST, "child"))["parent_stream_id"] == f"{HOST}:old"
@@ -616,6 +619,7 @@ def test_manager_reparent_stale_generation_with_closed_cross_host_parent(monkeyp
         assert (await env.store.fetch_session(HOST, "child"))["parent_stream_id"] == "node-b:successor"
         rows = [r for r in await env.audit() if r["action"] == "manager_reparent"]
         assert [(r["result"], r["refusal_code"]) for r in rows] == [
+            ("refused", "lifecycle_generation_required"),
             ("refused", "lifecycle_generation_mismatch"), ("admitted", None), ("applied", None)]
         for row in rows:
             assert (row["actor_identity"], row["actor_generation"], row["target_stream_id"],
@@ -672,30 +676,6 @@ def test_manager_reparent_admission_audit_failure_does_not_move(monkeypatch):
                 "expected_generation": await env.gen("child"), "reason": "move active lane",
                 "request_id": "audit-failure", "_auth_context": manager})
         assert (await env.store.fetch_session(HOST, "child"))["parent_stream_id"] == f"{HOST}:other"
-
-    scenario(check)
-
-
-def test_manager_reparent_uses_grant_without_external_ruling(monkeypatch):
-    monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
-
-    async def check(env: Env):
-        manager = await _manager(env)
-        await env.open("lane-owner", role="lead")
-        await env.open("lane-bound", role="worker", parent_stream_id=f"{HOST}:lane-owner")
-        await env.open("destination", role="lead")
-
-        class Rulings:
-            async def request_close(self, *_args, **_kwargs):
-                raise AssertionError("manager reparent entered the external close ruler")
-
-        env.server.lane_rulings = Rulings()
-        reply = await env.server._on_reparent({
-            "stream_id": f"{HOST}:lane-bound", "new_parent_stream_id": f"{HOST}:destination",
-            "expected_generation": await env.gen("lane-bound"), "reason": "move active lane",
-            "request_id": "ruling-waiver", "_auth_context": manager})
-        assert reply["type"] == "reparent.ok"
-        assert (await env.store.fetch_session(HOST, "lane-bound"))["parent_stream_id"] == f"{HOST}:destination"
 
     scenario(check)
 
@@ -885,9 +865,10 @@ def test_opposite_concurrent_manager_reparents_cannot_form_cycle(monkeypatch):
 
         env.store.update_session = gated_update
 
-        def move(worker, parent):
-            return env.server._on_reparent({"stream_id": f"{HOST}:{worker}", "new_parent_stream_id": f"{HOST}:{parent}",
-                                            "reason": "adopt", "request_id": f"rp-{worker}", "_auth_context": manager})
+        async def move(worker, parent):
+            return await env.server._on_reparent({"stream_id": f"{HOST}:{worker}", "new_parent_stream_id": f"{HOST}:{parent}",
+                                                  "expected_generation": await env.gen(worker),
+                                                  "reason": "adopt", "request_id": f"rp-{worker}", "_auth_context": manager})
 
         tasks = [asyncio.create_task(move("a", "b")), asyncio.create_task(move("b", "a"))]
         for _ in range(50):
@@ -1023,9 +1004,11 @@ def test_revoke_is_linearized_with_manager_reparent(monkeypatch):
         manager = await _manager(env)
         await env.open("a", role="lead")
         await env.open("w", role="worker")
+        worker_generation = await env.gen("w")
         finished_early, results = await _race(
             env,
             lambda: env.server._on_reparent({"stream_id": f"{HOST}:w", "new_parent_stream_id": f"{HOST}:a",
+                                             "expected_generation": worker_generation,
                                              "reason": "adopt", "request_id": "rp-w", "_auth_context": manager}),
             "update_session",
             lambda: env.mutate(OPERATOR, "revoke", request_id="v1", reason="stop now", expected=1))
@@ -1048,6 +1031,7 @@ def test_authority_lock_ordering_has_no_deadlock(monkeypatch):
         calls = [
             env.server._on_close(_close(manager, "f1")),
             env.server._on_reparent({"stream_id": f"{HOST}:w1", "new_parent_stream_id": f"{HOST}:a",
+                                     "expected_generation": await env.gen("w1"),
                                      "reason": "adopt", "request_id": "rp", "_auth_context": manager}),
             env.server._on_close(_close(manager, "f2")),
             env.server._on_close({"type": "close", "stream_id": f"{HOST}:w1", "reason": "operator",
@@ -1118,6 +1102,7 @@ def test_manager_reparent_cancelled_after_commit_keeps_applied_audit(monkeypatch
         committed, resume = _pause_after(env, "update_session", lambda *a, **k: "parent_stream_id" in k)
         task = asyncio.create_task(env.server._on_reparent({
             "stream_id": f"{HOST}:orphan", "new_parent_stream_id": f"{HOST}:a", "reason": "adopt orphan",
+            "expected_generation": await env.gen("orphan"),
             "request_id": "rp-cancel", "_auth_context": manager}))
         await _cancel_after_commit(task, committed, resume)
         assert (await env.store.fetch_session(HOST, "orphan"))["parent_stream_id"] == "node-a:a"
@@ -1143,6 +1128,7 @@ def test_manager_action_cancelled_before_authority_lock_has_no_effect(monkeypatc
         else:
             request = env.server._on_reparent({
                 "stream_id": f"{HOST}:fixture", "new_parent_stream_id": f"{HOST}:a", "reason": "adopt orphan",
+                "expected_generation": await env.gen("fixture"),
                 "request_id": "rp-wait", "_auth_context": manager})
         task = asyncio.create_task(request)
         for _ in range(50):
@@ -1265,6 +1251,7 @@ def test_manager_action_cancelled_inside_authority_lock_finishes_then_cancels(mo
                 env, "lifecycle_authority_audit", lambda *a, **k: k.get("result") == "admitted")
             task = asyncio.create_task(env.server._on_reparent({
                 "stream_id": f"{HOST}:fixture", "new_parent_stream_id": f"{HOST}:a", "reason": "adopt orphan",
+                "expected_generation": await env.gen("fixture"),
                 "request_id": "rp-inner", "_auth_context": manager}))
             await _cancel_after_commit(task, committed, resume)
         row = await env.store.fetch_session(HOST, "fixture")
@@ -1290,6 +1277,7 @@ def test_manager_reparent_cancelled_waiting_for_lifecycle_lock_has_no_effect(mon
         await lock.acquire()
         task = asyncio.create_task(env.server._on_reparent({
             "stream_id": f"{HOST}:fixture", "new_parent_stream_id": f"{HOST}:a", "reason": "adopt orphan",
+            "expected_generation": await env.gen("fixture"),
             "request_id": "rp-lc", "_auth_context": manager}))
         await _until(lambda: env.sessions.assistant.authority_lock.locked())
         assert not task.done() and env.sessions.assistant.authority_lock.locked()

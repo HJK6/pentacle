@@ -213,6 +213,38 @@ async def lane_manager(env, *, direct_parent=False):
     return manager
 
 
+def test_lane_bound_manager_reparent_uses_grant_waiver_without_ruling_or_report():
+    async def run():
+        async with journey() as env:
+            manager = await lane_manager(env, direct_parent=False)
+            target = await env.store.fetch_session(LANE_HOST, "lane")
+            await env.store.open_session(LANE_HOST, "destination", provider="codex", role="lead",
+                                         pane_status="pane_alive", bootstrap_state="ready")
+            await env.sessions.refresh()
+            owned = await env.store.submit(lambda conn: conn.execute(
+                "SELECT count(*) FROM v2_assistant_bart_lanes WHERE target_stream_id=? AND target_generation=?",
+                (TARGET, target["session_generation"])).fetchone()[0])
+            assert owned == 1
+            assert await env.store.find_report(TARGET, statuses={"done", "error", "aborted"},
+                                               session_generation=target["session_generation"]) is None
+            reply = await env.server._on_reparent({
+                "stream_id": TARGET, "new_parent_stream_id": f"{LANE_HOST}:destination",
+                "expected_generation": target["session_generation"], "reason": "move active lane",
+                "request_id": "lane-ruling-waiver", "_auth_context": manager})
+            assert reply["type"] == "reparent.ok"
+            assert (await env.store.fetch_session(LANE_HOST, "lane"))["parent_stream_id"] == f"{LANE_HOST}:destination"
+            pending = await env.store.submit(lambda conn: conn.execute(
+                "SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0])
+            assert pending == 0
+            assert await env.store.reservations(include_expired=True) == []
+            assert await env.store.find_report(TARGET, statuses={"done", "error", "aborted"},
+                                               session_generation=target["session_generation"]) is None
+            rows = [r for r in await env.store.lifecycle_authority_audit_rows(TARGET, limit=10)
+                    if r["action"] == "manager_reparent"]
+            assert [r["result"] for r in reversed(rows)] == ["admitted", "applied"]
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("direct_parent", [False, True])
 def test_no_report_lane_requires_ruler_then_audited_manager_admission(direct_parent):
     async def run():

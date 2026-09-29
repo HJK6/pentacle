@@ -2104,7 +2104,9 @@ class Server:
         code = policy.manager_request_code(msg)
         if code is None and not await policy.manager_holds(auth):
             code = "authority_holder_required"
-        expected_generation = str(msg.get("expected_generation") or "").strip() or generation
+        expected_generation = str(msg.get("expected_generation") or "").strip()
+        if code is None and not expected_generation:
+            code = "lifecycle_generation_required"
         if code is None and generation != expected_generation:
             code = "lifecycle_generation_mismatch"
         if code is not None:

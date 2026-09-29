@@ -3373,6 +3373,10 @@ def reparent(args: argparse.Namespace) -> int:
     (``--from-stream-id`` / ``--caller-stream-id`` default to the local leader),
     and maps the exit code off the daemon ``reparent.*`` response.
     """
+    expected_generation = getattr(args, "expected_generation", None)
+    if not isinstance(expected_generation, str) or not expected_generation.strip():
+        print("agent-orch reparent: --expected-generation is required", file=sys.stderr)
+        return 2
     config = load_config()
     caller_stream_id = (
         getattr(args, "caller_stream_id", None)
@@ -3391,7 +3395,7 @@ def reparent(args: argparse.Namespace) -> int:
                 timeout=timeout,
                 from_stream_id=from_stream_id,
                 caller_stream_id=caller_stream_id,
-                expected_generation=getattr(args, "expected_generation", None),
+                expected_generation=expected_generation.strip(),
             )
         )
     except ValueError as exc:
@@ -5578,7 +5582,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="caller stream id recorded as the audit actor (defaults to --from-stream-id).",
     )
     reparent_parser.add_argument("--reason", default="reparent")
-    reparent_parser.add_argument("--expected-generation", help="target seat generation from inspect; refuse if it changed")
+    reparent_parser.add_argument("--expected-generation", required=True,
+                                 help="target seat generation from inspect; refuse if it changed")
     reparent_parser.add_argument(
         "--timeout",
         type=float,

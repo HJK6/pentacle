@@ -107,7 +107,7 @@ def _reparent_args(**overrides):
         "from_stream_id": None,
         "caller_stream_id": None,
         "reason": "reparent",
-        "expected_generation": None,
+        "expected_generation": "generation-1",
         "timeout": 5.0,
     }
     data.update(overrides)
@@ -158,7 +158,7 @@ def test_reparent_cli_routes_args_to_reparent_once(monkeypatch, tmp_path, capsys
     assert call["caller_stream_id"] == "hostb:leader"
     assert call["from_stream_id"] == "hostb:leader"
     assert call["timeout"] == 5.0
-    assert call["expected_generation"] is None
+    assert call["expected_generation"] == "generation-1"
     assert json.loads(capsys.readouterr().out)["type"] == "reparent.ok"
 
 
@@ -200,6 +200,12 @@ def test_reparent_cli_error_exits_nonzero(monkeypatch, tmp_path, capsys):
     rc = cli.reparent(_reparent_args())
     assert rc == 1
     assert json.loads(capsys.readouterr().out)["error_code"] == "reparent_cross_host"
+
+
+def test_reparent_cli_requires_expected_generation(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(cli, "load_config", lambda: Config("ws://test", "tok", "hostb", tmp_path))
+    assert cli.reparent(_reparent_args(expected_generation=None)) == 2
+    assert "expected-generation" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
