@@ -615,6 +615,8 @@ def start_always_on(stop_existing=True):
     listener = ensure_always_on_models()
     listener.on_event = always_on_event
     listener.on_capture_end = lambda: get_service().capture_ended('room_mic', listener, state['meeting_active'])
+    if getattr(getattr(listener, 'voice_actions', None), 'enabled', False):
+        log('WARNING: local actions must remain disabled until capture acknowledgement ordering is fixed; keep MIC_LOCAL_ACTIONS=false.')
     listener.on_meeting_start = start_meeting_voice
     listener.on_meeting_stop = stop_meeting_voice
 
