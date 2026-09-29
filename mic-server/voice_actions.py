@@ -236,7 +236,7 @@ class VoiceActions:
             self.listener.suppress_recognition_until(self.playback_until)
         self._status(item, 'speaking', response=text)
         try:
-            self.speaker(text, deadline)
+            receipt = self.speaker(text, deadline)
         except Exception:
             # Even a disconnected SSH process may leave remote playback alive.
             # The remote UTC deadline and skew allowance remain the fence.
@@ -244,6 +244,9 @@ class VoiceActions:
         else:
             self.playback_until = time.monotonic()+1
             self.listener.suppress_recognition_until(self.playback_until)
+            if isinstance(receipt, dict) and receipt.get('suppressed'):
+                self._status(item, 'suppressed', response=text, reason=receipt.get('reason'))
+                return False
             self._status(item, 'spoken', response=text)
             return True
 

@@ -376,3 +376,18 @@ def test_only_explicit_player_configuration_can_select_audio(configured,monkeypa
     assert isinstance(speaker.sink, NullSink)
     speaker.speak('Captured safely.',time.time()+5)
     assert speaker.last['played'] is False
+
+
+def test_silent_local_action_reports_suppression_without_rendering(service,monkeypatch):
+    import speaker_service
+    from voice_speaker import speak
+    from .test_local_actions import fake_actions
+    monkeypatch.setattr(speaker_service,'get_service',lambda: service)
+    monkeypatch.setenv('MIC_VOICE_SPEAKER_MODE','resident')
+    service.silent = True
+    actions,listener,item = fake_actions(monkeypatch,speaker=speak)
+    before = len(service.speaker.renderer.calls)
+    assert actions._say(item,'Captured safely.') is False
+    last = actions.snapshot()['last']
+    assert last['state'] == 'suppressed' and last['reason'] == 'silent_mode'
+    assert len(service.speaker.renderer.calls) == before
