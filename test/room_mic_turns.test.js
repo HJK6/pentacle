@@ -69,3 +69,48 @@ test('reconnect backfill completes a delivered turn once and ignores older histo
   ]});
   await flush();assert.equal(f.calls.length,1);
 });
+test('merged actual distinct-header roots close only the active root; uncertain roots stay open',async()=>{
+  const calls=[];
+  const tracker=createRoomMicTurns({api:async(...args)=>{calls.push(args);return {outcome:'suppressed',reason:'silent'};},onOutcome:()=>{}});
+  const stream_id='workstation:seat';
+  const first=roomMicHeader('first','Repeat the request');
+  const second=roomMicHeader('second','Repeat the request');
+  tracker.register({streamId:stream_id,conversationId:'first',optimisticId:'o1',requestId:'r1',text:first});
+  tracker.register({streamId:stream_id,conversationId:'second',optimisticId:'o2',requestId:'r2',text:second});
+  tracker.observe({type:'chat.event',event:{stream_id,daemon_seq:1,kind:'USER',text:first,request_id:'r1',raw:{transport:'codex-rollout'}}});
+  tracker.observe({type:'chat.event',event:{stream_id,daemon_seq:2,kind:'USER',text:second,request_id:'r2',raw:{transport:'codex-rollout'}}});
+  tracker.observe({type:'chat.event',event:{stream_id,daemon_seq:3,kind:'ASSIST_TEXT',text:'First result',raw:{transport:'codex-rollout',phase:'final_answer'}}});
+  await flush();
+  assert.deepEqual(calls,[['POST','/turn-ended',{conversation_id:'first'}]]);
+  tracker.observe({type:'chat.event',event:{stream_id,daemon_seq:4,kind:'ASSIST_TEXT',text:'Second result',raw:{transport:'codex-rollout',phase:'final_answer'}}});
+  await flush();
+  assert.deepEqual(calls,[['POST','/turn-ended',{conversation_id:'first'}]]); // No authoritative second root/final pair.
+});
+test('a mismatched authoritative root id never falls back to equal tagged text',async()=>{
+  const f=fixture();
+  f.emit('USER',{transport:'codex-rollout'},{request_id:'other-request'});
+  f.emit('ASSIST',{transport:'codex-rollout',phase:'final_answer'});
+  await flush();assert.equal(f.calls.length,0);
+});
+test('typed first root prevents a merged room root from taking the typed final',async()=>{
+ const f=fixture();
+ f.emit('USER',{transport:'codex-rollout'},{text:'typed request',request_id:'typed'});
+ f.emit('USER',{transport:'codex-rollout'},{request_id:'request'});
+ f.emit('ASSIST',{transport:'codex-rollout',phase:'final_answer'});
+ await flush();assert.equal(f.calls.length,0);
+});
+test('separate answer roots may reuse a conversation id and each end once',async()=>{
+ const f=fixture();
+ f.tracker.register({streamId:'workstation:seat',conversationId:'conversation',optimisticId:'answer-o',requestId:'answer-r',text:roomMicHeader('conversation','answer')});
+ f.emit('USER',{transport:'codex-rollout'},{request_id:'request'});
+ f.emit('ASSIST',{transport:'codex-rollout',phase:'final_answer'});
+ f.emit('USER',{transport:'codex-rollout'},{request_id:'answer-r',text:roomMicHeader('conversation','answer')});
+ f.emit('ASSIST',{transport:'codex-rollout',phase:'final_answer'});
+ await flush();assert.equal(f.calls.length,2);
+});
+test('a terminal with another authoritative id never closes the active room root',async()=>{
+ const f=fixture();
+ f.emit('USER',{transport:'codex-rollout'},{request_id:'request'});
+ f.emit('ASSIST',{transport:'codex-rollout',phase:'final_answer'},{request_id:'other'});
+ await flush();assert.equal(f.calls.length,0);
+});

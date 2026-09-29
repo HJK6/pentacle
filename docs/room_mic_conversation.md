@@ -49,8 +49,17 @@ The delivering client registers only its own claimed captures. It observes the
 matching provider USER root, then a structured final answer or the existing
 provider turn-end marker, and posts `conversation_id` to `/turn-ended` once.
 Send receipts, sidechains, working heartbeats and UI quiet timers do not end a
-spoken turn. Ordered reconnect backfill uses the same sequence deduplication.
-The service owns fallback policy; an endpoint error never alters chat state.
+spoken turn. Strong request and optimistic IDs take precedence over text matching;
+text is a fallback only when the provider root carries neither ID. The tracker
+keys each delivery root separately, so answer turns can reuse a conversation ID.
+
+Only the active provider root owns an uncorrelated final. A typed root occupies
+that order without speech. If additional roots arrive while a provider turn is
+active, they can be merged into that turn; their uncertain fallback is left to
+the service's conversation ceiling. A missing fallback is preferable to closing
+an ID before its later answer. Ordered reconnect backfill uses the same sequence
+deduplication. The service owns fallback policy; an endpoint error never alters
+chat state.
 
 Focused checks:
 

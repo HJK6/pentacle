@@ -15,7 +15,8 @@ function createRoomMicTurns({ api, isSystemEndOfTurnEvent = () => false,
   const seen = new Map();
   function register({ streamId, conversationId, optimisticId, requestId, text }) {
     if (!roomMicHeader(conversationId, '') || !streamId || !optimisticId) return;
-    pending.set(conversationId, {streamId,conversationId,optimisticId,requestId,text});
+    // A conversation may own several answer roots; delivery identity is the key.
+    pending.set(JSON.stringify([streamId, optimisticId]), {streamId,conversationId,optimisticId,requestId,text});
   }
   function observe(frame) {
     if (['snapshot','stream_events'].includes(frame?.type) && Array.isArray(frame.events)) {
@@ -35,30 +36,38 @@ function createRoomMicTurns({ api, isSystemEndOfTurnEvent = () => false,
     const kind = String(event.kind || '').toUpperCase();
     const providerRoot = ['codex-rollout','claude-jsonl'].includes(raw.transport);
     if (kind === 'USER' && providerRoot) {
-      for (const [id, turn] of pending) {
-        if (turn.streamId !== streamId) continue;
-        if ((turn.requestId && event.request_id === turn.requestId)
-          || event.optimistic_id === turn.optimisticId || event.text === turn.text) {
-          pending.delete(id);
-          const turns = active.get(streamId) || new Map();
-          turns.set(id, turn);
-          active.set(streamId, turns);
+      const candidates = [...pending].filter(([, turn]) => {
+        if (turn.streamId !== streamId) return false;
+        if (event.request_id || event.optimistic_id) {
+          if (event.request_id && event.request_id !== turn.requestId) return false;
+          if (event.optimistic_id && event.optimistic_id !== turn.optimisticId) return false;
+          return true;
         }
-      }
+        return event.text === turn.text;
+      });
+      const match = candidates.length === 1 ? candidates[0] : null;
+      if (match) pending.delete(match[0]);
+      // A provider can absorb more than one USER root into a single turn. Only
+      // the first root owns the uncorrelated terminal; later roots remain open
+      // to the service ceiling. Missing fallback is safer than premature closure.
+      // Typed roots occupy that same order, but never call the voice endpoint.
+      if (!active.has(streamId)) active.set(streamId, {turn:match?.[1],
+        requestId:event.request_id,optimisticId:event.optimistic_id});
       return;
     }
     const final = ['ASSIST','ASSIST_TEXT'].includes(kind) && providerRoot && (
       raw.transport === 'codex-rollout' && raw.phase === 'final_answer'
       || raw.transport === 'claude-jsonl' && raw.stop_reason === 'end_turn');
     if (!final && !isSystemEndOfTurnEvent(event)) return;
-    const turns = active.get(streamId);
-    if (!turns) return;
+    const root = active.get(streamId);
+    if (!root) return;
     active.delete(streamId); // Remove before I/O: replay never creates another call.
-    for (const id of turns.keys()) {
-      Promise.resolve().then(() => api('POST','/turn-ended',{conversation_id:id}))
-        .then(result => onOutcome({conversationId:id,result}))
-        .catch(() => onOutcome({conversationId:id,result:{outcome:'refused',reason:'turn_ended_unavailable'}}));
-    }
+    if (!root.turn || event.request_id && event.request_id !== root.requestId
+      || event.optimistic_id && event.optimistic_id !== root.optimisticId) return;
+    const id = root.turn.conversationId;
+    Promise.resolve().then(() => api('POST','/turn-ended',{conversation_id:id}))
+      .then(result => onOutcome({conversationId:id,result}))
+      .catch(() => onOutcome({conversationId:id,result:{outcome:'refused',reason:'turn_ended_unavailable'}}));
   }
   return { register, observe };
 }
