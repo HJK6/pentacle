@@ -134,7 +134,7 @@ class SpeakerService:
 
     def contract(self, cid=None):
         limits = self.rules.snapshot()['replies']
-        return dict(helper=f"bart-say --conversation-id {cid or '<conversation_id>'} --kind reply --text <literal-line> --final",
+        return dict(helper=f"bart-say --conversation-id {cid or '<conversation_id>'} --kind reply --text <literal-line>",
                     **{key:limits[key] for key in ('sentences_per_line','words_per_line','characters_per_line')})
 
     def _suppressed(self, output, meeting, rules):

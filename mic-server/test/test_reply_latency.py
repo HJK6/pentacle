@@ -144,3 +144,24 @@ def test_reply_waits_for_own_ack_without_bypassing_new_capture(service):
     cid=opened(service)
     service.test_listener.suppress_recognition_until(service.test_clock[0]+20)
     assert line(service,cid)['reason']=='listener_busy'
+
+
+def test_header_helper_keeps_long_work_open_until_explicit_completion(service, monkeypatch, capsys):
+    import shlex
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tools import voice_reply
+    cid = opened(service)
+    argv = shlex.split(service.contract(cid)['helper'])[1:]
+    argv[argv.index('--text')+1] = 'I am checking. The result will follow.'
+    def submit(conversation_id, kind, text, action, final):
+        return line(service, conversation_id, kind=kind, text=text, action=action, final=final)
+    monkeypatch.setattr(voice_reply, 'submit_line', submit)
+    assert voice_reply.main(argv) == 0
+    assert json.loads(capsys.readouterr().out)['outcome'] == 'spoken'
+    service.test_clock[0] += 4
+    argv[argv.index('--text')+1] = 'The check is finished. The details are in chat.'
+    assert voice_reply.main(argv+['--final']) == 0
+    assert json.loads(capsys.readouterr().out)['outcome'] == 'spoken'
+    assert line(service,cid)['reason'] == 'closed_conversation'

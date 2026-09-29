@@ -5,7 +5,7 @@ delivering client carries it through binding handoff and prepends this machine
 header to the assistant input:
 
 ```text
-[pentacle-input {"origin":"room_mic","conversation_id":"opaque-service-id","voice_reply":{"helper":"bart-say --conversation-id opaque-service-id --kind reply --text <literal-line> --final","sentences_per_line":2,"words_per_line":40,"characters_per_line":300}}]
+[pentacle-input {"origin":"room_mic","conversation_id":"opaque-service-id","voice_reply":{"helper":"bart-say --conversation-id opaque-service-id --kind reply --text <literal-line>","sentences_per_line":2,"words_per_line":40,"characters_per_line":300}}]
 
 The recognized request.
 ```
