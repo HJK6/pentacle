@@ -35,10 +35,15 @@ class LineTests(unittest.TestCase):
 class HelperTests(unittest.TestCase):
     def setUp(self):
         self.seen = []
+        self.limits = dict(sentences_per_line=2, words_per_line=40, characters_per_line=300)
         self.result = {'outcome': 'spoken'}
         self.delay = 0
         owner = self
         class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps({'speaker':{'rules':{'replies':owner.limits}}}).encode())
             def do_POST(self):
                 owner.seen.append((self.path, json.loads(self.rfile.read(int(self.headers['Content-Length'])))))
                 time.sleep(owner.delay)

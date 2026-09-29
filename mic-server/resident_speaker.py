@@ -141,7 +141,7 @@ class ResidentSpeaker:
     def start(self):
         self.renderer.start()
 
-    def speak(self, text, deadline):
+    def speak(self, text, deadline, on_first_frame=None):
         if not isinstance(text, str) or not text.strip() or not 0 < len(text) <= 800:
             raise ValueError('Spoken response is too long')
         sentences = [s for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s]
@@ -156,6 +156,8 @@ class ResidentSpeaker:
                     playing.result()
                 if first is None:
                     first = time.monotonic()-started
+                    if on_first_frame:
+                        on_first_frame()
                 playing = player.submit(self.sink.consume, rendered['path'], deadline)
                 receipts.append(rendered)
             playing.result()
@@ -165,9 +167,11 @@ class ResidentSpeaker:
                              duration=sum(r['duration'] for r in receipts), files=receipts)
             return self.last
 
-    def clip(self, path, deadline):
+    def clip(self, path, deadline, on_start=None):
         with self.lock:
             started = time.monotonic()
+            if on_start:
+                on_start()
             result = self.sink.consume(path, deadline)
             self.last = dict(stopped=True, rendered=True, played=self.sink.name == 'player',
                              sink=self.sink.name, first_frame_seconds=time.monotonic()-started, **result)
@@ -210,13 +214,13 @@ class ClipBank:
             self.previous[group] = selected
             return selected
 
-    def play(self, group, phrases, deadline):
+    def play(self, group, phrases, deadline, on_start=None):
         selected = self.choose(group, phrases)
         entry = self.manifest['clips'][selected]
         path = self.root/entry['file']
         if hashlib.sha256(path.read_bytes()).hexdigest() != entry['sha256']:
             raise ValueError('Clip digest mismatch')
-        return dict(text=selected, **self.speaker.clip(path, deadline))
+        return dict(text=selected, **self.speaker.clip(path, deadline, on_start=on_start))
 
 
 def render_clips(speaker, root, clips):

@@ -2,13 +2,30 @@
 import re
 
 
-def check_line(text):
+DEFAULT_LIMITS = dict(sentences_per_line=2, words_per_line=40, characters_per_line=300)
+
+
+def counts(text):
+    sentence_text = re.sub(r"(?<=\d)\.(?=\d)", "", text)
+    return dict(characters_per_line=len(text), words_per_line=len(text.split()),
+                sentences_per_line=len([s for s in re.split(r"[.!?]+", sentence_text) if s.strip()]))
+
+
+def limit_refusal(text, limits):
+    if not isinstance(text, str) or not text.strip():
+        return None
+    for key, measured in counts(text).items():
+        if measured > limits[key]:
+            return dict(outcome="refused", reason=key.split("_")[0], limit_name=key, limit=limits[key], measured=measured)
+    return None
+
+
+def check_line(text, limits=None):
     if not isinstance(text, str) or not text.strip():
         return "empty_text"
-    if len(text) > 300:
-        return "characters"
-    if len(text.split()) > 40:
-        return "words"
+    refusal = limit_refusal(text, limits or DEFAULT_LIMITS)
+    if refusal:
+        return refusal["reason"]
     if re.search(r"[\r\n\x00-\x1f\x7f]", text):
         return "markup"
     if re.search(r"[`*_#\[\]{}<>]|(?:^|\s)[-•]\s|\$\(", text):
@@ -19,11 +36,6 @@ def check_line(text):
         return "identifier_or_path"
     if text.count('?') > 1:
         return "questions"
-    # A decimal point inside a number is not a sentence boundary.
-    sentence_text = re.sub(r"(?<=\d)\.(?=\d)", "", text)
-    sentences = [part for part in re.split(r"[.!?]+", sentence_text) if part.strip()]
-    if len(sentences) > 2:
-        return "sentences"
     numbers = re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)*(?:%?)(?!\w)", text)
     number_words = re.findall(r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion)\b", text, re.I)
     if len(numbers) + len(number_words) > 3:

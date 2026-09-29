@@ -39,8 +39,8 @@ class VoiceActions:
             self.worker = threading.Thread(target=self._run, name='local-voice-actions', daemon=True)
             self.worker.start()
 
-    def submit(self, text, generation):
-        item = dict(id=uuid.uuid4().hex, generation=generation, text=text, revision=self.revision)
+    def submit(self, text, generation, metadata=None):
+        item = dict(id=uuid.uuid4().hex, generation=generation, text=text, revision=self.revision, metadata=metadata or {})
         try:
             self.queue.put_nowait(item)
             return True
@@ -193,7 +193,7 @@ class VoiceActions:
                     return
                 self.pending = None
                 action = dict(version=2, **{k: v for k, v in decision.items() if k not in ('progress', 'sources')}) if route == 'spawn_agent' else None
-                accepted = self.listener.wake.complete(item.get('original', item['text']), action=action, capture_id=item['id'])
+                accepted = self.listener.wake.complete(item.get('original', item['text']), action=action, capture_id=item['id'], metadata=item.get('metadata'))
                 self._status(item, 'pending_client' if accepted else 'error', route=route, field_sources=decision.get('sources'), error=None if accepted else self.listener.wake.error)
         elif route == 'market_quote':
             self._status(item, 'fetching_quotes', route=route)

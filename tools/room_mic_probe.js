@@ -43,7 +43,7 @@ async function main() {
       const requestId='fixture-room-send-'+msgId;
       const colon=stream.indexOf(':');
       receiptPromise=client.sendMessage({host:stream.slice(0,colon),sessionName:stream.slice(colon+1),text,optimisticId,requestId});
-      delivered={stream,text,requestId};
+      delivered={stream,text,requestId,submitted_at:Date.now()/1000};
       return optimisticId;
     },
     onRoomMicTurn:turn=>{delivered={...delivered,turn:{...turn,requestId:delivered.requestId}};tracker.register(delivered.turn);},
@@ -51,6 +51,7 @@ async function main() {
   await delivery.tick(await api('GET','/status'));
   if(!delivered)throw Error('Fixture was not delivered');
   delivered.receipt=await receiptPromise;
+  delivered.receipt_at=Date.now()/1000;
   fs.writeFileSync(outputPath,JSON.stringify(delivered,null,2)+'\n');
   const finalDeadline=Date.now()+600000;
   while(!outcomes.length&&Date.now()<finalDeadline)await new Promise(resolve=>setTimeout(resolve,100));

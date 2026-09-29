@@ -56,13 +56,19 @@ def main():
             data = json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))) or b'{}')
             requests.append({'path':self.path,'data':data,'timestamp':time.time()})
             if self.path == '/fixture/capture':
-                pending.append({'id':data['id'],'generation':generation,'text':data['text']})
+                listener.until = 0  # Counterpart: a new completed capture follows the prior echo fence.
+                metadata = service.capture_ended('room_mic', listener)
+                pending.append({'id':data['id'],'generation':generation,'text':data['text'],**metadata})
+                service.mark(metadata['conversation_id'], 'routed_at')
                 result = {'ok':True}
             elif self.path == '/wake/claim':
                 capture = pending.pop(0) if pending else None
                 if capture:
-                    capture['conversation_id'] = service.open('room_mic',listener)
+                    capture['voice_reply'] = service.contract(capture['conversation_id'])
+                    service.mark(capture['conversation_id'], 'claimed_at')
                 result = {'claim':capture}
+            elif self.path == '/conversation/timing':
+                result = {'ok':service.mark(data.get('conversation_id'),data.get('stage'),data.get('at'))}
             elif self.path == '/speak':
                 result = service.speak(data,listener)
             elif self.path == '/turn-ended':

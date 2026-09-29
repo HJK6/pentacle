@@ -1,9 +1,9 @@
 'use strict';
 
-function roomMicHeader(conversationId, text) {
+function roomMicHeader(conversationId, text, contract) {
   if (typeof conversationId !== 'string' || !conversationId.trim()
     || conversationId.length > 256 || /[\x00-\x1f\x7f]/.test(conversationId)) return null;
-  return `[pentacle-input ${JSON.stringify({origin:'room_mic',conversation_id:conversationId})}]\n\n${text}`;
+  return `[pentacle-input ${JSON.stringify({origin:'room_mic',conversation_id:conversationId,...(contract ? {voice_reply:contract}: {})})}]\n\n${text}`;
 }
 
 // Only provider transcript roots and terminal signals establish a turn. Receipt
@@ -46,7 +46,14 @@ function createRoomMicTurns({ api, isSystemEndOfTurnEvent = () => false,
         return event.text === turn.text;
       });
       const match = candidates.length === 1 ? candidates[0] : null;
-      if (match) pending.delete(match[0]);
+      if (match) {
+        pending.delete(match[0]);
+        const timestamp = Date.parse(event.timestamp);
+        Promise.resolve().then(() => api('POST','/conversation/timing',{
+          conversation_id:match[1].conversationId,stage:'delivered_at',
+          at:Number.isFinite(timestamp) ? timestamp/1000 : Date.now()/1000,
+        })).catch(() => {});
+      }
       // A provider can absorb more than one USER root into a single turn. Only
       // the first root owns the uncorrelated terminal; later roots remain open
       // to the service ceiling. Missing fallback is safer than premature closure.

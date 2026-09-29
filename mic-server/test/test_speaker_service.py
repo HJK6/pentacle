@@ -148,7 +148,13 @@ def test_fallback_once_and_none_after_accepted_line(service):
     assert service.turn_ended(cid)['reason'] == 'line_already_accepted'
 
 
-def test_late_kickoff_once_and_not_after_line(service):
+def test_late_kickoff_once_and_not_after_line(service, tmp_path, monkeypatch):
+    policy = copy.deepcopy(DEFAULTS)
+    policy['replies']['late_kickoff_enabled'] = True
+    path = tmp_path/'late-rules.json'
+    path.write_text(json.dumps(policy))
+    monkeypatch.setenv('MIC_VOICE_RULES_FILE', str(path))
+    service.rules = Rules()
     cid = opened(service)
     service.test_clock[0] += 15
     service.tick()

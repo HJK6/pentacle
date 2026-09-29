@@ -8,7 +8,7 @@ from pathlib import Path
 import threading
 
 DEFAULTS = {
-    'replies': {'characters_per_line': 300, 'lines_per_conversation': 4,
+    'replies': {'sentences_per_line': 2, 'words_per_line': 40, 'late_kickoff_enabled': False, 'characters_per_line': 300, 'lines_per_conversation': 4,
                 'minimum_gap_seconds': 3, 'conversation_ceiling_seconds': 43200,
                 'kickoff_deadline_seconds': 15},
     'clips': {'acknowledgement': ['On it.', 'Looking into it.', 'One moment.', 'Let me check.', 'Got it.', 'Working on it.'],
@@ -33,14 +33,16 @@ def validate(value):
     replies = value['replies']
     if not isinstance(replies, dict) or set(replies) != set(DEFAULTS['replies']):
         raise ValueError('Invalid replies section')
-    bounds = {'characters_per_line': (1, 800), 'lines_per_conversation': (1, 100),
+    if type(replies['late_kickoff_enabled']) is not bool:
+        raise ValueError('late_kickoff_enabled must be boolean')
+    bounds = {'sentences_per_line': (1, 20), 'words_per_line': (1, 200), 'characters_per_line': (1, 800), 'lines_per_conversation': (1, 100),
               'minimum_gap_seconds': (0, 3600), 'conversation_ceiling_seconds': (1, 43200),
               'kickoff_deadline_seconds': (.01, 3600)}
     for key, (low, high) in bounds.items():
         n = replies[key]
         if type(n) not in (int, float) or not math.isfinite(n) or not low <= n <= high:
             raise ValueError('Invalid reply limit: '+key)
-        if key in ('characters_per_line', 'lines_per_conversation') and type(n) is not int:
+        if key in ('sentences_per_line', 'words_per_line', 'characters_per_line', 'lines_per_conversation') and type(n) is not int:
             raise ValueError('Reply count limits must be integers')
     def strings(items, *, allow_empty=True):
         if not isinstance(items, list) or (not allow_empty and not items) or any(not isinstance(s, str) or not s.strip() or len(s)>300 for s in items):
@@ -105,4 +107,4 @@ class Rules:
 
     def status(self):
         with self.lock:
-            return dict(version=self.version, error=self.error, modes=copy.deepcopy(self.value['modes']))
+            return dict(version=self.version, error=self.error, modes=copy.deepcopy(self.value['modes']), replies=copy.deepcopy(self.value['replies']))

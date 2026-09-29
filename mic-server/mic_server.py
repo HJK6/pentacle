@@ -614,6 +614,7 @@ def start_always_on(stop_existing=True):
 
     listener = ensure_always_on_models()
     listener.on_event = always_on_event
+    listener.on_capture_end = lambda: get_service().capture_ended('room_mic', listener, state['meeting_active'])
     listener.on_meeting_start = start_meeting_voice
     listener.on_meeting_stop = stop_meeting_voice
 
@@ -814,13 +815,15 @@ class MicHandler(BaseHTTPRequestHandler):
 
         body = self._read_body()
 
-        if self.path in ("/speak", "/turn-ended", "/speaker/rules/reload"):
+        if self.path in ("/speak", "/turn-ended", "/speaker/rules/reload", "/conversation/timing"):
             if self.client_address[0] not in ("127.0.0.1", "::1"):
                 self._json({"outcome": "refused", "reason": "loopback_only"}, 403)
                 return
             service = get_service()
             if self.path == "/speak":
                 self._json(service.speak(body, always_on_listener, state["meeting_active"] or state["mode"] == "meeting"))
+            elif self.path == '/conversation/timing':
+                self._json({'ok': service.mark(body.get('conversation_id'), body.get('stage'), body.get('at'))})
             elif self.path == "/turn-ended":
                 self._json(service.turn_ended(body.get("conversation_id") if isinstance(body, dict) else None,
                                             state["meeting_active"] or state["mode"] == "meeting"))
@@ -891,7 +894,10 @@ class MicHandler(BaseHTTPRequestHandler):
                 else:
                     claim = wake.claim(actions_version=body.get("actions_version", 0))
                     if claim and not claim.get("action"):
-                        claim["conversation_id"] = get_service().open("room_mic", always_on_listener, state["meeting_active"])
+                        if not claim.get('conversation_id'):
+                            claim['conversation_id'] = get_service().open('room_mic', always_on_listener, state['meeting_active'], acknowledge=False)
+                        claim['voice_reply'] = get_service().contract(claim['conversation_id'])
+                        get_service().mark(claim['conversation_id'], 'claimed_at')
                         with wake.lock:
                             wake.last_claim.update(conversation_id=claim["conversation_id"])
                     self._json({"claim": claim, "generation": wake.generation, "mode": state["mode"]})

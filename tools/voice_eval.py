@@ -65,6 +65,10 @@ def main():
     if endpoint == 'fixture':
         ids = {case['conversation_id'] for case in cases}
         class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps({'speaker':{'rules':{'replies':{'sentences_per_line':2,'words_per_line':40,'characters_per_line':300}}}}).encode())
             def do_POST(self):
                 data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 result = {'outcome':'spoken'} if self.path == '/speak' and data.get('conversation_id') in ids else {'outcome':'refused','reason':'unknown_conversation'}

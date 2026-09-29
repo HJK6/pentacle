@@ -53,7 +53,7 @@ test('every browser mic call shape survives real JSON websocket transport',async
  const cc=buildCc(transport,{config:{features:{mic:true}},clipboard:{}});
  try {
   assert.equal(await cc.startMicServer(),true);
-  for(const [method,path,body] of [['GET','/status'],['GET','/transcript/since/0'],['GET','/clipboard/since/0'],['GET','/calibration'],['GET','/logs'],['GET','/transcripts'],['GET','/transcript'],['GET','/wake/last-claim'],['POST','/mode/on'],['POST','/mode/clipboard',{}],['POST','/mode/meeting',{}],['POST','/mode/off',{}],['POST','/copy/start'],['POST','/copy/stop'],['POST','/wake/claim',{actions_version:2}],['POST','/actions/outcome',{id:'fixture',outcome:'delivered'}],['POST','/calibrate/start',{group:'wake'}],['POST','/calibrate/stop',{}],['POST','/audio/keep',{seconds:1}]] ) {
+  for(const [method,path,body] of [['GET','/status'],['GET','/transcript/since/0'],['GET','/clipboard/since/0'],['GET','/calibration'],['GET','/logs'],['GET','/transcripts'],['GET','/transcript'],['GET','/wake/last-claim'],['POST','/mode/on'],['POST','/mode/clipboard',{}],['POST','/mode/meeting',{}],['POST','/mode/off',{}],['POST','/copy/start'],['POST','/copy/stop'],['POST','/wake/claim',{actions_version:2}],['POST','/conversation/timing',{conversation_id:'fixture',stage:'delivered_at'}],['POST','/actions/outcome',{id:'fixture',outcome:'delivered'}],['POST','/calibrate/start',{group:'wake'}],['POST','/calibrate/stop',{}],['POST','/audio/keep',{seconds:1}]] ) {
    assert.equal((await cc.micRequest(method,path,body)).ok,true,`${method} ${path}`);
   }
   const count=seen.length;

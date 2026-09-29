@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from tools.voice_line import check_line
+from tools.voice_line import check_line, limit_refusal, DEFAULT_LIMITS
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -16,9 +16,6 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def submit_line(conversation_id, kind, text, action=None, final=False, endpoint=None):
-    reason = check_line(text)
-    if reason:
-        return {"outcome": "refused", "reason": reason}
     if not isinstance(conversation_id, str) or not conversation_id.strip():
         return {"outcome": "refused", "reason": "missing_conversation_id"}
     if kind != "reply" and not kind.startswith("announcement:"):
@@ -28,6 +25,19 @@ def submit_line(conversation_id, kind, text, action=None, final=False, endpoint=
         url = urllib.parse.urlsplit(base)
         if url.scheme != "http" or url.hostname not in {"127.0.0.1", "::1", "localhost"} or url.username or url.password or url.query or url.fragment or url.path not in {"", "/"}:
             return {"outcome": "refused", "reason": "nonlocal_endpoint"}
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        with opener.open(base.rstrip('/')+'/status', timeout=3) as response:
+            status = json.loads(response.read(131073))
+        replies = status['speaker']['rules']['replies']
+        limits = {key:replies[key] for key in DEFAULT_LIMITS}
+        if any(type(n) is not int or n < 1 for n in limits.values()):
+            return {"outcome":"refused", "reason":"invalid_rules"}
+        refusal = limit_refusal(text, limits)
+        if refusal:
+            return refusal
+        reason = check_line(text, limits)
+        if reason:
+            return {"outcome":"refused", "reason":reason}
         payload = {"conversation_id": conversation_id, "kind": kind, "text": text, "final": bool(final)}
         if action is not None:
             payload["action"] = action
@@ -45,7 +55,7 @@ def submit_line(conversation_id, kind, text, action=None, final=False, endpoint=
         if result["outcome"] != "spoken" and not isinstance(result.get("reason"), str):
             return {"outcome": "refused", "reason": "invalid_response"}
         return result
-    except (OSError, ValueError, urllib.error.URLError):
+    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
         return {"outcome": "refused", "reason": "speaker_unavailable"}
 
 

@@ -7429,7 +7429,11 @@ function updateMicUI(data) {
   }
 }
 
+let micStatusInFlight = false;
 async function fetchMicStatus() {
+  if (micStatusInFlight) return;
+  micStatusInFlight = true;
+  try {
   const data = await micApi('GET', '/status');
   updateMicUI(data);
   void wakeDelivery?.tick(data);
@@ -7464,6 +7468,7 @@ async function fetchMicStatus() {
       }
     }
   }
+  } finally { micStatusInFlight = false; }
 }
 
 document.getElementById('mic-btn-toggle').addEventListener('click', async () => {
@@ -7915,7 +7920,7 @@ CFG_READY.then((cfg) => {
       },
     });
     fetchMicStatus();
-    setInterval(fetchMicStatus, 1000);
+    setInterval(fetchMicStatus, 100);
   } else {
     const section = document.getElementById('mic-section');
     if (section) section.style.display = 'none';

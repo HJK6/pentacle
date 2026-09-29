@@ -318,6 +318,7 @@ class AlwaysOnListener:
 
         # Callback for mic_server integration
         self.on_event = None
+        self.on_capture_end = None
 
     def load_models(self):
         from silero_vad import load_silero_vad
@@ -904,12 +905,16 @@ class AlwaysOnListener:
             if self.captured_texts:
                 full_text = " ".join(self.captured_texts).strip()
                 if self.capture_origin in ("wake", "local_action", "followup"):
-                    if self.capture_origin == 'followup':
+                    origin = self.capture_origin
+                    # Release CAPTURING before the acknowledgement takes the recognition fence.
+                    self.state = "LISTENING"
+                    metadata = self.on_capture_end() if self.on_capture_end else {}
+                    if origin == 'followup':
                         self.voice_actions.submit_answer(full_text, self.followup_id)
-                    elif self.capture_origin == 'local_action':
-                        self.voice_actions.submit(full_text, self.wake.generation)
+                    elif origin == 'local_action':
+                        self.voice_actions.submit(full_text, self.wake.generation, metadata=metadata)
                     else:
-                        self.wake.complete(full_text)
+                        self.wake.complete(full_text, metadata=metadata)
                     self._emit("wake_completed", {"generation": self.wake.generation})
                 else:
                     copy_to_clipboard(full_text)

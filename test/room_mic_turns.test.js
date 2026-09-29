@@ -5,7 +5,7 @@ const { roomMicHeader, createRoomMicTurns } = require('../renderer/room_mic_turn
 const flush = () => new Promise(resolve=>setImmediate(resolve));
 function fixture() {
   const calls=[];
-  const tracker=createRoomMicTurns({api:async(...args)=>{calls.push(args);return {outcome:'suppressed',reason:'silent'};},
+  const tracker=createRoomMicTurns({api:async(...args)=>{if(args[1]==='/turn-ended') calls.push(args);return {outcome:'suppressed',reason:'silent'};},
     isSystemEndOfTurnEvent:event=>event.kind==='SYSTEM'&&event.raw?.subtype==='turn-summary'});
   const text=roomMicHeader('conversation','hello');
   tracker.register({streamId:'workstation:seat',conversationId:'conversation',optimisticId:'optimistic',requestId:'request',text});
@@ -49,7 +49,7 @@ test('typed/mobile user roots, receipts, sidechains and history do not end the r
 });
 test('offline completion callback cannot fail chat delivery and is never retried',async()=>{
   let calls=0;
-  const tracker=createRoomMicTurns({api:async()=>{calls++;throw Error('offline');}});
+  const tracker=createRoomMicTurns({api:async(method,path)=>{if(path==='/turn-ended') calls++;throw Error('offline');}});
   tracker.register({streamId:'workstation:seat',conversationId:'id',optimisticId:'o',text:'tagged'});
   const event={stream_id:'workstation:seat',daemon_seq:1,kind:'USER',text:'tagged',raw:{transport:'codex-rollout'}};
   tracker.observe({type:'chat.event',event});
@@ -71,7 +71,7 @@ test('reconnect backfill completes a delivered turn once and ignores older histo
 });
 test('merged actual distinct-header roots close only the active root; uncertain roots stay open',async()=>{
   const calls=[];
-  const tracker=createRoomMicTurns({api:async(...args)=>{calls.push(args);return {outcome:'suppressed',reason:'silent'};},onOutcome:()=>{}});
+  const tracker=createRoomMicTurns({api:async(...args)=>{if(args[1]==='/turn-ended') calls.push(args);return {outcome:'suppressed',reason:'silent'};},onOutcome:()=>{}});
   const stream_id='workstation:seat';
   const first=roomMicHeader('first','Repeat the request');
   const second=roomMicHeader('second','Repeat the request');

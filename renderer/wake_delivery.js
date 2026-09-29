@@ -117,8 +117,7 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
     const current = epoch;
     const valid = () => epoch === current && !muted;
     try {
-      const initialState = await getState();
-      const initialBinding = await binding();
+      const [initialState, initialBinding] = await Promise.all([getState(), binding()]);
       const initialTarget = target(initialState, initialBinding);
       if (!valid()) return;
       if (!held && !status.wake.pending_count) {
@@ -144,7 +143,7 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
         return;
       }
       // Off/generation and identity are read again after the destructive claim.
-      const latestStatus = await api('GET', '/status');
+      const [latestStatus, latestState, latestBinding] = await Promise.all([api('GET', '/status'), getState(), binding()]);
       observe(latestStatus);
       if (!valid() || !latestStatus || latestStatus.mode !== 'on'
         || latestStatus.wake?.generation !== held?.generation) return;
@@ -176,8 +175,6 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
         await api('POST', '/actions/outcome', { id: capture.id, generation: capture.generation, outcome, receipt });
         return;
       }
-      const latestState = await getState();
-      const latestBinding = await binding();
       const latestTarget = target(latestState, latestBinding);
       if (!valid()) return;
       if (!latestTarget || latestTarget !== initialTarget) {
@@ -185,7 +182,7 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
         return;
       }
       const capture = held;
-      const text = roomMicHeader(capture.conversation_id, capture.text);
+      const text = roomMicHeader(capture.conversation_id, capture.text, capture.voice_reply);
       if (!text) {
         note = 'Wake conversation unavailable. Waiting for a valid microphone claim.';
         return;

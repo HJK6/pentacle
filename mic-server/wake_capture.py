@@ -27,7 +27,7 @@ class WakeCaptures:
             self.error = None
             return True
 
-    def complete(self, text, action=None, capture_id=None):
+    def complete(self, text, action=None, capture_id=None, metadata=None):
         with self.lock:
             if text.strip():
                 if len(self.pending) >= 8:
@@ -35,6 +35,10 @@ class WakeCaptures:
                     return False
                 # One listener capture at a time; admission reserves its capacity.
                 item = dict(id=capture_id or str(uuid.uuid4()), generation=self.generation, text=text.strip())
+                item.update(metadata or {})
+                if item.get('conversation_id'):
+                    from speaker_service import get_service
+                    get_service().mark(item['conversation_id'], 'routed_at')
                 if action is not None:
                     item['action'] = action
                 self.pending.append(item)
