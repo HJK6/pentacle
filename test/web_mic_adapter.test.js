@@ -24,8 +24,9 @@ test('host adapter reaches configured service and forwards existing response/err
   const request=createMicRequest({features:{mic:true},micServerUrl:`http://127.0.0.1:${server.address().port}`});
   assert.deepEqual(await request('GET','/status'),{mode:'off',ok:true});
   assert.deepEqual(await request('POST','/mode/off',{caller:'fixture'}),{mode:'off',ok:true});
+  assert.deepEqual(await request('POST','/turn-ended',{conversation_id:'fixture-conversation'}),{mode:'off',ok:true});
   assert.deepEqual(await request('POST','/copy/start'),{error:'wake active',ok:false,status:409});
-  assert.deepEqual(seen,[['GET','/status',''],['POST','/mode/off','{"caller":"fixture"}'],['POST','/copy/start','']]);
+  assert.deepEqual(seen,[['GET','/status',''],['POST','/mode/off','{"caller":"fixture"}'],['POST','/turn-ended','{"conversation_id":"fixture-conversation"}'],['POST','/copy/start','']]);
  } finally {await new Promise(r=>server.close(r));}
 });
 test('unsupported operations, arbitrary destinations and oversize data never reach backend',async()=>{

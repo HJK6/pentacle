@@ -1,10 +1,11 @@
 'use strict';
 const { configuredAssistantRole } = require('./assistant_role');
 const { prepareVoiceSpawn, spawnOutcome } = require('./voice_action_delivery');
+const { roomMicHeader } = require('./room_mic_turns');
 
 // Reuse the main client's full-snapshot handshake and existing correlated chat
 // lifecycle. A claim owns one utterance; sendTurn must only create one request.
-function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawnAgent, getSpawnCatalog, onStatus = () => {} }) {
+function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawnAgent, getSpawnCatalog, onRoomMicTurn = () => {}, onStatus = () => {} }) {
   let busy = false;
   let held = null;
   let epoch = 0;
@@ -184,11 +185,17 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
         return;
       }
       const capture = held;
+      const text = roomMicHeader(capture.conversation_id, capture.text);
+      if (!text) {
+        note = 'Wake conversation unavailable. Waiting for a valid microphone claim.';
+        return;
+      }
       held = null;
       lastAttemptedId = capture.id;
       note = '';
       // Normal same-request reconnect replay belongs to ChatStore, not here.
-      await sendTurn(latestTarget, capture.text);
+      const optimisticId = await sendTurn(latestTarget, text);
+      onRoomMicTurn({streamId:latestTarget,conversationId:capture.conversation_id,optimisticId,text});
     } catch (error) {
       note = lastAttemptedId && !held
         ? 'Wake send unconfirmed. Check the chat send status; no new automatic send will be created.'

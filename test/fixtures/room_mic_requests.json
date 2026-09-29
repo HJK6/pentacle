@@ -1,0 +1,242 @@
+[
+  {
+    "id": "eval-01",
+    "category": "short_fact",
+    "origin": "room_mic",
+    "request": "What is the capital of France?",
+    "context": "Known fixture fact: Paris.",
+    "conversation_id": "fixture-01"
+  },
+  {
+    "id": "eval-02",
+    "category": "short_fact",
+    "origin": "room_mic",
+    "request": "How many minutes are in two hours?",
+    "context": "Known fixture answer: 120 minutes.",
+    "conversation_id": "fixture-02"
+  },
+  {
+    "id": "eval-03",
+    "category": "short_fact",
+    "origin": "room_mic",
+    "request": "Did the backup finish?",
+    "context": "Fixture result: backup completed successfully.",
+    "conversation_id": "fixture-03"
+  },
+  {
+    "id": "eval-04",
+    "category": "short_fact",
+    "origin": "room_mic",
+    "request": "How long until the timer finishes?",
+    "context": "Fixture timer has 90 seconds remaining.",
+    "conversation_id": "fixture-04"
+  },
+  {
+    "id": "eval-05",
+    "category": "short_fact",
+    "origin": "room_mic",
+    "request": "Is the package arriving today?",
+    "context": "Fixture tracking says arrival tomorrow, not today.",
+    "conversation_id": "fixture-05"
+  },
+  {
+    "id": "eval-06",
+    "category": "short_fact",
+    "origin": "room_mic",
+    "request": "Is the meeting at three or four?",
+    "context": "Fixture calendar: four in the afternoon.",
+    "conversation_id": "fixture-06"
+  },
+  {
+    "id": "eval-07",
+    "category": "too_much",
+    "origin": "room_mic",
+    "request": "Tell me all the release changes.",
+    "context": "Fixture: login fixed; export added; upload faster; keyboard shortcuts added; dark theme fixed. Full detail belongs in chat.",
+    "conversation_id": "fixture-07"
+  },
+  {
+    "id": "eval-08",
+    "category": "too_much",
+    "origin": "room_mic",
+    "request": "Read the whole report to me.",
+    "context": "Fixture report: costs fell about 12 percent and quality stayed stable; the long tables belong in chat.",
+    "conversation_id": "fixture-08"
+  },
+  {
+    "id": "eval-09",
+    "category": "too_much",
+    "origin": "room_mic",
+    "request": "What failed in the test run?",
+    "context": "Fixture: three upload checks failed because the storage service was unavailable; nineteen other checks passed. File names and log paths belong only in chat.",
+    "conversation_id": "fixture-09"
+  },
+  {
+    "id": "eval-10",
+    "category": "too_much",
+    "origin": "room_mic",
+    "request": "Explain all the code changes.",
+    "context": "Fixture: the client now preserves the spoken-request identity and signals when the answer ends. Code and identifiers belong in chat.",
+    "conversation_id": "fixture-10"
+  },
+  {
+    "id": "eval-11",
+    "category": "too_much",
+    "origin": "room_mic",
+    "request": "Compare every plan for me.",
+    "context": "Fixture: the basic plan costs less and meets the requirements; the premium plan has unused extras. Comparison table belongs in chat.",
+    "conversation_id": "fixture-11"
+  },
+  {
+    "id": "eval-12",
+    "category": "too_much",
+    "origin": "room_mic",
+    "request": "Give me the exact timings and every measurement.",
+    "context": "Fixture: average about 1.25 seconds, slowest about 2.76 seconds; raw precise samples and identifiers belong in chat.",
+    "conversation_id": "fixture-12"
+  },
+  {
+    "id": "eval-13",
+    "category": "long_work",
+    "origin": "room_mic",
+    "request": "Review the whole release and tell me when it is ready.",
+    "context": "Simulated delegated review is required. Started -> reviewer launched -> all required checks pass.",
+    "conversation_id": "fixture-13"
+  },
+  {
+    "id": "eval-14",
+    "category": "long_work",
+    "origin": "room_mic",
+    "request": "Check the thirty-page report for errors.",
+    "context": "Simulated delegated check is required. Started -> reviewer launched -> two errors found and fixed.",
+    "conversation_id": "fixture-14"
+  },
+  {
+    "id": "eval-15",
+    "category": "long_work",
+    "origin": "room_mic",
+    "request": "Prepare the migration plan.",
+    "context": "Simulated delegated investigation is required. Started -> researcher launched -> plan ready in chat.",
+    "conversation_id": "fixture-15"
+  },
+  {
+    "id": "eval-16",
+    "category": "long_work",
+    "origin": "room_mic",
+    "request": "Find why the upload is broken and fix it.",
+    "context": "Simulated delegated investigation is required. Started -> investigator launched -> storage retry fixed and test passes.",
+    "conversation_id": "fixture-16"
+  },
+  {
+    "id": "eval-17",
+    "category": "long_work",
+    "origin": "room_mic",
+    "request": "Audit the accessibility changes.",
+    "context": "Simulated delegated audit is required. Started -> auditor launched -> focus issue fixed.",
+    "conversation_id": "fixture-17"
+  },
+  {
+    "id": "eval-18",
+    "category": "long_work",
+    "origin": "room_mic",
+    "request": "Run the broad checks and report.",
+    "context": "Simulated delegated checks are required. Started -> agent launched -> checks take longer than expected -> checks pass.",
+    "conversation_id": "fixture-18"
+  },
+  {
+    "id": "eval-19",
+    "category": "needs_decision",
+    "origin": "room_mic",
+    "request": "Book the appointment.",
+    "context": "Cannot choose time: fixture offers morning or afternoon, operator preference missing. Do not actually book or ask the live operator.",
+    "conversation_id": "fixture-19"
+  },
+  {
+    "id": "eval-20",
+    "category": "needs_decision",
+    "origin": "room_mic",
+    "request": "Send the report to Alex.",
+    "context": "Fixture has two contacts named Alex. Recipient identity is indispensable. Do not send anything.",
+    "conversation_id": "fixture-20"
+  },
+  {
+    "id": "eval-21",
+    "category": "needs_decision",
+    "origin": "room_mic",
+    "request": "Delete the old project.",
+    "context": "Fixture has two projects both called old project. Target identity is indispensable. Do not delete anything.",
+    "conversation_id": "fixture-21"
+  },
+  {
+    "id": "eval-22",
+    "category": "needs_decision",
+    "origin": "room_mic",
+    "request": "Choose my preferred color.",
+    "context": "Fixture preferences have no color recorded. Ask one necessary preference question; no live operator prompt.",
+    "conversation_id": "fixture-22"
+  },
+  {
+    "id": "eval-23",
+    "category": "needs_decision",
+    "origin": "room_mic",
+    "request": "Schedule it next week.",
+    "context": "Fixture has no event duration. Duration is indispensable; do not change a calendar.",
+    "conversation_id": "fixture-23"
+  },
+  {
+    "id": "eval-24",
+    "category": "needs_decision",
+    "origin": "room_mic",
+    "request": "Start the paid upgrade.",
+    "context": "Fixture offers two paid tiers and choice is missing. Do not spend money; ask one necessary question.",
+    "conversation_id": "fixture-24"
+  },
+  {
+    "id": "eval-25",
+    "category": "failure",
+    "origin": "room_mic",
+    "request": "Did you finish the export?",
+    "context": "Fixture export failed because the source file is unavailable. No further action can repair that fixture.",
+    "conversation_id": "fixture-25"
+  },
+  {
+    "id": "eval-26",
+    "category": "failure",
+    "origin": "room_mic",
+    "request": "What is the latest price?",
+    "context": "Fixture data service is offline; do not invent a price or browse.",
+    "conversation_id": "fixture-26"
+  },
+  {
+    "id": "eval-27",
+    "category": "failure",
+    "origin": "room_mic",
+    "request": "Can you open the document?",
+    "context": "Fixture document does not exist. Do not open anything.",
+    "conversation_id": "fixture-27"
+  },
+  {
+    "id": "eval-28",
+    "category": "failure",
+    "origin": "room_mic",
+    "request": "Send me the finished build.",
+    "context": "Fixture build failed on an existing dependency error. Explain conclusion, detail in chat.",
+    "conversation_id": "fixture-28"
+  },
+  {
+    "id": "eval-29",
+    "category": "failure",
+    "origin": "room_mic",
+    "request": "Did the save work?",
+    "context": "Fixture save was refused because storage is full. Do not modify storage.",
+    "conversation_id": "fixture-29"
+  },
+  {
+    "id": "eval-30",
+    "category": "failure",
+    "origin": "room_mic",
+    "request": "Please recover the missing record.",
+    "context": "Fixture recovery exhausted the available backups without finding the record.",
+    "conversation_id": "fixture-30"
+  }
+]

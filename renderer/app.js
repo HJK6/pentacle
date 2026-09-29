@@ -27,6 +27,7 @@ const {
 } = require('./mic-state');
 const { createRemoteClipboardPoller } = require('./remote-clipboard-poll');
 const { createWakeDelivery } = require('./wake_delivery');
+const { createRoomMicTurns } = require('./room_mic_turns');
 const {
   filterSidebarSessions,
   collectSourceFilterHostIds,
@@ -5391,6 +5392,7 @@ window.cc.onChatStreamFrame((frame) => {
   // state.chatStream.sessions being kept current with chat_streamd's
   // inventory even when the in-slot chat UI is off.
   window.PentacleChatStore?.applyFrame?.(frame);
+  roomMicTurns?.observe(frame);
   applyChatStreamPayload(frame);
 });
 
@@ -7249,6 +7251,7 @@ for (const btn of document.querySelectorAll('.cell-voice')) {
 // ── Mic Control ───────────────────────────────────────────────
 
 let wakeDelivery = null;
+let roomMicTurns = null;
 
 const micState = {
   starting: false,
@@ -7891,6 +7894,10 @@ CFG_READY.then((cfg) => {
   // Mic panel — enabled on any platform when features.mic is true.
   // The mic server is cross-platform (MicServer.app on macOS, Python direct on Windows/Linux).
   if (CONFIG.features.mic) {
+    roomMicTurns = createRoomMicTurns({
+      api: micApi,
+      isSystemEndOfTurnEvent: event => window.PentacleChatCore.isSystemEndOfTurnEvent(event),
+    });
     wakeDelivery = createWakeDelivery({
       config: CONFIG,
       getState: () => window.PentacleChatStore?.sendTurn ? window.cc.getChatStreamState() : null,
@@ -7899,6 +7906,10 @@ CFG_READY.then((cfg) => {
       spawnAgent: (request) => window.cc.chatSpawnV2(request),
       getSpawnCatalog: () => window.cc.chatSpawnCatalog(),
       sendTurn: (streamId, text) => window.PentacleChatStore.sendTurn(streamId, text),
+      onRoomMicTurn: turn => {
+        const send = window.PentacleChatStore.getState().optimisticSends?.[turn.optimisticId];
+        roomMicTurns.register({...turn,requestId:send?.request_id});
+      },
       onStatus: (text) => {
         if (text && micState.mode === 'on') document.getElementById('mic-info').textContent = text;
       },

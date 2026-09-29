@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createWakeDelivery } = require('../renderer/wake_delivery');
+const tagged = (text,id='a') => `[pentacle-input {"origin":"room_mic","conversation_id":"conversation-${id}"}]\n\n${text}`;
 const row = (id='bart:current', extra={}) => ({ stream_id:id, host:'bart', role:'assistant', status:'open', pane_status:'pane_alive', ...extra });
 function fixture() {
   const f = { config:{features:{mic:true,assistantRole:'assistant'},mic:{wakeTargetHost:'bart'},chatStream:{}},
@@ -9,7 +10,9 @@ function fixture() {
     state:{connected:true,sessions:[row()]},claims:[{id:'a',generation:'one',text:'hello'}], sends:[], apiCalls:[], notes:[] };
   f.api = async (method,path) => {
     f.apiCalls.push(path);
-    return path==='/status' ? structuredClone(f.status) : {claim:f.claims.shift() || null};
+    if(path==='/status') return structuredClone(f.status);
+    const claim=f.claims.shift() || null;
+    return {claim:claim ? {...claim,conversation_id:'conversation-'+claim.id} : null};
   };
   f.make = () => createWakeDelivery({config:f.config, getState:async()=>structuredClone(f.state),
     api:(...args)=>f.api(...args),sendTurn:(...args)=>f.sends.push(args),onStatus:text=>f.notes.push(text)});
@@ -19,7 +22,7 @@ test('one send for concurrent/repeated polling, identical text in distinct captu
   const f=fixture();
   await Promise.all([f.helper.tick(f.status),f.helper.tick(f.status)]);
   await f.helper.tick(f.status);
-  assert.deepEqual(f.sends,[['bart:current','hello']]);
+  assert.deepEqual(f.sends,[['bart:current',tagged('hello')]]);
   f.claims.push({id:'b',generation:'one',text:'hello'});
   await f.helper.tick(f.status);
   assert.equal(f.sends.length,2);
@@ -49,7 +52,7 @@ test('handoff while claiming holds once, then sends to fresh unique assistant re
   await f.helper.tick(f.status); assert.equal(f.sends.length,0);
   f.status.wake.pending_count=0;
   await f.helper.tick(f.status);
-  assert.deepEqual(f.sends,[['bart:new','hello']]);
+  assert.deepEqual(f.sends,[['bart:new',tagged('hello')]]);
   assert.equal(f.apiCalls.filter(x=>x==='/wake/claim').length,1);
 });
 test('Off during claim cancels work even if an old On status returns',async()=>{
@@ -88,7 +91,7 @@ test('claimed message waits for reconnection without a second claim',async()=>{
   await f.helper.tick(f.status);
   f.state={connected:true,sessions:[row('bart:new')]};
   await f.helper.tick(f.status);
-  assert.deepEqual(f.sends,[['bart:new','hello']]);
+  assert.deepEqual(f.sends,[['bart:new',tagged('hello')]]);
   assert.equal(f.apiCalls.filter(p=>p==='/wake/claim').length,1);
 });
 test('lost claim response never reconstructs or replays its text',async()=>{
@@ -106,8 +109,8 @@ test('answer-ready text agrees with echo-tail readiness flag',()=>{
   assert.equal(f.helper.message(f.status),'Ready for your answer — say over to finish.');
 });
 function pinnedFixture(){const f=fixture();delete f.config.features.assistantRole;f.config.mic.wakeTargetStreamId='bart:direct';f.state.sessions=[row('bart:direct',{role:'lead'}),row('bart:unrelated',{role:'lead'})];f.helper=f.make();return f;}
-test('explicit wake identity bypasses ambiguous lead roles without selecting other leads',async()=>{const f=pinnedFixture();await f.helper.tick(f.status);assert.deepEqual(f.sends,[['bart:direct','hello']]);});
-test('explicit identity follows unique forward handoff lineage',async()=>{const f=pinnedFixture();f.state.sessions=[row('bart:direct',{role:'lead',closed_at:'closed'}),row('bart:next',{role:'lead',handoff_from_stream_id:'bart:direct',closed_at:'closed'}),row('bart:current',{role:'lead',handoff_from_stream_id:'bart:next'}),row('bart:other',{role:'lead'})];await f.helper.tick(f.status);assert.deepEqual(f.sends,[['bart:current','hello']]);});
+test('explicit wake identity bypasses ambiguous lead roles without selecting other leads',async()=>{const f=pinnedFixture();await f.helper.tick(f.status);assert.deepEqual(f.sends,[['bart:direct',tagged('hello')]]);});
+test('explicit identity follows unique forward handoff lineage',async()=>{const f=pinnedFixture();f.state.sessions=[row('bart:direct',{role:'lead',closed_at:'closed'}),row('bart:next',{role:'lead',handoff_from_stream_id:'bart:direct',closed_at:'closed'}),row('bart:current',{role:'lead',handoff_from_stream_id:'bart:next'}),row('bart:other',{role:'lead'})];await f.helper.tick(f.status);assert.deepEqual(f.sends,[['bart:current',tagged('hello')]]);});
 for(const kind of ['missing','closed','ambiguous','wrong-host','cycle'])test(`explicit identity fails closed: ${kind}`,async()=>{
  const f=pinnedFixture();f.status.wake.pending_count=0;
  if(kind==='missing')f.state.sessions=[row('bart:other',{role:'lead'})];
@@ -120,7 +123,7 @@ for(const kind of ['missing','closed','ambiguous','wrong-host','cycle'])test(`ex
 test('explicit handoff during claim holds capture and sends once to successor',async()=>{
  const f=pinnedFixture();const original=f.api;
  f.api=async(...args)=>{const r=await original(...args);if(args[1]==='/wake/claim')f.state.sessions=[row('bart:direct',{closed_at:'closed'}),row('bart:new',{role:'lead',handoff_from_stream_id:'bart:direct'})];return r;};
- await f.helper.tick(f.status);assert.equal(f.sends.length,0);f.status.wake.pending_count=0;await f.helper.tick(f.status);await f.helper.tick(f.status);assert.deepEqual(f.sends,[['bart:new','hello']]);assert.equal(f.apiCalls.filter(p=>p==='/wake/claim').length,1);
+ await f.helper.tick(f.status);assert.equal(f.sends.length,0);f.status.wake.pending_count=0;await f.helper.tick(f.status);await f.helper.tick(f.status);assert.deepEqual(f.sends,[['bart:new',tagged('hello')]]);assert.equal(f.apiCalls.filter(p=>p==='/wake/claim').length,1);
 });
 
 test('already-open wake client follows unrelated durable rebind while old target remains open',async()=>{
@@ -134,11 +137,11 @@ test('already-open wake client follows unrelated durable rebind while old target
    getBinding:async()=>binding,api:(...args)=>f.api(...args),
    sendTurn:(...args)=>f.sends.push(args),onStatus:text=>f.notes.push(text)});
  await f.helper.tick(f.status);
- assert.deepEqual(f.sends,[['bart:direct','hello']]);
+ assert.deepEqual(f.sends,[['bart:direct',tagged('hello')]]);
  f.claims.push({id:'second',generation:'one',text:'after rebind'});
  binding={ok:true,source:'durable',stream_id:'bart:unrelated',generation:'gen-b',revision:1};
  await f.helper.tick(f.status);
- assert.deepEqual(f.sends,[['bart:direct','hello'],['bart:unrelated','after rebind']]);
+ assert.deepEqual(f.sends,[['bart:direct',tagged('hello')],['bart:unrelated',tagged('after rebind','second')]]);
 });
 
 test('durable binding waits when its matching generation has a dead pane',async()=>{
@@ -170,7 +173,7 @@ test('explicit unconfigured and older daemon fallback work without a local pin',
      getBinding:async()=>result,api:(...args)=>f.api(...args),
      sendTurn:(...args)=>f.sends.push(args)});
    await f.helper.tick(f.status);
-   assert.deepEqual(f.sends,[['bart:current','hello']]);
+   assert.deepEqual(f.sends,[['bart:current',tagged('hello')]]);
  }
 });
 

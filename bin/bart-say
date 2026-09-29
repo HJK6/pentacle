@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""PATH entry point; resolving a symlink keeps the helper imports local."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.voice_reply import main
+raise SystemExit(main())

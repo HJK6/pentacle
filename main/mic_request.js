@@ -2,7 +2,7 @@
 const { resolveMicUrl } = require('./mic-url');
 
 const GET_PATHS = new Set(['/status', '/calibration', '/logs', '/transcripts', '/transcript', '/wake/last-claim']);
-const POST_PATHS = new Set(['/mode/on', '/mode/off', '/mode/clipboard', '/mode/meeting', '/copy/start', '/copy/stop', '/wake/claim', '/actions/outcome', '/calibrate/start', '/calibrate/stop', '/audio/keep']);
+const POST_PATHS = new Set(['/mode/on', '/mode/off', '/mode/clipboard', '/mode/meeting', '/copy/start', '/copy/stop', '/wake/claim', '/turn-ended', '/actions/outcome', '/calibrate/start', '/calibrate/stop', '/audio/keep']);
 
 // The authenticated web host controls its configured microphone. Browser input
 // selects an existing operation, never a destination or an arbitrary URL.
