@@ -93,7 +93,7 @@ def fake_actions(monkeypatch, classifier=None, speaker=None):
     from wake_capture import WakeCaptures
     from voice_actions import VoiceActions
     monkeypatch.delenv('MIC_LOCAL_ACTIONS', raising=False)
-    listener=SimpleNamespace(running=True,state='LISTENING',wake=WakeCaptures(True),_emit=Mock(),suppress_recognition_until=Mock())
+    listener=SimpleNamespace(running=True,state='LISTENING',wake=WakeCaptures(True),recognition_stamp=lambda: (0, False),_emit=Mock(),suppress_recognition_until=Mock())
     actions=VoiceActions(listener,classifier=classifier or (lambda text: {'route':'clarify','reply':'What task? Repeat the whole request.'}),speaker=speaker or Mock())
     return actions,listener,dict(id='a'*32,generation=listener.wake.generation,text='Spawn an agent')
 

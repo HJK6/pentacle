@@ -19,13 +19,14 @@ import signal
 import threading
 import subprocess
 from contextlib import contextmanager
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
 # Add mic-server to path
 sys.path.insert(0, os.path.dirname(__file__))
 
 from audio_buffer import get_audio_buffer
+from speaker_service import get_service
 
 def audio_duration_s(path):
     """Probe container duration before upload inference; never load another model."""
@@ -700,6 +701,7 @@ class MicHandler(BaseHTTPRequestHandler):
                     if isinstance(state["last_error"], dict) and state["last_error"].get("type") == "audio_health":
                         state["last_error"] = None
                 data = {
+                    "speaker": get_service().status(),
                     "mode": state["mode"],
                     "meeting_active": state["meeting_active"],
                     "clipboard_pid": state["clipboard_pid"],
@@ -812,7 +814,20 @@ class MicHandler(BaseHTTPRequestHandler):
 
         body = self._read_body()
 
-        if self.path == "/audio/keep":
+        if self.path in ("/speak", "/turn-ended", "/speaker/rules/reload"):
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                self._json({"outcome": "refused", "reason": "loopback_only"}, 403)
+                return
+            service = get_service()
+            if self.path == "/speak":
+                self._json(service.speak(body, always_on_listener, state["meeting_active"] or state["mode"] == "meeting"))
+            elif self.path == "/turn-ended":
+                self._json(service.turn_ended(body.get("conversation_id") if isinstance(body, dict) else None,
+                                            state["meeting_active"] or state["mode"] == "meeting"))
+            else:
+                self._json({"ok": service.reload(), "rules": service.rules.status()})
+
+        elif self.path == "/audio/keep":
             if self.client_address[0] not in ("127.0.0.1", "::1"):
                 self._json({"error": "audio preservation is loopback only"}, 403)
                 return
@@ -874,7 +889,12 @@ class MicHandler(BaseHTTPRequestHandler):
                 if state["mode"] != "on" or not wake or not wake.enabled or not always_on_listener.running:
                     self._json({"error": "wake capture is not active"}, 409)
                 else:
-                    self._json({"claim": wake.claim(actions_version=body.get("actions_version", 0)), "generation": wake.generation, "mode": state["mode"]})
+                    claim = wake.claim(actions_version=body.get("actions_version", 0))
+                    if claim and not claim.get("action"):
+                        claim["conversation_id"] = get_service().open("room_mic", always_on_listener, state["meeting_active"])
+                        with wake.lock:
+                            wake.last_claim.update(conversation_id=claim["conversation_id"])
+                    self._json({"claim": claim, "generation": wake.generation, "mode": state["mode"]})
 
         elif self.path == "/copy/start":
             if not always_on_listener or not always_on_listener.running:
@@ -1227,6 +1247,7 @@ def main():
     def handle_signal(sig, frame):
         log("Shutting down...")
         stop_all()
+        get_service().close()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_signal)
@@ -1234,7 +1255,8 @@ def main():
 
     get_audio_buffer()  # Startup expiry and cleanup continue even when mic is Off.
     bind_host = get_bind_host()
-    server = HTTPServer((bind_host, PORT), MicHandler)
+    server = ThreadingHTTPServer((bind_host, PORT), MicHandler)
+    threading.Thread(target=get_service().start, name="resident-speaker-start", daemon=True).start()
     log(f"Mic Server running on http://{bind_host}:{PORT}")
     log(f"Platform: {sys.platform}")
     log("Modes: clipboard, meeting, on, off")

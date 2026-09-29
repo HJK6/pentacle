@@ -69,6 +69,12 @@ def local_speaker_script():
 def speak(text, deadline, run=subprocess.run):
     if not isinstance(text, str) or not 0 < len(text) <= 800:
         raise ValueError('Spoken response is too long')
+    if run is subprocess.run and os.environ.get('MIC_VOICE_SPEAKER_MODE', 'resident') == 'resident':
+        from speaker_service import get_service
+        service = get_service()
+        if service.silent and 'lines' in service.rules.snapshot()['modes']['silent']['suppresses']:
+            return dict(stopped=True, played=False, suppressed=True, reason='silent_mode')
+        return service.speaker.speak(text, deadline)
     identifier = uuid.uuid4().hex
     payload = dict(id=identifier, text=text, deadline=deadline)
     payload['script'] = configured_speaker_script(

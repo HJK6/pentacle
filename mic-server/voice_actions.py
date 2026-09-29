@@ -223,12 +223,12 @@ class VoiceActions:
         while self.valid(item) and time.monotonic() < self.playback_until:
             time.sleep(.05)
         idle_deadline = time.monotonic()+10
-        while self.valid(item) and self.listener.state != 'LISTENING' and time.monotonic() < idle_deadline:
+        while self.valid(item) and (self.listener.state != 'LISTENING' or self.listener.recognition_stamp()[1]) and time.monotonic() < idle_deadline:
             time.sleep(.05)
         with self.listener.wake.lock:
             if not self.valid(item):
                 return
-            if self.listener.state != 'LISTENING':
+            if self.listener.state != 'LISTENING' or self.listener.recognition_stamp()[1]:
                 self._status(item, 'error', error='Speech deferred because the microphone is busy.')
                 return
             deadline = time.time()+30
