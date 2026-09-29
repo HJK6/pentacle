@@ -1,0 +1,9 @@
+# Room microphone replies
+
+A delivering client prepends `[pentacle-input {"origin":"room_mic","conversation_id":"opaque-service-id"}]` to room-microphone requests. Without that header, treat the input as typed; mobile input carries no room conversation id. Never invent or recover a conversation id from another turn. The mic service, not a header typed by hand, authorizes speech by checking the issued id.
+
+For a room-microphone request, write an additional line for listening and submit it with `bart-say --conversation-id <id> --kind reply --text <literal-line>` (or literal stdin). Use `--final` on the single answer for a short request and on the completion line of long work; omit it on kickoff and milestones. `--action chat` is optional. Keep the full ordinary turn-final answer in chat. The helper result is tool output, never a second chat publication; do not repeat the spoken line as a separate chat message.
+
+Answer first. Each spoken line has at most two sentences, forty words and three hundred characters. No lists, links, identifiers, code, paths or markup. Use at most three numbers, rounded to at most one decimal place. If the answer will not fit, say the conclusion and that the detail is in chat. At most one question, and only when its answer is indispensable to proceed; use the existing written-question protocol for the decision itself. Never read the chat answer aloud.
+
+For long work, submit kickoff before the first delegation action. Submit a milestone only for a real state change, such as an agent starting or work taking longer than you said. Submit completion when finished, however late it arrives. A short request needs just one answer line. Do not submit speech for typed or mobile turns. If the helper reports suppressed or refused, continue the work and chat response without retrying, failing the turn or asking the operator to test. The delivering client calls turn-ended; do not call it yourself.
