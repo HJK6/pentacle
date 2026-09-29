@@ -910,11 +910,13 @@ class Sessions:
         *,
         auth_context: dict[str, Any] | None = None,
         manager_authorized: bool = False,
+        expected_generation: str | None = None,
     ) -> dict[str, Any]:
         async with self._graph_lock:
             return await self._reparent_locked(
                 host, session_name, new_parent_stream_id,
-                auth_context=auth_context, manager_authorized=manager_authorized)
+                auth_context=auth_context, manager_authorized=manager_authorized,
+                expected_generation=expected_generation)
 
     async def _reparent_locked(
         self,
@@ -924,6 +926,7 @@ class Sessions:
         *,
         auth_context: dict[str, Any] | None = None,
         manager_authorized: bool = False,
+        expected_generation: str | None = None,
     ) -> dict[str, Any]:
         """Move one open worker to an open parent in the central registry.
 
@@ -947,6 +950,8 @@ class Sessions:
         worker = await self.store.fetch_session(host, session_name)
         if worker is None or str(worker.get("status") or "open") != "open":
             raise VerbError("reparent_worker_not_found", f"{worker_stream_id} is not an open worker")
+        if expected_generation is not None and worker.get("session_generation") != expected_generation:
+            raise VerbError("lifecycle_generation_mismatch", f"{worker_stream_id} generation changed")
         old_parent_stream_id = str(worker.get("parent_stream_id") or "").strip() or None
 
         parent = await self.store.fetch_session(
@@ -980,9 +985,10 @@ class Sessions:
                 and str(caller_row.get("handoff_from_stream_id") or "").strip()
                 == old_parent_stream_id
             )
-        if not allowed and manager_authorized:
+        if manager_authorized:
             # The designated lifecycle manager (verified by the caller) may move a
-            # non-child, but never a protected assistant or into a cycle.
+            # seat, but never a protected assistant or into a cycle, even when
+            # the manager also happens to be its current parent.
             if self.assistant.protects(worker):
                 raise VerbError("reparent_protected", f"{worker_stream_id} is a protected assistant")
             seen, cursor = set(), new_parent_stream_id

@@ -58,10 +58,10 @@ def initialize(conn: sqlite3.Connection) -> None:
         action TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_identity TEXT,
         actor_generation TEXT, target_stream_id TEXT, target_generation TEXT,
         old_revision INTEGER, new_revision INTEGER, prior_stream_id TEXT,
-        prior_generation TEXT, reason TEXT, request_id TEXT,
+        prior_generation TEXT, new_parent_stream_id TEXT, reason TEXT, request_id TEXT,
         result TEXT NOT NULL, refusal_code TEXT, created_at REAL NOT NULL)""")
     columns = {r[1] for r in conn.execute("PRAGMA table_info(v2_lifecycle_authority_audit)")}
-    for column in ("consent_id", "caller_claims"):
+    for column in ("consent_id", "caller_claims", "new_parent_stream_id"):
         if column not in columns:
             conn.execute(f"ALTER TABLE v2_lifecycle_authority_audit ADD COLUMN {column} TEXT")
     conn.execute("""CREATE INDEX IF NOT EXISTS ix_v2_lifecycle_authority_audit_target
@@ -148,9 +148,11 @@ def audit(conn: sqlite3.Connection, **fields: Any) -> None:
     verified = fields.get("actor_kind") not in {None, "unauthenticated"}
     fields["reason"] = scrub(fields.get("reason"), MAX_REASON) if verified else None
     fields["request_id"] = scrub(fields.get("request_id"), MAX_REQUEST_ID) if verified else None
+    fields["new_parent_stream_id"] = scrub(fields.get("new_parent_stream_id"), MAX_REQUEST_ID) if verified else None
     cols = ("action", "actor_kind", "actor_identity", "actor_generation", "target_stream_id",
             "target_generation", "old_revision", "new_revision", "prior_stream_id",
-            "prior_generation", "reason", "request_id", "result", "refusal_code", "consent_id", "caller_claims")
+            "prior_generation", "new_parent_stream_id", "reason", "request_id", "result", "refusal_code",
+            "consent_id", "caller_claims")
     values = [fields.get(c) for c in cols]
     conn.execute(f"INSERT INTO v2_lifecycle_authority_audit ({','.join(cols)}, created_at) "
                  f"VALUES ({','.join('?' * len(cols))}, ?)", (*values, time.time()))

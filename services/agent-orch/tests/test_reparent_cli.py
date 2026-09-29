@@ -30,6 +30,7 @@ DAEMON_ACCEPTED_FIELDS = {
     "caller_stream_id",
     "stream_token",
     "reason",
+    "expected_generation",
 }
 
 
@@ -79,6 +80,7 @@ def test_reparent_once_builds_daemon_accepted_wire_frame(monkeypatch, tmp_path):
             reason="reparent",
             from_stream_id="hostb:leader-old",
             caller_stream_id="hostb:leader-old",
+            expected_generation="generation-1",
         )
     )
     assert response["type"] == "reparent.ok"
@@ -93,6 +95,7 @@ def test_reparent_once_builds_daemon_accepted_wire_frame(monkeypatch, tmp_path):
     assert payload["from_stream_id"] == "hostb:leader-old"
     assert payload["caller_stream_id"] == "hostb:leader-old"
     assert payload["reason"] == "reparent"
+    assert payload["expected_generation"] == "generation-1"
     # No drift: every emitted key is one the daemon handler reads.
     assert set(payload) <= DAEMON_ACCEPTED_FIELDS, set(payload) - DAEMON_ACCEPTED_FIELDS
 
@@ -104,6 +107,7 @@ def _reparent_args(**overrides):
         "from_stream_id": None,
         "caller_stream_id": None,
         "reason": "reparent",
+        "expected_generation": None,
         "timeout": 5.0,
     }
     data.update(overrides)
@@ -125,6 +129,7 @@ def test_reparent_cli_routes_args_to_reparent_once(monkeypatch, tmp_path, capsys
         timeout=30.0,
         from_stream_id=None,
         caller_stream_id=None,
+        expected_generation=None,
     ):
         calls.append(
             {
@@ -134,6 +139,7 @@ def test_reparent_cli_routes_args_to_reparent_once(monkeypatch, tmp_path, capsys
                 "timeout": timeout,
                 "from_stream_id": from_stream_id,
                 "caller_stream_id": caller_stream_id,
+                "expected_generation": expected_generation,
             }
         )
         return {"type": "reparent.ok", "request_id": "reparent-1"}
@@ -152,14 +158,16 @@ def test_reparent_cli_routes_args_to_reparent_once(monkeypatch, tmp_path, capsys
     assert call["caller_stream_id"] == "hostb:leader"
     assert call["from_stream_id"] == "hostb:leader"
     assert call["timeout"] == 5.0
+    assert call["expected_generation"] is None
     assert json.loads(capsys.readouterr().out)["type"] == "reparent.ok"
 
 
 def test_reparent_cli_explicit_caller_overrides(monkeypatch, tmp_path):
     calls: list[dict] = []
 
-    async def fake_reparent_once(config, worker, new_parent, *, reason="reparent", timeout=30.0, from_stream_id=None, caller_stream_id=None):
-        calls.append({"from_stream_id": from_stream_id, "caller_stream_id": caller_stream_id})
+    async def fake_reparent_once(config, worker, new_parent, *, reason="reparent", timeout=30.0, from_stream_id=None, caller_stream_id=None, expected_generation=None):
+        calls.append({"from_stream_id": from_stream_id, "caller_stream_id": caller_stream_id,
+                      "expected_generation": expected_generation})
         return {"type": "reparent.ok", "request_id": "reparent-1"}
 
     monkeypatch.setattr(cli, "load_config", lambda: Config("ws://test", "tok", "hostb", tmp_path))
@@ -167,11 +175,13 @@ def test_reparent_cli_explicit_caller_overrides(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "reparent_once", fake_reparent_once)
 
     rc = cli.reparent(
-        _reparent_args(from_stream_id="hostb:override", caller_stream_id="hostb:caller")
+        _reparent_args(from_stream_id="hostb:override", caller_stream_id="hostb:caller",
+                       expected_generation="g-1")
     )
     assert rc == 0
     assert calls[0]["from_stream_id"] == "hostb:override"
     assert calls[0]["caller_stream_id"] == "hostb:caller"
+    assert calls[0]["expected_generation"] == "g-1"
 
 
 def test_reparent_cli_error_exits_nonzero(monkeypatch, tmp_path, capsys):

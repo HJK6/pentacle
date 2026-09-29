@@ -2636,6 +2636,7 @@ async def reparent_once(
     timeout: float = 30.0,
     from_stream_id: str | None = None,
     caller_stream_id: str | None = None,
+    expected_generation: str | None = None,
 ) -> dict[str, Any]:
     """Drive the daemon ``reparent`` RPC (P8). The worker is identified by
     ``host``/``session_name`` (split from its stream id, mirroring ``close``);
@@ -2665,6 +2666,8 @@ async def reparent_once(
             payload["from_stream_id"] = from_stream_id
         if caller_stream_id is not None:
             payload["caller_stream_id"] = caller_stream_id
+        if expected_generation is not None:
+            payload["expected_generation"] = expected_generation
         if (from_stream_id or caller_stream_id) and _stream_token_from_env():
             payload["stream_token"] = _stream_token_from_env()
         await ws.send(json.dumps(payload, separators=(",", ":")))

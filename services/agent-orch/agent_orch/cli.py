@@ -3391,6 +3391,7 @@ def reparent(args: argparse.Namespace) -> int:
                 timeout=timeout,
                 from_stream_id=from_stream_id,
                 caller_stream_id=caller_stream_id,
+                expected_generation=getattr(args, "expected_generation", None),
             )
         )
     except ValueError as exc:
@@ -5556,7 +5557,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.set_defaults(func=lifecycle)
     reparent_parser = subparsers.add_parser(
         "reparent",
-        description="move a direct-child worker to a new parent (same-daemon, same-host)",
+        description="move an open seat to an open parent in the same daemon; a verified lifecycle manager may move a non-child across hosts",
     )
     reparent_parser.add_argument("stream_id", help="worker stream id to re-parent")
     reparent_parser.add_argument(
@@ -5569,7 +5570,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--from-stream-id",
         dest="from_stream_id",
         default=None,
-        help="caller's asserted stream id (token-verified by the daemon; defaults to local leader).",
+        help="caller's own stream id (token-verified by the daemon; defaults to the current seat). Never name the old parent unless you hold its token.",
     )
     reparent_parser.add_argument(
         "--caller-stream-id",
@@ -5577,6 +5578,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="caller stream id recorded as the audit actor (defaults to --from-stream-id).",
     )
     reparent_parser.add_argument("--reason", default="reparent")
+    reparent_parser.add_argument("--expected-generation", help="target seat generation from inspect; refuse if it changed")
     reparent_parser.add_argument(
         "--timeout",
         type=float,

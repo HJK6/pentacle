@@ -596,6 +596,148 @@ def test_manager_reparent_fences(monkeypatch):
     scenario(check)
 
 
+def test_manager_reparent_stale_generation_with_closed_cross_host_parent(monkeypatch):
+    monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
+
+    async def check(env: Env):
+        manager = await _manager(env)
+        await env.open("old", role="lead")
+        await env.open("child", role="worker", parent_stream_id=f"{HOST}:old")
+        await env.store.mark_closed(HOST, "old", closed_at="2026-09-29T00:00:00Z", pane_status="pane_dead")
+        await env.store.open_session("node-b", "successor", role="lead")
+        await env.sessions.refresh()
+        msg = {"stream_id": f"{HOST}:child", "new_parent_stream_id": "node-b:successor",
+               "reason": "adopt orphan", "request_id": "adopt-orphan", "_auth_context": manager}
+        await _refused(env.server._on_reparent({**msg, "expected_generation": "stale"}),
+                       "lifecycle_generation_mismatch")
+        assert (await env.store.fetch_session(HOST, "child"))["parent_stream_id"] == f"{HOST}:old"
+        reply = await env.server._on_reparent({**msg, "expected_generation": await env.gen("child")})
+        assert reply["new_parent_stream_id"] == "node-b:successor"
+        assert (await env.store.fetch_session(HOST, "child"))["parent_stream_id"] == "node-b:successor"
+        rows = [r for r in await env.audit() if r["action"] == "manager_reparent"]
+        assert [(r["result"], r["refusal_code"]) for r in rows] == [
+            ("refused", "lifecycle_generation_mismatch"), ("admitted", None), ("applied", None)]
+        for row in rows:
+            assert (row["actor_identity"], row["actor_generation"], row["target_stream_id"],
+                    row["target_generation"], row["new_parent_stream_id"], row["reason"],
+                    row["request_id"], row["old_revision"], row["new_revision"]) == (
+                        f"{HOST}:bart", manager["session_generation"], f"{HOST}:child",
+                        await env.gen("child"), "node-b:successor", "adopt orphan", "adopt-orphan", 1, 1)
+
+    scenario(check)
+
+
+def test_manager_reparent_live_parent_and_owned_cycle(monkeypatch):
+    monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
+
+    async def check(env: Env):
+        manager = await _manager(env)
+        await env.open("other", role="lead")
+        await env.open("child", role="worker", parent_stream_id=f"{HOST}:other")
+        await env.open("destination", role="lead")
+        msg = {"stream_id": f"{HOST}:child", "new_parent_stream_id": f"{HOST}:destination",
+               "expected_generation": await env.gen("child"), "reason": "move active lane",
+               "request_id": "move-live", "_auth_context": manager}
+        assert (await env.server._on_reparent(msg))["type"] == "reparent.ok"
+        await env.open("owned", role="worker", parent_stream_id=f"{HOST}:bart")
+        await env.open("descendant", role="worker", parent_stream_id=f"{HOST}:owned")
+        await _refused(env.server._on_reparent({**msg, "stream_id": f"{HOST}:owned",
+                                                 "new_parent_stream_id": f"{HOST}:descendant",
+                                                 "expected_generation": await env.gen("owned"),
+                                                 "request_id": "cycle"}), "reparent_cycle")
+        assert (await env.store.fetch_session(HOST, "owned"))["parent_stream_id"] == f"{HOST}:bart"
+
+    scenario(check)
+
+
+def test_manager_reparent_admission_audit_failure_does_not_move(monkeypatch):
+    monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
+
+    async def check(env: Env):
+        manager = await _manager(env)
+        await env.open("other", role="lead")
+        await env.open("child", role="worker", parent_stream_id=f"{HOST}:other")
+        await env.open("destination", role="lead")
+        real_audit = env.store.lifecycle_authority_audit
+
+        async def failing_audit(**fields):
+            if fields.get("action") == "manager_reparent" and fields.get("result") == "admitted":
+                raise RuntimeError("audit unavailable")
+            await real_audit(**fields)
+
+        monkeypatch.setattr(env.store, "lifecycle_authority_audit", failing_audit)
+        with pytest.raises(RuntimeError, match="audit unavailable"):
+            await env.server._on_reparent({
+                "stream_id": f"{HOST}:child", "new_parent_stream_id": f"{HOST}:destination",
+                "expected_generation": await env.gen("child"), "reason": "move active lane",
+                "request_id": "audit-failure", "_auth_context": manager})
+        assert (await env.store.fetch_session(HOST, "child"))["parent_stream_id"] == f"{HOST}:other"
+
+    scenario(check)
+
+
+def test_manager_reparent_uses_grant_without_external_ruling(monkeypatch):
+    monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
+
+    async def check(env: Env):
+        manager = await _manager(env)
+        await env.open("lane-owner", role="lead")
+        await env.open("lane-bound", role="worker", parent_stream_id=f"{HOST}:lane-owner")
+        await env.open("destination", role="lead")
+
+        class Rulings:
+            async def request_close(self, *_args, **_kwargs):
+                raise AssertionError("manager reparent entered the external close ruler")
+
+        env.server.lane_rulings = Rulings()
+        reply = await env.server._on_reparent({
+            "stream_id": f"{HOST}:lane-bound", "new_parent_stream_id": f"{HOST}:destination",
+            "expected_generation": await env.gen("lane-bound"), "reason": "move active lane",
+            "request_id": "ruling-waiver", "_auth_context": manager})
+        assert reply["type"] == "reparent.ok"
+        assert (await env.store.fetch_session(HOST, "lane-bound"))["parent_stream_id"] == f"{HOST}:destination"
+
+    scenario(check)
+
+
+def test_manager_reparent_refuses_closed_new_parent_from_durable_store(monkeypatch):
+    monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
+
+    async def check(env: Env):
+        manager = await _manager(env)
+        await env.open("child", role="worker")
+        await env.open("destination", role="lead")
+        # Do not refresh Sessions: a cached open row must not override the
+        # durable close during a graph mutation.
+        await env.store.mark_closed(HOST, "destination", closed_at="2026-09-29T00:00:00Z",
+                                    pane_status="pane_dead")
+        await _refused(env.server._on_reparent({
+            "stream_id": f"{HOST}:child", "new_parent_stream_id": f"{HOST}:destination",
+            "expected_generation": await env.gen("child"), "reason": "adopt lane",
+            "request_id": "closed-parent", "_auth_context": manager}), "reparent_target_closed")
+        assert (await env.store.fetch_session(HOST, "child"))["parent_stream_id"] is None
+
+    scenario(check)
+
+
+def test_manager_reparent_audit_column_migrates_existing_store():
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("""CREATE TABLE v2_lifecycle_authority_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL,
+            actor_kind TEXT NOT NULL, actor_identity TEXT, actor_generation TEXT,
+            target_stream_id TEXT, target_generation TEXT, old_revision INTEGER,
+            new_revision INTEGER, prior_stream_id TEXT, prior_generation TEXT,
+            reason TEXT, request_id TEXT, result TEXT NOT NULL,
+            refusal_code TEXT, created_at REAL NOT NULL)""")
+        lifecycle_authority.initialize(conn)
+        lifecycle_authority.initialize(conn)
+        assert "new_parent_stream_id" in {row[1] for row in conn.execute(
+            "PRAGMA table_info(v2_lifecycle_authority_audit)")}
+    finally:
+        conn.close()
+
+
 # -- protected handoff carry -----------------------------------------------
 
 def test_handoff_carries_authority_only_from_exact_holder(monkeypatch):

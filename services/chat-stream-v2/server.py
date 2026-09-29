@@ -2067,12 +2067,18 @@ class Server:
         host, name = await self.sessions.resolve(msg)
         new_parent = str(msg.get("new_parent_stream_id") or "").strip()
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
-        try:
-            return await self.sessions.reparent(host, name, new_parent, auth_context=auth)
-        except VerbError as exc:
-            if exc.code != "reparent_unauthorized":
-                raise
-            if not await self.sessions.assistant.manager_holds(auth):
+        raw_expected_generation = msg.get("expected_generation")
+        if raw_expected_generation is not None and (
+                not isinstance(raw_expected_generation, str) or not raw_expected_generation.strip()):
+            raise VerbError("expected_generation_invalid", "expected_generation must be a non-empty string")
+        manager = await self.sessions.assistant.manager_holds(auth)
+        if not manager:
+            try:
+                return await self.sessions.reparent(host, name, new_parent, auth_context=auth,
+                                                    expected_generation=raw_expected_generation)
+            except VerbError as exc:
+                if exc.code != "reparent_unauthorized":
+                    raise
                 row = await self.store.fetch_session(host, name)
                 await self._manager_audit(
                     "reparent", msg, auth, f"{host}:{name}",
@@ -2098,13 +2104,17 @@ class Server:
         code = policy.manager_request_code(msg)
         if code is None and not await policy.manager_holds(auth):
             code = "authority_holder_required"
+        expected_generation = str(msg.get("expected_generation") or "").strip() or generation
+        if code is None and generation != expected_generation:
+            code = "lifecycle_generation_mismatch"
         if code is not None:
             await self._manager_audit("reparent", msg, auth, sid, generation, result="refused", refusal_code=code)
             raise VerbError(code, f"manager reparent refused: {code}")
         await self._manager_audit("reparent", msg, auth, sid, generation, result="admitted")
         try:
             reply = await self.sessions.reparent(
-                host, name, new_parent, auth_context=auth, manager_authorized=True)
+                host, name, new_parent, auth_context=auth, manager_authorized=True,
+                expected_generation=expected_generation)
         except VerbError as exc:
             await self._manager_audit("reparent", msg, auth, sid, generation, result="refused", refusal_code=exc.code)
             raise
@@ -2884,6 +2894,7 @@ class Server:
             actor_identity=str(auth.get("stream_id") or "") or None,
             actor_generation=auth.get("session_generation"), target_stream_id=target,
             target_generation=generation, old_revision=revision, new_revision=revision,
+            new_parent_stream_id=(msg.get("new_parent_stream_id") if action == "reparent" else None),
             reason=msg.get("reason"), request_id=msg.get("request_id"),
             result=result, refusal_code=refusal_code,
         )
