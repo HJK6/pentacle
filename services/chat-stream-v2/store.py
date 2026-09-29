@@ -4596,7 +4596,18 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
                         ),
                     )
                     source_id = int(cur.lastrowid) if cur.rowcount > 0 else None
-                    if source_id is not None and lifecycle is not None:
+                    # The prose mirror must run for every admitted source event,
+                    # whichever fence proved the append. A remote claude seat
+                    # (satellite event.push) carries a `claude_binding`, not a
+                    # `lifecycle` snapshot — the lifecycle CAS is codex-only — so
+                    # gating the mirror on `lifecycle is not None` alone silently
+                    # skipped a remote-hosted bound assistant's turn text, which
+                    # only mirrored while it ran daemon-local (local ingest builds
+                    # a lifecycle). `_mirror_source_event_conn` re-validates the
+                    # durable binding stream/generation itself, so firing it on
+                    # the binding fence is safe.
+                    # bug_ref: pentacle__bart_proactive_chat_status_publish_2026_09
+                    if source_id is not None and (lifecycle is not None or binding is not None):
                         self._mirror_source_event_conn(
                             conn, source_stream_id=stream_id,
                             source_event=json.loads(event_json), source_event_id=source_id,

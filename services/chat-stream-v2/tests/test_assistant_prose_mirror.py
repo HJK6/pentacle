@@ -294,6 +294,65 @@ def test_unfenced_source_append_never_projects():
     asyncio.run(_go())
 
 
+def test_remote_claude_binding_fenced_prose_is_projected():
+    """A remote (satellite event.push) claude bound seat carries a
+    ``claude_binding``, not a ``lifecycle`` snapshot — the lifecycle CAS is
+    codex-only. Its dispatch-free turn text must still mirror to the canonical
+    chat, exactly as a daemon-local seat's does through local ingest.
+
+    Regression: pentacle__bart_proactive_chat_status_publish_2026_09 — Bart's
+    bound front desk stopped reaching the chat after moving from a Thoth-local
+    seat to a remote Amaterasu (WSL) seat, whose events arrive via event.push
+    with lifecycle=None."""
+    async def _go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session(
+                "fixture-root", "visible", provider="claude", pane_pid="4242",
+            )
+            composite = AssistantComposite(store, config=_config(root["session_generation"]))
+            await composite.ensure_projection()
+            event = {
+                "stream_id": ROOT,
+                "provider": "claude",
+                "kind": "ASSIST_TEXT",
+                "text": "A remote proactive milestone",
+                "session_id": "fixture-session",
+                "timestamp": "2026-09-27T05:00:00.000Z",
+                "raw": {
+                    "source_session_identity": "fixture-session",
+                    "jsonl_record_uuid": "fixture-record",
+                    "transport": "claude-jsonl",
+                    "stop_reason": "end_turn",
+                },
+            }
+            inserted = await store.append_session_events_lifecycle_cas(
+                [{"stream_id": ROOT, "event": event, "identity": "remote-message",
+                  "claude_binding": "fixture-session"}], limit=20,
+            )
+            assert inserted and isinstance(inserted[0], int)
+            mirrored = [e for e in await store.fetch_session_event_tail(ASSISTANT, limit=20)
+                        if e["kind"] == "ASSIST_TEXT"]
+            assert len(mirrored) == 1
+            assert mirrored[0]["text"] == event["text"]
+            assert mirrored[0]["publish_kind"] == "status"
+            assert mirrored[0]["raw"]["mirrored_from"]["stream_id"] == ROOT
+            assert mirrored[0]["raw"]["mirrored_from"]["generation"] == root["session_generation"]
+            # Idempotent: the same event.push replay must not double-post.
+            replay = await store.append_session_events_lifecycle_cas(
+                [{"stream_id": ROOT, "event": event, "identity": "remote-message",
+                  "claude_binding": "fixture-session"}], limit=20,
+            )
+            assert replay == [None]
+            assert len([e for e in await store.fetch_session_event_tail(ASSISTANT, limit=20)
+                        if e["kind"] == "ASSIST_TEXT"]) == 1
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(_go())
+
+
 def test_restart_replay_and_generation_rebind(tmp_path):
     async def _go():
         database = str(tmp_path / "mirror.sqlite")
