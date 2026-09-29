@@ -1,6 +1,6 @@
 # Optional local microphone service
 
-Public source includes `mic_server.py`, the listener/meeting modules and configured local-action helpers. Source publication does not enable or restart a microphone service. The server starts in off mode; device/model provisioning and runtime activation are separate operator-controlled steps.
+Public source includes `mic_server.py`, the listener/meeting modules and configured local-action helpers. Source publication does not enable or restart a microphone service. The server starts in off mode when `MIC_SERVER_START_MODE` is unset. Explicit `off` also preloads the recognition model asynchronously; `on`, `clipboard` and `meeting` start their corresponding capture mode. Starting `on` requires `MIC_ALWAYS_ON_ENABLED=true`. Device/model provisioning and runtime activation are separate operator-controlled steps.
 
 The default bind is loopback `127.0.0.1:7780`. `MIC_BIND_HOST` is configurable, but the public local adapter contract uses loopback; sensitive routes reject non-loopback clients. This source does not provision authentication for exposing the service. Point the desktop/web `micServerUrl` at the configured service and enable `features.mic` only when the intended service is ready. See [desktop configuration](../docs/desktop_config.md).
 

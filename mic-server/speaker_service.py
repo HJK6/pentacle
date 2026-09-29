@@ -162,10 +162,10 @@ class SpeakerService:
             item, reason = self._conversation(cid, rules)
             if reason:
                 return self._outcome('suppressed', reason)
-            item['closed'] = 'closed_conversation'
-            item['meeting'] = meeting
             if item['lines']:
                 return self._outcome('suppressed', 'line_already_accepted')
+            item['closed'] = 'closed_conversation'
+            item['meeting'] = meeting
             return self._clip('fallback', item, rules)
 
     def tick(self):

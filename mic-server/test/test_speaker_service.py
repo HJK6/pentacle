@@ -353,3 +353,26 @@ def test_http_refuses_nonlocal_speaker_calls(service,monkeypatch):
     monkeypatch.setattr(mic_server,'get_service',lambda: service)
     handler.do_POST()
     assert replies == [(403,dict(outcome='refused',reason='loopback_only'))]
+
+
+def test_turn_ended_after_nonfinal_line_preserves_completion_capability(service):
+    cid = opened(service)
+    assert line(service,cid)['outcome'] == 'spoken'
+    receipt = service.speaker.last
+    assert service.turn_ended(cid)['reason'] == 'line_already_accepted'
+    assert service.speaker.last is receipt
+    service.test_clock[0] += 4
+    assert line(service,cid,final=True)['outcome'] == 'spoken'
+    assert line(service,cid)['reason'] == 'closed_conversation'
+
+
+@pytest.mark.parametrize('configured', [None, 'null', 'typo', 'PLAYER', ''])
+def test_only_explicit_player_configuration_can_select_audio(configured,monkeypatch,tmp_path):
+    if configured is None:
+        monkeypatch.delenv('MIC_SPEAKER_SINK', raising=False)
+    else:
+        monkeypatch.setenv('MIC_SPEAKER_SINK', configured)
+    speaker = ResidentSpeaker(renderer=Renderer(tmp_path),output_dir=tmp_path)
+    assert isinstance(speaker.sink, NullSink)
+    speaker.speak('Captured safely.',time.time()+5)
+    assert speaker.last['played'] is False
