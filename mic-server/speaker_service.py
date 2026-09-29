@@ -96,6 +96,8 @@ class SpeakerService:
             self.conversations[cid] = item
         if acknowledge:
             self._clip('acknowledgement', item, rules)
+        else:
+            item['ack_done'].set()
         return cid
 
     def mark(self, cid, stage, at=None):
@@ -119,6 +121,7 @@ class SpeakerService:
             return {}
         self.mark(cid, 'capture_ended_at')
         item = self.conversations[cid]
+        item['ack_done'].clear()
         rules = self.rules.snapshot()
         # Capture publishes immediately; playback cannot hold routing or a client claim.
         def acknowledge():

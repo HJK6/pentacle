@@ -41,6 +41,7 @@ class KokoroWorker:
         self.ready = False
         self.model_loads = 0
         self.rss_bytes = None
+        self.configuration = {}
         self.lock = threading.RLock()
         self.stderr = None
 
@@ -69,6 +70,7 @@ class KokoroWorker:
                 self.ready = True
                 self.model_loads = receipt['model_loads']
                 self.rss_bytes = receipt.get('rss_bytes')
+                self.configuration = {key:receipt.get(key) for key in ('threads','execution_provider','priority')}
             except Exception:
                 self.close()
                 raise
@@ -179,7 +181,9 @@ class ResidentSpeaker:
 
     def snapshot(self):
         return dict(ready=self.renderer.ready, model_loads=self.renderer.model_loads,
-                    rss_bytes=getattr(self.renderer, 'rss_bytes', None), sink=self.sink.name, error=self.error)
+                    rss_bytes=getattr(self.renderer, 'rss_bytes', None), sink=self.sink.name, error=self.error,
+                    renderer_pid=getattr(getattr(self.renderer, 'child', None), 'pid', None),
+                    configuration=getattr(self.renderer, 'configuration', {}))
 
     def close(self):
         self.renderer.close()

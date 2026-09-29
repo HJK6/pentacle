@@ -24,7 +24,9 @@ def main():
     if voice not in model.get_voices():
         raise ValueError('Configured voice is unavailable')
     print(json.dumps(dict(ready=True, model_loads=1, voice=voice,
-                         rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)), flush=True)
+                         rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                         threads=options.intra_op_num_threads, execution_provider='CPUExecutionProvider',
+                         priority=os.getpriority(os.PRIO_PROCESS, 0) if hasattr(os, 'getpriority') else None)), flush=True)
     for line in sys.stdin:
         request = json.loads(line)
         started = time.monotonic()
