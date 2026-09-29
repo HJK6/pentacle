@@ -19,7 +19,7 @@ class LineTests(unittest.TestCase):
         self.assertEqual(check_line('It is done. Read chat. Thank you.'), 'sentences')
 
     def test_every_structural_rule(self):
-        for line in ['See https://example.com.', 'See www.example.org.', 'Read example.com.',
+        for line in ['See https://example.com.', 'See www.example.org.', 'Read example.com.', 'Read example.edu.',
                      'Mail a@b.org.', 'Use `code`.', '*Ready*', 'One\nTwo', '- Ready',
                      'Read /tmp/file.', 'Read C:\\temp.', 'Use snake_case.', 'Use camelCase.',
                      'Use ab12cdef.', 'Read workstation:seat.', 'Use v2.', 'Run $(echo ready).']:
@@ -27,6 +27,7 @@ class LineTests(unittest.TestCase):
                 self.assertIsNotNone(check_line(line))
         self.assertEqual(check_line('Is it ready? Can I start?'), 'questions')
         self.assertEqual(check_line('It is 1, 2, 3 and 4.'), 'numbers')
+        self.assertEqual(check_line('It is one, two, three and four.'), 'numbers')
         self.assertEqual(check_line('It is about 1.234 seconds.'), 'unrounded_number')
         self.assertIsNone(check_line('It is about 1.5 seconds.'))
 

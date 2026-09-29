@@ -8,6 +8,7 @@ import sys
 
 async def verify(args):
     sys.path.insert(0, str(Path(args.repo)/'services/chat-stream-v2'))
+    sys.path.insert(0, str(Path(args.repo)/'services'))
     from codex_rollout_norm import normalize_codex_rollout_record
     from assistant_composite import AssistantComposite, AssistantCompositeConfig
     from store import Store
