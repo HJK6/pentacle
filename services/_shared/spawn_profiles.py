@@ -45,6 +45,7 @@ MODELS = {
         "gpt-5.6-sol": {"aliases": ("gpt-5.6-sol",), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-5.6-luna": {"aliases": ("gpt-5.6-luna",), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-6-sol": {"aliases": ("gpt-6-sol", "sol"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "gpt-6.1-sol": {"aliases": ("gpt-6.1-sol", "sol-6.1"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-6-luna": {"aliases": ("gpt-6-luna", "luna"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-6-astra": {"aliases": ("gpt-6-astra", "astra"), "efforts": ("low", "medium", "high", "xhigh", "max")},
     },

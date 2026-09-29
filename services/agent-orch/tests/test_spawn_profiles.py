@@ -66,6 +66,27 @@ def test_luna_is_spawnable_across_all_supported_efforts() -> None:
             assert revalidated["model"] == "gpt-6-luna"
 
 
+def test_sol61_catalog_aliases_and_retained_sol_policy() -> None:
+    assert spawn_profiles.CATALOG_VERSION == "spawn-catalog-v2"
+    assert catalog()["models"]["codex"]["gpt-6.1-sol"] == {
+        "aliases": ("gpt-6.1-sol", "sol-6.1"),
+        "efforts": ("low", "medium", "high", "xhigh", "max"),
+    }
+    for alias in ("gpt-6.1-sol", "sol-6.1"):
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            request = resolve_spawn(provider="codex", model=alias, effort=effort)
+            assert (request["model"], request["effort"]) == ("gpt-6.1-sol", effort)
+            validated = validate_v2(
+                provider="codex", spawn_profile="agent_orch", schema="SpawnRequestV2",
+                model="gpt-6.1-sol", effort=effort, catalog_version="spawn-catalog-v2",
+                resolution_source="explicit_override",
+            )
+            assert validated["model"] == "gpt-6.1-sol"
+    assert resolve_spawn(provider="codex", model="sol")["model"] == "gpt-6-sol"
+    assert resolve_spawn(provider="codex", model="gpt-6-sol")["model"] == "gpt-6-sol"
+    assert spawn_profiles.INTENTIONALLY_UNSPAWNABLE["codex"] == frozenset({"gpt-5.4", "gpt-5.5"})
+
+
 def test_all_codex_models_are_spawnable_at_max_effort() -> None:
     for model in spawn_profiles.MODELS["codex"]:
         resolved = resolve_spawn(provider="codex", model=model, effort="max")
