@@ -31,6 +31,7 @@ test('modelLabel uses the explicit desktop catalog map and raw fallback', () => 
   assert.equal(modelLabel('claude-opus-4-8'), 'Opus 4.8');
   assert.equal(modelLabel('claude-opus-5'), 'Opus 5');
   assert.equal(modelLabel('claude-opus-5-5'), 'Opus 5.5');
+  assert.equal(modelLabel('claude-sonnet-5-5'), 'Sonnet 5.5');
   assert.equal(modelLabel('claude-sonnet-5'), 'Sonnet 5');
   assert.equal(modelLabel('claude-fable-5'), 'Fable 5');
   assert.equal(modelLabel('claude-fable-5-1'), 'Fable 5.1');

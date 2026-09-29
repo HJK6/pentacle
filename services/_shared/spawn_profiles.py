@@ -36,7 +36,8 @@ MODELS = {
         "claude-opus-4-8": {"aliases": ("opus", "claude-opus-4-8"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "claude-opus-5-5": {"aliases": ("claude-opus-5-5", "opus-5.5", "opus-5"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "claude-opus-5": {"aliases": ("claude-opus-5",), "efforts": ("low", "medium", "high", "xhigh", "max")},
-        "claude-sonnet-5": {"aliases": ("sonnet", "claude-sonnet-5"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "claude-sonnet-5-5": {"aliases": ("claude-sonnet-5-5", "sonnet-5.5", "sonnet"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "claude-sonnet-5": {"aliases": ("claude-sonnet-5",), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "claude-fable-5-1": {"aliases": ("fable", "claude-fable-5-1", "claude-fable-5"), "efforts": ("low", "medium", "high", "xhigh", "max")},
     },
     "codex": {
@@ -55,7 +56,11 @@ MODELS = {
 # drift — a newly released model absent from both MODELS and this set fails the guard.
 # The "opus" alias stays pinned to claude-opus-4-8 (the profile default).
 # "opus-5" and "opus-5.5" select claude-opus-5-5; claude-opus-5 remains
-# available by full ID. "claude-fable-5" stays an alias of claude-fable-5-1 (operator
+# available by full ID. The bare "sonnet" alias and "sonnet-5.5" select
+# claude-sonnet-5-5; claude-sonnet-5 remains available by full ID (operator direct
+# 2026-09-29, dispatch 98810e03: use Sonnet 5.5 in lieu of the Luna/max tier). Unlike
+# "opus", "sonnet" is not a profile default, so moving it does not diverge from any
+# no-model default. "claude-fable-5" stays an alias of claude-fable-5-1 (operator
 # ruling 2026-09-01: never launch Fable 5 when 5.1 exists) so old clients and
 # handoffs from Fable 5 seats resolve to 5.1 instead of failing.
 INTENTIONALLY_UNSPAWNABLE = {

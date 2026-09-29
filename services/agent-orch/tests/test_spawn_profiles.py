@@ -6,7 +6,8 @@ from _shared.spawn_profiles import SpawnProfileError, catalog, resolve_handoff, 
 
 def test_sonnet5_and_opus_generations_are_spawnable_across_all_efforts() -> None:
     for alias, canonical in (
-        ("sonnet", "claude-sonnet-5"), ("claude-sonnet-5", "claude-sonnet-5"),
+        ("sonnet", "claude-sonnet-5-5"), ("sonnet-5.5", "claude-sonnet-5-5"),
+        ("claude-sonnet-5-5", "claude-sonnet-5-5"), ("claude-sonnet-5", "claude-sonnet-5"),
         ("opus-5", "claude-opus-5-5"), ("opus-5.5", "claude-opus-5-5"),
         ("claude-opus-5-5", "claude-opus-5-5"), ("claude-opus-5", "claude-opus-5"),
     ):
