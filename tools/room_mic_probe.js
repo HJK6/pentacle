@@ -52,7 +52,7 @@ async function main() {
   if(!delivered)throw Error('Fixture was not delivered');
   delivered.receipt=await receiptPromise;
   fs.writeFileSync(outputPath,JSON.stringify(delivered,null,2)+'\n');
-  const finalDeadline=Date.now()+180000;
+  const finalDeadline=Date.now()+600000;
   while(!outcomes.length&&Date.now()<finalDeadline)await new Promise(resolve=>setTimeout(resolve,100));
   fs.writeFileSync(outputPath+'.frames.json',JSON.stringify({events:frames,outcomes},null,2)+'\n');
   if(outcomes.length!==1)throw Error('The actual disposable turn did not end exactly once');

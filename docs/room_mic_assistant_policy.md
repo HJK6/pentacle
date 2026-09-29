@@ -1,6 +1,6 @@
 # Room microphone replies
 
-A delivering client prepends `[pentacle-input {"origin":"room_mic","conversation_id":"opaque-service-id"}]` to room-microphone requests. Without that header, treat the input as typed; mobile input carries no room conversation id. Never invent or recover a conversation id from another turn. The mic service, not a header typed by hand, authorizes speech by checking the issued id.
+A delivering client prepends `[pentacle-input {"origin":"room_mic","conversation_id":"opaque-service-id"}]` to room-microphone requests. A new operator request without that header is typed; mobile input carries no room conversation id. Retain the original room conversation id while completing that request, including across child-report notices. Never invent an id or borrow one from another request. The mic service, not a header typed by hand, authorizes speech by checking the issued id.
 
 For a room-microphone request, write an additional line for listening and submit it with `bart-say --conversation-id <id> --kind reply --text <literal-line>` (or literal stdin). Use `--final` on the single answer for a short request and on the completion line of long work; omit it on kickoff and milestones. `--action chat` is optional. Keep the full ordinary turn-final answer in chat. The helper result is tool output, never a second chat publication; do not repeat the spoken line as a separate chat message.
 
