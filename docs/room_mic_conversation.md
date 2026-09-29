@@ -30,8 +30,9 @@ helper sends JSON directly to localhost `POST /speak`; it never invokes a shell
 with the text. `BART_SPEAK_URL` can select another loopback HTTP port for a test
 service. Remote destinations, proxies and redirects are refused. The helper
 prints JSON with `outcome` (`spoken`, `suppressed`, `refused`) and a reason for
-non-spoken results. Refusal is nonfatal; unavailable endpoints have a two-second
-timeout and do not change the chat reply.
+non-spoken results. Refusal is nonfatal. The synchronous receipt allows the
+speaker's thirty-second operation deadline plus five seconds for transport;
+an unavailable endpoint does not change the chat reply and is never retried.
 
 The checker enforces two sentences, forty words, three hundred characters, one
 question, at most three numeric values and no links, identifiers, paths, code,

@@ -35,7 +35,7 @@ def submit_line(conversation_id, kind, text, action=None, final=False, endpoint=
         # No proxy, redirect or shell can send this line somewhere else.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         try:
-            response = opener.open(request, timeout=2)
+            response = opener.open(request, timeout=35)
         except urllib.error.HTTPError as error:
             response = error
         with response:

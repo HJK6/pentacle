@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
@@ -34,10 +35,12 @@ class HelperTests(unittest.TestCase):
     def setUp(self):
         self.seen = []
         self.result = {'outcome': 'spoken'}
+        self.delay = 0
         owner = self
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 owner.seen.append((self.path, json.loads(self.rfile.read(int(self.headers['Content-Length'])))))
+                time.sleep(owner.delay)
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(json.dumps(owner.result).encode())
@@ -75,6 +78,10 @@ class HelperTests(unittest.TestCase):
         self.result = {'ok':True}
         self.assertEqual(submit_line('id', 'reply', 'Ready.', endpoint=self.url)['reason'], 'invalid_response')
         self.assertEqual(submit_line('id', 'reply', 'Ready.', endpoint='http://127.0.0.1:1')['reason'], 'speaker_unavailable')
+
+    def test_synchronous_synthesis_receipt_can_take_longer_than_two_seconds(self):
+        self.delay = 2.1
+        self.assertEqual(submit_line('id', 'reply', 'Ready.', endpoint=self.url), {'outcome':'spoken'})
 
     def test_cli_prints_outcome_and_returns_success_on_refusal(self):
         with patch('builtins.print') as output:
