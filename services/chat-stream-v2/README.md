@@ -73,6 +73,20 @@ the original request closes exactly once, including after a daemon restart.
 Definitive refusals remain terminal. The existing 600-second unruled deadline
 policy is unchanged.
 
+## Codex terminal provider errors
+
+When a Codex rollout records `event_msg/task_complete` with a nonempty `error`,
+the shared normalizer emits an `ERROR` event. Local ingestion and satellite
+ingestion retain it in the ordinary event tail, so chat and inspection show why
+a turn stopped even when Codex emitted no final assistant message.
+
+Capacity failures use fixed text identifying `server_overloaded`; other errors
+use a fixed generic message. Arbitrary provider messages and details are not
+copied. The event includes the turn ID and an allowlisted error code. Turn IDs
+provide replay identity, so re-reading a completion does not duplicate it.
+Successful completions and token bookkeeping remain excluded. This visibility
+does not resume a task, switch models, or produce a completion report.
+
 ## Tests and supported integrations
 
 ```sh

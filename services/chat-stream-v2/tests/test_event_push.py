@@ -792,6 +792,34 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def test_satellite_terminal_error_reaches_tail_once_without_inbound_turn(tmp_path) -> None:
+    from satellite import Satellite, SatelliteConfig, _StreamTail
+
+    async def _go() -> None:
+        store = Store(":memory:"); store.start()
+        try:
+            await store.open_session("hostc", "v2-codex", visibility="visible", provider="codex", pane_pid="8123")
+            ep, casts, _ = _sink(store)
+            fixture = Path(__file__).parent / "fixtures" / "codex_terminal_error.jsonl"
+            satellite = Satellite(SatelliteConfig(host="hostc", checkout=str(tmp_path), history_bytes=-1))
+            state = _StreamTail("v2-codex", path=str(fixture), provider="codex", source_pane_pid="8123")
+            events = []
+            offset, capped = satellite._collect_stream(state, 500, events)
+            assert offset == fixture.stat().st_size and not capped
+            assert [e["kind"] for e in events] == ["TOOL_USE", "TOOL_RESULT", "ERROR"]
+            first = await ep.handle_push(_push(ep, events))
+            replay = await ep.handle_push(_push(ep, events))
+            assert first["inserted"] == 3 and replay["inserted"] == 0
+            tail = await store.fetch_session_event_tail("hostc:v2-codex", limit=500)
+            assert tail[-1]["kind"] == "ERROR"
+            assert sum(f.get("event", {}).get("kind") == "ERROR" for f in casts) == 1
+            assert await _count_user_and_tell(store, "hostc:v2-codex") == 0
+        finally:
+            store.stop()
+
+    _run(_go())
+
+
 def test_push_inserts_then_dedups_and_broadcasts_once() -> None:
     async def _go() -> None:
         store = Store(":memory:"); store.start()

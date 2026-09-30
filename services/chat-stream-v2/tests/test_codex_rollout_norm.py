@@ -8,7 +8,10 @@ as activity would make the setup look like a user turn.
 from __future__ import annotations
 
 import json
+import copy
 from pathlib import Path
+
+import pytest
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 
@@ -32,6 +35,68 @@ def _events(name: str = "codex_rollout_first_turn.jsonl") -> list[dict]:
 
 def _kinds_by_text(events: list[dict]) -> dict[str, str]:
     return {str(e.get("text") or "")[:24]: str(e.get("kind") or "") for e in events}
+
+
+def test_terminal_capacity_error_is_visible_after_tool_output() -> None:
+    events = _events("codex_terminal_error.jsonl")
+    assert [e["kind"] for e in events] == ["TOOL_USE", "TOOL_RESULT", "ERROR"]
+    error = events[-1]
+    assert "capacity" in error["text"] and "server_overloaded" in error["text"]
+    assert error["raw"]["provider_error_code"] == "server_overloaded"
+    assert error["raw"]["turn_id"] == "turn-public-1"
+    assert error["kind"] not in INBOUND_TURN_KINDS
+
+
+def test_terminal_error_identity_is_stable_without_ordinal_and_distinct_per_turn() -> None:
+    record = _records("codex_terminal_error.jsonl")[-1]
+    replay = copy.deepcopy(record)
+    replay.pop("ordinal")
+    another = copy.deepcopy(replay)
+    another["payload"]["turn_id"] = "turn-public-2"
+    events = normalize_codex_rollout_records([record, replay, another], host="h", session_name="v2-codex")
+    assert len(events) == 3
+    identities = [e["raw"]["jsonl_record_uuid"] for e in events]
+    assert identities[0] == identities[1]
+    assert identities[0] != identities[2]
+
+
+@pytest.mark.parametrize("error", [None, {}, "", False, []])
+def test_successful_completion_remains_bookkeeping(error) -> None:
+    record = _records("codex_terminal_error.jsonl")[-1]
+    record["payload"]["error"] = error
+    record["payload"]["last_agent_message"] = "Done."
+    assert normalize_codex_rollout_records([record], host="h", session_name="v2-codex") == []
+    record["payload"].pop("error")
+    assert normalize_codex_rollout_records([record], host="h", session_name="v2-codex") == []
+
+
+@pytest.mark.parametrize("error", [
+    {"message": "private-provider-detail", "codex_error_info": "future-error-code"},
+    {"message": "private-provider-detail", "codex_error_info": {"unexpected": "private-provider-detail"}},
+    "private-provider-detail", ["private-provider-detail"], True,
+])
+def test_unknown_or_malformed_terminal_error_uses_safe_generic_text(error) -> None:
+    record = _records("codex_terminal_error.jsonl")[-1]
+    record["payload"]["error"] = error
+    record["payload"]["last_agent_message"] = "An earlier message does not erase the failure."
+    events = normalize_codex_rollout_records([record], host="h", session_name="v2-codex")
+    assert len(events) == 1 and events[0]["kind"] == "ERROR"
+    assert events[0]["raw"]["provider_error_code"] == "unknown"
+    assert "private-provider-detail" not in json.dumps(events)
+    assert "future-error-code" not in json.dumps(events)
+
+
+def test_capacity_error_does_not_copy_provider_message_or_extra_fields() -> None:
+    record = _records("codex_terminal_error.jsonl")[-1]
+    record["payload"]["error"].update(message="private-provider-detail", details="private-provider-detail")
+    events = normalize_codex_rollout_records([record], host="h", session_name="v2-codex")
+    assert len(events) == 1
+    assert "private-provider-detail" not in json.dumps(events)
+
+
+@pytest.mark.parametrize("record", [None, [], {}, {"type": "event_msg", "payload": None}])
+def test_malformed_terminal_record_does_not_crash(record) -> None:
+    assert normalize_codex_rollout_records([record], host="h", session_name="v2-codex") == []
 
 
 def test_environment_context_is_system_not_user() -> None:

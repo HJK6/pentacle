@@ -135,8 +135,35 @@ def normalize_codex_rollout_record(
     record_type = record.get("type")
     payload_type = payload.get("type")
 
+    if record_type == "event_msg" and payload_type == "task_complete" and payload.get("error"):
+        # A provider failure can end the turn without any final assistant item.
+        # Keep that terminal explanation in both ingest paths, but never expose
+        # arbitrary provider messages/details (which may contain request data).
+        error = payload["error"]
+        code = error.get("codex_error_info") if isinstance(error, dict) else None
+        if code == "server_overloaded":
+            text = "Codex turn failed: selected model is at capacity (server_overloaded)."
+        else:
+            code = "unknown"
+            text = "Codex turn failed with a provider error."
+        turn_id = payload.get("turn_id")
+        if not isinstance(turn_id, str) or not turn_id.strip():
+            turn_id = None
+        # The native turn identity survives a replay with no ordinal. Separate
+        # turns with the same error must still produce separate durable events.
+        identity = f"codex-task-complete:{turn_id}" if turn_id else record_uuid
+        return _stamp_jsonl_event_identity(
+            [make("ERROR", text, {
+                "subtype": "provider-turn-error",
+                "provider_error_code": code,
+                "turn_id": turn_id,
+                "subsystem": "codex_rollout",
+                "bug_ref": "spec_pentacle__codex_silent_turn_stall_2026_09",
+            })], identity,
+        )
+
     if record_type != "response_item":
-        # `event_msg` (token counts, item_completed), `turn_context` and
+        # Other `event_msg` (token counts, item_completed), `turn_context` and
         # `world_state` are Codex bookkeeping, not conversation. Ingesting them
         # would inflate every stream's tail with rows no view renders.
         return []

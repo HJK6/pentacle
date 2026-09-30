@@ -353,6 +353,30 @@ def test_codex_stream_ingests_events_instead_of_returning_zero() -> None:
     asyncio.run(_go())
 
 
+def test_codex_terminal_error_is_persisted_broadcast_once_and_never_an_inbound_turn() -> None:
+    async def _go() -> None:
+        store = _open_store()
+        broadcasts = []
+
+        async def broadcast(frame):
+            broadcasts.append(frame)
+
+        try:
+            await store.open_session("h", "v2-codex", visibility="visible", pane_pid="8123")
+            ingest = _codex_ingest(store, broadcast)
+            row = await _codex_row(store, FIXTURES / "codex_terminal_error.jsonl")
+            assert await ingest._ingest_stream(row, _StreamIngest(), 500) == 3
+            assert await ingest._ingest_stream(row, _StreamIngest(), 500) == 0
+            tail = await store.fetch_session_event_tail("h:v2-codex", limit=500)
+            assert [e["kind"] for e in tail] == ["TOOL_USE", "TOOL_RESULT", "ERROR"]
+            assert sum(f.get("event", {}).get("kind") == "ERROR" for f in broadcasts) == 1
+            assert await _count_user_and_tell(store, "h:v2-codex") == 0
+        finally:
+            store.stop()
+
+    asyncio.run(_go())
+
+
 def test_ingest_advances_summary_only_from_persisted_turn_event() -> None:
     async def _go() -> tuple[float | None, str | None, list[dict]]:
         store = _open_store()
