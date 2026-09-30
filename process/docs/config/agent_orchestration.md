@@ -47,7 +47,20 @@ Point `AGENT_ORCH_MEMORY_REPO` at your spec workspace for supported agent-orch m
 
 Give a session a durable title and visible sessions a status card with a goal and plan. Update the card at milestones; keep the durable checkpoint in the spec. Bind an ownership seat to its spec. For delegated work, include the objective and explicit provider/model/effort, and keep workers hidden unless operator visibility is needed.
 
-Use `agent-orch tell` for peer context and `agent-orch report` for a commissioned completion. Report START, END, BLOCKER and GATE decisions concisely; keep full evidence in artifacts. A peer END message does not replace a completion report. Before recovering a missing report, inspect the child and treat recovered evidence as lower trust.
+Use `agent-orch tell` for peer context and `agent-orch report` for a commissioned completion. Report START, END, BLOCKER and GATE decisions concisely; keep full evidence in artifacts. A peer END message does not replace a completion report.
+
+A `child_idle_unreported`, explicit delivery failure, or apparent missing terminal report is an anomaly: inspect the child once. A missing notification does not mean the typed report is absent. If a durable report exists, read and use it once with `agent-orch inspect` or `agent-orch await`.
+
+If no terminal report exists, the current CLI has no `recover` verb. When an independent QA close gate remains, commission fresh QA for the same pinned candidate and evidence in a parented seat. Use `agent-orch spawn` with the review scope and explicit model selection:
+
+```sh
+agent-orch spawn --parent "$AGENT_ORCH_STREAM_ID" \
+  --provider "$QA_PROVIDER" --model "$QA_MODEL" --effort "$QA_EFFORT" \
+  --role qa --phase qa --spec-id "$SPEC_ID" \
+  --objective "$REVIEW_OBJECTIVE" --no-self-close-on-completion
+```
+
+The parent reads the typed report and closes the seat. `await-spawn` handles spawn creation and prompt delivery, not completion.
 
 Ask for user input only when a missing decision or action uniquely belongs to the user. A visible seat uses `agent-orch prompt ask` for an asynchronous durable question and continues independent work. Under a coordinator, workers route questions to it. An operator action uses Done / Not yet; a decision offers choices that change the next action. Silence and elapsed time provide no authority.
 
