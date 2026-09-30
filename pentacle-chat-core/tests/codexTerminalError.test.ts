@@ -5,6 +5,7 @@ import type { PentacleEvent } from '../src/types/pentacle.ts';
 
 test('terminal provider errors stay visible and replay once in the shared chat renderer', () => {
   const event: PentacleEvent = {
+    daemon_seq: 1,
     host: 'example', provider: 'codex', session_name: 'v2-example', session_id: 'session-example',
     stream_id: 'example:v2-example', timestamp: '2026-09-30T12:00:03Z', kind: 'ERROR',
     text: 'Codex turn failed: selected model is at capacity (server_overloaded).',
