@@ -141,7 +141,7 @@ def test_tracked_process_copy_describes_the_supported_report_path():
         "await-spawn",
     ):
         assert required in section
-    assert "before recovering a missing report" not in section
+    assert "before recovering a missing report" not in process_doc.lower()
 
 
 def test_effective_explicit_self_close_mapping(instructions):
