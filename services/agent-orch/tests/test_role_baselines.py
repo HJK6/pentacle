@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -73,12 +74,74 @@ def test_effective_peer_communications(instructions):
         assert required in orchestration
 
 
-def test_effective_inspect_before_recover(instructions):
+def test_effective_inspect_and_fresh_qa_when_report_is_missing(instructions):
     _, shared, orchestration = instructions
     assert "inspect an actual anomaly before recovery" in shared
-    waiting = orchestration.split("## Waiting for worker completion\n", 1)[1].split("\n## ", 1)[0]
-    for required in ("agent-orch inspect", "inspect once", "use `recover` only", "did not report"):
+    waiting = " ".join(
+        orchestration.split("## Waiting for worker completion\n", 1)[1]
+        .split("\n## ", 1)[0]
+        .lower()
+        .split()
+    )
+    for required in (
+        "child_idle_unreported",
+        "inspect the child once",
+        "a missing notification does not mean the typed report is absent",
+        "if the durable report exists",
+        "read and use that report once",
+        "agent-orch inspect",
+        "agent-orch await",
+        "if no terminal report exists",
+        "parented seat",
+        "agent-orch spawn",
+        "--parent",
+        "--provider",
+        "--model",
+        "--effort",
+        "--role qa",
+        "--phase qa",
+        "--spec-id",
+        "--objective",
+        "--no-self-close-on-completion",
+        "the parent reads the new typed report once",
+        "then closes that seat",
+        "`await-spawn` reconciles spawn creation and prompt delivery, not completion",
+    ):
         assert required in waiting
+    assert "use `recover` only" not in waiting
+
+
+def test_tracked_process_copy_describes_the_supported_report_path():
+    process_doc = (
+        Path(__file__).resolve().parents[3]
+        / "process/docs/config/agent_orchestration.md"
+    ).read_text(encoding="utf-8")
+    start = process_doc.index("A `child_idle_unreported`")
+    section = " ".join(
+        process_doc[start:].split("\n\nAsk for user input", 1)[0].lower().split()
+    )
+    for required in (
+        "inspect the child once",
+        "a missing notification does not mean the typed report is absent",
+        "if a durable report exists",
+        "agent-orch inspect",
+        "agent-orch await",
+        "if no terminal report exists",
+        "parented seat",
+        "agent-orch spawn",
+        "--parent",
+        "--provider",
+        "--model",
+        "--effort",
+        "--role qa --phase qa",
+        "--spec-id",
+        "--objective",
+        "--no-self-close-on-completion",
+        "the parent reads the typed report and closes the seat",
+        "await-spawn",
+    ):
+        assert required in section
+    assert "before recovering a missing report" not in section
 
 
 def test_effective_explicit_self_close_mapping(instructions):
