@@ -27,6 +27,23 @@ The vendored core corresponds to public `HJK6/pentacle-chat-core` commit `add42a
 
 Machine identities come from configuration, never a built-in fleet. The CLI uses `AGENT_ORCH_HOST_ID`, then `local_host_id` in its user config, then a sanitized local hostname. Daemon launch uses `--local-host` and the configured machine allowlist. Desktop identity and appearance follow [desktop configuration](desktop_config.md).
 
+Daemon activation and same-ref restarts use `services/chat-stream-v2/deploy/deploy.py`,
+including when a plist change requires a reload. The default log guard is the
+executing user's `~/Library/Logs/pentacle/chat-streamd-v2`; use `--log-guard-dir`
+for another layout. A missing directory refuses activation; volume-root overrides
+must be mounted. The deployer does not create a missing guard directory.
+
+Before activation, verify that the release checkout matches the running artifact
+and record its SHA/PID. The deploy transaction stamps that checkout SHA as
+`prior_sha` before either kickstart or plist reload; `--rollback` selects the
+previously stamped `prior_sha`. Post-activation failures retain the applied stamp
+and require inspection before retrying. Direct daemon `launchctl` restarts bypass
+this contract and are not a sanctioned release path. `tools/merge_gate.py promote`
+only advances Git; follow promotion with the gated deploy entrypoint in the
+coordinated runtime window. Focused coverage is in
+`services/chat-stream-v2/tests/test_deploy_log_guard.py`; the local release gate is
+`python services/chat-stream-v2/tools/run_gate.py merge`.
+
 Live tools use `PENTACLE_SMOKE_HOSTS` or `PENTACLE_SATELLITE_HOSTS` when supplied; otherwise they read the existing machine configuration (inline `PENTACLE_MACHINES_JSON`, `PENTACLE_MACHINES_FILE`, user machines.json, then a local-only default). Pinning selects remote machines only and refuses an empty target set before opening the Store. Empty or duplicate explicit lists fail. Scheduled smoke follows the same machine configuration. Local tool identity uses `PENTACLE_HOST_ID`, `AGENT_ORCH_HOST_ID`, then the configured local machine.
 
 The auth-context marker is disabled unless `PENTACLE_AUTH_CONTEXT_MARKER_HOST` identifies the host whose provider wrapper emits that marker. Shipped spawn policy applies the common concurrency cap; per-host overrides belong in a deployment-owned `services/_shared/spawn_defaults.local.json` (`{"schema_version": 1, "host_overrides": {...}}`, merged over the shipped `host_overrides`, never committed to the public repository). Satellite service templates read their identity from `PENTACLE_SATELLITE_HOST` in the private satellite environment file.
