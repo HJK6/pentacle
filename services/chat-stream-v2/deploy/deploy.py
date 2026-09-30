@@ -57,7 +57,7 @@ SERVICES: dict[str, ServiceConfig] = {
         launchd_label=V2_DAEMON_LABEL,
         requirements_path="services/chat-stream-v2/requirements.txt",
         editable_installs=("services/agent-orch",),
-        log_guard_dir="/Volumes/data",
+        log_guard_dir=str(Path.home() / "Library/Logs/pentacle/chat-streamd-v2"),
         launchd_environment=(("PENTACLE_SPAWN_RESERVATION_TTL_S", "600"),),
         runtime_roots=("services/chat-stream-v2", "services/_shared", "services/agent-orch/agent_orch"),
     ),
