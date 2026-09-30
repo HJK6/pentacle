@@ -66,13 +66,13 @@ def test_luna_is_spawnable_across_all_supported_efforts() -> None:
             assert revalidated["model"] == "gpt-6-luna"
 
 
-def test_sol61_catalog_aliases_and_retained_sol_policy() -> None:
+def test_sol61_catalog_aliases_and_explicit_sol60_policy() -> None:
     assert spawn_profiles.CATALOG_VERSION == "spawn-catalog-v2"
     assert catalog()["models"]["codex"]["gpt-6.1-sol"] == {
-        "aliases": ("gpt-6.1-sol", "sol-6.1"),
+        "aliases": ("gpt-6.1-sol", "sol-6.1", "sol"),
         "efforts": ("low", "medium", "high", "xhigh", "max"),
     }
-    for alias in ("gpt-6.1-sol", "sol-6.1"):
+    for alias in ("gpt-6.1-sol", "sol-6.1", "sol"):
         for effort in ("low", "medium", "high", "xhigh", "max"):
             request = resolve_spawn(provider="codex", model=alias, effort=effort)
             assert (request["model"], request["effort"]) == ("gpt-6.1-sol", effort)
@@ -82,7 +82,8 @@ def test_sol61_catalog_aliases_and_retained_sol_policy() -> None:
                 resolution_source="explicit_override",
             )
             assert validated["model"] == "gpt-6.1-sol"
-    assert resolve_spawn(provider="codex", model="sol")["model"] == "gpt-6-sol"
+    assert resolve_spawn(provider="codex", model="sol")["model"] == "gpt-6.1-sol"
+    assert catalog()["models"]["codex"]["gpt-6-sol"]["aliases"] == ("gpt-6-sol",)
     assert resolve_spawn(provider="codex", model="gpt-6-sol")["model"] == "gpt-6-sol"
     assert spawn_profiles.INTENTIONALLY_UNSPAWNABLE["codex"] == frozenset({"gpt-5.4", "gpt-5.5"})
 
@@ -143,9 +144,9 @@ def test_profiles_derive_same_provider_default_and_legacy_fallback() -> None:
 def test_codex_partial_explicit_overrides_are_pinned_for_both_profiles() -> None:
     cases = (
         (None, None, "gpt-6-luna", "max", "profile_default"),
-        ("sol", None, "gpt-6-sol", "max", "explicit_override"),
+        ("sol", None, "gpt-6.1-sol", "max", "explicit_override"),
         (None, "high", "gpt-6-luna", "high", "explicit_override"),
-        ("sol", "high", "gpt-6-sol", "high", "explicit_override"),
+        ("sol", "high", "gpt-6.1-sol", "high", "explicit_override"),
     )
     for profile in ("agent_orch", "desktop_manual"):
         for model, effort, expected_model, expected_effort, source in cases:
@@ -209,7 +210,7 @@ def test_host_override_and_policy_readback_share_one_config(monkeypatch, tmp_pat
 
 def test_explicit_claude_and_codex_efforts_are_canonical() -> None:
     assert resolve_spawn(provider="claude", model="opus", effort="max")["resolution_source"] == "explicit_override"
-    assert resolve_spawn(provider="codex", model="sol", effort="xhigh")["model"] == "gpt-6-sol"
+    assert resolve_spawn(provider="codex", model="sol", effort="xhigh")["model"] == "gpt-6.1-sol"
     terra = resolve_spawn(provider="codex", model="terra", effort="high")
     assert (terra["model"], terra["effort"], terra["resolution_source"]) == (
         "gpt-5.6-terra", "high", "explicit_override",
@@ -362,7 +363,7 @@ def test_supported_handoff_source_is_preserved() -> None:
 
 def test_gpt6_aliases_and_retained_56_models_across_efforts() -> None:
     aliases = {
-        "sol": "gpt-6-sol", "luna": "gpt-6-luna",
+        "sol": "gpt-6.1-sol", "luna": "gpt-6-luna",
         "gpt-6-sol": "gpt-6-sol", "gpt-6-luna": "gpt-6-luna",
         "gpt-5.6-sol": "gpt-5.6-sol", "gpt-5.6-luna": "gpt-5.6-luna",
         "gpt-5.6-terra": "gpt-5.6-terra", "terra": "gpt-5.6-terra",
