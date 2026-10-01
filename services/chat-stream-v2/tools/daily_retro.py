@@ -406,7 +406,7 @@ def completed_history(settings, baseline_path):
             continue
         for name, stage in zip(("sol", "astra"), stages):
             report = stage.get("report", {})
-            model, effort = ("gpt-6-sol", "medium") if name == "sol" else ("gpt-6-astra", "high")
+            model, effort = ("gpt-6.1-sol", "medium") if name == "sol" else ("gpt-6-astra", "high")
             if (stage.get("packet_hash") != digest(stage["packet"])
                     or report.get("effective_model") != model or report.get("effective_effort") != effort
                     or report.get("report_id") != stage.get("report_id")
@@ -581,7 +581,7 @@ def worker_collection(manifest, path):
 
 
 def worker_prompt(settings, manifest, stage, input_path):
-    model, effort = ("gpt-6-sol", "medium") if stage == "sol" else ("gpt-6-astra", "high")
+    model, effort = ("gpt-6.1-sol", "medium") if stage == "sol" else ("gpt-6-astra", "high")
     duty = ("Investigate originals, named follow-ups, related current work/rules and prior decisions; group repeated issues. "
             "Verify current defects rather than treating retros as conclusions. Draft one prioritized packet.") if stage == "sol" else (
             "Read EVERY original and ALL Sol dispositions/draft, including no-action. Detect omitted insights and evidence gaps. "
@@ -624,7 +624,7 @@ class Pipeline:
         stage = read(receipt_path, {})
         if stage.get("packet"):
             return stage
-        model, effort = ("gpt-6-sol", "medium") if name == "sol" else ("gpt-6-astra", "high")
+        model, effort = ("gpt-6.1-sol", "medium") if name == "sol" else ("gpt-6-astra", "high")
         if not stage:
             attempt = 1
         elif stage.get("failed"):
