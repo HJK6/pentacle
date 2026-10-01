@@ -97,25 +97,77 @@ def test_dot_token_allowed_over_tls():
         store, _ = _open_token_store()
         daemon = Server(store=store, dot_principal_stream_ids=[DOT_ID])
         calls = []
-        daemon.handlers["list_sessions"] = lambda m: _record(calls, "list_sessions.ok")
+        # `ping` is a base-allowed verb (handshake/keepalive), reachable
+        # independent of the read toggle; it proves the token is honoured over
+        # daemon-terminated TLS. (The read verb `list_sessions` is covered by the
+        # read-toggle test below and is denied by default.)
+        daemon.handlers["ping"] = lambda m: _record(calls, "ping.ok")
 
         peer = Peer()
         daemon._tls_connections.add(peer)  # daemon-terminated TLS connection
-        reply = await daemon._dispatch(_dot_frame("list_sessions"), websocket=peer)
-        assert reply[0]["type"] == "list_sessions.ok"
-        assert calls == ["list_sessions.ok"]
+        reply = await daemon._dispatch(_dot_frame("ping"), websocket=peer)
+        assert reply[0]["type"] == "ping.ok"
+        assert calls == ["ping.ok"]
 
     asyncio.run(run())
+
+
+def test_dot_read_verb_denied_by_default_enabled_by_toggle():
+    """v1: `list_sessions` is denied by default (read OFF); the
+    `PENTACLE_DOT_READ_ENABLED`/`dot_read_enabled` toggle re-enables it."""
+    async def run():
+        # Default: read disabled -> list_sessions denied before the handler.
+        store, _ = _open_token_store()
+        off = Server(store=store, dot_principal_stream_ids=[DOT_ID])
+        assert off.dot_read_enabled is False
+        reached = []
+        off.handlers["list_sessions"] = _passthrough(reached, "list_sessions")
+        peer = Peer()
+        off._tls_connections.add(peer)
+        reply = await off._dispatch(_dot_frame("list_sessions"), websocket=peer)
+        assert reply[0]["error_code"] == DOT_SCOPE_DENIED_CODE
+        assert reached == []
+
+        # Toggle ON: the projected read verb is reachable again.
+        store2, _ = _open_token_store()
+        on = Server(store=store2, dot_principal_stream_ids=[DOT_ID], dot_read_enabled=True)
+        assert on.dot_read_enabled is True
+        on_reached = []
+        on.handlers["list_sessions"] = _passthrough(on_reached, "list_sessions")
+        peer2 = Peer()
+        on._tls_connections.add(peer2)
+        reply2 = await on._dispatch(_dot_frame("list_sessions"), websocket=peer2)
+        assert reply2[0]["type"] == "list_sessions.ok"
+        assert on_reached == ["list_sessions"]
+
+    asyncio.run(run())
+
+
+def test_dot_read_toggle_reads_env(monkeypatch):
+    monkeypatch.setenv("PENTACLE_DOT_READ_ENABLED", "true")
+    assert Server(dot_principal_stream_ids=[DOT_ID]).dot_read_enabled is True
+    monkeypatch.setenv("PENTACLE_DOT_READ_ENABLED", "0")
+    assert Server(dot_principal_stream_ids=[DOT_ID]).dot_read_enabled is False
+    monkeypatch.delenv("PENTACLE_DOT_READ_ENABLED", raising=False)
+    assert Server(dot_principal_stream_ids=[DOT_ID]).dot_read_enabled is False
 
 
 # --------------------------------------------------------------------------- #
 # Default-deny verb surface, proven over the whole registry.
 # --------------------------------------------------------------------------- #
 
-def test_dot_default_deny_over_registry():
+@pytest.mark.parametrize("read_enabled", [False, True])
+def test_dot_default_deny_over_registry(read_enabled):
+    """Only the EFFECTIVE allowlist is reachable for a Dot principal: the base
+    verbs (ping/hello/send) always, plus the read verb (list_sessions) ONLY when
+    the read toggle is on. Every other registered handler denies by default."""
+    from server import DOT_BASE_ALLOWED_VERBS, DOT_READ_VERBS
+
     async def run():
         store, _ = _open_token_store()
-        daemon = Server(store=store, dot_principal_stream_ids=[DOT_ID])
+        daemon = Server(store=store, dot_principal_stream_ids=[DOT_ID],
+                        dot_read_enabled=read_enabled)
+        effective = DOT_BASE_ALLOWED_VERBS | (DOT_READ_VERBS if read_enabled else frozenset())
         peer = Peer()
         daemon._tls_connections.add(peer)
         reached = []
@@ -126,14 +178,17 @@ def test_dot_default_deny_over_registry():
 
         for verb in sorted(daemon.handlers):
             reply = await daemon._dispatch(_dot_frame(verb), websocket=peer)
-            if verb in DOT_ALLOWED_VERBS:
+            if verb in effective:
                 assert reply[0]["type"] == f"{verb}.ok", verb
             else:
                 # Denied before the handler, by some denial code; handler never ran.
                 assert reply[0].get("error_code"), verb
                 assert verb not in reached, verb
-        # Only the allowlist was ever reached.
-        assert set(reached) <= DOT_ALLOWED_VERBS
+        # Only the effective allowlist was ever reached. With read OFF (default),
+        # list_sessions is NOT reachable.
+        assert set(reached) <= effective
+        if not read_enabled:
+            assert "list_sessions" not in reached
 
     asyncio.run(run())
 
@@ -248,13 +303,18 @@ def test_dot_send_reaches_current_binding_attributed_not_operator():
             "to_stream_id": "bart:assistant", "text": "please orchestrate X",
             "_auth_context": auth,
         })
-        assert res["delivery"] == "landed"
-        assert res["delivered_to_binding"] == BACKEND
+        # The message is delivered to the resolved live backend...
         sent = comms.sent[0]
         assert sent["to_stream_id"] == BACKEND          # resolved at send time
         assert sent["from_stream_id"] == DOT_ID          # drives [from dot]
-        # Not operator provenance.
-        assert not sent["_auth_context"].get("operator_authenticated")
+        assert not sent["_auth_context"].get("operator_authenticated")  # not operator
+        # ...but the ACK to Dot discloses NO fleet data: only the stable composite
+        # id + safe delivery status; never the resolved backend seat/host/name.
+        assert res["delivery"] == "landed"
+        assert res["to_stream_id"] == "bart:assistant"
+        assert BACKEND not in json.dumps(res)
+        for leaked in ("delivered_to_binding", "host", "session_name"):
+            assert leaked not in res, leaked
 
     asyncio.run(run())
 
@@ -309,14 +369,16 @@ def test_dot_revocation_drops_live_connection():
         daemon = Server(store=store, dot_principal_stream_ids=[DOT_ID])
         peer = Peer()
         daemon._tls_connections.add(peer)
-        daemon.handlers["list_sessions"] = lambda m: _record([], "list_sessions.ok")
+        # Probe with a base-allowed verb so the pre-revocation call succeeds
+        # regardless of the (default-off) read toggle.
+        daemon.handlers["ping"] = lambda m: _record([], "ping.ok")
 
-        first = await daemon._dispatch(_dot_frame("list_sessions"), websocket=peer)
-        assert first[0]["type"] == "list_sessions.ok"
+        first = await daemon._dispatch(_dot_frame("ping"), websocket=peer)
+        assert first[0]["type"] == "ping.ok"
         # Revoke the seat token (e.g. the seat was closed): next RPC is refused,
         # even though the connection stayed open.
         holder["status"] = ""  # token no longer resolvable / open
-        after = await daemon._dispatch('{"type":"list_sessions","request_id":"after"}', websocket=peer)
+        after = await daemon._dispatch('{"type":"ping","request_id":"after"}', websocket=peer)
         assert after[0]["error_code"] == "authentication_required"
 
     asyncio.run(run())
@@ -331,20 +393,21 @@ def test_dot_revocation_on_loopback_does_not_fall_through_to_local_access():
         store, holder = _open_token_store()
         daemon = Server(store=store, dot_principal_stream_ids=[DOT_ID])
         reached = []
-        for verb in ("list_sessions", "spawn", "close"):
+        for verb in ("ping", "spawn", "close"):
             daemon.handlers[verb] = _passthrough(reached, verb)
         peer = Peer("127.0.0.1")   # loopback
         daemon._tls_connections.add(peer)
 
-        # First RPC authenticates the Dot and marks the connection sticky.
-        first = await daemon._dispatch(_dot_frame("list_sessions"), websocket=peer)
-        assert first[0]["type"] == "list_sessions.ok"
+        # First RPC authenticates the Dot and marks the connection sticky
+        # (base-allowed `ping`, independent of the read toggle).
+        first = await daemon._dispatch(_dot_frame("ping"), websocket=peer)
+        assert first[0]["type"] == "ping.ok"
         assert peer in daemon._client_dot_connections
         reached.clear()  # ignore the legitimate pre-revocation call
 
         # Revoke; a loopback RPC with no token must NOT reach the handler.
         holder["status"] = ""
-        for verb in ("list_sessions", "spawn", "close"):
+        for verb in ("ping", "spawn", "close"):
             reply = await daemon._dispatch(
                 json.dumps({"type": verb, "request_id": f"rev-{verb}"}), websocket=peer,
             )
@@ -358,8 +421,29 @@ def test_dot_revocation_on_loopback_does_not_fall_through_to_local_access():
 # Broadcasts: a Dot connection only ever gets the projected inventory, over TLS.
 # --------------------------------------------------------------------------- #
 
-def test_dot_broadcasts_restricted_to_projected_inventory():
-    daemon = Server(dot_principal_stream_ids=[DOT_ID])
+def test_dot_broadcasts_none_when_read_disabled():
+    """v1 default (read OFF): a Dot connection receives NO broadcast frame at
+    all — not even the projected inventory. This closes the subscription/push
+    read path and means Bart's reply frames never reach Dot over wss."""
+    daemon = Server(dot_principal_stream_ids=[DOT_ID])  # read OFF by default
+    assert daemon.dot_read_enabled is False
+    tls_peer = Peer()
+    daemon._tls_connections.add(tls_peer)
+    daemon._client_dot_connections.add(tls_peer)
+    daemon._client_authenticated_streams[tls_peer] = DOT_ID
+    for ftype, payload in (
+        ("session.inventory", {"sessions": [{"stream_id": "x", "visibility": "default",
+                                             "objective": "o", "last_text": "SECRET"}]}),
+        ("chat.event", {"event": {"stream_id": "x"}}),
+        ("working.state", {"stream_id": "x"}),
+        ("notification", {"notification": {}}),
+        ("hosts.stats", {"hosts": {"thoth": {"cpu": 1}}}),
+    ):
+        assert daemon._frame_for_client(tls_peer, ftype, payload) is None, ftype
+
+
+def test_dot_broadcasts_projected_inventory_when_read_enabled():
+    daemon = Server(dot_principal_stream_ids=[DOT_ID], dot_read_enabled=True)
     tls_peer = Peer()
     daemon._tls_connections.add(tls_peer)
     daemon._client_dot_connections.add(tls_peer)
@@ -372,7 +456,7 @@ def test_dot_broadcasts_restricted_to_projected_inventory():
     assert inv is not None
     assert "last_text" not in inv["sessions"][0]
     assert inv["sessions"][0].get("objective") == "o"
-    # Every other broadcast type is withheld.
+    # Every other broadcast type is withheld even with read ON.
     assert daemon._frame_for_client(tls_peer, "chat.event", {"event": {"stream_id": "x"}}) is None
     assert daemon._frame_for_client(tls_peer, "working.state", {"stream_id": "x"}) is None
     assert daemon._frame_for_client(tls_peer, "notification", {"notification": {}}) is None
@@ -418,3 +502,113 @@ def _async_return(value):
     async def _inner(*_a, **_k):
         return value
     return _inner
+
+
+# --------------------------------------------------------------------------- #
+# v1 delta: the hello RESPONSE discloses no fleet data (full frame sequence),
+# and Dot-bound error frames are code-only. (spec-QA cycle-1 F1 + F2.)
+# --------------------------------------------------------------------------- #
+
+def test_dot_hello_response_empty_and_no_hosts_stats():
+    """A Dot connection's hello returns exactly [hello, empty-snapshot]: no fleet
+    sessions/notifications/working_states AND no directly-appended hosts.stats
+    frame (which carries live host telemetry and bypasses _frame_for_client).
+    The assertion scans EVERY returned frame, not only the snapshot event."""
+    async def run():
+        store, _ = _open_token_store()
+        daemon = Server(store=store, dot_principal_stream_ids=[DOT_ID])
+        # Seed host telemetry so a leaked hosts.stats frame would be detectable.
+        daemon._host_stats["thoth"] = {"cpu": 0.9, "secret_host_metric": "LEAKME"}
+        peer = Peer()
+        daemon._tls_connections.add(peer)
+        frames = await daemon._dispatch(_dot_frame(
+            "hello", client="agent-orch",
+            subscribe={"all": True, "include_subagents": True},
+        ), websocket=peer)
+        types = [f.get("type") for f in frames]
+        assert types == ["hello", "snapshot"], types   # NO hosts.stats third frame
+        snap = frames[1]
+        assert snap["sessions"] == []
+        assert snap["notifications"] == []
+        assert snap["working_states"] == {}
+        assert snap["hosts"] == {}
+        # No host telemetry anywhere in the whole sequence.
+        blob = json.dumps(frames)
+        assert "hosts.stats" not in blob
+        assert "LEAKME" not in blob
+        assert "secret_host_metric" not in blob
+
+    asyncio.run(run())
+
+
+def test_dot_hello_still_denied_over_plain_ws():
+    """Hardening the hello response must not weaken the TLS-only gate."""
+    async def run():
+        store, _ = _open_token_store()
+        daemon = Server(store=store, dot_principal_stream_ids=[DOT_ID])
+        peer = Peer()  # NOT in _tls_connections -> plain ws
+        frames = await daemon._dispatch(_dot_frame(
+            "hello", subscribe={"all": True}), websocket=peer)
+        assert frames[0]["error_code"] == DOT_REQUIRES_TLS_CODE
+
+    asyncio.run(run())
+
+
+class _RaisingComms:
+    """comms.send that fails with an exception carrying fleet identifiers."""
+    def __init__(self):
+        self.sent = []
+    async def send(self, msg):
+        self.sent.append(msg)
+        raise RuntimeError("backend thoth:v2-SECRETBACKEND unreachable at 10.9.9.9")
+
+
+def test_dot_send_error_frame_is_code_only():
+    """A Dot send failure returns a code-only error frame: no free-form error
+    text or extras, so backend/internal identifiers never egress to Dot."""
+    async def run():
+        store, _ = _open_token_store()
+        daemon = Server(store=store, sessions=_FakeSessions(), comms=_RaisingComms(),
+                        dot_principal_stream_ids=[DOT_ID])
+        daemon.assistant_composite = _FakeComposite(BACKEND)
+        peer = Peer()
+        daemon._tls_connections.add(peer)
+        frames = await daemon._dispatch(_dot_frame(
+            "send", to_stream_id="bart:assistant", text="handoff"), websocket=peer)
+        err = frames[0]
+        assert err["type"] == "send.error"
+        assert err["error_code"] == "internal_error"
+        assert err.get("request_id") == "send-req"
+        # Code-only: no free-form text / extras, synthetic identifiers absent.
+        assert set(err) <= {"type", "error_code", "request_id"}
+        blob = json.dumps(err)
+        assert "SECRETBACKEND" not in blob and "10.9.9.9" not in blob
+
+
+    asyncio.run(run())
+
+
+def test_dot_scrub_outbound_unit():
+    """The scrub reduces any *.error to code-only and leaves acks untouched."""
+    scrub = Server._dot_scrub_outbound
+    err = scrub({"type": "send.error", "error_code": "boom",
+                 "error": "SECRET thoth:v2-x", "extra_field": "SECRET", "request_id": "r1"})
+    assert err == {"type": "send.error", "error_code": "boom", "request_id": "r1"}
+    ok = {"type": "send.result", "to_stream_id": "bart:assistant", "delivery": "landed"}
+    assert scrub(ok) == ok   # non-error passes through unchanged
+
+
+def test_dot_error_scrub_does_not_apply_to_non_dot_connection():
+    """A non-Dot connection still receives full error detail (no regression)."""
+    async def run():
+        daemon = Server(dot_principal_stream_ids=[DOT_ID])
+        def _boom(_m):
+            raise VerbError("boom", "SECRET thoth:v2-detail leaked")
+        daemon.handlers["ping"] = _boom
+        peer = Peer("127.0.0.1")  # loopback, NOT a Dot connection
+        frames = await daemon._dispatch(
+            json.dumps({"type": "ping", "request_id": "p1"}), websocket=peer)
+        assert frames[0]["error_code"] == "boom"
+        assert "SECRET thoth:v2-detail leaked" in json.dumps(frames[0])  # not scrubbed
+
+    asyncio.run(run())

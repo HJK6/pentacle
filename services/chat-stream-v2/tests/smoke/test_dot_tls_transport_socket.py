@@ -70,6 +70,8 @@ def test_dot_token_works_over_wss_and_is_refused_over_plain_ws(tmp_path):
                 dot_principal_stream_ids=[DOT_ID],
                 dot_tls_port=0, dot_tls_cert=cert, dot_tls_key=key, dot_tls_binds=["127.0.0.1"],
             )
+            # Seed host telemetry so a leaked hosts.stats hello frame would show.
+            server._host_stats["thoth"] = {"cpu": 0.9, "secret_host_metric": "LEAKME"}
             await server.bind()
             plain_port = server.port
             tls_port = server.dot_tls_port
@@ -79,13 +81,25 @@ def test_dot_token_works_over_wss_and_is_refused_over_plain_ws(tmp_path):
             client_ctx.check_hostname = False
             client_ctx.verify_mode = ssl.CERT_NONE
 
-            # (1) wss: Dot token is honoured.
+            # (1) wss: Dot token is honoured. The hello (subscribe:{all:true},
+            # like the stock agent-orch client) returns a well-formed but EMPTY
+            # snapshot and NO hosts.stats frame — the client does not hang and no
+            # fleet data / host telemetry egresses. The read verb is denied.
             async with websockets.connect(f"wss://127.0.0.1:{tls_port}", ssl=client_ctx) as ws:
                 assert json.loads(await ws.recv())["type"] == "welcome"
                 await ws.send(json.dumps({
                     "type": "hello", "client": "agent-orch", "from_stream_id": DOT_ID,
-                    "stream_token": TOKEN, "subscribe": {"mode": "rpc", "snapshot": False},
+                    "stream_token": TOKEN, "subscribe": {"all": True, "include_subagents": True},
                 }))
+                hello_seq = []
+                while not any(f.get("type") == "snapshot" for f in hello_seq):
+                    hello_seq.append(json.loads(await asyncio.wait_for(ws.recv(), 3)))
+                assert [f["type"] for f in hello_seq] == ["hello", "snapshot"]
+                snap = hello_seq[-1]
+                assert snap["sessions"] == [] and snap["hosts"] == {}
+                assert "LEAKME" not in json.dumps(hello_seq)
+                assert "hosts.stats" not in json.dumps(hello_seq)
+                # Read is DISABLED by default: list_sessions is refused.
                 await ws.send(json.dumps({
                     "type": "list_sessions", "request_id": "ls-tls",
                     "from_stream_id": DOT_ID, "stream_token": TOKEN,
@@ -93,7 +107,7 @@ def test_dot_token_works_over_wss_and_is_refused_over_plain_ws(tmp_path):
                 frames = []
                 while not any(f.get("request_id") == "ls-tls" for f in frames):
                     frames.append(json.loads(await asyncio.wait_for(ws.recv(), 3)))
-                assert frames[-1]["type"] == "list_sessions.ok"
+                assert frames[-1]["error_code"] == "dot_scope_denied"
 
             # (2) plain ws against the plain fleet port: Dot token refused.
             async with websockets.connect(f"ws://127.0.0.1:{plain_port}") as ws:
