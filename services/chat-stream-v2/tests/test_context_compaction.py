@@ -3,12 +3,51 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 
 from context_adapters import ContextReading, context_fields
 from routing_integrity import RoutingIntegrity
 from test_context_nudges import _context_harness
 from test_nudges import HOST, _iso, _new_store
+
+# --------------------------------------------------------------------------- #
+# Captured-layout fixtures for the Claude CLI self-update footer.
+#
+# Taken from the real idle front-desk pane (thoth:v2-410fb34f3f79, 2026-10-01):
+# the prompt sits ABOVE the footers, so the composer parser scans the divider,
+# the permission footer and — after an in-place CLI self-update — a persistent
+# banner line ("✔ Update installed · Restart to update", ✔=U+2714, ·=U+00B7).
+# Unlike the fake RecordingTmux.IDLE (prompt last, footers unscanned), these
+# exercise the footer region the deployed parser actually rejected.
+# --------------------------------------------------------------------------- #
+_DIV = "─" * 40
+_PERM_FOOTER = "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+_UPDATE_FOOTER = "                              ✔ Update installed · Restart to update"
+
+# Empty composer; the update banner renders below the permission footer.
+IDLE_WITH_UPDATE_FOOTER = "\n".join(
+    ["⏺ earlier assistant output", _DIV, "❯ ", _DIV, _PERM_FOOTER, _UPDATE_FOOTER, ""]
+)
+# Same captured layout WITHOUT the banner — the control that isolates it.
+IDLE_CAPTURED_LAYOUT = "\n".join(
+    ["⏺ earlier assistant output", _DIV, "❯ ", _DIV, _PERM_FOOTER, ""]
+)
+# Footer-like text ABOVE the permission footer must stay a draft (fail closed).
+UPDATE_BANNER_ABOVE_FOOTER = "\n".join(
+    [_DIV, "❯ ", "✔ Update installed · Restart to update", _DIV, _PERM_FOOTER, ""]
+)
+# A genuine draft that happens to be the banner text, typed on the prompt line.
+DRAFT_LOOKS_LIKE_FOOTER = "\n".join(
+    [_DIV, "❯ ✔ Update installed · Restart to update", _DIV, _PERM_FOOTER, ""]
+)
+# Unknown chrome after the banner still fails closed.
+UNKNOWN_CHROME_AFTER_FOOTER = IDLE_WITH_UPDATE_FOOTER + "spurious chrome line\n"
+# A plain in-progress draft under the banner (draft-protection with footer).
+DRAFT_UNDER_UPDATE_FOOTER = "\n".join(
+    ["⏺ earlier assistant output", _DIV, "❯ just compact now", _DIV,
+     _PERM_FOOTER, _UPDATE_FOOTER, ""]
+)
 
 
 def test_claude_compact_threshold_and_codex_backend_exemption(monkeypatch):
@@ -614,3 +653,138 @@ def test_uncertain_input_stays_fenced_until_user_event_reconciliation(tmp_path):
             store.stop()
 
     asyncio.run(run())
+
+
+def test_update_footer_structural_recognition():
+    """Parser: the self-update banner is empty-composer chrome only in its
+    structural footer position; drafts, footer-like composer text and unknown
+    chrome still fail closed."""
+    from boot_ready import claude_composer_empty, claude_prompt_ready
+
+    assert claude_prompt_ready(IDLE_WITH_UPDATE_FOOTER) is True
+    # RED before the fix / GREEN after: an empty composer under the banner.
+    assert claude_composer_empty(IDLE_WITH_UPDATE_FOOTER) is True
+    # Control: identical layout without the banner was always empty.
+    assert claude_composer_empty(IDLE_CAPTURED_LAYOUT) is True
+    # Structural: banner-like text ABOVE the permission footer is not chrome.
+    assert claude_composer_empty(UPDATE_BANNER_ABOVE_FOOTER) is False
+    # A genuine draft (even the banner text) on the prompt line stays a draft.
+    assert claude_composer_empty(DRAFT_LOOKS_LIKE_FOOTER) is False
+    # Unknown chrome after the banner still fails closed.
+    assert claude_composer_empty(UNKNOWN_CHROME_AFTER_FOOTER) is False
+
+
+def _arm_then_capture_and_cross(h, observer, capture):
+    now = time.time()
+
+    async def read(tokens, offset):
+        await observer.observe_context(
+            HOST, "child", provider="claude",
+            reading=ContextReading(tokens, model="claude-fable-5-1"),
+            observed_at=_iso(now + offset),
+        )
+
+    async def go():
+        await read(450_000, -8)
+        await h.job.run_pass()
+        h.tmux.set_capture("child", capture)
+        await read(500_000, -7)
+        await h.job.run_pass()
+
+    return go
+
+
+def test_update_footer_pane_compacts_once():
+    """Real compaction path: an empty composer carrying the CLI update footer
+    receives exactly one /compact (RED pre-fix: the footer deferred it)."""
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            observer = RoutingIntegrity(store, h.sessions)
+            await _arm_then_capture_and_cross(h, observer, IDLE_WITH_UPDATE_FOOTER)()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            basis = json.loads((await store.nudge_state(f"{HOST}:child", "context_compact"))["basis"])
+            assert basis["attempt"]["outcome"] in {"submitted", "pending_input"}
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_captured_layout_without_footer_compacts():
+    """Isolation control: the same captured layout without the banner also
+    compacts, proving the banner line is the only differentiator."""
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            observer = RoutingIntegrity(store, h.sessions)
+            await _arm_then_capture_and_cross(h, observer, IDLE_CAPTURED_LAYOUT)()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_draft_under_update_footer_defers_and_preserves_draft():
+    """A genuine draft beneath the update footer still blocks compaction and
+    the draft is never overwritten — footer tolerance must not leak a draft."""
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            observer = RoutingIntegrity(store, h.sessions)
+            await _arm_then_capture_and_cross(h, observer, DRAFT_UNDER_UPDATE_FOOTER)()
+            assert CONTEXT_COMPACT_COMMAND not in h.tmux.pasted
+            assert await h.tmux.capture("child") == DRAFT_UNDER_UPDATE_FOOTER
+            basis = json.loads((await store.nudge_state(f"{HOST}:child", "context_compact"))["basis"])
+            assert "attempt" not in basis
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_compact_defer_reason_logged_once_bounded(caplog):
+    """A persistent blocker logs one bounded INFO reason, not one per sweep,
+    and never the composer text."""
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            observer = RoutingIntegrity(store, h.sessions)
+            await _arm_then_capture_and_cross(h, observer, DRAFT_UNDER_UPDATE_FOOTER)()
+            # A second sweep with the same blocker must not re-log.
+            await h.job.run_pass()
+            assert CONTEXT_COMPACT_COMMAND not in h.tmux.pasted
+        finally:
+            store.stop()
+
+    with caplog.at_level(logging.INFO, logger="chat_streamd_v2.ledger"):
+        asyncio.run(run())
+    deferred = [
+        r for r in caplog.records
+        if "deferred" in r.getMessage() and "context_compact" in r.getMessage()
+    ]
+    assert len(deferred) == 1, [r.getMessage() for r in deferred]
+    message = deferred[0].getMessage()
+    assert "reason=composer_not_proven_empty" in message
+    assert "just compact now" not in message  # never log composer text

@@ -75,22 +75,43 @@ def claude_prompt_ready(pane_text: str) -> bool:
     return "⏵⏵ bypass permissions" in pane_text and "❯" in pane_text
 
 
+# The Claude CLI, after an in-place self-update, renders a persistent banner
+# line below the permission footer until the process restarts (observed:
+# "✔ Update installed · Restart to update"). It is daemon chrome, not a draft.
+# It must be recognised ONLY in that structural position — below the permission
+# footer — so the same text typed into the composer, or wrapped above the
+# footer, is still treated as a draft and fails closed.
+_CLAUDE_UPDATE_FOOTER = "Update installed · Restart to update"
+
+
+def _is_claude_update_footer(content: str) -> bool:
+    # Tolerate the leading status glyph (✔/✓) and the spacing the TUI uses to
+    # right-align the banner; require the exact banner text otherwise.
+    return content.lstrip("✔✓ ").strip() == _CLAUDE_UPDATE_FOOTER
+
+
 def claude_composer_empty(pane_text: str) -> bool:
     """Conservatively prove the current Claude composer contains no draft.
 
     The prompt marker may appear in history, so inspect the last one and allow
-    only the persistent divider and permission footer below it. Unknown chrome
-    fails closed rather than risking a slash command appended to a user draft.
+    only the persistent divider and permission footer below it, plus the CLI
+    self-update banner in its structural position below that footer. Unknown
+    chrome fails closed rather than risking a slash command appended to a user
+    draft.
     """
     lines = pane_text.splitlines()
     start = _last_claude_input_start(lines)
     if start is None or lines[start].strip() != "❯":
         return False
+    seen_permission_footer = False
     for line in lines[start + 1:]:
         content = line.strip()
         if not content or set(content) == {"─"}:
             continue
         if content.startswith("⏵⏵ bypass permissions"):
+            seen_permission_footer = True
+            continue
+        if seen_permission_footer and _is_claude_update_footer(content):
             continue
         return False
     return True

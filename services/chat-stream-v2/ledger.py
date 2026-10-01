@@ -1551,6 +1551,10 @@ class NudgeJob:
         self.outbound = outbound
         self.broadcast = broadcast
         self._last_tell_epoch_token: dict[str, int] = {}
+        # Bounded "why was this seat skipped" diagnostics for the compact pass:
+        # one INFO per (seat, generation, reason) transition, never per sweep,
+        # and never the composer text itself.
+        self._compact_skip_logged: dict[str, tuple[str, str]] = {}
         if self.outbound is not None:
             self.outbound.register_kind(
                 NOTICE_KIND_STATUS_CARD,
@@ -2043,7 +2047,22 @@ class NudgeJob:
                     )
                     continue
                 if not prepared:
-                    continue  # an ineligible seat or occupied draft caused no input
+                    # An ineligible seat or occupied draft caused no input. This
+                    # path records no basis attempt and used to be fully silent,
+                    # which hid a persistent per-seat defer (e.g. an unparsed CLI
+                    # update footer) for hours. Emit a bounded reason so a stuck
+                    # seat is observable without logging any composer content.
+                    reason = str(reply.get("reason") or reply.get("outcome") or "unknown")
+                    skip_key = (str(row.get("created_at") or ""), reason)
+                    if self._compact_skip_logged.get(sid) != skip_key:
+                        self._compact_skip_logged[sid] = skip_key
+                        log.info(
+                            "subsystem=context_compact bug_ref=assistant_context_compaction "
+                            "deferred stream=%s generation=%s reason=%s",
+                            sid, row.get("created_at"), reason,
+                        )
+                    continue
+                self._compact_skip_logged.pop(sid, None)
                 result.attempted += 1
                 basis["attempt"].update(reply)
                 await self.store.record_nudge(
