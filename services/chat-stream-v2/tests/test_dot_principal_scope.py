@@ -35,9 +35,9 @@ BACKEND = "thoth:v2-bartbackend"
 
 
 class Peer:
-    """A fake remote websocket (Amaterasu-like, non-loopback)."""
+    """A fake remote websocket (non-loopback; RFC 5737 TEST-NET address)."""
 
-    def __init__(self, address="100.104.128.92"):
+    def __init__(self, address="198.51.100.92"):
         self.remote_address = (address, 54321) if address is not None else None
 
 
