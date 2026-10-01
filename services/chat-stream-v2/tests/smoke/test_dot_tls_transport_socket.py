@@ -219,6 +219,9 @@ def test_dot_wss_send_ack_sanitized_and_live_revocation(tmp_path):
                 ack = acks[-1]
                 assert ack["type"] == "send.result"
                 assert ack["to_stream_id"] == "bart:assistant"
+                # The whitelisted delivery status DOES survive the real TLS RPC
+                # path (not merely that backend detail was dropped).
+                assert ack["delivery"] == "landed"
                 # The ack discloses NO backend seat/host/session_name.
                 assert BACKEND not in json.dumps(ack)
                 assert "v2-bartbackend-disposable" not in json.dumps(ack)
