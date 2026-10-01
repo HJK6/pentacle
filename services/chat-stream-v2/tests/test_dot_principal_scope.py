@@ -516,7 +516,8 @@ def test_dot_hello_response_empty_and_no_hosts_stats():
     The assertion scans EVERY returned frame, not only the snapshot event."""
     async def run():
         store, _ = _open_token_store()
-        daemon = Server(store=store, dot_principal_stream_ids=[DOT_ID])
+        daemon = Server(store=store, dot_principal_stream_ids=[DOT_ID],
+                        local_host="thoth-secret-hostid")
         # Seed host telemetry so a leaked hosts.stats frame would be detectable.
         daemon._host_stats["thoth"] = {"cpu": 0.9, "secret_host_metric": "LEAKME"}
         peer = Peer()
@@ -532,11 +533,13 @@ def test_dot_hello_response_empty_and_no_hosts_stats():
         assert snap["notifications"] == []
         assert snap["working_states"] == {}
         assert snap["hosts"] == {}
-        # No host telemetry anywhere in the whole sequence.
+        # No host telemetry OR host id anywhere in the whole sequence.
         blob = json.dumps(frames)
         assert "hosts.stats" not in blob
         assert "LEAKME" not in blob
         assert "secret_host_metric" not in blob
+        assert "thoth-secret-hostid" not in blob   # consent_host_id must not leak the host
+        assert "consent_host_id" not in blob
 
     asyncio.run(run())
 

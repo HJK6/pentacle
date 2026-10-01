@@ -1967,10 +1967,12 @@ class Server:
         hello: dict[str, Any] = {"type": "hello"}
         if composite_enabled:
             hello["capabilities"] = {"assistant_composite_v1": True}
+        # NB: no `consent_host_id` — it would disclose the daemon's host id
+        # (self.local_host) to Dot. Dot does no consent flow, and the hello
+        # response must carry no host detail.
         snapshot: dict[str, Any] = {
             "type": "snapshot",
             "events_mode": events_mode,
-            "consent_host_id": self.local_host,
             "capabilities": {
                 "close_expected_generation": True,
                 **({"assistant_composite_v1": True} if composite_enabled else {}),

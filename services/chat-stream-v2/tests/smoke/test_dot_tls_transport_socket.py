@@ -99,7 +99,10 @@ def test_dot_token_works_over_wss_and_is_refused_over_plain_ws(tmp_path):
                 assert snap["sessions"] == [] and snap["hosts"] == {}
                 assert "LEAKME" not in json.dumps(hello_seq)
                 assert "hosts.stats" not in json.dumps(hello_seq)
-                # Read is DISABLED by default: list_sessions is refused.
+                # Read is DISABLED by default: list_sessions is refused. This
+                # list_sessions also acts as a BARRIER: on the old path hosts.stats
+                # is appended AFTER the snapshot, so any trailing telemetry frame
+                # would arrive on the wire before this response. Assert none did.
                 await ws.send(json.dumps({
                     "type": "list_sessions", "request_id": "ls-tls",
                     "from_stream_id": DOT_ID, "stream_token": TOKEN,
@@ -107,6 +110,7 @@ def test_dot_token_works_over_wss_and_is_refused_over_plain_ws(tmp_path):
                 frames = []
                 while not any(f.get("request_id") == "ls-tls" for f in frames):
                     frames.append(json.loads(await asyncio.wait_for(ws.recv(), 3)))
+                assert all(f.get("type") != "hosts.stats" for f in frames), frames
                 assert frames[-1]["error_code"] == "dot_scope_denied"
 
             # (2) plain ws against the plain fleet port: Dot token refused.
@@ -126,6 +130,124 @@ def test_dot_token_works_over_wss_and_is_refused_over_plain_ws(tmp_path):
                     websockets.connect(f"ws://127.0.0.1:{tls_port}"), 3,
                 ) as ws:
                     await asyncio.wait_for(ws.recv(), 3)
+        finally:
+            if server is not None:
+                await server.close()
+            store.stop()
+
+    asyncio.run(run())
+
+
+BACKEND = "thoth:v2-bartbackend-disposable"
+
+
+class _StandinComposite:
+    """A disposable stand-in Bart binding for the round-trip proof."""
+    enabled = True
+    def __init__(self, backend):
+        self._backend = backend
+    def is_stream(self, sid):
+        return str(sid or "") == "bart:assistant"
+    async def binding(self):
+        return {"type": "assistant.binding.ok", "stream_id": self._backend, "generation": "g"}
+
+
+class _RecordingComms:
+    """Records the attributed peer send and returns a backend-identifying result;
+    the daemon must sanitize that result before it reaches Dot."""
+    def __init__(self):
+        self.sent = []
+    async def send(self, msg):
+        self.sent.append(msg)
+        return {"type": "send.result", "delivery": "landed", "to_stream_id": msg.get("to_stream_id"),
+                "host": "thoth", "session_name": "v2-bartbackend-disposable"}
+
+
+def test_dot_wss_send_ack_sanitized_and_live_revocation(tmp_path):
+    """Real-TLS WSS round trip (disposable binding): Dot connects over wss, sends
+    to the current Bart composite, gets a sanitized ack (no backend seat/host),
+    the delivery preserves [from dot] attribution, and revoking the token drops
+    the live connection on the next RPC. Never touches live Bart."""
+    async def run():
+        store = Store(str(tmp_path / "sessions.db"))
+        store.start()
+        server = None
+        try:
+            await store.open_session("amaterasu", "dot", provider="codex", pane_status="pane_alive")
+            await store.grant_stream_token(
+                "amaterasu", "dot",
+                hashlib.sha256(TOKEN.encode()).hexdigest(), STREAM_TOKEN_HASH_VERSION,
+            )
+            sessions = Sessions(store, local_host="thoth")
+            await sessions.refresh()
+            cert, key = _self_signed(tmp_path)
+            server = Server(
+                host="127.0.0.1", port=0, store=store, sessions=sessions,
+                dot_principal_stream_ids=[DOT_ID],
+                dot_tls_port=0, dot_tls_cert=cert, dot_tls_key=key, dot_tls_binds=["127.0.0.1"],
+            )
+            recording = _RecordingComms()
+            server.assistant_composite = _StandinComposite(BACKEND)
+            server.comms = recording
+            await server.bind()
+            tls_port = server.dot_tls_port
+
+            client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client_ctx.check_hostname = False
+            client_ctx.verify_mode = ssl.CERT_NONE
+
+            async with websockets.connect(f"wss://127.0.0.1:{tls_port}", ssl=client_ctx) as ws:
+                assert json.loads(await ws.recv())["type"] == "welcome"
+                await ws.send(json.dumps({
+                    "type": "hello", "client": "agent-orch", "from_stream_id": DOT_ID,
+                    "stream_token": TOKEN, "subscribe": {"all": True},
+                }))
+                # Drain the hello sequence up to the snapshot.
+                seq = []
+                while not any(f.get("type") == "snapshot" for f in seq):
+                    seq.append(json.loads(await asyncio.wait_for(ws.recv(), 3)))
+
+                # Send to the current Bart binding over wss.
+                await ws.send(json.dumps({
+                    "type": "send", "request_id": "snd-tls",
+                    "from_stream_id": DOT_ID, "stream_token": TOKEN,
+                    "to_stream_id": "bart:assistant", "text": "handoff from dot",
+                }))
+                acks = []
+                while not any(f.get("request_id") == "snd-tls" for f in acks):
+                    acks.append(json.loads(await asyncio.wait_for(ws.recv(), 3)))
+                ack = acks[-1]
+                assert ack["type"] == "send.result"
+                assert ack["to_stream_id"] == "bart:assistant"
+                # The ack discloses NO backend seat/host/session_name.
+                assert BACKEND not in json.dumps(ack)
+                assert "v2-bartbackend-disposable" not in json.dumps(ack)
+                for leaked in ("delivered_to_binding", "host", "session_name"):
+                    assert leaked not in ack, leaked
+                # ...but the message WAS delivered to the resolved backend as an
+                # attributed [from dot] handoff (provenance preserved).
+                assert recording.sent, "no delivery recorded"
+                delivered = recording.sent[-1]
+                assert delivered["to_stream_id"] == BACKEND
+                assert delivered["from_stream_id"] == DOT_ID
+
+                # Revoke the Dot seat; the next RPC on the LIVE wss connection is
+                # refused (per-RPC revalidation drops the live connection).
+                await store.mark_closed(
+                    "amaterasu", "dot",
+                    closed_at="2026-10-01T00:00:00Z", pane_status="pane_dead",
+                )
+                await ws.send(json.dumps({
+                    "type": "send", "request_id": "snd-revoked",
+                    "from_stream_id": DOT_ID, "stream_token": TOKEN,
+                    "to_stream_id": "bart:assistant", "text": "after revoke",
+                }))
+                post = []
+                while not any(f.get("request_id") == "snd-revoked" for f in post):
+                    post.append(json.loads(await asyncio.wait_for(ws.recv(), 3)))
+                assert post[-1]["error_code"] == "authentication_required"
+                # No second delivery happened after revocation.
+                assert len(recording.sent) == 1
         finally:
             if server is not None:
                 await server.close()
