@@ -188,30 +188,33 @@ changes received from peers, not every local edit; see
 [file versioning](https://docs.syncthing.net/users/versioning.html).
 The phone reads daemon data and does not need a synced memory filesystem.
 
-## Operator questions go through Updates
+## Operator questions go through the active chat
 
 The daemon already launches Claude with `--disallowed-tools AskUserQuestion`.
 Do not re-enable that native tool or edit global Claude settings. Verify the
 effective launch arguments and give agents the process question/routing rules.
-Codex seats receive the durable-question requirement in their launch instructions.
+Codex and Claude seats receive the active-chat question rule in their launch
+instructions.
 
 Install `agent-orch` as in the base README and make it available on spawned
-agents' PATH. An authenticated, open, visible Pentacle seat asks:
+agents' PATH. When operator input is genuinely required, an authenticated,
+open, visible Pentacle seat asks one concise question directly in its active
+chat and ends the turn. Do not use `request_user_input`, `agent-orch prompt
+ask`, or an Updates card as the operator-question channel. Never treat silence
+or elapsed time as approval.
+
+A hidden worker never asks the operator directly. It routes the question to its
+visible parent and continues independent work or reports blocked:
 
 ```sh
-agent-orch prompt ask --title "Which workspace should I use?" \
-  --body "Give the absolute path of the workspace for this task." \
-  --response-mode free_text
+agent-orch tell <visible-parent-stream-id> \
+  "BLOCKER: Which absolute workspace path should this task use?"
 ```
 
-For an owner action, use `--response-mode single_choice --option Done --option
-'Not yet'`. The command immediately returns a durable question ID. The operator
-answers in **Updates**, while the agent continues independent work. Inspect
-`agent-orch prompt status <question-id>` and read the full answer, including
-`note`/custom text, before interpreting its selected option.
-
-Hidden workers tell their visible parent instead. A standalone bootstrap agent
-cannot gain another seat's authority by claiming its stream ID; use a real
-visible Pentacle seat for this workflow. Keep its provided credentials private.
-See [orchestration](../process/docs/config/agent_orchestration.md) for the full
-question, role and reporting contract.
+A standalone bootstrap agent cannot gain another seat's authority by claiming
+its stream ID; use a real visible Pentacle seat for this workflow. Keep its
+provided credentials private. The visible parent owns the final operator
+question and synthesis. See
+[orchestration](../process/docs/config/agent_orchestration.md) for the full role
+and reporting contract; an injected fleet rule may override its portable
+question transport.
