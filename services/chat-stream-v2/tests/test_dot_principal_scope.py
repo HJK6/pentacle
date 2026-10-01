@@ -168,6 +168,7 @@ def test_dot_list_projection_is_metadata_only():
             "last_kind": "ASSIST_TEXT", "provider": "claude",
             "objective": "OBJECTIVE free text", "status_card": {"goal": "ship"},
             "display_name": "Nice Title",
+            "working_label": "Waiting for SECRET-TITLE",  # title-bearing free text
             # content / transcript / internals that must never egress:
             "last_text": "SECRET TRANSCRIPT BODY", "draft": "SECRET DRAFT",
             "question": "SECRET QUESTION?", "preview": "SECRET PREVIEW",
@@ -191,6 +192,12 @@ def test_dot_list_projection_is_metadata_only():
         assert s["display_name"] == "Nice Title"
         assert s["role"] == "lead" and s["working"] is True
         assert set(s).issubset(DOT_LIST_FIELDS)
+        # working_label can embed a title, so it is classified as free-text egress
+        # (not pure metadata) and still projected.
+        from server import DOT_FREETEXT_FIELDS, DOT_METADATA_FIELDS
+        assert "working_label" in DOT_FREETEXT_FIELDS
+        assert "working_label" not in DOT_METADATA_FIELDS
+        assert s["working_label"] == "Waiting for SECRET-TITLE"
 
         # A non-Dot caller still sees the full row (no regression).
         full = await daemon._on_list_sessions({})
@@ -315,6 +322,38 @@ def test_dot_revocation_drops_live_connection():
     asyncio.run(run())
 
 
+def test_dot_revocation_on_loopback_does_not_fall_through_to_local_access():
+    """A revoked Dot on a LOOPBACK TLS socket must stay denied — it must not slip
+    past the loopback exemption into unauthenticated local access. The Dot scope
+    is sticky to the connection, so dot_principal flipping false on revocation
+    still refuses the request."""
+    async def run():
+        store, holder = _open_token_store()
+        daemon = Server(store=store, dot_principal_stream_ids=[DOT_ID])
+        reached = []
+        for verb in ("list_sessions", "spawn", "close"):
+            daemon.handlers[verb] = _passthrough(reached, verb)
+        peer = Peer("127.0.0.1")   # loopback
+        daemon._tls_connections.add(peer)
+
+        # First RPC authenticates the Dot and marks the connection sticky.
+        first = await daemon._dispatch(_dot_frame("list_sessions"), websocket=peer)
+        assert first[0]["type"] == "list_sessions.ok"
+        assert peer in daemon._client_dot_connections
+        reached.clear()  # ignore the legitimate pre-revocation call
+
+        # Revoke; a loopback RPC with no token must NOT reach the handler.
+        holder["status"] = ""
+        for verb in ("list_sessions", "spawn", "close"):
+            reply = await daemon._dispatch(
+                json.dumps({"type": verb, "request_id": f"rev-{verb}"}), websocket=peer,
+            )
+            assert reply[0]["error_code"] == "authentication_required", verb
+        assert reached == []
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # Broadcasts: a Dot connection only ever gets the projected inventory, over TLS.
 # --------------------------------------------------------------------------- #
@@ -323,6 +362,7 @@ def test_dot_broadcasts_restricted_to_projected_inventory():
     daemon = Server(dot_principal_stream_ids=[DOT_ID])
     tls_peer = Peer()
     daemon._tls_connections.add(tls_peer)
+    daemon._client_dot_connections.add(tls_peer)
     daemon._client_authenticated_streams[tls_peer] = DOT_ID
 
     inv = daemon._frame_for_client(tls_peer, "session.inventory", {
@@ -339,8 +379,21 @@ def test_dot_broadcasts_restricted_to_projected_inventory():
 
     # A Dot connection on PLAIN ws receives nothing at all, not even inventory.
     plain_peer = Peer()
+    daemon._client_dot_connections.add(plain_peer)
     daemon._client_authenticated_streams[plain_peer] = DOT_ID
     assert daemon._frame_for_client(plain_peer, "session.inventory", {"sessions": []}) is None
+
+    # A REVOKED Dot (sticky connection, auth cleared) gets nothing — not even the
+    # projected inventory — and does not fall back to the normal fan-out, even on
+    # a loopback socket (regression for the loopback-revocation finding).
+    loop_peer = Peer("127.0.0.1")
+    daemon._tls_connections.add(loop_peer)
+    daemon._client_dot_connections.add(loop_peer)
+    # no entry in _client_authenticated_streams == revoked / revalidation cleared
+    assert daemon._frame_for_client(loop_peer, "session.inventory", {
+        "sessions": [{"stream_id": "x", "visibility": "default", "last_text": "SECRET"}],
+    }) is None
+    assert daemon._frame_for_client(loop_peer, "chat.event", {"event": {"stream_id": "x"}}) is None
 
 
 # --------------------------------------------------------------------------- #

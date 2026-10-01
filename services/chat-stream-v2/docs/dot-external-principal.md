@@ -46,8 +46,10 @@ events/report/audit). `list_sessions` is projected to `DOT_LIST_FIELDS`:
   working/idle + turn state, parent/handoff lineage, online, provider/model, last
   event time and kind, generation, bootstrap/host status.
 - **free text** (`DOT_FREETEXT_FIELDS`): `display_name`/title, `objective`,
-  `status_card`. These are human-authored and can carry operator content; they are
-  the **egress surface** and their disclosure is an operator activation decision.
+  `status_card`, and `working_label` (the composite builds it as
+  `Waiting for {title}`, so it is title-bearing). These are human-authored and can
+  carry operator content; they are the **egress surface** and their disclosure is
+  an operator activation decision.
 
 Content/transcript fields — `last_text`, `draft`, `question`, peer/message bodies,
 `usage` internals, `agents`, `assistant_activity` — are always dropped. Broadcasts

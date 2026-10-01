@@ -122,15 +122,18 @@ DOT_ALLOWED_VERBS = frozenset({"ping", "hello", "list_sessions", "send"})
 #: internals, agents, assistant_activity, ...) are never included.
 DOT_METADATA_FIELDS = frozenset({
     "stream_id", "host", "session_name", "role", "role_source", "phase",
-    "spec_id", "spec_ids", "working", "working_label", "turn_state",
+    "spec_id", "spec_ids", "working", "turn_state",
     "turn_state_since", "parent_stream_id", "handoff_from_stream_id",
     "online", "pending", "visibility", "provider", "model", "effort",
     "effective_model", "effective_effort", "last_event_at", "last_kind",
     "session_generation", "bootstrap_state", "state", "host_status",
     "host_status_reason", "host_status_since",
 })
+#: Human-authored / title-bearing fields that can carry operator content and so
+#: egress to Dot's cloud path. `working_label` is here (not metadata) because the
+#: composite builds it as "Waiting for {title}" (assistant_composite.project_session).
 DOT_FREETEXT_FIELDS = frozenset({
-    "display_name", "objective", "objective_source", "status_card",
+    "display_name", "objective", "objective_source", "status_card", "working_label",
 })
 DOT_LIST_FIELDS = DOT_METADATA_FIELDS | DOT_FREETEXT_FIELDS
 DOT_REQUIRES_TLS_CODE = "external_requires_tls"
@@ -508,6 +511,11 @@ class Server:
         #: Connections accepted by the TLS listener. Membership == "this socket
         #: terminated TLS in the daemon", the authenticated transport boundary.
         self._tls_connections: set[Any] = set()
+        #: Connections that have EVER authenticated as a Dot principal. Sticky for
+        #: the connection's life so a revoked Dot (whose per-RPC dot_principal has
+        #: flipped false) cannot fall through the loopback exemption into local
+        #: access: the dispatch/broadcast gates key on this, not on the live flag.
+        self._client_dot_connections: set[Any] = set()
         #: Wire-provided client names are claims only. A UI principal enters this
         #: connection-local map only after an auth-v2 proof checks against the
         #: existing operator credential registry.
@@ -960,6 +968,8 @@ class Server:
         self._client_authenticated_streams.pop(websocket, None)
         self._client_token_hashes.pop(websocket, None)
         self._client_system_producers.pop(websocket, None)
+        self._client_dot_connections.discard(websocket)
+        self._tls_connections.discard(websocket)
         self._operator_challenges.pop(websocket, None)
         self._connection_trust.pop(websocket, None)
         self._client_send_queues.pop(websocket, None)
@@ -1225,12 +1235,17 @@ class Server:
                     if request_id is not None:
                         denied["request_id"] = request_id
                     return [denied]
-            # External scoped ("Dot") principal: default-deny, TLS-only. This
-            # runs for EVERY verb (including the base-exempt ping/hello and even
-            # loopback) because a Dot seat must never reach anything outside its
-            # tiny allowlist, and its token is only honoured over daemon TLS.
-            dot_auth = dispatch_msg["_auth_context"]
-            if dot_auth.get("dot_principal"):
+            # External scoped ("Dot") connection enforcement. Keyed on the STICKY
+            # connection marker (not the per-RPC dot_principal flag) and run for
+            # EVERY verb incl. base-exempt ping/hello and even loopback — so a
+            # revoked Dot, whose dot_principal has flipped false, cannot fall
+            # through the loopback exemption above into local access.
+            if websocket in self._client_dot_connections:
+                dot_auth = dispatch_msg["_auth_context"]
+                if not dot_auth.get("dot_principal"):
+                    # Seat token revoked / no longer in the Dot set: refuse. The
+                    # connection stays Dot-scoped for its remaining life.
+                    return [self._auth_error_frame(verb, request_id, "authentication_required")]
                 if not dot_auth.get("transport_tls"):
                     return [self._auth_error_frame(verb, request_id, DOT_REQUIRES_TLS_CODE)]
                 if verb not in DOT_ALLOWED_VERBS:
@@ -1449,6 +1464,9 @@ class Server:
                 ),
             }
         )
+        if context["dot_principal"]:
+            # Sticky: once a Dot, enforced as a Dot for the connection's life.
+            self._client_dot_connections.add(websocket)
         if retired_owner is not None and reason_code == TOKEN_REASON_EXPIRED:
             context["retired_handoff_owner"] = retired_owner
         return context
@@ -1765,13 +1783,18 @@ class Server:
                 or self._operator_authenticated(websocket)
                 or websocket in self._client_authenticated_streams):
             return None
-        # External scoped ("Dot") principal: nothing is pushed over plain ws
-        # (its token is TLS-only), and over TLS only the field-projected session
-        # inventory ever reaches it — never chat.event/working.state/report/
-        # notification/schedule frames (which would carry content or authority).
-        auth_stream = self._client_authenticated_streams.get(websocket)
-        if auth_stream and auth_stream in self.dot_principal_stream_ids:
-            if websocket not in self._tls_connections or frame_type != "session.inventory":
+        # External scoped ("Dot") connection: keyed on the sticky marker so a
+        # revoked Dot (loopback or not) is never dropped back onto the normal
+        # fan-out. Over TLS and while still a verified Dot, only the field-
+        # projected session inventory ever reaches it — never chat.event/
+        # working.state/report/notification/schedule frames. A revoked Dot
+        # (auth_stream cleared / no longer in the set) or a plain-ws Dot gets
+        # nothing at all.
+        if websocket in self._client_dot_connections:
+            auth_stream = self._client_authenticated_streams.get(websocket)
+            if (websocket not in self._tls_connections
+                    or auth_stream not in self.dot_principal_stream_ids
+                    or frame_type != "session.inventory"):
                 return None
             sessions = payload.get("sessions") if isinstance(payload.get("sessions"), list) else []
             return {
