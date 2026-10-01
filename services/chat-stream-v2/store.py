@@ -1824,6 +1824,39 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             published_at = datetime.fromisoformat(str(recent["created_at"]).replace("Z", "+00:00")).timestamp()
             if 0 <= recorded_at - published_at < 120:
                 return
+        # A restart re-ingests the source transcript and mints a NEW
+        # source_event_id for an already-mirrored turn, defeating the
+        # "mirror:<source_event_id>" key dedup. Never mirror a source event that
+        # is OLDER than the newest event_ts already mirrored for this
+        # binding+source+generation: a genuine new turn is strictly newer, while
+        # a window-escaped re-ingest of an earlier turn is strictly older (the
+        # latest turn itself stays inside the append-layer identity-dedup window
+        # and is dropped before it ever reaches this projection). The watermark
+        # lives in the durable publications table, so it survives the restart
+        # that caused the replay.
+        source_ts = source_event.get("timestamp")
+        watermark = conn.execute(
+            "SELECT MAX(t.event_ts) FROM v2_assistant_composite_publications p "
+            "JOIN session_event_tail t ON t.event_id=p.event_id "
+            "WHERE p.stream_id=? AND p.publish_kind='status' AND p.dispatch_id='' "
+            "AND json_extract(p.canonical_payload_json,'$.mirrored_from.stream_id')=? "
+            "AND json_extract(p.canonical_payload_json,'$.mirrored_from.generation')=?",
+            (binding[0], source_stream_id, source_generation),
+        ).fetchone()[0]
+        if watermark is not None and isinstance(source_ts, str):
+            try:
+                src_epoch = datetime.fromisoformat(source_ts.replace("Z", "+00:00")).timestamp()
+                wm_epoch = datetime.fromisoformat(str(watermark).replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                src_epoch = wm_epoch = None
+            if src_epoch is not None and src_epoch < wm_epoch:
+                log.info(
+                    "assistant mirror skipped stale re-ingest source_event_id=%s event_ts=%s watermark=%s",
+                    source_event_id, source_ts, watermark,
+                    extra={"subsystem": "assistant_mirror",
+                           "bug_ref": "pentacle__assistant_mirror_restart_reingest_2026_10"},
+                )
+                return
         origin = {"stream_id": source_stream_id, "generation": source_generation,
                   "event_id": source_event_id, "event_ts": source_event.get("timestamp")}
         publication_key = f"mirror:{source_event_id}"

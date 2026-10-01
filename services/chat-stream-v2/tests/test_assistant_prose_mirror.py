@@ -1147,3 +1147,65 @@ def test_unknown_turn_metadata_preserves_dispatch_free_ingest():
         finally:
             store.stop()
     asyncio.run(_go())
+
+
+async def _append_ts(store: Store, text: str, *, identity: str, timestamp: str):
+    """Append one bound-seat turn-final event with an explicit source timestamp,
+    driving the real ingest -> mirror projection."""
+    event = {
+        "stream_id": ROOT, "provider": "codex", "kind": "ASSIST_TEXT", "text": text,
+        "timestamp": timestamp,
+        "raw": {"source_session_identity": "fixture-session", "message_id": identity},
+    }
+    result = await store.append_session_events_lifecycle_cas(
+        [{"stream_id": ROOT, "event": event, "identity": identity,
+          "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}], limit=20,
+    )
+    assert result is not None
+    return result[0]
+
+
+def test_restart_reingest_does_not_remirror_stale_turns(tmp_path):
+    """A restart re-ingests the source transcript; turns that escaped the
+    identity-dedup window get a NEW source seq (new mirror:<id> key) and used to
+    re-publish as stale chat messages. The event_ts watermark must drop any turn
+    older than the newest already-mirrored one, while a genuinely newer turn
+    after the restart still mirrors."""
+    async def _go():
+        database = str(tmp_path / "mirror-reingest.sqlite")
+        store = Store(database)
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            generation = root["session_generation"]
+            composite = AssistantComposite(store, config=_config(generation))
+            await composite.ensure_projection()
+            await _append_ts(store, "turn one", identity="seq-one", timestamp="2026-09-30T16:14:00.000Z")
+            await _append_ts(store, "turn two", identity="seq-two", timestamp="2026-09-30T16:20:00.000Z")
+            assert [r["text"] for r in await _answer_rows(store)] == ["turn one", "turn two"]
+            await composite.stop()
+        finally:
+            store.stop()
+
+        # Restart: reopen the durable store and re-ingest an EARLIER turn under a
+        # fresh identity, as a window-escaped transcript replay mints a new seq.
+        store = Store(database)
+        store.start()
+        try:
+            composite = AssistantComposite(store, config=_config(generation))
+            await composite.ensure_projection()
+            reseq = await _append_ts(store, "turn one", identity="seq-one-reingest",
+                                     timestamp="2026-09-30T16:14:00.000Z")
+            assert isinstance(reseq, int)  # a NEW source seq was minted (window-escaped)
+            # Stale re-ingest dropped by the watermark (16:14 < 16:20); no duplicate.
+            assert [r["text"] for r in await _answer_rows(store)] == ["turn one", "turn two"]
+
+            # A genuinely newer turn after the restart still mirrors.
+            await _append_ts(store, "turn three", identity="seq-three",
+                             timestamp="2026-09-30T16:30:00.000Z")
+            assert [r["text"] for r in await _answer_rows(store)] == ["turn one", "turn two", "turn three"]
+            await composite.stop()
+        finally:
+            store.stop()
+
+    asyncio.run(_go())
