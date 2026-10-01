@@ -169,6 +169,11 @@ def test_report_cli_sends_discharges(monkeypatch, tmp_path):
             "report",
             "--status",
             "done",
+            # A proactive, non-terminating report now states its inbox key
+            # explicitly (0 = proactive stream report); an omitted --msg-id is
+            # rejected for an open seat unless --terminate is used.
+            "--msg-id",
+            "0",
             "--result",
             json.dumps({"summary": "ok", "findings": [], "next_action": "nexus_verify"}),
             "--discharges",
@@ -180,3 +185,4 @@ def test_report_cli_sends_discharges(monkeypatch, tmp_path):
 
     assert args.func(args) == 0
     assert calls["request"]["discharges"] == ["obl-1", "obl-2"]
+    assert calls["request"]["msg_id"] == 0

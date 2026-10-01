@@ -262,10 +262,12 @@ must retain the last published pair. This allows startup, live failure,
 handshake buffering and healthy refresh to follow the same contract.
 
 The collector fills these rows by running one shared probe per provider under
-`scripts/`: `check_claude_usage.py` reads Enterprise monthly usage through the
-authenticated Claude OAuth endpoint (reusing Claude Code's macOS Keychain item,
-or `CLAUDE_CODE_OAUTH_TOKEN` from a protected environment) and falls back to the
-Claude CLI `/usage` screen for labeled monthly or weekly accounts. The optional
+`scripts/`: `check_claude_usage.py` drives the authenticated Claude CLI `/usage`
+screen by default; with the opt-in `PENTACLE_USAGE_CLAUDE_OAUTH=1` it first reads
+Enterprise monthly usage through the authenticated Claude OAuth endpoint (reusing
+Claude Code's macOS Keychain item, or `CLAUDE_CODE_OAUTH_TOKEN` from a protected
+environment) and falls back to the `/usage` screen for labeled monthly or weekly
+accounts. With the opt-in unset it makes no Keychain or network access. The optional
 Fable row is hidden by clients when unreported. `check_codex_usage.py` drives `codex
 app-server` (stdio JSON-RPC `account/rateLimits/read`) for the Codex row. It
 prefers the window whose `windowDurationMins` is at least a week; business

@@ -34,7 +34,21 @@ def _operator() -> dict:
 
 
 def _seat(stream_id: str) -> dict:
+    # A bare verified seat under the strict default: authenticated, but the
+    # daemon has NOT minted operator authority for it.
     return {"token_verified": True, "stream_id": stream_id}
+
+
+def _opted_in_seat(stream_id: str) -> dict:
+    # What the daemon mints for a verified internal seat when the deployment
+    # opts into seat operator authority (PENTACLE_SEAT_OPERATOR_AUTHORITY).
+    return {
+        "token_verified": True,
+        "stream_id": stream_id,
+        "operator_authenticated": True,
+        "operator_principal": f"agent:{stream_id}",
+        "operator_authority_source": "stream_token",
+    }
 
 
 async def _open(store: Store, sessions: Sessions, name: str, **fields) -> None:
@@ -166,27 +180,57 @@ def test_set_nexus_allowed_for_parent() -> None:
     asyncio.run(run())
 
 
-def test_set_nexus_allowed_for_token_verified_self() -> None:
+def test_set_nexus_refused_for_bare_verified_self_by_default() -> None:
+    # Strict default: a bare verified seat cannot promote ITSELF to nexus; that
+    # requires operator/service auth, the session's parent, or a nexus caller.
     async def run() -> None:
         store = Store(":memory:")
         store.start()
         try:
             sessions = Sessions(store, tmux=None, local_host=HOST)
-            await _open(store, sessions, "seat")
-            row = await sessions.set_role(
-                HOST, "seat", "nexus", auth_context=_seat(f"{HOST}:seat"),
-            )
-            assert row["role"] == "nexus"
-            stored = await store.fetch_role_source(HOST, "seat")
-            assert stored["role_source"] == "role_set"
-            assert stored["actor"] == f"{HOST}:seat"
+            await _open(store, sessions, "seat", role="lead")
+            with pytest.raises(VerbError) as exc:
+                await sessions.set_role(
+                    HOST, "seat", "nexus", auth_context=_seat(f"{HOST}:seat"),
+                )
+            assert exc.value.code == "role_authority_denied"
+            persisted = await store.fetch_session(HOST, "seat")
+            assert persisted["role"] == "lead"  # unchanged
+            assert await store.fetch_role_source(HOST, "seat") is None
         finally:
             store.stop()
 
     asyncio.run(run())
 
 
-def test_set_nexus_allowed_for_unrelated_verified_seat() -> None:
+def test_set_nexus_refused_for_unrelated_seat_leaves_row_unchanged() -> None:
+    # Strict default: an unrelated bare verified seat cannot grant nexus.
+    async def run() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            sessions = Sessions(store, tmux=None, local_host=HOST)
+            await _open(store, sessions, "rando", role="lead")
+            await _open(store, sessions, "seat", role="lead")
+            with pytest.raises(VerbError) as exc:
+                await sessions.set_role(
+                    HOST, "seat", "nexus", auth_context=_seat(f"{HOST}:rando"),
+                )
+            assert exc.value.code == "role_authority_denied"
+            persisted = await store.fetch_session(HOST, "seat")
+            assert persisted["role"] == "lead"  # unchanged
+            assert await store.fetch_role_source(HOST, "seat") is None
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_set_nexus_allowed_for_opted_in_verified_seat() -> None:
+    # Opt-in: the daemon has minted operator authority for this verified seat
+    # (PENTACLE_SEAT_OPERATOR_AUTHORITY), so it may grant nexus. The server-owned
+    # flag that mints `operator_authenticated` is the single gate shared with the
+    # privileged operator RPCs.
     async def run() -> None:
         store = Store(":memory:")
         store.start()
@@ -195,7 +239,7 @@ def test_set_nexus_allowed_for_unrelated_verified_seat() -> None:
             await _open(store, sessions, "rando", role="lead")
             await _open(store, sessions, "seat", role="lead")
             row = await sessions.set_role(
-                HOST, "seat", "nexus", auth_context=_seat(f"{HOST}:rando"),
+                HOST, "seat", "nexus", auth_context=_opted_in_seat(f"{HOST}:rando"),
             )
             assert row["role"] == "nexus"
             persisted = await store.fetch_session(HOST, "seat")

@@ -100,16 +100,6 @@ def test_all_codex_models_are_spawnable_at_max_effort() -> None:
         assert (revalidated["model"], revalidated["effort"]) == (model, "max")
 
 
-def test_interactive_catalog_advertises_only_currently_available_models() -> None:
-    available = catalog()["available_models"]
-    assert tuple(available["claude"]) == ("claude-opus-4-8",)
-    assert tuple(available["codex"]) == (
-        "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna",
-    )
-    assert "claude-fable-5-1" not in available["claude"]
-    assert "gpt-6-luna" not in available["codex"]
-
-
 def test_astra_is_cataloged_with_effort_ladder_and_policy_defaults() -> None:
     astra = catalog()["models"]["codex"]["gpt-6-astra"]
     assert astra == {
@@ -118,7 +108,7 @@ def test_astra_is_cataloged_with_effort_ladder_and_policy_defaults() -> None:
     }
     for profile in ("agent_orch", "desktop_manual"):
         request = resolve_spawn(provider="codex", spawn_profile=profile)
-        assert (request["model"], request["effort"]) == ("gpt-5.6-luna", "max")
+        assert (request["model"], request["effort"]) == ("gpt-6-luna", "max")
 
 
 def test_astra_alias_resolves_to_canonical_model() -> None:
@@ -140,11 +130,11 @@ def test_profiles_derive_same_provider_default_and_legacy_fallback() -> None:
     for profile in ("agent_orch", "desktop_manual"):
         request = resolve_spawn(provider="codex", spawn_profile=profile)
         assert (request["model"], request["effort"], request["resolution_source"]) == (
-            "gpt-5.6-luna", "max", "profile_default",
+            "gpt-6-luna", "max", "profile_default",
         )
     legacy = resolve_spawn(provider="codex", legacy=True)
     assert (legacy["model"], legacy["effort"], legacy["resolution_source"]) == (
-        "gpt-5.6-luna", "max", "legacy_server_fallback",
+        "gpt-6-luna", "max", "legacy_server_fallback",
     )
     for profile in ("agent_orch", "desktop_manual"):
         request = resolve_spawn(provider="claude", spawn_profile=profile)
@@ -153,9 +143,9 @@ def test_profiles_derive_same_provider_default_and_legacy_fallback() -> None:
 
 def test_codex_partial_explicit_overrides_are_pinned_for_both_profiles() -> None:
     cases = (
-        (None, None, "gpt-5.6-luna", "max", "profile_default"),
+        (None, None, "gpt-6-luna", "max", "profile_default"),
         ("sol", None, "gpt-6.1-sol", "max", "explicit_override"),
-        (None, "high", "gpt-5.6-luna", "high", "explicit_override"),
+        (None, "high", "gpt-6-luna", "high", "explicit_override"),
         ("sol", "high", "gpt-6.1-sol", "high", "explicit_override"),
     )
     for profile in ("agent_orch", "desktop_manual"):
@@ -197,7 +187,7 @@ def test_host_override_and_policy_readback_share_one_config(monkeypatch, tmp_pat
     spawn_profiles.load_spawn_config.cache_clear()
     try:
         assert (resolve_spawn(provider="codex", host="hostc")["model"], resolve_spawn(provider="codex", host="hostc")["effort"]) == ("gpt-5.6-terra", "max")
-        assert resolve_spawn(provider="codex", host="hosta")["model"] == "gpt-5.6-luna"
+        assert resolve_spawn(provider="codex", host="hosta")["model"] == "gpt-6-luna"
         assert validate_v2(
             provider="codex", spawn_profile="agent_orch", schema="SpawnRequestV2",
             model="gpt-5.6-terra", effort="max", catalog_version="spawn-catalog-v2",
@@ -411,3 +401,59 @@ def test_opus5_handoff_preserves_full_id_after_alias_moves() -> None:
     assert overridden.spawn["model"] == "claude-opus-5-5"
     assert "model" in overridden.changed_fields
     assert "claude-opus-5" not in spawn_profiles.INTENTIONALLY_UNSPAWNABLE["claude"]
+
+
+def test_available_models_defaults_to_the_full_public_catalog() -> None:
+    # The shipped public default narrows nothing: the interactive picker is
+    # offered the full MODELS catalog. Account-specific narrowing is opt-in
+    # installation config, not a shipped constant.
+    result = catalog()
+    available = result["available_models"]
+    assert available == result["models"]
+    assert set(available["claude"]) == set(spawn_profiles.MODELS["claude"])
+    assert set(available["codex"]) == set(spawn_profiles.MODELS["codex"])
+
+
+def test_available_models_installation_config_narrows_the_picker_only(monkeypatch, tmp_path) -> None:
+    # An installation whose accounts expose a subset sets `available_models`;
+    # the picker narrows, but the full MODELS map stays accepted for aliases,
+    # explicit launches and handoffs.
+    config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
+    config["available_models"] = {
+        "claude": ["claude-opus-4-8"],
+        "codex": ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"],
+    }
+    config_path = tmp_path / "spawn_defaults.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", config_path)
+    spawn_profiles.load_spawn_config.cache_clear()
+    try:
+        available = catalog()["available_models"]
+        assert tuple(available["claude"]) == ("claude-opus-4-8",)
+        assert tuple(available["codex"]) == ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna")
+        assert "claude-fable-5-1" not in available["claude"]
+        assert "gpt-6-luna" not in available["codex"]
+        # Narrowing is picker-only: a model absent from available_models still
+        # resolves (compatibility / explicit / handoff launches).
+        assert resolve_spawn(provider="codex", model="gpt-6-luna", effort="max")["model"] == "gpt-6-luna"
+        assert resolve_spawn(provider="claude", model="fable", effort="high")["model"] == "claude-fable-5-1"
+    finally:
+        spawn_profiles.load_spawn_config.cache_clear()
+
+
+def test_available_models_config_rejects_unknown_model(monkeypatch, tmp_path) -> None:
+    config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
+    config["available_models"] = {"codex": ["gpt-9-nope"]}
+    config_path = tmp_path / "spawn_defaults.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", config_path)
+    spawn_profiles.load_spawn_config.cache_clear()
+    try:
+        try:
+            catalog()
+        except SpawnProfileError as exc:
+            assert exc.code == "spawn_config_invalid"
+        else:
+            raise AssertionError("invalid available_models was accepted")
+    finally:
+        spawn_profiles.load_spawn_config.cache_clear()

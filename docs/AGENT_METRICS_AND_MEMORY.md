@@ -8,14 +8,18 @@ configuration outside the public repositories; the human READMEs stay brief.
 
 The daemon publishes a local state file; it does not query provider accounts.
 The included `scripts/check_claude_usage.py` reads the **account-period
-percentage used** from Claude OAuth. On macOS it reuses Claude Code's standard
-`Claude Code-credentials` Keychain item without printing or copying the token;
-on other platforms set `CLAUDE_CODE_OAUTH_TOKEN` in the collector's protected
-environment. Enterprise monthly `spend.percent` is preferred. The authenticated
-CLI `/usage` screen remains a fallback for labeled monthly and older weekly
-accounts. This is account quota, not session cost or requests per minute. It
-does not change the quota. The Fable row is optional and the client hides it
-when no Fable quota is reported.
+percentage used** from the authenticated Claude CLI `/usage` screen by default.
+An **opt-in** OAuth path is also available for accounts whose period the CLI
+screen does not label (for example Enterprise monthly `spend.percent`): set
+`PENTACLE_USAGE_CLAUDE_OAUTH=1` in the collector's environment to enable it.
+**Only when that flag is set** does the probe read a Claude OAuth token — on
+macOS by reusing Claude Code's standard `Claude Code-credentials` Keychain item
+without printing or copying the token, or from `CLAUDE_CODE_OAUTH_TOKEN` in the
+collector's protected environment — and make the one usage network call; it then
+falls back to the CLI `/usage` screen. With the flag unset (the default) the
+probe performs no Keychain lookup and no network call. This is account quota,
+not session cost or requests per minute. It does not change the quota. The Fable
+row is optional and the client hides it when no Fable quota is reported.
 
 1. As the same OS user that will run the collector, verify Claude login and
    complete the trust prompt **in the exact directory you will pass as
@@ -188,33 +192,38 @@ changes received from peers, not every local edit; see
 [file versioning](https://docs.syncthing.net/users/versioning.html).
 The phone reads daemon data and does not need a synced memory filesystem.
 
-## Operator questions go through the active chat
+## Operator questions go through Updates
 
 The daemon already launches Claude with `--disallowed-tools AskUserQuestion`.
 Do not re-enable that native tool or edit global Claude settings. Verify the
 effective launch arguments and give agents the process question/routing rules.
-Codex and Claude seats receive the active-chat question rule in their launch
+Codex and Claude seats receive the durable-question requirement in their launch
 instructions.
 
 Install `agent-orch` as in the base README and make it available on spawned
-agents' PATH. When operator input is genuinely required, an authenticated,
-open, visible Pentacle seat asks one concise question directly in its active
-chat and ends the turn. Do not use `request_user_input`, `agent-orch prompt
-ask`, or an Updates card as the operator-question channel. Never treat silence
-or elapsed time as approval.
-
-A hidden worker never asks the operator directly. It routes the question to its
-visible parent and continues independent work or reports blocked:
+agents' PATH. By default an authenticated, open, visible Pentacle seat asks:
 
 ```sh
-agent-orch tell <visible-parent-stream-id> \
-  "BLOCKER: Which absolute workspace path should this task use?"
+agent-orch prompt ask --title "Which workspace should I use?" \
+  --body "Give the absolute path of the workspace for this task." \
+  --response-mode free_text
 ```
 
-A standalone bootstrap agent cannot gain another seat's authority by claiming
-its stream ID; use a real visible Pentacle seat for this workflow. Keep its
-provided credentials private. The visible parent owns the final operator
-question and synthesis. See
-[orchestration](../process/docs/config/agent_orchestration.md) for the full role
-and reporting contract; an injected fleet rule may override its portable
-question transport.
+For an owner action, use `--response-mode single_choice --option Done --option
+'Not yet'`. The command immediately returns a durable question ID. The operator
+answers in **Updates**, while the agent continues independent work. Inspect
+`agent-orch prompt status <question-id>` and read the full answer, including
+`note`/custom text, before interpreting its selected option.
+
+Hidden workers tell their visible parent instead. A standalone bootstrap agent
+cannot gain another seat's authority by claiming its stream ID; use a real
+visible Pentacle seat for this workflow. Keep its provided credentials private.
+See [orchestration](../process/docs/config/agent_orchestration.md) for the full
+question, role and reporting contract.
+
+This `agent-orch prompt ask` transport is the portable public default. It is
+injectable: a fleet that prefers a different operator-question behavior (for
+example a visible seat asking one concise question directly in its active chat
+and routing a hidden worker's question to its visible parent) supplies that rule
+as a launch-level `developer_instructions` / `--append-system-prompt` override,
+which ranks above this default without changing the public baseline.

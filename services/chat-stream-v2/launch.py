@@ -39,8 +39,8 @@ import hashlib
 from typing import Any
 from dataclasses import dataclass
 
-#: The one tool a spawned Claude seat must not expose. Visible seats ask in the
-#: active chat; hidden workers route questions through their visible parent.
+#: The one tool a spawned Claude seat must not expose (operator questions route
+#: through `agent-orch prompt ask`, not AskUserQuestion).
 CLAUDE_DISALLOWED_TOOLS = "AskUserQuestion"
 
 #: Keep orchestrated Codex seats non-blocking while preserving Codex's
@@ -57,17 +57,21 @@ CODEX_STARTUP_CONFIG = (
 CODEX_DISABLED_FEATURES = ("plugins",)
 
 #: Operator-question policy injected as a launch-level developer_instructions
-#: override (ranks above AGENTS.md). Updates are not a reliable question surface
-#: for this fleet, so visible seats ask in the active chat.
+#: override (ranks above AGENTS.md). The portable public default routes operator
+#: questions through `agent-orch prompt ask` (asynchronous and durable); it is
+#: deliberately not fleet-specific. A fleet that wants different behavior (for
+#: example a visible seat asking directly in the active chat) injects its own
+#: override on top of this one. No apostrophes/quotes so `shlex.quote` of the
+#: `key=value` argv element stays clean.
 CODEX_OPERATOR_QUESTION_INSTRUCTION = (
-    "Orchestrated Pentacle seat: when operator input is genuinely required, a "
-    "visible seat asks one concise question in the active chat and ends the turn. "
-    "Do not use request_user_input or agent-orch prompt ask for operator questions. "
-    "A hidden worker routes its question to its visible parent with agent-orch tell "
-    "and continues independent work or reports blocked. If an agent-orch command "
-    "is blocked because the workspace sandbox denies its loopback connection, "
-    "retry only that agent-orch command with require_escalated. Never treat silence "
-    "or elapsed time as approval."
+    "Orchestrated Pentacle seat: never ask the operator a question by emitting a "
+    "prose question and ending your turn, and never via a native approval or "
+    "request_user_input surface. When you need operator input, run agent-orch "
+    "prompt ask (asynchronous and durable) then continue or report; if that is "
+    "impossible, report blocked to your lead. If an agent-orch command is blocked "
+    "because the workspace sandbox denies its loopback connection, retry only that "
+    "agent-orch command with require_escalated. Do not stop your turn waiting for an "
+    "operator reply in the pane."
 )
 
 # Visible, top-level seats are the operator's durable work surface. The idle

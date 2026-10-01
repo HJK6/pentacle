@@ -295,3 +295,24 @@ def test_current_event_supersedes_stale_bootstrap_projection(stale_state: str) -
     projected = with_bootstrap_state(row)
     assert projected["bootstrap_state"] == "started"
     assert projected["state"] == "started"
+
+
+def test_reset_blocked_is_preserved_even_with_a_current_event() -> None:
+    # A Codex reset interstitial is not cleared by event activity: a
+    # current-generation normalized event must NOT overwrite reset_blocked with
+    # "started". reset_blocked precedence is checked before the seen promotion.
+    row = {
+        "status": "open",
+        "bootstrap_state": "reset_blocked",
+        "_bootstrap_event_seen": True,
+    }
+    projected = with_bootstrap_state(row)
+    assert projected["bootstrap_state"] == "reset_blocked"
+    assert projected.get("state") != "started"
+
+
+def test_ready_still_wins_over_a_current_event() -> None:
+    row = {"status": "open", "bootstrap_state": "ready", "_bootstrap_event_seen": True}
+    projected = with_bootstrap_state(row)
+    assert projected["bootstrap_state"] == "ready"
+    assert projected["state"] == "ready"

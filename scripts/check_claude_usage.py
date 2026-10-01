@@ -20,6 +20,16 @@ from pathlib import Path
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 DEFAULT_KEYCHAIN_SERVICE = "Claude Code-credentials"
+#: Opt-in (default OFF) for the authenticated OAuth usage path. It reads the
+#: user's own Claude OAuth token (Keychain on macOS, or CLAUDE_CODE_OAUTH_TOKEN)
+#: and makes a network call to the Anthropic usage endpoint. Until a deployment
+#: sets this, the probe does NEITHER: no Keychain lookup and no network call, so
+#: the default path has no side effect and uses the local CLI /usage screen.
+OAUTH_ENABLED_ENV = "PENTACLE_USAGE_CLAUDE_OAUTH"
+
+
+def oauth_enabled() -> bool:
+    return os.environ.get(OAUTH_ENABLED_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def parse_weekly_usage(screen: str) -> dict | None:
@@ -190,17 +200,22 @@ def main() -> int:
     parser.add_argument("--tmux", default=os.environ.get("PENTACLE_USAGE_TMUX_BIN", "tmux"))
     parser.add_argument("--cwd", default=default_cwd())
     args = parser.parse_args()
-    token = oauth_token()
-    if token:
-        try:
-            result = collect_oauth(token)
-            if result is not None:
-                print(json.dumps(result))
-                return 0
-        except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError):
-            # Older account types and restricted networks still use the
-            # authenticated CLI screen below. Never surface private HTTP data.
-            pass
+    # The OAuth path is opt-in. When disabled (the default), do not read the
+    # Keychain and do not make the usage network call — fall straight through to
+    # the local CLI /usage screen below. The opt-in check runs BEFORE any token
+    # lookup or network, so the disabled path has neither side effect.
+    if oauth_enabled():
+        token = oauth_token()
+        if token:
+            try:
+                result = collect_oauth(token)
+                if result is not None:
+                    print(json.dumps(result))
+                    return 0
+            except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError):
+                # Older account types and restricted networks still use the
+                # authenticated CLI screen below. Never surface private HTTP data.
+                pass
     claude, tmux = shutil.which(args.claude), shutil.which(args.tmux)
     if not claude or not tmux:
         parser.exit(1, "Claude and tmux must be installed and available to this process\n")

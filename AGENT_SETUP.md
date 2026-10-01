@@ -71,13 +71,12 @@ not tasks the agent should pretend it completed.
 
 Follow [the agent metrics and memory guide](docs/AGENT_METRICS_AND_MEMORY.md) to
 set up Claude account limits, local/remote machine stats, Syncthing shared
-memory, and operator-question routing. A visible seat asks one concise question
-in its active chat and ends the turn; it does not use Updates or
-`agent-orch prompt ask`. A hidden worker routes its question to the visible
-parent with `agent-orch tell` and continues independent work or reports blocked.
-The daemon already disables Claude's native `AskUserQuestion` tool. Include
-these requested features in the handover and verify them using the guide's
-acceptance checks.
+memory, and questions through Updates. By default operator questions route
+through `agent-orch prompt ask` (asynchronous and durable; the operator answers
+in Updates); a fleet that prefers different behavior injects its own override on
+top of that default. The daemon already disables Claude's native
+`AskUserQuestion` tool. Include these requested features in the handover and
+verify them using the guide's acceptance checks.
 
 ## If a step fails
 
