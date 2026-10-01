@@ -149,6 +149,16 @@ DOT_FREETEXT_FIELDS = frozenset({
 DOT_LIST_FIELDS = DOT_METADATA_FIELDS | DOT_FREETEXT_FIELDS
 DOT_REQUIRES_TLS_CODE = "external_requires_tls"
 DOT_SCOPE_DENIED_CODE = "dot_scope_denied"
+#: Server-owned opt-in (default OFF = strict). When OFF, a verified internal
+#: seat token authenticates the seat but does NOT by itself confer operator
+#: authority, so privileged operator RPCs (grant_token, spawn_freeze/unfreeze,
+#: role=nexus) still require real operator/service auth or the session's parent
+#: — the historical public default. When ON, a verified INTERNAL seat gains
+#: operator-equivalent authority (agents are the only operator interface on a
+#: headless/CLI install). An external/restricted ("Dot") principal is excluded
+#: in every mode, loopback included, and can never become an authenticated
+#: operator. Changing the flag is a deploy-window (restart) action.
+SEAT_OPERATOR_AUTHORITY_ENV = "PENTACLE_SEAT_OPERATOR_AUTHORITY"
 
 #: WS frame ceiling. Blob transport sends a 1 MiB *decoded* chunk, which is
 #: ~1.37 MiB once base64-wrapped in a JSON envelope — over the websockets 1 MiB
@@ -381,6 +391,7 @@ class Server:
         dot_tls_key: str | None = None,
         dot_tls_binds: list[str] | None = None,
         dot_read_enabled: bool | None = None,
+        seat_operator_authority: bool | None = None,
     ) -> None:
         #: Interfaces to bind (v1 parity: Tailscale IP + 127.0.0.1). `--host`
         #: stays a single-bind alias; `--bind` (repeatable) lists all interfaces.
@@ -528,6 +539,16 @@ class Server:
                 "1", "true", "yes", "on",
             }
         self.dot_read_enabled: bool = bool(dot_read_enabled)
+        #: Opt-in seat operator authority (default OFF). See
+        #: SEAT_OPERATOR_AUTHORITY_ENV. Gates BOTH the operator context minted in
+        #: `_auth_context` and the role=nexus grant in `Sessions.set_role` (which
+        #: keys on the `operator_authenticated` this flag controls), so the two
+        #: share one trust policy. Never applied to a Dot principal.
+        if seat_operator_authority is None:
+            seat_operator_authority = str(
+                os.environ.get(SEAT_OPERATOR_AUTHORITY_ENV) or ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+        self._seat_operator_authority: bool = bool(seat_operator_authority)
         #: Effective reachable verbs for a Dot principal this run. Read verbs are
         #: included only when the read toggle is on; else they deny by default.
         self._dot_allowed_verbs: frozenset[str] = (
@@ -1507,11 +1528,12 @@ class Server:
                 stream_id=telemetry_stream_id,
                 operation=operation,
             )
+        token_verified = reason_code == TOKEN_REASON_VERIFIED
         context.update(
             {
                 "stream_id": owner or "",
                 "session_generation": verified_generation if reason_code == TOKEN_REASON_VERIFIED else None,
-                "token_verified": reason_code == TOKEN_REASON_VERIFIED,
+                "token_verified": token_verified,
                 "reason_code": reason_code or TOKEN_REASON_INTERNAL_ERROR,
                 "dot_principal": bool(
                     reason_code == TOKEN_REASON_VERIFIED
@@ -1524,6 +1546,20 @@ class Server:
             self._client_dot_connections.add(websocket)
         if retired_owner is not None and reason_code == TOKEN_REASON_EXPIRED:
             context["retired_handoff_owner"] = retired_owner
+        # Opt-in seat operator authority (default OFF). A verified INTERNAL seat
+        # is the operator interface on a headless/CLI install, so a deployment
+        # may elect to treat its seat token as operator-equivalent for the
+        # privileged RPCs. This is gated behind `self._seat_operator_authority`
+        # so the historical public default (seat token authenticates the seat
+        # but confers no operator authority) is preserved unless a deployment
+        # opts in. A Dot (external/restricted) principal is NEVER elevated, in
+        # any mode, loopback included: it cannot fabricate an authenticated
+        # operator dispatch. Unverified, expired, wrong-seat and anonymous
+        # connections remain fail-closed regardless of the flag.
+        if token_verified and self._seat_operator_authority and not context["dot_principal"]:
+            context["operator_authenticated"] = True
+            context["operator_principal"] = context["operator_principal"] or f"agent:{owner}"
+            context["operator_authority_source"] = "stream_token"
         return context
 
     @staticmethod
@@ -2550,7 +2586,53 @@ class Server:
                     "submission_confirmed": False, "action_committed": True,
                     "assistant_backend_ingress": "persisted_suppressed",
                 }
-        return await self.comms.send(direct_msg)
+        result = await self.comms.send(direct_msg)
+        if (
+            result.get("submission_confirmed") is True
+            or str(result.get("delivery") or "") in {"landed", "persisted"}
+        ):
+            try:
+                await self._bootstrap_visible_session_metadata(stream_id, direct_msg)
+            except Exception:  # noqa: BLE001 - metadata must never turn a landed send into failure
+                log.exception("visible session metadata bootstrap failed stream=%s", stream_id)
+        return result
+
+    async def _bootstrap_visible_session_metadata(
+        self, stream_id: str, msg: dict[str, Any],
+    ) -> None:
+        """Give a first operator turn an immediate, provider-independent card.
+
+        The provider launch instruction can replace this provisional text with
+        a better summary. This fallback matters for managed provider sandboxes
+        that correctly refuse to let the model read Pentacle's seat-token file.
+        """
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if auth.get("operator_authenticated") is not True:
+            return
+        row = self.sessions.get(stream_id)
+        if row is None:
+            return
+        if (
+            str(row.get("status") or "open") != "open"
+            or str(row.get("parent_stream_id") or "").strip()
+            or str(row.get("visibility") or "default") == "hidden"
+        ):
+            return
+        body = str(msg.get("text") or msg.get("message") or "")
+        summary = re.sub(r"\s+", " ", body).strip()
+        if not summary:
+            return
+        host, name = self.sessions.split(stream_id)
+        if not str(row.get("title") or "").strip():
+            title = summary if len(summary) <= 80 else summary[:77].rstrip() + "..."
+            await self.sessions.rename(host, name, title, source="agent")
+        if not isinstance(row.get("status_card"), dict):
+            goal = summary if len(summary) <= 500 else summary[:497].rstrip() + "..."
+            await self.sessions.set_status_card(host, name, {
+                "goal": goal,
+                "plan": ["Understand the request", "Complete and validate the work"],
+                "update": "Request received; work started.",
+            })
 
     async def _dot_send_to_bart(
         self, msg: dict[str, Any], auth: dict[str, Any], *, composite_stream_id: str,

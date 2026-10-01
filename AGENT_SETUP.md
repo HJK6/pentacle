@@ -71,9 +71,12 @@ not tasks the agent should pretend it completed.
 
 Follow [the agent metrics and memory guide](docs/AGENT_METRICS_AND_MEMORY.md) to
 set up Claude account limits, local/remote machine stats, Syncthing shared
-memory, and questions through Updates. The daemon already disables Claude's
-native `AskUserQuestion` tool. Include these requested features in the handover
-and verify them using the guide's acceptance checks.
+memory, and questions through Updates. By default operator questions route
+through `agent-orch prompt ask` (asynchronous and durable; the operator answers
+in Updates); a fleet that prefers different behavior injects its own override on
+top of that default. The daemon already disables Claude's native
+`AskUserQuestion` tool. Include these requested features in the handover and
+verify them using the guide's acceptance checks.
 
 ## If a step fails
 

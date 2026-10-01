@@ -19,7 +19,22 @@ After a verified hello, the socket may omit repeated tokens; the daemon retains
 only the token hash and owner and revalidates the open seat on each RPC. Closed
 or replaced tokens fail. An explicitly invalid token cannot fall back to an
 earlier valid identity. Existing self/parent authorization checks still apply.
-Seat credentials cannot remotely grant tokens or freeze/unfreeze spawning.
+By default a verified seat credential **cannot** remotely grant tokens, set
+`role=nexus`, or freeze/unfreeze spawning — those privileged operator RPCs
+still require real operator/service authentication or the session's parent.
+
+A headless/CLI installation, where agents are the only operator interface, may
+opt into **seat operator authority** by setting
+`PENTACLE_SEAT_OPERATOR_AUTHORITY=1` on the daemon (a deploy-window restart
+action). While enabled, a verified **internal** seat is treated as an
+authenticated operator and so may invoke `grant_token`, `spawn_freeze`,
+`spawn_unfreeze` and `role=nexus`. The same single policy gates both the
+operator context minted at authentication and the `role=nexus` grant, so they
+never diverge. This never applies to an external/restricted ("Dot") principal
+in any mode, loopback included: a Dot seat can never become an authenticated
+operator, switch the mode, mint or elevate identities, expand its scope, or
+fabricate an operator dispatch. Unverified, expired, wrong-seat and anonymous
+connections remain fail-closed regardless of the flag.
 
 A fresh operator CLI with no seat credential should run on the daemon machine
 (directly or over SSH), or use the enrolled UI to start an agent. Legacy token

@@ -28,7 +28,16 @@ const scenarios = require('./lib/web_scenarios');
 const { main: startHost } = require('../../server');
 
 const ROOT = path.join(__dirname, '..', '..');
-const CHROME_CANDIDATES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'];
+const CHROME_CANDIDATES = [
+  process.env.PENTACLE_CHROME,
+  process.env.CHROME_BIN,
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  'google-chrome',
+  'google-chrome-stable',
+  'chromium',
+  'chromium-browser',
+].filter(Boolean);
 const SEEDER = path.join(__dirname, 'lib', 'seed_web_gate.py');
 const DAEMON = path.join(__dirname, 'lib', 'web_gate_daemon.py');
 
@@ -59,7 +68,11 @@ function parseArgs(argv) {
 
 function resolveChrome() {
   for (const bin of CHROME_CANDIDATES) {
-    try { execFileSync('which', [bin], { stdio: 'ignore' }); return bin; } catch { /* next */ }
+    if (path.isAbsolute(bin)) {
+      try { fs.accessSync(bin, fs.constants.X_OK); return bin; } catch { /* next */ }
+    } else {
+      try { execFileSync('which', [bin], { stdio: 'ignore' }); return bin; } catch { /* next */ }
+    }
   }
   throw new Error(`no Chrome/Chromium on PATH (tried ${CHROME_CANDIDATES.join(', ')})`);
 }

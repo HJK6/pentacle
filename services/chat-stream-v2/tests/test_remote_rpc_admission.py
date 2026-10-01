@@ -79,28 +79,91 @@ def test_authenticated_operator_can_invoke_protected_rpc():
     asyncio.run(run())
 
 
-def test_bound_seat_token_is_revalidated_and_cannot_grant_admin_authority():
+def _seat_store(token, stream_id="local:seat", state=None):
+    state = state if state is not None else {
+        "stream_id": stream_id, "status": "open", "token_hash_version": STREAM_TOKEN_HASH_VERSION,
+    }
+    async def token_state(digest):
+        assert digest == hashlib.sha256(token.encode()).hexdigest()
+        return dict(state) if state else None
+    return SimpleNamespace(stream_token_state=token_state), state
+
+
+def test_strict_default_seat_token_authenticates_but_grants_no_operator_authority():
+    # Default (strict): a verified seat token authenticates the seat — send/tell
+    # work — but confers NO operator authority, so privileged operator RPCs stay
+    # fail-closed. This is the historical public default (no opt-in flag set).
     async def run():
         token = "synthetic-seat-token"
-        state = {"stream_id": "local:seat", "status": "open", "token_hash_version": STREAM_TOKEN_HASH_VERSION}
-        async def token_state(digest):
-            assert digest == hashlib.sha256(token.encode()).hexdigest()
-            return dict(state) if state else None
-        daemon = Server(store=SimpleNamespace(stream_token_state=token_state))
+        store, state = _seat_store(token)
+        daemon = Server(store=store)
         peer = Peer()
         async def handler(msg):
             assert msg["_auth_context"]["stream_id"] == "local:seat"
-            return {"type": "send.ok"}
+            assert msg["_auth_context"]["token_verified"] is True
+            assert msg["_auth_context"]["operator_authenticated"] is False
+            assert "operator_authority_source" not in msg["_auth_context"]
+            return {"type": f'{msg["type"]}.ok'}
         daemon.handlers["send"] = handler
         daemon.handlers["grant_token"] = handler
+        daemon.handlers["spawn_freeze"] = handler
         first = {"type": "send", "from_stream_id": "local:seat", "stream_token": token}
         assert (await daemon._dispatch(json.dumps(first), websocket=peer))[0]["type"] == "send.ok"
         assert (await daemon._dispatch('{"type":"send"}', websocket=peer))[0]["type"] == "send.ok"
         assert (await daemon._dispatch('{"type":"grant_token"}', websocket=peer))[0]["error_code"] == "operator_auth_required"
         assert (await daemon._dispatch('{"type":"spawn_freeze"}', websocket=peer))[0]["error_code"] == "operator_auth_required"
+    asyncio.run(run())
+
+
+def test_opted_in_seat_token_is_revalidated_and_grants_operator_authority():
+    # With the server-owned opt-in on, a verified INTERNAL seat gains
+    # operator-equivalent authority for the privileged RPCs. Revocation
+    # (closed/replaced token) still fails closed on the very next RPC.
+    async def run():
+        token = "synthetic-seat-token"
+        store, state = _seat_store(token)
+        daemon = Server(store=store, seat_operator_authority=True)
+        peer = Peer()
+        async def handler(msg):
+            assert msg["_auth_context"]["stream_id"] == "local:seat"
+            assert msg["_auth_context"]["operator_authenticated"] is True
+            assert msg["_auth_context"]["operator_principal"] == "agent:local:seat"
+            assert msg["_auth_context"]["operator_authority_source"] == "stream_token"
+            return {"type": f'{msg["type"]}.ok'}
+        daemon.handlers["send"] = handler
+        daemon.handlers["grant_token"] = handler
+        daemon.handlers["spawn_freeze"] = handler
+        first = {"type": "send", "from_stream_id": "local:seat", "stream_token": token}
+        assert (await daemon._dispatch(json.dumps(first), websocket=peer))[0]["type"] == "send.ok"
+        assert (await daemon._dispatch('{"type":"send"}', websocket=peer))[0]["type"] == "send.ok"
+        assert (await daemon._dispatch('{"type":"grant_token"}', websocket=peer))[0]["type"] == "grant_token.ok"
+        assert (await daemon._dispatch('{"type":"spawn_freeze"}', websocket=peer))[0]["type"] == "spawn_freeze.ok"
         assert (await daemon._dispatch('{"type":"send","stream_token":"wrong"}', websocket=peer))[0]["error_code"] == "authentication_required"
         state.clear()
         assert (await daemon._dispatch('{"type":"send"}', websocket=peer))[0]["error_code"] == "authentication_required"
+    asyncio.run(run())
+
+
+def test_dot_principal_never_gains_operator_authority_even_when_opted_in():
+    # An external/restricted ("Dot") principal is excluded in every mode: even
+    # with the opt-in on, its verified seat is never minted as an operator.
+    async def run():
+        token = "synthetic-dot-token"
+        store, _ = _seat_store(token, stream_id="local:dot", state={
+            "stream_id": "local:dot", "status": "open",
+            "token_hash_version": STREAM_TOKEN_HASH_VERSION,
+        })
+        daemon = Server(
+            store=store, seat_operator_authority=True,
+            dot_principal_stream_ids=["local:dot"],
+        )
+        ctx = await daemon._auth_context(
+            Peer(), {"type": "send", "from_stream_id": "local:dot", "stream_token": token},
+        )
+        assert ctx["token_verified"] is True
+        assert ctx["dot_principal"] is True
+        assert ctx["operator_authenticated"] is False
+        assert "operator_authority_source" not in ctx
     asyncio.run(run())
 
 

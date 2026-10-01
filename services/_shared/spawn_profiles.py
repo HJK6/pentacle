@@ -50,6 +50,13 @@ MODELS = {
         "gpt-6-astra": {"aliases": ("gpt-6-astra", "astra"), "efforts": ("low", "medium", "high", "xhigh", "max")},
     },
 }
+# Which MODELS ids are advertised to interactive New Chat clients is an
+# installation policy, not a shipped constant: a deployment whose provider
+# accounts expose only a subset sets an optional ``available_models`` map in the
+# spawn config (see ``_available_model_ids`` / ``load_spawn_config``). The
+# shipped public default advertises the full MODELS catalog. The full MODELS map
+# is always accepted for existing sessions, explicit compatibility launches,
+# aliases and handoffs regardless of the advertised projection.
 # Ids the daemon knows a context window for (see chat-stream context_thresholds)
 # but that we deliberately do NOT expose as spawn targets: superseded generations
 # you would never launch a fresh lane on. Every such id must be listed here so the
@@ -169,11 +176,13 @@ def load_spawn_config() -> dict[str, Any]:
         if (
             not isinstance(local, dict)
             or local.get("schema_version") != 1
-            or set(local) - {"schema_version", "host_overrides"}
+            or set(local) - {"schema_version", "host_overrides", "available_models"}
             or not isinstance(local.get("host_overrides", {}), dict)
         ):
             raise _config_error("unsupported local spawn defaults")
         raw["host_overrides"] = {**raw.get("host_overrides", {}), **local.get("host_overrides", {})}
+        if "available_models" in local:
+            raw["available_models"] = local["available_models"]
     providers = raw.get("providers")
     if not isinstance(providers, dict):
         raise _config_error("spawn defaults providers must be an object")
@@ -195,11 +204,46 @@ def load_spawn_config() -> dict[str, Any]:
                 raise _config_error("invalid provider host override")
             merged = {**providers[provider], **partial}
             _config_tuple(provider, merged)
+    if raw.get("available_models") is not None:
+        _validate_available_models(raw["available_models"])
     profiles = raw.get("profiles", {})
     handoff = profiles.get("agent_orch", {}).get("handoff") if isinstance(profiles, dict) else None
     if not isinstance(handoff, dict):
         raise _config_error("agent_orch handoff policy is required")
     return raw
+
+
+def _available_model_ids(config: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+    """Model ids advertised to interactive New Chat clients, per provider.
+
+    Account-specific availability is installation policy: an optional
+    ``available_models`` map in the spawn config (provider -> list of canonical
+    model ids, each a subset of ``MODELS``) narrows the picker to the currently
+    launchable set. Absent — the shipped public default — the full ``MODELS``
+    catalog is advertised. ``load_spawn_config`` has already validated any
+    provided map, so each listed id is known.
+    """
+    configured = config.get("available_models")
+    result: dict[str, tuple[str, ...]] = {}
+    for provider in MODELS:
+        ids = configured.get(provider) if isinstance(configured, dict) else None
+        result[provider] = tuple(ids) if ids else tuple(MODELS[provider])
+    return result
+
+
+def _validate_available_models(available: object) -> None:
+    if not isinstance(available, dict):
+        raise _config_error("available_models must be an object")
+    for provider, ids in available.items():
+        if provider not in MODELS:
+            raise _config_error(f"available_models lists unknown provider: {provider}")
+        if not isinstance(ids, list) or not ids:
+            raise _config_error(f"available_models[{provider}] must be a non-empty list")
+        for model_id in ids:
+            if model_id not in MODELS[provider]:
+                raise _config_error(
+                    f"available_models[{provider}] lists unknown model: {model_id}"
+                )
 
 
 def _default_tuple(provider: str, host: str | None) -> tuple[str, str]:
@@ -402,6 +446,10 @@ def catalog() -> dict:
             "profiles": config.get("profiles", {}),
         },
         "models": MODELS,
+        "available_models": {
+            provider: {model: MODELS[provider][model] for model in model_ids}
+            for provider, model_ids in _available_model_ids(config).items()
+        },
     }
 
 

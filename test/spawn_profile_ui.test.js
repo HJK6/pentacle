@@ -166,7 +166,8 @@ test('spawn picker stays catalog-driven — model list and efforts derive from t
   // never a client-side literal. Positively assert the derivation chain so a regression that
   // reintroduces a hardcoded list (in any order) fails: catalog ← IPC response, model options ←
   // Object.keys(entries), efforts ← the selected catalog entry.
-  assert.match(app, /newSessionCatalog = response\.catalog/);
+  assert.match(app, /newSessionCatalog = catalogForNewSession\(response\.catalog\)/);
+  assert.match(app, /models: catalog\.available_models/);
   assert.match(app, /const entries = newSessionCatalog\.models\?\.\[selection\.provider\]/);
   assert.match(app, /const models = Object\.keys\(entries\)/);
   assert.match(app, /const efforts = entries\[selection\.model\]\?\.efforts/);

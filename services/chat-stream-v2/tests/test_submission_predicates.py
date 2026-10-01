@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from boot_ready import (  # noqa: E402
+    claude_composer_empty,
+    claude_prompt_ready,
     claude_prompt_in_active_draft,
     claude_prompt_submitted,
     codex_prompt_in_active_draft,
@@ -26,6 +28,13 @@ CLAUDE_DRAFT = "⏵⏵ bypass permissions on (bypass)\n❯ run the delivery chec
 CLAUDE_SUBMITTED_HISTORY = "⏺ run the delivery check now\n\n✻ Working…\n❯ "
 CLAUDE_SUBMITTED_MARKER = "❯ run the delivery check now\n⎿  reading the repo\n❯ "
 CLAUDE_BOOT = "⏵⏵ bypass permissions on (bypass)\n❯ "
+CLAUDE_MANAGED_BOOT = """Claude Code v2.1.286
+Bypass permissions mode was disabled by settings
+────────────────────────────────
+❯
+────────────────────────────────
+⏸ manual mode on · ? for shortcuts
+"""
 
 
 def test_claude_unsubmitted_draft_is_not_submitted() -> None:
@@ -47,6 +56,16 @@ def test_claude_reply_marker_after_input_is_submitted() -> None:
 def test_claude_empty_boot_is_neither() -> None:
     assert claude_prompt_submitted(CLAUDE_BOOT, BRIEF) is False
     assert claude_prompt_in_active_draft(CLAUDE_BOOT, BRIEF) is False
+
+
+def test_managed_claude_manual_mode_is_ready_with_an_empty_composer() -> None:
+    assert claude_prompt_ready(CLAUDE_MANAGED_BOOT) is True
+    assert claude_composer_empty(CLAUDE_MANAGED_BOOT) is True
+
+
+def test_managed_claude_trust_dialog_is_not_ready() -> None:
+    pane = "Claude Code\nQuick safety check: Is this a project you trust?\n❯ No, exit"
+    assert claude_prompt_ready(pane) is False
 
 
 # -- codex ---------------------------------------------------------------------

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read labeled account-week limits from the user's authenticated Claude /usage UI."""
+"""Read authenticated Claude account-period limits for Pentacle."""
 
 from __future__ import annotations
 
@@ -12,8 +12,24 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
+
+
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+DEFAULT_KEYCHAIN_SERVICE = "Claude Code-credentials"
+#: Opt-in (default OFF) for the authenticated OAuth usage path. It reads the
+#: user's own Claude OAuth token (Keychain on macOS, or CLAUDE_CODE_OAUTH_TOKEN)
+#: and makes a network call to the Anthropic usage endpoint. Until a deployment
+#: sets this, the probe does NEITHER: no Keychain lookup and no network call, so
+#: the default path has no side effect and uses the local CLI /usage screen.
+OAUTH_ENABLED_ENV = "PENTACLE_USAGE_CLAUDE_OAUTH"
+
+
+def oauth_enabled() -> bool:
+    return os.environ.get(OAUTH_ENABLED_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def parse_weekly_usage(screen: str) -> dict | None:
@@ -22,10 +38,10 @@ def parse_weekly_usage(screen: str) -> dict | None:
     section = None
     for line in screen.splitlines():
         label = line.casefold()
-        if re.search(r"current\s+(week|session)|weekly|all models|sonnet|opus|fable|extra usage", label):
-            if ("week" in label or "current" in label) and "all model" in label:
+        if re.search(r"current\s+(week|month|session)|weekly|monthly|all models|sonnet|opus|fable|extra usage", label):
+            if ("week" in label or "month" in label) and "all model" in label:
                 section = "week_all"
-            elif "week" in label and "fable" in label:
+            elif ("week" in label or "month" in label) and "fable" in label:
                 section = "week_fable"
             else:
                 section = None
@@ -40,8 +56,82 @@ def parse_weekly_usage(screen: str) -> dict | None:
         reset = re.search(r"\bResets\s+(.+)", line, re.I)
         if reset and result[section + "_pct"] is not None:
             result[section + "_resets"] = reset.group(1).strip()
-    # Session usage/cost and unlabeled percentages are not account-week limits.
+    # Session usage/cost and unlabeled percentages are not account-period limits.
     return result if result["week_all_pct"] is not None else None
+
+
+def parse_oauth_usage(payload: dict) -> dict | None:
+    """Map Enterprise monthly spend onto the stable account-period wire."""
+    spend = payload.get("spend")
+    if not isinstance(spend, dict) or spend.get("enabled") is False:
+        return None
+    value = spend.get("percent")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    value = int(value)
+    if not 0 <= value <= 100:
+        return None
+    return {
+        "week_all_pct": value,
+        "week_all_resets": None,
+        "week_fable_pct": None,
+        "week_fable_resets": None,
+    }
+
+
+def oauth_token(*, run=subprocess.run) -> str | None:
+    """Read Claude OAuth from a protected env or Claude Code's macOS Keychain."""
+    token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    if token:
+        return token
+    if sys.platform != "darwin":
+        return None
+    security = shutil.which("security")
+    service = os.environ.get(
+        "PENTACLE_USAGE_CLAUDE_KEYCHAIN_SERVICE", DEFAULT_KEYCHAIN_SERVICE
+    ).strip()
+    if not security or not service:
+        return None
+    try:
+        result = run(
+            [security, "find-generic-password", "-w", "-s", service],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode:
+        return None
+    try:
+        credentials = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(credentials, dict):
+        return None
+    oauth = credentials.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    value = oauth.get("accessToken")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def collect_oauth(token: str, *, timeout: float = 10,
+                  urlopen=urllib.request.urlopen) -> dict | None:
+    request = urllib.request.Request(
+        CLAUDE_USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "pentacle-usage-probe",
+        },
+    )
+    with urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read())
+    return parse_oauth_usage(payload) if isinstance(payload, dict) else None
 
 
 def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
@@ -110,6 +200,22 @@ def main() -> int:
     parser.add_argument("--tmux", default=os.environ.get("PENTACLE_USAGE_TMUX_BIN", "tmux"))
     parser.add_argument("--cwd", default=default_cwd())
     args = parser.parse_args()
+    # The OAuth path is opt-in. When disabled (the default), do not read the
+    # Keychain and do not make the usage network call — fall straight through to
+    # the local CLI /usage screen below. The opt-in check runs BEFORE any token
+    # lookup or network, so the disabled path has neither side effect.
+    if oauth_enabled():
+        token = oauth_token()
+        if token:
+            try:
+                result = collect_oauth(token)
+                if result is not None:
+                    print(json.dumps(result))
+                    return 0
+            except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError):
+                # Older account types and restricted networks still use the
+                # authenticated CLI screen below. Never surface private HTTP data.
+                pass
     claude, tmux = shutil.which(args.claude), shutil.which(args.tmux)
     if not claude or not tmux:
         parser.exit(1, "Claude and tmux must be installed and available to this process\n")

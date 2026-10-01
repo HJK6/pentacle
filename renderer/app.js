@@ -5874,6 +5874,11 @@ function updateNewSessionStatus(message = '', isError = false) {
   status.classList.toggle('is-error', !!isError);
 }
 
+function catalogForNewSession(catalog) {
+  if (!catalog?.available_models) return catalog;
+  return { ...catalog, models: catalog.available_models };
+}
+
 function setNewSessionBackgroundInert(inert) {
   const overlay = document.getElementById('new-session-overlay');
   Array.from(document.body.children).forEach((child) => {
@@ -6038,7 +6043,7 @@ async function loadSpawnCatalog() {
     renderNewSessionModal();
     return false;
   }
-  newSessionCatalog = response.catalog;
+  newSessionCatalog = catalogForNewSession(response.catalog);
   const prefs = spawnPreferences();
   newSessionSelection = selectionForProvider(prefs.defaultProvider === 'claude' ? 'claude' : 'codex');
   renderNewSessionModal();
@@ -6048,7 +6053,7 @@ async function loadSpawnCatalog() {
 function warmSpawnCatalog() {
   spawnCatalogLoader.load().then((response) => {
     if (!response?.ok || !response.catalog?.profiles?.desktop_manual) return;
-    newSessionCatalog = response.catalog;
+    newSessionCatalog = catalogForNewSession(response.catalog);
     const prefs = spawnPreferences();
     newSessionSelection = selectionForProvider(prefs.defaultProvider === 'claude' ? 'claude' : 'codex');
   }).catch(() => {
@@ -6807,7 +6812,8 @@ function paintLimits(limits) {
     footer.innerHTML = '';
     return;
   }
-  footer.innerHTML = limits.map((limit) => {
+  const displayedLimits = limits.filter((limit) => limit.id !== 'fable' || limit.pct != null);
+  footer.innerHTML = displayedLimits.map((limit) => {
     const pct = limit.pct;
     const pctText = pct == null ? '—' : `${pct}%`;
     const reset = limit.resets_text ?? limit.resets_at_iso;

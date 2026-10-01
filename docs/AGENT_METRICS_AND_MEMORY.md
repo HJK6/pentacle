@@ -7,9 +7,19 @@ configuration outside the public repositories; the human READMEs stay brief.
 ## Claude account limits
 
 The daemon publishes a local state file; it does not query provider accounts.
-The included `scripts/check_claude_usage.py` reads **weekly percentage used**
-from the authenticated Claude CLI's `/usage` UI. This is account quota, not
-session cost, API spend or requests per minute. It does not change the quota.
+The included `scripts/check_claude_usage.py` reads the **account-period
+percentage used** from the authenticated Claude CLI `/usage` screen by default.
+An **opt-in** OAuth path is also available for accounts whose period the CLI
+screen does not label (for example Enterprise monthly `spend.percent`): set
+`PENTACLE_USAGE_CLAUDE_OAUTH=1` in the collector's environment to enable it.
+**Only when that flag is set** does the probe read a Claude OAuth token — on
+macOS by reusing Claude Code's standard `Claude Code-credentials` Keychain item
+without printing or copying the token, or from `CLAUDE_CODE_OAUTH_TOKEN` in the
+collector's protected environment — and make the one usage network call; it then
+falls back to the CLI `/usage` screen. With the flag unset (the default) the
+probe performs no Keychain lookup and no network call. This is account quota,
+not session cost or requests per minute. It does not change the quota. The Fable
+row is optional and the client hides it when no Fable quota is reported.
 
 1. As the same OS user that will run the collector, verify Claude login and
    complete the trust prompt **in the exact directory you will pass as
@@ -29,15 +39,19 @@ session cost, API spend or requests per minute. It does not change the quota.
    switching Claude accounts.
 
    Set `PENTACLE_USAGE_CLAUDE_BIN` and `PENTACLE_USAGE_TMUX_BIN` to absolute paths
-   if the service PATH needs them. The bounded probe opens its own tmux server,
-   sends only `/usage` and closes that server. It never accepts trust/login
-   prompts or sends a model prompt. No private browser service or OAuth-token
-   extraction is needed.
-2. Verify `week_all_pct` and `week_all_resets` against the labeled account-week
-   observation. Optional `week_fable_pct`/`week_fable_resets` remain `null` unless
-   explicitly reported. Never substitute Sonnet, session usage or zero for an
-   unknown pool.
-3. Write `usage_state.json` **beside the daemon's actual persistent DB**. For the
+   if the service PATH needs them. If OAuth does not expose a supported account
+   period, the bounded fallback opens its own tmux server, sends only `/usage`
+   and closes that server. It never accepts trust/login prompts or sends a model
+   prompt. No private browser service is needed. On managed networks, also set
+   `SSL_CERT_FILE` to the organization's trusted CA bundle in the collector
+   environment.
+2. Verify `week_all_pct` and `week_all_resets` against the labeled account-period
+   observation. The legacy wire-field names remain stable for compatibility.
+   Optional `week_fable_pct`/`week_fable_resets` remain `null` unless explicitly
+   reported. Never substitute Sonnet, session usage or zero for an unknown pool.
+3. Write `usage_state.json` **beside the daemon's actual persistent DB**. The
+   Codex probe prefers a weekly window and also supports the account-period
+   `individualLimit` returned by current business accounts. For the
    base README's `~/.config/pentacle/sessions.db`:
 
    ```sh
@@ -50,6 +64,10 @@ session cost, API spend or requests per minute. It does not change the quota.
    it preserves unknown/previous Codex state. A Codex account probe is a separate
    optional integration. Keep the usage publisher enabled; do not pass
    `--disable-usage-state-publisher` to the daemon.
+
+   For a Codex-only installation, omit `--skip-codex` and pass `--skip-claude`.
+   This preserves unknown/previous Claude and Fable state without requiring a
+   Claude login or trusted Claude workspace.
 4. Install one user-owned scheduled job running that exact command every five
    minutes, with absolute paths and explicit PATH, HOME and
    `PENTACLE_USAGE_CWD`. Use a macOS LaunchAgent with `RunAtLoad=true` and
@@ -179,10 +197,11 @@ The phone reads daemon data and does not need a synced memory filesystem.
 The daemon already launches Claude with `--disallowed-tools AskUserQuestion`.
 Do not re-enable that native tool or edit global Claude settings. Verify the
 effective launch arguments and give agents the process question/routing rules.
-Codex seats receive the durable-question requirement in their launch instructions.
+Codex and Claude seats receive the durable-question requirement in their launch
+instructions.
 
 Install `agent-orch` as in the base README and make it available on spawned
-agents' PATH. An authenticated, open, visible Pentacle seat asks:
+agents' PATH. By default an authenticated, open, visible Pentacle seat asks:
 
 ```sh
 agent-orch prompt ask --title "Which workspace should I use?" \
@@ -201,3 +220,10 @@ cannot gain another seat's authority by claiming its stream ID; use a real
 visible Pentacle seat for this workflow. Keep its provided credentials private.
 See [orchestration](../process/docs/config/agent_orchestration.md) for the full
 question, role and reporting contract.
+
+This `agent-orch prompt ask` transport is the portable public default. It is
+injectable: a fleet that prefers a different operator-question behavior (for
+example a visible seat asking one concise question directly in its active chat
+and routing a hidden worker's question to its visible parent) supplies that rule
+as a launch-level `developer_instructions` / `--append-system-prompt` override,
+which ranks above this default without changing the public baseline.

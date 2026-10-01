@@ -207,16 +207,27 @@ def with_bootstrap_state(
     seen = internal_seen if event_seen is None else event_seen
     if str(result.get("status") or "open") != "open":
         return result
-    if result.get("bootstrap_state") in {"queued", "starting", "ready", "failed"}:
+    if result.get("bootstrap_state") == "ready":
         result["state"] = result["bootstrap_state"]
         return result
     # A Codex reset interstitial is not a transient boot state. Preserve the
     # typed block until an input path explicitly observes a usable composer and
-    # clears it durably; event activity alone is not current-pane evidence.
+    # clears it durably; event activity alone is not current-pane evidence. This
+    # check MUST precede the `seen` promotion below: a current-generation event
+    # is not evidence that the reset interstitial has cleared, so it must never
+    # overwrite reset_blocked with "started".
     if result.get("bootstrap_state") == "reset_blocked":
         return result
+    # A current-generation normalized event is stronger evidence than a stale
+    # queued/starting/failed projection left by an admission timeout. This is
+    # especially important when transcript discovery settles just after the
+    # spawn request's bounded proof window.
     if seen:
         result["bootstrap_state"] = "started"
+        result["state"] = "started"
+        return result
+    if result.get("bootstrap_state") in {"queued", "starting", "failed"}:
+        result["state"] = result["bootstrap_state"]
         return result
     if result.get("bootstrap_state") == "unproven":
         return result
@@ -1044,7 +1055,12 @@ class Sessions:
         whose own seat is already `nexus`) or the session's parent may grant
         `nexus`; any other role is open to any authenticated caller. The verb is
         authenticated exactly like `reparent`: a wire identity claim alone
-        cannot mutate a seat.
+        cannot mutate a seat. `operator` here is the daemon's
+        `operator_authenticated` context: when a deployment opts into seat
+        operator authority (server-owned, default off), a verified internal seat
+        is marked operator_authenticated by the daemon and so may grant `nexus`;
+        otherwise a bare verified seat cannot. That one server-owned policy gates
+        both this grant and the privileged operator RPCs.
         """
         role = str(role or "").strip()
         if not role:
@@ -1076,6 +1092,12 @@ class Sessions:
         await self.assistant.authorize_role(target, role, auth)
 
         if role == "nexus":
+            # `operator` is the daemon-minted operator_authenticated context: a
+            # bare verified seat sets it only when the deployment opts into seat
+            # operator authority (server-owned, default off), and never for a Dot
+            # principal. Keying on it here keeps nexus grants on the same trust
+            # policy as the privileged operator RPCs. A wire identity claim alone
+            # never reaches this branch as an authenticated caller.
             operator_facing = operator or service
             if not operator_facing and caller and ":" in caller:
                 caller_host, caller_name = self.split(caller)
@@ -1157,7 +1179,10 @@ class Sessions:
             # The card contract promises restart survival; never ack a write
             # that did not reach the sessions row (v1 parity).
             raise VerbError("unknown_session", "session has no persisted row")
-        return self._cache(row)
+        updated = self._cache(row)
+        if emit_if_changed := getattr(self._inventory_emitter, "emit_if_changed", None):
+            await emit_if_changed(immediate=True)
+        return updated
 
     async def mark_closed(
         self,

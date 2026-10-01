@@ -4029,10 +4029,17 @@ def report(args: argparse.Namespace) -> int:
     if getattr(args, "terminate", False) and args.status == "progress":
         print("agent-orch report: validation failed: report: --terminate is incompatible with --status=progress", file=sys.stderr)
         return 2
-    # Omitted --msg-id means a proactive stream report. The daemon accepts
-    # msg_id=0 as the conventional self/proactive key; awaited reports still
-    # pass the specific inbox msg_id they answer.
+    # Only self-closing, tell-driven workers may omit --msg-id.  For an open
+    # seat, silently choosing 0 can make a commissioned report durable but
+    # invisible to the leader awaiting its actual inbox msg_id.
     if args.msg_id is None:
+        if not getattr(args, "terminate", False):
+            print(
+                "agent-orch report: validation failed: --msg-id is required unless --terminate is used; "
+                "use --msg-id 0 explicitly for a proactive non-terminating report",
+                file=sys.stderr,
+            )
+            return 2
         args.msg_id = 0
     if args.status in {"error", "aborted"} and not args.reason and args.result is None and args.result_file is None:
         exc = SchemaError(
@@ -5626,7 +5633,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--msg-id",
         type=int,
         default=None,
-        help="Inbox msg_id this report answers. Omit for a proactive stream report; omitted defaults to msg_id=0.",
+        help="Inbox msg_id this report answers. Required unless --terminate is used; use 0 explicitly for a proactive non-terminating report.",
     )
     report_parser.add_argument("--status", choices=["done", "progress", "error", "aborted"], required=True)
     report_parser.add_argument("--reason")

@@ -122,6 +122,25 @@ def test_binding_survives_reservation_release_writer_gap_and_restart(tmp_path,mo
     asyncio.run(run())
 
 
+def test_codex_native_child_descriptor_is_admitted(tmp_path,monkeypatch):
+    async def run():
+        store=Store(":memory:");store.start();state=_StreamIngest()
+        try:
+            path=tmp_path/".codex"/"sessions"/"child.jsonl";write_log(path)
+            h=Harness(store,monkeypatch,path);await h.open()
+            h.descriptors=[("9000","12","w",path)]
+            async def tree(root_pid):
+                assert root_pid==PID
+                return [PID,"9000"]
+            monkeypatch.setattr(module,"process_tree",tree)
+            assert await h.run(h.ingest(),state)==1
+            assert len(await store.fetch_session_event_tail("h:v2-root",limit=500))==1
+            row=await store.fetch_session("h","v2-root")
+            assert row["observer_binding"]["transcript"]["path"]==str(path)
+        finally:_close_stream(state);store.stop()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("change",["birth","native","inode","generation"])
 def test_binding_revokes_on_identity_change(tmp_path,monkeypatch,change):
     async def run():

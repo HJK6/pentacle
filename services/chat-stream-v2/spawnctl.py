@@ -2888,6 +2888,10 @@ class SpawnCtl:
                 plan = launch.build_launch(
                     machine, provider=provider, tmux_session=name,
                     launch_model=launch_model, launch_effort=launch_effort,
+                    operator_facing=(
+                        not str(msg.get("parent_stream_id") or "").strip()
+                        and str(msg.get("visibility") or "default") != "hidden"
+                    ),
                     initial_prompt_file=(
                         str(msg.get("_native_initial_prompt_path") or "")
                         if provider == "codex" and not explicit else None

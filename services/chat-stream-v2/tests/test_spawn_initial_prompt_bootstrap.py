@@ -10,7 +10,7 @@ import pytest
 
 import spawnctl as spawnctl_mod
 from server import Server
-from sessions import Sessions, VerbError
+from sessions import Sessions, VerbError, with_bootstrap_state
 from spawnctl import SpawnCtl
 from tmux_transport import open_fields
 from store import Store
@@ -283,3 +283,36 @@ def test_refresh_restores_started_state_from_durable_event_history() -> None:
             store.stop()
 
     assert asyncio.run(run()) == "started"
+
+
+@pytest.mark.parametrize("stale_state", ["queued", "starting", "failed"])
+def test_current_event_supersedes_stale_bootstrap_projection(stale_state: str) -> None:
+    row = {
+        "status": "open",
+        "bootstrap_state": stale_state,
+        "_bootstrap_event_seen": True,
+    }
+    projected = with_bootstrap_state(row)
+    assert projected["bootstrap_state"] == "started"
+    assert projected["state"] == "started"
+
+
+def test_reset_blocked_is_preserved_even_with_a_current_event() -> None:
+    # A Codex reset interstitial is not cleared by event activity: a
+    # current-generation normalized event must NOT overwrite reset_blocked with
+    # "started". reset_blocked precedence is checked before the seen promotion.
+    row = {
+        "status": "open",
+        "bootstrap_state": "reset_blocked",
+        "_bootstrap_event_seen": True,
+    }
+    projected = with_bootstrap_state(row)
+    assert projected["bootstrap_state"] == "reset_blocked"
+    assert projected.get("state") != "started"
+
+
+def test_ready_still_wins_over_a_current_event() -> None:
+    row = {"status": "open", "bootstrap_state": "ready", "_bootstrap_event_seen": True}
+    projected = with_bootstrap_state(row)
+    assert projected["bootstrap_state"] == "ready"
+    assert projected["state"] == "ready"

@@ -959,7 +959,15 @@ async def _open_transcripts(pids: list[str]) -> list[str]:
 
 
 async def _open_writable_transcripts(root_pid: str) -> list[tuple[str, tuple[int, int]]]:
-    rc, out = await _exec("lsof", "-p", root_pid, "-FpfatDin")
+    # The npm Codex launcher is a Node wrapper; current releases keep the
+    # rollout descriptor open in their native Codex child. The pane-root proof
+    # is still checked separately by ``_provider_root``. Restrict descriptor
+    # admission to that proven process tree, matching the satellite observer.
+    pids = await process_tree(root_pid)
+    if not pids:
+        return []
+    allowed_pids = set(pids)
+    rc, out = await _exec("lsof", "-p", ",".join(pids), "-FpfatDin")
     if rc != 0:
         return []  # a partial listing cannot establish uniqueness
     pid = descriptor = access = kind = device = inode = ""
@@ -977,7 +985,7 @@ async def _open_writable_transcripts(root_pid: str) -> list[tuple[str, tuple[int
         elif field == "t": kind = value
         elif field == "D": device = value
         elif field == "i": inode = value
-        elif (field == "n" and pid == root_pid and descriptor.isdecimal()
+        elif (field == "n" and pid in allowed_pids and descriptor.isdecimal()
               and access in {"u", "w"} and kind == "REG"
               and value.endswith(".jsonl") and any(fragment in value for fragment in TRANSCRIPT_DIRS)):
             try:

@@ -401,3 +401,59 @@ def test_opus5_handoff_preserves_full_id_after_alias_moves() -> None:
     assert overridden.spawn["model"] == "claude-opus-5-5"
     assert "model" in overridden.changed_fields
     assert "claude-opus-5" not in spawn_profiles.INTENTIONALLY_UNSPAWNABLE["claude"]
+
+
+def test_available_models_defaults_to_the_full_public_catalog() -> None:
+    # The shipped public default narrows nothing: the interactive picker is
+    # offered the full MODELS catalog. Account-specific narrowing is opt-in
+    # installation config, not a shipped constant.
+    result = catalog()
+    available = result["available_models"]
+    assert available == result["models"]
+    assert set(available["claude"]) == set(spawn_profiles.MODELS["claude"])
+    assert set(available["codex"]) == set(spawn_profiles.MODELS["codex"])
+
+
+def test_available_models_installation_config_narrows_the_picker_only(monkeypatch, tmp_path) -> None:
+    # An installation whose accounts expose a subset sets `available_models`;
+    # the picker narrows, but the full MODELS map stays accepted for aliases,
+    # explicit launches and handoffs.
+    config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
+    config["available_models"] = {
+        "claude": ["claude-opus-4-8"],
+        "codex": ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"],
+    }
+    config_path = tmp_path / "spawn_defaults.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", config_path)
+    spawn_profiles.load_spawn_config.cache_clear()
+    try:
+        available = catalog()["available_models"]
+        assert tuple(available["claude"]) == ("claude-opus-4-8",)
+        assert tuple(available["codex"]) == ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna")
+        assert "claude-fable-5-1" not in available["claude"]
+        assert "gpt-6-luna" not in available["codex"]
+        # Narrowing is picker-only: a model absent from available_models still
+        # resolves (compatibility / explicit / handoff launches).
+        assert resolve_spawn(provider="codex", model="gpt-6-luna", effort="max")["model"] == "gpt-6-luna"
+        assert resolve_spawn(provider="claude", model="fable", effort="high")["model"] == "claude-fable-5-1"
+    finally:
+        spawn_profiles.load_spawn_config.cache_clear()
+
+
+def test_available_models_config_rejects_unknown_model(monkeypatch, tmp_path) -> None:
+    config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
+    config["available_models"] = {"codex": ["gpt-9-nope"]}
+    config_path = tmp_path / "spawn_defaults.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", config_path)
+    spawn_profiles.load_spawn_config.cache_clear()
+    try:
+        try:
+            catalog()
+        except SpawnProfileError as exc:
+            assert exc.code == "spawn_config_invalid"
+        else:
+            raise AssertionError("invalid available_models was accepted")
+    finally:
+        spawn_profiles.load_spawn_config.cache_clear()
