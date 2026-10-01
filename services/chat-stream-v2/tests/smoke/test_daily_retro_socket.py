@@ -38,7 +38,7 @@ def daily_retro_surface(tmp_path, monkeypatch):
             for name in ("a", "b", "worker"):
                 rows[name] = await store.open_session("fixture", name, provider="codex", role="assistant" if name != "worker" else "worker",
                                                      visibility="hidden", pane_status="pane_alive",
-                                                     effective_model="gpt-6-sol", effective_effort="medium")
+                                                     effective_model="gpt-6.1-sol", effective_effort="medium")
                 await store.grant_stream_token("fixture", name, hashlib.sha256(f"token-{name}".encode()).hexdigest(), STREAM_TOKEN_HASH_VERSION)
             sessions = Sessions(store, local_host="fixture")
             await sessions.refresh()
