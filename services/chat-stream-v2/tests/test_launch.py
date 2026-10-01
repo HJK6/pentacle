@@ -58,3 +58,62 @@ def test_codex_launch_changes_to_configured_cwd(tmp_path: Path) -> None:
     assert "Do not use request_user_input or agent-orch prompt ask" in plan.command
     assert "retry only that agent-orch command with require_escalated" in plan.command
     assert "run agent-orch prompt ask" not in plan.command
+
+
+def test_visible_codex_launch_requires_title_and_status(tmp_path: Path) -> None:
+    machine = launch.local_machine(
+        "local",
+        cwd=str(tmp_path),
+        codex_bin="/bin/echo",
+        projects_root=str(tmp_path / "projects"),
+    )
+
+    visible = launch.build_launch(
+        machine,
+        provider="codex",
+        tmux_session="visible-codex",
+        launch_model="gpt-5.6-sol",
+        launch_effort="high",
+        operator_facing=True,
+    )
+    worker = launch.build_launch(
+        machine,
+        provider="codex",
+        tmux_session="worker-codex",
+        launch_model="gpt-5.6-sol",
+        launch_effort="high",
+    )
+
+    assert "Pentacle visible-session setup" in visible.command
+    assert "agent-orch title" in visible.command
+    assert "agent-orch status" in visible.command
+    assert "Pentacle visible-session setup" not in worker.command
+
+
+def test_visible_claude_launch_appends_title_and_status_instruction(tmp_path: Path) -> None:
+    machine = launch.local_machine(
+        "local",
+        cwd=str(tmp_path),
+        claude_bin="/bin/echo",
+        projects_root=str(tmp_path / "projects"),
+    )
+
+    visible = launch.build_launch(
+        machine,
+        provider="claude",
+        tmux_session="visible-claude",
+        launch_model="claude-opus-4-8",
+        launch_effort="high",
+        operator_facing=True,
+    )
+    worker = launch.build_launch(
+        machine,
+        provider="claude",
+        tmux_session="worker-claude",
+        launch_model="claude-opus-4-8",
+        launch_effort="high",
+    )
+
+    assert "--append-system-prompt" in visible.command
+    assert "Pentacle visible-session setup" in visible.command
+    assert "--append-system-prompt" not in worker.command

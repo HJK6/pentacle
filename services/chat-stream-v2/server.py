@@ -2560,7 +2560,53 @@ class Server:
                     "submission_confirmed": False, "action_committed": True,
                     "assistant_backend_ingress": "persisted_suppressed",
                 }
-        return await self.comms.send(direct_msg)
+        result = await self.comms.send(direct_msg)
+        if (
+            result.get("submission_confirmed") is True
+            or str(result.get("delivery") or "") in {"landed", "persisted"}
+        ):
+            try:
+                await self._bootstrap_visible_session_metadata(stream_id, direct_msg)
+            except Exception:  # noqa: BLE001 - metadata must never turn a landed send into failure
+                log.exception("visible session metadata bootstrap failed stream=%s", stream_id)
+        return result
+
+    async def _bootstrap_visible_session_metadata(
+        self, stream_id: str, msg: dict[str, Any],
+    ) -> None:
+        """Give a first operator turn an immediate, provider-independent card.
+
+        The provider launch instruction can replace this provisional text with
+        a better summary. This fallback matters for managed provider sandboxes
+        that correctly refuse to let the model read Pentacle's seat-token file.
+        """
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if auth.get("operator_authenticated") is not True:
+            return
+        row = self.sessions.get(stream_id)
+        if row is None:
+            return
+        if (
+            str(row.get("status") or "open") != "open"
+            or str(row.get("parent_stream_id") or "").strip()
+            or str(row.get("visibility") or "default") == "hidden"
+        ):
+            return
+        body = str(msg.get("text") or msg.get("message") or "")
+        summary = re.sub(r"\s+", " ", body).strip()
+        if not summary:
+            return
+        host, name = self.sessions.split(stream_id)
+        if not str(row.get("title") or "").strip():
+            title = summary if len(summary) <= 80 else summary[:77].rstrip() + "..."
+            await self.sessions.rename(host, name, title, source="agent")
+        if not isinstance(row.get("status_card"), dict):
+            goal = summary if len(summary) <= 500 else summary[:497].rstrip() + "..."
+            await self.sessions.set_status_card(host, name, {
+                "goal": goal,
+                "plan": ["Understand the request", "Complete and validate the work"],
+                "update": "Request received; work started.",
+            })
 
     async def _dot_send_to_bart(
         self, msg: dict[str, Any], auth: dict[str, Any], *, composite_stream_id: str,

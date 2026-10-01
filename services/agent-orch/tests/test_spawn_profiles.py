@@ -100,6 +100,16 @@ def test_all_codex_models_are_spawnable_at_max_effort() -> None:
         assert (revalidated["model"], revalidated["effort"]) == (model, "max")
 
 
+def test_interactive_catalog_advertises_only_currently_available_models() -> None:
+    available = catalog()["available_models"]
+    assert tuple(available["claude"]) == ("claude-opus-4-8",)
+    assert tuple(available["codex"]) == (
+        "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna",
+    )
+    assert "claude-fable-5-1" not in available["claude"]
+    assert "gpt-6-luna" not in available["codex"]
+
+
 def test_astra_is_cataloged_with_effort_ladder_and_policy_defaults() -> None:
     astra = catalog()["models"]["codex"]["gpt-6-astra"]
     assert astra == {
@@ -108,7 +118,7 @@ def test_astra_is_cataloged_with_effort_ladder_and_policy_defaults() -> None:
     }
     for profile in ("agent_orch", "desktop_manual"):
         request = resolve_spawn(provider="codex", spawn_profile=profile)
-        assert (request["model"], request["effort"]) == ("gpt-6-luna", "max")
+        assert (request["model"], request["effort"]) == ("gpt-5.6-luna", "max")
 
 
 def test_astra_alias_resolves_to_canonical_model() -> None:
@@ -130,11 +140,11 @@ def test_profiles_derive_same_provider_default_and_legacy_fallback() -> None:
     for profile in ("agent_orch", "desktop_manual"):
         request = resolve_spawn(provider="codex", spawn_profile=profile)
         assert (request["model"], request["effort"], request["resolution_source"]) == (
-            "gpt-6-luna", "max", "profile_default",
+            "gpt-5.6-luna", "max", "profile_default",
         )
     legacy = resolve_spawn(provider="codex", legacy=True)
     assert (legacy["model"], legacy["effort"], legacy["resolution_source"]) == (
-        "gpt-6-luna", "max", "legacy_server_fallback",
+        "gpt-5.6-luna", "max", "legacy_server_fallback",
     )
     for profile in ("agent_orch", "desktop_manual"):
         request = resolve_spawn(provider="claude", spawn_profile=profile)
@@ -143,9 +153,9 @@ def test_profiles_derive_same_provider_default_and_legacy_fallback() -> None:
 
 def test_codex_partial_explicit_overrides_are_pinned_for_both_profiles() -> None:
     cases = (
-        (None, None, "gpt-6-luna", "max", "profile_default"),
+        (None, None, "gpt-5.6-luna", "max", "profile_default"),
         ("sol", None, "gpt-6.1-sol", "max", "explicit_override"),
-        (None, "high", "gpt-6-luna", "high", "explicit_override"),
+        (None, "high", "gpt-5.6-luna", "high", "explicit_override"),
         ("sol", "high", "gpt-6.1-sol", "high", "explicit_override"),
     )
     for profile in ("agent_orch", "desktop_manual"):
@@ -187,7 +197,7 @@ def test_host_override_and_policy_readback_share_one_config(monkeypatch, tmp_pat
     spawn_profiles.load_spawn_config.cache_clear()
     try:
         assert (resolve_spawn(provider="codex", host="hostc")["model"], resolve_spawn(provider="codex", host="hostc")["effort"]) == ("gpt-5.6-terra", "max")
-        assert resolve_spawn(provider="codex", host="hosta")["model"] == "gpt-6-luna"
+        assert resolve_spawn(provider="codex", host="hosta")["model"] == "gpt-5.6-luna"
         assert validate_v2(
             provider="codex", spawn_profile="agent_orch", schema="SpawnRequestV2",
             model="gpt-5.6-terra", effort="max", catalog_version="spawn-catalog-v2",

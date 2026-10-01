@@ -1,9 +1,10 @@
-"""Contract + unit tests for the public Codex weekly-usage probe.
+"""Contract + unit tests for the public Codex account-usage probe.
 
 The probe drives ``codex app-server`` (stdio JSON-RPC) and emits the canonical
 wire object the v2 usage collector consumes. These tests pin: the collector
-actually invokes a shipped ``scripts/check_codex_usage.py``; the weekly window
-is classified by duration (fail-closed on ambiguity); the wire shape matches
+actually invokes a shipped ``scripts/check_codex_usage.py``; weekly windows are
+classified by duration (fail-closed on ambiguity), current business-account
+individual limits are supported; the wire shape matches
 ``usage_collector._CODEX_USAGE_FIELDS``; and the source carries no private/user
 residue (hardcoded Homebrew path, Homebrew PATH injection, or a hardcoded TZ).
 """
@@ -64,6 +65,10 @@ def _weekly(pct, resets_at, *, duration=10080):
     return {"usedPercent": pct, "resetsAt": resets_at, "windowDurationMins": duration}
 
 
+def _individual(remaining_pct, resets_at):
+    return {"limit": "25000", "used": "250", "remainingPercent": remaining_pct, "resetsAt": resets_at}
+
+
 # ---- Collector contract -----------------------------------------------------
 
 def test_collector_invokes_a_shipped_codex_script(monkeypatch, tmp_path):
@@ -86,6 +91,25 @@ def test_collector_invokes_a_shipped_codex_script(monkeypatch, tmp_path):
     assert script.name == "check_codex_usage.py"
     assert script.is_file(), f"collector wires a missing script: {script}"
     assert "--json" in codex_command
+
+
+def test_collector_can_skip_claude_without_skipping_codex(monkeypatch, tmp_path):
+    """A Codex-only install must preserve Claude state without a failing probe."""
+    import collect_usage_state
+
+    seen: dict = {}
+
+    class _Collector:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def run_once(self):
+            pass
+
+    monkeypatch.setattr(collect_usage_state, "UsageStateCollector", _Collector)
+    collect_usage_state.main(["--state", str(tmp_path / "state.json"), "--skip-claude"])
+    assert "no_update" in seen["claude_command"][-1]
+    assert Path(seen["codex_command"][1]).name == "check_codex_usage.py"
 
 
 def test_json_payload_keys_match_the_collector_contract():
@@ -115,6 +139,32 @@ def test_weekly_window_is_classified_by_duration_not_position():
 def test_missing_weekly_window_is_a_valid_all_null_observation():
     parsed = probe._parse_rate_limits({"rateLimits": {"primary": _weekly(80, 1, duration=300)}})
     assert parsed == {"pct": None, "resets_at_iso": None, "resets_text": None}
+
+
+def test_individual_limit_is_used_when_weekly_windows_are_absent():
+    parsed = probe._parse_rate_limits({"rateLimits": {
+        "primary": None,
+        "secondary": None,
+        "individualLimit": _individual(99, 1_793_491_200),
+    }})
+    assert parsed["pct"] == 1
+    assert parsed["resets_at_iso"] == "2026-11-01T00:00:00Z"
+
+
+def test_weekly_window_takes_precedence_over_individual_limit():
+    parsed = probe._parse_rate_limits({"rateLimits": {
+        "secondary": _weekly(37, 1_789_628_400),
+        "individualLimit": _individual(99, 1_793_491_200),
+    }})
+    assert parsed["pct"] == 37
+
+
+@pytest.mark.parametrize("bad", [-1, 101, True, float("inf"), "99", [], {}])
+def test_individual_limit_rejects_invalid_remaining_percent(bad):
+    with pytest.raises(ValueError):
+        probe._parse_rate_limits({"rateLimits": {
+            "individualLimit": _individual(bad, 1_793_491_200),
+        }})
 
 
 def test_two_weekly_windows_fail_closed():

@@ -4,8 +4,8 @@
 Recent Codex releases removed the ``/status`` command, so screen-scraping no
 longer works. Instead we spawn ``codex app-server`` (stdio JSON-RPC), complete
 the initialize handshake, and call ``account/rateLimits/read`` for structured
-rate-limit data, emitting the single weekly Codex limit consumed by the usage
-collector.
+rate-limit data. Weekly windows are preferred when present; business accounts
+that expose only ``individualLimit`` use that account-period quota instead.
 
 Usage:
     python3 check_codex_usage.py          # human-readable
@@ -136,11 +136,14 @@ def _read_response(proc, expect_id, timeout=RPC_TIMEOUT) -> dict:
 
 
 def _parse_rate_limits(result: dict, *, tz: tzinfo | None = None) -> dict:
-    """Return the unique weekly limit from an app-server response.
+    """Return the best account limit from an app-server response.
 
     ``primary`` and ``secondary`` are classified by duration, not position. A
-    missing weekly window is a valid all-null observation; two weekly windows are
-    ambiguous and fail closed.
+    unique weekly window remains authoritative. Business accounts may instead
+    return ``primary``/``secondary`` as null and provide ``individualLimit``;
+    its remaining percentage is converted to the used percentage expected by
+    the Pentacle limits contract. Two weekly windows are ambiguous and fail
+    closed.
     """
     if not isinstance(result, dict):
         raise ValueError("rateLimits result must be a mapping")
@@ -164,10 +167,27 @@ def _parse_rate_limits(result: dict, *, tz: tzinfo | None = None) -> dict:
         ):
             weekly.append(candidate)
 
-    if not weekly:
-        return {"pct": None, "resets_at_iso": None, "resets_text": None}
     if len(weekly) != 1:
-        raise ValueError("expected exactly one weekly rate-limit candidate")
+        if weekly:
+            raise ValueError("expected exactly one weekly rate-limit candidate")
+        individual = rate_limits.get("individualLimit")
+        if individual is None:
+            return {"pct": None, "resets_at_iso": None, "resets_text": None}
+        if not isinstance(individual, dict):
+            raise ValueError("individualLimit must be a mapping")
+        if "remainingPercent" not in individual:
+            raise ValueError("individual remainingPercent is required")
+        remaining_pct = _pct(individual["remainingPercent"])
+        if remaining_pct is None:
+            return {"pct": None, "resets_at_iso": None, "resets_text": None}
+        if "resetsAt" not in individual:
+            raise ValueError("individual resetsAt is required for numeric remainingPercent")
+        resets_at_iso, resets_text = _fmt_reset(individual["resetsAt"], tz=tz)
+        return {
+            "pct": 100 - remaining_pct,
+            "resets_at_iso": resets_at_iso,
+            "resets_text": resets_text,
+        }
 
     candidate = weekly[0]
     if "usedPercent" not in candidate:

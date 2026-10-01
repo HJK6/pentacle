@@ -105,6 +105,32 @@ test('usage footer renders all three percent cards and ignores health presentati
   assert.doesNotMatch(footer.innerHTML, /As of:|Last attempt:|fresh|stale|error|Upstream|Probed|usage-freshness|aria-label/i);
 });
 
+test('usage footer omits the optional Fable card when no Fable quota is reported', () => {
+  const app = read('renderer/app.js');
+  const paintStart = app.indexOf('function paintLimits(limits)');
+  const renderStart = app.indexOf('function renderLimits(limits, health)', paintStart);
+  const footerSource = app.slice(paintStart, renderStart);
+  const footer = { innerHTML: '' };
+  const usageSection = { style: {} };
+  const paintLimits = vm.runInNewContext(`(${footerSource.trim()})`, {
+    document: { getElementById(id) { return id === 'usage-section' ? usageSection : footer; } },
+    esc: String,
+    usageBarClass() { return 'usage-bar-fill-normal'; },
+    usageResetText: String,
+  });
+
+  paintLimits([
+    { id: 'claude', label: 'Claude', pct: 24, resets_text: 'Nov 1' },
+    { id: 'fable', label: 'Fable', pct: null, resets_text: null },
+    { id: 'codex', label: 'Codex', pct: 1, resets_text: 'Nov 1' },
+  ]);
+
+  assert.equal((footer.innerHTML.match(/class="usage-compact-item"/g) || []).length, 2);
+  assert.match(footer.innerHTML, /data-limit-id="claude"/);
+  assert.match(footer.innerHTML, /data-limit-id="codex"/);
+  assert.doesNotMatch(footer.innerHTML, /data-limit-id="fable"/);
+});
+
 test('limits health is validated and shown as text without a polling timer', () => {
   const app = read('renderer/app.js');
 
@@ -229,4 +255,3 @@ test('machine stats chrome projects the daemon fleet without a local collector t
   assert.match(css, /#machine-stats-section \.sidebar-section-body[\s\S]*padding: 0 12px 9px/);
   assert.match(css, /\.machine-stat-card[\s\S]*margin-top: 4px/);
 });
-

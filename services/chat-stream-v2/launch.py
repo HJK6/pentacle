@@ -70,6 +70,18 @@ CODEX_OPERATOR_QUESTION_INSTRUCTION = (
     "or elapsed time as approval."
 )
 
+# Visible, top-level seats are the operator's durable work surface. The idle
+# nudge remains a recovery mechanism, but it deliberately does not interrupt a
+# working provider. Injecting this launch contract prevents a busy new chat
+# from remaining untitled and without a status card indefinitely.
+VISIBLE_SESSION_METADATA_INSTRUCTION = (
+    "Pentacle visible-session setup: after the first substantive operator request "
+    "and before extended work, run `agent-orch title` with a concise durable goal "
+    "and `agent-orch status` with the goal, plan, and current update. Refresh the "
+    "status card at material milestones. Execute these commands; do not merely "
+    "describe them."
+)
+
 # The marker is deliberately stable: spawnctl uses it to distinguish a real
 # tuple launch, which can use Codex's positional initial prompt, from an
 # explicit command (usually a test/smoke stub) whose input contract is unknown.
@@ -394,6 +406,7 @@ def _claude_command(
     machine: LocalMachine, tmux_session: str, session_id: str,
     stream_token_file: str,
     *, launch_model: str | None, launch_effort: str | None,
+    operator_facing: bool = False,
     resume: bool = False,
     resume_cwd: str | None = None,
 ) -> str:
@@ -404,6 +417,10 @@ def _claude_command(
     claude_bin = _resolve_local_executable(_shell_executable(machine.claude_bin))
     model_flag = f"--model {shlex.quote(launch_model)} " if launch_model else ""
     effort_flag = f"--effort {shlex.quote(launch_effort)} " if launch_effort else ""
+    metadata_flag = (
+        f"--append-system-prompt {shlex.quote(VISIBLE_SESSION_METADATA_INSTRUCTION)} "
+        if operator_facing else ""
+    )
     identity_flag = "--resume" if resume else "--session-id"
     return (
         f"cd {shlex.quote(resume_cwd or machine.cwd)} && "
@@ -413,13 +430,14 @@ def _claude_command(
         f"--dangerously-skip-permissions "
         f"--permission-mode bypassPermissions "
         f"--disallowed-tools {CLAUDE_DISALLOWED_TOOLS} "
-        f"{model_flag}{effort_flag}{identity_flag} {shlex.quote(session_id)}"
+        f"{model_flag}{effort_flag}{metadata_flag}{identity_flag} {shlex.quote(session_id)}"
     )
 
 
 def _codex_command(
     machine: LocalMachine, tmux_session: str, stream_token_file: str,
     *, launch_model: str | None, launch_effort: str | None,
+    operator_facing: bool = False,
     initial_prompt_file: str | None = None,
 ) -> str:
     """The codex launch shell command (v1 codex_provider.py:_codex_launch_prefix).
@@ -462,12 +480,15 @@ def _codex_command(
             continue
         stripped.append(arg)
     args = stripped
-    if CODEX_OPERATOR_QUESTION_INSTRUCTION in existing:
-        merged = existing
-    elif existing:
-        merged = f"{existing}\n\n{CODEX_OPERATOR_QUESTION_INSTRUCTION}"
-    else:
-        merged = CODEX_OPERATOR_QUESTION_INSTRUCTION
+    required_instructions = [CODEX_OPERATOR_QUESTION_INSTRUCTION]
+    if operator_facing:
+        required_instructions.append(VISIBLE_SESSION_METADATA_INSTRUCTION)
+    merged_parts = [existing] if existing else []
+    merged_parts.extend(
+        instruction for instruction in required_instructions
+        if instruction not in existing
+    )
+    merged = "\n\n".join(merged_parts)
     args.extend(["-c", f"developer_instructions={merged}"])
     argv = " ".join(shlex.quote(part) for part in [executable, *args])
     env_prefix = f"{stream_env_assignments(machine, tmux_session, stream_token_file)} "
@@ -519,6 +540,7 @@ def build_launch(
     tmux_session: str,
     launch_model: str | None,
     launch_effort: str | None,
+    operator_facing: bool = False,
     initial_prompt_file: str | None = None,
     resume_session_id: str | None = None,
     resume_jsonl_path: str | None = None,
@@ -536,6 +558,7 @@ def build_launch(
         command = _claude_command(
             machine, tmux_session, session_id, stream_token_file,
             launch_model=launch_model, launch_effort=launch_effort,
+            operator_facing=operator_facing,
             resume=resume_session_id is not None,
             resume_cwd=resume_cwd,
         )
@@ -557,6 +580,7 @@ def build_launch(
         command = _codex_command(
             machine, tmux_session, stream_token_file,
             launch_model=launch_model, launch_effort=launch_effort,
+            operator_facing=operator_facing,
             initial_prompt_file=initial_prompt_file,
         )
         return LaunchPlan(

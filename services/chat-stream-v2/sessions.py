@@ -1167,7 +1167,10 @@ class Sessions:
             # The card contract promises restart survival; never ack a write
             # that did not reach the sessions row (v1 parity).
             raise VerbError("unknown_session", "session has no persisted row")
-        return self._cache(row)
+        updated = self._cache(row)
+        if emit_if_changed := getattr(self._inventory_emitter, "emit_if_changed", None):
+            await emit_if_changed(immediate=True)
+        return updated
 
     async def mark_closed(
         self,

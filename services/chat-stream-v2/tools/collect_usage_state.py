@@ -24,10 +24,12 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(__file__).resolve().parents[3] / "scripts",
     )
     parser.add_argument("--skip-codex", action="store_true", help="collect only Claude; preserve prior Codex state without probing")
+    parser.add_argument("--skip-claude", action="store_true", help="collect only Codex; preserve prior Claude/Fable state without probing")
     args = parser.parse_args(argv)
     UsageStateCollector(
         state_path=args.state,
-        claude_command=(sys.executable, str(args.shared_scripts / "check_claude_usage.py"), "--local-fallback", "--json"),
+        claude_command=((sys.executable, "-c", 'print(\'{"status":"no_update"}\')') if args.skip_claude
+                        else (sys.executable, str(args.shared_scripts / "check_claude_usage.py"), "--local-fallback", "--json")),
         codex_command=((sys.executable, "-c", 'print(\'{"status":"no_update"}\')') if args.skip_codex
                        else (sys.executable, str(args.shared_scripts / "check_codex_usage.py"), "--json")),
     ).run_once()

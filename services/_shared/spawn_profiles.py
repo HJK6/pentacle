@@ -50,6 +50,15 @@ MODELS = {
         "gpt-6-astra": {"aliases": ("gpt-6-astra", "astra"), "efforts": ("low", "medium", "high", "xhigh", "max")},
     },
 }
+# Models advertised to interactive New Chat clients on the currently supported
+# public provider accounts. The full MODELS map remains accepted for existing
+# sessions, explicit compatibility launches, and handoffs; clients use this
+# narrower set so retired or not-yet-enabled tuples are not offered as if they
+# were launchable.
+AVAILABLE_MODEL_IDS = {
+    "claude": ("claude-opus-4-8",),
+    "codex": ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"),
+}
 # Ids the daemon knows a context window for (see chat-stream context_thresholds)
 # but that we deliberately do NOT expose as spawn targets: superseded generations
 # you would never launch a fresh lane on. Every such id must be listed here so the
@@ -402,6 +411,10 @@ def catalog() -> dict:
             "profiles": config.get("profiles", {}),
         },
         "models": MODELS,
+        "available_models": {
+            provider: {model: MODELS[provider][model] for model in model_ids}
+            for provider, model_ids in AVAILABLE_MODEL_IDS.items()
+        },
     }
 
 

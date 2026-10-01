@@ -18,6 +18,58 @@ def test_weekly_labels_do_not_confuse_session_or_other_model_limits():
     assert probe.parse_weekly_usage("Current week (all models)\n101% used") is None
 
 
+def test_monthly_all_models_label_populates_the_account_period_row():
+    value = probe.parse_weekly_usage(
+        "Current session\n3% used\nCurrent month (all models)\n24% used\nResets Nov 1\n"
+    )
+    assert value == {
+        "week_all_pct": 24,
+        "week_all_resets": "Nov 1",
+        "week_fable_pct": None,
+        "week_fable_resets": None,
+    }
+
+
+def test_enterprise_monthly_spend_populates_the_account_period_row():
+    assert probe.parse_oauth_usage({"spend": {"enabled": True, "percent": 24}}) == {
+        "week_all_pct": 24,
+        "week_all_resets": None,
+        "week_fable_pct": None,
+        "week_fable_resets": None,
+    }
+
+
+@pytest.mark.parametrize("spend", [
+    None,
+    {"enabled": False, "percent": 24},
+    {"enabled": True, "percent": True},
+    {"enabled": True, "percent": 1.5},
+    {"enabled": True, "percent": 101},
+])
+def test_enterprise_monthly_spend_rejects_non_limits(spend):
+    assert probe.parse_oauth_usage({"spend": spend}) is None
+
+
+def test_environment_oauth_token_precedes_keychain(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", " protected-token ")
+    assert probe.oauth_token(run=lambda *args, **kwargs: pytest.fail("keychain read")) == "protected-token"
+
+
+def test_macos_oauth_token_uses_claude_code_keychain(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(probe.sys, "platform", "darwin")
+    monkeypatch.setattr(probe.shutil, "which", lambda executable: "/usr/bin/security")
+
+    def run(command, **kwargs):
+        assert command[-1] == "Claude Code-credentials"
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"claudeAiOauth":{"accessToken":"secure-value"}}',
+        )
+
+    assert probe.oauth_token(run=run) == "secure-value"
+
+
 def test_only_explicit_weekly_fable_label_populates_fable():
     value = probe.parse_weekly_usage("Current week (all models)\n0% used\nCurrent week (Fable)\n20% used\nResets Friday")
     assert value["week_all_pct"] == 0

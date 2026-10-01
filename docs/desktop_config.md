@@ -262,10 +262,15 @@ must retain the last published pair. This allows startup, live failure,
 handshake buffering and healthy refresh to follow the same contract.
 
 The collector fills these rows by running one shared probe per provider under
-`scripts/`: `check_claude_usage.py` drives the Claude CLI `/usage` screen for
-the weekly Claude/Fable rows, and `check_codex_usage.py` drives `codex
-app-server` (stdio JSON-RPC `account/rateLimits/read`) for the weekly Codex
-row, selecting the window whose `windowDurationMins` is at least a week. The
+`scripts/`: `check_claude_usage.py` reads Enterprise monthly usage through the
+authenticated Claude OAuth endpoint (reusing Claude Code's macOS Keychain item,
+or `CLAUDE_CODE_OAUTH_TOKEN` from a protected environment) and falls back to the
+Claude CLI `/usage` screen for labeled monthly or weekly accounts. The optional
+Fable row is hidden by clients when unreported. `check_codex_usage.py` drives `codex
+app-server` (stdio JSON-RPC `account/rateLimits/read`) for the Codex row. It
+prefers the window whose `windowDurationMins` is at least a week; business
+accounts that expose only `individualLimit` use that account-period quota,
+converting `remainingPercent` to the used percentage shown in Pentacle. The
 Claude probe binary comes from `PENTACLE_USAGE_CLAUDE_BIN` (the deploy sets it to
 the Claude shim); the Codex binary is found on `PATH` (the collector's launchd
 PATH includes the Codex install dir), so Codex adds no dedicated knob. Codex

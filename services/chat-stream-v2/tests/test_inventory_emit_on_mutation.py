@@ -163,6 +163,28 @@ def test_set_visibility_emits_inventory_immediately() -> None:
     asyncio.run(run())
 
 
+def test_set_status_card_emits_inventory_immediately() -> None:
+    async def run() -> None:
+        store, sessions, frames = await _registry()
+        try:
+            await sessions.open(HOST, "status-card", visibility="visible")
+            await _prime(sessions)
+            await sessions.set_status_card(
+                HOST,
+                "status-card",
+                {"goal": "Ship the fix", "plan": ["Implement", "Validate"], "active_index": 1},
+            )
+            card = frames[0]["sessions"][0]["status_card"]
+            assert card["goal"] == "Ship the fix"
+            assert [step["text"] for step in card["plan"]] == ["Implement", "Validate"]
+            assert [step["status"] for step in card["plan"]] == ["active", "pending"]
+            await _one_immediate_frame(sessions, frames)
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
 def test_reparent_emits_inventory_immediately() -> None:
     async def run() -> None:
         store, sessions, frames = await _registry()

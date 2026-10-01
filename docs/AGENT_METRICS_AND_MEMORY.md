@@ -7,9 +7,15 @@ configuration outside the public repositories; the human READMEs stay brief.
 ## Claude account limits
 
 The daemon publishes a local state file; it does not query provider accounts.
-The included `scripts/check_claude_usage.py` reads **weekly percentage used**
-from the authenticated Claude CLI's `/usage` UI. This is account quota, not
-session cost, API spend or requests per minute. It does not change the quota.
+The included `scripts/check_claude_usage.py` reads the **account-period
+percentage used** from Claude OAuth. On macOS it reuses Claude Code's standard
+`Claude Code-credentials` Keychain item without printing or copying the token;
+on other platforms set `CLAUDE_CODE_OAUTH_TOKEN` in the collector's protected
+environment. Enterprise monthly `spend.percent` is preferred. The authenticated
+CLI `/usage` screen remains a fallback for labeled monthly and older weekly
+accounts. This is account quota, not session cost or requests per minute. It
+does not change the quota. The Fable row is optional and the client hides it
+when no Fable quota is reported.
 
 1. As the same OS user that will run the collector, verify Claude login and
    complete the trust prompt **in the exact directory you will pass as
@@ -29,15 +35,19 @@ session cost, API spend or requests per minute. It does not change the quota.
    switching Claude accounts.
 
    Set `PENTACLE_USAGE_CLAUDE_BIN` and `PENTACLE_USAGE_TMUX_BIN` to absolute paths
-   if the service PATH needs them. The bounded probe opens its own tmux server,
-   sends only `/usage` and closes that server. It never accepts trust/login
-   prompts or sends a model prompt. No private browser service or OAuth-token
-   extraction is needed.
-2. Verify `week_all_pct` and `week_all_resets` against the labeled account-week
-   observation. Optional `week_fable_pct`/`week_fable_resets` remain `null` unless
-   explicitly reported. Never substitute Sonnet, session usage or zero for an
-   unknown pool.
-3. Write `usage_state.json` **beside the daemon's actual persistent DB**. For the
+   if the service PATH needs them. If OAuth does not expose a supported account
+   period, the bounded fallback opens its own tmux server, sends only `/usage`
+   and closes that server. It never accepts trust/login prompts or sends a model
+   prompt. No private browser service is needed. On managed networks, also set
+   `SSL_CERT_FILE` to the organization's trusted CA bundle in the collector
+   environment.
+2. Verify `week_all_pct` and `week_all_resets` against the labeled account-period
+   observation. The legacy wire-field names remain stable for compatibility.
+   Optional `week_fable_pct`/`week_fable_resets` remain `null` unless explicitly
+   reported. Never substitute Sonnet, session usage or zero for an unknown pool.
+3. Write `usage_state.json` **beside the daemon's actual persistent DB**. The
+   Codex probe prefers a weekly window and also supports the account-period
+   `individualLimit` returned by current business accounts. For the
    base README's `~/.config/pentacle/sessions.db`:
 
    ```sh
@@ -50,6 +60,10 @@ session cost, API spend or requests per minute. It does not change the quota.
    it preserves unknown/previous Codex state. A Codex account probe is a separate
    optional integration. Keep the usage publisher enabled; do not pass
    `--disable-usage-state-publisher` to the daemon.
+
+   For a Codex-only installation, omit `--skip-codex` and pass `--skip-claude`.
+   This preserves unknown/previous Claude and Fable state without requiring a
+   Claude login or trusted Claude workspace.
 4. Install one user-owned scheduled job running that exact command every five
    minutes, with absolute paths and explicit PATH, HOME and
    `PENTACLE_USAGE_CWD`. Use a macOS LaunchAgent with `RunAtLoad=true` and

@@ -67,7 +67,14 @@ npm run build:web
 PENTACLE_CONFIG="$HOME/.config/pentacle/pentacle.config.js" node server --port 7795
 ```
 
-Use **New Chat**, select `local`, then the provider/model. Sessions open in terminal view. A disconnected daemon produces an error and creates no synthetic session. Keep the daemon running while using the web client or mobile.
+Use **New Chat**, select `local`, then the provider/model. The picker uses the
+catalog's `available_models` projection, while the daemon retains its broader
+compatibility catalog for existing sessions and explicit handoffs. Sessions
+open in terminal view. A disconnected daemon produces an error and creates no
+synthetic session. Keep the daemon running while using the web client or mobile.
+On the first landed operator turn, a visible top-level session receives a
+provisional durable title and status card; the provider may replace that
+summary, and later status changes publish to Web immediately.
 
 To try the unfinished structured view, enable **Chat UI (experimental)** in Settings and reload, or set `features.chatUi: true` in your private config. Fresh installs default to `false`; an existing saved opt-in is preserved. Keep it off for normal use.
 

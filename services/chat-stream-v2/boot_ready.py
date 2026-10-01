@@ -71,8 +71,26 @@ def claude_prompt_ready(pane_text: str) -> bool:
     # A booted Claude TUI in bypass mode persistently renders the
     # permission-mode footer and an input caret; the welcome banner scrolls
     # off and newer TUIs omit it, so it must not be required (earlier fix note).
-    # The trust dialog shows neither an accepted footer nor a usable caret.
-    return "⏵⏵ bypass permissions" in pane_text and "❯" in pane_text
+    # Managed installations may forbid bypass mode. Claude then renders an
+    # explicit policy warning plus the normal manual-mode composer. That is a
+    # usable chat surface (individual tool approvals remain provider-owned),
+    # not a boot failure. The trust/login dialogs remain excluded.
+    lowered = pane_text.casefold()
+    if any(marker in lowered for marker in (
+        "quick safety check:",
+        "do you trust this folder",
+        "sign in to continue",
+        "log in to continue",
+    )):
+        return False
+    if "⏵⏵ bypass permissions" in pane_text and "❯" in pane_text:
+        return True
+    managed_manual = (
+        "bypass permissions mode was disabled by settings" in lowered
+        and "claude code" in lowered
+        and any(line.strip() == "❯" for line in pane_text.splitlines())
+    )
+    return managed_manual
 
 
 def claude_composer_empty(pane_text: str) -> bool:
@@ -90,7 +108,7 @@ def claude_composer_empty(pane_text: str) -> bool:
         content = line.strip()
         if not content or set(content) == {"─"}:
             continue
-        if content.startswith("⏵⏵ bypass permissions"):
+        if content.startswith(("⏵⏵ bypass permissions", "⏸ manual mode on")):
             continue
         return False
     return True
@@ -284,7 +302,7 @@ def claude_command_exactly_in_active_draft(pane_text: str, command: str) -> bool
         content = line.strip()
         if not content or set(content) == {"─"}:
             continue
-        if content.startswith("⏵⏵ bypass permissions"):
+        if content.startswith(("⏵⏵ bypass permissions", "⏸ manual mode on")):
             break
         if content.startswith(("✻ ", "✶ ", "✳ ", "⏺ ", "⎿ ", "● ")):
             return False
