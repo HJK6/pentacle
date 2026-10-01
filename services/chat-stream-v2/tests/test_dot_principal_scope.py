@@ -164,7 +164,7 @@ def test_dot_list_projection_is_metadata_only():
         row = {
             "stream_id": "thoth:v2-worker", "host": "thoth", "session_name": "v2-worker",
             "visibility": "default", "role": "lead", "phase": "qa", "working": True,
-            "working_label": "Working", "last_event_at": "2026-09-30T00:00:00Z",
+            "last_event_at": "2026-09-30T00:00:00Z",
             "last_kind": "ASSIST_TEXT", "provider": "claude",
             "objective": "OBJECTIVE free text", "status_card": {"goal": "ship"},
             "display_name": "Nice Title",
