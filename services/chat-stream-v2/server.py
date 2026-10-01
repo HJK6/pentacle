@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import socket
+import ssl
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -94,6 +95,60 @@ SYSTEM_NOTIFICATION_DEDUP_RE = re.compile(
     r"|infra-census\|[A-Za-z][-A-Za-z0-9]{0,127})"
     r"\|([0-9]{4}-[0-9]{2}-[0-9]{2})$"
 )
+
+# -- External scoped principal ("Dot") ---------------------------------------
+# A least-privilege, revocable, read-mostly outside agent. It is an ordinary
+# per-RPC-revalidated seat (so a seat close/revoke drops it live), restricted to
+# a tiny verb allowlist and keyed into the scope by durable config membership.
+# It is authorized ONLY over a daemon-terminated TLS connection, so its token is
+# refused over plain ws (see `_handle_tls_client`/`transport_tls`).
+#: Comma-separated stream ids that receive the Dot scope (env; constructor param
+#: overrides for tests). Changing the set is a deploy-window action; live
+#: revocation uses the seat token lifecycle, not this set.
+DOT_PRINCIPAL_STREAM_IDS_ENV = "PENTACLE_DOT_PRINCIPAL_STREAM_IDS"
+DOT_TLS_PORT_ENV = "PENTACLE_DOT_TLS_PORT"
+DOT_TLS_CERT_ENV = "PENTACLE_DOT_TLS_CERT"
+DOT_TLS_KEY_ENV = "PENTACLE_DOT_TLS_KEY"
+DOT_TLS_BINDS_ENV = "PENTACLE_DOT_TLS_BINDS"
+#: v1 un-defer (operator b3e1c657, parent ruling f4e6c3cf): the read view is
+#: DISABLED by default. This env toggle (default off) re-enables the single
+#: projected read verb (`list_sessions`) + the projected inventory broadcast; it
+#: is a deploy-window (restart) action and a new grant is required to turn it on.
+DOT_READ_ENABLED_ENV = "PENTACLE_DOT_READ_ENABLED"
+#: Default-deny verb allowlist for a Dot principal. `ping`/`hello` are the
+#: protocol handshake; `send` is constrained to the assistant composite in
+#: `_on_send`. `list_sessions` is the (projected) read, reachable ONLY when the
+#: read toggle is on (see `Server.dot_read_enabled` / `_dot_allowed_verbs`).
+#: Every other registered handler denies with `dot_scope_denied`.
+DOT_BASE_ALLOWED_VERBS = frozenset({"ping", "hello", "send"})
+DOT_READ_VERBS = frozenset({"list_sessions"})
+#: The full potential surface (read enabled). Membership tests for the effective
+#: surface use `Server._dot_allowed_verbs`, which excludes the read verbs when
+#: the toggle is off.
+DOT_ALLOWED_VERBS = DOT_BASE_ALLOWED_VERBS | DOT_READ_VERBS
+#: The ONLY session fields a Dot principal may read. Split into pure metadata
+#: and free-text descriptive labels; the latter can carry operator content and
+#: are the enumerated egress surface accepted at activation. Content/transcript
+#: fields (last_text, draft, question, preview, pending_peer_messages, usage
+#: internals, agents, assistant_activity, ...) are never included.
+DOT_METADATA_FIELDS = frozenset({
+    "stream_id", "host", "session_name", "role", "role_source", "phase",
+    "spec_id", "spec_ids", "working", "turn_state",
+    "turn_state_since", "parent_stream_id", "handoff_from_stream_id",
+    "online", "pending", "visibility", "provider", "model", "effort",
+    "effective_model", "effective_effort", "last_event_at", "last_kind",
+    "session_generation", "bootstrap_state", "state", "host_status",
+    "host_status_reason", "host_status_since",
+})
+#: Human-authored / title-bearing fields that can carry operator content and so
+#: egress to Dot's cloud path. `working_label` is here (not metadata) because the
+#: composite builds it as "Waiting for {title}" (assistant_composite.project_session).
+DOT_FREETEXT_FIELDS = frozenset({
+    "display_name", "objective", "objective_source", "status_card", "working_label",
+})
+DOT_LIST_FIELDS = DOT_METADATA_FIELDS | DOT_FREETEXT_FIELDS
+DOT_REQUIRES_TLS_CODE = "external_requires_tls"
+DOT_SCOPE_DENIED_CODE = "dot_scope_denied"
 
 #: WS frame ceiling. Blob transport sends a 1 MiB *decoded* chunk, which is
 #: ~1.37 MiB once base64-wrapped in a JSON envelope — over the websockets 1 MiB
@@ -320,6 +375,12 @@ class Server:
         hosts: Any = None,
         reconciler: Any = None,
         token_telemetry: SeatTokenTelemetry | None = None,
+        dot_principal_stream_ids: Any = None,
+        dot_tls_port: int | None = None,
+        dot_tls_cert: str | None = None,
+        dot_tls_key: str | None = None,
+        dot_tls_binds: list[str] | None = None,
+        dot_read_enabled: bool | None = None,
     ) -> None:
         #: Interfaces to bind (v1 parity: Tailscale IP + 127.0.0.1). `--host`
         #: stays a single-bind alias; `--bind` (repeatable) lists all interfaces.
@@ -421,6 +482,67 @@ class Server:
         # The sole non-seat service principal is connection-bound after its
         # exact hello proof. It never enters the seat-token maps above.
         self._client_system_producers: dict[Any, str] = {}
+        # -- External scoped ("Dot") principal + its TLS transport -----------
+        # Membership set (durable config): which verified seat ids get the Dot
+        # scope. Env is the deploy-time source; the constructor param overrides
+        # it for tests. Live revocation uses the seat token lifecycle.
+        if dot_principal_stream_ids is None:
+            dot_principal_stream_ids = [
+                part.strip()
+                for part in str(os.environ.get(DOT_PRINCIPAL_STREAM_IDS_ENV) or "").split(",")
+                if part.strip()
+            ]
+        self.dot_principal_stream_ids: frozenset[str] = frozenset(
+            s for s in dot_principal_stream_ids if s
+        )
+        # Daemon-terminated TLS listener. When a cert/key is configured the
+        # daemon binds a SECOND ws server with its own SSLContext; a connection
+        # it accepts is TLS by construction (a plain-ws client cannot complete
+        # the handshake), which is the ONLY source of `transport_tls`.
+        self.dot_tls_port: int = int(
+            dot_tls_port if dot_tls_port is not None
+            else (os.environ.get(DOT_TLS_PORT_ENV) or 0)
+        )
+        self.dot_tls_cert: str = str(
+            dot_tls_cert if dot_tls_cert is not None
+            else (os.environ.get(DOT_TLS_CERT_ENV) or "")
+        )
+        self.dot_tls_key: str = str(
+            dot_tls_key if dot_tls_key is not None
+            else (os.environ.get(DOT_TLS_KEY_ENV) or "")
+        )
+        if dot_tls_binds is None:
+            env_binds = [
+                part.strip()
+                for part in str(os.environ.get(DOT_TLS_BINDS_ENV) or "").split(",")
+                if part.strip()
+            ]
+            dot_tls_binds = env_binds or list(self.binds)
+        self.dot_tls_binds: list[str] = [b for b in dot_tls_binds if b] or list(self.binds)
+        # v1: the Dot read view (projected `list_sessions` + projected inventory
+        # broadcast) is DISABLED unless this toggle is explicitly on. The hello
+        # response and error-frame hardening below are unconditional and do NOT
+        # depend on this flag. Changing the flag is a restart action.
+        if dot_read_enabled is None:
+            dot_read_enabled = str(os.environ.get(DOT_READ_ENABLED_ENV) or "").strip().lower() in {
+                "1", "true", "yes", "on",
+            }
+        self.dot_read_enabled: bool = bool(dot_read_enabled)
+        #: Effective reachable verbs for a Dot principal this run. Read verbs are
+        #: included only when the read toggle is on; else they deny by default.
+        self._dot_allowed_verbs: frozenset[str] = (
+            DOT_BASE_ALLOWED_VERBS | DOT_READ_VERBS if self.dot_read_enabled
+            else DOT_BASE_ALLOWED_VERBS
+        )
+        self._tls_ws_server: Any = None
+        #: Connections accepted by the TLS listener. Membership == "this socket
+        #: terminated TLS in the daemon", the authenticated transport boundary.
+        self._tls_connections: set[Any] = set()
+        #: Connections that have EVER authenticated as a Dot principal. Sticky for
+        #: the connection's life so a revoked Dot (whose per-RPC dot_principal has
+        #: flipped false) cannot fall through the loopback exemption into local
+        #: access: the dispatch/broadcast gates key on this, not on the live flag.
+        self._client_dot_connections: set[Any] = set()
         #: Wire-provided client names are claims only. A UI principal enters this
         #: connection-local map only after an auth-v2 proof checks against the
         #: existing operator credential registry.
@@ -577,7 +699,47 @@ class Server:
             self.port = sock.getsockname()[1]
             break
         log.info("v2 bound host=%s port=%s", ",".join(self.binds), self.port)
+        await self._bind_tls_listener()
         return self.port
+
+    async def _bind_tls_listener(self) -> None:
+        """Bind the optional daemon-terminated TLS (wss) listener for external
+        scoped principals. Enablement hinges on a configured cert+key; the port
+        may be 0 to pick a free one (tests) while production pins a fixed port. A
+        client that reaches this listener necessarily completed a TLS handshake
+        with the daemon, which is the sole, non-spoofable source of
+        `transport_tls`."""
+        if not (self.dot_tls_cert and self.dot_tls_key):
+            return
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(certfile=self.dot_tls_cert, keyfile=self.dot_tls_key)
+        target: Any = self.dot_tls_binds if len(self.dot_tls_binds) > 1 else self.dot_tls_binds[0]
+        try:
+            self._tls_ws_server = await serve(
+                self._handle_tls_client, target, self.dot_tls_port,
+                ssl=ssl_context, max_size=WS_MAX_SIZE,
+            )
+        except OSError as exc:
+            # A failed TLS bind must not take the plain listener down; the daemon
+            # keeps serving the fleet, and the external path is simply absent.
+            log.error("v2 tls bind failed host=%s port=%s errno=%s",
+                      ",".join(self.dot_tls_binds), self.dot_tls_port, exc.errno)
+            self._tls_ws_server = None
+            return
+        bound_port = self.dot_tls_port
+        for sock in getattr(self._tls_ws_server, "sockets", None) or []:
+            bound_port = sock.getsockname()[1]
+            break
+        self.dot_tls_port = bound_port
+        log.info("v2 tls bound host=%s port=%s", ",".join(self.dot_tls_binds), bound_port)
+
+    async def _handle_tls_client(self, websocket: Any) -> None:
+        """TLS connections run the same handler, flagged as TLS for their life."""
+        self._tls_connections.add(websocket)
+        try:
+            await self._handle_client(websocket)
+        finally:
+            self._tls_connections.discard(websocket)
 
     async def serve_forever(self) -> None:
         assert self._ws_server is not None, "bind() must be called before serve_forever()"
@@ -601,6 +763,13 @@ class Server:
         for task in tuple(self._client_writer_tasks.values()):
             task.cancel()
         self._client_writer_tasks.clear()
+        if self._tls_ws_server is not None:
+            self._tls_ws_server.close()
+            try:
+                await asyncio.wait_for(self._tls_ws_server.wait_closed(), timeout=3)
+            except (asyncio.TimeoutError, asyncio.CancelledError):  # pragma: no cover
+                pass
+            self._tls_ws_server = None
         if self._ws_server is None:
             return
         self._ws_server.close()
@@ -826,6 +995,8 @@ class Server:
         self._client_authenticated_streams.pop(websocket, None)
         self._client_token_hashes.pop(websocket, None)
         self._client_system_producers.pop(websocket, None)
+        self._client_dot_connections.discard(websocket)
+        self._tls_connections.discard(websocket)
         self._operator_challenges.pop(websocket, None)
         self._connection_trust.pop(websocket, None)
         self._client_send_queues.pop(websocket, None)
@@ -1091,6 +1262,24 @@ class Server:
                     if request_id is not None:
                         denied["request_id"] = request_id
                     return [denied]
+            # External scoped ("Dot") connection enforcement. Keyed on the STICKY
+            # connection marker (not the per-RPC dot_principal flag) and run for
+            # EVERY verb incl. base-exempt ping/hello and even loopback — so a
+            # revoked Dot, whose dot_principal has flipped false, cannot fall
+            # through the loopback exemption above into local access.
+            if websocket in self._client_dot_connections:
+                dot_auth = dispatch_msg["_auth_context"]
+                if not dot_auth.get("dot_principal"):
+                    # Seat token revoked / no longer in the Dot set: refuse. The
+                    # connection stays Dot-scoped for its remaining life.
+                    return [self._auth_error_frame(verb, request_id, "authentication_required")]
+                if not dot_auth.get("transport_tls"):
+                    return [self._auth_error_frame(verb, request_id, DOT_REQUIRES_TLS_CODE)]
+                # v1: `list_sessions` (the read) is denied unless the read toggle
+                # is on; `self._dot_allowed_verbs` already excludes the read verbs
+                # when it is off, so the default-deny branch below covers it.
+                if verb not in self._dot_allowed_verbs:
+                    return [self._auth_error_frame(verb, request_id, DOT_SCOPE_DENIED_CODE)]
             if verb in {
                 "hello", "list_sessions", "inspect_stream", "request_stream_events", "send.receipt.get",
                 # Upload verbs carry the owning connection so an interrupted
@@ -1120,7 +1309,32 @@ class Server:
             self._record_unsupported(verb, caller=caller)
         if request_id is not None and frames:
             frames[0].setdefault("request_id", request_id)
+        # v1 (parent ruling f4e6c3cf): a Dot connection may receive only acks/
+        # errors that disclose no fleet data. The handler error boundary above
+        # embeds free-form exception text + VerbError extras; reduce any
+        # Dot-bound `*.error` frame to a stable code-only shape. Success acks
+        # (ping pong, hello, the already-sanitized send.result) pass through.
+        if websocket is not None and websocket in self._client_dot_connections:
+            frames = [self._dot_scrub_outbound(frame) for frame in frames]
         return frames
+
+    @staticmethod
+    def _dot_scrub_outbound(frame: dict[str, Any]) -> dict[str, Any]:
+        """Reduce a Dot-bound error frame to `{type, error_code, request_id}`.
+
+        Non-error frames pass through unchanged. This is the final egress scrub
+        for the external scoped principal: a `send` (or any) failure can never
+        carry backend/internal identifiers to Dot via the error string/extras.
+        """
+        if not isinstance(frame, dict) or not str(frame.get("type") or "").endswith(".error"):
+            return frame
+        scrubbed: dict[str, Any] = {
+            "type": frame["type"],
+            "error_code": frame.get("error_code") or "error",
+        }
+        if "request_id" in frame:
+            scrubbed["request_id"] = frame["request_id"]
+        return scrubbed
 
     @staticmethod
     def _token_auth_requested(msg: dict[str, Any]) -> bool:
@@ -1158,6 +1372,10 @@ class Server:
             "service_authenticated": False,
             "service_actor": "",
             "service_attempted": False,
+            # True only for a connection the daemon's own TLS listener accepted.
+            "transport_tls": websocket in self._tls_connections,
+            # Set once a verified seat id is in the configured Dot scope set.
+            "dot_principal": False,
             "peer_loopback": self._is_loopback_client(websocket),
             "local_admin_verified": (isinstance(msg.get("local_admin_token"), str)
                                      and self._is_loopback_client(websocket)
@@ -1295,8 +1513,15 @@ class Server:
                 "session_generation": verified_generation if reason_code == TOKEN_REASON_VERIFIED else None,
                 "token_verified": reason_code == TOKEN_REASON_VERIFIED,
                 "reason_code": reason_code or TOKEN_REASON_INTERNAL_ERROR,
+                "dot_principal": bool(
+                    reason_code == TOKEN_REASON_VERIFIED
+                    and owner in self.dot_principal_stream_ids
+                ),
             }
         )
+        if context["dot_principal"]:
+            # Sticky: once a Dot, enforced as a Dot for the connection's life.
+            self._client_dot_connections.add(websocket)
         if retired_owner is not None and reason_code == TOKEN_REASON_EXPIRED:
             context["retired_handoff_owner"] = retired_owner
         return context
@@ -1613,6 +1838,30 @@ class Server:
                 or self._operator_authenticated(websocket)
                 or websocket in self._client_authenticated_streams):
             return None
+        # External scoped ("Dot") connection: keyed on the sticky marker so a
+        # revoked Dot (loopback or not) is never dropped back onto the normal
+        # fan-out. v1 (read OFF, the default): a Dot connection receives NO
+        # broadcast frame at all — not even the projected inventory — so no
+        # subscription/push read path exists and Bart's reply frames
+        # (chat.event/peer delivery) never reach Dot. When the read toggle is on,
+        # only the field-projected session inventory ever reaches it (never
+        # chat.event/working.state/report/notification/schedule). A revoked Dot
+        # (auth_stream cleared / no longer in the set) or a plain-ws Dot gets
+        # nothing at all.
+        if websocket in self._client_dot_connections:
+            auth_stream = self._client_authenticated_streams.get(websocket)
+            if (websocket not in self._tls_connections
+                    or auth_stream not in self.dot_principal_stream_ids):
+                return None
+            if not self.dot_read_enabled:
+                return None
+            if frame_type != "session.inventory":
+                return None
+            sessions = payload.get("sessions") if isinstance(payload.get("sessions"), list) else []
+            return {
+                **payload,
+                "sessions": [self._dot_project_session(s) for s in sessions if isinstance(s, dict)],
+            }
         # The server speaks first, but a connection has the restrictive default
         # immediately: broadcasts may race the client's hello and must never
         # leak hidden/nested work during that window.
@@ -1710,6 +1959,32 @@ class Server:
         self._connection_trust[websocket] = trust
         return None
 
+    def _dot_hello_frames(self, events_mode: str) -> list[dict[str, Any]]:
+        """The complete hello response for a Dot connection: `[hello, snapshot]`
+        with an empty, well-formed snapshot and NO `hosts.stats` frame. Discloses
+        no fleet data; unblocks a client that waits for a snapshot."""
+        composite_enabled = bool(getattr(self.assistant_composite, "enabled", False))
+        hello: dict[str, Any] = {"type": "hello"}
+        if composite_enabled:
+            hello["capabilities"] = {"assistant_composite_v1": True}
+        # NB: no `consent_host_id` — it would disclose the daemon's host id
+        # (self.local_host) to Dot. Dot does no consent flow, and the hello
+        # response must carry no host detail.
+        snapshot: dict[str, Any] = {
+            "type": "snapshot",
+            "events_mode": events_mode,
+            "capabilities": {
+                "close_expected_generation": True,
+                **({"assistant_composite_v1": True} if composite_enabled else {}),
+            },
+            "sessions": [],
+            "notifications": [],
+            "updates": [],
+            "hosts": {},
+            "working_states": {},
+        }
+        return [hello, snapshot]
+
     async def _on_hello(self, msg: dict[str, Any]) -> list[dict[str, Any]]:
         """Apply hello.subscribe before constructing the connection's frames."""
         subscribe = msg.get("subscribe") if isinstance(msg.get("subscribe"), dict) else {}
@@ -1747,6 +2022,17 @@ class Server:
             self._client_exclude_event_types[websocket] = exclude_event_types
             self._client_events_mode[websocket] = events_mode
             self._client_assistant_composite_v1[websocket] = self._client_wants_assistant_composite(msg)
+            # v1 (parent ruling f4e6c3cf): a Dot connection's hello discloses no
+            # fleet data, whatever it subscribed to. Return exactly
+            # [hello, <empty snapshot>] — no fleet sessions/notifications/
+            # working_states/schedules, and crucially NO directly-appended
+            # hosts.stats frame (which carries live host telemetry and bypasses
+            # _frame_for_client). This also unblocks the stock agent-orch client,
+            # which blocks waiting for a snapshot frame. Unconditional: Dot never
+            # reads the fleet via hello; when the read toggle is on it reads via
+            # the explicit projected list_sessions RPC instead.
+            if websocket in self._client_dot_connections:
+                return self._dot_hello_frames(events_mode)
             if self.store and self._operator_authenticated(websocket) and self._connection_trust[websocket].client_kind == 'pentacle-mobile':
                 try:
                     async with self.sessions.assistant.authority_lock:
@@ -1916,7 +2202,18 @@ class Server:
             }
             for row in active
         ]
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if auth.get("dot_principal"):
+            active = [self._dot_project_session(row) for row in active]
         return {"type": "list_sessions.ok", "active": active}
+
+    @staticmethod
+    def _dot_project_session(session: dict[str, Any]) -> dict[str, Any]:
+        """Project a session row to the Dot allowlist only. Content/transcript
+        fields (last_text, draft, question, preview, pending_peer_messages, usage
+        internals, agents, ...) are dropped: this is the server-side egress
+        boundary for the external scoped principal."""
+        return {k: v for k, v in session.items() if k in DOT_LIST_FIELDS}
 
     async def _on_thread_read(self, msg: dict[str, Any]) -> dict[str, Any]:
         auth = dict(msg.get("_auth_context") or {})
@@ -2200,9 +2497,15 @@ class Server:
     async def _on_send(self, msg: dict[str, Any]) -> dict[str, Any]:
         host, name = await self.sessions.resolve(msg)
         stream_id = f"{host}:{name}"
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         composite = self.assistant_composite
         if composite is not None and composite.is_stream(stream_id):
-            auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+            if auth.get("dot_principal"):
+                # Attributed external handoff to the CURRENT Bart binding, not an
+                # operator grant; bypasses the operator-only composite intake.
+                # `stream_id` is the stable composite id (e.g. bart:assistant),
+                # the only target identity Dot's ack is allowed to echo.
+                return await self._dot_send_to_bart(msg, auth, composite_stream_id=stream_id)
             if auth.get("operator_authenticated") is not True:
                 raise VerbError("assistant_send_unauthorized", "assistant composite send requires authenticated caller")
             try:
@@ -2227,6 +2530,9 @@ class Server:
                 } if composite.config.direct_primary else {"delivery": "accepted"}),
                 "assistant_composite": accepted,
             }
+        # A Dot principal may send ONLY to the assistant composite binding.
+        if auth.get("dot_principal"):
+            raise VerbError(DOT_SCOPE_DENIED_CODE, "Dot may message only the assistant binding")
         # Wire callers cannot suppress ordinary QA/progress admission with the
         # private daemon-only backend marker.  Only main's composite dispatcher
         # reaches ``Comms.send_assistant_backend`` directly.
@@ -2245,6 +2551,61 @@ class Server:
                     "assistant_backend_ingress": "persisted_suppressed",
                 }
         return await self.comms.send(direct_msg)
+
+    async def _dot_send_to_bart(
+        self, msg: dict[str, Any], auth: dict[str, Any], *, composite_stream_id: str,
+    ) -> dict[str, Any]:
+        """Deliver a Dot principal's message to the CURRENT assistant backend.
+
+        The backend is resolved at send time from the live binding (never a
+        hardcoded seat), and delivered as an ordinary attributed peer `send`
+        carrying the Dot's own `from_stream_id`, so the existing `[from <dot>]`
+        envelope and token-verified provenance apply. It is NOT operator intake:
+        Bart receives it as an attributed external handoff and applies its normal
+        grant rules.
+
+        v1 (parent ruling f4e6c3cf): the ack returned to Dot must disclose no
+        fleet data. The resolved backend seat id (and its host/session_name) is
+        live fleet binding state, so the ack echoes only the stable composite id
+        (`composite_stream_id`, e.g. bart:assistant) plus safe delivery status —
+        never the resolved backend seat/host/session_name.
+        """
+        composite = self.assistant_composite
+        if composite is None:
+            raise VerbError("assistant_composite_unavailable", "assistant composite not configured")
+        binding = await composite.binding()
+        target = str(binding.get("stream_id") or "").strip()
+        if not target:
+            raise VerbError("assistant_binding_unavailable", "no current assistant binding to receive the message")
+        dot_id = str(auth.get("stream_id") or "").strip()
+        body = msg.get("text") if "text" in msg else msg.get("message")
+        body = "" if body is None else str(body)
+        if not body.strip():
+            raise VerbError("bad_request", "message is required")
+        send_msg = {
+            "type": "send",
+            "to_stream_id": target,
+            # Drives the `[from <dot>]` peer envelope and attributed provenance;
+            # the verified seat identity equals this claim, so it is honoured.
+            "from_stream_id": dot_id,
+            "text": body,
+            "request_id": msg.get("request_id"),
+            "msg_id": msg.get("msg_id"),
+            "_auth_context": auth,
+        }
+        result = await self.comms.send(send_msg)
+        # Build a sanitized ack from scratch: only the stable composite id and a
+        # whitelist of non-identifying delivery-status fields leave to Dot. The
+        # resolved backend seat/host/session_name from `comms.send` is dropped.
+        ack: dict[str, Any] = {"type": "send.result", "to_stream_id": composite_stream_id}
+        if isinstance(result, dict):
+            for key in ("delivery", "state", "submission_confirmed",
+                        "action_committed", "submission_attempts"):
+                if key in result:
+                    ack[key] = result[key]
+        if msg.get("request_id") is not None:
+            ack["request_id"] = msg.get("request_id")
+        return ack
 
     async def accept_assistant_operator_input(
         self, msg: dict[str, Any], *, operator_principal: str,
