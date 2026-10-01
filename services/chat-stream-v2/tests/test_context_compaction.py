@@ -672,6 +672,11 @@ def test_update_footer_structural_recognition():
     assert claude_composer_empty(DRAFT_LOOKS_LIKE_FOOTER) is False
     # Unknown chrome after the banner still fails closed.
     assert claude_composer_empty(UNKNOWN_CHROME_AFTER_FOOTER) is False
+    # Managed manual mode renders a different permission footer; the banner
+    # below it is chrome there too, and a banner above it stays a draft.
+    manual = "  ⏸ manual mode on · ? for shortcuts"
+    assert claude_composer_empty("\n".join([_DIV, "❯ ", _DIV, manual, _UPDATE_FOOTER, ""])) is True
+    assert claude_composer_empty("\n".join([_DIV, "❯ ", _UPDATE_FOOTER, _DIV, manual, ""])) is False
 
 
 def _arm_then_capture_and_cross(h, observer, capture):
