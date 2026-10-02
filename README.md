@@ -16,6 +16,9 @@ then serve and open Pentacle Web.
 
 For a phone, see [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile).
 
+To connect a ChatGPT "Dot" agent to your own fleet for large assignments, see
+[Connect a ChatGPT Dot agent](docs/connect-a-dot-agent.md).
+
 ## Which repositories do I need?
 
 | Repository | What it provides | Do I need to clone it? |
