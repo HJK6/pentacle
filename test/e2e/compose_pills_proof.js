@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
-// Proof driver for the compact-first compose bar + view-pills changes
-// (lane thoth:v2-8d71aa8d8ba1). Reuses the hermetic web_gate harness: seeds an
+// Proof driver for the compact-first compose bar + view-pills changes.
+// Reuses the hermetic web_gate harness: seeds an
 // isolated chat-stream-v2 daemon, serves the built web bundle, drives it in real
 // headless Chrome over CDP, and captures before/after screenshots + numeric
 // evidence for the composer states, the pill order/default, and the settings.

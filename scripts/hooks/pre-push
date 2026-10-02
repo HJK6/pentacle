@@ -416,6 +416,52 @@ if [ "$records" -eq 0 ] && [ "$is_public" -eq 1 ]; then
   fail=1
 fi
 
+# ── (d) private-terms residue: no host-local private dictionary term may reach a
+# public repo. Enforced HERE (not in CI) because the dictionary is host-local and
+# must never live in the repo or in CI. Fail closed for public destinations: the
+# dictionary must exist and the residue sub-check must run clean.
+#   Production: the dictionary defaults to $HOME/.config/pentacle/private-terms.json
+#   (override with PENTACLE_PRIVATE_TERMS_FILE); a MISSING file is a refusal.
+#   Test mode (PENTACLE_PREPUSH_TEST_MODE=1): only runs when a test supplies
+#   PENTACLE_PRIVATE_TERMS_FILE, so unrelated hook tests stay host-independent.
+# The checker + allowlist are resolved from the hook's own location so this works
+# both in a real checkout and when a test drives the hook via core.hooksPath.
+if [ "$is_public" -eq 1 ]; then
+  terms_file="${PENTACLE_PRIVATE_TERMS_FILE:-}"
+  if [ -z "$terms_file" ] && [ "${PENTACLE_PREPUSH_TEST_MODE:-}" != 1 ]; then
+    terms_file="$HOME/.config/pentacle/private-terms.json"
+  fi
+  if [ -n "$terms_file" ]; then
+    residue_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    residue_script="${0%/*}/../check_public_residue.py"
+    residue_allowlist="${residue_root}/configs/public_fixture_allowlist.json"
+    if [ ! -f "$terms_file" ]; then
+      warn "REFUSED: private-terms dictionary not found at '${terms_file}' (fail closed); create it or set PENTACLE_PRIVATE_TERMS_FILE."
+      fail=1
+    elif ! command -v python3 >/dev/null 2>&1; then
+      warn "REFUSED: python3 unavailable to run the private-terms residue check for a public push (fail closed)."
+      fail=1
+    elif [ ! -f "$residue_script" ]; then
+      warn "REFUSED: residue checker not found at '${residue_script}' (fail closed)."
+      fail=1
+    else
+      pt_verdict="$(python3 "$residue_script" --root "$residue_root" --allowlist "$residue_allowlist" --private-terms-file "$terms_file" 2>/dev/null | python3 -c 'import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("FAIL"); sys.exit(0)
+pt = d.get("private_terms", {})
+ok = pt.get("status") == "checked" and d.get("unexcepted_match_count") == 0 and d.get("passed") is True
+print("OK" if ok else "FAIL")' 2>/dev/null)"
+      if [ "$pt_verdict" != "OK" ]; then
+        warn "REFUSED: the private-terms residue check did not pass for this public push (fail closed)."
+        warn "         run: python3 scripts/check_public_residue.py --private-terms-file '${terms_file}'"
+        fail=1
+      fi
+    fi
+  fi
+fi
+
 if [ "$fail" -ne 0 ]; then
   warn "push blocked. Resolve the refusal before retrying."
   exit 1

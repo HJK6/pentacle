@@ -1,6 +1,6 @@
 'use strict';
 
-// Host resolution for a `peers[]` profile entry (e.g. daffodil). The web host
+// Host resolution for a `peers[]` profile entry (e.g. a remote peer). The web host
 // only had `local` / `remote` / `config.hosts`; a profile that lists SSH peers
 // (not a `hosts` map) could not attach them. terminal_adapter now builds an SSH
 // target from each peer, at parity with the Electron host registry (hosts.js).

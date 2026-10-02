@@ -22,7 +22,7 @@ const ID = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com'];
 
 function childEnv(extra = {}) {
   const e = { ...process.env, ...extra };
-  for (const k of ['BASH_ENV', 'ENV', 'PENTACLE_PREPUSH_TEST_MODE', 'PENTACLE_ALLOWED_PUBLIC_REMOTES', 'PENTACLE_ALLOWED_PRIVATE_REMOTES', 'PENTACLE_PUBLIC_ROOTS']) {
+  for (const k of ['BASH_ENV', 'ENV', 'PENTACLE_PREPUSH_TEST_MODE', 'PENTACLE_ALLOWED_PUBLIC_REMOTES', 'PENTACLE_ALLOWED_PRIVATE_REMOTES', 'PENTACLE_PUBLIC_ROOTS', 'PENTACLE_PRIVATE_TERMS_FILE']) {
     if (!(k in extra)) delete e[k];
   }
   return e;
@@ -451,4 +451,68 @@ test('the hook is POSIX sh (shebang + `sh -n` clean)', () => {
   assert.match(src.split('\n')[0], /^#!\/bin\/sh$/, 'hook must be #!/bin/sh');
   const chk = spawnSync('sh', ['-n', hookPath], { encoding: 'utf8' });
   assert.equal(chk.status, 0, `sh -n failed: ${chk.stderr}`);
+});
+
+// ── (d) private-terms residue fail-closed enforcement (public destinations) ───
+// The checker + allowlist resolve from the hook's own location (the real repo);
+// --root is the pushed clone. In test mode the check runs only when a test
+// supplies PENTACLE_PRIVATE_TERMS_FILE, so the rest of the suite is host-agnostic.
+const SYN_TERM = 'ZZPRIVATESYNTHETICZZ';
+function writeTerms(dir, terms) {
+  const p = path.join(dir, 'private-terms.json');   // sibling of the work clone, i.e. OUTSIDE --root
+  fs.writeFileSync(p, JSON.stringify(terms));
+  return p;
+}
+// The residue checker reads the pushed repo's own allowlist (residue_root). The
+// real one requires its 206 fixtures to be present; a sandbox clone seeds a
+// minimal empty allowlist so the private-terms scan is the only thing exercised.
+function seedAllowlist(work) {
+  fs.mkdirSync(path.join(work, 'configs'), { recursive: true });
+  commitFile(work, path.join('configs', 'public_fixture_allowlist.json'),
+    JSON.stringify({ version: 1, fixtures: {} }) + '\n', 'seed minimal residue allowlist');
+}
+test('public push is REFUSED when a committed file contains a private-dictionary term', () => {
+  const sb = sandbox();
+  const terms = writeTerms(sb.dir, [SYN_TERM]);
+  git(sb.work, [...ID, 'checkout', '-b', 'leak']);
+  seedAllowlist(sb.work);
+  commitFile(sb.work, 'notes.md', `benign line\ncontains ${SYN_TERM} here\n`, 'oops private');
+  const r = tryGit(sb.work, withHook(['push', 'public', 'leak:refs/heads/leak']),
+    pub(sb.remote, { PENTACLE_PRIVATE_TERMS_FILE: terms }));
+  assert.notEqual(r.status, 0, `expected refusal, got accept\n${r.stderr}`);
+  assert.match(r.stderr, /private-terms residue check did not pass/);
+});
+test('public push is REFUSED (fail closed) when the private-terms dictionary is missing', () => {
+  const sb = sandbox();
+  git(sb.work, [...ID, 'checkout', '-b', 'nofile']);
+  commitFile(sb.work, 'f.txt', 'clean\n', 'clean feature');
+  const missing = path.join(sb.dir, 'does-not-exist.json');
+  const r = tryGit(sb.work, withHook(['push', 'public', 'nofile:refs/heads/nofile']),
+    pub(sb.remote, { PENTACLE_PRIVATE_TERMS_FILE: missing }));
+  assert.notEqual(r.status, 0, `expected fail-closed refusal, got accept\n${r.stderr}`);
+  assert.match(r.stderr, /private-terms dictionary not found/);
+});
+test('public push is ACCEPTED when no dictionary term appears in the tree', () => {
+  const sb = sandbox();
+  const terms = writeTerms(sb.dir, [SYN_TERM]);
+  git(sb.work, [...ID, 'checkout', '-b', 'clean2']);
+  seedAllowlist(sb.work);
+  commitFile(sb.work, 'f.txt', 'nothing secret here\n', 'clean feature');
+  const r = tryGit(sb.work, withHook(['push', 'public', 'clean2:refs/heads/clean2']),
+    pub(sb.remote, { PENTACLE_PRIVATE_TERMS_FILE: terms }));
+  assert.equal(r.status, 0, `expected accept, got ${r.status}\n${r.stderr}`);
+});
+test('private-terms enforcement does not run in test mode without an explicit terms file', () => {
+  const sb = sandbox();
+  git(sb.work, [...ID, 'checkout', '-b', 'noenforce']);
+  commitFile(sb.work, 'f.txt', 'clean\n', 'clean feature');
+  const r = tryGit(sb.work, withHook(['push', 'public', 'noenforce:refs/heads/noenforce']), pub(sb.remote));
+  assert.equal(r.status, 0, `expected accept, got ${r.status}\n${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /private-terms/);
+});
+test('the private-terms enforcement is public-only, fail-closed, with a host-local default path', () => {
+  const src = fs.readFileSync(hookPath, 'utf8');
+  assert.match(src, /private-terms dictionary not found/);
+  assert.match(src, /PENTACLE_PRIVATE_TERMS_FILE/);
+  assert.match(src, /\.config\/pentacle\/private-terms\.json/);
 });

@@ -300,10 +300,9 @@ def test_remote_claude_binding_fenced_prose_is_projected():
     codex-only. Its dispatch-free turn text must still mirror to the canonical
     chat, exactly as a daemon-local seat's does through local ingest.
 
-    Regression: pentacle__bart_proactive_chat_status_publish_2026_09 — Bart's
-    bound front desk stopped reaching the chat after moving from a Thoth-local
-    seat to a remote Amaterasu (WSL) seat, whose events arrive via event.push
-    with lifecycle=None."""
+    Regression: a bound front desk seat stopped reaching the chat after
+    moving from a daemon-local seat to a remote push-based seat, whose events
+    arrive via event.push with lifecycle=None."""
     async def _go():
         store = Store(":memory:")
         store.start()

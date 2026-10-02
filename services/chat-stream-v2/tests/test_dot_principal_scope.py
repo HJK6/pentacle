@@ -1,7 +1,7 @@
 """The external scoped ("Dot") principal: TLS-only, read-metadata-only,
 Bart-only-messaging, default-deny, revocable.
 
-Dot is the operator's cloud OpenAI agent on Amaterasu. The daemon — not the
+Dot is the operator's external cloud agent. The daemon — not the
 client — enforces that its token works only over daemon-terminated TLS, that it
 can read only an allowlisted set of metadata fields (never transcript content),
 that it can message only the current assistant binding as an attributed
