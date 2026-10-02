@@ -123,6 +123,39 @@ test('spawn picker displays mapped labels while retaining raw option values and 
   assert.deepEqual(codexEmissions, [{ provider: 'codex', model: 'gpt-5.6-terra' }]);
 });
 
+function loadCatalogForNewSession() {
+  return new Function(`${extractFunction('catalogForNewSession')}; return catalogForNewSession;`)();
+}
+
+test('catalogForNewSession swaps in available_models and preserves its list order (operator 7c2717e4)', () => {
+  const catalogForNewSession = loadCatalogForNewSession();
+  const catalog = {
+    // full catalog in MODELS declaration order (luna is NOT first here)
+    models: { codex: { 'gpt-5.6-terra': { efforts: ['high'] }, 'gpt-6.1-sol': { efforts: ['high'] }, 'gpt-6-luna': { efforts: ['high'] } } },
+    available_models: {
+      codex: { 'gpt-6-luna': { efforts: ['high'] }, 'gpt-6.1-sol': { efforts: ['high'] }, 'gpt-6-astra': { efforts: ['high'] } },
+      claude: { 'claude-opus-4-8': { efforts: ['high'] }, 'claude-opus-5-5': { efforts: ['high'] }, 'claude-fable-5-1': { efforts: ['high'] } },
+    },
+  };
+  const narrowed = catalogForNewSession(catalog);
+  // The picker reads narrowed.models; its key order must equal available_models'
+  // config order (operator dispatch 7c2717e4), not the full-catalog order.
+  assert.deepEqual(Object.keys(narrowed.models.codex), ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra']);
+  assert.deepEqual(Object.keys(narrowed.models.claude), ['claude-opus-4-8', 'claude-opus-5-5', 'claude-fable-5-1']);
+  // Absent available_models => unchanged full catalog (shipped public default).
+  assert.equal(catalogForNewSession({ models: { codex: {} } }).available_models, undefined);
+});
+
+test('spawn picker renders model options in catalog (available_models) order (operator 7c2717e4)', () => {
+  const options = [...renderProfileForTest(
+    { provider: 'codex', model: 'gpt-6-luna', effort: 'high' },
+    { 'gpt-6-luna': { efforts: ['high'] }, 'gpt-6.1-sol': { efforts: ['high'] }, 'gpt-6-astra': { efforts: ['high'] } },
+    [],
+  ).container.querySelectorAll('#spawn-model option')].map((option) => option.value);
+  // No client-side sort: options follow the catalog key order as given.
+  assert.deepEqual(options, ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra']);
+});
+
 test('spawn picker enumerates catalog-backed providers and exposes Claude/Fable without fabricating providers', () => {
   const providerSelections = [];
   const catalog = {

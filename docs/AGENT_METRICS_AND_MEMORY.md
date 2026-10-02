@@ -197,8 +197,15 @@ The phone reads daemon data and does not need a synced memory filesystem.
 The daemon already launches Claude with `--disallowed-tools AskUserQuestion`.
 Do not re-enable that native tool or edit global Claude settings. Verify the
 effective launch arguments and give agents the process question/routing rules.
-Codex and Claude seats receive the durable-question requirement in their launch
-instructions.
+The two providers get the requirement by different mechanisms: **Codex** seats
+receive the durable-question instruction (route operator questions through
+`agent-orch prompt ask`) appended to their launch `developer_instructions`.
+**Claude** seats do not get that injected instruction — they launch with
+`--disallowed-tools AskUserQuestion` (plus, for visible/top-level seats, a
+session-metadata `--append-system-prompt`), and their operator-question routing
+comes from `AGENTS.md`, not a launch-injected durable-question string. Visible,
+top-level seats of either provider additionally receive the session-metadata
+instruction.
 
 Install `agent-orch` as in the base README and make it available on spawned
 agents' PATH. By default an authenticated, open, visible Pentacle seat asks:
@@ -221,9 +228,15 @@ visible Pentacle seat for this workflow. Keep its provided credentials private.
 See [orchestration](../process/docs/config/agent_orchestration.md) for the full
 question, role and reporting contract.
 
-This `agent-orch prompt ask` transport is the portable public default. It is
-injectable: a fleet that prefers a different operator-question behavior (for
-example a visible seat asking one concise question directly in its active chat
-and routing a hidden worker's question to its visible parent) supplies that rule
-as a launch-level `developer_instructions` / `--append-system-prompt` override,
-which ranks above this default without changing the public baseline.
+This `agent-orch prompt ask` transport is the portable public default. For Codex
+seats it is enforced last-wins: `_codex_command` strips any pre-existing
+`developer_instructions`, places that operator/fleet text first, then appends the
+public `agent-orch prompt ask` mandate (and, for visible seats, the
+session-metadata instruction) after it. A fleet that prefers a different
+operator-question behavior (for example a visible seat asking one concise
+question directly in its active chat and routing a hidden worker's question to
+its visible parent) layers that rule as `developer_instructions` /
+`--append-system-prompt`, but the public mandate is re-appended last so a custom
+value can never suppress it — the public baseline always holds. Fleet-specific
+behavior is therefore additive context on top of the public default, not a
+replacement for it.

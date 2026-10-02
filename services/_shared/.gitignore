@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+# Deployment-local spawn policy overlay (host_overrides + available_models).
+# Loaded by spawn_profiles.py beside spawn_defaults.json but never shipped:
+# it carries per-installation model availability/picker config and must not be
+# committed to the public repo.
+spawn_defaults.local.json

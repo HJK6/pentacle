@@ -25,6 +25,28 @@ for _path in reversed((SERVICE_DIR, TESTS_DIR, SERVICES_ROOT, AGENT_ORCH_DIR, TO
 # collection so results never depend on the operator's machine config.
 os.environ["PENTACLE_HOST_ID"] = "test-host"
 
+# The admission/auth tests construct Server() and assert its DEFAULT behavior
+# (opt-ins OFF). Server() falls back to these env vars whenever the matching
+# constructor arg is None, so an operator shell that exports any of them would
+# silently flip a default and make the suite non-hermetic. PR #53 QA finding 1:
+# the strict-default seat-token test depended on PENTACLE_SEAT_OPERATOR_AUTHORITY
+# being unset, which conftest did not guarantee. Scrub every Server-constructor
+# opt-in/identity env default before collection; a test that wants a flag on
+# passes it explicitly to Server(), which overrides the (now-absent) env.
+for _server_opt_in_env in (
+    "PENTACLE_SEAT_OPERATOR_AUTHORITY",
+    "PENTACLE_DOT_PRINCIPAL_STREAM_IDS",
+    "PENTACLE_DOT_READ_ENABLED",
+    "PENTACLE_DOT_TLS_PORT",
+    "PENTACLE_DOT_TLS_CERT",
+    "PENTACLE_DOT_TLS_KEY",
+    "PENTACLE_DOT_TLS_BINDS",
+    "PENTACLE_SYSTEM_PRODUCER_STREAM_ID",
+    "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN",
+    "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE",
+):
+    os.environ.pop(_server_opt_in_env, None)
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _public_test_environment():

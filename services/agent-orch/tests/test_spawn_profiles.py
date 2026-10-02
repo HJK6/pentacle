@@ -441,6 +441,35 @@ def test_available_models_installation_config_narrows_the_picker_only(monkeypatc
         spawn_profiles.load_spawn_config.cache_clear()
 
 
+def test_available_models_preserves_config_list_order(monkeypatch, tmp_path) -> None:
+    # Operator requirement (dispatch 7c2717e4): the config list order drives the
+    # picker display order for every provider. The daemon must emit
+    # available_models in the config's list order, NOT the MODELS declaration
+    # order. The fleet order below differs from MODELS on purpose:
+    # MODELS codex order is 5.6-terra, 5.6-sol, 5.6-luna, 6-sol, 6.1-sol, 6-luna,
+    # 6-astra, so a config of [6-luna, 6.1-sol, 6-astra] that round-trips in that
+    # exact sequence can only be list-ordered, not catalog-ordered.
+    config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
+    config["available_models"] = {
+        "codex": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"],
+        "claude": ["claude-opus-4-8", "claude-opus-5-5", "claude-fable-5-1"],
+    }
+    config_path = tmp_path / "spawn_defaults.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", config_path)
+    spawn_profiles.load_spawn_config.cache_clear()
+    try:
+        available = catalog()["available_models"]
+        # list() captures insertion/key order, which is what the web picker
+        # (Object.keys) and the mobile picker (Object.entries) render in.
+        assert list(available["codex"]) == ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]
+        assert list(available["claude"]) == ["claude-opus-4-8", "claude-opus-5-5", "claude-fable-5-1"]
+        # Discriminating guard: this is the config order, not the MODELS order.
+        assert list(available["codex"]) != [m for m in spawn_profiles.MODELS["codex"] if m in available["codex"]]
+    finally:
+        spawn_profiles.load_spawn_config.cache_clear()
+
+
 def test_available_models_config_rejects_unknown_model(monkeypatch, tmp_path) -> None:
     config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
     config["available_models"] = {"codex": ["gpt-9-nope"]}

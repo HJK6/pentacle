@@ -36,6 +36,18 @@ operator, switch the mode, mint or elevate identities, expand its scope, or
 fabricate an operator dispatch. Unverified, expired, wrong-seat and anonymous
 connections remain fail-closed regardless of the flag.
 
+Scope of the opt-in: `grant_token`, `spawn_freeze`, `spawn_unfreeze` and
+`role=nexus` are illustrative, not exhaustive. When enabled, the daemon mints a
+full operator context on the verified internal seat — `operator_authenticated`
+true, `operator_principal` `agent:<seat>`, `operator_authority_source`
+`stream_token` — so **every** code path gated on operator authentication treats
+that seat as the operator, including non-RPC consumers such as assistant-composite
+input and answering operator questions. That breadth is intentional for a
+headless install where agents are the only operator interface; it is exactly why
+the flag defaults OFF and should stay OFF on any deployment with a human operator
+surface. Enable it only with that whole-context grant in mind, not just the four
+named RPCs.
+
 A fresh operator CLI with no seat credential should run on the daemon machine
 (directly or over SSH), or use the enrolled UI to start an agent. Legacy token
 strings and arbitrary `from_stream_id` claims do not authenticate remote access.

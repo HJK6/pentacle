@@ -29,6 +29,45 @@ terminal transports. See
 and [daemon setup](../services/chat-stream-v2/README.md) before adding remote
 machines. A display label alone does not configure a terminal transport.
 
+## Choosing which models the picker offers
+
+The New Chat model picker — on both the web client and the mobile app — offers,
+per provider, the models the daemon advertises in its spawn catalog
+(`spawn_catalog_get`). The shipped default advertises the full catalog. To narrow
+the picker to the models your provider accounts actually expose, set an
+`available_models` map in the deployment-local, **never-committed**
+`services/_shared/spawn_defaults.local.json` (it sits beside `spawn_defaults.json`
+and is git-ignored):
+
+```json
+{
+  "schema_version": 1,
+  "available_models": {
+    "claude": ["claude-opus-4-8", "claude-opus-5-5", "claude-fable-5-1"],
+    "codex":  ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]
+  }
+}
+```
+
+- **Per provider, canonical ids.** Keys are providers (`claude`, `codex`); each
+  value is a non-empty list of canonical model ids drawn from the catalog (see
+  `agent-orch models`). An unknown provider or id fails the config closed rather
+  than silently dropping it.
+- **List order is display order.** The picker shows each provider's models in the
+  order you list them, on web and mobile alike. Omit a model to hide it.
+- **Display-only.** Narrowing affects only the New Chat picker. The full catalog
+  stays authoritative for everything else: existing seats, explicit launches by
+  full id, aliases, handoffs and the configured spawn defaults all keep working
+  against models you have hidden — so hiding a model never breaks a running seat
+  or a spawn default.
+- **Omit the key for the default.** With no `available_models` (the shipped
+  state), the full catalog is offered.
+- **Applies after a daemon restart.** The daemon caches the policy for its
+  process lifetime, so repin/restart the daemon to pick up an edit.
+
+Each user or installation owns its own `spawn_defaults.local.json`, so different
+deployments present different picker lists from the same public code.
+
 ## Web client controls
 
 Machine sigils identify the host for each session. Each terminal slot has a

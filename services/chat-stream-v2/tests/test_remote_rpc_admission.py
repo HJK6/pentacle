@@ -167,6 +167,34 @@ def test_dot_principal_never_gains_operator_authority_even_when_opted_in():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("address", ["127.0.0.1", "::1", "::ffff:127.0.0.1"])
+def test_dot_principal_denied_operator_authority_on_loopback_even_when_opted_in(address):
+    # PR #53 QA finding 5: the opted-in Dot denial above was only exercised on a
+    # non-loopback peer, so "denied in every mode INCLUDING loopback" rested on
+    # the pre-existing default-mode tests. A Dot principal connecting over actual
+    # loopback with the server-owned opt-in ON must still never be minted as an
+    # operator — loopback is the one transport that grants local CLI bootstrap,
+    # so it is exactly where a Dot-exclusion regression would hide.
+    async def run():
+        token = "synthetic-dot-token"
+        store, _ = _seat_store(token, stream_id="local:dot", state={
+            "stream_id": "local:dot", "status": "open",
+            "token_hash_version": STREAM_TOKEN_HASH_VERSION,
+        })
+        daemon = Server(
+            store=store, seat_operator_authority=True,
+            dot_principal_stream_ids=["local:dot"],
+        )
+        ctx = await daemon._auth_context(
+            Peer(address), {"type": "send", "from_stream_id": "local:dot", "stream_token": token},
+        )
+        assert ctx["token_verified"] is True
+        assert ctx["dot_principal"] is True
+        assert ctx["operator_authenticated"] is False
+        assert "operator_authority_source" not in ctx
+    asyncio.run(run())
+
+
 def test_wire_hello_authentication_finishes_before_back_to_back_rpc(monkeypatch):
     from store import Store
     from websockets.asyncio.client import connect
