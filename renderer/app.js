@@ -5939,7 +5939,7 @@ function renderNewSessionLocationOptions(container) {
   }
 
   container.innerHTML = options.map((opt) => (
-    `<button class="new-session-option new-session-machine color-${esc(opt.color)}" data-loc="${esc(opt.id)}" title="Select ${esc(opt.label)}" aria-label="Select ${esc(opt.label)} machine">
+    `<button class="new-session-option new-session-machine${showMachineIcons() ? '' : ' new-session-option--no-mark'} color-${esc(opt.color)}" data-loc="${esc(opt.id)}" title="Select ${esc(opt.label)}" aria-label="Select ${esc(opt.label)} machine">
       ${showMachineIcons() ? `<span class="new-session-option-mark" aria-hidden="true">${machineSigilMarkup(opt.id, opt.label, 25)}</span>` : ''}
       <span class="new-session-option-label">${esc(opt.label)}</span>
       <span class="new-session-option-meta">Machine</span>

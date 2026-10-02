@@ -4172,6 +4172,8 @@ body.web-sidebar-narrow .grid.maximized .grid-cell.narrow-active {
   text-align: left;
 }
 
+.new-session-option--no-mark { grid-template-columns: 1fr auto; }
+
 .new-session-option:hover {
   border-color: var(--fg-dim);
   background: var(--bg3);

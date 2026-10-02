@@ -65,3 +65,32 @@ for (const count of [1, 2]) {
     assert.equal(renders, count + 1);
   });
 }
+
+for (const count of [1, 2]) {
+  test(`${count} host(s): New Chat machine grid matches its mark presence`, () => {
+    const { JSDOM } = require('jsdom');
+    const css = fs.readFileSync(require.resolve('../renderer/styles.css'), 'utf8');
+    const dom = new JSDOM('<style>' + css + '</style><div id="options"></div>');
+    const roster = ['laptop', 'server'].slice(0, count);
+    const visible = hostPresentation.showMachineIcons({}, roster);
+    const context = {
+      getNewSessionHostOptions: () => roster.map(id => ({ id, label: id, color: 'blue' })),
+      newSessionLocation: 'laptop', showMachineIcons: () => visible, esc: String,
+      machineSigilMarkup: () => '<svg class="machine-sigil"></svg>',
+    };
+    const begin = source.indexOf('function renderNewSessionLocationOptions(');
+    vm.runInNewContext(source.slice(begin, source.indexOf('\n}', begin) + 2), context);
+    const container = dom.window.document.getElementById('options');
+    context.renderNewSessionLocationOptions(container);
+    assert.equal(container.children.length, count, 'all configured machines remain selectable');
+    for (const button of container.children) {
+      assert.equal(button.classList.contains('new-session-option--no-mark'), count === 1);
+      assert.equal(button.children.length, count === 1 ? 2 : 3);
+      assert.equal(button.querySelectorAll('.new-session-option-mark .machine-sigil').length, count === 1 ? 0 : 1);
+      assert.equal(dom.window.getComputedStyle(button).gridTemplateColumns, count === 1 ? '1fr auto' : '26px 1fr auto');
+      assert.equal(button.querySelector('.new-session-option-label').textContent, button.dataset.loc);
+      assert.equal(button.querySelector('.new-session-option-meta').textContent, 'Machine');
+    }
+    dom.window.close();
+  });
+}
