@@ -305,6 +305,7 @@ class Notify:
         notice_store: Any = None,
         outbound: Any = None,
         assistant_binding: Any = None,
+        assistant_stream_id: str = "",
     ) -> None:
         self._db = _StoreThread(db_path)
         self._comms = comms
@@ -313,6 +314,7 @@ class Notify:
         self._notice_store = notice_store
         self._outbound = outbound
         self._assistant_binding = assistant_binding
+        self._assistant_stream_id = str(assistant_stream_id or "")
         self._answer_recovery_after = ""
         if outbound is not None:
             outbound.register_kind(NOTICE_KIND_NOTIFICATION_ANSWER, guard=self._answer_delivery_guard,
@@ -489,7 +491,21 @@ class Notify:
         question = await self._agent_question_for_notification(record)
         if question is not None:
             client_record["question"] = self._question_client_payload(question)
+            # The bound assistant is hidden; its cards belong to the composite chat.
+            producer = _nullable_text(question.get("producer_stream_id"))
+            if producer and producer == await self._bound_assistant_stream_id():
+                client_record["surfaced_to_stream_id"] = self._assistant_stream_id
         return client_record
+
+    async def _bound_assistant_stream_id(self) -> str:
+        """The composite chat's current direct-primary seat, or '' when none."""
+        if not self._assistant_stream_id or self._assistant_binding is None:
+            return ""
+        try:
+            binding = await self._assistant_binding()
+        except ValueError:
+            return ""
+        return _nullable_text(binding.get("stream_id")) if isinstance(binding, dict) else ""
 
     # -- answer payload (lifted verbatim) ---------------------------------
 
@@ -1071,9 +1087,15 @@ class Notify:
     async def _question_scope(self, viewer_stream_id: str) -> list[str] | None:
         sessions = getattr(self._comms, "sessions", None) if self._comms is not None else None
         resolver = getattr(sessions, "visible_question_scope_stream_ids", None)
-        if resolver is None:
-            return None
-        return await resolver(viewer_stream_id)
+        scope = await resolver(viewer_stream_id) if resolver is not None else None
+        if viewer_stream_id == self._assistant_stream_id:
+            # The composite chat also shows its current direct-primary seat's questions.
+            bound = await self._bound_assistant_stream_id()
+            if bound:
+                scope = [viewer_stream_id] if scope is None else scope
+                if bound not in scope:
+                    scope = [*scope, bound]
+        return scope
 
     # -- prompt answer/cancel helpers (lifted) ----------------------------
 

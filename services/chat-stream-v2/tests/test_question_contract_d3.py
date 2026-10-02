@@ -551,3 +551,56 @@ def test_ordinary_ask_cannot_forge_composite_lifetime_exemption(tmp_path):
         finally:
             await notify.stop()
     _run(go())
+
+
+def test_bound_assistant_questions_surface_in_composite_chat(tmp_path):
+    """A hidden direct-primary assistant's cards belong to the composite chat."""
+    async def go():
+        composite, bound, other = "bart:assistant", "hosta:v2-lead", "hosta:v2-other"
+        sessions = _FakeSessions({
+            bound: {"visibility": "hidden", "status": "open", "session_generation": "g1"},
+            other: {"visibility": "visible", "status": "open", "session_generation": "g2"},
+        })
+        binding = {"stream_id": bound, "generation": "g1"}
+        async def current_binding():
+            return dict(binding)
+        pushed: list[dict] = []
+        async def broadcast(payload):
+            pushed.append(payload)
+        notify = _notify(tmp_path, sessions=sessions, broadcast=broadcast,
+                         assistant_binding=current_binding, assistant_stream_id=composite)
+        await notify.start()
+        try:
+            request = _ask("q-card", producer=bound)
+            request["_auth_context"]["session_generation"] = "g1"
+            asked = await notify.prompt(request)
+            assert asked["type"] == "prompt.ask.ok"
+            assert asked["notification"]["surfaced_to_stream_id"] == composite
+            assert pushed[-1]["notification"]["surfaced_to_stream_id"] == composite
+            assert (await notify.prompt(_ask("q-visible", producer=other)))["type"] == "prompt.ask.ok"
+            assert "surfaced_to_stream_id" not in pushed[-1]["notification"]
+
+            async def listed(viewer):
+                return await notify.prompt({"type": "prompt.list", "request_id": "l-" + viewer,
+                                            "producer_stream_id": viewer, "open": True})
+            reply = await listed(composite)
+            assert [q["question_id"] for q in reply["questions"]] == ["q-card"]
+            assert reply["producer_stream_ids"] == [composite, bound]
+            assert reply["surfaced_to_stream_id"] == composite
+            snapshot = {n["question"]["question_id"]: n for n in await notify.snapshot_notifications()}
+            assert snapshot["q-card"]["surfaced_to_stream_id"] == composite
+            assert "surfaced_to_stream_id" not in snapshot["q-visible"]
+
+            # A different viewer keeps its literal scope.
+            assert [q["question_id"] for q in (await listed(other))["questions"]] == ["q-visible"]
+
+            # After a rebind the old producer's cards no longer surface there.
+            binding["stream_id"] = other
+            reply = await listed(composite)
+            assert [q["question_id"] for q in reply["questions"]] == ["q-visible"]
+            snapshot = {n["question"]["question_id"]: n for n in await notify.snapshot_notifications()}
+            assert "surfaced_to_stream_id" not in snapshot["q-card"]
+        finally:
+            await notify.stop()
+
+    _run(go())

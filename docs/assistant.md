@@ -212,6 +212,16 @@ with the dispatch's fixed request key and `response_state=final`. Publish the
 exact answer, preserving Markdown and whitespace. The canonical prose event is
 the authoritative reply; the shared transcript renderer handles its Markdown.
 
+## Direct-primary questions
+
+The current direct-primary seat asks with the ordinary durable `prompt ask`,
+even while hidden. The daemon surfaces those cards in the composite chat: a
+`prompt.list` for the composite stream also covers the bound seat, and each of
+its question notifications carries `surfaced_to_stream_id` naming the composite.
+The producer and the answer route stay the bound seat. After a rebind, the
+previous seat's cards no longer surface there. Lane `question.open` is not used
+in this mode.
+
 The source transcript remains intact. In the same ingest transaction, the store
 omits a mirrored final when that source turn contains the route's exact frozen
 USER envelope and the same dispatch already has a final prose publication. It
