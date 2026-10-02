@@ -75,7 +75,7 @@ class WatchWake:
         self.store, self.sessions, self.clock = store, sessions, clock
         self.root_binding = root_binding
         if outbound is not None:
-            for kind in ("watch", "wake", "wake_urgent", "report", "reconciler", "tree_idle", "lane_digest"):
+            for kind in ("watch", "wake", "wake_urgent", "wake_missed", "report", "reconciler", "tree_idle", "lane_digest"):
                 outbound.register_kind(kind, guard=self.delivery_guard, lock_factory=self.delivery_locks)
 
     def wire_handlers(self):
@@ -126,6 +126,11 @@ class WatchWake:
             observations[f"{row['host']}:{row['session_name']}"] = observation
         binding = self.root_binding() if callable(self.root_binding) else None
         await self.store.evaluate_watch_wake(observations, now=self.clock(), root_binding=binding)
+
+    async def missed_wake_alarm(self):
+        """Separate reconcile callback so it still runs when `tick` raises."""
+        grace = os.environ.get("PENTACLE_MISSED_WAKE_S", "")
+        await self.store.missed_wake_alarm(now=self.clock(), grace_s=int(grace) if grace.isdigit() else 300)
 
     @asynccontextmanager
     async def delivery_locks(self, row):

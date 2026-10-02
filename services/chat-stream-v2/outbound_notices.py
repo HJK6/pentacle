@@ -46,7 +46,7 @@ _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_REPORT,
     NOTICE_KIND_RECONCILER,
     NOTICE_KIND_SPAWN_FAILURE,
-    "watch", "wake",
+    "watch", "wake", "wake_missed",
     NOTICE_KIND_TREE_IDLE,
     NOTICE_KIND_LANE_DIGEST,
     NOTICE_KIND_NOTIFICATION_ANSWER,

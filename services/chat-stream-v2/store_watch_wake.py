@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import sqlite3
@@ -52,6 +53,7 @@ WATCH_WAKE_DDL = (
         kind TEXT PRIMARY KEY, enabled INTEGER NOT NULL, epoch INTEGER NOT NULL)""",
 )
 D2_KINDS = ("watch", "wake", "wake_urgent")
+log = logging.getLogger("chat_streamd_v2.watch_wake")
 
 
 def _json(value):
@@ -387,7 +389,46 @@ class _WatchWakeStoreMixin:
                 count = 0
                 for row in conn.execute("SELECT * FROM v2_watch_wake WHERE state='active'").fetchall():
                     count += _evaluate_conn(conn, row, observations.get(row["child"], {}), stamp)
-                count += _evaluate_fleet_conn(conn, observations, root_binding, stamp)
+                # Fleet notices are advisory; their failure must not roll back
+                # wakes and watches (2026-10-02: a null lane ETA stalled wakes ~19h).
+                conn.execute("SAVEPOINT fleet_eval")
+                try:
+                    count += _evaluate_fleet_conn(conn, observations, root_binding, stamp)
+                except Exception:
+                    conn.execute("ROLLBACK TO fleet_eval")
+                    log.exception("fleet evaluation failed; wakes and watches still committed")
+                finally:
+                    conn.execute("RELEASE fleet_eval")
+                return count
+        return await self.submit(op)
+
+    async def missed_wake_alarm(self, *, now=None, grace_s=300):
+        """Alert each owner once whose wake is still unfired `grace_s` after due."""
+        stamp = time.time() if now is None else now
+        def op(conn):
+            with conn:
+                count = 0
+                for row in conn.execute("SELECT * FROM v2_watch_wake WHERE kind='wake' AND state='active'").fetchall():
+                    data = json.loads(row["data"])
+                    if data["due_at"] > stamp - grace_s or not _live(conn, row["owner"], row["owner_generation"]):
+                        continue
+                    nid = _id("wake_missed", row["id"])
+                    if conn.execute("SELECT 1 FROM v2_outbound_notices WHERE notice_id=?", (nid,)).fetchone():
+                        continue
+                    body = build_notice_body(nid, (
+                        f"Missed wake: due {_stamp(data['due_at'])} has not fired after "
+                        f"{int((stamp - data['due_at']) // 60)} min (daemon scheduler fault; tell the "
+                        f"fleet infra owner). Note: {data.get('note') or 'resume your work'}."))
+                    _insert_outbound_notice_conn(conn, notice_id=nid, tell_id=nid, kind="wake_missed", dedupe_key=nid,
+                        recipient_stream_id=row["owner"], source_stream_id=None, episode_id=row["id"],
+                        body=body, created_at=_stamp(time.time()),
+                        metadata={"wake_id": row["id"], "due_at": data["due_at"],
+                                  "owner_generation": row["owner_generation"]})
+                    _fact(conn, owner=row["owner"], owner_generation=row["owner_generation"], child=None,
+                          child_generation=None, kind="wake_missed", source=row["id"], notice_id=nid, now=stamp)
+                    log.warning("ALERT wake_missed %s", {"wake_id": row["id"], "owner": row["owner"],
+                                                         "due_at": data["due_at"], "late_s": int(stamp - data["due_at"])})
+                    count += 1
                 return count
         return await self.submit(op)
 
@@ -396,7 +437,7 @@ class _WatchWakeStoreMixin:
             with conn:
                 work = conn.execute("UPDATE v2_watch_wake SET state='cancelled' WHERE state!='cancelled'").rowcount
                 notices = conn.execute("""UPDATE v2_outbound_notices SET terminal_at=?, terminal_reason='d2_rollback'
-                    WHERE kind IN ('watch','wake','wake_urgent') AND delivered_at IS NULL AND terminal_at IS NULL""",
+                    WHERE kind IN ('watch','wake','wake_urgent','wake_missed') AND delivered_at IS NULL AND terminal_at IS NULL""",
                     (_stamp(time.time() if now is None else now),)).rowcount
                 return {"cancelled_work": work, "terminal_notices": notices}
         return await self.submit(op)
@@ -546,7 +587,8 @@ def _fleet_overrun(card, now):
         if eta <= start:
             return None
         return max(0.0, 100.0 * (now - eta) / (eta - start))
-    except (KeyError, TypeError, ValueError, OverflowError):
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        # `status --eta none` stores both fields as null: no ETA, no overrun.
         return None
 
 

@@ -540,7 +540,7 @@ async def run(args: argparse.Namespace) -> int:
     server.handlers.update(watch_wake.wire_handlers())
 
     async def reconcile_callbacks():
-        await run_reconcile_callbacks(event_push.check_pin_drift, watch_wake.tick)
+        await run_reconcile_callbacks(event_push.check_pin_drift, watch_wake.tick, watch_wake.missed_wake_alarm)
 
     reconciler = SessionReconciler(
         sessions,
