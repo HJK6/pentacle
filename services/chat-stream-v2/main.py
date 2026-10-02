@@ -540,7 +540,8 @@ async def run(args: argparse.Namespace) -> int:
     server.handlers.update(watch_wake.wire_handlers())
 
     async def reconcile_callbacks():
-        await run_reconcile_callbacks(event_push.check_pin_drift, watch_wake.tick, watch_wake.missed_wake_alarm)
+        # The alarm runs before tick so a late wake fired in this pass still alerts.
+        await run_reconcile_callbacks(event_push.check_pin_drift, watch_wake.missed_wake_alarm, watch_wake.tick)
 
     reconciler = SessionReconciler(
         sessions,
@@ -648,6 +649,7 @@ async def run(args: argparse.Namespace) -> int:
     # loaded: adopt the ones whose pane survived, release the rest, and roll
     # back only an ownership-fenced pane whose session-row registration fails.
     log.info("spawn intents: %s", await spawnctl.reconcile_spawn_intents())
+    await run_reconcile_callbacks(watch_wake.missed_wake_alarm)
     await watch_wake.tick()
     # Reconciliation has settled the inventory and every interrupted intent, so
     # a new spawn can no longer race it: open the spawn gate (QA #18).

@@ -128,7 +128,7 @@ class WatchWake:
         await self.store.evaluate_watch_wake(observations, now=self.clock(), root_binding=binding)
 
     async def missed_wake_alarm(self):
-        """Separate reconcile callback so it still runs when `tick` raises."""
+        """Separate callback, run before `tick`, so it still runs when `tick` raises."""
         grace = os.environ.get("PENTACLE_MISSED_WAKE_S", "")
         await self.store.missed_wake_alarm(now=self.clock(), grace_s=int(grace) if grace.isdigit() else 300)
 

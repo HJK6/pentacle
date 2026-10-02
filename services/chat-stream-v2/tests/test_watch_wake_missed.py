@@ -81,10 +81,12 @@ def test_due_wake_fires_despite_cleared_lane_eta():
     asyncio.run(run())
 
 
-def test_fleet_failure_rolls_back_only_fleet_work(monkeypatch):
+def test_fleet_failure_rolls_back_only_fleet_work(monkeypatch, caplog):
+    """SAVEPOINT isolation, independent of the null-ETA input fix."""
     import store_watch_wake
 
-    def boom(*args, **kwargs):
+    def boom(conn, *args, **kwargs):
+        conn.execute("INSERT INTO v2_fleet_switch_state VALUES ('probe', 1, 0)")
         raise RuntimeError("fleet fault")
 
     monkeypatch.setattr(store_watch_wake, "_evaluate_fleet_conn", boom)
@@ -99,6 +101,11 @@ def test_fleet_failure_rolls_back_only_fleet_work(monkeypatch):
                                             {"request_id": "w", "due_at": 110, "note": "", "urgent": False}, now=100)
             assert await store.evaluate_watch_wake(obs, now=110, root_binding=binding) == 1
             assert len(await _notices(store, "wake")) == 1
+            assert (await store.list_watch_wake("wake", "hosta:root", root["session_generation"]))[0]["state"] == "consumed"
+            probe = await store.submit(lambda c: c.execute(
+                "SELECT COUNT(*) FROM v2_fleet_switch_state WHERE kind='probe'").fetchone()[0])
+            assert probe == 0  # the fleet write rolled back with its savepoint
+            assert "fleet evaluation failed" in caplog.text
         finally:
             store.stop()
     asyncio.run(run())
@@ -125,7 +132,7 @@ def test_missed_wake_alarm_delivered_once_across_restart(monkeypatch):
                 monkeypatch.setattr(store_watch_wake, "_evaluate_conn", stalled)
             else:
                 monkeypatch.undo()
-            await run_reconcile_callbacks(ww.tick, ww.missed_wake_alarm)
+            await run_reconcile_callbacks(ww.missed_wake_alarm, ww.tick)  # main.py order
             if deliver:
                 for notice in await _notices(store, "wake_missed"):
                     await outbound.deliver_now(notice["notice_id"])
@@ -163,6 +170,53 @@ def test_missed_wake_alarm_delivered_once_across_restart(monkeypatch):
             assert len(missed) == 1 and len(wakes) == 1
             _, missed, wakes = await phase(path, clock, stall=False)
             assert len(missed) == 1 and len(wakes) == 1
+    asyncio.run(run())
+
+
+def test_late_recovery_pass_alerts_and_fires_once():
+    """Daemon down past due+grace: the first pass both alerts and fires, once."""
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            sessions = Sessions(store, local_host="hosta")
+            comms = _RecordingComms()
+            outbound = OutboundNoticeQueue(store, comms, config=OutboundNoticeConfig(lease_s=0.1, max_attempts=3))
+            clock = [100]
+            ww = WatchWake(store, sessions, outbound, clock=lambda: clock[0])
+            owner = await sessions.open("hosta", "owner", provider="shell", no_watch=True)
+            await store.register_watch_wake("wake", "hosta:owner", owner["session_generation"],
+                                            {"request_id": "w", "due_at": 1000, "note": "late", "urgent": False}, now=100)
+            clock[0] = 1000 + 600
+            await run_reconcile_callbacks(ww.missed_wake_alarm, ww.tick)
+            await run_reconcile_callbacks(ww.missed_wake_alarm, ww.tick)
+            missed, wakes = await _notices(store, "wake_missed"), await _notices(store, "wake")
+            assert len(missed) == 1 and len(wakes) == 1
+            for notice in missed + wakes:
+                assert await outbound.deliver_now(notice["notice_id"]) is True
+            assert sorted(c["message"].split("]")[-1].split(":")[0].strip() for c in comms.calls) == ["Missed wake", "Timed wake"]
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_on_time_wake_never_alerts():
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            sessions = Sessions(store, local_host="hosta")
+            clock = [100]
+            ww = WatchWake(store, sessions, clock=lambda: clock[0])
+            owner = await sessions.open("hosta", "owner", provider="shell", no_watch=True)
+            await store.register_watch_wake("wake", "hosta:owner", owner["session_generation"],
+                                            {"request_id": "w", "due_at": 1000, "note": "", "urgent": False}, now=100)
+            for t in (1000, 1070, 1400, 5000):
+                clock[0] = t
+                await run_reconcile_callbacks(ww.missed_wake_alarm, ww.tick)
+            assert await _notices(store, "wake_missed") == [] and len(await _notices(store, "wake")) == 1
+        finally:
+            store.stop()
     asyncio.run(run())
 
 
