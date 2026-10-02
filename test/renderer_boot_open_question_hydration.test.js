@@ -13,8 +13,8 @@ function openQuestion(overrides = {}) {
   return {
     notification_id: 'n-open', producer: 'agent_question.v1', state: 'open',
     title: 'Card', body: 'Body', created_at: '2026-10-02T00:00:00Z',
-    answer_to_stream_id: 'hostc:v2-bound',
-    question: { question_id: 'q-open', producer_stream_id: 'hostc:v2-bound', state: 'open',
+    answer_to_stream_id: 'local:bound-seat',
+    question: { question_id: 'q-open', producer_stream_id: 'local:bound-seat', state: 'open',
       response_mode: 'single_choice', options: [{ label: 'OK', value: 'OK' }] },
     ...overrides,
   };
@@ -40,8 +40,8 @@ test('a renderer that loads after the daemon snapshot still learns open question
     `getOpenQuestionsForStream(${JSON.stringify(stream)}).map(n => n.question.question_id)`, context);
   // No chat has been opened: the card is known for its surface and its producer.
   assert.deepEqual([...ids('composite:assistant')], ['q-open']);
-  assert.deepEqual([...ids('hostc:v2-bound')], ['q-open']);
-  assert.deepEqual([...ids('hostc:v2-unrelated')], []);
+  assert.deepEqual([...ids('local:bound-seat')], ['q-open']);
+  assert.deepEqual([...ids('local:unrelated-seat')], []);
 });
 
 test('boot hydration tolerates a missing or failing notification list', async () => {
@@ -51,6 +51,6 @@ test('boot hydration tolerates a missing or failing notification list', async ()
   const absent = installRenderer();
   for (let i = 0; i < 6; i += 1) await flush();
   for (const { context } of [failing, absent]) {
-    assert.equal(vm.runInContext("getOpenQuestionsForStream('hostc:v2-bound').length", context), 0);
+    assert.equal(vm.runInContext("getOpenQuestionsForStream('local:bound-seat').length", context), 0);
   }
 });
