@@ -34,15 +34,15 @@ class _RecordingComms:
 
 async def _fleet(store, sessions):
     """A fleet root with one lane whose card has a cleared ETA (the live shape)."""
-    root = await sessions.open("hosta", "root", provider="shell", no_watch=True)
-    await store.update_session("hosta", "root", pane_status="pane_alive")
-    lead = await sessions.open("hosta", "lead", provider="shell", role="lead", no_watch=True,
-                               parent_stream_id="hosta:root")
-    await store.update_session("hosta", "lead", status_card=json.dumps(CLEARED))
-    binding = ("hosta:root", root["session_generation"])
-    obs = {"hosta:root": {"session_generation": root["session_generation"], "online": True,
+    root = await sessions.open("local", "root", provider="shell", no_watch=True)
+    await store.update_session("local", "root", pane_status="pane_alive")
+    lead = await sessions.open("local", "lead", provider="shell", role="lead", no_watch=True,
+                               parent_stream_id="local:root")
+    await store.update_session("local", "lead", status_card=json.dumps(CLEARED))
+    binding = ("local:root", root["session_generation"])
+    obs = {"local:root": {"session_generation": root["session_generation"], "online": True,
                           "pane_status": "pane_alive"},
-           "hosta:lead": {"session_generation": lead["session_generation"], "working": False}}
+           "local:lead": {"session_generation": lead["session_generation"], "working": False}}
     return root, binding, obs
 
 
@@ -66,16 +66,16 @@ def test_due_wake_fires_despite_cleared_lane_eta():
         store = Store()
         store.start()
         try:
-            sessions = Sessions(store, local_host="hosta")
+            sessions = Sessions(store, local_host="local")
             root, binding, obs = await _fleet(store, sessions)
             gen = root["session_generation"]
-            await store.register_watch_wake("wake", "hosta:root", gen,
+            await store.register_watch_wake("wake", "local:root", gen,
                                             {"request_id": "w", "due_at": 110, "note": "resume", "urgent": False}, now=100)
             assert await store.evaluate_watch_wake(obs, now=109, root_binding=binding) == 0
             await store.evaluate_watch_wake(obs, now=110, root_binding=binding)
             await store.evaluate_watch_wake(obs, now=111, root_binding=binding)
             assert len(await _notices(store, "wake")) == 1
-            assert (await store.list_watch_wake("wake", "hosta:root", gen))[0]["state"] == "consumed"
+            assert (await store.list_watch_wake("wake", "local:root", gen))[0]["state"] == "consumed"
         finally:
             store.stop()
     asyncio.run(run())
@@ -95,13 +95,13 @@ def test_fleet_failure_rolls_back_only_fleet_work(monkeypatch, caplog):
         store = Store()
         store.start()
         try:
-            sessions = Sessions(store, local_host="hosta")
+            sessions = Sessions(store, local_host="local")
             root, binding, obs = await _fleet(store, sessions)
-            await store.register_watch_wake("wake", "hosta:root", root["session_generation"],
+            await store.register_watch_wake("wake", "local:root", root["session_generation"],
                                             {"request_id": "w", "due_at": 110, "note": "", "urgent": False}, now=100)
             assert await store.evaluate_watch_wake(obs, now=110, root_binding=binding) == 1
             assert len(await _notices(store, "wake")) == 1
-            assert (await store.list_watch_wake("wake", "hosta:root", root["session_generation"]))[0]["state"] == "consumed"
+            assert (await store.list_watch_wake("wake", "local:root", root["session_generation"]))[0]["state"] == "consumed"
             probe = await store.submit(lambda c: c.execute(
                 "SELECT COUNT(*) FROM v2_fleet_switch_state WHERE kind='probe'").fetchone()[0])
             assert probe == 0  # the fleet write rolled back with its savepoint
@@ -123,7 +123,7 @@ def test_missed_wake_alarm_delivered_once_across_restart(monkeypatch):
         store = Store(path)
         store.start()
         try:
-            sessions = Sessions(store, local_host="hosta")
+            sessions = Sessions(store, local_host="local")
             comms = _RecordingComms()
             outbound = OutboundNoticeQueue(store, comms, config=OutboundNoticeConfig(lease_s=0.1, max_attempts=3))
             ww = WatchWake(store, sessions, outbound, clock=lambda: clock[0])
@@ -145,9 +145,9 @@ def test_missed_wake_alarm_delivered_once_across_restart(monkeypatch):
             path = os.path.join(tmp, "sessions.db")
             store = Store(path)
             store.start()
-            sessions = Sessions(store, local_host="hosta")
-            owner = await sessions.open("hosta", "owner", provider="shell", no_watch=True)
-            await store.register_watch_wake("wake", "hosta:owner", owner["session_generation"],
+            sessions = Sessions(store, local_host="local")
+            owner = await sessions.open("local", "owner", provider="shell", no_watch=True)
+            await store.register_watch_wake("wake", "local:owner", owner["session_generation"],
                                             {"request_id": "w", "due_at": 1000, "note": "E1 window", "urgent": False},
                                             now=100)
             store.stop()
@@ -158,7 +158,7 @@ def test_missed_wake_alarm_delivered_once_across_restart(monkeypatch):
             clock[0] = 1000 + 301
             calls, missed, wakes = await phase(path, clock, stall=True, deliver=True)
             assert len(missed) == 1 and wakes == []
-            assert missed[0]["recipient_stream_id"] == "hosta:owner"
+            assert missed[0]["recipient_stream_id"] == "local:owner"
             assert missed[0]["delivered_at"] is not None
             assert len(calls) == 1 and calls[0]["urgent"] is False
             assert "Missed wake" in calls[0]["message"] and "E1 window" in calls[0]["message"]
@@ -179,13 +179,13 @@ def test_late_recovery_pass_alerts_and_fires_once():
         store = Store()
         store.start()
         try:
-            sessions = Sessions(store, local_host="hosta")
+            sessions = Sessions(store, local_host="local")
             comms = _RecordingComms()
             outbound = OutboundNoticeQueue(store, comms, config=OutboundNoticeConfig(lease_s=0.1, max_attempts=3))
             clock = [100]
             ww = WatchWake(store, sessions, outbound, clock=lambda: clock[0])
-            owner = await sessions.open("hosta", "owner", provider="shell", no_watch=True)
-            await store.register_watch_wake("wake", "hosta:owner", owner["session_generation"],
+            owner = await sessions.open("local", "owner", provider="shell", no_watch=True)
+            await store.register_watch_wake("wake", "local:owner", owner["session_generation"],
                                             {"request_id": "w", "due_at": 1000, "note": "late", "urgent": False}, now=100)
             clock[0] = 1000 + 600
             await run_reconcile_callbacks(ww.missed_wake_alarm, ww.tick)
@@ -205,11 +205,11 @@ def test_on_time_wake_never_alerts():
         store = Store()
         store.start()
         try:
-            sessions = Sessions(store, local_host="hosta")
+            sessions = Sessions(store, local_host="local")
             clock = [100]
             ww = WatchWake(store, sessions, clock=lambda: clock[0])
-            owner = await sessions.open("hosta", "owner", provider="shell", no_watch=True)
-            await store.register_watch_wake("wake", "hosta:owner", owner["session_generation"],
+            owner = await sessions.open("local", "owner", provider="shell", no_watch=True)
+            await store.register_watch_wake("wake", "local:owner", owner["session_generation"],
                                             {"request_id": "w", "due_at": 1000, "note": "", "urgent": False}, now=100)
             for t in (1000, 1070, 1400, 5000):
                 clock[0] = t
@@ -225,18 +225,18 @@ def test_no_alarm_for_fired_cancelled_or_dead_owner_wakes():
         store = Store()
         store.start()
         try:
-            sessions = Sessions(store, local_host="hosta")
-            owner = await sessions.open("hosta", "owner", provider="shell", no_watch=True)
-            gone = await sessions.open("hosta", "gone", provider="shell", no_watch=True)
+            sessions = Sessions(store, local_host="local")
+            owner = await sessions.open("local", "owner", provider="shell", no_watch=True)
+            gone = await sessions.open("local", "gone", provider="shell", no_watch=True)
             gen = owner["session_generation"]
             for rid in ("fired", "cancelled"):
-                await store.register_watch_wake("wake", "hosta:owner", gen,
+                await store.register_watch_wake("wake", "local:owner", gen,
                                                 {"request_id": rid, "due_at": 1000, "note": "", "urgent": False}, now=100)
-            await store.register_watch_wake("wake", "hosta:gone", gone["session_generation"],
+            await store.register_watch_wake("wake", "local:gone", gone["session_generation"],
                                             {"request_id": "dead", "due_at": 1000, "note": "", "urgent": False}, now=100)
-            cancelled = [r for r in await store.list_watch_wake("wake", "hosta:owner", gen) if r["request_id"] == "cancelled"][0]
-            await store.cancel_watch_wake("wake", "hosta:owner", gen, cancelled["id"], request_id="c1")
-            await store.update_session("hosta", "gone", status="closed")
+            cancelled = [r for r in await store.list_watch_wake("wake", "local:owner", gen) if r["request_id"] == "cancelled"][0]
+            await store.cancel_watch_wake("wake", "local:owner", gen, cancelled["id"], request_id="c1")
+            await store.update_session("local", "gone", status="closed")
             await store.evaluate_watch_wake({}, now=1000)  # fires "fired"; retires the dead owner's wake
             assert await store.missed_wake_alarm(now=5000, grace_s=300) == 0
             assert await _notices(store, "wake_missed") == []
