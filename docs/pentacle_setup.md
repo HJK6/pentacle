@@ -14,6 +14,85 @@ developer walkthrough. The web host prints the local URL to open in a browser;
 for a shared HTTPS deployment, use the [web host guide](../server/README.md)
 and its authentication requirements.
 
+## BRANDING
+
+Use the shipped artwork and palette unchanged, or customize these existing
+source files in your own checkout. There is no separate branding config file;
+`PENTACLE_CONFIG` and browser profiles configure connections and host identity,
+not an arbitrary global brand palette.
+
+### Bring your own logo
+
+Replace the PNGs below, keeping their filenames and dimensions. The browser
+favicon, home-screen icon and installed PWA icons are separate assets; replace
+all of them for consistent branding.
+
+| File under `renderer/assets/` | Size | Use |
+| --- | --- | --- |
+| `favicon.png` | 64 × 64 | Browser favicon |
+| `favicon-180.png` | 180 × 180 | Apple touch icon |
+| `icon-192.png`, `icon-512.png` | 192 × 192, 512 × 512 | PWA icons |
+| `icon-maskable-192.png`, `icon-maskable-512.png` | 192 × 192, 512 × 512 | Maskable PWA icons |
+
+Use square PNGs. Ordinary icons may have transparency; maskable icons should
+have a full background with the important artwork inside the central safe
+area, so a platform's crop preserves it. `renderer/index.html` references the
+favicon and touch icon; `renderer/manifest.webmanifest` references the PWA
+icons. Keep those paths if replacing files in place. The manifest's `name`,
+`short_name`, `background_color` and `theme_color`, and the HTML `theme-color`
+meta tag, control installation labels and browser chrome separately from UI
+colors. These assets do not replace host sigils or provider badges.
+
+### Bring your own colors
+
+| Source | What to edit |
+| --- | --- |
+| `renderer/app.js` → `DESIGN_THEME_VARS.dark` / `.light` | Runtime app palette: `accent`, `accentDim`, `blue` (primary buttons), surfaces and text |
+| `renderer/styles.css` → dark/light root variables | Matching CSS defaults (`--pc-accent`, `--pc-accent-dim`, etc.) |
+| `renderer/cosmic_theme.css` → `.cosmic` | Scoped chat colors such as `--cosmic-green` |
+| `renderer/src/cosmic_tokens.ts` → `palette` | Matching component tokens such as `green` |
+
+For example, replace dark `accent: '#7ef0ba'` in `DESIGN_THEME_VARS` and
+`--pc-accent: #7ef0ba` in `styles.css` with `#ffb53d`. For primary buttons
+such as New Chat, also replace dark `blue: '#3fb950'` in `DESIGN_THEME_VARS`
+and `--blue: #3fb950` in `styles.css` with the same color: `blue` is a legacy
+token name, and its shipped dark value is green. The runtime palette is
+applied as inline CSS variables on startup and when appearance changes; editing
+only `styles.css` loses to those runtime values. Edit the light palette too if
+you want a custom accent in both appearance modes. To change the chat accent,
+change `--cosmic-green` and `palette.green` together; status/severity and host
+accents are separate tokens, so keep their semantic colors readable. Host
+labels/colors remain configured as described in [desktop configuration](desktop_config.md),
+not by replacing global palette tokens. See the [cosmic theme guide](desktop_cosmic_theme.md).
+
+After replacing artwork or editing tokens, run `npm run build:web`, then restart
+your web host as usual (`node server --profile <name>` for a named profile).
+The host serves a frozen snapshot from startup, so rebuilding without restarting
+a running host keeps the old branding. Reload the page and verify the primary
+controls and favicon. Choose dark/light
+in Settings to inspect both palettes. The build copies assets/CSS and bundles
+the token source; editing `renderer/dist/web/` directly is temporary. An already
+installed PWA may retain old icons: reinstall it to verify the new installation
+artwork, and hard-reload the page if cached artwork persists.
+
+### Start from or reset to the shipped defaults
+
+Before customizing, record `git rev-parse HEAD` as your defaults commit and
+copy any existing custom artwork somewhere safe. To reset only branding,
+restore the files you changed from that commit, for example:
+
+```sh
+git restore --source=<defaults-commit> -- renderer/assets/favicon.png renderer/app.js renderer/styles.css
+npm run build:web
+```
+
+Include the other icons, `renderer/index.html`, `renderer/manifest.webmanifest`,
+`renderer/cosmic_theme.css` and `renderer/src/cosmic_tokens.ts` in that restore
+only if you changed them. This discards edits in the named files, so save any
+other changes there first. Restart the web host, reload, verify the original logo and colors, and
+reinstall an installed PWA if its icon is still cached. Leaving the source
+files unchanged uses our defaults from the outset.
+
 ## Host profiles and terminals
 
 Choose a browser profile with `node server --profile <name>`. Keep private

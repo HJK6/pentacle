@@ -2,6 +2,10 @@
 
 The cosmic theme is a scoped presentation layer for the desktop chat surface. It provides palette, type, spacing, machine-token, status, and severity values without coupling the renderer to a particular host.
 
+For asset replacement, app-wide colors, rebuild and reset instructions, see
+[BRANDING in setup](pentacle_setup.md#branding). App appearance and scoped chat
+palettes are separate; update both when changing the overall brand.
+
 ## Scoped tokens
 
 The `.cosmic` root exposes `--cosmic-*` variables. Keep non-chat application styles in the ordinary root layer so the theme can be enabled or removed without changing layout code.
