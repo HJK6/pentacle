@@ -1263,3 +1263,37 @@ def test_restart_reingest_guard_survives_retention_and_keeps_live_out_of_order_t
             store.stop()
 
     asyncio.run(_go())
+
+
+def test_restart_reingest_watermark_compares_instants_not_text(tmp_path):
+    """Offsets and mixed precision must not let an older turn replay."""
+    async def _go():
+        database = str(tmp_path / "mirror-offsets.sqlite")
+        store = Store(database)
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            generation = root["session_generation"]
+            composite = AssistantComposite(store, config=_config(generation))
+            await composite.ensure_projection()
+            # 06:55Z, then the newer 07:05Z written with a later offset and no fraction.
+            await _append_ts(store, "turn one", identity="seq-one", timestamp="2025-11-02T01:55:00.000-05:00")
+            await _append_ts(store, "turn two", identity="seq-two", timestamp="2025-11-02T01:05:00-06:00")
+            await composite.stop()
+        finally:
+            store.stop()
+
+        store = Store(database)
+        store.start()
+        try:
+            composite = AssistantComposite(store, config=_config(generation))
+            await composite.ensure_projection()
+            # 07:02Z is older than the true watermark (07:05Z) but sorts after it as text.
+            await _append_ts(store, "turn between", identity="seq-between-reingest",
+                             timestamp="2025-11-02T01:02:00-06:00")
+            assert [r["text"] for r in await _answer_rows(store)] == ["turn one", "turn two"]
+            await composite.stop()
+        finally:
+            store.stop()
+
+    asyncio.run(_go())

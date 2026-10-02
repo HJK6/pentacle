@@ -1300,6 +1300,17 @@ from store_watch_wake import _WatchWakeStoreMixin, WATCH_WAKE_DDL, install_defau
 #: own source timestamp; live turns are ingested within seconds.
 _MIRROR_REPLAY_MIN_AGE_S = 300.0
 
+
+def _iso_epoch(value: object) -> float | None:
+    """Parse an ISO-8601 instant; None when absent or malformed."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
@@ -1837,24 +1848,23 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
         # out-of-order delivery never drops it). The latest turn itself stays
         # inside the append-layer identity-dedup window. The watermark is read
         # from the durable publication payload, so it survives both the restart
-        # and retention pruning of the composite event tail.
+        # and retention pruning of the composite event tail. Accepted limit: a
+        # reply written during a daemon outage of five minutes or more, after
+        # the provider clock stepped back past the previous turn, is not mirrored.
         source_ts = source_event.get("timestamp")
-        watermark = conn.execute(
-            "SELECT MAX(json_extract(canonical_payload_json,'$.mirrored_from.event_ts')) "
-            "FROM v2_assistant_composite_publications "
-            "WHERE stream_id=? AND publish_kind='status' AND dispatch_id='' "
-            "AND json_extract(canonical_payload_json,'$.mirrored_from.stream_id')=? "
-            "AND json_extract(canonical_payload_json,'$.mirrored_from.generation')=?",
-            (binding[0], source_stream_id, source_generation),
-        ).fetchone()[0]
-        if isinstance(watermark, str) and isinstance(source_ts, str):
-            try:
-                src_epoch = datetime.fromisoformat(source_ts.replace("Z", "+00:00")).timestamp()
-                wm_epoch = datetime.fromisoformat(watermark.replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                src_epoch = wm_epoch = None
-            if (src_epoch is not None and src_epoch < wm_epoch
-                    and recorded_at - src_epoch >= _MIRROR_REPLAY_MIN_AGE_S):
+        src_epoch = _iso_epoch(source_ts)
+        if src_epoch is not None and recorded_at - src_epoch >= _MIRROR_REPLAY_MIN_AGE_S:
+            # Compare instants, not text: providers may write offsets or mixed precision.
+            mirrored = [_iso_epoch(row[0]) for row in conn.execute(
+                "SELECT DISTINCT json_extract(canonical_payload_json,'$.mirrored_from.event_ts') "
+                "FROM v2_assistant_composite_publications "
+                "WHERE stream_id=? AND publish_kind='status' AND dispatch_id='' "
+                "AND json_extract(canonical_payload_json,'$.mirrored_from.stream_id')=? "
+                "AND json_extract(canonical_payload_json,'$.mirrored_from.generation')=?",
+                (binding[0], source_stream_id, source_generation),
+            )]
+            watermark = max((epoch for epoch in mirrored if epoch is not None), default=None)
+            if watermark is not None and src_epoch < watermark:
                 log.info(
                     "assistant mirror skipped stale re-ingest source_event_id=%s event_ts=%s watermark=%s",
                     source_event_id, source_ts, watermark,
