@@ -4551,7 +4551,7 @@ function renderSourceFilterBar(visibleSessions) {
   const configuredHostIds = (Array.isArray(HOST_IDS) ? HOST_IDS : [])
     .filter((id) => id && getSourceForSession('', id));
   const hostIds = configuredHostIds.length ? configuredHostIds : visibleHostIds;
-  if (hostIds.length < 1 || !showMachineIcons()) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+  if (hostIds.length < 1) { bar.style.display = 'none'; return; }
 
   bar.style.display = 'flex';
   let html = `<button class="source-filter-btn${state.sourceFilter === null ? ' active' : ''}" data-host="all">All</button>`;
@@ -4559,7 +4559,8 @@ function renderSourceFilterBar(visibleSessions) {
     const name = getSourceForSession('', id) || id;
     const color = getSourceColorForSession('', id);
     const isActive = state.sourceFilter === id;
-    html += `<button class="source-filter-btn color-${color}${isActive ? ' active' : ''}" data-host="${esc(id)}" title="${esc(name)}" aria-label="${esc(name)}">${machineSigilMarkup(id, name)}</button>`;
+    const sigil = machineSigilMarkup(id, name);
+    html += `<button class="source-filter-btn color-${color}${isActive ? ' active' : ''}" data-host="${esc(id)}" title="${esc(name)}" aria-label="${esc(name)}">${sigil || esc(name)}</button>`;
   }
   bar.innerHTML = html;
 
