@@ -14,6 +14,8 @@ icons hide automatically when the workspace has one host.
 ![Pentacle Web chat view showing a sample website launch conversation](docs/images/onboarding-chat.png)
 
 [New Chat and terminal screenshots](docs/screenshots.md) show the other views.
+Agents also publish reviewable reports and assets — see the
+[reports and assets showcase](docs/reports_showcase.md).
 
 ## Getting started
 
@@ -117,3 +119,8 @@ The certified daemon runner is `python services/chat-stream-v2/tools/run_gate.py
 ## Work process
 
 Start with [PROCESS.md](PROCESS.md), [workspace setup](process/README.md) and [AGENTS.md](AGENTS.md). The included process supplies spec templates, lifecycle directories, validation and search tools, development and QA guidelines, and optional daemon-backed agent coordination. Copy the process workspace to a private directory before adding real work or receipts.
+
+## Contributions
+
+PRs, feature requests, and bug reports are welcome — open an issue or pull
+request at <https://github.com/HJK6/pentacle/issues>.

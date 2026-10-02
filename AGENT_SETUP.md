@@ -19,6 +19,18 @@ install/configure one and request the account login when needed. Phone signing,
 trust and unlock actions may require the owner. These are setup prerequisites,
 not tasks the agent should pretend it completed.
 
+## Ask the owner during setup
+
+Early in setup, ask the owner these simple questions and apply the answers:
+
+- Do you want the **always-on assistant**? If so, what **name** and **icon**
+  should it use? (Default name in this kit is **Bart**.)
+- Do you want to connect a **ChatGPT "Dot"** agent for large assignments?
+- Do you want to change the app **icons or colours** from the shipped defaults?
+- What do you want to **call your machines** (display names)?
+
+Keep the defaults if the owner has no preference.
+
 ## Agent checklist
 
 1. **Inspect first.** Read [README.md](README.md) and the relevant repository's
@@ -108,3 +120,8 @@ display title. Mic stays disabled by default; naming a typed assistant does not
 customize the current fixed voice wake. Use [the process kit](process/README.md)
 and [memory discovery](process/MEMORY.md) for private facts, preferences,
 decisions and work; configure daemon and CLI memory roots separately.
+
+## Contributions
+
+PRs, feature requests, and bug reports are welcome — open an issue or pull
+request at <https://github.com/HJK6/pentacle/issues>.

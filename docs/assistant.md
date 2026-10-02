@@ -2,6 +2,8 @@
 
 The assistant is an ordinary top-level session identified by a configured role. It uses the existing chat view, transcripts, reports, questions, spawn reservations and handoff. This option adds no service, database or model router. It is disabled by default.
 
+You give the assistant a name and an icon. This guide uses the default name **Bart**, shown with a machine sigil as its icon (see the screenshots in the mobile README). Both are yours to change: set the name when you bootstrap the assistant (the `--name` value below), and the icon follows the host's sigil/colour. The name is display data only — it is not an authorization or a wake word.
+
 ## Configuration
 
 Set `PENTACLE_ASSISTANT_ROLE=assistant` in the daemon's private environment to protect that role on its local host. Set `features.assistantRole` to the same nonempty slug in each participating desktop/mobile private configuration. Leave these absent or empty for ordinary behavior. Public examples ship without an active assistant role. Restart the daemon after changing its environment and rebuild/reload clients according to their existing configuration workflow. Do not commit personal instructions, machine identities, credentials or context into these public repositories.
@@ -10,7 +12,7 @@ Clients pin an exact role match ahead of the normal attention order while retain
 
 ## Bootstrap your own assistant
 
-Run this from a public checkout with its Python dependencies and candidate `agent-orch` installed, tmux and a working provider CLI. In every shell used below, activate the installed environment (`source .venv-dev/bin/activate` after [developer installation](developer_onboarding.md#1-install-prerequisites)), or use that environment's Python executable explicitly. The provider account must already be logged in and support your explicit model/effort; check the installed `agent-orch models` catalog as well as your account. The assistant's name (for example Nova), physical host label (`local` here), provider/model and protected task role (`assistant`) are distinct. Keep instructions, process memory, credentials, config and stores outside the checkout. [Agent setup](../AGENT_SETUP.md) covers ordinary installation; this wrapper adds the named protected backend and exact composite configuration.
+Run this from a public checkout with its Python dependencies and candidate `agent-orch` installed, tmux and a working provider CLI. In every shell used below, activate the installed environment (`source .venv-dev/bin/activate` after [developer installation](developer_onboarding.md#1-install-prerequisites)), or use that environment's Python executable explicitly. The provider account must already be logged in and support your explicit model/effort; check the installed `agent-orch models` catalog as well as your account. The assistant's name (for example Bart), physical host label (`local` here), provider/model and protected task role (`assistant`) are distinct. Keep instructions, process memory, credentials, config and stores outside the checkout. [Agent setup](../AGENT_SETUP.md) covers ordinary installation; this wrapper adds the named protected backend and exact composite configuration.
 
 1. Prepare a private working directory and a compact instructions file. The example paths below are operator-chosen variables, not host defaults. Do not overwrite existing files. Include references to your private `soul.md`, process `MEMORY.md`, active work and commitments; the soul owns local paths/capabilities, while memory owns facts/preferences/decisions. Copy [the process kit](../process/README.md) separately when desired, and configure the daemon's `PENTACLE_MEMORY_ROOT` and CLI's `AGENT_ORCH_MEMORY_REPO` to that copy. Role discovery uses `agents/assistant_baseline.md` in the CLI memory root when you author one privately; the bootstrap passes the explicit instructions file to initial spawn without modifying it.
 
@@ -57,7 +59,7 @@ python3 services/chat-stream-v2/main.py \
 ```sh
 python3 tools/bootstrap_assistant.py \
   --url ws://127.0.0.1:7791 --credential-file "$OPERATOR_CREDENTIAL" \
-  --physical-host local --name Nova --provider codex \
+  --physical-host local --name Bart --provider codex \
   --model gpt-6-sol --effort medium \
   --private-workspace "$PRIVATE_WORKSPACE" \
   --instructions-file "$INSTRUCTIONS_FILE" --dry-run
@@ -78,7 +80,7 @@ The machine-readable receipt separates `composite_stream_id` (`local:assistant`)
 
 Readback must show `activation: restart_binding_verified`, the exact returned stream/generation, binding `source` (`env` initially) and `revision` (0 initially). A stale pair fails closed; do not invent a new generation or edit SQLite. The immutable startup setting `PENTACLE_ASSISTANT_REBIND_AUTHORIZED_SPEC_IDS` is a JSON array, default `[]`; malformed values fail startup. An explicit opt-in requires a matching qualified spec with verified grant provenance on a live visible parentless seat. Naming a title/role/spec without that grant gives no privilege. The happy-path recipe leaves this setting unset.
 
-6. Build/serve Pentacle Web using the generated `assistant-client.cjs` as the private config (`PENTACLE_CONFIG` or `--profile`), following [the web host guide](../server/README.md). It carries the same physical host, credential-file path, `features.assistantRole: assistant`, mic off and experimental Chat on so the composite can be selected. Select Nova's `local:assistant` row, send one typed input and see the correlated provider answer in the browser. Queue persistence or `submission_confirmed=false` alone is not a reply. Retain the input/dispatch IDs, backend generation, canonical publication receipt/event and actual effective tuple privately. Have the backend follow the daemon-authored `assistant publish` contract exactly, preserving answer text and IDs on retry.
+6. Build/serve Pentacle Web using the generated `assistant-client.cjs` as the private config (`PENTACLE_CONFIG` or `--profile`), following [the web host guide](../server/README.md). It carries the same physical host, credential-file path, `features.assistantRole: assistant`, mic off and experimental Chat on so the composite can be selected. Select Bart's `local:assistant` row, send one typed input and see the correlated provider answer in the browser. Queue persistence or `submission_confirmed=false` alone is not a reply. Retain the input/dispatch IDs, backend generation, canonical publication receipt/event and actual effective tuple privately. Have the backend follow the daemon-authored `assistant publish` contract exactly, preserving answer text and IDs on retry.
 
 For Web/mobile away from the daemon machine, loopback is not reachable. Use the physical host's permitted VPN/LAN address in the client endpoint and the documented authenticated listener/access setup; a phone's `localhost` is the phone. The generated client URL is the bootstrap URL; change your private client endpoint deliberately for remote access. Mobile needs its own enrolled credential and matching `assistantRole`, following [mobile setup](https://github.com/HJK6/pentacle-mobile/blob/main/AGENT_SETUP.md). Composite custom title comes from the daemon; no legacy assistant alias or client rebuild is needed to choose the typed name. Provider login, supported account tuple, physical phone/signing and microphone provisioning remain separate installation prerequisites.
 
@@ -246,3 +248,16 @@ Focused coverage is in `tests/test_assistant_prose_mirror.py` and
 isolated authenticated WebSocket journey. Renderer coverage is in
 `test/shared_transcript_view.test.ts`. Tests use isolated streams/databases and
 never send dispatch probes to a configured live assistant.
+
+## Working with your assistant (coordination practices)
+
+These are the conventions we use to keep an assistant-run workspace calm and productive. They are guidelines, not features — adopt what fits.
+
+- **One ordinary chat.** The assistant is a normal top-level chat — talk to it naturally. A new topic can begin while earlier work continues; it keeps each task's scope and owners intact.
+- **Keep the sidebar clean.** Long-running work runs in separate lanes led by a visible leader you can open and talk to directly; the helpers and reviewers under a lane stay hidden and are closed when their work is done, and finished or idle sessions are closed promptly.
+- **Decisions as cards.** When the assistant needs a decision from you, it asks with a durable question card carrying the context, what each option does, and a recommendation — so it can still be answered correctly later, not only inline in the moment.
+- **Simplest thing that works.** Reuse what already exists, finish the scoped work, and avoid duplicate review/permission chains or temporary patches that leave the real problem unresolved; small leftovers are finished before a task is called done.
+- **Verify, don't hand you test steps.** Features are checked with mocks and agent-driven runs; you are asked only for a step that genuinely needs you, such as real hardware or a real account action.
+- **Escalate instead of thrashing.** When something fails the same way twice, the assistant freezes retries, gets an independent look, and tells you once with a plan.
+- **A second agent for big external work.** You can connect a separate cloud agent (see the Dot connection guide) for large, self-contained tasks, while the local assistant handles day-to-day coordination and small fixes.
+- **Plain, timezone-aware updates.** Status and times are written for you in your own local time, and routine no-op notices stay quiet.
