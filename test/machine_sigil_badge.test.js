@@ -28,6 +28,7 @@ function loadFn(windowStub) {
     CONFIG,
     HOST_IDS: CONFIG.chatStream.hosts,
     hostPresentation,
+    showMachineIcons: () => true,
     esc: (s) => String(s),
     getSourceInitial: (s) => hostPresentation.initial(s),
   };
@@ -99,7 +100,7 @@ test('machine stats reuse configured sigils with accessible labels and retain da
     streamHostForHostId: id => id === 'local' ? 'thoth' : id,
     _streamHostToHostId: id => id, getSourceForSession: (_, id) => names[id],
     getSourceColorForSession: (_, id) => colors[id], esc: s => String(s),
-    machineSigilMarkup: loadFn(cosmic), statUsagePct: (used, total) => used / total * 100,
+    showMachineIcons: () => true, machineSigilMarkup: loadFn(cosmic), statUsagePct: (used, total) => used / total * 100,
     machineStatsIsStale: stats => stats.stale, statNumber: n => n == null ? null : Number(n),
     fmtStatPct: n => n == null ? '--' : n + '%',
     fmtStatBytes: String, fmtStatUptime: String, usageBarClass: () => 'low',

@@ -174,3 +174,11 @@ for the current behavior and setup.
 | Experimental structured Chat is unavailable | Enable `features.chatUi` and inspect the daemon health result. |
 | Terminal attach fails | Check the selected host ID and its configured tmux transport. |
 | Local daemon exits | Run the daemon command directly and inspect its startup error. |
+
+### Single-machine appearance
+
+Machine badges hide automatically when the fleet has exactly one host. The
+sidebar, machine filter, spawn picker and machine stats show no machine icon
+or initial-letter fallback in that case. With two or more configured or
+discovered hosts, all machine badges return, including for offline hosts. No
+setting is required. Host labels, accents and assistant identity artwork remain.

@@ -4467,7 +4467,16 @@ function getSourceInitial(source) {
 // host filter, in the host's configured accent (via currentColor so it tracks
 // the color-<accent> class and stays consistent with the yellow spec). Falls
 // back to the initial letter if the cosmic bundle is unavailable.
+function showMachineIcons() {
+  const observed = typeof state === 'undefined' ? [] : [
+    ...(state.sessions || []).filter(s => !isProtectedAssistantSession(s)).map(s => s.hostId),
+    ...Object.keys(state.chatStream?.hostsStats || {}).map(_streamHostToHostId),
+  ];
+  return hostPresentation.showMachineIcons(CONFIG, HOST_IDS, observed);
+}
+
 function machineSigilMarkup(hostId, fallbackName = '', size = 15, identityKind = '') {
+  if (!identityKind && !showMachineIcons()) return '';
   const cosmic = window.PentacleCosmic;
   const kind = identityKind || hostPresentation.hostSigil(CONFIG, hostId, HOST_IDS);
   if (cosmic && kind && typeof cosmic.machineSigil === 'function') {
@@ -4542,7 +4551,7 @@ function renderSourceFilterBar(visibleSessions) {
   const configuredHostIds = (Array.isArray(HOST_IDS) ? HOST_IDS : [])
     .filter((id) => id && getSourceForSession('', id));
   const hostIds = configuredHostIds.length ? configuredHostIds : visibleHostIds;
-  if (hostIds.length < 1) { bar.style.display = 'none'; return; }
+  if (hostIds.length < 1 || !showMachineIcons()) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
 
   bar.style.display = 'flex';
   let html = `<button class="source-filter-btn${state.sourceFilter === null ? ' active' : ''}" data-host="all">All</button>`;
@@ -4659,7 +4668,7 @@ function renderSidebar() {
     const machineName = getSourceForSession(s.name, hostId) || hostId;
     const machineColor = protectedAssistant ? 'forest-green' : getSourceColorForSession(s.name, hostId);
     const iconLabel = protectedAssistant ? `${displayName} assistant` : machineName;
-    const machineAvatar = `<span class="s-machine-avatar color-${machineColor}" title="${esc(iconLabel)}" aria-label="${esc(iconLabel)}">${machineSigilMarkup(hostId, iconLabel, 15, protectedAssistant ? 'djinni' : '')}</span>`;
+    const machineAvatar = (protectedAssistant || showMachineIcons()) ? `<span class="s-machine-avatar color-${machineColor}" title="${esc(iconLabel)}" aria-label="${esc(iconLabel)}">${machineSigilMarkup(hostId, iconLabel, 15, protectedAssistant ? 'djinni' : '')}</span>` : '';
     const offlineLabel = row.direct?.error || offlineHostStatus(s);
     const offline = !!offlineLabel;
     const offlineBadge = offline
@@ -5930,7 +5939,7 @@ function renderNewSessionLocationOptions(container) {
 
   container.innerHTML = options.map((opt) => (
     `<button class="new-session-option new-session-machine color-${esc(opt.color)}" data-loc="${esc(opt.id)}" title="Select ${esc(opt.label)}" aria-label="Select ${esc(opt.label)} machine">
-      <span class="new-session-option-mark" aria-hidden="true">${machineSigilMarkup(opt.id, opt.label, 25)}</span>
+      ${showMachineIcons() ? `<span class="new-session-option-mark" aria-hidden="true">${machineSigilMarkup(opt.id, opt.label, 25)}</span>` : ''}
       <span class="new-session-option-label">${esc(opt.label)}</span>
       <span class="new-session-option-meta">Machine</span>
     </button>`
@@ -6956,7 +6965,7 @@ function renderHostsStats(hosts = state.chatStream.hostsStats) {
     const card = [];
     card.push('<div class="machine-stat-card color-' + esc(color) + '" data-machine-stats-host="' + esc(streamHost) + '">');
     card.push('<div class="machine-stat-head">');
-    card.push('<span class="machine-stat-mark color-' + esc(color) + '" title="' + esc(label) + '" aria-label="' + esc(label) + '">' + machineSigilMarkup(hostId, label) + '</span>');
+    if (showMachineIcons()) card.push('<span class="machine-stat-mark color-' + esc(color) + '" title="' + esc(label) + '" aria-label="' + esc(label) + '">' + machineSigilMarkup(hostId, label) + '</span>');
     card.push('<span class="machine-stat-name">' + esc(label) + '</span>');
     card.push('<span class="machine-stat-state ' + (stale ? 'error' : 'ok') + '">' + (stale ? 'Stale' : 'Live') + '</span>');
     card.push('</div>');

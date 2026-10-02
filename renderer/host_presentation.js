@@ -39,6 +39,13 @@ function hostSigil(config = {}, hostId, roster = config.chatStream?.hosts || ['l
   return ({ 'forest-green': 'djinni', green: 'djinni', 'royal-blue': 'mage', blue: 'mage', cyan: 'mage', red: 'sun', orange: 'flower', mauve: 'flower', purple: 'flower', yellow: 'ibis' })[color];
 }
 
+// A disabled single-host condition can never suppress multi-host identification.
+function showMachineIcons(config, roster, observed = [], singleHostCondition = true) {
+  const hosts = new Set([...(roster || []), ...observed]
+    .filter(Boolean).map(id => streamHost(config, id)));
+  return hosts.size !== 1 || !singleHostCondition;
+}
+
 function initial(label) { return (Array.from(text(label))[0] || '').toUpperCase(); }
 
-module.exports = { PALETTE, ACCENTS, localIdentity, streamHost, hostLabel, hostColor, hostSigil, initial };
+module.exports = { PALETTE, ACCENTS, localIdentity, streamHost, hostLabel, hostColor, hostSigil, initial, showMachineIcons };
