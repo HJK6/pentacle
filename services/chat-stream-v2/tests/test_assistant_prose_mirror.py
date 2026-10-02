@@ -1209,3 +1209,54 @@ def test_restart_reingest_does_not_remirror_stale_turns(tmp_path):
             store.stop()
 
     asyncio.run(_go())
+
+
+def test_restart_reingest_guard_survives_retention_and_keeps_live_out_of_order_turns(tmp_path):
+    """The watermark must not depend on the prunable composite event tail, and a
+    promptly ingested turn stamped slightly before the newest mirror is live,
+    not a replay."""
+    async def _publications(store):
+        return await store.submit(lambda conn: [row[0] for row in conn.execute(
+            "SELECT json_extract(canonical_payload_json,'$.message') "
+            "FROM v2_assistant_composite_publications WHERE publish_kind='status' ORDER BY event_id")])
+
+    def _iso(offset_s: float) -> str:
+        moment = datetime.now(timezone.utc) + timedelta(seconds=offset_s)
+        return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    async def _go():
+        database = str(tmp_path / "mirror-retention.sqlite")
+        store = Store(database)
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            generation = root["session_generation"]
+            composite = AssistantComposite(store, config=_config(generation))
+            await composite.ensure_projection()
+            await _append_ts(store, "turn one", identity="seq-one", timestamp="2026-09-30T16:14:00.000Z")
+            await _append_ts(store, "turn two", identity="seq-two", timestamp="2026-09-30T16:20:00.000Z")
+            # Retention pruned the composite tail; the publications remain.
+            await store.submit(lambda conn: conn.execute(
+                "DELETE FROM session_event_tail WHERE stream_id=?", (ASSISTANT,)))
+            await composite.stop()
+        finally:
+            store.stop()
+
+        store = Store(database)
+        store.start()
+        try:
+            composite = AssistantComposite(store, config=_config(generation))
+            await composite.ensure_projection()
+            await _append_ts(store, "turn one", identity="seq-one-reingest",
+                             timestamp="2026-09-30T16:14:00.000Z")
+            assert await _publications(store) == ["turn one", "turn two"]
+
+            await _append_ts(store, "turn now", identity="seq-now", timestamp=_iso(0))
+            await _append_ts(store, "turn slightly earlier", identity="seq-earlier", timestamp=_iso(-5))
+            assert await _publications(store) == [
+                "turn one", "turn two", "turn now", "turn slightly earlier"]
+            await composite.stop()
+        finally:
+            store.stop()
+
+    asyncio.run(_go())
