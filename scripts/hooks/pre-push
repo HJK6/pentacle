@@ -202,6 +202,14 @@ fi
 
 # ── (b) explicit refspec: no bare / matching-branch (`:` or `+:`) pushes ─────
 read_parent_argv() {
+  # Test seam for sandboxes that block process introspection (Codex QA): a
+  # fixture remote in test mode may supply the invoking argv from a file. A
+  # GitHub destination always uses the real argv, and a missing file is unknown.
+  if [ "${PENTACLE_PREPUSH_TEST_MODE:-}" = 1 ] && [ "$is_github" -eq 0 ] \
+      && [ -n "${PENTACLE_PREPUSH_TEST_ARGV_FILE:-}" ]; then
+    cat "$PENTACLE_PREPUSH_TEST_ARGV_FILE" 2>/dev/null
+    return
+  fi
   case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*)
       # Git for Windows launches this POSIX shell with $PPID=1; its /proc and

@@ -20,18 +20,30 @@ const hookPath = path.join(hooksDir, 'pre-push');
 const windowsArgvHelper = path.join(hooksDir, 'read-windows-push-argv.ps1');
 const ID = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com'];
 
+// A sandbox (e.g. Codex QA) may block reading the parent `git push` argv via
+// /proc or ps. Only then do pushes in test mode hand the hook the exact argv
+// they run through PENTACLE_PREPUSH_TEST_ARGV_FILE; elsewhere the real argv is used.
+const PARENT_ARGV_READABLE = fs.existsSync(`/proc/${process.pid}/cmdline`)
+  || spawnSync('ps', ['-ww', '-o', 'args=', '-p', String(process.pid)], { encoding: 'utf8' }).status === 0;
+function argvFixture(args, env) {
+  if (PARENT_ARGV_READABLE || env.PENTACLE_PREPUSH_TEST_MODE !== '1' || !args.includes('push')) return env;
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-prepush-argv-')), 'argv');
+  fs.writeFileSync(file, ['git', ...args].join('\n') + '\n');
+  return { ...env, PENTACLE_PREPUSH_TEST_ARGV_FILE: file };
+}
+
 function childEnv(extra = {}) {
   const e = { ...process.env, ...extra };
-  for (const k of ['BASH_ENV', 'ENV', 'PENTACLE_PREPUSH_TEST_MODE', 'PENTACLE_ALLOWED_PUBLIC_REMOTES', 'PENTACLE_ALLOWED_PRIVATE_REMOTES', 'PENTACLE_PUBLIC_ROOTS', 'PENTACLE_PRIVATE_TERMS_FILE']) {
+  for (const k of ['BASH_ENV', 'ENV', 'PENTACLE_PREPUSH_TEST_MODE', 'PENTACLE_PREPUSH_TEST_ARGV_FILE', 'PENTACLE_ALLOWED_PUBLIC_REMOTES', 'PENTACLE_ALLOWED_PRIVATE_REMOTES', 'PENTACLE_PUBLIC_ROOTS', 'PENTACLE_PRIVATE_TERMS_FILE']) {
     if (!(k in extra)) delete e[k];
   }
   return e;
 }
 function git(cwd, args, env = {}) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', env: childEnv(env) });
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: childEnv(argvFixture(args, env)) });
 }
 function tryGit(cwd, args, env = {}) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: childEnv(env) });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: childEnv(argvFixture(args, env)) });
   return { status: r.status == null ? 1 : r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 function runHookDirect(name, url, { stdin = '', env = {} } = {}) {
@@ -443,6 +455,48 @@ test('the pinned default public root is the public repo root and is not read fro
   assert.ok(overrideLine, 'override line present');
   const idx = src.indexOf(overrideLine);
   assert.match(src.slice(Math.max(0, idx - 200), idx), /PENTACLE_PREPUSH_TEST_MODE:-\}" = 1/);
+});
+
+// ── test argv seam (sandbox-tolerant suite) ─────────────────────────────────
+// runHookDirect's parent is node, never `git push`, so the real argv is unknown
+// in every environment; only an honoured fixture could change the outcome.
+function argvFile(lines) {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-prepush-argv-')), 'argv');
+  fs.writeFileSync(file, lines.join('\n') + '\n');
+  return file;
+}
+test('fixture argv is ignored for a GitHub destination (real argv required, fail closed)', () => {
+  const file = argvFile(['git', 'push', 'origin', 'x:refs/heads/x']);
+  const r = runHookDirect('origin', 'git@github.com:HJK6/pentacle.git', {
+    stdin: `refs/heads/x ${'a'.repeat(40)} refs/heads/x ${'0'.repeat(40)}\n`,
+    env: { PENTACLE_PREPUSH_TEST_MODE: '1', PENTACLE_PREPUSH_TEST_ARGV_FILE: file, GIT_SSH_COMMAND: 'false' },
+  });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /REFUSED: could not read\/parse the invoking 'git push'/);
+});
+test('fixture argv is ignored outside test mode', () => {
+  const sb = sandbox();
+  const r = runHookDirect('origin', sb.remote, {
+    env: { PENTACLE_PREPUSH_TEST_ARGV_FILE: argvFile(['git', 'push', 'origin']) },
+  });
+  assert.match(r.stderr, /could not read the invoking 'git push' argv/);
+  assert.doesNotMatch(r.stderr, /no refspec/);
+});
+test('a missing fixture argv file is unknown argv and fails closed on a public fixture remote', () => {
+  const sb = sandbox();
+  const r = runHookDirect('public', sb.remote, {
+    env: pub(sb.remote, { PENTACLE_PREPUSH_TEST_ARGV_FILE: path.join(sb.dir, 'absent') }),
+  });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /REFUSED: could not read\/parse the invoking 'git push'/);
+});
+test('an honoured fixture argv still goes through the refspec parser (bare push REJECTED)', () => {
+  const sb = sandbox();
+  const r = runHookDirect('public', sb.remote, {
+    env: pub(sb.remote, { PENTACLE_PREPUSH_TEST_ARGV_FILE: argvFile(['git', 'push', 'public']) }),
+  });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /REFUSED: no refspec/);
 });
 
 // ── portability ──────────────────────────────────────────────────────────────
