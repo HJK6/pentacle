@@ -14,7 +14,7 @@ from test_nudges import HOST, _iso, _new_store
 # --------------------------------------------------------------------------- #
 # Captured-layout fixtures for the Claude CLI self-update footer.
 #
-# Taken from the real idle front-desk pane (thoth:v2-410fb34f3f79, 2026-10-01):
+# Taken from a real idle assistant pane (2026-10-01):
 # the prompt sits ABOVE the footers, so the composer parser scans the divider,
 # the permission footer and — after an in-place CLI self-update — a persistent
 # banner line ("✔ Update installed · Restart to update", ✔=U+2714, ·=U+00B7).
