@@ -1236,8 +1236,10 @@ def test_restart_reingest_guard_survives_retention_and_keeps_live_out_of_order_t
             await _append_ts(store, "turn one", identity="seq-one", timestamp="2026-09-30T16:14:00.000Z")
             await _append_ts(store, "turn two", identity="seq-two", timestamp="2026-09-30T16:20:00.000Z")
             # Retention pruned the composite tail; the publications remain.
-            await store.submit(lambda conn: conn.execute(
-                "DELETE FROM session_event_tail WHERE stream_id=?", (ASSISTANT,)))
+            def _prune(conn):
+                conn.execute("DELETE FROM session_event_tail WHERE stream_id=?", (ASSISTANT,))
+                conn.commit()
+            await store.submit(_prune)
             await composite.stop()
         finally:
             store.stop()
@@ -1247,6 +1249,7 @@ def test_restart_reingest_guard_survives_retention_and_keeps_live_out_of_order_t
         try:
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
+            assert await _answer_rows(store) == []
             await _append_ts(store, "turn one", identity="seq-one-reingest",
                              timestamp="2026-09-30T16:14:00.000Z")
             assert await _publications(store) == ["turn one", "turn two"]
