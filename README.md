@@ -6,6 +6,15 @@ Pentacle is a terminal workspace for coding agents, work specifications and revi
 
 The renderer's structured **Chat view is experimental and disabled by default**. Use terminal view for normal work. Mobile is a separate client and is unaffected by this setting.
 
+## See the workspace
+
+A single-machine example with invented sessions and conversation text. Machine
+icons hide automatically when the workspace has one host.
+
+![Pentacle Web chat view showing a sample website launch conversation](docs/images/onboarding-chat.png)
+
+[New Chat and terminal screenshots](docs/screenshots.md) show the other views.
+
 ## Getting started
 
 The easiest setup is to start a coding agent such as Fable or Astra and give it
