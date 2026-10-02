@@ -503,7 +503,7 @@ class Notify:
             return ""
         try:
             binding = await self._assistant_binding()
-        except ValueError:
+        except Exception:  # noqa: BLE001 - a binding read must never fail hello or a list
             return ""
         return _nullable_text(binding.get("stream_id")) if isinstance(binding, dict) else ""
 

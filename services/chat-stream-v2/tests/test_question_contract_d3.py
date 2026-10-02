@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -567,8 +568,9 @@ def test_bound_assistant_questions_surface_in_composite_chat(tmp_path):
         pushed: list[dict] = []
         async def broadcast(payload):
             pushed.append(payload)
-        notify = _notify(tmp_path, sessions=sessions, broadcast=broadcast,
-                         assistant_binding=current_binding, assistant_stream_id=composite)
+        notify = _notify(tmp_path, sessions=sessions, broadcast=broadcast)
+        notify._assistant_binding = current_binding
+        notify._assistant_stream_id = composite
         await notify.start()
         try:
             request = _ask("q-card", producer=bound)
@@ -594,12 +596,22 @@ def test_bound_assistant_questions_surface_in_composite_chat(tmp_path):
             # A different viewer keeps its literal scope.
             assert [q["question_id"] for q in (await listed(other))["questions"]] == ["q-visible"]
 
-            # After a rebind the old producer's cards no longer surface there.
+            # After a rebind the daemon stops listing and stamping the old producer's cards.
             binding["stream_id"] = other
             reply = await listed(composite)
             assert [q["question_id"] for q in reply["questions"]] == ["q-visible"]
             snapshot = {n["question"]["question_id"]: n for n in await notify.snapshot_notifications()}
             assert "surfaced_to_stream_id" not in snapshot["q-card"]
+
+            # A failed binding read costs only the stamp and the wider scope.
+            async def broken_binding():
+                raise sqlite3.OperationalError("database is locked")
+            notify._assistant_binding = broken_binding
+            snapshot = {n["question"]["question_id"]: n for n in await notify.snapshot_notifications()}
+            assert set(snapshot) == {"q-card", "q-visible"}
+            assert all("surfaced_to_stream_id" not in n for n in snapshot.values())
+            reply = await listed(composite)
+            assert reply["type"] == "prompt.list.ok" and reply["questions"] == []
         finally:
             await notify.stop()
 

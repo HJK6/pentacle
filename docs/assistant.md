@@ -218,9 +218,12 @@ The current direct-primary seat asks with the ordinary durable `prompt ask`,
 even while hidden. The daemon surfaces those cards in the composite chat: a
 `prompt.list` for the composite stream also covers the bound seat, and each of
 its question notifications carries `surfaced_to_stream_id` naming the composite.
-The producer and the answer route stay the bound seat. After a rebind, the
-previous seat's cards no longer surface there. Lane `question.open` is not used
-in this mode.
+The producer and the answer route stay the bound seat. After a rebind the
+daemon stops listing and stamping the previous seat's cards; a web client that
+was already open keeps its cached cards until it reloads, and answers still go
+to that seat. A closed seat's questions expire as usual. A failed binding read
+omits the stamp and the wider scope; it never fails hello or a list. Lane
+`question.open` is not used in this mode.
 
 The source transcript remains intact. In the same ingest transaction, the store
 omits a mirrored final when that source turn contains the route's exact frozen
