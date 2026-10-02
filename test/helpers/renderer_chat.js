@@ -15,7 +15,7 @@ answerModule._compile(esbuild.buildSync({ entryPoints: [answerModule.id], bundle
 const { buildPentacleQuestionAnswerText } = answerModule.exports;
 
 
-function installRenderer({ dismissResult, questionOverride, assistantRole = '', initialSessions = [], popoutContext = null, selectSessionDetail = null, renderTranscriptTimelineHtml = null, requestStreamEvents = null, setTimeout: setTimer = null } = {}) {
+function installRenderer({ dismissResult, questionOverride, assistantRole = '', initialSessions = [], popoutContext = null, selectSessionDetail = null, renderTranscriptTimelineHtml = null, requestStreamEvents = null, setTimeout: setTimer = null, ccOverrides = null } = {}) {
   const html = fs.readFileSync(path.join(root, 'renderer', 'index.html'), 'utf8');
   const dom = new JSDOM(html, { url: 'http://pentacle.test/renderer/index.html' });
   const dismissCalls = [];
@@ -121,6 +121,7 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
     chatClose: async (...args) => { closeCalls.push(args); return { ok: true }; },
     chatKill: async (...args) => { killCalls.push(args); return { ok: true }; },
     killTmuxSession: async (...args) => { killCalls.push(args); return { ok: true }; },
+    ...(ccOverrides || {}),
   };
   dom.window.HOST = {
     hostname: 'example.local',

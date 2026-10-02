@@ -741,6 +741,24 @@ function ensureDurableQuestionsHydrated(streamId) {
     });
 }
 
+// The host forwards the daemon's connect snapshot only to renderers attached at
+// that moment, so one that loads or resyncs later never receives its open
+// question notifications. Fetch them once so sidebar attention is correct
+// before any chat is opened.
+function hydrateOpenDurableQuestions() {
+  if (typeof window.cc?.notificationList !== 'function') return Promise.resolve();
+  return Promise.resolve(window.cc.notificationList({ states: ['open'] })).then((reply) => {
+    if (!reply || !Array.isArray(reply.notifications)) return;
+    let changed = false;
+    for (const notification of reply.notifications) {
+      changed = indexDurableQuestionNotification(notification) || changed;
+    }
+    if (!changed) return;
+    scheduleDurableQuestionSlotRenders();
+    refreshSidebarUnread();
+  }).catch(() => {});
+}
+
 function durableQuestionOptionBModel(notification) {
   const question = notification?.question || {};
   let options = Array.isArray(question.options) ? question.options : [];
@@ -5441,6 +5459,7 @@ async function performWebChatResync() {
   }
   window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...snapshot });
   restoreSlotsAfterReconnect();
+  hydrateOpenDurableQuestions();
 }
 
 window.cc.onReconnect?.(() => {
@@ -7910,6 +7929,7 @@ CFG_READY.then((cfg) => {
     warmSpawnCatalog();
     window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...(snapshot || {}) });
     bindChatPopout();
+    hydrateOpenDurableQuestions();
   }).catch(() => {
     if (IS_CHAT_POPOUT) bindChatPopout();
   });

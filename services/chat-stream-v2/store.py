@@ -1848,9 +1848,11 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
         # out-of-order delivery never drops it). The latest turn itself stays
         # inside the append-layer identity-dedup window. The watermark is read
         # from the durable publication payload, so it survives both the restart
-        # and retention pruning of the composite event tail. Accepted limit: a
-        # reply written during a daemon outage of five minutes or more, after
-        # the provider clock stepped back past the previous turn, is not mirrored.
+        # and retention pruning of the composite event tail. Accepted limit: if
+        # source timestamps fall five minutes or more behind the daemon clock
+        # and behind the prior watermark (a backward provider clock step, with
+        # or without daemon downtime), EVERY such turn is skipped until source
+        # time passes the watermark again.
         source_ts = source_event.get("timestamp")
         src_epoch = _iso_epoch(source_ts)
         if src_epoch is not None and recorded_at - src_epoch >= _MIRROR_REPLAY_MIN_AGE_S:
