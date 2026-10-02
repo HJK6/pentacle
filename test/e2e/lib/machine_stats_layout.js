@@ -19,6 +19,7 @@ function cardMarkup() {
     streamHostForHostId: id => id === 'local' ? 'thoth' : id,
     _streamHostToHostId: id => id, getSourceForSession: () => 'Thoth',
     getSourceColorForSession: () => 'yellow', esc: String,
+    showMachineIcons: () => true,
     machineSigilMarkup: () => '<svg aria-hidden="true"></svg>',
     statUsagePct: (used, total) => used / total * 100,
     machineStatsIsStale: () => false,

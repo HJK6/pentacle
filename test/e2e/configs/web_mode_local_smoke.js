@@ -37,12 +37,13 @@ module.exports = {
   appName: 'Pentacle',
   features: { mic: false },
   tmux: 'tmux',
-  hosts: { local: { kind: 'local' } },
+  // Keep machine glyphs visible for the gate's real-app contrast assertions.
+  hosts: { local: { kind: 'local' }, local2: { kind: 'local' } },
   agents: {},
   chatStream: {
     url: `ws://127.0.0.1:${smokePort}`,
     localHost: 'local',
-    hosts: ['local'],
+    hosts: ['local', 'local2'],
     // The loopback daemon trusts 127.0.0.1 and keeps no credential registry, so
     // point the client at a path with no operator envelope.
     tokenPath: path.join(__dirname, 'no-such-operator-token'),

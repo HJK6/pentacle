@@ -7,7 +7,7 @@
 //   node test/e2e/web_gate.js --profile <config.js>   # by-hand, external daemon
 //
 // The deterministic predeploy gate for web mode. With no --profile it is fully
-// hermetic: it seeds a scratch chat-stream-v2 sessions DB (two visible sessions
+// hermetic: it seeds a scratch chat-stream-v2 sessions DB (three visible sessions
 // + transcripts), boots a loopback daemon against that DB, serves the web
 // bundle from server/, drives it in real headless Chrome over CDP, and runs the
 // named scenario functions from lib/web_scenarios.js. Every terminal action
@@ -165,12 +165,13 @@ function writeProfile(scratch, daemonPort) {
     appName: 'Pentacle',
     features: { mic: false, chatUi: true, inputBar: true },
     tmux: 'tmux',
-    hosts: { local: { kind: 'local' } },
+    // Contrast scenarios exercise real machine glyphs, which require multiple hosts.
+    hosts: { local: { kind: 'local' }, local2: { kind: 'local' } },
     agents: {},
     chatStream: {
       url: `ws://127.0.0.1:${daemonPort}`,
       localHost: 'local',
-      hosts: ['local'],
+      hosts: ['local', 'local2'],
       // An isolated credential exercises the real operator authentication contract.
       tokenPath: path.join(scratch, 'operator-auth', 'token'),
     },
@@ -180,7 +181,11 @@ function writeProfile(scratch, daemonPort) {
   return file;
 }
 
-async function startDaemon(args, scratch, runtime, fixtures = [FIXTURE, { host: 'local', sessionName: 'web-gate-survivor', streamId: 'local:web-gate-survivor' }]) {
+async function startDaemon(args, scratch, runtime, fixtures = [
+  FIXTURE,
+  { host: 'local', sessionName: 'web-gate-survivor', streamId: 'local:web-gate-survivor' },
+  { host: 'local2', sessionName: 'web-gate-second-host', streamId: 'local2:web-gate-second-host' },
+]) {
   const db = path.join(scratch, 'sessions.db');
   execFileSync(args.python, [DAEMON, scratch, '--issue'], { cwd: ROOT });
   // Seed BEFORE boot: the daemon rebuilds its inventory purely from this DB.
