@@ -52,6 +52,10 @@ DEFAULT_RUNTIME_DIR = "~/repos/pentacle-public-runtime"
 DEFAULT_CONNECT_TIMEOUT = 8.0
 DEFAULT_READ_TIMEOUT = 75.0
 
+#: Transport sentinels used by run_remote -> classifiers (not real provider exits).
+EXIT_SSH_TIMEOUT = 124
+EXIT_SSH_TRANSPORT = 127
+
 #: Runs on the remote host via ``python3 -``. Reads ``~/.claude.json`` and prints
 #: ONLY the allowlisted usage/anchor fields as JSON. The OAuth token and every
 #: other field are never read into anything that is printed — this is the
@@ -166,9 +170,14 @@ def run_remote(
     try:
         proc = run(argv, input=input_text, capture_output=True, text=True, timeout=read_timeout)
     except subprocess.TimeoutExpired:
-        return 124, "", "ssh read timed out"
+        return EXIT_SSH_TIMEOUT, "", "ssh read timed out"
     except (OSError, subprocess.SubprocessError) as exc:
-        return 127, "", f"ssh transport failure ({type(exc).__name__})"
+        return EXIT_SSH_TRANSPORT, "", f"ssh transport failure ({type(exc).__name__})"
+    # OpenSSH itself exits 255 on connect/auth/transport failure (distinct from a
+    # remote probe's own non-zero exit). Normalize it to the transport sentinel so
+    # classifiers never mistake an unreachable host for a provider/no-weekly result.
+    if proc.returncode == 255:
+        return EXIT_SSH_TRANSPORT, proc.stdout or "", (proc.stderr or "").strip() or "ssh connect failed (255)"
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
@@ -222,18 +231,24 @@ def classify_claude_cache(host: str, plucked: dict, *, now_ms: int,
     seven_pct = _coerce_pct(plucked.get("seven_day_pct"))
     cache_uuid = plucked.get("cache_account_uuid")
     oauth_uuid = plucked.get("oauth_account_uuid")
-    if seven_pct is None or cache_uuid is None:
+    if seven_pct is None or not cache_uuid:
         return {"fallback": True, "reason": "cache_miss"}
-    # C1: the cache must belong to the currently logged-in account.
-    if oauth_uuid is not None and cache_uuid != oauth_uuid:
+    # C1 (fail closed): only use the cache when BOTH account ids are present and
+    # exactly equal. A missing oauth anchor means we cannot prove the cache
+    # belongs to the currently logged-in account, so we must fall back rather than
+    # risk presenting a prior account's value as current.
+    if not oauth_uuid or cache_uuid != oauth_uuid:
         return {"fallback": True, "reason": "account_mismatch"}
+    # C2 (fail closed): require a valid millisecond stamp and compare in ms, so a
+    # missing/invalid stamp is never "ok", and 600.x s at a 600 s cutoff is stale.
     fetched_ms = plucked.get("fetched_at_ms")
-    age_seconds = None
-    outcome = OUTCOME_OK
-    if isinstance(fetched_ms, (int, float)):
-        age_seconds = max(0, int((now_ms - fetched_ms) / 1000))
-        if age_seconds > max_age_s:  # C2: stale, but value still shown + flagged
-            outcome = OUTCOME_STALE
+    if not isinstance(fetched_ms, (int, float)) or isinstance(fetched_ms, bool) or fetched_ms <= 0:
+        outcome = OUTCOME_STALE  # value shown, flagged; freshness unverifiable
+        age_seconds = None
+    else:
+        age_ms = now_ms - fetched_ms
+        age_seconds = max(0, int(age_ms / 1000))
+        outcome = OUTCOME_OK if age_ms <= max_age_s * 1000 else OUTCOME_STALE
     five_pct = _coerce_pct(plucked.get("five_hour_pct"))
     return _row(
         host, "claude", outcome,
@@ -250,10 +265,16 @@ def classify_claude_cache(host: str, plucked: dict, *, now_ms: int,
 # --- Claude TUI/OAuth fallback classification (pure) ------------------------
 def classify_claude_fallback(host: str, exit_code: int, stdout: str, stderr: str,
                              *, mismatch: bool, now_ms: int) -> dict:
-    """Classify the deployed check_claude_usage.py result for the fallback path."""
-    if exit_code in (124,) :
+    """Classify the deployed check_claude_usage.py result for the fallback path.
+
+    Transport/timeout are distinguished from provider failures; a successful parse
+    with a weekly % is ``ok``. When the cache was for a different account and the
+    live probe yields no current-account number, the row is ``account_mismatch``
+    (never the stale account's value), with the specific sub-reason in ``note``.
+    """
+    if exit_code == EXIT_SSH_TIMEOUT:
         return _row(host, "claude", OUTCOME_TIMEOUT, source="claude-probe")
-    if exit_code == 127:
+    if exit_code in (EXIT_SSH_TRANSPORT, 255):
         return _row(host, "claude", OUTCOME_TRANSPORT_ERROR, source="claude-probe")
     stdout = (stdout or "").strip()
     if exit_code == 0 and stdout:
@@ -266,23 +287,32 @@ def classify_claude_fallback(host: str, exit_code: int, stdout: str, stderr: str
             return _row(host, "claude", OUTCOME_OK, pct=pct,
                         resets_text=data.get("week_all_resets"),
                         source="claude-probe", probed_at=_iso_from_ms(now_ms))
+    # No usable weekly % — classify the failure explicitly from the probe's own
+    # sanitized stderr (check_claude_usage.py messages), never a catch-all.
     low = (stderr or "").casefold()
     if "sign in" in low or "log in" in low or "logged in" in low:
-        outcome = OUTCOME_AUTH_ERROR
-    elif "did not provide labeled weekly" in low or "trusted claude workspace" in low:
-        # No weekly limits readable from the TUI either.
-        outcome = OUTCOME_ACCOUNT_MISMATCH if mismatch else OUTCOME_NO_WEEKLY_LIMITS
+        base = OUTCOME_AUTH_ERROR
+    elif "did not provide labeled weekly" in low:
+        base = OUTCOME_TIMEOUT  # the probe's own 60s deadline expired
+    elif "must be installed" in low or "not found" in low or "not a trusted" in low:
+        base = OUTCOME_PROVIDER_ERROR
+    elif exit_code == 0:
+        base = OUTCOME_PARSER_ERROR  # exit 0 but no parseable weekly %
     else:
-        outcome = OUTCOME_ACCOUNT_MISMATCH if mismatch else OUTCOME_NO_WEEKLY_LIMITS
-    return _row(host, "claude", outcome, source="claude-probe")
+        base = OUTCOME_PROVIDER_ERROR
+    if mismatch:
+        # Cache belonged to another account and we could not read a current-account
+        # number: report account_mismatch, keeping the specific cause as a note.
+        return _row(host, "claude", OUTCOME_ACCOUNT_MISMATCH, source="claude-probe", note=base)
+    return _row(host, "claude", base, source="claude-probe")
 
 
 # --- Codex probe classification (pure) --------------------------------------
 def classify_codex_probe(host: str, exit_code: int, stdout: str, stderr: str,
                          *, now_ms: int) -> dict:
-    if exit_code == 124:
+    if exit_code == EXIT_SSH_TIMEOUT:
         return _row(host, "codex", OUTCOME_TIMEOUT, source="codex-app-server")
-    if exit_code == 127:
+    if exit_code in (EXIT_SSH_TRANSPORT, 255):
         return _row(host, "codex", OUTCOME_TRANSPORT_ERROR, source="codex-app-server")
     stdout = (stdout or "").strip()
     if exit_code == 0 and stdout:
@@ -391,15 +421,21 @@ def _runtime_dir(env: dict | None = None) -> str:
 
 
 def _remote_script(runtime: str, name: str) -> str:
-    """A shell token for a deployed probe path that lets the remote expand ``~``.
+    """A safe shell token for a deployed probe path, allowing only ``~``/``$HOME``.
 
-    ``shlex.quote`` would single-quote a leading ``~`` and defeat tilde expansion,
-    so normalize ``~`` → ``$HOME`` and double-quote (expansion-safe, space-safe).
+    ``shlex.quote`` on a leading ``~`` would defeat tilde expansion, but leaving the
+    whole path unquoted (or merely double-quoted) would let a crafted
+    ``PENTACLE_USAGE_RUNTIME_DIR`` inject ``$(...)``/backticks. So emit a quoted
+    ``"$HOME"`` prefix for a home-relative path and ``shlex.quote`` the remainder;
+    an absolute path is fully ``shlex.quote``d. Nothing else expands.
     """
-    rt = runtime
-    if rt == "~" or rt.startswith("~/"):
-        rt = "$HOME" + rt[1:]
-    return f'"{rt}/scripts/{name}"'
+    full = f"{runtime}/scripts/{name}"
+    for prefix in ("~/", "$HOME/"):
+        if full.startswith(prefix):
+            return '"$HOME"/' + shlex.quote(full[len(prefix):])
+    if full in ("~", "$HOME"):
+        return '"$HOME"'
+    return shlex.quote(full)
 
 
 def read_remote_claude(machine: dict, *, now_ms: int, max_age_s: int,

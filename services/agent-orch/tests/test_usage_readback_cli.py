@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import shlex
 from argparse import Namespace
 from contextlib import redirect_stdout, redirect_stderr
 
@@ -83,16 +84,62 @@ def test_usage_cli_claude_fallback_classes():
     auth = ur.classify_claude_fallback("merlin", 1, "", "Please sign in to continue",
                                        mismatch=False, now_ms=NOW_MS)
     assert auth["outcome"] == ur.OUTCOME_AUTH_ERROR
-    noweek = ur.classify_claude_fallback(
+    # the probe's own deadline message is a timeout, not "no weekly limits"
+    deadline = ur.classify_claude_fallback(
         "merlin", 1, "", "Claude usage unavailable: ... did not provide labeled weekly ...",
         mismatch=False, now_ms=NOW_MS)
-    assert noweek["outcome"] == ur.OUTCOME_NO_WEEKLY_LIMITS
+    assert deadline["outcome"] == ur.OUTCOME_TIMEOUT
+    missing_bin = ur.classify_claude_fallback(
+        "merlin", 1, "", "Claude and tmux must be installed", mismatch=False, now_ms=NOW_MS)
+    assert missing_bin["outcome"] == ur.OUTCOME_PROVIDER_ERROR
+    ssh255 = ur.classify_claude_fallback("merlin", 255, "", "ssh connect failed (255)",
+                                         mismatch=False, now_ms=NOW_MS)
+    assert ssh255["outcome"] == ur.OUTCOME_TRANSPORT_ERROR
     timeout = ur.classify_claude_fallback("merlin", 124, "", "", mismatch=False, now_ms=NOW_MS)
     assert timeout["outcome"] == ur.OUTCOME_TIMEOUT
     ok = ur.classify_claude_fallback(
         "merlin", 0, json.dumps({"week_all_pct": 42, "week_all_resets": "soon"}), "",
         mismatch=False, now_ms=NOW_MS)
     assert ok["outcome"] == ur.OUTCOME_OK and ok["pct"] == 42
+    # after a cache account-mismatch, a failed live read reports account_mismatch
+    # (never the stale account's number), keeping the specific cause as a note.
+    # (exit 1 + deadline message goes through the lower branch where mismatch wraps.)
+    mm = ur.classify_claude_fallback(
+        "merlin", 1, "", "Claude usage unavailable: ... did not provide labeled weekly ...",
+        mismatch=True, now_ms=NOW_MS)
+    assert mm["outcome"] == ur.OUTCOME_ACCOUNT_MISMATCH and mm["pct"] is None
+    assert mm["note"] == ur.OUTCOME_TIMEOUT
+    # but a pure transport/timeout at the ssh layer is reported as-is (not masked
+    # as account_mismatch) even under mismatch, since the account couldn't be read
+    assert ur.classify_claude_fallback("merlin", 124, "", "", mismatch=True,
+                                       now_ms=NOW_MS)["outcome"] == ur.OUTCOME_TIMEOUT
+
+
+def test_usage_cli_claude_cache_anchor_fail_closed():
+    # oauth anchor absent -> cannot verify current account -> must fall back
+    sig = ur.classify_claude_cache("merlin", _cache(oauth_account_uuid=None),
+                                   now_ms=NOW_MS, max_age_s=600)
+    assert sig == {"fallback": True, "reason": "account_mismatch"}
+    # empty-string anchors are also treated as unverifiable
+    sig2 = ur.classify_claude_cache("merlin", _cache(oauth_account_uuid=""),
+                                    now_ms=NOW_MS, max_age_s=600)
+    assert sig2["fallback"] is True
+
+
+def test_usage_cli_claude_cache_bad_stamp_fail_closed():
+    # missing / non-numeric / non-positive fetchedAtMs -> stale (never ok), pct kept
+    for bad in (None, "nope", 0, -5, True):
+        row = ur.classify_claude_cache("merlin", _cache(fetched_at_ms=bad),
+                                       now_ms=NOW_MS, max_age_s=600)
+        assert row["outcome"] == ur.OUTCOME_STALE, bad
+        assert row["pct"] == 85 and row["age_seconds"] is None
+
+
+def test_usage_cli_claude_cache_fractional_boundary():
+    # 600.9s old must be stale at a 600s cutoff (ms comparison, not floored secs)
+    row = ur.classify_claude_cache("merlin", _cache(fetched_at_ms=NOW_MS - 600_900),
+                                   now_ms=NOW_MS, max_age_s=600)
+    assert row["outcome"] == ur.OUTCOME_STALE and row["age_seconds"] == 600
 
 
 def test_usage_cli_codex_ok_and_errors():
@@ -220,15 +267,29 @@ def test_usage_cli_handler_json_and_table(monkeypatch):
     assert rc == 0 and "merlin" in out2.getvalue() and "85%" in out2.getvalue()
 
 
-def test_remote_script_path_allows_tilde_expansion():
-    # Regression: shlex.quote on a ~-path blocks remote tilde expansion, so the
-    # deployed probe path must normalize ~ -> $HOME and stay double-quoted.
+def test_remote_script_expands_home_safely():
+    # ~-path: quoted $HOME prefix + shlex-quoted remainder. shlex.quote leaves a
+    # clean remainder bare (still safe); only $HOME expands remotely.
     tok = ur._remote_script("~/repos/pentacle-public-runtime", "check_codex_usage.py")
-    assert tok == '"$HOME/repos/pentacle-public-runtime/scripts/check_codex_usage.py"'
-    assert "'~" not in tok and not tok.startswith("'")
+    assert tok == '"$HOME"/repos/pentacle-public-runtime/scripts/check_codex_usage.py'
+    assert "'~" not in tok
+    # an absolute clean path is returned bare (shlex.quote), still one shell token
+    tok2 = ur._remote_script("/opt/pentacle", "check_codex_usage.py")
+    assert shlex.split(tok2) == ["/opt/pentacle/scripts/check_codex_usage.py"]
 
 
-def test_codex_command_has_no_single_quoted_tilde(monkeypatch):
+def test_remote_script_blocks_injection():
+    # A crafted runtime dir must NOT allow command substitution / backticks: the
+    # dangerous remainder is shlex-quoted into exactly one literal shell token.
+    for evil in ("~/x$(touch /tmp/pwn)", "~/`id`", "/a b;rm -rf /", "~/x';echo bad;'"):
+        tok = ur._remote_script(evil, "check_codex_usage.py")
+        rest = tok[len('"$HOME"/'):] if tok.startswith('"$HOME"/') else tok
+        # the shell parses the remainder as exactly ONE literal token (no exec)
+        parsed = shlex.split(rest)
+        assert len(parsed) == 1 and parsed[0].endswith("/scripts/check_codex_usage.py")
+
+
+def test_codex_command_expands_home_not_tilde_literal(monkeypatch):
     captured = {}
 
     def fake_runner(target, command, *, input_text=None, **kw):
@@ -238,8 +299,56 @@ def test_codex_command_has_no_single_quoted_tilde(monkeypatch):
                "codex_bin": "/opt/homebrew/bin/codex"}
     ur.read_remote_codex(machine, now_ms=NOW_MS, runner=fake_runner,
                          env={"PENTACLE_USAGE_RUNTIME_DIR": "~/repos/pentacle-public-runtime"})
-    assert "$HOME/repos/pentacle-public-runtime/scripts/check_codex_usage.py" in captured["cmd"]
+    assert '"$HOME"/repos/pentacle-public-runtime/scripts/check_codex_usage.py' in captured["cmd"]
     assert "'~" not in captured["cmd"]
+
+
+def test_usage_cli_two_host_isolation(monkeypatch):
+    # One host's transport failure must not alter the other host's rows or values.
+    env = {"PENTACLE_MACHINES_JSON": json.dumps([
+        {"name": "thoth", "ssh_target": None},
+        {"name": "merlin", "ssh_target": "u@merlin", "codex_bin": "/x/codex"},
+        {"name": "amaterasu", "ssh_target": "u@amaterasu", "codex_bin": "/x/codex"},
+    ])}
+
+    def fake_runner(target, command, *, input_text=None, **kw):
+        if "merlin" in target:
+            return 255, "", "ssh: connect to host merlin port 22: No route to host"
+        if input_text and "cachedUsageUtilization" in input_text:
+            return 0, json.dumps(_cache()), ""
+        return 0, json.dumps({"pct": 15}), ""
+
+    merlin = ur.read_host("merlin", env=env, runner=fake_runner, now_ms=NOW_MS)
+    amaterasu = ur.read_host("amaterasu", env=env, runner=fake_runner, now_ms=NOW_MS)
+    assert all(r["outcome"] == ur.OUTCOME_TRANSPORT_ERROR and r["pct"] is None for r in merlin)
+    # amaterasu is unaffected: real values come through
+    by = {r["provider"]: r for r in amaterasu}
+    assert by["claude"]["pct"] == 85 and by["codex"]["pct"] == 15
+    assert all(r["host"] == "amaterasu" for r in amaterasu)
+
+
+def test_usage_cli_injected_cache_field_never_surfaces(monkeypatch):
+    # Even if a remote returned extra/hostile fields, only the allowlisted row
+    # fields reach CLI output — unknown fields (incl. a token) are dropped.
+    env_machines = json.dumps([{"name": "merlin", "ssh_target": "u@merlin", "codex_bin": "/x/codex"}])
+    monkeypatch.setenv("PENTACLE_MACHINES_JSON", env_machines)
+
+    def fake_runner(target, command, *, input_text=None, **kw):
+        if input_text and "cachedUsageUtilization" in input_text:
+            poisoned = _cache()
+            poisoned["accessToken"] = SENTINEL_TOKEN  # hostile extra field
+            poisoned["note"] = SENTINEL_TOKEN
+            return 0, json.dumps(poisoned), ""
+        return 0, json.dumps({"pct": 15}), ""
+    monkeypatch.setattr(ur, "run_remote", fake_runner)
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        rc = cli.usage(Namespace(host="merlin", json=True, max_age_seconds=600))
+    assert rc == 0
+    assert SENTINEL_TOKEN not in out.getvalue()
+    rows = json.loads(out.getvalue())
+    assert {r["provider"] for r in rows} == {"claude", "codex"}
 
 
 def test_usage_cli_unknown_host():
