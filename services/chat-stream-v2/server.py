@@ -3266,6 +3266,13 @@ class Server:
                 await self._flush_composite_tells(composite)
             except Exception:  # noqa: BLE001 - a flush failure must not fail the rebind
                 log.exception("composite tell flush failed after rebind stream=%s", composite.config.stream_id)
+            # Resume direct route processing: a direct input re-queued while the
+            # old pane was dead must now replay to the new binding.  The route
+            # worker does not observe a rebind on its own.
+            try:
+                composite.wake_route_worker()
+            except Exception:  # noqa: BLE001 - a wake failure must not fail the rebind
+                log.exception("composite route-worker wake failed after rebind stream=%s", composite.config.stream_id)
         return receipt
 
     async def _on_assistant_authority(self, msg: dict[str, Any]) -> dict[str, Any]:
