@@ -4710,6 +4710,26 @@ def watch_wake(args: argparse.Namespace) -> int:
     return _coordination_request(args, payload)
 
 
+def usage(args: argparse.Namespace) -> int:
+    """Read one host's current Claude/Codex account-period usage (/usage limits)."""
+    from agent_orch import usage_readback
+
+    max_age = args.max_age_seconds
+    if max_age is None:
+        env_val = os.environ.get("PENTACLE_USAGE_MAX_AGE_SECONDS")
+        max_age = int(env_val) if env_val and env_val.isdigit() else usage_readback.DEFAULT_MAX_AGE_SECONDS
+    try:
+        rows = usage_readback.read_host(args.host, max_age_s=max_age)
+    except usage_readback.UsageReadbackError as exc:
+        print(f"agent-orch usage: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(rows, separators=(",", ":")))
+    else:
+        print(usage_readback.render_table(rows))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = AgentOrchArgumentParser(prog="agent-orch")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -5716,6 +5736,18 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--json", action="store_true")
     inspect_parser.add_argument("--timeout", type=float, default=30.0)
     inspect_parser.set_defaults(func=inspect)
+
+    usage_parser = subparsers.add_parser(
+        "usage",
+        description="read one host's current Claude/Codex account-period usage (/usage limits) once",
+    )
+    usage_parser.add_argument("--host", required=True, help="host name from machines.json (e.g. thoth, merlin, amaterasu)")
+    usage_parser.add_argument("--json", action="store_true")
+    usage_parser.add_argument(
+        "--max-age-seconds", type=int, default=None,
+        help="cache freshness cutoff; older Claude-cache reads report 'stale' (default env PENTACLE_USAGE_MAX_AGE_SECONDS or 600)",
+    )
+    usage_parser.set_defaults(func=usage)
 
     ledger_parser = subparsers.add_parser("ledger", description="read durable coordination ledger records")
     ledger_sub = ledger_parser.add_subparsers(dest="ledger_command", required=True)
