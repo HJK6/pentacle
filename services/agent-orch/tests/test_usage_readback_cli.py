@@ -121,6 +121,21 @@ def test_usage_cli_claude_fallback_classes():
     assert okm["outcome"] == ur.OUTCOME_OK and okm["pct"] == 33
 
 
+def test_usage_cli_non_object_json_never_crashes():
+    # exit 0 with valid-but-non-object JSON ([], null, "s", 1) must NOT raise
+    # AttributeError on .get(); it is parser_error (and account_mismatch under
+    # mismatch), for both the Claude fallback and the Codex classifier.
+    for payload in ("[]", "null", '"weekly"', "123"):
+        cf = ur.classify_claude_fallback("merlin", 0, payload, "", mismatch=False, now_ms=NOW_MS)
+        assert cf["outcome"] == ur.OUTCOME_PARSER_ERROR and cf["pct"] is None
+        cfm = ur.classify_claude_fallback("merlin", 0, payload, "", mismatch=True, now_ms=NOW_MS)
+        assert cfm["outcome"] == ur.OUTCOME_ACCOUNT_MISMATCH and cfm["note"] == ur.OUTCOME_PARSER_ERROR
+        cx = ur.classify_codex_probe("merlin", 0, payload, "", now_ms=NOW_MS)
+        assert cx["outcome"] == ur.OUTCOME_PARSER_ERROR and cx["pct"] is None
+    # a non-dict cache pluck falls back rather than crashing
+    assert ur.classify_claude_cache("merlin", [], now_ms=NOW_MS)["fallback"] is True
+
+
 def test_usage_cli_claude_cache_anchor_fail_closed():
     # oauth anchor absent -> cannot verify current account -> must fall back
     sig = ur.classify_claude_cache("merlin", _cache(oauth_account_uuid=None),
@@ -288,20 +303,35 @@ def test_remote_script_blocks_injection():
     # A crafted runtime dir must NOT allow command substitution / backticks: the
     # dangerous remainder is shlex-quoted into exactly one literal shell token.
     import subprocess, os, tempfile
-    sentinel = os.path.join(tempfile.mkdtemp(), "pwn_SENTINEL")
-    # A real shell must expand only $HOME and treat the hostile remainder as a
-    # literal path — the command substitution must NOT execute (no sentinel file).
-    for evil in (f"~/x$(touch {sentinel})", "~/`id`", "/a b;rm -rf /", "~/x';echo bad;'"):
+    d = tempfile.mkdtemp()
+    # Per-case non-destructive payloads: command-substitution, backtick and
+    # semicolon, each touching its OWN sentinel. A real shell must expand only
+    # $HOME, preserve the hostile remainder verbatim, create NO sentinel, and
+    # produce NO extra output.
+    cases = [
+        (f"~/a$(touch {d}/sub)b", os.path.join(d, "sub"),
+         f"/HOMEDIR/a$(touch {d}/sub)b/scripts/check_codex_usage.py"),
+        (f"~/a`touch {d}/bq`b", os.path.join(d, "bq"),
+         f"/HOMEDIR/a`touch {d}/bq`b/scripts/check_codex_usage.py"),
+        (f"~/a;touch {d}/semi;b", os.path.join(d, "semi"),
+         f"/HOMEDIR/a;touch {d}/semi;b/scripts/check_codex_usage.py"),
+    ]
+    for evil, sentinel, expected in cases:
         tok = ur._remote_script(evil, "check_codex_usage.py")
         res = subprocess.run(["sh", "-c", f"printf '%s' {tok}"],
                              env={"HOME": "/HOMEDIR", "PATH": "/usr/bin:/bin"},
                              capture_output=True, text=True)
-        assert res.returncode == 0
-        # $HOME expanded; the whole dangerous remainder survived verbatim as path
-        assert res.stdout.endswith("/scripts/check_codex_usage.py")
-        assert "$(" not in res.stdout or evil.startswith("~/x$(")  # literal preserved, not run
-        assert not os.path.exists(sentinel), "command substitution executed!"
-    # and the tilde/home path actually expands
+        assert res.returncode == 0 and res.stderr == ""
+        assert res.stdout == expected, (evil, res.stdout)   # exact literal, nothing extra
+        assert not os.path.exists(sentinel), f"injection executed for {evil!r}"
+    # absolute path with metacharacters is also inert and exact
+    tok = ur._remote_script(f"/a b;touch {d}/abs", "check_codex_usage.py")
+    res = subprocess.run(["sh", "-c", f"printf '%s' {tok}"],
+                         env={"HOME": "/HOMEDIR", "PATH": "/usr/bin:/bin"},
+                         capture_output=True, text=True)
+    assert res.stdout == f"/a b;touch {d}/abs/scripts/check_codex_usage.py"
+    assert not os.path.exists(os.path.join(d, "abs"))
+    # and a clean home path actually expands
     tok = ur._remote_script("~/repos/x", "check_codex_usage.py")
     res = subprocess.run(["sh", "-c", f"printf '%s' {tok}"],
                          env={"HOME": "/HOMEDIR", "PATH": "/usr/bin:/bin"},

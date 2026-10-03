@@ -199,6 +199,20 @@ def _coerce_pct(value) -> int | None:
     return value if 0 <= value <= 100 else None
 
 
+def _parse_json_obj(text: str) -> dict | None:
+    """Parse the last non-empty line of ``text`` as a JSON object.
+
+    Returns the dict, or ``None`` when the text is not valid JSON OR parses to a
+    non-object (``[]``, ``null``, ``"s"``, ``1``). Guards against ``.get`` on a
+    non-dict, which would otherwise raise ``AttributeError`` and crash the read.
+    """
+    try:
+        data = json.loads((text or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _row(host, provider, outcome, *, pct=None, resets_at_iso=None, resets_text=None,
          source=None, probed_at=None, fetched_at=None, age_seconds=None,
          five_hour_pct=None, note=None) -> dict:
@@ -228,6 +242,8 @@ def classify_claude_cache(host: str, plucked: dict, *, now_ms: int,
     Returns either a finished row (outcome ok/stale) or a sentinel
     ``{"fallback": True, "reason": "cache_miss" | "account_mismatch"}``.
     """
+    if not isinstance(plucked, dict):  # defensive: non-object pluck -> fall back
+        return {"fallback": True, "reason": "cache_miss"}
     seven_pct = _coerce_pct(plucked.get("seven_day_pct"))
     cache_uuid = plucked.get("cache_account_uuid")
     oauth_uuid = plucked.get("oauth_account_uuid")
@@ -283,13 +299,13 @@ def classify_claude_fallback(host: str, exit_code: int, stdout: str, stderr: str
     elif exit_code in (EXIT_SSH_TRANSPORT, 255):
         base = OUTCOME_TRANSPORT_ERROR
     elif exit_code == 0 and stdout:
-        try:
-            data = json.loads(stdout.splitlines()[-1])
+        data = _parse_json_obj(stdout)
+        if data is None:  # not valid JSON, or valid but not an object ([], null, "s", 1)
+            base = OUTCOME_PARSER_ERROR
+        else:
             pct = _coerce_pct(data.get("week_all_pct"))
             resets_text = data.get("week_all_resets")
             base = OUTCOME_OK if pct is not None else OUTCOME_PARSER_ERROR
-        except (ValueError, IndexError):
-            base = OUTCOME_PARSER_ERROR
     elif "sign in" in low or "log in" in low or "logged in" in low:
         base = OUTCOME_AUTH_ERROR
     elif "did not provide labeled weekly" in low:
@@ -320,9 +336,8 @@ def classify_codex_probe(host: str, exit_code: int, stdout: str, stderr: str,
         return _row(host, "codex", OUTCOME_TRANSPORT_ERROR, source="codex-app-server")
     stdout = (stdout or "").strip()
     if exit_code == 0 and stdout:
-        try:
-            data = json.loads(stdout.splitlines()[-1])
-        except (ValueError, IndexError):
+        data = _parse_json_obj(stdout)
+        if data is None:
             return _row(host, "codex", OUTCOME_PARSER_ERROR, source="codex-app-server")
         pct = _coerce_pct(data.get("pct"))
         if pct is not None:
@@ -406,6 +421,8 @@ def read_local(host: str, env: dict | None = None) -> list[dict]:
         with path.open(encoding="utf-8") as handle:
             state = json.load(handle)
     except (OSError, ValueError):
+        state = None
+    if not isinstance(state, dict):  # unreadable or non-object JSON
         return [
             _row(host, "claude", OUTCOME_PARSER_ERROR, source="cadence-file"),
             _row(host, "codex", OUTCOME_PARSER_ERROR, source="cadence-file"),
