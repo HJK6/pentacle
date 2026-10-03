@@ -22,7 +22,7 @@ from v2_runtime import iso_now
 
 
 def issue_link(ws_url: str, *, label: str = "phone", ttl_seconds: int = 600,
-               codes_path: Path | None = None) -> dict[str, object]:
+               codes_path: Path | None = None, scope_stream: str | None = None) -> dict[str, object]:
     endpoint = urlsplit(ws_url)
     if (endpoint.scheme not in {"ws", "wss"} or not endpoint.hostname
             or endpoint.username is not None or endpoint.password is not None
@@ -31,6 +31,7 @@ def issue_link(ws_url: str, *, label: str = "phone", ttl_seconds: int = 600,
     _ = endpoint.port  # Reject malformed ports before writing a code.
     if not 1 <= ttl_seconds <= 3600:
         raise ValueError("--ttl-seconds must be between 1 and 3600")
+    scope = operator_auth.canonical_scope({"stream": scope_stream} if scope_stream else None)
     registry = EnrollmentRegistry(codes_path=codes_path)
     path = registry.codes_path
     with operator_auth.file_lock(path.with_suffix(path.suffix + ".lock")):
@@ -46,6 +47,7 @@ def issue_link(ws_url: str, *, label: str = "phone", ttl_seconds: int = 600,
             "label": label, "protocol_version": 2,
             "scheme": operator_auth.AUTH_SCHEME, "client_kind": "pentacle-mobile",
             "replaces_credential_id": None,
+            "scope": dict(scope) if scope else None,
         }
         operator_auth.atomic_write_json(path, codes)
     return {
@@ -60,9 +62,12 @@ def main() -> int:
     parser.add_argument("--ws-url", required=True, help="daemon endpoint reachable by the phone or simulator")
     parser.add_argument("--label", default="phone")
     parser.add_argument("--ttl-seconds", type=int, default=600)
+    parser.add_argument("--scope-stream", default=None,
+                        help="restrict the enrolled credential to one assistant stream (e.g. daff:assistant)")
     args = parser.parse_args()
     try:
-        result = issue_link(args.ws_url, label=args.label, ttl_seconds=args.ttl_seconds)
+        result = issue_link(args.ws_url, label=args.label, ttl_seconds=args.ttl_seconds,
+                            scope_stream=args.scope_stream)
     except (ValueError, operator_auth.OperatorRegistryUnavailable) as exc:
         parser.exit(1, f"Enrollment link creation failed: {exc}\n")
     print(json.dumps(result))

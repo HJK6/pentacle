@@ -444,7 +444,7 @@ def test_live_clear_returns_to_env_and_partial_durable_pair_fails_closed():
             assert cleared["new_binding"]["stream_id"] == A
             assert cleared["new_binding"]["revision"] == 2
             await store.submit(lambda conn: conn.execute(
-                "UPDATE v2_assistant_direct_binding SET stream_id=?,generation=NULL WHERE id=1", (A,)
+                "UPDATE v2_assistant_direct_binding SET stream_id=?,generation=NULL WHERE name='bart'", (A,)
             ))
             with pytest.raises(ValueError, match="assistant_binding_corrupt"):
                 await composite.binding()

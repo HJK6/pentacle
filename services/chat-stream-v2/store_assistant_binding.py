@@ -11,11 +11,101 @@ from typing import Any
 
 ASSISTANT_BINDING_DDL = """
 CREATE TABLE IF NOT EXISTS v2_assistant_direct_binding (
-    id INTEGER PRIMARY KEY CHECK(id=1),
+    name TEXT PRIMARY KEY,
     stream_id TEXT,
     generation TEXT,
     revision INTEGER NOT NULL,
     updated_at TEXT NOT NULL
+)
+"""
+
+
+def migrate_binding_to_named(conn: sqlite3.Connection) -> bool:
+    """One-time migration: ``id=1`` single-row binding -> ``name``-keyed row.
+
+    Converts the legacy single-assistant table to the two-assistant form,
+    seeding the existing row as ``name='bart'`` byte-identical.  Idempotent:
+    returns False when the table is already in the named form or absent.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='v2_assistant_direct_binding'"
+    ).fetchone()
+    if row is None:
+        return False
+    schema = row[0] if not isinstance(row, sqlite3.Row) else row["sql"]
+    if "CHECK(id=1)" not in str(schema):
+        return False
+    conn.execute("SAVEPOINT assistant_binding_named")
+    try:
+        conn.execute("ALTER TABLE v2_assistant_direct_binding RENAME TO v2_assistant_direct_binding_previous")
+        conn.execute(ASSISTANT_BINDING_DDL)
+        conn.execute(
+            "INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) "
+            "SELECT 'bart',stream_id,generation,revision,updated_at "
+            "FROM v2_assistant_direct_binding_previous WHERE id=1"
+        )
+        conn.execute("DROP TABLE v2_assistant_direct_binding_previous")
+        conn.execute("RELEASE assistant_binding_named")
+    except BaseException:
+        conn.execute("ROLLBACK TO assistant_binding_named")
+        conn.execute("RELEASE assistant_binding_named")
+        raise
+    return True
+
+
+def rollback_binding_to_single(conn: sqlite3.Connection) -> bool:
+    """Reverse of :func:`migrate_binding_to_named` for the rollback path.
+
+    Restores the legacy ``id INTEGER PRIMARY KEY CHECK(id=1)`` single-row form
+    from ``name='bart'``, discarding any other named rows (e.g. ``daff``).
+    Idempotent: returns False when the table is already single-row or absent.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='v2_assistant_direct_binding'"
+    ).fetchone()
+    if row is None:
+        return False
+    schema = row[0] if not isinstance(row, sqlite3.Row) else row["sql"]
+    if "CHECK(id=1)" in str(schema):
+        return False
+    conn.execute("SAVEPOINT assistant_binding_single")
+    try:
+        conn.execute("ALTER TABLE v2_assistant_direct_binding RENAME TO v2_assistant_direct_binding_named")
+        conn.execute(
+            "CREATE TABLE v2_assistant_direct_binding ("
+            "id INTEGER PRIMARY KEY CHECK(id=1),stream_id TEXT,generation TEXT,"
+            "revision INTEGER NOT NULL,updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v2_assistant_direct_binding(id,stream_id,generation,revision,updated_at) "
+            "SELECT 1,stream_id,generation,revision,updated_at "
+            "FROM v2_assistant_direct_binding_named WHERE name='bart'"
+        )
+        conn.execute("DROP TABLE v2_assistant_direct_binding_named")
+        conn.execute("RELEASE assistant_binding_single")
+    except BaseException:
+        conn.execute("ROLLBACK TO assistant_binding_single")
+        conn.execute("RELEASE assistant_binding_single")
+        raise
+    return True
+ASSISTANT_COMPOSITE_TELL_QUEUE_DDL = """
+CREATE TABLE IF NOT EXISTS v2_assistant_composite_tell_queue (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    tell_id TEXT NOT NULL UNIQUE,
+    from_stream_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+)
+"""
+SCOPED_OWNERSHIP_DDL = """
+CREATE TABLE IF NOT EXISTS v2_scoped_ownership (
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(kind, key)
 )
 """
 ASSISTANT_REBIND_AUDIT_DDL = """
@@ -55,14 +145,16 @@ def _stamp() -> str:
 
 
 def _binding_conn(
-    conn: sqlite3.Connection, env_binding: dict[str, str], *, include_target: bool = True,
+    conn: sqlite3.Connection, env_binding: dict[str, str], *, name: str = "bart",
+    include_target: bool = True,
 ) -> dict[str, Any]:
     # ``include_target`` resolves the bound seat row for diagnostic
     # provider/model/effort fields.  Per-event callers on the ingest hot path
     # (the prose mirror) pass ``False`` to skip that extra sessions JOIN when
     # they only need the effective stream/generation/source.
     row = conn.execute(
-        "SELECT stream_id,generation,revision FROM v2_assistant_direct_binding WHERE id=1"
+        "SELECT stream_id,generation,revision FROM v2_assistant_direct_binding WHERE name=?",
+        (name,),
     ).fetchone()
     revision = int(row["revision"]) if row else 0
     if row and bool(row["stream_id"]) != bool(row["generation"]):
@@ -128,14 +220,96 @@ def _configured_spec_authorized(row: dict[str, Any], authorized_spec_ids: frozen
 
 
 class AssistantBindingStoreMixin:
-    async def get_assistant_binding(self, *, env_binding: dict[str, str]) -> dict[str, Any]:
-        return await self.submit(lambda conn: _binding_conn(conn, env_binding))
+    async def record_scoped_owner(self, *, kind: str, key: str, credential_id: str) -> None:
+        """Bind a blob sha or request id to the scoped credential that created it.
+
+        First writer wins (INSERT OR IGNORE), so an existing owner is never
+        reassigned by a later credential.
+        """
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT OR IGNORE INTO v2_scoped_ownership(kind,key,credential_id,created_at) "
+                "VALUES(?,?,?,?)", (kind, key, credential_id, _stamp()),
+            )
+            conn.commit()
+        await self.submit(_op)
+
+    async def scoped_owner(self, *, kind: str, key: str) -> str | None:
+        def _op(conn: sqlite3.Connection) -> str | None:
+            row = conn.execute(
+                "SELECT credential_id FROM v2_scoped_ownership WHERE kind=? AND key=?", (kind, key),
+            ).fetchone()
+            return str(row[0]) if row else None
+        return await self.submit(_op)
+
+    async def blob_referenced_in_stream(self, *, sha: str, stream_id: str) -> bool:
+        """Whether any event in ``stream_id`` references blob ``sha``.
+
+        Lets a scoped client fetch a blob that the assistant posted into its own
+        chat, without owning it.  Bounded JSON scan of the stream's event tail.
+        """
+        def _op(conn: sqlite3.Connection) -> bool:
+            row = conn.execute(
+                "SELECT 1 FROM session_event_tail WHERE stream_id=? AND event_json LIKE ? LIMIT 1",
+                (stream_id, f"%{sha}%"),
+            ).fetchone()
+            return row is not None
+        return await self.submit(_op)
+
+    async def enqueue_composite_tell(
+        self, *, name: str, tell_id: str, from_stream_id: str, body: str, request_id: str,
+    ) -> dict[str, Any]:
+        """Durably queue one composite tell received while the binding is unbound.
+
+        Ordered by insertion ``seq``; idempotent by ``tell_id`` so a retried
+        enqueue after a lost reply does not duplicate.
+        """
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                prior = conn.execute(
+                    "SELECT seq FROM v2_assistant_composite_tell_queue WHERE tell_id=?", (tell_id,),
+                ).fetchone()
+                if prior is not None:
+                    conn.commit()
+                    return {"queued": True, "duplicate": True}
+                conn.execute(
+                    "INSERT INTO v2_assistant_composite_tell_queue"
+                    "(name,tell_id,from_stream_id,body,request_id,created_at) VALUES(?,?,?,?,?,?)",
+                    (name, tell_id, from_stream_id, body, request_id, _stamp()),
+                )
+                conn.commit()
+                return {"queued": True, "duplicate": False}
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
+    async def claim_composite_tells(self, *, name: str) -> list[dict[str, Any]]:
+        """Return this assistant's queued tells in insertion order."""
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            return [dict(r) for r in conn.execute(
+                "SELECT seq,tell_id,from_stream_id,body,request_id FROM v2_assistant_composite_tell_queue "
+                "WHERE name=? ORDER BY seq", (name,),
+            ).fetchall()]
+        return await self.submit(_op)
+
+    async def delete_composite_tell(self, *, seq: int) -> None:
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute("DELETE FROM v2_assistant_composite_tell_queue WHERE seq=?", (seq,))
+            conn.commit()
+        await self.submit(_op)
+
+    async def get_assistant_binding(
+        self, *, env_binding: dict[str, str], name: str = "bart",
+    ) -> dict[str, Any]:
+        return await self.submit(lambda conn: _binding_conn(conn, env_binding, name=name))
 
     async def rebind_assistant(
         self, *, env_binding: dict[str, str], actor_stream_id: str, actor_generation: str,
         target_stream_id: str | None, target_generation: str | None,
         request_id: str, expected_revision: int, clear: bool = False,
-        authorized_spec_ids: frozenset[str] = frozenset(),
+        authorized_spec_ids: frozenset[str] = frozenset(), name: str = "bart",
     ) -> dict[str, Any]:
         # The revision is a compare-and-swap observation, not caller intent.
         # A retry after a lost reply may observe the newly committed revision.
@@ -147,7 +321,7 @@ class AssistantBindingStoreMixin:
             conn.execute("BEGIN IMMEDIATE")
             old: dict[str, Any] = {}
             try:
-                old = _binding_conn(conn, env_binding)
+                old = _binding_conn(conn, env_binding, name=name)
                 prior = conn.execute(
                     "SELECT payload_digest,actor_stream_id,actor_generation,receipt_json,outcome "
                     "FROM v2_assistant_rebind_audit "
@@ -212,11 +386,11 @@ class AssistantBindingStoreMixin:
                            "effective_effort": target["effective_effort"]}
                 stamp = _stamp()
                 conn.execute(
-                    "INSERT INTO v2_assistant_direct_binding(id,stream_id,generation,revision,updated_at) "
-                    "VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                    "INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) "
+                    "VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
                     "stream_id=excluded.stream_id,generation=excluded.generation,"
                     "revision=excluded.revision,updated_at=excluded.updated_at",
-                    (stored_stream, stored_generation, new["revision"], stamp),
+                    (name, stored_stream, stored_generation, new["revision"], stamp),
                 )
                 receipt = {"type": "assistant.rebind.ok", "request_id": request_id,
                            "old_binding": old, "new_binding": new, "duplicate": False}
@@ -249,6 +423,40 @@ class AssistantBindingStoreMixin:
         if result.get("error_code"):
             raise ValueError(result["error_code"])
         return result
+
+    async def recover_assistant_binding(
+        self, *, name: str, target_stream_id: str, target_generation: str = "",
+    ) -> dict[str, Any]:
+        """Daemon-owned recovery rebind (no client/actor path).
+
+        Used by Daff recovery after it respawns the seat: the predecessor is dead
+        so the normal handoff-proof authorization cannot apply.  Validates the new
+        seat is live, then points the named binding at it and bumps the revision.
+        """
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                target = _seat_conn(conn, target_stream_id)
+                _live_seat(target, target=True)
+                if target_generation and target["session_generation"] != target_generation:
+                    raise ValueError("assistant_rebind_generation_mismatch")
+                old = _binding_conn(conn, {"stream_id": "", "generation": ""},
+                                    name=name, include_target=False)
+                generation = str(target["session_generation"])
+                revision = int(old["revision"]) + 1
+                conn.execute(
+                    "INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) "
+                    "VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+                    "stream_id=excluded.stream_id,generation=excluded.generation,"
+                    "revision=excluded.revision,updated_at=excluded.updated_at",
+                    (name, target_stream_id, generation, revision, _stamp()),
+                )
+                conn.commit()
+                return {"stream_id": target_stream_id, "generation": generation, "revision": revision}
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
 
     async def fail_closed_assistant_routes(self, *, stream_id: str, target_stream_id: str,
                                            target_generation: str) -> int:

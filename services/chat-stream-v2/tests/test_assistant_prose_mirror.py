@@ -227,7 +227,7 @@ def test_kv_disable_invalid_value_and_nonprose_are_excluded():
             await _append(store, "❯")
             assert await _answer_rows(store) == []
             await store.put("assistant.mirror.enabled", "0")
-            assert (await store.assistant_mirror_state()) == {
+            assert (await store.assistant_mirror_state(ASSISTANT)) == {
                 "enabled": False, "source": "kv",
                 "binding": {"composite_stream_id": ASSISTANT,
                             "source_stream_id": ROOT,
@@ -236,7 +236,7 @@ def test_kv_disable_invalid_value_and_nonprose_are_excluded():
             }
             await _append(store, "while disabled")
             await store.put("assistant.mirror.enabled", "invalid")
-            assert (await store.assistant_mirror_state())["source"] == "kv_invalid"
+            assert (await store.assistant_mirror_state(ASSISTANT))["source"] == "kv_invalid"
             await _append(store, "while invalid")
             assert await _answer_rows(store) == []
             await store.put("assistant.mirror.enabled", "on")
@@ -589,8 +589,8 @@ async def _set_durable_binding(store: Store, stream_id: str, generation: str):
     """
     def _op(conn):
         conn.execute(
-            "INSERT INTO v2_assistant_direct_binding(id,stream_id,generation,revision,updated_at) "
-            "VALUES(1,?,?,1,?) ON CONFLICT(id) DO UPDATE SET "
+            "INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) "
+            "VALUES('bart',?,?,1,?) ON CONFLICT(name) DO UPDATE SET "
             "stream_id=excluded.stream_id,generation=excluded.generation,"
             "revision=excluded.revision,updated_at=excluded.updated_at",
             (stream_id, generation, "2026-09-27T12:45:33.000Z"),
@@ -643,7 +643,7 @@ def test_durable_hot_rebind_moves_mirror_source_without_restart():
             assert [row["text"] for row in await _answer_rows(store)] == ["update from the rebound desk"]
 
             # Readback reflects the live durable source.
-            state = await store.assistant_mirror_state()
+            state = await store.assistant_mirror_state(ASSISTANT)
             assert state["binding"]["source_stream_id"] == "fixture-newdesk:visible"
             assert state["binding"]["source_generation"] == newseat["session_generation"]
             assert state["binding"]["source_binding"] == "durable"
@@ -672,7 +672,7 @@ def test_dispatched_reply_under_durable_binding_suppresses_and_publishes_once():
                 store, config=_config_for("fixture-newdesk:visible", desk["session_generation"]),
                 dispatch=dispatch)
             await composite.ensure_projection()
-            assert (await store.assistant_mirror_state())["binding"]["source_binding"] == "durable"
+            assert (await store.assistant_mirror_state(ASSISTANT))["binding"]["source_binding"] == "durable"
 
             route = await _route_for(composite, store, "question-1")
             assert route["route_target"] == "fixture-newdesk:visible"
@@ -714,8 +714,8 @@ def test_corrupt_durable_binding_fails_closed_without_breaking_ingest():
             # A partial durable row (stream present, generation blank) is corrupt.
             def _corrupt(conn):
                 conn.execute(
-                    "INSERT INTO v2_assistant_direct_binding(id,stream_id,generation,revision,updated_at) "
-                    "VALUES(1,?,?,1,?)", ("fixture-root:visible", "", "2026-09-27T12:45:33.000Z"),
+                    "INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) "
+                    "VALUES('bart',?,?,1,?)", ("fixture-root:visible", "", "2026-09-27T12:45:33.000Z"),
                 )
                 conn.commit()
             await store.submit(_corrupt)
@@ -724,7 +724,7 @@ def test_corrupt_durable_binding_fails_closed_without_breaking_ingest():
             src_id = await _append(store, "line during corrupt binding", identity="corrupt-line")
             assert isinstance(src_id, int)
             assert await _answer_rows(store) == []
-            state = await store.assistant_mirror_state()
+            state = await store.assistant_mirror_state(ASSISTANT)
             assert state["binding"]["source_binding"] == "unavailable"
             await composite.stop()
         finally:

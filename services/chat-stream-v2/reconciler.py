@@ -109,6 +109,9 @@ class SessionReconciler:
         self.outbound = outbound or OutboundNoticeQueue(self.store, comms)
         self.outbound.comms = comms
         self.on_reconcile_tick = on_reconcile_tick
+        # Optional async hook invoked when a protected seat is preserved-dead, so
+        # a recovery owner (Daff only) can respawn it.  Wired by main.
+        self.on_protected_dead: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self.cfg = config or ReconcileConfig()
         self._dead_episodes: dict[str, dict[str, Any]] = {}
         self._offline_episodes: dict[str, dict[str, Any]] = {}
@@ -416,6 +419,15 @@ class SessionReconciler:
             expected_generation=str(episode.get("generation") or ""),
         )
         if marked is None:
+            # A protected seat is preserved, not closed.  A recovery owner (Daff
+            # only) may respawn it; Bart's preserve path is unchanged because its
+            # callback declines a non-Daff row.
+            callback = getattr(self, "on_protected_dead", None)
+            if callback is not None:
+                try:
+                    await callback(dict(row))
+                except Exception:  # noqa: BLE001 - recovery failure must not break reconcile
+                    log.exception("protected-seat recovery hook failed sid=%s", sid)
             return False
         # Presence has proven only that the remote pane is absent.  It has not
         # captured the close-time process/boot inventory needed to prove an

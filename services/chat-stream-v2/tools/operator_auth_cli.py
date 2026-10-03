@@ -41,6 +41,13 @@ def _parser() -> argparse.ArgumentParser:
         help="device kind to bind (default: pentacle-mobile)",
     )
     issue.add_argument("--label", default="", help="optional device label")
+    issue.add_argument(
+        "--scope-stream",
+        default=None,
+        metavar="STREAM",
+        help="restrict this credential to a single assistant stream "
+             "(e.g. daff:assistant). Omit for an unscoped full-rights credential.",
+    )
 
     commands.add_parser("list", help="list credential metadata")
 
@@ -83,14 +90,17 @@ def _issue(
     *,
     client_kind: str,
     label: str,
+    scope_stream: str | None = None,
 ) -> None:
-    credential_id, code = registry.issue(client_kind, label=label)
+    scope = {"stream": scope_stream} if scope_stream else None
+    credential_id, code = registry.issue(client_kind, label=label, scope=scope)
     _print_json(
         {
             "status": "issued",
             "credential_id": credential_id,
             "client_kind": client_kind,
             "label": label,
+            "scope": scope,
             "code": code,
         }
     )
@@ -144,7 +154,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         registry.initialize()
         if args.command == "issue":
-            _issue(registry, client_kind=args.client_kind, label=args.label.strip())
+            _issue(registry, client_kind=args.client_kind, label=args.label.strip(),
+                   scope_stream=(args.scope_stream.strip() if args.scope_stream else None))
         elif args.command == "list":
             _list_credentials(registry)
         elif args.command == "revoke":
