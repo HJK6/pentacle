@@ -251,18 +251,28 @@ async def run(args: argparse.Namespace) -> int:
         spawnctl=spawnctl, comms=comms, local_host=args.local_host, binds=binds,
         hosts=hosts,
     )
-    assistant_config = AssistantCompositeConfig.from_env()
-    assistant_router = (
-        AssistantRouterAdapter(
-            assistant_config.router_endpoint,
-            timeout_s=assistant_config.router_timeout_s,
-            ssh_bin=args.ssh_bin,
-            action_path=assistant_config.router_action_path,
-        ) if assistant_config.enabled and not assistant_config.direct_primary else None
-    )
+    # Fixed two-assistant map (bart, daff).  bart reads the existing unprefixed
+    # env keys byte-identically; daff reads PENTACLE_ASSISTANT_DAFF_* and stays
+    # inert until configured.
+    assistant_configs = AssistantCompositeConfig.all_from_env()
+
+    def _assistant_router_for(cfg: AssistantCompositeConfig):
+        return (
+            AssistantRouterAdapter(
+                cfg.router_endpoint,
+                timeout_s=cfg.router_timeout_s,
+                ssh_bin=args.ssh_bin,
+                action_path=cfg.router_action_path,
+            ) if cfg.enabled and not cfg.direct_primary else None
+        )
 
     async def _dispatch_assistant_route(route: dict[str, object]) -> dict[str, object]:
-        """Deliver one already-intended backend turn without blocking routing."""
+        """Deliver one already-intended backend turn without blocking routing.
+
+        Shared across named assistants: the composite identity comes from the
+        durable route row (its ``stream_id`` column), never a single config.
+        """
+        route_stream_id = str(route.get("stream_id") or "")
         target = str(route.get("route_target") or "")
         host, separator, session_name = target.partition(":")
         if not separator or not host or not session_name:
@@ -291,7 +301,7 @@ async def run(args: argparse.Namespace) -> int:
                 return {"delivery": "failed", "reason": "assistant_direct_generation_conflict"}
             envelope = route_payload.get("direct_envelope")
             if not isinstance(envelope, dict) or (
-                envelope.get("origin") != assistant_config.stream_id
+                envelope.get("origin") != route_stream_id
                 or envelope.get("dispatch_id") != dispatch_id
                 or envelope.get("reply_to_message_id") != source_message_id
                 or envelope.get("reply_to_question_id") != (str(route.get("reply_to_question_id") or "") or None)
@@ -315,7 +325,7 @@ async def run(args: argparse.Namespace) -> int:
                 f"reply_to_message_id: {source_message_id}\n"
                 "Return no visible prose. Submit exactly one validated assistant-router/v1 "
                 "classifier result with: agent-orch assistant operation --operation route.resolve "
-                f"--request-id resolve:{dispatch_id} --composite-stream-id {assistant_config.stream_id} "
+                f"--request-id resolve:{dispatch_id} --composite-stream-id {route_stream_id} "
                 f"--dispatch-id {dispatch_id} "
                 f"--reply-to-message-id {source_message_id} --payload <router-result-json>\n"
                 "Use only the supplied routing-context lane/unresolved IDs. If it does not establish "
@@ -341,7 +351,7 @@ async def run(args: argparse.Namespace) -> int:
                 f"router_disposition: {route_payload.get('disposition', '')}\n"
                 f"lane_id: {route_payload.get('lane_id', '')}\n"
                 "Publish visible prose only with: agent-orch assistant publish "
-                f"--request-id publish:{dispatch_id} --composite-stream-id {assistant_config.stream_id} "
+                f"--request-id publish:{dispatch_id} --composite-stream-id {route_stream_id} "
                 f"--dispatch-id {dispatch_id} --reply-to-message-id {source_message_id} "
                 "--publish-kind prose --message <text>\n"
                 "For a bound lane's terminal report, use the existing agent-orch report --result "
@@ -365,23 +375,68 @@ async def run(args: argparse.Namespace) -> int:
             "attachments": attachments,
             "request_id": dispatch_id,
             "optimistic_id": dispatch_id,
-            "from_stream_id": assistant_config.stream_id,
+            "from_stream_id": route_stream_id,
             "_assistant_expected_generation": str(route.get("route_target_generation") or "")
             if route_payload.get("admission_mode") == "direct_primary" else None,
         })
 
-    assistant_composite = AssistantComposite(
-        store,
-        config=assistant_config,
-        router=assistant_router,
-        dispatch=_dispatch_assistant_route if assistant_config.enabled else None,
-        broadcast=server.broadcast,
-        question_operation=server._assistant_question_operation,
-        question_answer=server._assistant_question_answer,
-        publication_attachments=server._assistant_publication_attachments,
-    )
+    assistant_composites: dict[str, AssistantComposite] = {}
+    for _name, _cfg in assistant_configs.items():
+        assistant_composites[_name] = AssistantComposite(
+            store,
+            config=_cfg,
+            router=_assistant_router_for(_cfg),
+            dispatch=_dispatch_assistant_route if _cfg.enabled else None,
+            broadcast=server.broadcast,
+            question_operation=server._assistant_question_operation,
+            question_answer=server._assistant_question_answer,
+            publication_attachments=server._assistant_publication_attachments,
+        )
+    server.assistant_composites = assistant_composites
+    # Primary (bart) alias: existing single-composite call sites (notify binding,
+    # backend routing-integrity, watch-wake root, handler resolution fallbacks)
+    # keep referring to bart byte-identically.
+    assistant_composite = assistant_composites["bart"]
+    assistant_config = assistant_configs["bart"]
     server.assistant_composite = assistant_composite
-    comms.assistant_ingress_policy = assistant_composite.suppress_routine_backend_ingress
+
+    async def _assistant_ingress_policy(*, target_stream_id, body, msg, verb):
+        """Fan routine backend ingress across named assistants.
+
+        Only the router-backed assistant participates in the authority-request
+        model; a direct-primary assistant (daff) is a harmless no-op here.
+        """
+        from outbound_notices import ASSISTANT_AUTHORITY_REQUEST_TOKEN
+        authority = msg.get("_assistant_authority_request_token") is ASSISTANT_AUTHORITY_REQUEST_TOKEN
+        for _composite in assistant_composites.values():
+            if authority and _composite.config.direct_primary:
+                continue
+            result = await _composite.suppress_routine_backend_ingress(
+                target_stream_id=target_stream_id, body=body, msg=msg, verb=verb,
+            )
+            if result is not None:
+                return result
+        return None
+
+    comms.assistant_ingress_policy = _assistant_ingress_policy
+
+    # Cosmo reply push: one Expo push to the scoped CosmoPushTokens audience when
+    # an assistant reply commits.  Self-filtering by stream, so wiring it to every
+    # composite is safe — only daff:assistant has scoped subscribers.
+    from cosmo_push import CosmoPush
+    import uiverbs as _uiverbs_mod
+
+    def _cosmo_push_table():
+        import boto3
+        return (boto3.resource("dynamodb", region_name=_uiverbs_mod.AWS_REGION)
+                .Table(_uiverbs_mod.COSMO_PUSH_TOKENS_TABLE))
+
+    _cosmo_push = CosmoPush(
+        table_factory=_cosmo_push_table,
+        registry=server.operator_credential_registry,
+    )
+    for _composite in assistant_composites.values():
+        _composite.reply_push = _cosmo_push.push_reply
     window_schedule = WindowSchedule(
         store, sessions, comms, spawnctl,
         local_host=args.local_host, broadcast=server.broadcast,
@@ -455,10 +510,11 @@ async def run(args: argparse.Namespace) -> int:
             )
         except Exception:  # noqa: BLE001 - close truth is already durable
             log.exception("close resolver (question expiry) failed stream=%s", stream_id)
-        try:
-            await assistant_composite.target_closed(stream_id, session_generation)
-        except Exception:  # noqa: BLE001 - close truth is already durable
-            log.exception("close resolver (assistant route) failed stream=%s", stream_id)
+        for _composite in assistant_composites.values():
+            try:
+                await _composite.target_closed(stream_id, session_generation)
+            except Exception:  # noqa: BLE001 - close truth is already durable
+                log.exception("close resolver (assistant route) failed stream=%s", stream_id)
         return results
 
     sessions.set_awaiter_resolver(_on_producer_close)
@@ -556,6 +612,39 @@ async def run(args: argparse.Namespace) -> int:
         on_reconcile_tick=reconcile_callbacks,
     )
     server.reconciler = reconciler
+
+    # Daff seat recovery: daemon-owned respawn of the Daff assistant only.  Bart
+    # is never recovered (the hook declines non-Daff rows).  Enabled only when
+    # the daff composite is configured.
+    if assistant_composites.get("daff") is not None and assistant_composites["daff"].config.enabled:
+        import uuid as _uuid
+        from recovery import DaffRecovery
+
+        async def _tell_bart_degraded(text: str) -> None:
+            bart = assistant_composites.get("bart")
+            if bart is None:
+                return
+            tell_id = f"daff-degraded-{_uuid.uuid4().hex}"
+            delivered = await server._deliver_composite_tell(
+                bart, bart.config.stream_id, "daemon:recovery", text, tell_id, "",
+            )
+            if delivered is None:
+                await store.enqueue_composite_tell(
+                    name=bart.config.name, tell_id=tell_id,
+                    from_stream_id="daemon:recovery", body=text, request_id="",
+                )
+
+        daff_recovery = DaffRecovery(
+            sessions=sessions, spawnctl=spawnctl, store=store, local_host=args.local_host,
+            composites=lambda: assistant_composites,
+            flush_composite_tells=server._flush_composite_tells,
+            tell_bart=_tell_bart_degraded,
+            startup_prompt=os.environ.get("PENTACLE_ASSISTANT_DAFF_STARTUP_PROMPT", "")
+            or "You are Daff, the operator's always-on assistant. Read your startup context and resume.",
+        )
+        reconciler.on_protected_dead = daff_recovery.on_dead
+        server.daff_recovery = daff_recovery
+
     usage_state_path = (
         Path(args.db).with_name("usage_state.json")
         if args.db != ":memory:"
@@ -599,18 +688,22 @@ async def run(args: argparse.Namespace) -> int:
     #    Verbs arriving before their store is up park on a bounded readiness gate
     #    (never error); `hello`'s snapshot tolerates an unopened store.
     store.start()
-    if assistant_config.enabled:
-        await assistant_composite.load_binding()
+    for _composite in assistant_composites.values():
+        if _composite.config.enabled:
+            await _composite.load_binding()
     if store.schedule_schema_health == "ok":
         window_schedule.mark_store_ready()
     else:
         window_schedule.mark_store_failed()
     await lifecycle.start()
-    if assistant_config.enabled:
-        projection = await assistant_composite.ensure_projection()
-        recovery = await assistant_composite.recover()
+    for _name, _composite in assistant_composites.items():
+        if not _composite.config.enabled:
+            continue
+        projection = await _composite.ensure_projection()
+        recovery = await _composite.recover()
         log.info(
-            "assistant composite projection ready stream=%s generation=%s recovery=%s",
+            "assistant composite projection ready name=%s stream=%s generation=%s recovery=%s",
+            _name,
             projection.get("stream_id") if projection else "",
             projection.get("session_generation") if projection else "",
             recovery,
@@ -777,7 +870,8 @@ async def run(args: argparse.Namespace) -> int:
         task.cancel()
     if tasks:
         await asyncio.wait(tasks, timeout=5)
-    await assistant_composite.stop()
+    for _composite in assistant_composites.values():
+        await _composite.stop()
     if server.lane_rulings is not None:
         await server.lane_rulings.stop()
     await server.close()

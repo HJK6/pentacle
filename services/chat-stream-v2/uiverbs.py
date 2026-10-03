@@ -67,6 +67,9 @@ log = logging.getLogger("chat_streamd_v2.uiverbs")
 PUSH_TTL_SECONDS = 90 * 24 * 60 * 60
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 PUSH_TOKENS_TABLE = os.environ.get("PUSH_TOKENS_TABLE", "PushTokens")
+#: A stream-scoped credential (Cosmo) registers into a SEPARATE table so the
+#: legacy PushTokens readers never see the operator's device (see spec D).
+COSMO_PUSH_TOKENS_TABLE = os.environ.get("COSMO_PUSH_TOKENS_TABLE", "CosmoPushTokens")
 SPEC_ID_RE = re.compile(r"^[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$")
 
 
@@ -138,6 +141,26 @@ class UIVerbs:
         push_token = str(msg.get("push_token") or "").strip()
         if not push_token:
             return {"type": "register_push.error", "request_id": rid, "error": "push_token is required"}
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if auth.get("scoped_principal"):
+            # Scoped (Cosmo) device -> the separate CosmoPushTokens audience,
+            # bound to the credential and its one scope stream.  Legacy readers
+            # never see it.
+            item = {
+                "push_token": push_token,
+                "credential_id": str(auth.get("credential_id") or ""),
+                "scope_stream": str(auth.get("scope_stream") or ""),
+                "platform": str(msg.get("platform") or "ios"),
+                "device_name": str(msg.get("device_name") or ""),
+                "registered_at": iso_now(),
+                "active": True,
+                "ttl": int(time.time()) + PUSH_TTL_SECONDS,
+            }
+            await asyncio.to_thread(
+                lambda: boto3.resource("dynamodb", region_name=AWS_REGION)
+                .Table(COSMO_PUSH_TOKENS_TABLE).put_item(Item=item)
+            )
+            return {"type": "register_push.ok", "request_id": rid}
         item = {
             "push_token": push_token,
             "platform": str(msg.get("platform") or "ios"),

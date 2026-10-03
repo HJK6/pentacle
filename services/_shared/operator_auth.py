@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import stat
 import tempfile
@@ -42,6 +43,26 @@ CREDENTIAL_FIELDS = frozenset(
         "replaces_credential_id",
     }
 )
+# Optional, back-compatible fields a stored record may additionally carry.
+# A legacy record without these is treated as unscoped (full operator rights).
+CREDENTIAL_OPTIONAL_FIELDS = frozenset({"scope"})
+_SCOPE_STREAM_RE = re.compile(r"^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$")
+
+
+def canonical_scope(value: object) -> dict[str, str] | None:
+    """Validate and normalize a credential scope, or None for unscoped.
+
+    V1 supports exactly one restriction: a single assistant stream,
+    ``{"stream": "<host:session>"}``.  Anything else is rejected at rest.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"stream"}:
+        raise OperatorAuthError("invalid credential scope")
+    stream = value.get("stream")
+    if not isinstance(stream, str) or not _SCOPE_STREAM_RE.fullmatch(stream):
+        raise OperatorAuthError("invalid credential scope")
+    return {"stream": stream}
 
 
 class OperatorAuthError(ValueError):
@@ -58,6 +79,10 @@ class ConnectionTrust:
     credential_id: str
     client_kind: str
     operator_trusted: bool = True
+    # Server-authoritative scope.  None = unscoped (full operator rights); a
+    # dict like {"stream": "daff:assistant"} restricts the connection.  Never
+    # read from the wire.
+    scope: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -306,9 +331,14 @@ class OperatorCredentialRegistry:
         normalized: dict[str, dict[str, Any]] = {}
         for raw_id, raw_record in raw_credentials.items():
             credential_id = canonical_uuid(raw_id)
-            if not isinstance(raw_record, dict) or set(raw_record) != CREDENTIAL_FIELDS:
+            if (not isinstance(raw_record, dict)
+                    or set(raw_record) - CREDENTIAL_OPTIONAL_FIELDS != CREDENTIAL_FIELDS):
                 raise OperatorRegistryUnavailable("operator credential record schema invalid")
             record = dict(raw_record)
+            try:
+                record["scope"] = canonical_scope(record.get("scope"))
+            except OperatorAuthError as exc:
+                raise OperatorRegistryUnavailable("operator credential record schema invalid") from exc
             record["client_kind"] = canonical_client_kind(record.get("client_kind"))
             decode_b64url(record.get("proof_key"), expected_bytes=AUTH_PROOF_BYTES)
             if not isinstance(record.get("label"), str):
@@ -332,8 +362,10 @@ class OperatorCredentialRegistry:
             atomic_write_json(self.path, {"version": REGISTRY_VERSION, "credentials": credentials})
             return result
 
-    def issue(self, client_kind: str, *, label: str = "", replaces_credential_id: str | None = None) -> tuple[str, str]:
+    def issue(self, client_kind: str, *, label: str = "", replaces_credential_id: str | None = None,
+              scope: Mapping[str, str] | None = None) -> tuple[str, str]:
         client_kind = canonical_client_kind(client_kind)
+        scope = canonical_scope(scope)
         if replaces_credential_id is not None:
             replaces_credential_id = canonical_uuid(replaces_credential_id)
         credential_id = str(uuid.uuid4())
@@ -353,6 +385,7 @@ class OperatorCredentialRegistry:
                 "created_at": utc_now(),
                 "revoked_at": None,
                 "replaces_credential_id": replaces_credential_id,
+                "scope": dict(scope) if scope else None,
             }
 
         self._mutate(add)
@@ -371,7 +404,10 @@ class OperatorCredentialRegistry:
         expected = hmac.new(proof_key, proof_transcript(nonce, credential_id, client_kind), hashlib.sha256).digest()
         if not hmac.compare_digest(expected, supplied):
             raise OperatorAuthError("operator credential invalid")
-        return ConnectionTrust(transport="v2", credential_id=credential_id, client_kind=client_kind)
+        return ConnectionTrust(
+            transport="v2", credential_id=credential_id, client_kind=client_kind,
+            scope=canonical_scope(record.get("scope")),
+        )
 
     def revoke(self, credential_id: str) -> None:
         credential_id = canonical_uuid(credential_id)

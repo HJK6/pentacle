@@ -75,6 +75,7 @@ class AssistantCompositeConfig:
     """Portable daemon configuration.  Feature remains off unless enabled."""
 
     enabled: bool = False
+    name: str = "bart"
     stream_id: str = ""
     router_endpoint: str = DEFAULT_ROUTER_ENDPOINT
     router_timeout_s: float = DEFAULT_ROUTER_TIMEOUT_S
@@ -93,16 +94,27 @@ class AssistantCompositeConfig:
         return bool(self.direct_primary_stream_id and self.direct_primary_generation)
 
     @classmethod
-    def from_env(cls, env: dict[str, str] | None = None) -> "AssistantCompositeConfig":
+    def from_env(
+        cls, env: dict[str, str] | None = None, *, name: str = "bart", env_prefix: str = "",
+    ) -> "AssistantCompositeConfig":
+        """Build one named assistant's config from the environment.
+
+        ``env_prefix`` is inserted after ``PENTACLE_ASSISTANT_`` so a second
+        assistant reads its own key namespace (e.g. ``PENTACLE_ASSISTANT_DAFF_*``)
+        while ``bart`` keeps the existing unprefixed keys byte-identical.
+        """
         values = os.environ if env is None else env
-        enabled = _env_bool(values, "PENTACLE_ASSISTANT_COMPOSITE_ENABLED")
-        stream_id = str(values.get("PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID") or "").strip()
+        base = f"PENTACLE_ASSISTANT_{env_prefix}"
+        def _k(suffix: str) -> str:
+            return base + suffix
+        enabled = _env_bool(values, _k("COMPOSITE_ENABLED"))
+        stream_id = str(values.get(_k("COMPOSITE_STREAM_ID")) or "").strip()
         if enabled and not _STREAM_ID_RE.fullmatch(stream_id):
             # A malformed feature config must fail closed, rather than accept
             # traffic and leave it without an identity.
             raise ValueError("assistant_composite_stream_id_required")
-        direct_stream = str(values.get("PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID") or "").strip()
-        direct_generation = str(values.get("PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION") or "").strip()
+        direct_stream = str(values.get(_k("DIRECT_PRIMARY_STREAM_ID")) or "").strip()
+        direct_generation = str(values.get(_k("DIRECT_PRIMARY_GENERATION")) or "").strip()
         direct_requested = bool(direct_stream or direct_generation)
         if direct_requested and not enabled:
             raise ValueError("assistant_direct_requires_composite_enabled")
@@ -110,28 +122,28 @@ class AssistantCompositeConfig:
                                  or direct_stream == stream_id
                                  or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", direct_generation)):
             raise ValueError("assistant_direct_binding_invalid")
-        endpoint = str(values.get("PENTACLE_ASSISTANT_ROUTER_ENDPOINT") or DEFAULT_ROUTER_ENDPOINT).strip()
+        endpoint = str(values.get(_k("ROUTER_ENDPOINT")) or DEFAULT_ROUTER_ENDPOINT).strip()
         if enabled and not direct_requested and (not endpoint.startswith("ssh://") or "/" not in endpoint[6:]):
             raise ValueError("assistant_router_endpoint_required")
-        action_path = str(values.get("PENTACLE_ASSISTANT_ROUTER_ACTION_PATH") or "").strip()
+        action_path = str(values.get(_k("ROUTER_ACTION_PATH")) or "").strip()
         if enabled and not direct_requested and (not action_path.startswith("/") or "\x00" in action_path):
             # The local adapter is host-private deployment configuration.  A
             # source tree must never hard-code a user's Windows/runtime path.
             raise ValueError("assistant_router_action_path_required")
         backend_ids: dict[str, str] = {}
-        for name in ("PENTACLE_ASSISTANT_ASTRA_STREAM_ID", "PENTACLE_ASSISTANT_LUNA_STREAM_ID"):
-            value = str(values.get(name) or "").strip()
+        for backend_key in ("ASTRA_STREAM_ID", "LUNA_STREAM_ID"):
+            value = str(values.get(_k(backend_key)) or "").strip()
             if value and not _STREAM_ID_RE.fullmatch(value):
                 raise ValueError("assistant_backend_stream_id_invalid")
-            backend_ids[name] = value
-        if enabled and not direct_requested and (not backend_ids["PENTACLE_ASSISTANT_ASTRA_STREAM_ID"]
-                        or not backend_ids["PENTACLE_ASSISTANT_LUNA_STREAM_ID"]):
+            backend_ids[backend_key] = value
+        if enabled and not direct_requested and (not backend_ids["ASTRA_STREAM_ID"]
+                        or not backend_ids["LUNA_STREAM_ID"]):
             raise ValueError("assistant_backend_stream_ids_required")
-        authority_stream = str(values.get("PENTACLE_ASSISTANT_AUTHORITY_STREAM_ID") or "").strip()
+        authority_stream = str(values.get(_k("AUTHORITY_STREAM_ID")) or "").strip()
         if authority_stream and not _STREAM_ID_RE.fullmatch(authority_stream):
             raise ValueError("assistant_authority_stream_id_invalid")
         try:
-            authorized_specs = json.loads(values.get("PENTACLE_ASSISTANT_REBIND_AUTHORIZED_SPEC_IDS", "[]"))
+            authorized_specs = json.loads(values.get(_k("REBIND_AUTHORIZED_SPEC_IDS"), "[]"))
         except (TypeError, ValueError) as exc:
             raise ValueError("assistant_rebind_authorized_specs_invalid") from exc
         if (not isinstance(authorized_specs, list)
@@ -141,19 +153,38 @@ class AssistantCompositeConfig:
             raise ValueError("assistant_rebind_authorized_specs_invalid")
         return cls(
             enabled=enabled,
+            name=name,
             stream_id=stream_id,
             router_endpoint=endpoint,
-            router_timeout_s=_bounded_timeout(values.get("PENTACLE_ASSISTANT_ROUTER_TIMEOUT_S"), DEFAULT_ROUTER_TIMEOUT_S),
+            router_timeout_s=_bounded_timeout(values.get(_k("ROUTER_TIMEOUT_S")), DEFAULT_ROUTER_TIMEOUT_S),
             router_action_path=action_path,
-            astra_stream_id=direct_stream if direct_requested else backend_ids["PENTACLE_ASSISTANT_ASTRA_STREAM_ID"],
-            luna_stream_id="" if direct_requested else backend_ids["PENTACLE_ASSISTANT_LUNA_STREAM_ID"],
+            astra_stream_id=direct_stream if direct_requested else backend_ids["ASTRA_STREAM_ID"],
+            luna_stream_id="" if direct_requested else backend_ids["LUNA_STREAM_ID"],
             direct_primary_stream_id=direct_stream,
             direct_primary_generation=direct_generation,
             authority_stream_id=authority_stream,
             rebind_authorized_spec_ids=frozenset(authorized_specs),
-            mirror_enabled_default=_env_bool(values, "PENTACLE_ASSISTANT_MIRROR_ENABLED", True),
-            title=str(values.get("PENTACLE_ASSISTANT_COMPOSITE_TITLE") or "Assistant").strip()[:120] or "Assistant",
+            mirror_enabled_default=_env_bool(values, _k("MIRROR_ENABLED"), True),
+            title=str(values.get(_k("COMPOSITE_TITLE")) or "Assistant").strip()[:120] or "Assistant",
         )
+
+    @staticmethod
+    def assistant_names() -> tuple[str, ...]:
+        """The fixed set of assistants this daemon supports."""
+        return ("bart", "daff")
+
+    @classmethod
+    def all_from_env(cls, env: dict[str, str] | None = None) -> "dict[str, AssistantCompositeConfig]":
+        """Build the fixed name->config map.
+
+        ``bart`` reads the existing unprefixed keys (byte-identical to the
+        single-assistant daemon); ``daff`` reads ``PENTACLE_ASSISTANT_DAFF_*``
+        and stays inert until those keys are configured.
+        """
+        return {
+            "bart": cls.from_env(env, name="bart", env_prefix=""),
+            "daff": cls.from_env(env, name="daff", env_prefix="DAFF_"),
+        }
 
 
 def direct_dispatch_envelope(
@@ -244,6 +275,10 @@ class AssistantComposite:
         self._worker_lock = asyncio.Lock()
         self._binding_lock = asyncio.Lock()
         self.ruling_hook: Callable[..., Awaitable[dict[str, Any] | None]] | None = None
+        #: Optional async hook invoked once per committed user-facing reply
+        #: (prose/final).  Wired by main for the Cosmo push audience; a no-op for
+        #: assistants with no scoped push subscribers.
+        self.reply_push: Callable[..., Awaitable[None]] | None = None
         self._dispatch_tasks: set[asyncio.Task[None]] = set()
         self._owner = f"assistant-router-{uuid.uuid4().hex[:12]}"
         self._activity_lock = asyncio.Lock()
@@ -274,13 +309,15 @@ class AssistantComposite:
         )
 
     async def load_binding(self) -> dict[str, Any]:
-        binding = await self.store.get_assistant_binding(env_binding=self._env_binding())
+        binding = await self.store.get_assistant_binding(
+            env_binding=self._env_binding(), name=self.env_config.name,
+        )
         self._apply_binding(binding)
         return binding
 
     async def binding(self) -> dict[str, Any]:
         return {"type": "assistant.binding.ok", **await self.store.get_assistant_binding(
-            env_binding=self._env_binding(),
+            env_binding=self._env_binding(), name=self.env_config.name,
         )}
 
     async def rebind(self, msg: dict[str, Any], *, actor_stream_id: str | None) -> dict[str, Any]:
@@ -308,6 +345,7 @@ class AssistantComposite:
                 target_generation=None if clear else str(msg.get("target_generation") or ""),
                 request_id=request_id, expected_revision=expected_revision, clear=clear,
                 authorized_spec_ids=self.env_config.rebind_authorized_spec_ids,
+                name=self.env_config.name,
             )
             if not receipt.get("duplicate"):
                 self._apply_binding(receipt["new_binding"])
@@ -415,6 +453,7 @@ class AssistantComposite:
                 source_stream_id=self.config.direct_primary_stream_id,
                 source_generation=self.config.direct_primary_generation,
                 enabled_default=self.config.mirror_enabled_default,
+                name=self.config.name,
             )
         # The shared sessions schema stays untouched; these public fields are
         # projected on the existing inventory/events transport.
@@ -1275,8 +1314,19 @@ class AssistantComposite:
             direct_single_final=direct_route,
         )
         await self.refresh_activity()
-        if not stored.get("duplicate") and self.broadcast is not None:
-            await self.broadcast({"type": "chat.event", "event": stored["event"]})
+        if not stored.get("duplicate"):
+            if self.broadcast is not None:
+                await self.broadcast({"type": "chat.event", "event": stored["event"]})
+            # One push per committed user-facing reply.  The publish-key dedup means
+            # replays/reconnects (duplicate=True) never re-push.
+            if (self.reply_push is not None and kind == "prose" and response_state == "final"):
+                try:
+                    await self.reply_push(
+                        stream_id=self.config.stream_id,
+                        message_id="publication:" + publication_key, text=body,
+                    )
+                except Exception:  # noqa: BLE001 - push is best-effort, never fails a publish
+                    log.exception("reply push failed stream=%s", self.config.stream_id)
         return {
             "type": "assistant.publish.ok", "publication_key": publication_key,
             "event_id": stored["event_id"], "duplicate": bool(stored.get("duplicate")),

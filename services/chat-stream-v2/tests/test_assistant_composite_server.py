@@ -48,7 +48,7 @@ async def _seed_dispatch(store, *, input_identity: str, dispatch_id: str, target
     )
 
 
-def test_composite_intercepts_send_and_refuses_tell_without_changing_ordinary_panes() -> None:
+def test_composite_intercepts_send_and_queues_unbound_tell_without_changing_ordinary_panes() -> None:
     async def _go() -> None:
         store = Store(":memory:")
         store.start()
@@ -104,12 +104,21 @@ def test_composite_intercepts_send_and_refuses_tell_without_changing_ordinary_pa
             assert comms.sent and comms.sent[0]["text"] == "ordinary"
             assert "_assistant_composite_backend_dispatch" not in comms.sent[0]
 
+            # A composite tell now routes to the current binding rather than being
+            # rejected.  An unauthenticated caller is refused.
             try:
-                await server._on_tell({"to_stream_id": COMPOSITE_STREAM, "text": "no pane"})
+                await server._on_tell({"to_stream_id": COMPOSITE_STREAM, "text": "no auth"})
             except VerbError as exc:
-                assert exc.code == "assistant_composite_no_pane"
+                assert exc.code == "assistant_tell_unauthorized"
             else:  # pragma: no cover
-                raise AssertionError("tell to a pane-less composite must be refused")
+                raise AssertionError("unauthenticated composite tell must be refused")
+            # With operator authority but no live binding, the tell is queued, not pasted.
+            queued = await server._on_tell({
+                "to_stream_id": COMPOSITE_STREAM, "text": "queued while unbound",
+                "_auth_context": {"operator_authenticated": True, "operator_principal": "operator:fixture"},
+            })
+            assert queued["queued"] is True
+            assert queued["delivery_status"] == "queued_unbound"
             assert not comms.told
         finally:
             store.stop()
