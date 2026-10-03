@@ -393,8 +393,17 @@ def test_deadline_wins_over_late_ruling_and_audits_refusal():
                     "stream_id": ADVISOR, "session_generation": advisor["session_generation"]}})
             await server.lane_rulings.tick()
             assert len(spawned.calls) == 1
+            # A missed SLA tells the requesting lead only; it is never mirrored to
+            # the operator composite surface.
             events = await store.fetch_session_event_tail("fixture-chat:assistant", limit=20)
-            assert len([e for e in events if rid in str(e.get("text") or "")]) == 1
+            assert all("proceeded unruled" not in str(e.get("text") or "") for e in events)
+            unruled = await store.submit(lambda conn: conn.execute(
+                "SELECT recipient_stream_id, body, kind FROM v2_outbound_notices WHERE notice_id=?",
+                ("assistant-lane-ruling-unruled:" + rid,)).fetchone())
+            assert unruled is not None
+            assert unruled[0] == ROOT and unruled[2] == "assistant_lane_ruling_result"
+            assert "Ruling deadline passed (no answer in 10 min)" in unruled[1]
+            assert f"proceeded unruled: spawn {first['stream_id']} ({rid})" in unruled[1]
             audit = await store.submit(lambda conn: [row[0] for row in conn.execute(
                 "SELECT event FROM v2_assistant_lane_ruling_audit WHERE ruling_request_id=? ORDER BY id", (rid,))])
             assert audit == ["request", "timeout", "release", "refused"]
