@@ -7,7 +7,7 @@
 // and PENTACLE_* scrubbed) so the suite is deterministic on any host; individual
 // tests re-add exactly what they exercise.
 
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -25,11 +25,18 @@ const ID = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com'];
 // they run through PENTACLE_PREPUSH_TEST_ARGV_FILE; elsewhere the real argv is used.
 const PARENT_ARGV_READABLE = fs.existsSync(`/proc/${process.pid}/cmdline`)
   || spawnSync('ps', ['-ww', '-o', 'args=', '-p', String(process.pid)], { encoding: 'utf8' }).status === 0;
+const argvFixtureDirs = [];
+after(() => { for (const dir of argvFixtureDirs) fs.rmSync(dir, { recursive: true, force: true }); });
+function argvFile(lines) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-prepush-argv-'));
+  argvFixtureDirs.push(dir);
+  const file = path.join(dir, 'argv');
+  fs.writeFileSync(file, lines.join('\n') + '\n');
+  return file;
+}
 function argvFixture(args, env) {
   if (PARENT_ARGV_READABLE || env.PENTACLE_PREPUSH_TEST_MODE !== '1' || !args.includes('push')) return env;
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-prepush-argv-')), 'argv');
-  fs.writeFileSync(file, ['git', ...args].join('\n') + '\n');
-  return { ...env, PENTACLE_PREPUSH_TEST_ARGV_FILE: file };
+  return { ...env, PENTACLE_PREPUSH_TEST_ARGV_FILE: argvFile(['git', ...args]) };
 }
 
 function childEnv(extra = {}) {
@@ -460,11 +467,6 @@ test('the pinned default public root is the public repo root and is not read fro
 // ── test argv seam (sandbox-tolerant suite) ─────────────────────────────────
 // runHookDirect's parent is node, never `git push`, so the real argv is unknown
 // in every environment; only an honoured fixture could change the outcome.
-function argvFile(lines) {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-prepush-argv-')), 'argv');
-  fs.writeFileSync(file, lines.join('\n') + '\n');
-  return file;
-}
 test('fixture argv is ignored for a GitHub destination (real argv required, fail closed)', () => {
   const file = argvFile(['git', 'push', 'origin', 'x:refs/heads/x']);
   const r = runHookDirect('origin', 'git@github.com:HJK6/pentacle.git', {
