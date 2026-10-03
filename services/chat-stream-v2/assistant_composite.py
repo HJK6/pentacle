@@ -283,6 +283,9 @@ class AssistantComposite:
         self.publication_attachments = publication_attachments
         self._worker: asyncio.Task[None] | None = None
         self._worker_lock = asyncio.Lock()
+        # Set by _wake_worker; consumed at each worker exit decision so a wake
+        # that races the worker's exit (worker-exit wake race) is never lost.
+        self._worker_rewake = False
         self._binding_lock = asyncio.Lock()
         self.ruling_hook: Callable[..., Awaitable[dict[str, Any] | None]] | None = None
         #: Optional async hook invoked once per committed user-facing reply
@@ -645,27 +648,35 @@ class AssistantComposite:
                             lane_id=str(lane["lane_id"]), question_id=None,
                         )
                 target, generation, reply_lane_id = explicit_target
-                dispatch_id = "assistant-reply-" + uuid.uuid4().hex
-                backend_context = (
-                    {} if self.config.direct_primary else
-                    _backend_routing_context(await self._router_input(record))
-                )
-                direct_envelope = (direct_dispatch_envelope(
-                    self.config, record, dispatch_id=dispatch_id, target=target, generation=generation,
-                ) if self.config.direct_primary else None)
-                updated = await self._update_route(
-                    str(record["route_id"]), routing_state="resolved", delivery_state="intent",
-                    dispatch_id=dispatch_id, route_target=target, route_target_generation=generation,
-                    route_payload={"schema_version": "assistant-direct/v1" if self.config.direct_primary else "assistant-router/v1",
-                                   "admission_mode": "direct_primary" if self.config.direct_primary else "router",
-                                   "disposition": "lane" if reply_lane_id else "conversation", "lane_id": reply_lane_id,
-                                   "depends_on_message_id": None, "reason": "explicit_reply",
-                                   "backend_context": backend_context,
-                                   **({"direct_envelope": direct_envelope} if direct_envelope else {})},
-                )
-                if updated is not None:
-                    record = updated
-                    self._start_dispatch(updated)
+                if self.config.direct_primary and generation is None:
+                    # Dead-window correlated input: the answer lifecycle above has
+                    # completed durably, but the bound pane is unbound.  Leave the
+                    # admitted route queued (do NOT pin the dead generation) and
+                    # wake the worker so it replays the body to the live successor
+                    # after the (re)bind — the worker re-queues/pauses until then.
+                    self._wake_worker()
+                else:
+                    dispatch_id = "assistant-reply-" + uuid.uuid4().hex
+                    backend_context = (
+                        {} if self.config.direct_primary else
+                        _backend_routing_context(await self._router_input(record))
+                    )
+                    direct_envelope = (direct_dispatch_envelope(
+                        self.config, record, dispatch_id=dispatch_id, target=target, generation=generation,
+                    ) if self.config.direct_primary else None)
+                    updated = await self._update_route(
+                        str(record["route_id"]), routing_state="resolved", delivery_state="intent",
+                        dispatch_id=dispatch_id, route_target=target, route_target_generation=generation,
+                        route_payload={"schema_version": "assistant-direct/v1" if self.config.direct_primary else "assistant-router/v1",
+                                       "admission_mode": "direct_primary" if self.config.direct_primary else "router",
+                                       "disposition": "lane" if reply_lane_id else "conversation", "lane_id": reply_lane_id,
+                                       "depends_on_message_id": None, "reason": "explicit_reply",
+                                       "backend_context": backend_context,
+                                       **({"direct_envelope": direct_envelope} if direct_envelope else {})},
+                    )
+                    if updated is not None:
+                        record = updated
+                        self._start_dispatch(updated)
             else:
                 self._wake_worker()
         return {
@@ -712,7 +723,17 @@ class AssistantComposite:
                         )
                 if prior is None:
                     raise ValueError("assistant_explicit_reply_unresolved")
-            return self.config.direct_primary_stream_id, await self._direct_target_generation(), lane_id
+            # Correlation is validated above (stale question / unresolved reply
+            # still raise).  Only the final live-target resolution may be unbound
+            # during a dead window: signal that with generation=None so the caller
+            # admits the correlated input durably and defers dispatch to replay.
+            # A genuine conflict (pane alive at a different generation) raises
+            # ValueError here and is still refused.
+            try:
+                generation = await self._direct_target_generation()
+            except _DirectTargetUnbound:
+                generation = None
+            return self.config.direct_primary_stream_id, generation, lane_id
         if question_id:
             lane = await self.store.get_assistant_composite_lane_for_question(
                 stream_id=self.config.stream_id, question_id=question_id,
@@ -769,8 +790,19 @@ class AssistantComposite:
         return target, await self._target_generation(target), prior_result.get("lane_id")
 
     def _wake_worker(self) -> None:
+        # Ask any running worker to re-loop before it exits, then start a fresh
+        # worker if none is running.  This is synchronous (no awaits), so a
+        # running worker always observes the flag at its next exit decision and a
+        # just-exited worker's task is already .done() here — closing the race.
+        self._worker_rewake = True
         if self._worker is None or self._worker.done():
+            self._worker_rewake = False
             self._worker = asyncio.create_task(self._run_worker(), name="assistant-composite-routing")
+
+    def wake_route_worker(self) -> None:
+        """Public: resume direct route processing after a (re)bind so input
+        re-queued during a dead window replays to the current binding."""
+        self._wake_worker()
 
     async def _run_worker(self) -> None:
         # One claim/classification at a time.  A dispatch is detached before
@@ -779,19 +811,28 @@ class AssistantComposite:
         try:
             async with self._worker_lock:
                 while True:
+                    # Reset before claiming so any wake during claim/classify is
+                    # observed at the exit decisions below (worker-exit race).
+                    self._worker_rewake = False
                     route = await self.store.claim_assistant_composite_route(
                         stream_id=self.config.stream_id, owner=self._owner,
                     )
                     if route is None:
+                        if self._worker_rewake:
+                            continue
                         return
                     await self.refresh_activity()
                     try:
                         await self._classify_one(route)
                     except _DirectTargetUnbound:
-                        # Direct target is unbound (pane dead, awaiting recovery
-                        # rebind).  The route was re-queued in order; pause here
-                        # rather than busy-spin on the same route.  A rebind or
-                        # recovery `recover()` calls `_wake_worker()` to resume.
+                        # Direct target is unbound (pane dead, awaiting a rebind).
+                        # The route was re-queued in order.  If a (re)bind wake
+                        # arrived meanwhile the binding may now be live — retry
+                        # once; otherwise pause rather than busy-spin while still
+                        # unbound.  A later wake (recovery `recover()` or a manual
+                        # `_on_assistant_rebind`) resumes processing.
+                        if self._worker_rewake:
+                            continue
                         return
         except RuntimeError as exc:
             # Daemon teardown owns cancellation/store closure.  A detached
