@@ -15,7 +15,7 @@ answerModule._compile(esbuild.buildSync({ entryPoints: [answerModule.id], bundle
 const { buildPentacleQuestionAnswerText } = answerModule.exports;
 
 
-function installRenderer({ dismissResult, questionOverride, assistantRole = '', initialSessions = [], popoutContext = null, selectSessionDetail = null, renderTranscriptTimelineHtml = null, requestStreamEvents = null, setTimeout: setTimer = null, storage = {}, terminalClass = null, ccOverrides = null } = {}) {
+function installRenderer({ dismissResult, questionOverride, assistantRole = '', defaultChatView = true, initialSessions = [], popoutContext = null, selectSessionDetail = null, renderTranscriptTimelineHtml = null, requestStreamEvents = null, setTimeout: setTimer = null, storage = {}, terminalClass = null, ccOverrides = null } = {}) {
   const html = fs.readFileSync(path.join(root, 'renderer', 'index.html'), 'utf8');
   const dom = new JSDOM(html, { url: 'http://pentacle.test/renderer/index.html' });
   for (const [key, value] of Object.entries(storage)) dom.window.localStorage.setItem(key, value);
@@ -34,6 +34,7 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
     hostColors: { local: 'royal-blue' },
     features: {
       chatUi: true,
+      defaultChatView,
       inputBar: true,
       dashboards: false,
       usage: false,

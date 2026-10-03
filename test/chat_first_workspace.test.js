@@ -5,8 +5,8 @@ const vm = require('node:vm');
 const { installRenderer, mountRaceSlot } = require('./helpers/renderer_chat');
 const { normalizeWorkspace, visibleWorkspaceSlots, defaultSessionView } = require('../renderer/workspace_layout');
 
-test('bundled configuration enables the chat workspace for new installations', () => {
-  assert.equal(require('../pentacle.config.example').features.defaultChatView, true);
+test('bundled configuration keeps new installations terminal-first', () => {
+  assert.equal(require('../pentacle.config.example').features.defaultChatView, false);
   assert.equal(require('../pentacle.config.example').features.chatUi, undefined);
 });
 
@@ -30,14 +30,14 @@ test('corrupt or obsolete preferences are bounded; active hidden slots stay reac
     { name: '<untrusted>', hostId: 'local', mode: 'chat', draft: '' });
 });
 
-test('fresh workspace is light, one pane, and normal attachment starts in chat', async () => {
-  const h = installRenderer({ questionOverride: null });
+test('fresh workspace is light, one pane, and terminal-first when configured', async () => {
+  const h = installRenderer({ questionOverride: null, defaultChatView: false });
   const value = vm.runInContext(`(() => {
     const pending = attachSession(0, 'claude-hostc-race', 'A real chat', 'local');
     pending.catch(() => {});
     return { mode: state.slotViewModes[0], theme: state.appearance.theme };
   })()`, h.context);
-  assert.equal(value.mode, 'chat');
+  assert.equal(value.mode, 'terminal');
   assert.equal(value.theme, 'light');
   assert.equal(h.dom.window.document.querySelector('.grid').dataset.paneCount, '1');
 });

@@ -84,13 +84,14 @@ PENTACLE_CONFIG="$HOME/.config/pentacle/pentacle.config.js" node server --port 7
 Use **New Chat**, select `local`, then the provider/model. The picker uses the
 catalog's `available_models` projection, while the daemon retains its broader
 compatibility catalog for existing sessions and explicit handoffs. Agent
-sessions open in Chat view. A disconnected daemon produces an error and creates no
-synthetic session. Keep the daemon running while using the web client or mobile.
+sessions open in the configured Default view; Chat remains available per pane.
+A disconnected daemon produces an error and creates no synthetic session. Keep
+the daemon running while using the web client or mobile.
 On the first landed operator turn, a visible top-level session receives a
 provisional durable title and status card; the provider may replace that
 summary, and later status changes publish to Web immediately.
 
-For an existing terminal-first installation, choose **Chat** under Default view in Settings, or set `features.defaultChatView: true` in your private config. Fresh installs default to Chat; explicit saved preferences are preserved. The header layout controls select one to four panes without closing hidden sessions.
+New installs retain a Terminal-first default. To open new sessions in Chat, choose **Chat** under Default view in Settings or set `features.defaultChatView: true` in your private config. Explicit saved preferences are preserved. The header layout controls select one to four panes without closing hidden sessions.
 
 The private config selects `chatStream.url`, `chatStream.tokenPath`, host labels, terminal transports and optional features. The token must be a regular mode-0600 file inside a mode-0700 directory, using a path without symbolic-link ancestors. Do not commit credentials or runtime databases. See [daemon setup and remote clients](services/chat-stream-v2/README.md) and [public support boundaries](docs/public_release.md).
 
