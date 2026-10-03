@@ -272,37 +272,41 @@ def classify_claude_fallback(host: str, exit_code: int, stdout: str, stderr: str
     live probe yields no current-account number, the row is ``account_mismatch``
     (never the stale account's value), with the specific sub-reason in ``note``.
     """
-    if exit_code == EXIT_SSH_TIMEOUT:
-        return _row(host, "claude", OUTCOME_TIMEOUT, source="claude-probe")
-    if exit_code in (EXIT_SSH_TRANSPORT, 255):
-        return _row(host, "claude", OUTCOME_TRANSPORT_ERROR, source="claude-probe")
+    # Compute a single base outcome (and a successful pct row), then apply the
+    # account-mismatch wrap uniformly so no branch escapes it (F3).
     stdout = (stdout or "").strip()
-    if exit_code == 0 and stdout:
+    low = (stderr or "").casefold()
+    pct = None
+    resets_text = None
+    if exit_code == EXIT_SSH_TIMEOUT:
+        base = OUTCOME_TIMEOUT
+    elif exit_code in (EXIT_SSH_TRANSPORT, 255):
+        base = OUTCOME_TRANSPORT_ERROR
+    elif exit_code == 0 and stdout:
         try:
             data = json.loads(stdout.splitlines()[-1])
+            pct = _coerce_pct(data.get("week_all_pct"))
+            resets_text = data.get("week_all_resets")
+            base = OUTCOME_OK if pct is not None else OUTCOME_PARSER_ERROR
         except (ValueError, IndexError):
-            return _row(host, "claude", OUTCOME_PARSER_ERROR, source="claude-probe")
-        pct = _coerce_pct(data.get("week_all_pct"))
-        if pct is not None:
-            return _row(host, "claude", OUTCOME_OK, pct=pct,
-                        resets_text=data.get("week_all_resets"),
-                        source="claude-probe", probed_at=_iso_from_ms(now_ms))
-    # No usable weekly % — classify the failure explicitly from the probe's own
-    # sanitized stderr (check_claude_usage.py messages), never a catch-all.
-    low = (stderr or "").casefold()
-    if "sign in" in low or "log in" in low or "logged in" in low:
+            base = OUTCOME_PARSER_ERROR
+    elif "sign in" in low or "log in" in low or "logged in" in low:
         base = OUTCOME_AUTH_ERROR
     elif "did not provide labeled weekly" in low:
         base = OUTCOME_TIMEOUT  # the probe's own 60s deadline expired
     elif "must be installed" in low or "not found" in low or "not a trusted" in low:
         base = OUTCOME_PROVIDER_ERROR
     elif exit_code == 0:
-        base = OUTCOME_PARSER_ERROR  # exit 0 but no parseable weekly %
+        base = OUTCOME_PARSER_ERROR  # exit 0 but nothing to parse
     else:
         base = OUTCOME_PROVIDER_ERROR
+    if base == OUTCOME_OK:
+        return _row(host, "claude", OUTCOME_OK, pct=pct, resets_text=resets_text,
+                    source="claude-probe", probed_at=_iso_from_ms(now_ms))
     if mismatch:
-        # Cache belonged to another account and we could not read a current-account
-        # number: report account_mismatch, keeping the specific cause as a note.
+        # Cache was for another account and we could not read a current-account
+        # number (whatever the reason): report account_mismatch (pct null, never
+        # the stale account's value), keeping the specific cause in `note`.
         return _row(host, "claude", OUTCOME_ACCOUNT_MISMATCH, source="claude-probe", note=base)
     return _row(host, "claude", base, source="claude-probe")
 

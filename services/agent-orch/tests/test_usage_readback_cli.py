@@ -109,10 +109,16 @@ def test_usage_cli_claude_fallback_classes():
         mismatch=True, now_ms=NOW_MS)
     assert mm["outcome"] == ur.OUTCOME_ACCOUNT_MISMATCH and mm["pct"] is None
     assert mm["note"] == ur.OUTCOME_TIMEOUT
-    # but a pure transport/timeout at the ssh layer is reported as-is (not masked
-    # as account_mismatch) even under mismatch, since the account couldn't be read
-    assert ur.classify_claude_fallback("merlin", 124, "", "", mismatch=True,
-                                       now_ms=NOW_MS)["outcome"] == ur.OUTCOME_TIMEOUT
+    # mismatch wrapping is uniform: ANY non-ok fallback (incl. early ssh
+    # timeout/transport) under mismatch -> account_mismatch, cause kept in note.
+    for code, cause in ((124, ur.OUTCOME_TIMEOUT), (255, ur.OUTCOME_TRANSPORT_ERROR)):
+        r = ur.classify_claude_fallback("merlin", code, "", "", mismatch=True, now_ms=NOW_MS)
+        assert r["outcome"] == ur.OUTCOME_ACCOUNT_MISMATCH and r["pct"] is None
+        assert r["note"] == cause
+    # a successful current-account read after a mismatch is reported ok (its value)
+    okm = ur.classify_claude_fallback("merlin", 0, json.dumps({"week_all_pct": 33}), "",
+                                      mismatch=True, now_ms=NOW_MS)
+    assert okm["outcome"] == ur.OUTCOME_OK and okm["pct"] == 33
 
 
 def test_usage_cli_claude_cache_anchor_fail_closed():
@@ -281,12 +287,26 @@ def test_remote_script_expands_home_safely():
 def test_remote_script_blocks_injection():
     # A crafted runtime dir must NOT allow command substitution / backticks: the
     # dangerous remainder is shlex-quoted into exactly one literal shell token.
-    for evil in ("~/x$(touch /tmp/pwn)", "~/`id`", "/a b;rm -rf /", "~/x';echo bad;'"):
+    import subprocess, os, tempfile
+    sentinel = os.path.join(tempfile.mkdtemp(), "pwn_SENTINEL")
+    # A real shell must expand only $HOME and treat the hostile remainder as a
+    # literal path — the command substitution must NOT execute (no sentinel file).
+    for evil in (f"~/x$(touch {sentinel})", "~/`id`", "/a b;rm -rf /", "~/x';echo bad;'"):
         tok = ur._remote_script(evil, "check_codex_usage.py")
-        rest = tok[len('"$HOME"/'):] if tok.startswith('"$HOME"/') else tok
-        # the shell parses the remainder as exactly ONE literal token (no exec)
-        parsed = shlex.split(rest)
-        assert len(parsed) == 1 and parsed[0].endswith("/scripts/check_codex_usage.py")
+        res = subprocess.run(["sh", "-c", f"printf '%s' {tok}"],
+                             env={"HOME": "/HOMEDIR", "PATH": "/usr/bin:/bin"},
+                             capture_output=True, text=True)
+        assert res.returncode == 0
+        # $HOME expanded; the whole dangerous remainder survived verbatim as path
+        assert res.stdout.endswith("/scripts/check_codex_usage.py")
+        assert "$(" not in res.stdout or evil.startswith("~/x$(")  # literal preserved, not run
+        assert not os.path.exists(sentinel), "command substitution executed!"
+    # and the tilde/home path actually expands
+    tok = ur._remote_script("~/repos/x", "check_codex_usage.py")
+    res = subprocess.run(["sh", "-c", f"printf '%s' {tok}"],
+                         env={"HOME": "/HOMEDIR", "PATH": "/usr/bin:/bin"},
+                         capture_output=True, text=True)
+    assert res.stdout == "/HOMEDIR/repos/x/scripts/check_codex_usage.py"
 
 
 def test_codex_command_expands_home_not_tilde_literal(monkeypatch):
