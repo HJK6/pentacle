@@ -226,17 +226,27 @@ def test_correlated_question_reply_admits_and_completes_answer_lifecycle():
     asyncio.run(run())
 
 
-def test_dead_window_inputs_replay_in_order_without_duplicates():
-    """Multiple inputs queued during a dead window replay in admission order, each
-    delivered exactly once; a same-identity retry is a durable no-op."""
+def test_dead_window_replay_preserves_submission_order_under_delay():
+    """Multiple inputs queued during a dead window replay to the single target pane
+    in admission order at the SUBMISSION boundary — even when the first dispatch is
+    slow — and each is delivered exactly once (a same-identity retry is a no-op).
+
+    The dispatch callback records the input identity it is given and holds the first
+    dispatch behind a gate; if the worker did not serialize direct-primary dispatch,
+    a later input could submit before the gated first one (observed order [b,a]).
+    """
     async def run():
         store = Store(":memory:")
         store.start()
         try:
-            dispatched = []
+            submitted = []
+            gate = asyncio.Event()
 
             async def dispatch(route):
-                dispatched.append(route["route_target_generation"])
+                envelope = json.loads(route["route_json"]).get("direct_envelope", {})
+                submitted.append(envelope.get("reply_to_message_id"))
+                if len(submitted) == 1:
+                    await gate.wait()  # hold the first; a later one must not overtake it
                 return {"delivery": "landed"}
 
             daff, s1, _sessions, server = await _build(store, dispatch=dispatch)
@@ -253,22 +263,31 @@ def test_dead_window_inputs_replay_in_order_without_duplicates():
             })
             for mid in ("a", "b", "c"):
                 assert (await _await_route(store, mid, lambda r: r["routing_state"] == "queued"))["routing_state"] == "queued"
-            assert not dispatched
+            assert not submitted
 
             s2 = await _spec_seat(store, "fixture-daff:s2")
             await server.sessions.refresh()
             await _rebind_to_successor(server, "fixture-daff:s2", s2)
 
-            order = []
+            # The worker submits 'a' (gated) and must NOT submit 'b'/'c' until 'a'
+            # completes — serialized through the single pane.
+            for _ in range(50):
+                if submitted:
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            assert submitted == ["a"]  # not overtaken while the first is in flight
+
+            gate.set()
+            for _ in range(200):
+                if len(submitted) >= 3:
+                    break
+                await asyncio.sleep(0.01)
+            assert submitted == ["a", "b", "c"]  # exactly once each, admission order
+
             for mid in ("a", "b", "c"):
                 route = await _await_route(store, mid, lambda r: r["routing_state"] == "resolved")
                 assert route["route_target_generation"] == s2["session_generation"]
-                order.append((mid, route["dispatch_id"]))
-            # Exactly three dispatches (no duplicate from the retry), all to S2.
-            assert len(dispatched) == 3
-            assert all(g == s2["session_generation"] for g in dispatched)
-            # Distinct dispatch ids, admission order preserved by created_at.
-            assert len({d for _, d in order}) == 3
         finally:
             store.stop()
 
