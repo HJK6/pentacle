@@ -443,16 +443,26 @@ def _codex_command(
     *, launch_model: str | None, launch_effort: str | None,
     operator_facing: bool = False,
     initial_prompt_file: str | None = None,
+    launch_cwd: str | None = None,
 ) -> str:
     """The codex launch shell command (v1 codex_provider.py:_codex_launch_prefix).
 
     Required flags, resolved model/effort (explicit-only, as for claude), the
     apps-off guard (`features.apps=false`, opt back in with
     PENTACLE_CODEX_ENABLE_APPS=1), and the operator-question developer_instructions
-    mandate merged last-wins."""
+    mandate merged last-wins.
+
+    ``launch_cwd`` is the spawn-requested working directory; absent it the
+    machine's ``codex_cwd`` default is used. Without this the command always
+    cd'd to ``codex_cwd`` and silently ignored a spawn ``--cwd``."""
+    effective_cwd = launch_cwd or machine.codex_cwd
     parts = _command_parts(machine.codex_bin)
     executable = _resolve_local_executable(parts[0] if parts else "codex")
     args = parts[1:]
+    # Pre-trust the exact launch directory so honoring a spawn --cwd into a fresh
+    # worktree does not stall on Codex's interactive folder-trust prompt. Mirrors
+    # the `[projects."<path>"] trust_level = "trusted"` entry Codex persists.
+    args.extend(["-c", f'projects."{effective_cwd}".trust_level="trusted"'])
     for required in CODEX_REQUIRED_FLAGS:
         if required not in args:
             args.append(required)
@@ -509,7 +519,7 @@ def _codex_command(
             "exec \"$@\" \"$prompt\"",
         ))
         return (
-            f"cd {shlex.quote(machine.codex_cwd)} && "
+            f"cd {shlex.quote(effective_cwd)} && "
             f"{agent_orch_path_export(machine, provider_bin=executable)}"
             f"{_codex_path_export(executable)}"
             f"{env_prefix}exec /bin/sh -c {shlex.quote(launcher)} "
@@ -517,7 +527,7 @@ def _codex_command(
             f"{shlex.quote(initial_prompt_file)} {argv}"
         )
     return (
-        f"cd {shlex.quote(machine.codex_cwd)} && "
+        f"cd {shlex.quote(effective_cwd)} && "
         f"{agent_orch_path_export(machine, provider_bin=executable)}"
         f"{_codex_path_export(executable)}"
         f"{env_prefix}exec {argv}"
@@ -549,6 +559,7 @@ def build_launch(
     resume_session_id: str | None = None,
     resume_jsonl_path: str | None = None,
     resume_cwd: str | None = None,
+    cwd: str | None = None,
 ) -> LaunchPlan:
     """Turn a RESOLVED (provider, model, effort) tuple into the exact launch v1
     emits. `launch_model`/`launch_effort` are None for a profile-default spawn
@@ -586,6 +597,7 @@ def build_launch(
             launch_model=launch_model, launch_effort=launch_effort,
             operator_facing=operator_facing,
             initial_prompt_file=initial_prompt_file,
+            launch_cwd=cwd,
         )
         return LaunchPlan(
             command=command,

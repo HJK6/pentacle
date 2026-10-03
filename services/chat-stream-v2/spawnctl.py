@@ -2905,6 +2905,9 @@ class SpawnCtl:
                     resume_cwd=(
                         str(msg.get("_resume_cwd") or "") or None
                     ),
+                    cwd=(
+                        str(msg.get("cwd") or "") or None
+                    ),
                 )
             except ValueError as exc:
                 raise VerbError("spawn_launch_unavailable", str(exc)) from exc

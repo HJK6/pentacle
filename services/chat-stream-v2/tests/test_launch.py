@@ -119,3 +119,55 @@ def test_visible_claude_launch_appends_title_and_status_instruction(tmp_path: Pa
     assert "--append-system-prompt" in visible.command
     assert "Pentacle visible-session setup" in visible.command
     assert "--append-system-prompt" not in worker.command
+
+
+def _codex_machine(tmp_path: Path) -> "launch.LocalMachine":
+    # codex_cwd is the machine default; launch_cwd (spawn --cwd) must override it.
+    return launch.local_machine(
+        "hostc", cwd=str(tmp_path / "machine-default"),
+        codex_bin="/bin/echo", projects_root=str(tmp_path / "projects"),
+    )
+
+
+def test_codex_command_honors_launch_cwd_and_trusts_it(tmp_path: Path) -> None:
+    machine = _codex_machine(tmp_path)
+    worktree = "/tmp/fresh-worktree"
+    cmd = launch._codex_command(
+        machine, "sess", "/tmp/tok", launch_model=None, launch_effort=None,
+        launch_cwd=worktree,
+    )
+    assert f"cd {shlex.quote(worktree)} &&" in cmd
+    assert f'projects."{worktree}".trust_level="trusted"' in cmd
+    # The machine default must NOT be the cd target when a launch cwd is given.
+    assert f"cd {shlex.quote(machine.codex_cwd)} &&" not in cmd
+
+
+def test_codex_command_falls_back_to_machine_codex_cwd(tmp_path: Path) -> None:
+    machine = _codex_machine(tmp_path)
+    cmd = launch._codex_command(
+        machine, "sess", "/tmp/tok", launch_model=None, launch_effort=None,
+    )
+    assert f"cd {shlex.quote(machine.codex_cwd)} &&" in cmd
+    assert f'projects."{machine.codex_cwd}".trust_level="trusted"' in cmd
+
+
+def test_codex_initial_prompt_branch_honors_launch_cwd(tmp_path: Path) -> None:
+    machine = _codex_machine(tmp_path)
+    worktree = "/tmp/fresh-worktree-ip"
+    cmd = launch._codex_command(
+        machine, "sess", "/tmp/tok", launch_model=None, launch_effort=None,
+        initial_prompt_file="/tmp/prompt", launch_cwd=worktree,
+    )
+    assert f"cd {shlex.quote(worktree)} &&" in cmd
+    assert f'projects."{worktree}".trust_level="trusted"' in cmd
+
+
+def test_build_launch_threads_spawn_cwd_to_codex(tmp_path: Path) -> None:
+    machine = _codex_machine(tmp_path)
+    worktree = "/tmp/spawn-cwd-wt"
+    plan = launch.build_launch(
+        machine, provider="codex", tmux_session="s",
+        launch_model=None, launch_effort=None, cwd=worktree,
+    )
+    assert f"cd {shlex.quote(worktree)} &&" in plan.command
+    assert f'projects."{worktree}".trust_level="trusted"' in plan.command
