@@ -44,7 +44,8 @@ import store_lifecycle_authority as lifecycle_authority
 from store_assistant_binding import (
     ASSISTANT_BINDING_DDL, ASSISTANT_REBIND_AUDIT_DDL,
     ASSISTANT_REBIND_AUDIT_INDEX_DDL, ASSISTANT_HANDOFF_PROOF_DDL,
-    AssistantBindingStoreMixin, _binding_conn,
+    ASSISTANT_COMPOSITE_TELL_QUEUE_DDL, SCOPED_OWNERSHIP_DDL,
+    AssistantBindingStoreMixin, _binding_conn, migrate_binding_to_named,
 )
 from assistant_lane_rulings import RULING_REQUESTS_DDL, BART_LANE_OWNERSHIP_DDL, RULING_AUDIT_DDL
 import store_consent as consent
@@ -1332,8 +1333,11 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
         self._start_error: BaseException | None = None
         self._columns: set[str] = set()
         # Written and read on the store thread after the composite projection
-        # is ready. None keeps every non-direct deployment unchanged.
-        self._assistant_mirror_binding: tuple[str, str, str, bool] | None = None
+        # is ready. Keyed by composite stream id so each named assistant
+        # (bart, daff) carries its own mirror; empty keeps every non-direct
+        # deployment unchanged.  Tuple: (composite_stream_id, source_stream_id,
+        # source_generation, enabled_default, name).
+        self._assistant_mirror_binding: dict[str, tuple[str, str, str, bool, str]] = {}
         self._init_routing_integrity_state()
 
     @property
@@ -1446,9 +1450,14 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             conn.execute(OUTBOUND_NOTICE_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DDL)
             conn.execute(ASSISTANT_BINDING_DDL)
+            # One-time: convert the legacy single-row (id=1) binding to the
+            # name-keyed form, seeding the existing row as name='bart'.
+            migrate_binding_to_named(conn)
             conn.execute(ASSISTANT_REBIND_AUDIT_DDL)
             conn.execute(ASSISTANT_REBIND_AUDIT_INDEX_DDL)
             conn.execute(ASSISTANT_HANDOFF_PROOF_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_TELL_QUEUE_DDL)
+            conn.execute(SCOPED_OWNERSHIP_DDL)
             conn.execute(RULING_REQUESTS_DDL)
             conn.execute(BART_LANE_OWNERSHIP_DDL)
             conn.execute(RULING_AUDIT_DDL)
@@ -1649,17 +1658,23 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
 
     async def configure_assistant_mirror(
         self, *, composite_stream_id: str, source_stream_id: str,
-        source_generation: str, enabled_default: bool,
+        source_generation: str, enabled_default: bool, name: str = "bart",
     ) -> None:
-        """Install the daemon's trusted direct-primary mirror binding."""
+        """Install one named assistant's trusted direct-primary mirror binding."""
         def _op(_conn: sqlite3.Connection) -> None:
-            self._assistant_mirror_binding = (
-                composite_stream_id, source_stream_id, source_generation, enabled_default,
+            self._assistant_mirror_binding[composite_stream_id] = (
+                composite_stream_id, source_stream_id, source_generation, enabled_default, name,
             )
         await self.submit(_op)
 
+    @staticmethod
+    def _mirror_kv_key(name: str) -> str:
+        # Bart keeps the legacy unprefixed key byte-identical; other assistants
+        # (daff) get their own per-name override key.
+        return "assistant.mirror.enabled" if name == "bart" else f"assistant.mirror.{name}.enabled"
+
     def _effective_mirror_source_conn(
-        self, conn: sqlite3.Connection,
+        self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str] | None,
     ) -> tuple[str, str, str] | None:
         """Resolve the live direct-primary source seat for the mirror.
 
@@ -1671,12 +1686,12 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
         usable source is bound.  Fails closed on a corrupt or unconfigured
         binding rather than break source-event ingestion.
         """
-        binding = self._assistant_mirror_binding
         if binding is None:
             return None
         try:
             effective = _binding_conn(
-                conn, {"stream_id": binding[1], "generation": binding[2]}, include_target=False,
+                conn, {"stream_id": binding[1], "generation": binding[2]},
+                name=binding[4], include_target=False,
             )
         except ValueError:
             return None
@@ -1684,18 +1699,22 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             return None
         return effective["stream_id"], effective["generation"], effective["source"]
 
-    def _assistant_mirror_state_conn(self, conn: sqlite3.Connection) -> dict[str, Any]:
-        binding = self._assistant_mirror_binding
+    def _assistant_mirror_state_conn(
+        self, conn: sqlite3.Connection, composite_stream_id: str,
+    ) -> dict[str, Any]:
+        binding = self._assistant_mirror_binding.get(composite_stream_id)
         if binding is None:
             return {"enabled": False, "source": "unbound", "binding": None}
-        override = conn.execute("SELECT v FROM kv WHERE k='assistant.mirror.enabled'").fetchone()
+        override = conn.execute(
+            "SELECT v FROM kv WHERE k=?", (self._mirror_kv_key(binding[4]),),
+        ).fetchone()
         if override is None:
             enabled, source = binding[3], "env"
         else:
             normalized = str(override[0]).strip().lower()
             enabled = normalized in {"1", "true", "on"}
             source = "kv" if normalized in {"1", "true", "on", "0", "false", "off"} else "kv_invalid"
-        effective = self._effective_mirror_source_conn(conn)
+        effective = self._effective_mirror_source_conn(conn, binding)
         if effective is None:
             source_stream_id, source_generation, source_binding = binding[1], binding[2], "unavailable"
         else:
@@ -1708,24 +1727,40 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
                         "source_binding": source_binding},
         }
 
-    async def assistant_mirror_state(self) -> dict[str, Any]:
-        return await self.submit(self._assistant_mirror_state_conn)
+    async def assistant_mirror_state(self, composite_stream_id: str) -> dict[str, Any]:
+        return await self.submit(
+            lambda conn: self._assistant_mirror_state_conn(conn, composite_stream_id)
+        )
 
     def _mirror_source_event_conn(
         self, conn: sqlite3.Connection, *, source_stream_id: str,
         source_event: dict[str, Any], source_event_id: int, recorded_at: float,
     ) -> None:
+        """Project an admitted source event for whichever named assistant owns it.
+
+        Each named assistant (bart, daff) has at most one mirror binding and a
+        distinct source seat, so at most one binding matches ``source_stream_id``.
+        """
+        for binding in list(self._assistant_mirror_binding.values()):
+            self._mirror_source_event_for_binding(
+                conn, binding, source_stream_id=source_stream_id,
+                source_event=source_event, source_event_id=source_event_id,
+                recorded_at=recorded_at,
+            )
+
+    def _mirror_source_event_for_binding(
+        self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str], *,
+        source_stream_id: str, source_event: dict[str, Any], source_event_id: int,
+        recorded_at: float,
+    ) -> None:
         """Project an admitted source event in its ingest transaction only."""
-        binding = self._assistant_mirror_binding
-        if binding is None:
-            return
-        effective = self._effective_mirror_source_conn(conn)
+        effective = self._effective_mirror_source_conn(conn, binding)
         if effective is None:
             return
         effective_source_stream_id, source_generation, _source_binding = effective
         if source_stream_id != effective_source_stream_id:
             return
-        if not self._assistant_mirror_state_conn(conn)["enabled"]:
+        if not self._assistant_mirror_state_conn(conn, binding[0])["enabled"]:
             return
         if source_event.get("kind") != "ASSIST_TEXT" or source_event.get("attachments"):
             return

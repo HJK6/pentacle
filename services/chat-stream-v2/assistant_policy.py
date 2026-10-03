@@ -19,6 +19,18 @@ class AssistantPolicy:
         self.role = os.environ.get("PENTACLE_ASSISTANT_ROLE", "").strip()
         if self.role and (len(self.role) > 40 or not re.fullmatch(r"[a-z0-9_-]+", self.role)):
             raise ValueError("PENTACLE_ASSISTANT_ROLE must be a short role slug")
+        # A second protected assistant (daff) may run beside the primary (bart).
+        # Its role slug is a separate opt-in key; it is preserved-on-death and
+        # close-guarded exactly like the primary, but confers no fleet lifecycle
+        # authority (that is governed solely by store_lifecycle_authority).  The
+        # primary ``self.role`` still backs operator-credential and consent
+        # protection byte-identically.
+        self.extra_roles: set[str] = set()
+        daff_role = os.environ.get("PENTACLE_ASSISTANT_DAFF_ROLE", "").strip()
+        if daff_role:
+            if len(daff_role) > 40 or not re.fullmatch(r"[a-z0-9_-]+", daff_role):
+                raise ValueError("PENTACLE_ASSISTANT_DAFF_ROLE must be a short role slug")
+            self.extra_roles.add(daff_role)
         self.lock = asyncio.Lock()
         # Fleet lifecycle authority: designate/transfer/revoke/handoff-carry and a
         # manager close/reparent from admission through effect all hold this
@@ -27,8 +39,13 @@ class AssistantPolicy:
         # Nothing holding a lifecycle or graph lock may acquire it.
         self.authority_lock = asyncio.Lock()
 
+    @property
+    def roles(self) -> set[str]:
+        """Every protected assistant role on this host (primary + any extra)."""
+        return ({self.role} if self.role else set()) | self.extra_roles
+
     def protects(self, row):
-        return bool(self.role and row and row.get("role") == self.role)
+        return bool(row and self.roles and row.get("role") in self.roles)
 
     @staticmethod
     def _error(code, message):
@@ -38,11 +55,14 @@ class AssistantPolicy:
     def operator(self, auth):
         return bool(auth.get("operator_authenticated") or auth.get("service_authenticated"))
 
-    async def available(self, host, *, excluding="", predecessor=""):
+    async def available(self, host, role=None, *, excluding="", predecessor=""):
+        # Singleton is enforced per protected role, so bart and daff are each
+        # their own singleton and never block the other.
+        role = role or self.role
         if host != self.local_host:
             raise self._error("assistant_host_invalid", "assistant must run on the configured daemon host")
         rows = await self.store.list_open_sessions_with_event_summary()
-        holders = [r for r in rows if self.protects(r) and r.get("stream_id") != excluding]
+        holders = [r for r in rows if r.get("role") == role and r.get("stream_id") != excluding]
         if any(r.get("stream_id") != predecessor for r in holders):
             raise self._error("assistant_exists", "an assistant is already open; use its managed handoff")
         # A spawn may return starting/uncertain before an open row exists. Its
@@ -55,22 +75,22 @@ class AssistantPolicy:
             if not payload:
                 continue
             intent = json.loads(payload) if isinstance(payload, str) else payload
-            if self.protects(intent.get("open_fields", {})):
+            if intent.get("open_fields", {}).get("role") == role:
                 raise self._error("assistant_exists", "assistant spawn is unresolved; reconcile its receipt before retrying")
 
     async def authorize_role(self, target, role, auth):
-        if not self.role or (role != self.role and not self.protects(target)):
+        if not self.roles or (role not in self.roles and not self.protects(target)):
             return
         if not self.operator(auth):
             raise self._error("role_authority_denied", "assistant role changes require authenticated operator authority")
-        if role == self.role:
+        if role in self.roles:
             if target.get("parent_stream_id"):
                 raise self._error("assistant_parent_invalid", "assistant must be a top-level session")
-            await self.available(target["host"], excluding=target["stream_id"])
+            await self.available(target["host"], role, excluding=target["stream_id"])
 
     @asynccontextmanager
     async def spawn(self, msg, host):
-        if not self.role:
+        if not self.roles:
             yield
             return
         predecessor = str(msg.get("handoff_from_stream_id") or "") if msg.get("handoff") else ""
@@ -78,14 +98,16 @@ class AssistantPolicy:
         if predecessor and ":" in predecessor:
             source = await self.store.fetch_session(*predecessor.split(":", 1))
         role = msg.get("role") or (source or {}).get("role")
-        if role != self.role and not self.protects(source):
+        if role not in self.roles and not self.protects(source):
             yield
             return
         auth = msg.get("_auth_context") or {}
         own_handoff = bool(self.protects(source) and auth.get("token_verified") and auth.get("stream_id") == predecessor)
         if not (self.operator(auth) or own_handoff):
             raise self._error("role_authority_denied", "assistant activation requires operator authority; rotation requires its owner")
-        if role != self.role:
+        if role not in self.roles:
+            raise self._error("role_authority_denied", "assistant handoff must preserve its protected role")
+        if self.protects(source) and role != source.get("role"):
             raise self._error("role_authority_denied", "assistant handoff must preserve its protected role")
         if msg.get("parent_stream_id") and not predecessor:
             raise self._error("assistant_parent_invalid", "assistant must be a top-level session")

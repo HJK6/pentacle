@@ -34,6 +34,7 @@ import re
 import socket
 import ssl
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -149,6 +150,17 @@ DOT_FREETEXT_FIELDS = frozenset({
 DOT_LIST_FIELDS = DOT_METADATA_FIELDS | DOT_FREETEXT_FIELDS
 DOT_REQUIRES_TLS_CODE = "external_requires_tls"
 DOT_SCOPE_DENIED_CODE = "dot_scope_denied"
+#: Deny-by-default verb allowlist for a stream-scoped credential (the Cosmo
+#: client).  Every other registered handler denies with `scope_denied`.  Outbound
+#: server frames (welcome/snapshot/pong/chat.event/working.state/notification/
+#: session.inventory) are not request verbs; they are filtered to the one scope
+#: stream in `_frame_for_client` and the hello snapshot.
+SCOPED_ALLOWED_VERBS = frozenset({
+    "hello", "ping", "request_stream_events", "send", "send.receipt.get",
+    "upload_blob_init", "upload_blob_chunk", "fetch_blob", "transcribe_blob",
+    "register_push",
+})
+SCOPE_DENIED_CODE = "scope_denied"
 #: Server-owned opt-in (default OFF = strict). When OFF, a verified internal
 #: seat token authenticates the seat but does NOT by itself confer operator
 #: authority, so privileged operator RPCs (grant_token, spawn_freeze/unfreeze,
@@ -411,7 +423,11 @@ class Server:
         self.comms = comms
         # Attached by main after the durable store is available.  Keeping it
         # optional makes old deployments and focused unit servers unchanged.
+        # ``assistant_composite`` is the primary (bart) alias; ``assistant_composites``
+        # is the fixed name->composite map (bart, daff).  Focused unit tests set
+        # only the single alias, so the resolver below falls back to it.
         self.assistant_composite: Any = None
+        self.assistant_composites: dict[str, Any] = {}
         self.lane_rulings = AssistantLaneRulings(self) if store is not None else None
         #: The peer probe pool. When present, `hello`/`snapshot` serves its live
         #: hosts dict (local entry + every peer's binary reachability); absent,
@@ -564,6 +580,13 @@ class Server:
         #: flipped false) cannot fall through the loopback exemption into local
         #: access: the dispatch/broadcast gates key on this, not on the live flag.
         self._client_dot_connections: set[Any] = set()
+        #: Sticky per-connection marker for a stream-scoped credential (Cosmo),
+        #: mirroring the Dot marker so a revoked scoped credential can never fall
+        #: back to loopback/operator rights for the connection's remaining life.
+        self._client_scoped_connections: set[Any] = set()
+        #: Scoped connections whose latest per-RPC recheck found the credential
+        #: revoked, so egress (broadcasts) stops within one heartbeat too.
+        self._client_scoped_revoked: set[Any] = set()
         #: Wire-provided client names are claims only. A UI principal enters this
         #: connection-local map only after an auth-v2 proof checks against the
         #: existing operator credential registry.
@@ -1017,6 +1040,8 @@ class Server:
         self._client_token_hashes.pop(websocket, None)
         self._client_system_producers.pop(websocket, None)
         self._client_dot_connections.discard(websocket)
+        self._client_scoped_connections.discard(websocket)
+        self._client_scoped_revoked.discard(websocket)
         self._tls_connections.discard(websocket)
         self._operator_challenges.pop(websocket, None)
         self._connection_trust.pop(websocket, None)
@@ -1272,6 +1297,7 @@ class Server:
                 code = None
                 if not any(auth.get(key) for key in (
                     "operator_authenticated", "token_verified", "service_authenticated",
+                    "scoped_principal",
                 )):
                     code = "authentication_required"
                 elif verb in {"grant_token", "spawn_freeze", "spawn_unfreeze"} and not (
@@ -1301,6 +1327,24 @@ class Server:
                 # when it is off, so the default-deny branch below covers it.
                 if verb not in self._dot_allowed_verbs:
                     return [self._auth_error_frame(verb, request_id, DOT_SCOPE_DENIED_CODE)]
+            # Stream-scoped credential (Cosmo) enforcement.  Keyed on the sticky
+            # marker and run for EVERY verb, so a revoked scoped credential (whose
+            # scoped_principal has flipped false) is refused rather than falling
+            # through.  Deny-by-default: only the scoped allowlist is reachable.
+            if websocket in self._client_scoped_connections:
+                scoped_auth = dispatch_msg["_auth_context"]
+                if not scoped_auth.get("scoped_principal"):
+                    return [self._auth_error_frame(verb, request_id, "authentication_required")]
+                if verb not in SCOPED_ALLOWED_VERBS:
+                    return [self._auth_error_frame(verb, request_id, SCOPE_DENIED_CODE)]
+                if verb == "fetch_blob":
+                    readable = await self._scoped_blob_readable(
+                        str(scoped_auth.get("credential_id") or ""),
+                        str(dispatch_msg.get("blob_sha") or ""),
+                        str(scoped_auth.get("scope_stream") or ""),
+                    )
+                    if not readable:
+                        return [self._auth_error_frame(verb, request_id, "blob_forbidden")]
             if verb in {
                 "hello", "list_sessions", "inspect_stream", "request_stream_events", "send.receipt.get",
                 # Upload verbs carry the owning connection so an interrupted
@@ -1323,6 +1367,16 @@ class Server:
         if hasattr(reply, "__aiter__"):
             return reply
         frames = list(reply) if isinstance(reply, list) else [reply]
+        # Record blob ownership when a scoped credential completes an upload, so a
+        # later fetch/transcribe/send-attachment can be confined to its own blobs.
+        if (verb == "upload_blob_chunk" and websocket in self._client_scoped_connections
+                and frames and isinstance(frames[0], dict)
+                and frames[0].get("type") == "upload_blob.ok" and frames[0].get("blob_sha")):
+            cred = str(dispatch_msg.get("_auth_context", {}).get("credential_id") or "")
+            if cred:
+                await self.store.record_scoped_owner(
+                    kind="blob", key=str(frames[0]["blob_sha"]), credential_id=cred,
+                )
         if any(frame.get("error_code") == "unsupported_in_v2" for frame in frames):
             # Some lifted handlers reject a supported wire verb with the same
             # capability-gap code instead of falling through the dispatch table.
@@ -1402,6 +1456,30 @@ class Server:
                                      and self._is_loopback_client(websocket)
                                      and await asyncio.to_thread(local_admin.verify, msg.get("local_admin_token"))),
         }
+        trust_scope = getattr(trust, "scope", None) if trust is not None else None
+        if trust_scope:
+            # A stream-scoped credential (Cosmo).  It authenticates as a valid v2
+            # credential but is NEVER elevated to operator rights, and a per-RPC
+            # registry recheck enforces revocation within one heartbeat.  Scope is
+            # server-authoritative (from the stored record), never from the wire.
+            self._client_scoped_connections.add(websocket)
+            revoked = await asyncio.to_thread(
+                self._scoped_credential_revoked, trust.credential_id, trust.client_kind,
+            )
+            if revoked:
+                self._client_scoped_revoked.add(websocket)
+            else:
+                self._client_scoped_revoked.discard(websocket)
+            context.update({
+                "operator_authenticated": False,
+                "operator_principal": "",
+                "operator_trusted": False,
+                "scoped_principal": not revoked,
+                "scope": None if revoked else dict(trust_scope),
+                "scope_stream": "" if revoked else str(trust_scope.get("stream") or ""),
+                "credential_id": trust.credential_id,
+            })
+            return context
         bound_system_actor = self._client_system_producers.get(websocket)
         if bound_system_actor is not None:
             claim = str(msg.get("from_stream_id") or "").strip()
@@ -1767,7 +1845,7 @@ class Server:
             return True
         if (
             str(session.get("provider") or "") == "composite"
-            and getattr(self.assistant_composite, "is_stream", lambda _value: False)(session.get("stream_id"))
+            and self._composite_for(session.get("stream_id")) is not None
             and not include_assistant_composite
         ):
             return False
@@ -1806,9 +1884,44 @@ class Server:
             )
         ]
 
+    def _composites(self) -> dict[str, Any]:
+        """The active name->composite map, falling back to the single primary.
+
+        Focused unit tests set only ``self.assistant_composite``; production sets
+        the full ``assistant_composites`` map.  Either way this returns the live
+        composites to resolve against.
+        """
+        composites = self.assistant_composites
+        if composites:
+            return composites
+        return {"bart": self.assistant_composite} if self.assistant_composite is not None else {}
+
+    def _composite_for(self, stream_id: object) -> Any:
+        """Return the named assistant composite that owns ``stream_id``, or None."""
+        for composite in self._composites().values():
+            if composite is not None and composite.is_stream(stream_id):
+                return composite
+        return None
+
+    def _composite_for_message(self, msg: dict[str, Any]) -> Any:
+        """Resolve the composite a composite-scoped verb targets.
+
+        Backend verbs carry the composite identity explicitly (``composite_stream_id``);
+        fall back to the primary when absent so single-composite callers are
+        unchanged.
+        """
+        resolved = self._composite_for(str(msg.get("composite_stream_id") or ""))
+        return resolved if resolved is not None else self.assistant_composite
+
+    def _enabled_composites(self) -> list[Any]:
+        return [c for c in self._composites().values() if c is not None and getattr(c, "enabled", False)]
+
+    def _any_composite_enabled(self) -> bool:
+        return bool(self._enabled_composites())
+
     def _project_assistant_composite_session(self, session: dict[str, Any]) -> dict[str, Any]:
-        composite = self.assistant_composite
-        if composite is not None and composite.is_stream(session.get("stream_id")):
+        composite = self._composite_for(session.get("stream_id"))
+        if composite is not None:
             return composite.project_session(session)
         return dict(session)
 
@@ -1898,6 +2011,27 @@ class Server:
                 **payload,
                 "sessions": [self._dot_project_session(s) for s in sessions if isinstance(s, dict)],
             }
+        # Stream-scoped credential (Cosmo): every outbound frame is filtered to the
+        # one scope stream; a revoked scoped connection receives nothing.
+        scope_stream = self._scoped_stream_for(websocket)
+        if scope_stream is not None:
+            if websocket in self._client_scoped_revoked:
+                return None
+            if frame_type == "session.inventory":
+                sessions = payload.get("sessions") if isinstance(payload.get("sessions"), list) else []
+                return {**payload, "sessions": [
+                    s for s in sessions if isinstance(s, dict) and s.get("stream_id") == scope_stream
+                ]}
+            if frame_type == "chat.event":
+                event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+                return dict(payload) if str(event.get("stream_id") or "") == scope_stream else None
+            if frame_type in {"working.state", "completion.report", "session.died", "notification"}:
+                stream_id = str(payload.get("stream_id") or payload.get("from_stream_id") or "")
+                if frame_type == "notification":
+                    stream_id = str((payload.get("notification") or {}).get("stream_id") or stream_id)
+                return dict(payload) if stream_id == scope_stream else None
+            # Any other broadcast frame (host.stats, schedule.*, ...) is withheld.
+            return None
         # The server speaks first, but a connection has the restrictive default
         # immediately: broadcasts may race the client's hello and must never
         # leak hidden/nested work during that window.
@@ -1944,6 +2078,35 @@ class Server:
             ):
                 return None
         return dict(payload)
+
+    def _scoped_credential_revoked(self, credential_id: str, client_kind: str) -> bool:
+        """Per-RPC revocation check for a scoped credential (fail closed)."""
+        try:
+            record = self.operator_credential_registry.load().credentials.get(credential_id)
+        except Exception:  # noqa: BLE001 - an unreadable registry fails closed
+            return True
+        return (record is None or bool(record.get("revoked_at"))
+                or record.get("client_kind") != client_kind)
+
+    def _scoped_stream_for(self, websocket: Any) -> str | None:
+        """The single stream a scoped connection is confined to, or None."""
+        if websocket not in self._client_scoped_connections:
+            return None
+        trust = self._connection_trust.get(websocket)
+        scope = getattr(trust, "scope", None) if trust is not None else None
+        stream = (dict(scope).get("stream") if scope else None)
+        return stream or None
+
+    async def _scoped_blob_readable(self, credential_id: str, sha: str, scope_stream: str) -> bool:
+        """A scoped credential may read only blobs it owns or that its own stream
+        references (e.g. an image the assistant posted into the scoped chat)."""
+        if not sha or self.store is None:
+            return False
+        if await self.store.scoped_owner(kind="blob", key=sha) == credential_id:
+            return True
+        return bool(scope_stream) and await self.store.blob_referenced_in_stream(
+            sha=sha, stream_id=scope_stream,
+        )
 
     def _operator_authenticated(self, websocket: Any) -> bool:
         """The one connection-bound operator predicate used by auth and fanout."""
@@ -1999,7 +2162,7 @@ class Server:
         """The complete hello response for a Dot connection: `[hello, snapshot]`
         with an empty, well-formed snapshot and NO `hosts.stats` frame. Discloses
         no fleet data; unblocks a client that waits for a snapshot."""
-        composite_enabled = bool(getattr(self.assistant_composite, "enabled", False))
+        composite_enabled = bool(self._any_composite_enabled())
         hello: dict[str, Any] = {"type": "hello"}
         if composite_enabled:
             hello["capabilities"] = {"assistant_composite_v1": True}
@@ -2086,7 +2249,7 @@ class Server:
             frames = [{
                 "type": "ready", "snapshot": False, "events_mode": events_mode,
             }]
-            if getattr(self.assistant_composite, "enabled", False):
+            if self._any_composite_enabled():
                 frames[0]["capabilities"] = {"assistant_composite_v1": True}
             if str(subscribe.get("mode") or "").lower() != "rpc" and "hosts.stats" not in exclude_event_types:
                 frames.append(self.hosts_stats_frame())
@@ -2140,7 +2303,7 @@ class Server:
                     and not (msg.get("_auth_context") or {}).get("token_verified")
                     and websocket not in self._client_authenticated_streams
                 ) else {}),
-                **({"assistant_composite_v1": True} if getattr(self.assistant_composite, "enabled", False) else {}),
+                **({"assistant_composite_v1": True} if self._any_composite_enabled() else {}),
             },
             "sessions": snapshot_sessions,
             "notifications": (await self.notify.snapshot_notifications(
@@ -2181,7 +2344,7 @@ class Server:
                 else None
             )
         hello: dict[str, Any] = {"type": "hello"}
-        if getattr(self.assistant_composite, "enabled", False):
+        if self._any_composite_enabled():
             hello["capabilities"] = {"assistant_composite_v1": True}
         frames: list[dict[str, Any]] = [hello, snapshot]
         if "hosts.stats" not in exclude_event_types:
@@ -2209,8 +2372,7 @@ class Server:
                     for stream_id, payload in values.items()
                     if isinstance(payload, dict)
                 })
-        composite = self.assistant_composite
-        if composite is not None and composite.enabled:
+        for composite in self._enabled_composites():
             merged[composite.config.stream_id] = composite.working_payload()
         return merged
 
@@ -2290,16 +2452,17 @@ class Server:
             await self.store.fetch_session_event_tail(stream_id, limit=event_tail)
             if event_tail else []
         )
-        if self.assistant_composite is not None and self.assistant_composite.is_stream(stream_id):
-            recent_events = await self.assistant_composite.enrich_events(recent_events)
+        _inspect_composite = self._composite_for(stream_id)
+        if _inspect_composite is not None:
+            recent_events = await _inspect_composite.enrich_events(recent_events)
         bootstrap_event = bool(recent_events) or bool(session.get("_bootstrap_event_seen"))
         if not bootstrap_event:
             bootstrap_event = bool(
                 await self.store.fetch_session_event_tail(stream_id, limit=1)
             )
         session = with_bootstrap_state(session, event_seen=bootstrap_event)
-        if self.assistant_composite is not None and self.assistant_composite.is_stream(stream_id):
-            session = {**session, "assistant_mirror": await self.store.assistant_mirror_state()}
+        if self._composite_for(stream_id) is not None:
+            session = {**session, "assistant_mirror": await self.store.assistant_mirror_state(stream_id)}
         if report_id is not None:
             existing_report = await self.store.get_report(report_id)
             if existing_report is not None and existing_report.get("from_stream_id") != stream_id:
@@ -2518,11 +2681,12 @@ class Server:
     async def _on_tell(self, msg: dict[str, Any]) -> dict[str, Any]:
         host, name = await self.sessions.resolve(msg)
         target_stream_id = f"{host}:{name}"
-        if getattr(self.assistant_composite, "is_stream", lambda _value: False)(target_stream_id):
-            raise VerbError("assistant_composite_no_pane", "assistant composite has no provider pane")
-        composite = self.assistant_composite
+        composite = self._composite_for(target_stream_id)
         if composite is not None:
-            suppressed = await composite.suppress_routine_backend_ingress(
+            return await self._composite_tell(composite, target_stream_id, msg)
+        primary = self.assistant_composite
+        if primary is not None:
+            suppressed = await primary.suppress_routine_backend_ingress(
                 target_stream_id=target_stream_id, body=str(msg.get("text") or msg.get("message") or ""),
                 msg=msg, verb="tell",
             )
@@ -2530,18 +2694,148 @@ class Server:
                 return suppressed
         return await self.comms.tell(msg)
 
+    async def _composite_tell(
+        self, composite: Any, composite_stream_id: str, msg: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Route `tell <name>:assistant` to the composite's current bound pane.
+
+        Only operator credentials and agent stream tokens may tell a composite;
+        scoped/Dot clients are refused.  The binding is resolved at send time and
+        the generation checked, so a rebind is picked up and a stale generation
+        refused.  If there is no live binding the tell is durably queued and
+        flushed, in order, when the composite is next bound.
+        """
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if auth.get("dot_principal") or auth.get("scoped_principal"):
+            raise VerbError(DOT_SCOPE_DENIED_CODE, "a scoped client may not tell the assistant composite")
+        if not (auth.get("operator_authenticated") is True
+                or auth.get("service_authenticated") is True
+                or auth.get("token_verified") is True):
+            raise VerbError("assistant_tell_unauthorized",
+                            "assistant composite tell requires operator or agent stream authority")
+        body = msg.get("text") if "text" in msg else msg.get("message")
+        body = "" if body is None else str(body)
+        if not body.strip():
+            raise VerbError("bad_request", "message is required")
+        tell_id = str(msg.get("tell_id") or msg.get("request_id") or uuid.uuid4().hex)
+        from_stream_id = str(
+            msg.get("from_stream_id") or auth.get("stream_id") or auth.get("operator_principal") or ""
+        )
+        delivered = await self._deliver_composite_tell(
+            composite, composite_stream_id, from_stream_id, body, tell_id, str(msg.get("request_id") or ""),
+        )
+        if delivered is not None:
+            return delivered
+        # No live binding: queue until the composite is next bound.
+        await self.store.enqueue_composite_tell(
+            name=composite.config.name, tell_id=tell_id, from_stream_id=from_stream_id,
+            body=body, request_id=str(msg.get("request_id") or ""),
+        )
+        return {
+            "type": "tell.ok", "to_stream_id": composite_stream_id, "tell_id": tell_id,
+            "delivery_status": "queued_unbound", "queued": True, "submission_confirmed": False,
+        }
+
+    async def _deliver_composite_tell(
+        self, composite: Any, composite_stream_id: str, from_stream_id: str,
+        body: str, tell_id: str, request_id: str,
+    ) -> dict[str, Any] | None:
+        """Deliver one composite tell to the current bound pane.
+
+        Returns the `tell.ok` reply, or None when the composite is unbound (caller
+        queues).  Raises `assistant_direct_generation_conflict` when the bound
+        seat's live generation no longer matches the binding.
+        """
+        binding = await composite.binding()
+        target = str(binding.get("stream_id") or "").strip()
+        generation = str(binding.get("generation") or "").strip()
+        if not target:
+            return None
+        host, _, name = target.partition(":")
+        seat = await self.store.fetch_session(host, name)
+        if seat is None or seat.get("status") != "open":
+            # The bound pane is gone (e.g. mid-recovery): queue until rebind.
+            return None
+        if generation and seat.get("session_generation") != generation:
+            # The pane was replaced without a rebind: refuse the stale generation.
+            raise VerbError("assistant_direct_generation_conflict",
+                            "assistant binding generation is stale")
+        reply = await self.comms.tell({
+            "type": "tell", "to_stream_id": target, "host": host, "session_name": name,
+            "from_stream_id": from_stream_id or composite_stream_id, "message": body,
+            "tell_id": tell_id, "request_id": request_id,
+            # Addressed composite delivery bypasses the routine backend-ingress
+            # filter (it is an explicit tell to the bound pane, not incidental peer
+            # chatter persisted without a paste).
+            "_assistant_composite_backend_dispatch": True,
+        })
+        return {
+            "type": "tell.ok", "to_stream_id": composite_stream_id, "tell_id": tell_id,
+            "delivery_status": reply.get("delivery_status"),
+            "submission_confirmed": reply.get("submission_confirmed"),
+        }
+
+    async def _flush_composite_tells(self, composite: Any) -> int:
+        """Deliver this composite's queued tells, in order, to the new binding.
+
+        Called after a (re)bind.  Stops at the first still-unbound or stale-
+        generation delivery, leaving the remainder queued in order.
+        """
+        delivered = 0
+        for row in await self.store.claim_composite_tells(name=composite.config.name):
+            try:
+                result = await self._deliver_composite_tell(
+                    composite, composite.config.stream_id, row["from_stream_id"],
+                    row["body"], row["tell_id"], row.get("request_id") or "",
+                )
+            except VerbError:
+                break
+            if result is None:
+                break
+            await self.store.delete_composite_tell(seq=row["seq"])
+            delivered += 1
+        return delivered
+
     async def _on_send(self, msg: dict[str, Any]) -> dict[str, Any]:
         host, name = await self.sessions.resolve(msg)
         stream_id = f"{host}:{name}"
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
-        composite = self.assistant_composite
-        if composite is not None and composite.is_stream(stream_id):
+        composite = self._composite_for(stream_id)
+        if composite is not None:
             if auth.get("dot_principal"):
                 # Attributed external handoff to the CURRENT Bart binding, not an
                 # operator grant; bypasses the operator-only composite intake.
                 # `stream_id` is the stable composite id (e.g. bart:assistant),
                 # the only target identity Dot's ack is allowed to echo.
                 return await self._dot_send_to_bart(msg, auth, composite_stream_id=stream_id)
+            if auth.get("scoped_principal"):
+                # A scoped client (Cosmo) may send only into its own scope stream,
+                # with attachments it owns; its request id is recorded for receipts.
+                if auth.get("scope_stream") != stream_id:
+                    raise VerbError(SCOPE_DENIED_CODE, "scoped client may send only to its own stream")
+                cred = str(auth.get("credential_id") or "")
+                request_id = str(msg.get("request_id") or "")
+                try:
+                    attachments = await self._validate_assistant_input_attachments(
+                        msg.get("attachments"), owner_credential_id=cred,
+                    )
+                    if request_id:
+                        await self.store.record_scoped_owner(
+                            kind="request", key=request_id, credential_id=cred,
+                        )
+                    accepted = await composite.accept_input(
+                        {**msg, "attachments": attachments}, operator_principal=f"scoped:{cred}",
+                    )
+                except ValueError as exc:
+                    raise VerbError(str(exc), str(exc)) from exc
+                return {
+                    "type": "send.result", "host": host, "session_name": name,
+                    "to_stream_id": stream_id,
+                    **({"state": "landed", "delivery": "landed", "submission_confirmed": True,
+                        "action_committed": True, "receipt_id": accepted.get("receipt_id")}
+                       if composite.config.direct_primary else {"delivery": "accepted"}),
+                    "assistant_composite": accepted,
+                }
             if auth.get("operator_authenticated") is not True:
                 raise VerbError("assistant_send_unauthorized", "assistant composite send requires authenticated caller")
             try:
@@ -2569,13 +2863,23 @@ class Server:
         # A Dot principal may send ONLY to the assistant composite binding.
         if auth.get("dot_principal"):
             raise VerbError(DOT_SCOPE_DENIED_CODE, "Dot may message only the assistant binding")
+        # A scoped client may send ONLY to its own scope stream (the composite).
+        if auth.get("scoped_principal"):
+            raise VerbError(SCOPE_DENIED_CODE, "scoped client may send only to its own stream")
         # Wire callers cannot suppress ordinary QA/progress admission with the
         # private daemon-only backend marker.  Only main's composite dispatcher
         # reaches ``Comms.send_assistant_backend`` directly.
         direct_msg = dict(msg)
         direct_msg.pop("_assistant_composite_backend_dispatch", None)
-        if composite is not None:
-            suppressed = await composite.suppress_routine_backend_ingress(
+        # Routine backend-ingress suppression applies to a composite's hidden
+        # backend seats (bart's astra/luna); resolve the owning composite for the
+        # target.  A direct-primary assistant (daff) has no such backends.
+        backend_composite = next(
+            (c for c in self._composites().values()
+             if c is not None and c.is_backend_stream(stream_id)), None,
+        )
+        if backend_composite is not None:
+            suppressed = await backend_composite.suppress_routine_backend_ingress(
                 target_stream_id=stream_id, body=str(direct_msg.get("text") or direct_msg.get("message") or ""),
                 msg=direct_msg, verb="send",
             )
@@ -2652,7 +2956,7 @@ class Server:
         (`composite_stream_id`, e.g. bart:assistant) plus safe delivery status —
         never the resolved backend seat/host/session_name.
         """
-        composite = self.assistant_composite
+        composite = self._composite_for(composite_stream_id)
         if composite is None:
             raise VerbError("assistant_composite_unavailable", "assistant composite not configured")
         binding = await composite.binding()
@@ -2693,7 +2997,9 @@ class Server:
         self, msg: dict[str, Any], *, operator_principal: str,
     ) -> dict[str, Any]:
         """Server-only daemon intake; it cannot be reached by a seat token."""
-        composite = self.assistant_composite
+        composite = self._composite_for(str(msg.get("to_stream_id") or ""))
+        if composite is None:
+            composite = self.assistant_composite
         if composite is None:
             raise ValueError("assistant_composite_unavailable")
         principal = str(operator_principal or "").strip()
@@ -2704,7 +3010,9 @@ class Server:
             {**msg, "attachments": attachments}, operator_principal=principal,
         )
 
-    async def _validate_assistant_input_attachments(self, raw: object) -> list[dict[str, Any]]:
+    async def _validate_assistant_input_attachments(
+        self, raw: object, *, owner_credential_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         if raw is None or raw == []:
             return []
         try:
@@ -2715,6 +3023,11 @@ class Server:
         if blob_store is None or not callable(getattr(blob_store, "read_verified", None)):
             raise VerbError("attachment_fetch_failed", "blob store unavailable")
         for attachment in attachments:
+            if owner_credential_id is not None:
+                # A scoped credential may attach only blobs it owns.
+                owner = await self.store.scoped_owner(kind="blob", key=str(attachment["key"]))
+                if owner != owner_credential_id:
+                    raise VerbError("blob_forbidden", "scoped credential may attach only its own blobs")
             try:
                 await blob_store.read_verified(str(attachment["key"]), max_bytes=ATTACHMENT_MAX_BYTES)
             except KeyError as exc:
@@ -2763,15 +3076,22 @@ class Server:
         Reads the content-addressed blob and forwards it to the loopback mic
         route with ``prompt_profile=fleet``; the daemon never loads a model.
         See ``transcribe.py`` for the contract and error codes."""
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        blob_sha = str(msg.get("blob_sha") or "")
+        if auth.get("scoped_principal"):
+            # A scoped credential may transcribe only blobs it owns.
+            owner = await self.store.scoped_owner(kind="blob", key=blob_sha)
+            if owner != str(auth.get("credential_id") or ""):
+                raise VerbError("blob_forbidden", "scoped credential may transcribe only its own blobs")
         result = await self._get_transcriber().transcribe_blob(
             request_id=str(msg.get("request_id") or ""),
-            blob_sha=str(msg.get("blob_sha") or ""),
+            blob_sha=blob_sha,
             mime=str(msg.get("mime") or ""),
         )
         return {"type": "transcribe_blob.ok", **result}
 
     async def _on_assistant_publish(self, msg: dict[str, Any]) -> dict[str, Any]:
-        composite = self.assistant_composite
+        composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if composite is None or not auth.get("token_verified"):
             raise VerbError("assistant_publish_unauthorized", "assistant.publish requires a verified backend stream token")
@@ -2834,7 +3154,7 @@ class Server:
         return {"ok": bool(str(reply.get("type") or "").endswith(".ok")), "reply": reply}
 
     async def _on_assistant_operation(self, msg: dict[str, Any]) -> dict[str, Any]:
-        composite = self.assistant_composite
+        composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if composite is None or not auth.get("token_verified"):
             raise VerbError("assistant_operation_unauthorized", "assistant.operation requires a verified backend stream token")
@@ -2846,7 +3166,7 @@ class Server:
             raise VerbError(str(exc), str(exc)) from exc
 
     async def _on_assistant_binding(self, msg: dict[str, Any]) -> dict[str, Any]:
-        composite = self.assistant_composite
+        composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if composite is None or not (auth.get("operator_authenticated") or auth.get("token_verified")):
             raise VerbError("assistant_binding_unauthorized", "assistant.binding requires authenticated access")
@@ -2856,14 +3176,22 @@ class Server:
             raise VerbError(str(exc), str(exc)) from exc
 
     async def _on_assistant_rebind(self, msg: dict[str, Any]) -> dict[str, Any]:
-        composite = self.assistant_composite
+        composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if composite is None or not auth.get("token_verified") or not auth.get("stream_id"):
             raise VerbError("assistant_rebind_unauthorized", "assistant.rebind requires a verified stream token")
         try:
-            return await composite.rebind(msg, actor_stream_id=str(auth["stream_id"]))
+            receipt = await composite.rebind(msg, actor_stream_id=str(auth["stream_id"]))
         except ValueError as exc:
             raise VerbError(str(exc), str(exc)) from exc
+        if not receipt.get("duplicate"):
+            # A fresh binding: deliver anything queued while the composite was
+            # unbound, in order, to the new pane.
+            try:
+                await self._flush_composite_tells(composite)
+            except Exception:  # noqa: BLE001 - a flush failure must not fail the rebind
+                log.exception("composite tell flush failed after rebind stream=%s", composite.config.stream_id)
+        return receipt
 
     async def _on_assistant_authority(self, msg: dict[str, Any]) -> dict[str, Any]:
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
@@ -2928,6 +3256,15 @@ class Server:
         request_id = str(msg.get("request_id") or "").strip()
         if not target or not request_id:
             raise VerbError("bad_request", "to_stream_id and request_id are required")
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if auth.get("scoped_principal"):
+            # A scoped credential may read only its own stream and only receipts
+            # for request ids it issued.
+            if target != auth.get("scope_stream"):
+                raise VerbError(SCOPE_DENIED_CODE, "scoped credential may read only its own stream")
+            owner = await self.store.scoped_owner(kind="request", key=request_id)
+            if owner != str(auth.get("credential_id") or ""):
+                raise VerbError(SCOPE_DENIED_CODE, "scoped credential may read only its own request ids")
         include_subagents, opened_by_host_ids, _excluded, _events_mode = self._subscription_for_message(msg)
         if not self._stream_is_visible_to_client(
             target, include_subagents, opened_by_host_ids,
@@ -2951,9 +3288,13 @@ class Server:
         # Snapshot the authenticated generation before persistence can yield to
         # a close/reopen. The current session is not a replacement credential.
         auth = dict(msg.get("_auth_context") or {})
-        composite = self.assistant_composite
         extras = msg.get("extras")
         correlation = extras.get("assistant_composite") if isinstance(extras, dict) else None
+        composite = self._composite_for(
+            str(correlation.get("stream_id") or "")
+        ) if isinstance(correlation, dict) else None
+        if composite is None:
+            composite = self.assistant_composite
         if (composite is None or not composite.enabled or correlation is None
                 or msg.get("status") not in {"done", "error", "aborted"}):
             return await self.ledger.report(msg)
@@ -2979,6 +3320,9 @@ class Server:
         """Return a cursor-resumable, byte-bounded event stream."""
         host, name = await self.sessions.resolve(msg)
         stream_id = f"{host}:{name}"
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if auth.get("scoped_principal") and stream_id != auth.get("scope_stream"):
+            raise VerbError(SCOPE_DENIED_CODE, "scoped credential may read only its own stream")
         include_subagents, opened_by_host_ids, _excluded, _events_mode = self._subscription_for_message(msg)
         if not self._stream_is_visible_to_client(
             stream_id, include_subagents, opened_by_host_ids,
@@ -3045,8 +3389,9 @@ class Server:
                 if not page:
                     break
 
-                if self.assistant_composite is not None and self.assistant_composite.is_stream(stream_id):
-                    page = await self.assistant_composite.enrich_events(page)
+                _page_composite = self._composite_for(stream_id)
+                if _page_composite is not None:
+                    page = await _page_composite.enrich_events(page)
                 frames = await asyncio.to_thread(
                     _assemble_event_frames,
                     page,

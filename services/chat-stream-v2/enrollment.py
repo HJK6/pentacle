@@ -60,6 +60,7 @@ class EnrollmentRegistry:
                 client_kind,
                 label=str(payload.get("label") or ""),
                 replaces_credential_id=payload.get("replaces_credential_id"),
+                scope=payload.get("scope"),
             )
         except operator_auth.OperatorRegistryUnavailable as exc:
             raise EnrollmentError("Operator credential registry is unavailable") from exc
@@ -105,6 +106,10 @@ class EnrollmentRegistry:
                     replaces_credential_id = operator_auth.canonical_uuid(replaces_credential_id)
                 except operator_auth.OperatorAuthError:
                     continue
+            try:
+                scope = operator_auth.canonical_scope(raw_payload.get("scope"))
+            except operator_auth.OperatorAuthError:
+                continue
             normalized[raw_code.upper()] = {
                 "created_at": str(raw_payload.get("created_at") or iso_now()),
                 "expires_at": expires_at,
@@ -114,6 +119,7 @@ class EnrollmentRegistry:
                 "scheme": expected_scheme,
                 "client_kind": client_kind,
                 "replaces_credential_id": replaces_credential_id,
+                "scope": scope,
             }
         return normalized
 
