@@ -100,6 +100,51 @@ def _read_checkout_sha() -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _read_deploy_stamp_sha(path: str | None) -> str:
+    """The deploy stamp deploy.py writes records the deployed SHA; use it when a
+    non-git runtime (an exported tree) has no reachable git HEAD."""
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            stamp = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    sha = stamp.get("sha") if isinstance(stamp, dict) else ""
+    return str(sha or "").strip()
+
+
+def _read_version_file_sha(path: Path) -> str:
+    """A release tarball (no .git and no deploy stamp) may ship a VERSION file
+    whose first line records the built SHA/version."""
+    try:
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+    except OSError:
+        return ""
+    return lines[0].strip() if lines else ""
+
+
+def _select_runtime_sha(checkout_sha: str, deploy_stamp_path: str | None, version_path: Path) -> str:
+    """Resolve the runtime SHA the welcome advertises: git HEAD, else the
+    deploy-stamp SHA, else a shipped VERSION file. Empty only when none exist, so
+    a non-git/tarball install no longer reports a spurious empty 'Daemon unknown'."""
+    if checkout_sha.strip():
+        return checkout_sha.strip()
+    stamp_sha = _read_deploy_stamp_sha(deploy_stamp_path)
+    if stamp_sha:
+        return stamp_sha
+    return _read_version_file_sha(version_path)
+
+
+def _resolve_runtime_sha() -> str:
+    """Off-loop runtime-SHA resolution; callers must run it off the event loop."""
+    return _select_runtime_sha(
+        _read_checkout_sha(),
+        os.environ.get("PENTACLE_DEPLOY_STAMP_PATH"),
+        Path(__file__).resolve().parents[2] / "VERSION",
+    )
+
+
 async def _run_machine_stats(server: Server, host: str) -> None:
     while True:
         try:
@@ -741,7 +786,7 @@ async def run(args: argparse.Namespace) -> int:
     # cannot widen an existing readiness window. The value is captured once and
     # later compared read-only against the deploy-owned kv target on verdicts
     # and reconciler passes.
-    event_push.set_daemon_sha(await asyncio.to_thread(_read_checkout_sha))
+    event_push.set_daemon_sha(await asyncio.to_thread(_resolve_runtime_sha))
     server.runtime_sha = event_push.daemon_sha
     if event_push.daemon_sha:
         log.info("event.push boot daemon SHA: %s", event_push.daemon_sha)
