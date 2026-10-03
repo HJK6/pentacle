@@ -97,6 +97,81 @@ def test_real_outbox_and_comms_policy_deliver_once_to_bound_authority(change):
     asyncio.run(go())
 
 
+def test_lane_ruling_notice_wakes_non_astra_target_while_composite_authority_stays_pinned():
+    from outbound_notices import ASSISTANT_AUTHORITY_REQUEST_TOKEN
+    from sessions import VerbError
+
+    async def go():
+        store = Store(":memory:"); store.start()
+        try:
+            c, _, _, _ = await setup_case(store)
+            non_astra = LEAD_STREAM
+            assert non_astra != c.config.astra_stream_id and not c.is_backend_stream(non_astra)
+            # A lane-ruling request OR result notice wakes its own bound target,
+            # which is validated against the durable ruling row in comms rather
+            # than pinned to the astra backend seat.
+            for extra in ({"_assistant_lane_ruling": True, "_assistant_lane_ruling_request_id": "ruling-x"},
+                          {"_assistant_lane_ruling": True}):
+                assert await c.suppress_routine_backend_ingress(
+                    target_stream_id=non_astra, body="[Assistant lane ruling] x",
+                    msg={"tell_id": "t", "_assistant_authority_request_token": ASSISTANT_AUTHORITY_REQUEST_TOKEN,
+                         "_assistant_authority_request_generation": "g", **extra},
+                    verb="notice") is None
+            # The composite's OWN decision-authority request (no lane-ruling
+            # marker) is still rejected for a non-astra target...
+            with pytest.raises(VerbError, match="configured assistant authority changed"):
+                await c.suppress_routine_backend_ingress(
+                    target_stream_id=non_astra, body="[assistant composite authority request]\nx",
+                    msg={"tell_id": "t2", "_assistant_authority_request_token": ASSISTANT_AUTHORITY_REQUEST_TOKEN,
+                         "_assistant_authority_request_generation": "g"}, verb="notice")
+            # ...and delivered when it targets the astra backend seat.
+            assert await c.suppress_routine_backend_ingress(
+                target_stream_id=c.config.astra_stream_id, body="[assistant composite authority request]\nx",
+                msg={"tell_id": "t3", "_assistant_authority_request_token": ASSISTANT_AUTHORITY_REQUEST_TOKEN,
+                     "_assistant_authority_request_generation": "g"}, verb="notice") is None
+        finally: store.stop()
+    asyncio.run(go())
+
+
+def test_lane_ruling_result_notice_delivers_through_real_outbox_to_non_astra_requester():
+    from types import SimpleNamespace
+    from comms import Comms
+    from sessions import Sessions
+
+    async def go():
+        store = Store(":memory:"); store.start()
+        try:
+            c, _, _, lead = await setup_case(store)
+            # A lane-ruling result is bound to the requesting lead (a non-astra
+            # seat), exactly as AssistantLaneRulings._result_notice enqueues it.
+            await store.enqueue_outbound_notice(
+                notice_id="assistant-lane-ruling-result:r1", kind="assistant_lane_ruling_result",
+                dedupe_key="assistant-lane-ruling-result:r1", recipient_stream_id=LEAD_STREAM,
+                tell_id="assistant-lane-ruling-result:r1", source_stream_id=AUTHORITY_STREAM,
+                body="[Assistant lane ruling] {}",
+                metadata={"authority_generation": lead["session_generation"]})
+            sessions = Sessions(store, tmux=None, local_host=LEAD_STREAM.split(":")[0])
+            await sessions.refresh()
+            comms = Comms(store, sessions, SimpleNamespace(tmux=None))
+            comms.assistant_ingress_policy = c.suppress_routine_backend_ingress
+            seen = []
+            async def route(msg):
+                seen.append(msg)
+                return {"final_target": msg["stream_id"], "original_target": msg["stream_id"],
+                        "forwarded": False, "hops": [msg["stream_id"]]}, msg["message"]
+            async def inject(msg, tell_id, routed, body, digest):
+                return {"delivery_status": "delivered", "submission_confirmed": True}
+            comms._route = route
+            comms._deliver_tell = inject
+            queue = OutboundNoticeQueue(store, comms)
+            await queue.drain_once(limit=5, force=True)
+            row = await store.submit(lambda conn: dict(conn.execute("SELECT * FROM v2_outbound_notices").fetchone()))
+            assert row["delivered_at"] and not row["terminal_at"]
+            assert seen and seen[0].get("_assistant_lane_ruling") is True
+        finally: store.stop()
+    asyncio.run(go())
+
+
 def test_existing_operation_receipts_survive_constraint_migration(tmp_path):
     import sqlite3
     from store_routing import ASSISTANT_COMPOSITE_OPERATIONS_DDL

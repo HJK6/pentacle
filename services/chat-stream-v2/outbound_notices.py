@@ -318,6 +318,13 @@ class OutboundNoticeQueue:
                 metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
                 message["_assistant_authority_request_token"] = ASSISTANT_AUTHORITY_REQUEST_TOKEN
                 message["_assistant_authority_request_generation"] = metadata["authority_generation"]
+                # A lane-ruling request/result wakes its own bound target (the
+                # configured lane authority, or the requesting lead for a result),
+                # which is NOT pinned to the composite's astra backend seat. The
+                # marker lets the ingress policy deliver it to that target instead
+                # of rejecting every non-astra authority as a misconfiguration.
+                if kind in {NOTICE_KIND_ASSISTANT_LANE_RULING, NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT}:
+                    message["_assistant_lane_ruling"] = True
                 if kind == NOTICE_KIND_ASSISTANT_LANE_RULING:
                     message["_assistant_lane_ruling_request_id"] = metadata["ruling_request_id"]
             deliver_notice = getattr(self.comms, "deliver_outbound_notice", None)
