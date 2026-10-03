@@ -12,6 +12,10 @@ from store import Store
 BIRTH="Wed Sep 9 11:00:00 2026"
 PID="8123"
 EXE="/provider/codex"
+FIXTURES=Path(__file__).parent/"fixtures"
+PARALLEL_ROLLOUT_CASES=json.loads(
+    (FIXTURES/"codex_parallel_rollouts.v1.json").read_text()
+)["cases"]
 
 
 def test_existing_database_gains_only_empty_observer_authority(tmp_path):
@@ -38,11 +42,18 @@ def test_existing_database_gains_only_empty_observer_authority(tmp_path):
     asyncio.run(check())  # Additive migration is idempotent; no proof backfill.
 
 
-def write_log(path,identity="native-a",turn="one"):
+def write_log(path,identity="native-a",turn="one",source="cli",model=None,effort="high"):
     path.parent.mkdir(parents=True,exist_ok=True)
-    path.write_text(json.dumps({"type":"session_meta","payload":{"id":identity}})+"\n"+
-        json.dumps({"type":"response_item","timestamp":"2026-09-09T16:20:00Z",
-          "payload":{"type":"message","id":turn,"role":"user","content":[{"type":"input_text","text":"Operator goal "+turn}]}})+"\n")
+    records=[{"type":"session_meta","timestamp":"2026-09-09T16:19:32Z","payload":{
+        "id":identity,"source":source,"originator":"codex-tui","cli_version":"0.157.1",
+        "cwd":"/synthetic/workspace"}}]
+    if model:
+        records.append({"type":"turn_context","timestamp":"2026-09-09T16:19:33Z",
+            "payload":{"model":model,"effort":effort}})
+    records.append({"type":"response_item","timestamp":"2026-09-09T16:20:00Z",
+        "payload":{"type":"message","id":turn,"role":"user",
+                   "content":[{"type":"input_text","text":"Operator goal "+turn}]}})
+    path.write_text("".join(json.dumps(record)+"\n" for record in records))
 
 
 class Harness:
@@ -69,6 +80,83 @@ class Harness:
         return Ingest(self.store,self.sessions,self,lambda frame:asyncio.sleep(0),local_host="h",recent_limit=500)
     async def run(self,ingest,state):
         return await ingest._ingest_stream(self.sessions.get("h:v2-root"),state,500)
+
+
+@pytest.mark.parametrize("case",PARALLEL_ROLLOUT_CASES,ids=lambda case:case["id"])
+def test_codex_parallel_primary_and_guardian_binds_interactive_rollout(tmp_path,monkeypatch,case):
+    async def run():
+        store=Store(":memory:");store.start();state=_StreamIngest()
+        try:
+            primary=tmp_path/".codex"/"sessions"/f"{case['id']}-primary.jsonl"
+            guardian=primary.with_name(f"{case['id']}-guardian.jsonl")
+            write_log(primary,identity=f"{case['id']}-primary",turn="operator",source=case["primary_source"],
+                      model=case["model"],effort=case["reasoning_effort"])
+            write_log(guardian,identity=f"{case['id']}-guardian",turn="sidechain",source=case["subagent_source"],
+                      model=case["model"],effort=case["reasoning_effort"])
+            h=Harness(store,monkeypatch,primary);await h.open()
+            await store.update_session("h","v2-root",bootstrap_state="starting")
+            await h.sessions.refresh()
+            h.descriptors=[(PID,"12","w",primary),(PID,"13","w",guardian)]
+
+            assert await h.run(h.ingest(),state)==1
+            row=await store.fetch_session("h","v2-root")
+            assert row["observer_binding"]["transcript"]["path"]==str(primary)
+            assert row["observer_binding"]["transcript"]["session_id"]==f"{case['id']}-primary"
+            tail=await store.fetch_session_event_tail("h:v2-root",limit=500)
+            assert [event["kind"] for event in tail]==["USER"]
+            assert "Operator goal operator" in tail[0]["text"]
+            assert all("sidechain" not in json.dumps(event) for event in tail)
+            projected=next(row for row in h.sessions.list_open() if row["stream_id"]=="h:v2-root")
+            assert projected["bootstrap_state"]=="started"
+        finally:
+            _close_stream(state)
+            assert state.fd is None
+            store.stop()
+    asyncio.run(run())
+
+
+def test_codex_parallel_two_interactive_rollouts_remain_ambiguous(tmp_path,monkeypatch):
+    async def run():
+        store=Store(":memory:");store.start();state=_StreamIngest()
+        try:
+            primary=tmp_path/".codex"/"sessions"/"primary.jsonl"
+            foreign=primary.with_name("foreign.jsonl")
+            write_log(primary,identity="primary",source="cli",model="gpt-6-sol")
+            write_log(foreign,identity="foreign",source="cli",model="gpt-6-sol")
+            h=Harness(store,monkeypatch,primary);await h.open()
+            h.descriptors=[(PID,"12","w",primary),(PID,"13","w",foreign)]
+            assert await h.run(h.ingest(),state)==0
+            assert (await store.fetch_session("h","v2-root"))["observer_binding"].get("transcript") is None
+            assert await store.fetch_session_event_tail("h:v2-root",limit=500)==[]
+            assert state.fd is None
+        finally:
+            _close_stream(state)
+            assert state.fd is None
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case",["subagent_only","malformed_header"])
+def test_codex_first_bind_rejects_noninteractive_or_unreadable_rollout(tmp_path,monkeypatch,case):
+    async def run():
+        store=Store(":memory:");store.start();state=_StreamIngest()
+        try:
+            path=tmp_path/".codex"/"sessions"/"candidate.jsonl"
+            if case=="subagent_only":
+                write_log(path,source={"subagent":{"other":"guardian"}},model="gpt-6-astra")
+            else:
+                path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_text('{"type":"session_meta","payload":')
+            h=Harness(store,monkeypatch,path);await h.open()
+            assert await h.run(h.ingest(),state)==0
+            assert (await store.fetch_session("h","v2-root"))["observer_binding"].get("transcript") is None
+            assert await store.fetch_session_event_tail("h:v2-root",limit=500)==[]
+            assert state.fd is None
+        finally:
+            _close_stream(state)
+            assert state.fd is None
+            store.stop()
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("case",["readonly","helper","ambiguous","wrong_command","pid_reuse","missing_birth"])
