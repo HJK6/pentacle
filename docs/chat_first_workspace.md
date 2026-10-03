@@ -8,7 +8,8 @@ but remains deprecated upstream. Prefer the web host or installed PWA.
 ## Daily use
 
 - Choose a conversation in the left sidebar, or **New chat** to select a host and
-  provider. Ordinary agent sessions open in **Chat**. Search filters the sidebar.
+  provider. New sessions open in the configured Default view; **Chat** remains
+  available per pane. Search filters the sidebar.
 - Scroll and select conversation text normally. **Load earlier** retrieves older
   history. While reading above the bottom, incoming messages do not pull you
   away; the down-arrow returns to the latest message.
@@ -26,9 +27,9 @@ but remains deprecated upstream. Prefer the web host or installed PWA.
   the conversation, and Terminal offers a retry.
 - The sidebar button toggles navigation. On narrow screens it opens a drawer;
   the numbered pane navigator selects one readable pane at a time.
-- Settings includes **Light / Dark**, density, and the **Chat workspace** feature.
-  An explicit existing opt-out is respected. Enable the feature and reload to
-  migrate a terminal-first installation.
+- Settings includes **Light / Dark**, density, and a **Default view** selector
+  with **Chat** and **Terminal** choices. Terminal remains the new-install
+  default. Select **Chat** to open future sessions there; no reload is needed.
 
 ## Persistence and privacy
 
