@@ -348,6 +348,12 @@ class AssistantComposite:
         from outbound_notices import ASSISTANT_AUTHORITY_REQUEST_TOKEN
         if msg.get("_assistant_authority_request_token") is ASSISTANT_AUTHORITY_REQUEST_TOKEN:
             from sessions import VerbError
+            # A direct-primary lane ruling targets the independently bound
+            # ruling authority, not astra_stream_id (the primary itself);
+            # comms checks the pending ruling row's exact authority tuple.
+            if (self.enabled and self.config.direct_primary
+                    and msg.get("_assistant_lane_ruling_request_id")):
+                return None
             if not self.enabled or target_stream_id != self.config.astra_stream_id:
                 raise VerbError("unknown_session", "configured assistant authority changed")
             return None

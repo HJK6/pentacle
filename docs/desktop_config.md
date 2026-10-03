@@ -91,7 +91,7 @@ provider models and effort. See [daemon setup](../services/chat-stream-v2/README
 | Key | Type and default | Effect |
 | --- | --- | --- |
 | `features` | Object; example flags below | Defaults before saved Settings overrides. |
-| `features.chatUi` | Boolean; false | Experimental structured Chat. Terminals are the default session surface. Reload after changing. |
+| `features.defaultChatView` | Boolean; true | New sessions open in Chat when true and Terminal when false. Both views remain available per pane. The old saved `chatUi: false` preference migrates to Terminal-first. |
 | `features.inputBar` | Boolean; example true | Retained compatibility flag; currently unused. |
 | `features.usage` | Boolean; example false | Sidebar usage setting. Explicit false excludes live limits.update subscription frames; enabling it requires reload. Cached snapshot values may still paint. |
 | `features.dashboards` | Boolean; false | Dashboard/widgets controls; actual backends require external adapters. |
@@ -303,3 +303,7 @@ A separately installed compatible local mic service can expose natural wake capt
 When the service reports wake capture enabled, say **Hey Bart**, speak the message, then pause and say **over**. The desktop uses fresh connected session inventory to select the unique current role holder on the configured host, regardless of the focused chat. Ambiguous or disconnected inventory defers delivery. The mic panel shows readiness, pending work and errors. Manual mic-button capture continues to send to its original chat.
 
 The service's completion claim is atomic across clients. The desktop holds one claimed message while waiting for an assistant and creates only one `sendTurn` for it; the existing chat send/retry lifecycle handles subsequent transport. Turning the mic Off cancels held work before the request, and service lifecycle changes invalidate older work. Pending and latest-claim review data are in memory; a service or desktop crash can lose an unsent claim. Review an unconfirmed claim in the local service and check the chat before explicitly retrying; the desktop does not reconstruct or automatically create a second message. Startup and persistent-mute behavior are controlled by the external service.
+
+## Chat-first layout
+
+See [workspace controls and persistence](chat_first_workspace.md). Light is the new-install appearance; an explicitly saved Dark preference is preserved. The web host and Electron share the renderer, but upstream recommends web/PWA.

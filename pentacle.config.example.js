@@ -83,7 +83,7 @@ module.exports = {
     "brightWhite": "#d6e8da"
   },
   "features": {
-    "chatUi": false, // default false; experimental; terminals remain the default
+    "defaultChatView": false, // terminal-first by default; choose Chat in Settings or set true
     "inputBar": true, // compatibility-only, currently unused
     "usage": false, // example default false; enables daemon usage/limits subscriptions
     "dashboards": false, // default false; optional dashboard adapters

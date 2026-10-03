@@ -4,7 +4,7 @@ Pentacle is a terminal workspace for coding agents, work specifications and revi
 
 > **The Electron desktop app is deprecated** — no further upgrades, packaging or rollout, and it is not recommended for new installs. Use Pentacle Web for daily work; run the daemon and open the served URL in a browser. The desktop source remains available; see [Desktop (deprecated)](#desktop-deprecated) and [web host setup](server/README.md).
 
-The renderer's structured **Chat view is experimental and disabled by default**. Use terminal view for normal work. Mobile is a separate client and is unaffected by this setting.
+This checkout provides a **chat-first workspace**: left-side conversations, a scrollable transcript, a bottom composer, and one to four panes. **Terminal** and **Status** remain available per pane. See [workspace controls](docs/chat_first_workspace.md). Native mobile is a separate client of the same daemon.
 
 ## See the workspace
 
@@ -83,14 +83,15 @@ PENTACLE_CONFIG="$HOME/.config/pentacle/pentacle.config.js" node server --port 7
 
 Use **New Chat**, select `local`, then the provider/model. The picker uses the
 catalog's `available_models` projection, while the daemon retains its broader
-compatibility catalog for existing sessions and explicit handoffs. Sessions
-open in terminal view. A disconnected daemon produces an error and creates no
-synthetic session. Keep the daemon running while using the web client or mobile.
+compatibility catalog for existing sessions and explicit handoffs. Agent
+sessions open in the configured Default view; Chat remains available per pane.
+A disconnected daemon produces an error and creates no synthetic session. Keep
+the daemon running while using the web client or mobile.
 On the first landed operator turn, a visible top-level session receives a
 provisional durable title and status card; the provider may replace that
 summary, and later status changes publish to Web immediately.
 
-To try the unfinished structured view, enable **Chat UI (experimental)** in Settings and reload, or set `features.chatUi: true` in your private config. Fresh installs default to `false`; an existing saved opt-in is preserved. Keep it off for normal use.
+New installs retain a Terminal-first default. To open new sessions in Chat, choose **Chat** under Default view in Settings or set `features.defaultChatView: true` in your private config. Explicit saved preferences are preserved. The header layout controls select one to four panes without closing hidden sessions.
 
 The private config selects `chatStream.url`, `chatStream.tokenPath`, host labels, terminal transports and optional features. The token must be a regular mode-0600 file inside a mode-0700 directory, using a path without symbolic-link ancestors. Do not commit credentials or runtime databases. See [daemon setup and remote clients](services/chat-stream-v2/README.md) and [public support boundaries](docs/public_release.md).
 

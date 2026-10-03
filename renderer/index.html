@@ -1,13 +1,13 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
 <head>
   <link rel="manifest" href="manifest.webmanifest">
-  <meta name="theme-color" content="#18181f">
+  <meta name="theme-color" content="#fcfbf8">
   <link rel="icon" type="image/png" href="assets/favicon.png">
   <link rel="apple-touch-icon" href="assets/favicon-180.png">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Terminal Dashboard</title>
+  <title>Pentacle</title>
   <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css">
   <link rel="stylesheet" href="styles.css">
   <!-- Cosmic / arcane theme (workstream B token+font layer, scoped to `.cosmic`)
@@ -19,11 +19,21 @@
        `.cosmic`, so it only applies inside the opted-in chat surface. -->
   <link rel="stylesheet" href="cosmic_chat_surface.css">
   <link rel="stylesheet" href="chat_v3.css">
+  <link rel="stylesheet" href="workspace.css">
 </head>
 <body>
   <!-- Titlebar (draggable) -->
   <div class="titlebar">
+    <div class="workspace-brand"><button id="sidebar-toggle" class="workspace-icon-button" type="button" aria-label="Toggle chat sidebar" aria-expanded="true" title="Toggle chat sidebar"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button><span>Pentacle</span></div>
+    <div class="workspace-title">Your workspace <span class="workspace-title-separator">/</span> <span>Chats</span></div>
     <div class="titlebar-right">
+      <div class="workspace-layout-control" role="group" aria-label="Workspace layout">
+        <span>Layout</span>
+        <button type="button" data-pane-count-button="1" aria-label="One pane" aria-pressed="true" title="One pane">1</button>
+        <button type="button" data-pane-count-button="2" aria-label="Two panes" aria-pressed="false" title="Two panes">2</button>
+        <button type="button" data-pane-count-button="3" aria-label="Three panes" aria-pressed="false" title="Three panes">3</button>
+        <button type="button" data-pane-count-button="4" aria-label="Four panes" aria-pressed="false" title="Four panes">4</button>
+      </div>
       <button class="settings-btn" id="settings-btn" title="Settings" aria-label="Settings">&#9881;</button>
       <button class="web-refresh-btn" id="web-refresh-btn" title="Update available — reload" aria-label="Update available — reload" hidden><svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/><path fill-rule="evenodd" d="M8 3a5 5 0 0 1 4.546 2.914.5.5 0 0 0 .908-.417A6 6 0 0 0 3.53 3.53l.708.708A5 5 0 0 1 8 3zm-4.546 8.086A5 5 0 0 0 12.47 12.47l-.708-.708A5 5 0 0 1 3.454 10.5a.5.5 0 1 0-.908.417z"/></svg></button>
     </div>
@@ -31,9 +41,9 @@
 
   <div class="main">
     <!-- Sidebar -->
-    <div class="sidebar">
+    <aside class="sidebar" aria-label="Chat navigation">
       <div class="view-switcher">
-        <button class="view-btn active" id="view-chats" data-view="chats">Agents</button>
+        <button class="view-btn active" id="view-chats" data-view="chats">Chats</button>
         <button class="view-btn" id="view-dashboards" data-view="dashboards">Dashboards</button>
       </div>
       <div id="config-warning-banner" class="chat-stream-degraded-banner" role="status" aria-live="polite" hidden></div>
@@ -41,12 +51,13 @@
 
       <!-- Sessions Panel -->
       <div class="sidebar-panel" id="panel-sessions">
+        <button class="sb-btn sb-btn-new" id="btn-new" title="New Chat" aria-label="New Chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14 M5 12h14"></path></svg><span>New chat</span></button>
         <div class="sidebar-search-row">
         <div class="sidebar-search">
           <svg class="sidebar-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
-          <input id="session-search" type="search" placeholder="Search chats" autocomplete="off">
+          <input id="session-search" type="search" placeholder="Search conversations" aria-label="Search conversations" autocomplete="off">
         </div>
-          <button class="sb-btn sb-btn-new" id="btn-new" title="New Chat" aria-label="New Chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14 M5 12h14"></path></svg></button>
+
         </div>
         <div class="sidebar-stats" id="stats"></div>
         <div class="source-filter-bar" id="source-filter-bar" style="display:none"></div>
@@ -98,7 +109,11 @@
           <div class="usage-footer" id="machine-stats-footer"></div>
         </div>
       </div>
-    </div>
+      <div class="workspace-sidebar-footer"><span class="workspace-avatar" aria-hidden="true">P</span><div><strong>Personal workspace</strong><span>Local-first. Always yours.</span></div></div>
+    </aside>
+    <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="Close chat sidebar" tabindex="-1"></button>
+
+
 
     <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="Sidebar width" aria-orientation="vertical" tabindex="0" title="Drag to resize the sidebar. Arrow keys adjust its width."></div>
 

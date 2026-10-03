@@ -266,7 +266,12 @@ answers them locally — the host still refuses `WEB_UNSUPPORTED` as a safety ne
 
 A **loopback** bind (`127.0.0.1`, `localhost`, `::1`) is single-user and needs
 no token: any client that can reach the port gets the operator's full
-`window.cc`. This is the default and is fine on a machine you control.
+`window.cc`. This is the default for a single-user machine you control.
+Unauthenticated HTTP and WebSocket requests must name a literal loopback or
+`localhost` Host at the actual listening port. A supplied Origin must exactly
+match that HTTP origin; foreign/null/duplicate origins and DNS-rebinding Hosts
+are rejected with 403. Local tools may omit Origin. This is browser isolation,
+not authentication against other local processes; use token auth on shared hosts.
 
 A **routable** bind (anything else — `0.0.0.0`, a tailnet IP) **refuses to
 start** without `--token-file <path>`; there is no way to publish the surface
