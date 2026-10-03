@@ -108,6 +108,7 @@ def test_recovers_daff_rebinds_and_flushes(monkeypatch):
         try:
             dead = await store.fetch_session("fixture-host", "daff-dead")
             await recovery.on_dead(dict(dead))
+            await recovery.drain()  # recovery runs as a background task now
             assert spawnctl.calls == 1
             # Binding now points at the fresh seat.
             bound = await daff.binding()
@@ -128,7 +129,8 @@ def test_concurrent_triggers_produce_one_seat(monkeypatch):
         try:
             dead = dict(await store.fetch_session("fixture-host", "daff-dead"))
             await asyncio.gather(recovery.on_dead(dead), recovery.on_dead(dead))
-            # The singleton guard means only one spawn ran.
+            await recovery.drain()
+            # The per-generation guard means only one spawn ran.
             assert spawnctl.calls == 1
         finally:
             store.stop()
@@ -143,6 +145,7 @@ def test_three_failures_degrade_and_tell_bart_once(monkeypatch):
         try:
             dead = dict(await store.fetch_session("fixture-host", "daff-dead"))
             await recovery.on_dead(dead)
+            await recovery.drain()
             assert spawnctl.calls == 4  # initial + 3 retries
             assert len(tells) == 1
             assert "degraded" in tells[0]
@@ -150,6 +153,55 @@ def test_three_failures_degrade_and_tell_bart_once(monkeypatch):
             card = await store.fetch_session("fixture-host", "daff-dead")
             updates = (card.get("status_card") or {}).get("updates") or []
             assert any("DEGRADED" in str(u.get("text", "")) for u in updates)
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_exhausted_episode_not_retried_on_next_reconcile(monkeypatch):
+    """Finding 6: the preserved-dead row stays open, so the reconciler re-fires
+    on_dead every pass.  An exhausted dead generation must NOT respawn or tell
+    Bart again."""
+    async def run():
+        store, daff, sessions, spawnctl, recovery, flushed, tells = await _build(
+            monkeypatch, fail_times=99)
+        try:
+            dead = dict(await store.fetch_session("fixture-host", "daff-dead"))
+            await recovery.on_dead(dead)
+            await recovery.drain()
+            assert spawnctl.calls == 4 and len(tells) == 1
+            # A later reconcile pass fires on_dead again for the SAME dead row.
+            await recovery.on_dead(dead)
+            await recovery.drain()
+            assert spawnctl.calls == 4  # no second respawn storm
+            assert len(tells) == 1      # no second degraded tell
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_on_dead_returns_before_backoff_completes(monkeypatch):
+    """Finding 7: the reconciler awaits on_dead inline on its serial pass, so
+    on_dead must return promptly (schedule a background task) rather than block
+    through the retry backoffs."""
+    async def run():
+        gate = asyncio.Event()
+
+        async def _blocking_sleep(_seconds):
+            # Simulate a long retry backoff: block until the test releases it.
+            await gate.wait()
+
+        store, daff, sessions, spawnctl, recovery, flushed, tells = await _build(
+            monkeypatch, fail_times=99)
+        recovery._sleep = _blocking_sleep
+        try:
+            dead = dict(await store.fetch_session("fixture-host", "daff-dead"))
+            # First attempt fails, then recovery awaits the (blocked) backoff.
+            await asyncio.wait_for(recovery.on_dead(dead), timeout=1.0)
+            # on_dead returned while recovery is still in-flight inside a backoff.
+            assert any(not t.done() for t in recovery._tasks)
+            gate.set()
+            await recovery.drain()
         finally:
             store.stop()
     asyncio.run(run())

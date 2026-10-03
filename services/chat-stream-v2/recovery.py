@@ -51,7 +51,22 @@ class DaffRecovery:
         self.effort = effort
         self._sleep = sleep
         self._lock = asyncio.Lock()
-        self._inflight = False
+        # Keyed by the DEAD seat's session generation so recovery is exactly-once
+        # per dead episode: the reconciler keeps re-firing on_dead every pass
+        # while the preserved-dead row stays open.  ``_active`` suppresses a
+        # duplicate in-flight recovery; ``_degraded`` suppresses any further
+        # respawn/degraded-tell for a generation whose recovery already exhausted.
+        self._active: set[str] = set()
+        self._degraded: set[str] = set()
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    @staticmethod
+    def _episode_key(row: dict[str, Any]) -> str:
+        return str(
+            row.get("session_generation")
+            or row.get("created_at")
+            or f"{row.get('host')}:{row.get('session_name')}"
+        )
 
     def _daff_composite(self) -> Any:
         return (self._composites() or {}).get("daff")
@@ -66,19 +81,47 @@ class DaffRecovery:
         return bool(role and row.get("role") == role)
 
     async def on_dead(self, row: dict[str, Any]) -> None:
-        """Reconciler hook: respawn only the Daff seat; decline everything else."""
+        """Reconciler hook: respawn only the Daff seat; decline everything else.
+
+        Returns IMMEDIATELY.  The reconciler awaits this hook inline on its
+        serial pass, so the actual recovery (which sleeps through retry backoffs
+        of up to 12m30s total) runs in a tracked background task; blocking here
+        would stall every other session's checks/reaps.
+        """
         if not self._is_daff_row(row):
             return
         daff = self._daff_composite()
         if daff is None or not getattr(daff, "enabled", False):
             return
-        if self._inflight:  # one recovery at a time -> never a duplicate seat
+        key = self._episode_key(row)
+        # Exactly-once per dead episode: the preserved-dead row stays open, so
+        # the reconciler re-fires on_dead each pass.  Suppress a duplicate
+        # in-flight recovery and any retry/degraded-tell for an exhausted episode.
+        if key in self._active or key in self._degraded:
             return
-        self._inflight = True
+        self._active.add(key)
+        task = asyncio.create_task(
+            self._recover_episode(row, daff, key), name="daff-recovery",
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _recover_episode(self, row: dict[str, Any], daff: Any, key: str) -> None:
         try:
-            await self._recover(row, daff)
+            recovered = await self._recover(row, daff)
+            if not recovered:
+                # Exhausted: never respawn or re-degrade this dead generation.
+                self._degraded.add(key)
+        except Exception:  # noqa: BLE001 - a recovery crash must not wedge the owner
+            log.exception("daff recovery episode crashed key=%s", key)
         finally:
-            self._inflight = False
+            self._active.discard(key)
+
+    async def drain(self) -> None:
+        """Await any in-flight recovery tasks (shutdown / test synchronisation)."""
+        pending = [t for t in self._tasks if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _recover(self, row: dict[str, Any], daff: Any) -> bool:
         predecessor = f"{row['host']}:{row['session_name']}"

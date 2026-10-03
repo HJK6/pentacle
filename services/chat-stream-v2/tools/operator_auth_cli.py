@@ -128,10 +128,14 @@ def _rotate(
         raise operator_auth.OperatorAuthError("credential is unavailable for rotation")
 
     replacement_label = label or f"rotation-{operator_auth.credential_fingerprint(prior_id)}"
+    # Rotation preserves the prior restriction verbatim: a scoped (e.g. Cosmo)
+    # credential must NOT silently widen into a full operator credential on
+    # rotation.  Unscoped records stay unscoped (scope None).
     replacement_id, code = registry.issue(
         str(prior["client_kind"]),
         label=replacement_label,
         replaces_credential_id=prior_id,
+        scope=prior.get("scope"),
     )
     replaced_id = registry.activate_replacement(replacement_id)
     _print_json(

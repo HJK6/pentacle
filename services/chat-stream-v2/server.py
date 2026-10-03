@@ -65,6 +65,7 @@ from seat_token_telemetry import (
 from sessions import VerbError, _finish_despite_cancel, with_bootstrap_state
 from store import STREAM_TOKEN_HASH_VERSION, role_source_for
 from machine_stats import validate_machine_stats
+from submission_events import COMMITTED_PENDING_PROOF_STATUSES
 from assistant_lane_rulings import AssistantLaneRulings
 
 log = logging.getLogger("chat_streamd_v2.server")
@@ -2109,12 +2110,19 @@ class Server:
         )
 
     def _operator_authenticated(self, websocket: Any) -> bool:
-        """The one connection-bound operator predicate used by auth and fanout."""
+        """The one connection-bound operator predicate used by auth and fanout.
+
+        A stream-scoped (Cosmo) credential is NEVER an operator, even though its
+        record carries ``operator_trusted``: excluding scope here makes every
+        operator predicate (hello gate, snapshot fanout, consent registration,
+        schedule surface) deny-by-default for scoped connections at one point.
+        """
         trust = self._connection_trust.get(websocket)
         return bool(
             trust
             and trust.transport == "v2"
             and trust.operator_trusted
+            and not getattr(trust, "scope", None)
             and trust.client_kind in operator_auth.CLIENT_KINDS
         )
 
@@ -2184,6 +2192,33 @@ class Server:
         }
         return [hello, snapshot]
 
+    def _scoped_hello_frames(self, events_mode: str) -> list[dict[str, Any]]:
+        """The complete hello response for a scoped (Cosmo) connection:
+        `[hello, snapshot]` with an empty, well-formed snapshot and NO
+        `hosts.stats` frame.  A scoped client is confined to one stream and reads
+        it via `request_stream_events`; its hello discloses no fleet data (no
+        sessions/hosts/working_states), mirroring the Dot restriction.  Carries
+        the composite capability so the client knows the assistant surface is up.
+        """
+        composite_enabled = bool(self._any_composite_enabled())
+        hello: dict[str, Any] = {"type": "hello"}
+        if composite_enabled:
+            hello["capabilities"] = {"assistant_composite_v1": True}
+        snapshot: dict[str, Any] = {
+            "type": "snapshot",
+            "events_mode": events_mode,
+            "capabilities": {
+                "close_expected_generation": True,
+                **({"assistant_composite_v1": True} if composite_enabled else {}),
+            },
+            "sessions": [],
+            "notifications": [],
+            "updates": [],
+            "hosts": {},
+            "working_states": {},
+        }
+        return [hello, snapshot]
+
     async def _on_hello(self, msg: dict[str, Any]) -> list[dict[str, Any]]:
         """Apply hello.subscribe before constructing the connection's frames."""
         subscribe = msg.get("subscribe") if isinstance(msg.get("subscribe"), dict) else {}
@@ -2209,9 +2244,16 @@ class Server:
             error_code = self._authenticate_operator_hello(websocket, msg)
             if error_code:
                 return [{"type": "hello.error", "error_code": error_code}]
-            auth = msg.get("_auth_context") or {}
+            # The dispatch-time `_auth_context` ran before `_authenticate_operator_hello`
+            # bound this socket's trust, so re-derive it now that the credential
+            # (and any server-authoritative scope/revocation) is known.  This makes
+            # `scoped_principal` live on the hello itself and keeps the scoped
+            # connection registry/revocation set in sync.
+            auth = await self._auth_context(websocket, msg)
+            msg["_auth_context"] = auth
             if not self._is_loopback_client(websocket) and not (
                 self._operator_authenticated(websocket) or auth.get("token_verified")
+                or auth.get("scoped_principal")
                 or (auth.get("service_authenticated") and not snapshot_requested
                     and str(subscribe.get("mode") or "").lower() == "rpc")
             ):
@@ -2232,6 +2274,13 @@ class Server:
             # the explicit projected list_sessions RPC instead.
             if websocket in self._client_dot_connections:
                 return self._dot_hello_frames(events_mode)
+            # A scoped (Cosmo) connection authenticates as a valid credential but
+            # is NOT an operator: it gets an empty, fleet-free hello (no sessions,
+            # hosts, working states or hosts.stats) and reads its one scope stream
+            # via request_stream_events, under the one-stream egress filter.  It
+            # also never enters the operator consent registration below.
+            if websocket in self._client_scoped_connections:
+                return self._scoped_hello_frames(events_mode)
             if self.store and self._operator_authenticated(websocket) and self._connection_trust[websocket].client_kind == 'pentacle-mobile':
                 try:
                     async with self.sessions.assistant.authority_lock:
@@ -2753,8 +2802,12 @@ class Server:
             return None
         host, _, name = target.partition(":")
         seat = await self.store.fetch_session(host, name)
-        if seat is None or seat.get("status") != "open":
-            # The bound pane is gone (e.g. mid-recovery): queue until rebind.
+        if (seat is None or seat.get("status") != "open"
+                or seat.get("presumed_dead_at") or seat.get("closed_at")):
+            # The bound pane is gone or preserved-dead (a protected seat the
+            # reconciler keeps at status='open' with presumed_dead_at while a
+            # recovery owner respawns it): treat as unbound and queue until the
+            # binding is rebound to the live successor.
             return None
         if generation and seat.get("session_generation") != generation:
             # The pane was replaced without a rebind: refuse the stale generation.
@@ -2792,9 +2845,31 @@ class Server:
                 break
             if result is None:
                 break
+            if not self._composite_tell_committed(result):
+                # Delivery is not yet committed (e.g. pasted_unsubmitted: the
+                # paste sits in an active draft and the target has not received
+                # it as input).  Keep the row queued and stop in order — a later
+                # rebind/recovery flush retries; a same-tell_id replay is a no-op
+                # so retrying never duplicates.
+                break
             await self.store.delete_composite_tell(seq=row["seq"])
             delivered += 1
         return delivered
+
+    @staticmethod
+    def _composite_tell_committed(reply: dict[str, Any]) -> bool:
+        """Whether a composite-tell delivery is committed enough to dequeue.
+
+        True for a confirmed submission and for the non-fatal do-not-resubmit
+        states (``committed_pending_proof`` and the legacy proof-pending
+        aliases): those are durably committed and a resubmit would duplicate.
+        False for ``pasted_unsubmitted`` and any not-landed/failure status, which
+        are safe (and necessary) to retry.
+        """
+        if reply.get("submission_confirmed"):
+            return True
+        status = str(reply.get("delivery_status") or "")
+        return status == "delivered" or status in COMMITTED_PENDING_PROOF_STATUSES
 
     async def _on_send(self, msg: dict[str, Any]) -> dict[str, Any]:
         host, name = await self.sessions.resolve(msg)

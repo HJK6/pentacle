@@ -120,6 +120,21 @@ def test_register_push_operator_stays_on_legacy_table(monkeypatch):
     assert "credential_id" not in recorder[0][1]
 
 
+# --- wiring: only Daff pushes to Cosmo ---------------------------------------
+
+def test_cosmo_reply_push_wired_to_daff_only():
+    """The reply-push hook is wired to the Daff composite ONLY.  Bart's composite
+    must have no hook, so a committed Bart reply never pushes to the Cosmo
+    audience even if a bart-scoped token exists in CosmoPushTokens."""
+    import main
+    bart = SimpleNamespace(reply_push="should-be-cleared")
+    daff = SimpleNamespace(reply_push=None)
+    hook = object()
+    main._wire_cosmo_reply_push({"bart": bart, "daff": daff}, hook)
+    assert daff.reply_push is hook
+    assert bart.reply_push is None
+
+
 # --- publish fires exactly one reply push -------------------------------------
 
 def test_committed_daff_reply_pushes_once_and_bart_never(monkeypatch):
