@@ -7625,7 +7625,30 @@ function setupSettingsPanel() {
   const list = document.getElementById('settings-list');
   const closeBtn = document.getElementById('settings-close');
   const reloadBtn = document.getElementById('settings-reload');
+  const versionLineEl = document.getElementById('settings-version-line');
   if (!btn || !overlay || !modal || !list) return;
+
+  // Show this host's own build SHA and the connected daemon's runtime SHA as one
+  // unobtrusive footer line — short in the label, full on hover. Both come from
+  // the chat-stream snapshot (window.cc bridge), so it works in both Electron and
+  // web mode; the build SHA is present even before the daemon connects.
+  // Both the label and the hover title gate on the SAME validity check, so a
+  // malformed (non-empty but not 40-hex) SHA reads "unknown" in both places.
+  const isSha = (sha) => /^[0-9a-f]{40}$/i.test(sha);
+  const shortSha = (sha) => (isSha(sha) ? sha.slice(0, 7) : 'unknown');
+  const fullSha = (sha) => (isSha(sha) ? sha : 'unknown');
+  async function refreshVersionLine() {
+    if (!versionLineEl) return;
+    let build = '';
+    let runtime = '';
+    try {
+      const snap = await window.cc?.getChatStreamState?.();
+      if (snap && typeof snap.build_sha === 'string') build = snap.build_sha.trim();
+      if (snap && typeof snap.runtime_sha === 'string') runtime = snap.runtime_sha.trim();
+    } catch (_) { /* leave the SHAs unknown */ }
+    versionLineEl.textContent = `Desktop ${shortSha(build)} · Daemon ${shortSha(runtime)}`;
+    versionLineEl.title = `Desktop build: ${fullSha(build)}\nDaemon runtime: ${fullSha(runtime)}`;
+  }
 
   const setSwitch = (el, on) => el.setAttribute('aria-checked', on ? 'true' : 'false');
   const setSegment = (row, value) => {
@@ -7763,6 +7786,7 @@ function setupSettingsPanel() {
     list.querySelectorAll('.settings-row').forEach(row => {
       if (row.dataset.flag) setSwitch(row.querySelector('.settings-switch'), CONFIG.features[row.dataset.flag] === true);
     });
+    refreshVersionLine();
     overlay.style.display = 'flex';
     window.PentacleHarness?.emit?.('settings:open', { data: {} });
   }

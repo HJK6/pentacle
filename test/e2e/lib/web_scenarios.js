@@ -437,8 +437,48 @@ async function colouredHostGlyphs({ session, report }) {
     { subsystem: 'machine-stats', bug_ref: 'web_machine_stats_cpu_compaction_2026_09', layout });
 }
 
+// Issue #13: the Settings footer shows the running build SHA and the connected
+// daemon's runtime SHA. In the hermetic gate the web host and the seeded daemon
+// both run from this checkout, so each SHA resolves to the checkout HEAD and the
+// line renders two real 7-hex prefixes. Driven over CDP: open Settings, assert
+// the footer text and the full-SHA hover title, then close the modal.
+async function settingsVersionLine(ctx) {
+  const { session, report, cdp, timeoutMs } = ctx;
+  // The daemon SHA only populates once the chat-stream handshake completes.
+  await waitForValue(session, cdp,
+    'window.cc.getChatStreamState().then((s) => s.connected === true)', (v) => v === true,
+    { timeoutMs, label: 'chat-stream connected (for the daemon runtime SHA)' });
+
+  const data = await session.eval(`(async () => {
+    const snap = await window.cc.getChatStreamState();
+    document.getElementById('settings-btn').click();
+    return { buildSha: snap.build_sha, runtimeSha: snap.runtime_sha };
+  })()`);
+  const build = String(data.buildSha || '');
+  const runtime = String(data.runtimeSha || '');
+
+  // The footer repaints asynchronously (refreshVersionLine pulls a fresh
+  // snapshot); poll the DOM text until it reflects both short SHAs.
+  const text = await waitForValue(session, cdp,
+    `(document.getElementById('settings-version-line') || {}).textContent || ''`,
+    (v) => typeof v === 'string' && /^Desktop [0-9a-f]{7} · Daemon [0-9a-f]{7}$/.test(v),
+    { timeoutMs, label: 'settings version line shows both short SHAs' });
+
+  report.ok('the web host exposes its build SHA via the snapshot', /^[0-9a-f]{40}$/.test(build), { build });
+  report.ok('the daemon runtime SHA arrives on the welcome frame', /^[0-9a-f]{40}$/.test(runtime), { runtime });
+  report.ok('the footer shows the build short SHA under "Desktop"', text.includes(`Desktop ${build.slice(0, 7)}`), { text, build });
+  report.ok('the footer shows the daemon short SHA under "Daemon"', text.includes(`Daemon ${runtime.slice(0, 7)}`), { text, runtime });
+
+  const title = await session.eval(`(document.getElementById('settings-version-line') || {}).title || ''`);
+  report.ok('the full SHAs are available on hover', title.includes(build) && title.includes(runtime), { title });
+
+  // Leave the modal closed so later scenarios see a clean page.
+  await session.eval(`document.getElementById('settings-close').click()`);
+}
+
 const SCENARIOS = [
   ['transport-and-config', transportAndConfig],
+  ['settings-version-line', settingsVersionLine],
   ['sidebar-from-inventory', sidebarFromInventory],
   ['coloured-host-glyphs', colouredHostGlyphs],
   ['slot-attach-type-resize-kill', slotAttachTypeResizeKill],
@@ -459,6 +499,7 @@ module.exports = {
   waitForValue,
   pollUntil,
   transportAndConfig,
+  settingsVersionLine,
   sidebarFromInventory,
   slotAttachTypeResizeKill,
   chatTranscriptPaint,

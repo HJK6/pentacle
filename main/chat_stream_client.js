@@ -115,6 +115,30 @@ function _backoff(attempt) {
   return (base + jitter) * 1000;
 }
 
+// Resolve this host's build SHA across the three ways Pentacle is run:
+//  1. a packaged Electron app — electron-builder stamps package.json
+//     `pentacleBuildSha` (scripts/build-mac.js);
+//  2. a deployed web release — built with `git archive <sha>`, which has no
+//     `.git` and no packaged metadata, so `build-sha.txt` carries the SHA via
+//     the `export-subst` rule in `.gitattributes`;
+//  3. a source checkout (dev / E2E gate) — fall back to `git rev-parse HEAD`.
+// Returns a 40-char lowercase SHA, or '' when none is resolvable.
+function resolveBuildSha() {
+  const fromPackage = String(require('../package.json').pentacleBuildSha || '').trim();
+  if (/^[0-9a-f]{40}$/.test(fromPackage)) return fromPackage;
+  try {
+    const stamped = fs.readFileSync(path.resolve(__dirname, '..', 'build-sha.txt'), 'utf8').trim();
+    if (/^[0-9a-f]{40}$/.test(stamped)) return stamped;
+  } catch (_) { /* no export-subst stamp in a source checkout */ }
+  try {
+    const fromGit = execFileSync('git', ['-C', path.resolve(__dirname, '..'), 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+    if (/^[0-9a-f]{40}$/.test(fromGit)) return fromGit;
+  } catch (_) { /* git unavailable */ }
+  return '';
+}
+
 class ChatStreamClient {
   constructor() {
     this._ws = null;
@@ -157,16 +181,10 @@ class ChatStreamClient {
     this._handshakeState = 'idle';
     this._emitFrame = null;
     this._socketGeneration = 0;
-    this._buildSha = String(require('../package.json').pentacleBuildSha || '').trim();
-    if (!/^[0-9a-f]{40}$/.test(this._buildSha)) {
-      try {
-        this._buildSha = execFileSync('git', ['-C', path.resolve(__dirname, '..'), 'rev-parse', 'HEAD'], {
-          encoding: 'utf8',
-        }).trim();
-      } catch (_) {
-        this._buildSha = '';
-      }
-    }
+    this._buildSha = resolveBuildSha();
+    // The connected daemon's checkout SHA, captured from its `welcome` frame;
+    // refreshed on every (re)connect, '' until a welcome arrives.
+    this._runtimeSha = '';
   }
 
   init(cfg, emitFrame) {
@@ -198,6 +216,11 @@ class ChatStreamClient {
       limits: validatedLimits(this._limits),
       limits_health: this._limitsHealth,
       hosts_stats: { ...this._hostsStats },
+      // Version info for the Settings footer (issue #13): this host's own build
+      // SHA and the connected daemon's checkout SHA. Both ride the snapshot so
+      // the renderer reads them from one place in Electron and web mode.
+      build_sha: this._buildSha,
+      runtime_sha: this._runtimeSha,
     };
   }
 
@@ -1306,6 +1329,7 @@ try {
           this._failHandshake(ws, operatorAuthError('operator_auth_v2_required'));
           return;
         }
+        this._runtimeSha = typeof msg.runtime_sha === 'string' ? msg.runtime_sha.trim() : '';
         try {
           const hello = this._helloPayload(msg, authMaterial);
           snapshotDisabled = hello.subscribe?.snapshot === false;

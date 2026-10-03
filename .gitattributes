@@ -14,3 +14,8 @@
 *.woff2 binary
 *.ttf binary
 *.eot binary
+
+# Stamp the commit SHA into build-sha.txt on `git archive` (how the web
+# release is built), so the running build can report its version without a
+# .git dir or packaged metadata. See resolveBuildSha() in main/chat_stream_client.js.
+build-sha.txt export-subst

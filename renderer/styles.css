@@ -4147,6 +4147,14 @@ body.web-sidebar-narrow .grid.maximized .grid-cell.narrow-active {
 }
 .settings-modal.has-pending-reload .settings-reload-note { display: block; }
 
+.settings-version-line {
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+  white-space: nowrap;
+}
+
 #new-session-location .sb-btn.active { background: var(--blue); color: #fff; border-color: var(--blue); }
 
 .new-session-options {
