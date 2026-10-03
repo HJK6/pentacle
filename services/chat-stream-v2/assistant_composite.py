@@ -858,6 +858,7 @@ class AssistantComposite:
         if isinstance(admission, dict) and admission.get("admission_mode") == "direct_primary":
             # This lock serializes route resolution with rebind. The store's
             # BEGIN IMMEDIATE commits each resolved route or new pin in order.
+            pending_direct: dict[str, Any] | None = None
             async with self._binding_lock:
                 if not self.config.direct_primary:
                     await self._update_route(
@@ -883,7 +884,7 @@ class AssistantComposite:
                                        "direct_envelope": direct_envelope},
                     )
                     if updated is not None:
-                        self._start_dispatch(updated)
+                        pending_direct = updated
                 except _DirectTargetUnbound:
                     # The bound pane is dead/preserved-dead (awaiting the recovery
                     # owner's rebind).  Re-queue this input unchanged (lease
@@ -899,6 +900,15 @@ class AssistantComposite:
                     await self._update_route(
                         str(route["route_id"]), routing_state="routing_failed", error_code=str(exc),
                     )
+            # Direct primary has a SINGLE target pane, so queued input must reach it
+            # in admission order.  Dispatch synchronously here (outside the binding
+            # lock, so a concurrent rebind is not blocked by the paste): the worker
+            # does not claim the next queued route until this one has been submitted,
+            # which preserves replay order through the backend send boundary.
+            # `_dispatch_one` never raises (it records its own failure), so this
+            # cannot wedge the worker.
+            if pending_direct is not None:
+                await self._dispatch_one(pending_direct)
             return
         try:
             if self.router is None:
