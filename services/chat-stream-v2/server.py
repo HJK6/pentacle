@@ -1957,7 +1957,16 @@ class Server:
 
     @staticmethod
     def _is_loopback_client(websocket: Any) -> bool:
-        """Local bootstrap trusts the actual transport peer, never wire claims."""
+        """Bootstrap trusts local native tools, never browser-origin requests."""
+        # Browsers can connect to loopback from unrelated websites. Presence
+        # of Origin removes the local exception even for null/empty/local
+        # values; the existing operator/stream/service auth still applies.
+        # These are transport headers, never fields in a client message.
+        headers = getattr(getattr(websocket, "request", None), "headers", None)
+        if headers is None:  # supported legacy websockets server API
+            headers = getattr(websocket, "request_headers", None)
+        if headers is not None and any(str(name).lower() == "origin" for name in headers):
+            return False
         peer = getattr(websocket, "remote_address", None)
         if not isinstance(peer, (tuple, list)) or not peer:
             return False
