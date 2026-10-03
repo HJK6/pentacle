@@ -27,6 +27,18 @@ class _Comms:
         return {"type": "tell.ok", "delivery_status": "delivered", "submission_confirmed": True}
 
 
+class _UnconfirmedComms:
+    """A Comms whose paste lands in the composer but is not yet submitted."""
+
+    def __init__(self):
+        self.told = []
+
+    async def tell(self, msg):
+        self.told.append(dict(msg))
+        return {"type": "tell.ok", "delivery_status": "pasted_unsubmitted",
+                "submission_confirmed": False}
+
+
 async def _seat(store, stream_id):
     host, name = stream_id.split(":", 1)
     return await store.open_session(
@@ -166,6 +178,158 @@ def test_stale_generation_refused():
             else:
                 raise AssertionError("a stale binding generation must be refused")
             assert not comms.told
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_tell_queued_when_bound_pane_preserved_dead():
+    """A protected seat the reconciler preserves (status='open' + presumed_dead_at)
+    must be treated as UNBOUND for composite tells: the tell queues for replay
+    after recovery rebinds, instead of being delivered to the dead generation."""
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            daff_seat = await _seat(store, DAFF_SEAT)
+            daff = AssistantComposite(store, config=_config(
+                "daff", "DAFF_", DAFF_CHAT, DAFF_SEAT, daff_seat["session_generation"]))
+            server, comms, sessions = await _server_with(store, {"daff": daff})
+            # Preserve the bound pane exactly as the reconciler's protected-seat
+            # branch does (Sessions.mark_reconciled_dead): the row stays 'open'
+            # but carries presumed_dead_at.
+            await store.update_session(
+                "fixture-daffs", "visible",
+                expected_generation=daff_seat.get("created_at"),
+                presumed_dead_at="2026-10-03T00:00:00Z")
+            row = await store.fetch_session("fixture-daffs", "visible")
+            assert row["status"] == "open" and row["presumed_dead_at"]
+
+            reply = await server._on_tell({
+                "to_stream_id": DAFF_CHAT, "text": "while-dead", "tell_id": "d1",
+                "_auth_context": {"operator_authenticated": True, "operator_principal": "operator:fixture"},
+            })
+            assert reply["queued"] is True
+            assert reply["delivery_status"] == "queued_unbound"
+            assert not comms.told  # never delivered to the dead pane
+            queued = await store.claim_composite_tells(name="daff")
+            assert [r["body"] for r in queued] == ["while-dead"]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_flush_retains_tell_when_delivery_unconfirmed():
+    """Flush must not dequeue a tell whose delivery is not committed (e.g.
+    pasted_unsubmitted): a rebind could otherwise acknowledge and discard a tell
+    before the target assistant receives it."""
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            bart_seat = await _seat(store, BART_SEAT)
+            bart = AssistantComposite(store, config=_config(
+                "bart", "", BART_CHAT, BART_SEAT, bart_seat["session_generation"]))
+            daff = AssistantComposite(store, config=_config(
+                "daff", "DAFF_", DAFF_CHAT, DAFF_SEAT, "g-daff-pending"))
+            server, comms, sessions = await _server_with(store, {"bart": bart, "daff": daff})
+            server.comms = _UnconfirmedComms()
+
+            reply = await server._on_tell({
+                "to_stream_id": DAFF_CHAT, "text": "first", "tell_id": "t0",
+                "_auth_context": {"operator_authenticated": True, "operator_principal": "operator:fixture"},
+            })
+            assert reply["queued"] is True
+
+            live = await store.open_session(
+                "fixture-daffs", "visible", provider="codex", role="assistant",
+                visibility="default", pane_status="pane_alive",
+                effective_model="gpt-6-sol", effective_effort="high")
+            daff2 = AssistantComposite(store, config=_config(
+                "daff", "DAFF_", DAFF_CHAT, DAFF_SEAT, live["session_generation"]))
+            await daff2.load_binding()
+            server.assistant_composites["daff"] = daff2
+
+            delivered = await server._flush_composite_tells(daff2)
+            assert delivered == 0  # unconfirmed -> not counted delivered
+            assert server.comms.told  # it did attempt delivery
+            # The row is retained for a later (confirmed) retry.
+            still = await store.claim_composite_tells(name="daff")
+            assert [r["body"] for r in still] == ["first"]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_direct_send_during_dead_window_replays_to_new_generation():
+    """E queued-input replay for SENDS: a direct-primary input that the router
+    resolves while the bound pane is preserved-dead must be re-queued (not failed,
+    not pinned to the dead generation) and replayed to the live successor after
+    the recovery owner rebinds."""
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            s1 = await _seat(store, DAFF_SEAT)
+            dispatched = []
+
+            async def dispatch(route):
+                dispatched.append(route)
+                return {"delivery": "landed"}
+
+            daff = AssistantComposite(store, config=_config(
+                "daff", "DAFF_", DAFF_CHAT, DAFF_SEAT, s1["session_generation"]),
+                dispatch=dispatch)
+            await daff.load_binding()
+            await daff.ensure_projection()
+            sessions = Sessions(store, tmux=None, local_host=LOCAL)
+            await sessions.refresh()
+            server = Server(store=store, sessions=sessions, local_host=LOCAL)
+            server.assistant_composites = {"daff": daff}
+            server.assistant_composite = daff
+
+            # The bound pane goes preserved-dead before the input is resolved.
+            await store.update_session(
+                "fixture-daffs", "visible", expected_generation=s1.get("created_at"),
+                presumed_dead_at="2026-10-03T00:00:00Z")
+
+            await server._on_send({
+                "to_stream_id": DAFF_CHAT, "text": "during-dead",
+                "msg_id": "m1", "request_id": "r1",
+                "_auth_context": {"operator_authenticated": True, "operator_principal": "operator:fixture"},
+            })
+            # The worker re-queues the route (no dispatch to the dead generation).
+            for _ in range(50):
+                route = await store.get_assistant_composite_route(
+                    stream_id=DAFF_CHAT, input_identity="m1")
+                if route and route["routing_state"] == "queued" and route.get("error_code") == "assistant_direct_target_unbound":
+                    break
+                await asyncio.sleep(0.01)
+            assert route["routing_state"] == "queued"
+            assert not dispatched
+
+            # Recovery owner spawns a live successor, rebinds, and replays.
+            s2 = await store.open_session(
+                "fixture-daffs", "visible2", provider="codex", role="assistant",
+                visibility="default", pane_status="pane_alive",
+                effective_model="gpt-6-sol", effective_effort="high")
+            await store.recover_assistant_binding(
+                name="daff", target_stream_id="fixture-daffs:visible2",
+                target_generation=s2["session_generation"])
+            await daff.load_binding()
+            await daff.recover()  # wakes the worker
+            for _ in range(100):
+                route = await store.get_assistant_composite_route(
+                    stream_id=DAFF_CHAT, input_identity="m1")
+                if route["routing_state"] == "resolved" and dispatched:
+                    break
+                await asyncio.sleep(0.01)
+            assert route["routing_state"] == "resolved"
+            assert route["route_target_generation"] == s2["session_generation"]
+            assert dispatched  # replayed in order to the live successor
         finally:
             store.stop()
 

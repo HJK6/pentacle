@@ -76,6 +76,18 @@ from window_schedule import WindowSchedule
 log = logging.getLogger("chat_streamd_v2")
 
 
+def _wire_cosmo_reply_push(assistant_composites: dict, push_reply) -> None:
+    """Wire the Cosmo reply-push hook to the Daff composite ONLY.
+
+    Bart must never push to the Cosmo audience (a bart-scoped token would
+    otherwise receive Bart reply text), so Bart's composite gets NO hook and its
+    publish never invokes push.  Deny-by-default: any non-Daff composite is left
+    without a reply-push hook.
+    """
+    for name, composite in (assistant_composites or {}).items():
+        composite.reply_push = push_reply if name == "daff" else None
+
+
 def _read_checkout_sha() -> str:
     """Read this daemon checkout's HEAD; callers must run it off the event loop."""
     try:
@@ -466,8 +478,9 @@ async def run(args: argparse.Namespace) -> int:
     comms.assistant_ingress_policy = _assistant_ingress_policy
 
     # Cosmo reply push: one Expo push to the scoped CosmoPushTokens audience when
-    # an assistant reply commits.  Self-filtering by stream, so wiring it to every
-    # composite is safe — only daff:assistant has scoped subscribers.
+    # a DAFF reply commits.  Wired to the Daff composite ONLY — Bart must never
+    # push to the Cosmo audience (a bart-scoped token would otherwise receive
+    # Bart reply text), so Bart's publish never invokes the hook at all.
     from cosmo_push import CosmoPush
     import uiverbs as _uiverbs_mod
 
@@ -480,8 +493,7 @@ async def run(args: argparse.Namespace) -> int:
         table_factory=_cosmo_push_table,
         registry=server.operator_credential_registry,
     )
-    for _composite in assistant_composites.values():
-        _composite.reply_push = _cosmo_push.push_reply
+    _wire_cosmo_reply_push(assistant_composites, _cosmo_push.push_reply)
     window_schedule = WindowSchedule(
         store, sessions, comms, spawnctl,
         local_host=args.local_host, broadcast=server.broadcast,

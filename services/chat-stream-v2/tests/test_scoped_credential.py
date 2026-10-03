@@ -208,6 +208,56 @@ def test_live_revocation_drops_next_rpc():
     asyncio.run(run())
 
 
+def test_scoped_hello_discloses_no_fleet():
+    """A scoped (Cosmo) credential authenticates but is NOT an operator: its
+    hello returns an empty, fleet-free snapshot (no sessions/hosts/working_states,
+    no hosts.stats), never the full operator inventory."""
+    async def run():
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as d:
+            tmp = pathlib.Path(d)
+            store = Store(":memory:")
+            store.start()
+            try:
+                reg, cid = await _registry_with_scoped(tmp)
+                # A populated fleet that must not leak through a scoped hello.
+                await store.open_session(
+                    "fixture-other", "lead", provider="claude", role="lead",
+                    visibility="default", pane_status="pane_alive",
+                    effective_model="claude-opus-5-5", effective_effort="high")
+                server, peer = _scoped_server(store, reg, cid)
+                await server.sessions.refresh()
+                frames = await server._dispatch(_frame("hello"), websocket=peer)
+                assert frames[0]["type"] == "hello"  # admitted, not authentication_required
+                snap = next(f for f in frames if f.get("type") == "snapshot")
+                assert snap["sessions"] == []
+                assert snap["hosts"] == {}
+                assert snap["working_states"] == {}
+                # The host-telemetry frame bypasses _frame_for_client, so it must
+                # never be appended for a scoped connection.
+                assert all(f.get("type") != "hosts.stats" for f in frames)
+                # The scoped credential is not elevated to an operator.
+                assert not server._operator_authenticated(peer)
+            finally:
+                store.stop()
+    asyncio.run(run())
+
+
+def test_rotation_preserves_scope(tmp_path):
+    """A routine credential rotation must NOT widen a scoped (Cosmo) credential
+    into a full unscoped operator credential."""
+    import operator_auth_cli
+    reg = operator_auth.OperatorCredentialRegistry(tmp_path / "creds.json")
+    reg.initialize()
+    cid, _ = reg.issue("pentacle-mobile", label="cosmo", scope={"stream": DAFF_CHAT})
+    operator_auth_cli._rotate(reg, credential_id=cid, label="rotated")
+    creds = reg.load().credentials
+    assert creds[cid]["revoked_at"] is not None  # prior revoked
+    active = [c for c in creds.values() if c.get("revoked_at") is None]
+    assert len(active) == 1
+    assert active[0]["scope"] == {"stream": DAFF_CHAT}  # scope carried over
+
+
 def test_scope_is_server_authoritative_and_legacy_is_unscoped(tmp_path):
     reg = operator_auth.OperatorCredentialRegistry(tmp_path / "creds.json")
     cid, _ = reg.issue("pentacle-mobile", label="x", scope={"stream": DAFF_CHAT})

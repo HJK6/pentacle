@@ -55,6 +55,16 @@ _ROUTER_FAILURE_MESSAGE_MAX = 512
 _ROUTER_FAILURE_TRACEBACK_MAX = 4096
 
 
+class _DirectTargetUnbound(ValueError):
+    """The direct-primary target is dead/preserved-dead (not a live generation
+    conflict).  Raised by generation resolution so the direct dispatch path can
+    re-queue the input for replay after the recovery owner rebinds, instead of
+    failing it.  A ``ValueError`` subclass so the router/backend fallback paths
+    (which ``except ValueError``) keep treating a dead backend target as a
+    fallback trigger.
+    """
+
+
 def _env_bool(env: dict[str, str], key: str, default: bool = False) -> bool:
     raw = env.get(key)
     if raw is None:
@@ -563,7 +573,14 @@ class AssistantComposite:
             stream_id=self.config.stream_id, input_identity=input_identity,
         )
         if existing is None and self.config.direct_primary:
-            await self._direct_target_generation()
+            # Reject only a genuine live generation conflict at admit time.  A
+            # dead/preserved-dead target (awaiting the recovery rebind) must still
+            # be ADMITTED so the USER event is persisted and its route queues for
+            # in-order replay to the live successor — not refused to the caller.
+            try:
+                await self._direct_target_generation()
+            except _DirectTargetUnbound:
+                pass
         # An explicit reply is a deterministic correlation request, never an
         # invitation to run the classifier.  Validate a new reply before
         # admitting its USER event; a durable retry returns its old receipt
@@ -768,7 +785,14 @@ class AssistantComposite:
                     if route is None:
                         return
                     await self.refresh_activity()
-                    await self._classify_one(route)
+                    try:
+                        await self._classify_one(route)
+                    except _DirectTargetUnbound:
+                        # Direct target is unbound (pane dead, awaiting recovery
+                        # rebind).  The route was re-queued in order; pause here
+                        # rather than busy-spin on the same route.  A rebind or
+                        # recovery `recover()` calls `_wake_worker()` to resume.
+                        return
         except RuntimeError as exc:
             # Daemon teardown owns cancellation/store closure.  A detached
             # worker that loses that race has no legal recovery write to make.
@@ -819,6 +843,17 @@ class AssistantComposite:
                     )
                     if updated is not None:
                         self._start_dispatch(updated)
+                except _DirectTargetUnbound:
+                    # The bound pane is dead/preserved-dead (awaiting the recovery
+                    # owner's rebind).  Re-queue this input unchanged (lease
+                    # cleared) so it replays IN ORDER to the live successor, then
+                    # pause the worker — recovery's `recover()`/a rebind re-wakes
+                    # it.  Do NOT fail or dispatch to the stale generation.
+                    await self._update_route(
+                        str(route["route_id"]), routing_state="queued",
+                        error_code="assistant_direct_target_unbound",
+                    )
+                    raise
                 except ValueError as exc:
                     await self._update_route(
                         str(route["route_id"]), routing_state="routing_failed", error_code=str(exc),
@@ -1083,14 +1118,23 @@ class AssistantComposite:
         if not separator or not host or not session_name:
             raise ValueError("assistant_backend_target_invalid")
         row = await self.store.fetch_session(host, session_name)
-        if row is None or str(row.get("status") or "") != "open":
+        if row is None:
             raise ValueError("assistant_backend_target_unavailable")
+        if (str(row.get("status") or "") != "open"
+                or row.get("presumed_dead_at") or row.get("closed_at")):
+            # A preserved-dead protected seat keeps status='open' but carries
+            # presumed_dead_at/closed_at; its stored generation is stale.  Signal
+            # "unbound" distinctly so the direct path can re-queue for replay.
+            raise _DirectTargetUnbound("assistant_direct_target_unbound")
         generation = str(row.get("session_generation") or "")
         if not generation:
             raise ValueError("assistant_backend_generation_unavailable")
         return generation
 
     async def _direct_target_generation(self) -> str:
+        # Propagates _DirectTargetUnbound when the bound pane is dead/preserved-
+        # dead; raises a true conflict only when the pane is LIVE at a generation
+        # that no longer matches the binding (a replace without a rebind).
         generation = await self._target_generation(self.config.direct_primary_stream_id)
         if generation != self.config.direct_primary_generation:
             raise ValueError("assistant_direct_generation_conflict")
