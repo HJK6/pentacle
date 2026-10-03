@@ -399,7 +399,14 @@ class AssistantComposite:
         from outbound_notices import ASSISTANT_AUTHORITY_REQUEST_TOKEN
         if msg.get("_assistant_authority_request_token") is ASSISTANT_AUTHORITY_REQUEST_TOKEN:
             from sessions import VerbError
-            if not self.enabled or target_stream_id != self.config.astra_stream_id:
+            if not self.enabled:
+                raise VerbError("unknown_session", "configured assistant authority changed")
+            # A lane-ruling request/result notice wakes its OWN bound target: the
+            # configured lane-ruling authority (any seat), or the requesting lead
+            # for a result. That target is validated against the durable ruling
+            # row in comms, so it is not pinned here. Only the composite's own
+            # decision-authority request stays pinned to the astra backend seat.
+            if not msg.get("_assistant_lane_ruling") and target_stream_id != self.config.astra_stream_id:
                 raise VerbError("unknown_session", "configured assistant authority changed")
             return None
         if not self.is_backend_stream(target_stream_id):

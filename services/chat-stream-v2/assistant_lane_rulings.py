@@ -622,7 +622,7 @@ class AssistantLaneRulings:
                 ).fetchone())
         request = await self.store.submit(op)
         if request and request["state"] == "unruled":
-            await self._mirror_unruled(request)
+            await self._notify_unruled(request)
             await self._release(request)
 
     async def _mirror_unruled(self, request: dict[str, Any]) -> None:
@@ -656,6 +656,41 @@ class AssistantLaneRulings:
             with conn:
                 conn.execute("UPDATE v2_assistant_lane_rulings SET mirror_sent=1 WHERE ruling_request_id=?", (rid,))
         await self.store.submit(mark_mirrored)
+
+    async def _notify_unruled(self, request: dict[str, Any]) -> None:
+        """A timeout (deadline) tells only the requesting seat; an unavailable or
+        disabled authority still mirrors to the operator composite surface."""
+        if str(request.get("reason") or "") == "deadline":
+            await self._notice_requester_unruled(request)
+        else:
+            await self._mirror_unruled(request)
+
+    async def _notice_requester_unruled(self, request: dict[str, Any]) -> None:
+        """Deliver a deadline-passed notice to the requesting seat only.
+
+        The operator chat is deliberately not mirrored: a quietly-missed SLA is
+        the requester's lane concern, not an operator-facing status line.
+        """
+        if request.get("mirror_sent"):
+            return
+        rid = request["ruling_request_id"]
+        minutes = max(1, int(round(self.sla_s / 60.0)))
+        body = ("[Assistant lane ruling] "
+                f"Ruling deadline passed (no answer in {minutes} min); proceeded unruled: "
+                f"{request['action']} {request['target_stream_id']} ({rid}).")
+        await self.store.enqueue_outbound_notice(
+            notice_id="assistant-lane-ruling-unruled:" + rid,
+            kind="assistant_lane_ruling_result", dedupe_key="assistant-lane-ruling-unruled:" + rid,
+            recipient_stream_id=request["requester_stream_id"],
+            tell_id="assistant-lane-ruling-unruled:" + rid,
+            source_stream_id=request["authority_stream_id"],
+            body=body, metadata={"authority_generation": request["requester_generation"],
+                                 "ruling_request_id": rid},
+        )
+        def mark(conn: sqlite3.Connection) -> None:
+            with conn:
+                conn.execute("UPDATE v2_assistant_lane_rulings SET mirror_sent=1 WHERE ruling_request_id=?", (rid,))
+        await self.store.submit(mark)
 
     async def _release(self, request: dict[str, Any]) -> None:
         rid = request["ruling_request_id"]
@@ -774,7 +809,7 @@ class AssistantLaneRulings:
                 return [dict(row) for row in conn.execute(
                     "SELECT * FROM v2_assistant_lane_rulings WHERE state='unruled_disabled'")]
         for request in await self.store.submit(op):
-            await self._mirror_unruled(request)
+            await self._notify_unruled(request)
             await self._release(request)
 
     async def tick(self) -> None:
@@ -791,7 +826,7 @@ class AssistantLaneRulings:
                     await self._enqueue_notice(row)
             else:
                 if row["state"] in {"unruled", "unruled_disabled"}:
-                    await self._mirror_unruled(row)
+                    await self._notify_unruled(row)
                 await self._release(row)
 
     def _ensure_worker(self) -> None:
