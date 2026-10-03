@@ -5,9 +5,11 @@ const WORKSPACE_STORAGE_KEY = 'pentacle.workspace.v1';
 const validSlot = value => Number.isInteger(value) && value >= 0 && value < 4;
 function normalizeWorkspace(value = {}) {
   const raw = value && typeof value === 'object' ? value : {};
+  const paneCount = Number.isInteger(raw.paneCount) && raw.paneCount >= 1 && raw.paneCount <= 4 ? raw.paneCount : 1;
+  const activeSlot = validSlot(raw.activeSlot) ? raw.activeSlot : 0;
   return {
-    paneCount: Number.isInteger(raw.paneCount) && raw.paneCount >= 1 && raw.paneCount <= 4 ? raw.paneCount : 1,
-    activeSlot: validSlot(raw.activeSlot) ? raw.activeSlot : 0,
+    paneCount, activeSlot,
+    visibleSlots: visibleWorkspaceSlots(paneCount, activeSlot, raw.visibleSlots),
     bindings: Array.from({ length: 4 }, (_, index) => {
       const item = Array.isArray(raw.bindings) ? raw.bindings[index] : null;
       if (!item || typeof item.name !== 'string' || !item.name || item.name.length > 512
@@ -20,10 +22,17 @@ function normalizeWorkspace(value = {}) {
     }),
   };
 }
-function visibleWorkspaceSlots(paneCount, activeSlot) {
-  const normalized = normalizeWorkspace({ paneCount, activeSlot });
-  const slots = Array.from({ length: normalized.paneCount }, (_, i) => i);
-  if (!slots.includes(normalized.activeSlot)) slots[slots.length - 1] = normalized.activeSlot;
+function visibleWorkspaceSlots(paneCount, activeSlot, previousSlots = []) {
+  const count = Number.isInteger(paneCount) && paneCount >= 1 && paneCount <= 4 ? paneCount : 1;
+  const active = validSlot(activeSlot) ? activeSlot : 0;
+  // Visibility is a selection, not a function of focus. Keep it stable when
+  // focusing an already-visible pane; only resizing or revealing a hidden pane
+  // replaces a member. Old preferences without visibleSlots migrate naturally.
+  const slots = [...new Set(Array.isArray(previousSlots) ? previousSlots.filter(validSlot) : [])].slice(0, count);
+  for (let slot = 0; slots.length < count && slot < 4; slot++) {
+    if (!slots.includes(slot)) slots.push(slot);
+  }
+  if (!slots.includes(active)) slots[slots.length - 1] = active;
   return slots;
 }
 function defaultSessionView(chatEnabled, session) {

@@ -24,6 +24,8 @@ test('corrupt or obsolete preferences are bounded; active hidden slots stay reac
   assert.equal(defaultSessionView(true, { provider: 'claude' }), 'chat');
   assert.equal(defaultSessionView(false, { provider: 'claude' }), 'terminal');
   assert.equal(defaultSessionView(true, { provider: 'terminal' }), 'terminal');
+  assert.deepEqual(normalizeWorkspace({ paneCount: 2, activeSlot: 0, visibleSlots: [0, 3] }).visibleSlots, [0, 3]);
+  assert.deepEqual(normalizeWorkspace({ paneCount: 3, activeSlot: 3, visibleSlots: [-1, 9, 0, 0, '2'] }).visibleSlots, [0, 1, 3]);
   assert.deepEqual(normalizeWorkspace({ bindings: [{ name: '<untrusted>', hostId: 'local', mode: 'evil' }] }).bindings[0],
     { name: '<untrusted>', hostId: 'local', mode: 'chat', draft: '' });
 });
@@ -133,4 +135,74 @@ test('composer forwards literal slash text, Shift+Enter does not send, and offli
   input.dispatchEvent(new h.dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.sendCalls.length, 1);
+});
+
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const run = (h, code) => vm.runInContext(code, h.context);
+const visibleSlots = h => [0, 1, 2, 3].filter(slot => !h.dom.window.document.getElementById(`cell-${slot}`).classList.contains('workspace-hidden'));
+
+test('focus does not replace visible panes after reducing four panes to two or three', async () => {
+  for (const count of [2, 3]) {
+    const h = installRenderer({ questionOverride: null });
+    await tick();
+    h.dom.window.document.querySelector('[data-pane-count-button="4"]').click();
+    run(h, 'focusSlot(3)');
+    h.dom.window.document.querySelector(`[data-pane-count-button="${count}"]`).click();
+    const expected = count === 2 ? [0, 3] : [0, 1, 3];
+    assert.deepEqual(visibleSlots(h), expected);
+    for (const slot of expected) {
+      h.dom.window.document.getElementById(`cell-${slot}`).dispatchEvent(new h.dom.window.Event('pointerdown', { bubbles: true }));
+      assert.deepEqual(visibleSlots(h), expected, `pointer focus ${slot} in ${count} panes`);
+      run(h, `focusSlot(${slot})`);
+      assert.deepEqual(visibleSlots(h), expected, `sidebar focus ${slot} in ${count} panes`);
+    }
+    // Selecting a genuinely hidden slot, unlike focusing a visible pane, reveals it.
+    run(h, 'focusSlot(2)');
+    assert.ok(visibleSlots(h).includes(2));
+    assert.equal(visibleSlots(h).length, count);
+    assert.equal(h.closeCalls.length + h.killCalls.length, 0);
+  }
+});
+
+test('batch restore keeps saved active/narrow/composer focus and persists all drafts', async () => {
+  const sessions = [0, 3].map(slot => ({ host: 'hostc', stream_id: `hostc:session-${slot}`, session_name: `session-${slot}`, provider: 'claude', status: 'open', visibility: 'default' }));
+  const bindings = [0, 1, 2, 3].map(slot => [0, 3].includes(slot) ? { name: `session-${slot}`, hostId: 'local', mode: 'chat', draft: `draft${slot}` } : null);
+  const h = installRenderer({ questionOverride: null, initialSessions: sessions, storage: {
+    'pentacle.workspace.v1': JSON.stringify({ paneCount: 1, activeSlot: 0, bindings }),
+  } });
+  await tick();
+  assert.equal(run(h, 'state.workspace.activeSlot'), 0);
+  assert.equal(run(h, 'narrowActiveSlot'), 0);
+  assert.equal(h.dom.window.document.activeElement.dataset.slot, '0');
+  assert.deepEqual(visibleSlots(h), [0]);
+  assert.equal(h.dom.window.document.getElementById('cell-0').classList.contains('narrow-active'), true);
+  assert.equal(h.dom.window.document.getElementById('cell-3').classList.contains('narrow-active'), false);
+  const saved = JSON.parse(h.dom.window.localStorage.getItem('pentacle.workspace.v1'));
+  assert.equal(saved.activeSlot, 0);
+  assert.equal(saved.bindings[0].draft, 'draft0');
+  assert.equal(saved.bindings[3].draft, 'draft3');
+  assert.equal(h.closeCalls.length + h.killCalls.length, 0);
+});
+
+test('late restore never leaks a draft into a rebound slot, including same-name ABA', async () => {
+  for (const host of ['local', 'other']) {
+    const h = installRenderer({ questionOverride: null });
+    await tick();
+    mountRaceSlot(h.context);
+    run(h, `
+      detachSlot(0);
+      state.workspaceRestored = false;
+      state.workspace.bindings[0] = { name: 'claude-hostc-race', hostId: 'local', mode: 'chat', draft: 'old private draft' };
+      var originalAttach = attachSession, releaseRestore;
+      attachSession = function(...args) { originalAttach(...args); return new Promise(resolve => { releaseRestore = resolve; }); };
+      var pendingRestore = restoreWorkspaceSessions();
+      attachSession = originalAttach;
+    `);
+    await run(h, `attachSession(0, 'claude-hostc-race', 'New binding', '${host}')`);
+    run(h, 'releaseRestore()');
+    await run(h, 'pendingRestore');
+    assert.equal(run(h, 'state.slotDrafts[0]'), '', host);
+    assert.equal(h.dom.window.document.querySelector('.slot-chat-compose-input').value, '', host);
+    assert.equal(JSON.parse(h.dom.window.localStorage.getItem('pentacle.workspace.v1')).bindings[0].draft, '', host);
+  }
 });

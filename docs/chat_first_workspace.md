@@ -18,7 +18,8 @@ but remains deprecated upstream. Prefer the web host or installed PWA.
 - The **1 / 2 / 3 / 4** toolbar controls choose the visible pane count. Click a
   pane to target it. Sidebar selection uses an empty visible pane, otherwise
   replaces the focused pane. Right-click a session to choose a particular slot.
-  Reducing the count hides panes without closing their sessions. Maximize is a
+  Reducing the count hides panes without closing their sessions. Focusing a
+  visible pane leaves the other visible panes in place. Maximize is a
   temporary focus view; its restore button returns to the chosen layout.
 - **Status**, report tabs, questions and the terminal fallback remain available
   per pane. Terminal attachment is lazy: failure to attach a PTY does not remove
@@ -31,7 +32,7 @@ but remains deprecated upstream. Prefer the web host or installed PWA.
 
 ## Persistence and privacy
 
-The browser stores pane count, focused slot, open session identifiers, selected
+The browser stores pane count, visible slots, focused slot, open session identifiers, selected
 views and unsent drafts in `pentacle.workspace.v1`. Restore only attaches
 sessions still present in the daemon inventory; it never spawns a replacement for
 a missing session. Text selection, history and delivery state use the existing
