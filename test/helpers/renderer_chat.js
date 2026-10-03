@@ -15,9 +15,10 @@ answerModule._compile(esbuild.buildSync({ entryPoints: [answerModule.id], bundle
 const { buildPentacleQuestionAnswerText } = answerModule.exports;
 
 
-function installRenderer({ dismissResult, questionOverride, assistantRole = '', initialSessions = [], popoutContext = null, selectSessionDetail = null, renderTranscriptTimelineHtml = null, requestStreamEvents = null, setTimeout: setTimer = null, ccOverrides = null } = {}) {
+function installRenderer({ dismissResult, questionOverride, assistantRole = '', initialSessions = [], popoutContext = null, selectSessionDetail = null, renderTranscriptTimelineHtml = null, requestStreamEvents = null, setTimeout: setTimer = null, storage = {}, terminalClass = null, ccOverrides = null } = {}) {
   const html = fs.readFileSync(path.join(root, 'renderer', 'index.html'), 'utf8');
   const dom = new JSDOM(html, { url: 'http://pentacle.test/renderer/index.html' });
+  for (const [key, value] of Object.entries(storage)) dom.window.localStorage.setItem(key, value);
   const dismissCalls = [];
   const notificationResolveCalls = [];
   const sendCalls = [];
@@ -156,7 +157,7 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
     __dirname: path.join(root, 'renderer'),
     __filename: path.join(root, 'renderer', 'app.js'),
     require(name) {
-      if (name === '@xterm/xterm') return { Terminal: class { loadAddon() {} open() {} write() {} dispose() {} } };
+      if (name === '@xterm/xterm') return { Terminal: terminalClass || class { loadAddon() {} open() {} write() {} dispose() {} } };
       if (name === '@xterm/addon-fit') return { FitAddon: class { fit() {} } };
       if (name === '@xterm/addon-unicode11') return { Unicode11Addon: class {} };
       if (name === '@xterm/addon-webgl') return { WebglAddon: class {} };

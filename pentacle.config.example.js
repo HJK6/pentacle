@@ -83,7 +83,7 @@ module.exports = {
     "brightWhite": "#d6e8da"
   },
   "features": {
-    "chatUi": false, // default false; experimental; terminals remain the default
+    "defaultChatView": true, // new sessions open in Chat; Terminal remains available per pane
     "inputBar": true, // compatibility-only, currently unused
     "usage": false, // example default false; enables daemon usage/limits subscriptions
     "dashboards": false, // default false; optional dashboard adapters

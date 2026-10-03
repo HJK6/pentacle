@@ -140,6 +140,7 @@
     "test/assistant_composite.test.js": "Synthetic identities in composite routing, rendering, reply/retry and ordinary-session isolation fixtures.",
     "test/assistant_composite_reply.test.ts": "Synthetic identities in composite routing, rendering, reply/retry and ordinary-session isolation fixtures.",
     "test/chat_display_rule_parity.test.ts": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
+    "test/chat_first_workspace.test.js": "Synthetic host and session identifiers exercise workspace binding, restore, and draft isolation.",
     "test/chat_events_lazy.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/chat_harness_scenario.test.ts": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/chat_popout_closed_stream.test.js": "Synthetic stream identities exercise closed popout history binding and assistant-direct isolation.",

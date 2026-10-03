@@ -8,6 +8,7 @@ const { WebglAddon } = require('@xterm/addon-webgl'); // GPU-accelerated renderi
 const { createTerminalPaste } = require('./terminal_paste');
 const { normalizeSplit, createGridColResizer } = require('./grid_col_resizer');
 const { normalizeSidebarWidth, createSidebarResizer } = require('./sidebar_resizer');
+const { WORKSPACE_STORAGE_KEY, normalizeWorkspace, visibleWorkspaceSlots, defaultSessionView } = require('./workspace_layout');
 const path = require('path');
 const chatUi = require('./chat_ui_state');
 const assetRender = require('./asset_render');
@@ -80,29 +81,25 @@ CONFIG.features = CONFIG.features || {};
 // apply live; backend-dependent flags need a window reload (the panel surfaces
 // a "Reload to apply" badge).
 const SETTINGS_STORAGE_KEY = 'pentacle.settings.v1';
-const DEFAULT_APPEARANCE = { theme: 'dark', density: 'comfortable' };
+const DEFAULT_APPEARANCE = { theme: 'light', density: 'comfortable' };
 const DESIGN_THEME_VARS = {
-  dark: {
-    // Green palette (pre-reskin greens restored): light-green --blue + old green
-    // backgrounds; reskin structure/mint --pc-accent otherwise unchanged.
-    bg: '#0c1310', bg2: '#121e18', bg3: '#1a2b22', fg: '#e7f1eb', fgDim: '#5f7368',
-    blue: '#3fb950', green: '#56d364', red: '#f47067', yellow: '#e8c37b',
-    purple: '#4ea67e', cyan: '#6fb3ff', border: '#1b2a22',
-    app: '#0c1310', side: '#121e18', pane: '#0c1310', header: '#121e18',
-    text: '#e7f1eb', dim: '#8fa89d', soft: '#5f7368', faint: '#43554c',
-    line: '#1b2a22', lineSoft: '#14201a', accent: '#7ef0ba', accentDim: '#4ea67e',
-    codeBg: '#0b1611', codeLine: '#1e2f26', chipBg: '#1a2b22', chipTx: '#8bf0c0',
-    userBg: '#16352880', userLine: '#2e5947',
-  },
   light: {
-    bg: '#c8d0c6', bg2: '#dbe1d5', bg3: '#c6d3c1', fg: '#18231b', fgDim: '#6c7a70',
-    blue: '#1c6b45', green: '#1f7a3e', red: '#b23b32', yellow: '#876717',
-    purple: '#357a58', cyan: '#2f6db0', border: '#c2ccbc',
-    app: '#d7ddd1', side: '#dbe1d5', pane: '#e5eae0', header: '#dce2d6',
-    text: '#18231b', dim: '#4f5d53', soft: '#6c7a70', faint: '#8b988d',
-    line: '#c2ccbc', lineSoft: '#cfd8c9', accent: '#1c6b45', accentDim: '#357a58',
-    codeBg: '#cfd8ca', codeLine: '#b1bdab', chipBg: '#c6d3c1', chipTx: '#1b5c3c',
-    userBg: '#c6d5c7', userLine: '#9cb29c',
+    bg: '#fcfbf8', bg2: '#f5f4f0', bg3: '#eeede8', fg: '#292823', fgDim: '#77756d',
+    blue: '#a0523d', green: '#378267', red: '#b9473e', yellow: '#997323', purple: '#8060a8', cyan: '#477eaa', border: '#e6e4de',
+    app: '#fcfbf8', side: '#f5f4f0', pane: '#fcfbf8', header: '#fcfbf8',
+    text: '#292823', dim: '#68665e', soft: '#817e74', faint: '#a6a298',
+    line: '#e6e4de', lineSoft: '#efeee9', accent: '#a0523d', accentDim: '#bb725b',
+    codeBg: '#f1f0eb', codeLine: '#e3e0d8', chipBg: '#eeede8', chipTx: '#4d4a42',
+    userBg: '#f1efe8', userLine: '#e9e5db',
+  },
+  dark: {
+    bg: '#22221f', bg2: '#1b1b19', bg3: '#343430', fg: '#eceae3', fgDim: '#a09d92',
+    blue: '#d5987f', green: '#7eba9a', red: '#ec9388', yellow: '#d3b777', purple: '#b6a0d4', cyan: '#8bb4d0', border: '#3b3b35',
+    app: '#22221f', side: '#1b1b19', pane: '#22221f', header: '#22221f',
+    text: '#eceae3', dim: '#b9b6aa', soft: '#a09d92', faint: '#7b786f',
+    line: '#3b3b35', lineSoft: '#30302b', accent: '#d5987f', accentDim: '#c18a73',
+    codeBg: '#2b2b27', codeLine: '#41413a', chipBg: '#343430', chipTx: '#dbd8cd',
+    userBg: '#30302b', userLine: '#3b3b34',
   },
 };
 
@@ -144,7 +141,7 @@ function saveSettingsOverride(key, value) {
 }
 
 function normalizeAppearance(raw = {}) {
-  const theme = raw.theme === 'light' ? 'light' : 'dark';
+  const theme = raw.theme === 'dark' ? 'dark' : 'light';
   const density = raw.density === 'compact' ? 'compact' : 'comfortable';
   return {
     theme, density,
@@ -406,6 +403,10 @@ const state = {
   // chat_streamd live-state availability. Sidebar rows remain daemon-owned;
   // this flag only gates actions that require a connected daemon.
   degraded: false,
+  workspace: (() => { try { return normalizeWorkspace(JSON.parse(localStorage.getItem(WORKSPACE_STORAGE_KEY) || '{}')); } catch { return normalizeWorkspace(); } })(),
+  workspaceRestored: false,
+  workspaceRestoring: false,
+  slotTerminalPending: [false, false, false, false],
   slots: [null, null, null, null], // { name, displayName } or null
   terminals: [null, null, null, null], // { term, fitAddon } or null
   slotViewModes: ['terminal', 'terminal', 'terminal', 'terminal'], // 'chat' | 'terminal' | 'asset' | 'status'
@@ -1867,6 +1868,7 @@ function applyChatStreamState(data) {
   if (state.chatStream.connected) {
     _perfRecord('renderer:sidebar-seeded-from-snapshot', { count: state.sessions.length });
     syncSlotDisplayNames();
+    restoreWorkspaceSessions();
   }
   // On disconnect, drop the lazy-load tracker so the next connect re-fetches
   // each active chat slot's stream events. Live events keep flowing into
@@ -2623,7 +2625,7 @@ function ensureSlotChatSurface(slot) {
 	  const inputEl = document.createElement('textarea');
 	  inputEl.className = 'slot-chat-compose-input';
   inputEl.rows = 1;
-  inputEl.placeholder = '';
+  inputEl.placeholder = 'Message your agent, or type a / command…';
   inputEl.setAttribute('aria-label', 'Message');
   inputEl.dataset.slot = String(slot);
 
@@ -2664,6 +2666,7 @@ function ensureSlotChatSurface(slot) {
 	  micEl.className = 'slot-chat-compose-mic';
 	  micEl.setAttribute('aria-label', 'Microphone controls');
 	  micEl.title = 'Microphone controls';
+      micEl.hidden = !CONFIG.features.mic;
 	  micEl.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-4 0h8"/></svg>';
 
 	  const sendEl = document.createElement('button');
@@ -3834,7 +3837,7 @@ function renderSlotChat(slot) {
   }
   refs.inputEl?.classList.toggle('is-remote-draft', !!remoteDraft && !state.slotDraftTouched[slot]);
   refs.inputEl?.classList.toggle('is-remote-pending', !!remotePending && !state.slotDraftTouched[slot]);
-  refs.inputEl?.setAttribute('placeholder', '');
+  refs.inputEl?.setAttribute('placeholder', 'Message your agent, or type a / command…');
   renderSlotReply(slot);
 
   if (refs.scrollEl && shouldStick) scrollSlotChatToBottom(refs);
@@ -4270,10 +4273,7 @@ function updateSlotViewMode(slot, mode) {
     header.querySelectorAll('.cell-view-toggle').forEach((btn) => {
       const active = btn.dataset.mode === mode;
       btn.classList.toggle('active', active);
-      btn.style.opacity = active ? '1' : '0.65';
-      btn.style.borderColor = active ? '#2dd4bf' : '#284137';
-      btn.style.color = active ? '#dff8ea' : '#86a595';
-      btn.style.background = active ? '#173126' : '#101815';
+      btn.setAttribute('aria-pressed', String(active));
     });
   }
   if (chatUiEnabled()) renderSlotChat(slot);
@@ -4284,7 +4284,11 @@ function updateSlotViewMode(slot, mode) {
     });
   }
   ensureSlotAssetTabs(slot);
-  if (mode === 'terminal') scheduleVisibleSlotFits();
+  if (mode === 'terminal' && state.slots[slot]) {
+    ensureSlotTerminal(slot);
+    scheduleVisibleSlotFits();
+  }
+  persistWorkspace();
 }
 
 function ensureSlotModeToggle(slot) {
@@ -4303,9 +4307,9 @@ function ensureSlotModeToggle(slot) {
   // Pill order: Status, Chat, Terminal (Chat sits next to Status as the default
   // view). Reordered from the legacy Status/Terminal/Chat per operator request.
   group.innerHTML = `
-    <button class="cell-view-toggle" data-slot="${slot}" data-mode="status" title="Session status view" aria-label="Session status view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Status</button>
-    <button class="cell-view-toggle" data-slot="${slot}" data-mode="chat" title="Chat view" aria-label="Chat view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Chat</button>
-    <button class="cell-view-toggle" data-slot="${slot}" data-mode="terminal" title="Terminal view" aria-label="Terminal view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Terminal</button>`;
+    <button class="cell-view-toggle" data-slot="${slot}" data-mode="status" title="Session status view" aria-label="Session status view">Status</button>
+    <button class="cell-view-toggle" data-slot="${slot}" data-mode="chat" title="Chat view" aria-label="Chat view">Chat</button>
+    <button class="cell-view-toggle" data-slot="${slot}" data-mode="terminal" title="Terminal view" aria-label="Terminal view">Terminal</button>`;
   actions.prepend(group);
   group.querySelectorAll('.cell-view-toggle').forEach((btn) => {
     btn.addEventListener('click', (e) => {
@@ -4315,7 +4319,6 @@ function ensureSlotModeToggle(slot) {
       if (btn.dataset.mode === 'terminal') focusTerminal(slot);
     });
   });
-  updateSlotViewMode(slot, state.slotViewModes[slot]);
 }
 
 function ensureChatPopoutAction(slot) {
@@ -4871,7 +4874,7 @@ function assignToSlot(sessionName, displayName, hostId) {
       // In maximized mode, switch the maximized view to this slot
       maximizeSlot(existing);
     }
-    focusTerminal(existing);
+    focusSlot(existing);
     return existing;
   }
 
@@ -4884,11 +4887,9 @@ function assignToSlot(sessionName, displayName, hostId) {
   }
 
   // Find first empty slot
-  let slot = state.slots.findIndex(s => s === null);
-  if (slot === -1) {
-    // All full — replace the last slot (slot 3)
-    slot = 3;
-  }
+  const visible = state.workspace.visibleSlots;
+  let slot = visible.find(i => state.slots[i] === null);
+  if (slot === undefined) slot = state.workspace.activeSlot;
 
   attachSession(slot, sessionName, displayName, hostId);
   return slot;
@@ -4957,12 +4958,10 @@ function activateSidebarRow(el, defaultHostId) {
     updateSlotViewMode(slot, 'chat');
     return;
   }
-  // Ordinary open (primary-action 'status') and any default: land on the
-  // configured default view. A fresh attach/replacement sets the slot to
-  // defaultChatViewMode() in attachSession (Chat unless the operator chose
-  // Terminal); re-selecting an already-attached slot leaves its explicit
-  // in-session Chat/Status/Terminal toggle untouched. Status stays reachable
-  // through the per-cell view toggle.
+  // Ordinary open lands on the configured default view (Chat unless the
+  // operator chose Terminal in Settings > Default view); preserve an explicitly
+  // chosen mode when revisiting an attached pane. Status and Terminal remain
+  // explicit controls.
 }
 
 // firstUnreadReportForStream returns the {assetId, assetKey} of the newest
@@ -4981,7 +4980,7 @@ function firstUnreadReportForStream(streamId) {
 async function attachSession(slot, sessionName, displayName, hostId, options = {}) {
   hostId = hostId || 'local';
   // Kill existing terminal in this slot
-  detachSlot(slot);
+  detachSlot(slot, { preserveWorkspace: true });
 
   state.slotGen[slot]++;
   const gen = state.slotGen[slot]; // capture generation to detect stale async resumes
@@ -4989,7 +4988,7 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
     popoutStreamId: options.popoutStreamId || null,
     assistantDirect: options.assistantDirect || null,
     session_kind: canonicalChatSessionStateForNameHost(sessionName, hostId)?.session_kind };
-  if (document.body.classList.contains('web-sidebar-narrow')) setNarrowActiveSlot(slot);
+  if (options.activate !== false && document.body.classList.contains('web-sidebar-narrow')) setNarrowActiveSlot(slot);
   closedChatSlots.update();
   window.PentacleHarness?.emit?.('slot:attach', { slot, host: hostId, data: { sessionName } });
 
@@ -5050,7 +5049,12 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   state.slotBuffers[slot] = '';
   state.slotDrafts[slot] = '';
   state.slotDraftTouched[slot] = false;
-  state.slotViewModes[slot] = isCompositeSlot(slot) ? 'chat' : defaultChatViewMode();
+  state.slotViewModes[slot] = isCompositeSlot(slot) ? 'chat' :
+    (options.viewMode || defaultSessionView(defaultChatViewMode() === 'chat', canonicalChatSessionStateForNameHost(sessionName, hostId)));
+  if (options.activate !== false) {
+    state.workspace.activeSlot = slot;
+    applyWorkspaceLayout();
+  }
   fetchSlotAssetSnapshot(slot, gen);
   ensureSlotAssetTabs(slot);
 
@@ -5067,7 +5071,22 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
     return;
   }
 
-  const term = new Terminal({
+  renderSidebar();
+  if (chatUiEnabled()) renderSlotChat(slot);
+  updateSlotViewMode(slot, state.slotViewModes[slot]);
+  if (options.activate !== false) focusSlot(slot);
+}
+
+async function ensureSlotTerminal(slot) {
+  if (!state.slots[slot] || state.terminals[slot] || state.slotTerminalPending[slot] || isCompositeSlot(slot)) return;
+  const gen = state.slotGen[slot];
+  const { name: sessionName, hostId } = state.slots[slot];
+  const container = state.slotChatRefs[slot]?.terminalMount || document.getElementById(`term-${slot}`);
+  state.slotTerminalPending[slot] = true;
+  container.innerHTML = '';
+  let term;
+  try {
+  term = new Terminal({
     theme: terminalThemeForAppearance(),
     fontFamily: "'SFMono-Regular', 'SF Mono', '.SF NS Mono', 'Menlo', 'Monaco', monospace",
     fontSize: 13,
@@ -5186,11 +5205,7 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   const paneId = await window.cc.createPty(slot, sessionName, hostId, term.cols, term.rows);
   // Bail if another attachSession took over this slot while we awaited
   if (state.slotGen[slot] !== gen) return;
-  if (!paneId) {
-    console.warn(`[attach] createPty returned null for session=${sessionName}, detaching`);
-    detachSlot(slot);
-    return;
-  }
+  if (!paneId) throw new Error('Terminal attachment is unavailable. Chat is still connected independently.');
   state.slots[slot].paneId = paneId;
 
   // Observe resize — only send resizePty when cols/rows ACTUALLY change.
@@ -5209,12 +5224,31 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   ro.observe(container);
   state.terminals[slot]._ro = ro;
 
-  renderSidebar();
-  if (chatUiEnabled()) renderSlotChat(slot);
-  updateSlotViewMode(slot, state.slotViewModes[slot]);
+    if (state.slotViewModes[slot] === 'terminal') {
+      fitVisibleSlot(slot);
+      if (!state.workspaceRestoring && state.workspace.activeSlot === slot) focusTerminal(slot);
+    }
+  } catch (error) {
+    if (state.slotGen[slot] !== gen) return;
+    try { term?.dispose(); } catch {}
+    state.terminals[slot] = null;
+    container.innerHTML = '';
+    const message = document.createElement('div');
+    message.className = 'terminal-unavailable';
+    const text = document.createElement('p');
+    text.textContent = error?.message || 'Terminal attachment failed. Your session has not been closed.';
+    const retry = document.createElement('button');
+    retry.textContent = 'Retry terminal';
+    retry.addEventListener('click', () => ensureSlotTerminal(slot));
+    message.append(text, retry);
+    container.appendChild(message);
+    console.warn('[terminal attach]', error?.message || error);
+  } finally {
+    if (state.slotGen[slot] === gen) state.slotTerminalPending[slot] = false;
+  }
 }
 
-function detachSlot(slot) {
+function detachSlot(slot, { preserveWorkspace = false } = {}) {
   closedChatSlots.forget(slot);
   const wasBot = state.botSlots[slot];
   const sessionName = state.slots[slot] && state.slots[slot].name;
@@ -5274,6 +5308,7 @@ function detachSlot(slot) {
   state.slotBuffers[slot] = '';
   state.slotDrafts[slot] = '';
   state.slotDraftTouched[slot] = false;
+  state.slotTerminalPending[slot] = false;
   state.slotViewModes[slot] = 'terminal';
   syncChatHistoryPins();
   state.slotActiveAsset[slot] = null;
@@ -5308,7 +5343,7 @@ function detachSlot(slot) {
 
   // Clear terminal container
   const container = document.getElementById(`term-${slot}`);
-  container.innerHTML = '<div class="cell-empty">Click a session or bot to attach</div>';
+  container.innerHTML = workspaceEmptyHtml();
 
   // If this was the maximized slot, go back to grid view
   if (state.maximizedSlot === slot) {
@@ -5316,6 +5351,133 @@ function detachSlot(slot) {
   }
 
   renderSidebar();
+  if (!preserveWorkspace) persistWorkspace();
+}
+
+function workspaceEmptyHtml() {
+  return '<div class="cell-empty workspace-empty"><span class="workspace-mark" aria-hidden="true">✳</span><h1>A little space for big ideas.</h1><p>Start a conversation, or pick up where you left off.</p><button type="button" data-workspace-new>New chat <span aria-hidden="true">↗</span></button><span class="workspace-empty-hint">Your agents, projects, and conversations. In one place.</span></div>';
+}
+
+function persistWorkspace() {
+  if (IS_CHAT_POPOUT || state.workspaceRestoring) return;
+  const bindings = state.slots.map((session, slot) => session ? {
+    name: session.name, hostId: session.hostId || 'local', mode: state.slotViewModes[slot],
+    draft: state.slotChatRefs[slot]?.inputEl?.value || state.slotDrafts[slot] || '',
+  } : null);
+  try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify({ ...state.workspace, bindings })); } catch { /* private mode / quota */ }
+}
+
+async function restoreWorkspaceSessions() {
+  if (IS_CHAT_POPOUT || state.workspaceRestored || !state.chatStream.connected) return;
+  state.workspaceRestored = true;
+  const bindings = state.workspace.bindings.slice();
+  state.workspaceRestoring = true;
+  try {
+    const results = await Promise.allSettled(bindings.map(async (binding, slot) => {
+      if (!binding || state.slots[slot]) return;
+      const session = findSession(binding.name, binding.hostId);
+      // Never resurrect a closed session or create a synthetic inventory row.
+      if (!session) return;
+      const attached = attachSession(slot, binding.name, session.display_name || session.title || binding.name, binding.hostId, {
+        viewMode: chatUiEnabled() ? binding.mode : 'terminal', activate: false,
+      });
+      const generation = state.slotGen[slot];
+      await attached;
+      // An asynchronous restore must not copy private text into another binding
+      // (even an ABA reattach of the same name), or overwrite a new user draft.
+      if (state.slotGen[slot] !== generation || state.slots[slot]?.name !== binding.name
+        || state.slots[slot]?.hostId !== binding.hostId || state.slotDraftTouched[slot]) return;
+      state.slotDrafts[slot] = binding.draft;
+      state.slotDraftTouched[slot] = true;
+      if (state.slotChatRefs[slot]) state.slotChatRefs[slot].inputEl.value = binding.draft;
+      renderSlotChat(slot);
+    }));
+    for (const result of results) {
+      if (result.status === 'rejected') console.warn('[workspace restore]', result.reason?.message || result.reason);
+    }
+  } finally {
+    state.workspaceRestoring = false;
+    // Attachments did not move focus. Synchronize desktop/narrow focus and
+    // persist the complete batch once, including drafts and hidden bindings.
+    focusSlot(state.workspace.activeSlot);
+  }
+}
+
+function applyWorkspaceLayout() {
+  const grid = document.querySelector('.grid');
+  if (!grid) return;
+  const { paneCount, activeSlot } = state.workspace;
+  grid.dataset.paneCount = String(paneCount);
+  const visible = visibleWorkspaceSlots(paneCount, activeSlot, state.workspace.visibleSlots);
+  state.workspace.visibleSlots = visible;
+  for (let slot = 0; slot < 4; slot++) {
+    const cell = document.getElementById(`cell-${slot}`);
+    cell?.classList.toggle('workspace-hidden', !visible.includes(slot));
+    cell?.classList.toggle('workspace-active', slot === activeSlot);
+    if (cell) cell.dataset.workspacePosition = String(visible.indexOf(slot));
+  }
+  document.querySelectorAll('[data-pane-count-button]').forEach(button => {
+    button.setAttribute('aria-pressed', String(Number(button.dataset.paneCountButton) === paneCount));
+  });
+  scheduleVisibleSlotFits();
+}
+
+function focusSlot(slot) {
+  state.workspace.activeSlot = slot;
+  applyWorkspaceLayout();
+  setNarrowActiveSlot(slot);
+  if (state.slotViewModes[slot] === 'chat') state.slotChatRefs[slot]?.inputEl?.focus({ preventScroll: true });
+  else if (state.slotViewModes[slot] === 'terminal') focusTerminal(slot);
+  else (state.slotViewModes[slot] === 'status' ? state.slotChatRefs[slot]?.statusMount : state.slotChatRefs[slot]?.assetMount)?.focus?.({ preventScroll: true });
+  document.body.classList.remove('sidebar-open');
+  persistWorkspace();
+}
+
+function setupWorkspaceControls() {
+  for (const button of document.querySelectorAll('[data-pane-count-button]')) {
+    button.addEventListener('click', () => {
+      state.workspace.paneCount = Number(button.dataset.paneCountButton);
+      if (state.maximizedSlot !== null) minimizeAll();
+      applyWorkspaceLayout();
+      sidebarResizer?.refresh();
+      gridColResizers.forEach(resizer => resizer.refresh());
+      persistWorkspace();
+    });
+  }
+  for (let slot = 0; slot < 4; slot++) {
+    document.getElementById(`cell-${slot}`)?.addEventListener('pointerdown', () => {
+      if (state.workspace.activeSlot === slot) return;
+      state.workspace.activeSlot = slot;
+      applyWorkspaceLayout();
+      setNarrowActiveSlot(slot);
+      persistWorkspace();
+    });
+  }
+  document.addEventListener('click', event => {
+    if (event.target.closest('[data-workspace-new]')) document.getElementById('btn-new')?.click();
+  });
+  document.addEventListener('input', event => {
+    if (event.target.classList?.contains('slot-chat-compose-input')) persistWorkspace();
+  });
+  const toggle = document.getElementById('sidebar-toggle');
+  toggle?.addEventListener('click', () => {
+    const narrow = document.body.classList.contains('web-sidebar-narrow');
+    const enabled = document.body.classList.toggle(narrow ? 'sidebar-open' : 'sidebar-collapsed');
+    toggle.setAttribute('aria-expanded', String(narrow ? enabled : !enabled));
+    scheduleVisibleSlotFits();
+  });
+  document.getElementById('sidebar-scrim')?.addEventListener('click', () => {
+    document.body.classList.remove('sidebar-open');
+    toggle?.setAttribute('aria-expanded', 'false');
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && document.body.classList.contains('sidebar-open')) {
+      document.body.classList.remove('sidebar-open');
+      toggle?.setAttribute('aria-expanded', 'false');
+    }
+  });
+  applyWorkspaceLayout();
+  setNarrowActiveSlot(state.workspace.activeSlot);
 }
 
 function focusTerminal(slot) {
@@ -5383,7 +5545,8 @@ function maximizeSlot(slot) {
   gridColResizers.forEach(resizer => resizer.refresh());
   sidebarResizer?.refresh();
   requestAnimationFrame(() => {
-    if (fitVisibleSlot(slot)) state.terminals[slot].term.focus();
+    fitVisibleSlot(slot);
+    focusSlot(slot);
   });
 
   renderSidebar();
@@ -7813,7 +7976,7 @@ for (const row of slotGrid?.querySelectorAll('.grid-row') || []) {
   const key = rowName === 'top' ? 'gridColSplitTop' : 'gridColSplitBottom';
   gridColResizers.push(createGridColResizer({
     grid: row, handle: row.querySelector('.grid-col-resizer'), initialSplit: state.appearance[key],
-    isVisible: () => state.currentView === 'chats' && state.maximizedSlot === null && !document.body.classList.contains('web-sidebar-narrow'),
+    isVisible: () => state.currentView === 'chats' && state.workspace.paneCount === 4 && state.maximizedSlot === null && !document.body.classList.contains('web-sidebar-narrow'),
     save: fraction => {
       state.appearance[key] = fraction;
       saveAppearanceSetting(key, fraction);
@@ -7822,10 +7985,10 @@ for (const row of slotGrid?.querySelectorAll('.grid-row') || []) {
     emit: (name, data) => window.PentacleHarness?.emit?.(`slot-layout:${name}`, { data: { ...data, row: rowName } }),
   }));
 }
-if (window.__PENTACLE_CONFIG__ && !new URLSearchParams(location.search).has('pentacle-chat-popout')) {
+if (!IS_CHAT_POPOUT) {
   document.body.classList.add('web-sidebar-resizable');
   for (const button of document.querySelectorAll('[data-narrow-slot]')) {
-    button.addEventListener('click', () => setNarrowActiveSlot(Number(button.dataset.narrowSlot)));
+    button.addEventListener('click', () => focusSlot(Number(button.dataset.narrowSlot)));
   }
   setNarrowActiveSlot(narrowActiveSlot);
   sidebarResizer = createSidebarResizer({
@@ -7839,20 +8002,24 @@ if (window.__PENTACLE_CONFIG__ && !new URLSearchParams(location.search).has('pen
     },
     onNarrow: narrow => {
       document.body.classList.toggle('web-sidebar-narrow', narrow);
-      if (narrow) setNarrowActiveSlot(narrowActiveSlot);
+      if (narrow) setNarrowActiveSlot(state.workspace.activeSlot);
+      document.getElementById('sidebar-toggle')?.setAttribute('aria-expanded', String(!narrow && !document.body.classList.contains('sidebar-collapsed')));
     },
     onResize: scheduleVisibleSlotFits,
   });
 }
 window.addEventListener('beforeunload', () => {
+  persistWorkspace();
   sidebarResizer?.destroy();
   gridColResizers.forEach(resizer => resizer.destroy());
 });
 
+setupWorkspaceControls();
+
 // Set empty state for all cells.
 for (let i = 0; i < 4; i++) {
   const container = document.getElementById(`term-${i}`);
-  container.innerHTML = '<div class="cell-empty">Click a session or bot to attach</div>';
+  container.innerHTML = workspaceEmptyHtml();
 }
 
 // Single document-level capture-phase wheel handler for ALL slots.
@@ -7887,7 +8054,7 @@ document.addEventListener('wheel', (e) => {
     }
     return;
   }
-  if (state.slotViewModes[slot] === 'chat' || state.slotViewModes[slot] === 'asset') return;
+  if (state.slotViewModes[slot] !== 'terminal') return;
   e.preventDefault();
   e.stopImmediatePropagation();
   const now = Date.now();
