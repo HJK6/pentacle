@@ -619,6 +619,10 @@ def start_always_on(stop_existing=True):
         log('WARNING: local actions must remain disabled until capture acknowledgement ordering is fixed; keep MIC_LOCAL_ACTIONS=false.')
     listener.on_meeting_start = start_meeting_voice
     listener.on_meeting_stop = stop_meeting_voice
+    # Silent/meeting voice phrases are matched in-service from the rules Modes section.
+    listener.mode_phrases = lambda: get_service().rules.snapshot()["modes"]
+    listener.on_silent = lambda on: get_service().set_silent(
+        on, "voice", listener=listener, meeting=state["meeting_active"] or state["mode"] == "meeting")
 
     # Re-enumerate the audio backend so this long-running server opens the input
     # stream against the current CoreAudio device IDs. PortAudio caches the device

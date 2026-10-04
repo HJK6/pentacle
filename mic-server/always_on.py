@@ -310,6 +310,11 @@ class AlwaysOnListener:
         self.on_meeting_start = None
         self.on_meeting_stop = None
 
+        # Mode voice phrases (silent / meeting), matched in-service before Bart routing.
+        # mode_phrases() returns the rules Modes section; on_silent(on) toggles silent mode.
+        self.mode_phrases = None
+        self.on_silent = None
+
         # Calibration state
         self.cal_group = None
         self.cal_samples = []
@@ -881,6 +886,34 @@ class AlwaysOnListener:
                     self._execute_command(cmd)
             return
 
+    def match_mode(self, text):
+        """Match a captured wake line against the rules Modes phrases (silent/meeting).
+
+        Returns a command name handled inside the mic service, or None. Matching is
+        substring on normalized text so near misses ("silent movie", "meeting notes")
+        do not switch a mode. The wake word and "over" are still required to reach here.
+        """
+        if not self.mode_phrases:
+            return None
+        try:
+            modes = self.mode_phrases()
+        except Exception:
+            return None
+        if not isinstance(modes, dict):
+            return None
+        norm = normalize(text)
+        def hit(group, key):
+            return any(normalize(p) and normalize(p) in norm for p in modes.get(group, {}).get(key, []))
+        if hit('silent', 'on_phrases'):
+            return 'silent_on'
+        if hit('silent', 'off_phrases'):
+            return 'silent_off'
+        if hit('meeting', 'on_phrases'):
+            return 'start_meeting'
+        if hit('meeting', 'off_phrases'):
+            return 'end_meeting'
+        return None
+
     def _execute_command(self, cmd):
         with self.wake.lock:
             return self._execute_command_locked(cmd)
@@ -908,13 +941,31 @@ class AlwaysOnListener:
                     origin = self.capture_origin
                     # Release CAPTURING before the acknowledgement takes the recognition fence.
                     self.state = "LISTENING"
-                    metadata = self.on_capture_end() if self.on_capture_end else {}
-                    if origin == 'followup':
-                        self.voice_actions.submit_answer(full_text, self.followup_id)
-                    elif origin == 'local_action':
-                        self.voice_actions.submit(full_text, self.wake.generation, metadata=metadata)
+                    mode_cmd = self.match_mode(full_text) if origin == 'wake' else None
+                    if mode_cmd:
+                        # A silent/meeting phrase is handled in-service and never sent to Bart;
+                        # no conversation is opened and no acknowledgement plays. The listener
+                        # stays in LISTENING so "Hey Bart ... over" still reaches Bart (and ends
+                        # the meeting) while a meeting records.
+                        self._emit('mode_phrase', {'command': mode_cmd, 'text': full_text})
+                        if mode_cmd in ('silent_on', 'silent_off') and self.on_silent:
+                            self.on_silent(mode_cmd == 'silent_on')
+                        elif mode_cmd == 'start_meeting':
+                            self.meeting_active = True
+                            if self.on_meeting_start:
+                                self.on_meeting_start()
+                        elif mode_cmd == 'end_meeting':
+                            self.meeting_active = False
+                            if self.on_meeting_stop:
+                                self.on_meeting_stop()
                     else:
-                        self.wake.complete(full_text, metadata=metadata)
+                        metadata = self.on_capture_end() if self.on_capture_end else {}
+                        if origin == 'followup':
+                            self.voice_actions.submit_answer(full_text, self.followup_id)
+                        elif origin == 'local_action':
+                            self.voice_actions.submit(full_text, self.wake.generation, metadata=metadata)
+                        else:
+                            self.wake.complete(full_text, metadata=metadata)
                     self._emit("wake_completed", {"generation": self.wake.generation})
                 else:
                     copy_to_clipboard(full_text)
