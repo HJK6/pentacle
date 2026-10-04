@@ -160,6 +160,84 @@ def test_pending_input_fences_new_episode_until_saved_proof_reconciles():
     asyncio.run(run())
 
 
+def test_claude_assistant_front_desk_compacts_at_lower_thresholds(monkeypatch):
+    for suffix in ("ADVISORY_ABS", "ADVISORY_PCT", "COMPACT_ABS", "COMPACT_PCT",
+                   "ASSISTANT_ADVISORY_ABS", "ASSISTANT_COMPACT_ABS"):
+        monkeypatch.delenv("PENTACLE_CONTEXT_" + suffix, raising=False)
+    level = lambda tokens: context_fields(
+        "claude", ContextReading(tokens, model="claude-opus-5-5"), assistant_backend=True,
+    )[2]
+    assert level(149_999) == "none"
+    assert level(150_000) == "advisory"
+    assert level(200_000) == "compact"
+    assert context_fields("claude", ContextReading(200_000, model="claude-opus-5-5"))[2] == "none"
+    monkeypatch.setenv("PENTACLE_CONTEXT_ASSISTANT_COMPACT_ABS", "250000")
+    assert level(200_000) == "advisory"
+
+
+def test_unproven_input_retries_after_cooldown_while_still_compact():
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig, NudgeJob
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(
+                store, parent=False, config=NudgeConfig(compact_enabled=True),
+            )
+            sid = f"{HOST}:child"
+            observer = RoutingIntegrity(store, h.sessions)
+            now = time.time()
+
+            async def read(tokens, offset):
+                await observer.observe_context(
+                    HOST, "child", provider="claude",
+                    reading=ContextReading(tokens, model="claude-fable-5-1"),
+                    observed_at=_iso(now + offset),
+                )
+
+            await read(450_000, -8)
+            await h.job.run_pass()
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await read(500_000, -7)
+            await h.job.run_pass()
+            first = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert first["attempt"]["outcome"] == "pending_input"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+
+            # Inside the cooldown the unproven attempt still fences a repaste.
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+
+            # Past the cooldown and still compact-level: same episode retries.
+            h.job = NudgeJob(
+                h.sessions, h.comms, store,
+                NudgeConfig(compact_enabled=True, compact_cooldown_s=0.0),
+            )
+            await h.job.run_pass()
+            retried = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert retried["epoch"] == first["epoch"]
+            assert retried["attempt"]["id"] != first["attempt"]["id"]
+            assert retried["attempt"]["ordinal"] == 2
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 2
+
+            # A new crossing does not inherit a permanent fence either.
+            await read(399_999, -6)
+            await read(500_000, -5)
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await h.job.run_pass()  # the new crossing's advisory occupies the composer
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await h.job.run_pass()
+            third = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert third["epoch"] != first["epoch"]
+            assert third["pending_prior_attempt"]["outcome"] == "unproven_expired"
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 3
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
 def test_codex_parent_receives_no_claude_context_pressure():
     from ledger import NudgeConfig
 

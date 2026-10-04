@@ -1931,7 +1931,7 @@ class NudgeJob:
     async def _compact_pass(
         self, rows: list[dict[str, Any]], now: float, result: NudgePassResult,
     ) -> None:
-        """Submit one compact command per durable crossing, with no blind retry."""
+        """Submit a compact command per durable crossing; retry unproven input after the cooldown."""
         if not self.config.compact_enabled:
             return
         command = sanitize_injectable(CONTEXT_COMPACT_COMMAND)
@@ -1962,15 +1962,18 @@ class NudgeJob:
                                 sid, NUDGE_KIND_CONTEXT_COMPACT, now,
                                 json.dumps(basis, sort_keys=True),
                             )
-                        else:
-                            await self._alert_compact_pending(
-                                sid, str(prior_pending.get("id") or ""),
-                            )
-                    else:
-                        await self._alert_compact_pending(
-                            sid, str(prior_pending.get("id") or ""),
+                    if prior_pending.get("outcome") == "pending_input":
+                        if not self._compact_unproven_expired(prior_pending, now):
+                            continue  # give the saved proof one cooldown to land
+                        # Still over the line after the cooldown: the earlier
+                        # command did not hold. Release the fence and retry.
+                        prior_pending["outcome"] = "unproven_expired"
+                        await self.store.record_nudge(
+                            sid, NUDGE_KIND_CONTEXT_COMPACT, now,
+                            json.dumps(basis, sort_keys=True),
                         )
-                    continue  # reconcile before any attempt in the new epoch
+                    else:
+                        continue
                 attempt = basis.get("attempt")
                 if isinstance(attempt, dict):
                     if attempt.get("outcome") == "submitted":
@@ -1988,12 +1991,15 @@ class NudgeJob:
                                     sid, NUDGE_KIND_CONTEXT_COMPACT, now,
                                     json.dumps(basis, sort_keys=True),
                                 )
-                            else:
-                                await self._alert_compact_pending(sid, str(attempt.get("id") or ""))
+                                continue
+                        if not self._compact_unproven_expired(attempt, now):
+                            continue
+                        # Unproven and still compact-level after the cooldown:
+                        # retry under the same idle and empty-composer guards
+                        # rather than leaving the seat to grow to its window.
+                    elif attempt.get("outcome") != "no_input":
                         continue
-                    if attempt.get("outcome") != "no_input":
-                        continue
-                    if now - float(attempt.get("at") or 0) < self.config.compact_cooldown_s:
+                    elif now - float(attempt.get("at") or 0) < self.config.compact_cooldown_s:
                         continue
                 result.candidates += 1
                 if result.attempted >= self.config.max_per_pass:
@@ -2087,6 +2093,10 @@ class NudgeJob:
                     )
                     await self._alert_compact_pending(sid, attempt_id)
 
+    def _compact_unproven_expired(self, attempt: dict[str, Any], now: float) -> bool:
+        """Whether an unconfirmed command has had its cooldown to prove itself."""
+        return now - float(attempt.get("at") or 0) >= self.config.compact_cooldown_s
+
     async def _alert_compact_pending(self, sid: str, attempt_id: str) -> None:
         """Escalate one ambiguous command without letting alert I/O cause repaste."""
         if self.notify is None:
@@ -2097,8 +2107,8 @@ class NudgeJob:
                 title="Compaction input needs review",
                 body=(
                     f"{sid} has an unconfirmed /compact attempt {attempt_id}. "
-                    "Inspect the saved USER-event watermark and pane before any manual action; "
-                    "the daemon will not repaste it."
+                    "The daemon retries after the compact cooldown if the seat is idle "
+                    "with an empty composer and still over the compact threshold."
                 ),
                 dedup_key=attempt_id,
                 severity="warning",

@@ -77,7 +77,7 @@ def context_fields(
     Codex compacts itself, including the configured assistant backend. It
     retains token/window telemetry but never receives threshold pressure.
     Claude warns at the capped 70%/400K line and requests compaction at the
-    capped 85%/500K line. Deliberate, scheduled and recovery handoff are
+    capped 85%/500K line; a Claude assistant front desk uses 150K/200K. Deliberate, scheduled and recovery handoff are
     independent of these levels.
     """
     tokens = int(reading.tokens)
@@ -88,16 +88,25 @@ def context_fields(
         return tokens, window, "none"
     if provider == "claude":
         window = _claude_window(reading.model)
+        # The assistant front desk routes and relays; it needs far less
+        # history than a working seat, and every wake rereads its context.
+        advisory_env, advisory_abs, compact_env, compact_abs = (
+            ("PENTACLE_CONTEXT_ASSISTANT_ADVISORY_ABS", 150_000,
+             "PENTACLE_CONTEXT_ASSISTANT_COMPACT_ABS", 200_000)
+            if assistant_backend else
+            ("PENTACLE_CONTEXT_ADVISORY_ABS", 400_000,
+             "PENTACLE_CONTEXT_COMPACT_ABS", 500_000)
+        )
         advisory = min(
             env_number(
-                os.environ, "PENTACLE_CONTEXT_ADVISORY_ABS", 400_000,
+                os.environ, advisory_env, advisory_abs,
                 lambda raw: int(float(raw)),
             ),
             round(env_number(os.environ, "PENTACLE_CONTEXT_ADVISORY_PCT", 0.70, float) * window),
         )
         compact = min(
             env_number(
-                os.environ, "PENTACLE_CONTEXT_COMPACT_ABS", 500_000,
+                os.environ, compact_env, compact_abs,
                 lambda raw: int(float(raw)),
             ),
             round(env_number(os.environ, "PENTACLE_CONTEXT_COMPACT_PCT", 0.85, float) * window),

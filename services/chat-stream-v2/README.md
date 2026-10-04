@@ -171,6 +171,8 @@ do not refuse spawns or implement a `handoff_planned` exemption.
 Claude defaults are advisory at `min(400000, 70% of model window)` and compact
 at `min(500000, 85%)`. `PENTACLE_CONTEXT_ADVISORY_ABS`,
 `PENTACLE_CONTEXT_COMPACT_ABS` and their `_PCT` overrides are supported.
+The Claude seat bound as the assistant front desk uses 150000/200000
+(`PENTACLE_CONTEXT_ASSISTANT_ADVISORY_ABS`, `PENTACLE_CONTEXT_ASSISTANT_COMPACT_ABS`).
 Codex still reports tokens and model window but always has level `none`.
 Routine context-threshold handoff is retired; deliberate, scheduled and
 recovery handoff remain independent of the level.
@@ -187,10 +189,11 @@ is idle with a proven empty composer. The source lifecycle lock and Comms pane
 input lock serialize this with observations and other input. A durable attempt
 ID and USER-event watermark are recorded before possible pane input.
 Only a matching current-generation USER event proves submission. Ambiguous
-input stays `pending_input` and is never automatically repasted; only a
-proved pre-input failure can retry after
-`PENTACLE_CONTEXT_COMPACT_COOLDOWN_S=600`. Disabling the action leaves the
-advisory and pending-input fence intact. A confirmed submission consumes the
+input stays `pending_input` for `PENTACLE_CONTEXT_COMPACT_COOLDOWN_S=600`;
+after that, a seat still at compact level is retried under the same idle and
+empty-composer guards, as is a proved pre-input failure. An unproven attempt
+never blocks compaction permanently. Disabling the action leaves the
+advisory and pending-input state intact. A confirmed submission consumes the
 episode, so continued high context does not repeat the command.
 
 Only valid readings no older than 1800 seconds and no earlier than session
