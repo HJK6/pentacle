@@ -208,3 +208,43 @@ Private evidence hashes:
 - m3-regression.log: `5e27b45e933b6e3417e2804615e334ff70c51466337690779e6f414fcbca9618`
 - m2-kubeconfig-red.log: `0bb3f20eda277a2dc009393cacd1fc8a7037dfed52ab1f30ca384dd2aaba7244`
 - m2-kubeconfig-green.log: `f6eec9b16af98e64764fadfa47259289059a0f06ab6ede25054452161091e7e8`
+
+## M4: web download and unavailable-state source checkpoint
+
+Supported non-image attachments render an escaped filename, canonical type and
+bounded size with an inert download placeholder. The existing authenticated
+chatFetchBlob bridge supplies bytes; size and SHA-256 must match before an
+object URL/download anchor is enabled. Files are application/octet-stream
+ downloads, never PDF/archive/CAD/HTML/SVG previews. URLs are node-scoped and
+revoked when nodes are removed; late responses cannot resurrect detached links.
+Transient errors offer a retry; the exact blob_unknown refusal displays
+"File expired or unavailable" with no href. The shared Electron/web bridge now
+preserves that stable error code without exposing arbitrary exception text.
+Images keep their existing viewer path.
+
+Actual store/view tests exposed a related shared-core bug: empty ASSIST_TEXT
+attachments were filtered as noise. The attachment exemption now includes
+ASSIST_TEXT alongside ASSIST. The same change will be carried to mobile in M5.
+
+The existing web-mode CDP gate gains a seeded-file scenario: real authenticated
+bridge/daemon fetch, PDF and ZIP object-URL byte-hash equality, and an absent
+file's unavailable state. The fixture is created only inside the gate's scratch
+DB/blob root. No CI workflow was changed. This browser scenario is pending
+exact-head CI execution; DOM tests are not substituted for browser evidence.
+
+Local evidence: 17 new web/DOM cases plus 25 existing display-parity tests pass;
+renderer core bundle builds. Seeder readback verifies two exact-hash files and
+one intentionally absent file. The inherited M3 recovery test was updated to
+use an actual server upload_id, with separate raw-SHA refusal preserved. The
+combined ten-format CLI journey now interrupts a partial upload, retries the
+same upload request ID on a new connection, publishes, retries and hot-rebinds,
+and proves one card plus exact fetched bytes. 252 selected Python tests pass.
+The former M3 head's CI failure remains historical until this candidate passes.
+
+Private evidence hashes:
+- m4-render-red.log: `721b1d18879be7e20a50a29ddc957d23cb0a60001f7ba3cf9b02d66fec096e88`
+- m4-focused.log: `12357f948d0bdc478a7cd25cdff5de745675913926f92fa8e51c143c43a342af`
+- m4-build.log: `65ba9956d59c72ca9323cb4a6e511ef7ee6cfda1c5114ff448a053eca3e1d6f6`
+- m3-legacy-fixture-red.log: `600e206b05d49096e27c88558e6e347066483c3731d74a522b32bead3f1b3b4e`
+- m3-review-repair.log: `6839f1893d54d52e5aa48488de6de846c1052775c62b971b5f535f7476fa9498`
+- m4-python-regression.log: `ef84bcf84db36cde21ac063c9de8034df82f0ab4e93e7af04244d125cbd832da`

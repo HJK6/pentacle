@@ -417,30 +417,44 @@ def test_real_blob_publication_retains_verified_download_envelope(tmp_path):
     from blobs import BlobStore
     from server import Server
     async def run():
-        blobs = BlobStore(str(tmp_path/'blobs'))
-        await blobs.start()
-        handlers = blobs.wire_handlers()
-        body = b'generated result artifact'
-        await handlers['upload_blob_init']({'request_id': 'upload'})
-        uploaded = await handlers['upload_blob_chunk']({'request_id': 'upload',
-            'data_b64': base64.b64encode(body).decode(), 'final': True})
-        key = hashlib.sha256(body).hexdigest()
-        assert uploaded['blob_sha'] == key
         async with setup() as (store, composite, rows):
+            blobs = BlobStore(str(tmp_path/'blobs'), attachment_store=store)
+            await blobs.start()
+            handlers = blobs.wire_handlers()
+            body = b'%PDF generated synthetic result artifact'
+            owner = object()
+            upload_auth = dict(token_verified=True, stream_id=ASTRA,
+                               session_generation=rows[ASTRA]['session_generation'])
+            await handlers['upload_blob_init']({'request_id': 'upload',
+                'purpose': 'chat_attachment', 'filename': 'result.pdf',
+                '_auth_context': upload_auth, '_client_websocket': owner})
+            uploaded = await handlers['upload_blob_chunk']({'request_id': 'upload',
+                'data_b64': base64.b64encode(body).decode(), 'final': True,
+                '_auth_context': upload_auth, '_client_websocket': owner})
+            key = hashlib.sha256(body).hexdigest()
+            assert uploaded['blob_sha'] == key
             server = Server(store=store, comms=SimpleNamespace(blob_store=blobs))
             composite.publication_attachments = server._assistant_publication_attachments
             await _seed_dispatch(store, input_identity='input', dispatch_id='d',
                                  target=LUNA, generation=rows[LUNA]['session_generation'])
             request = dict(request_id='p', composite_stream_id=STREAM, dispatch_id='d',
                 reply_to_message_id='input', publish_kind='prose', message='Artifact attached',
-                attachment_ids=[key], evidence_refs=[])
+                attachment_ids=[uploaded['upload_id']], evidence_refs=[],
+                _auth_context=dict(token_verified=True, stream_id=LUNA,
+                                   session_generation=rows[LUNA]['session_generation']))
+            with pytest.raises(ValueError, match='attachment_unverified'):
+                await composite.publish({**request, 'attachment_ids': [key]}, actor_stream_id=LUNA)
             published = await composite.publish(request, actor_stream_id=LUNA)
             assert not published['duplicate']
             saved = await store.get_assistant_composite_publication(stream_id=STREAM, publication_key='p')
             event = await store.submit(lambda conn: json.loads(conn.execute(
                 'SELECT event_json FROM session_event_tail WHERE event_id=?', (saved['event_id'],),
             ).fetchone()[0]))
-            assert event['attachments'] == [{'key': key, 'mime': 'application/octet-stream', 'size': len(body)}]
+            attachment = event['attachments'][0]
+            assert (attachment['key'], attachment['mime'], attachment['size'], attachment['filename']) == (key, 'application/pdf', len(body), 'result.pdf')
+            assert attachment['upload_id'] == uploaded['upload_id']
+            assert attachment['uploader']['stream_id'] == ASTRA
+            assert attachment['publisher']['stream_id'] == LUNA
             with pytest.raises(ValueError, match='attachment_unverified'):
                 await composite.publish({**request, 'request_id': 'missing', 'attachment_ids': ['0'*64]}, actor_stream_id=LUNA)
     asyncio.run(run())

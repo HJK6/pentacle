@@ -5757,3 +5757,19 @@ body.web-sidebar-narrow .grid.maximized .grid-cell.narrow-active {
 .provider-relogin textarea { height: 70px; resize: vertical; }
 .provider-relogin-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
 .provider-relogin [hidden] { display: none !important; }
+
+/* Managed attachments are downloads, never embedded document/archive previews. */
+.slot-chat-file-attachment {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #465064);
+  border-radius: 10px;
+  min-width: 0;
+  max-width: 100%;
+}
+.slot-chat-file-download { overflow-wrap: anywhere; text-decoration: underline; cursor: pointer; }
+.slot-chat-file-download[aria-disabled="true"] { cursor: default; }
+.slot-chat-file-download[data-file-state="failed"] { cursor: pointer; }
+.slot-chat-file-type, .slot-chat-file-status { font-size: 12px; opacity: 0.8; overflow-wrap: anywhere; }
