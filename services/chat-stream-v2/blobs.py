@@ -25,7 +25,8 @@ Wire (dotting is deliberate and matches v1): request types use underscores
 is no separate token. A non-final chunk is acked with NO frame (fire and
 forget); completion is a `final: true` chunk, never a separate commit verb.
 
-Size gates (v1 constants, preserved): total <= 64 MiB, per-chunk <= 1 MiB.
+Size gates (v1 constants, preserved): generic total <= 64 MiB, per-chunk <= 1 MiB.
+Managed chat attachments add a 25 MiB per-purpose cap and server provenance.
 """
 
 from __future__ import annotations
@@ -37,8 +38,15 @@ import hashlib
 import logging
 import os
 import re
+import uuid
+from functools import partial
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
+
+from chat_attachment_types import (
+    AttachmentError, ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_PURPOSE, sanitized_filename,
+    validated_media_type, verified_uploader,
+)
 
 log = logging.getLogger("chat_streamd_v2.blobs")
 
@@ -52,12 +60,12 @@ _SANITIZE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
 class _Upload:
     """One in-flight upload's mutable state: the open temp file, the running
-    sha, and the running total (the 64 MiB gate is a running check, not just an
+    sha, and the running total (the per-purpose gate is a running check, not just an
     init hint - a client can lie about `size_hint_bytes`)."""
 
-    __slots__ = ("fd", "tmp_path", "hasher", "size", "owner")
+    __slots__ = ("fd", "tmp_path", "hasher", "size", "owner", "purpose", "filename", "identity", "max_bytes")
 
-    def __init__(self, fd: int, tmp_path: str, owner: Any = None) -> None:
+    def __init__(self, fd: int, tmp_path: str, owner: Any = None, *, purpose=None, filename=None, identity=None, max_bytes=TOTAL_MAX_BYTES) -> None:
         self.fd = fd
         self.tmp_path = tmp_path
         self.hasher = hashlib.sha256()
@@ -66,21 +74,23 @@ class _Upload:
         #: It is the upload's one owning path: when the connection closes, the
         #: server calls `abort_connection` and this partial upload is torn down.
         self.owner = owner
+        self.purpose, self.filename, self.identity, self.max_bytes = purpose, filename, identity, max_bytes
 
 
 class BlobStore:
     """Content-addressed blob store with the v1 wire protocol.
 
-    Every disk/base64 operation runs through `_run` (the loop's default
-    executor) so the event loop only ever touches small JSON envelopes. Chunks
+    Disk operations run off-loop, through `_run` or the managed Store worker.
+    Managed row/file transitions share a per-digest lock. Chunks
     of one upload are serialized by a per-upload lock: the server dispatches one
     task per WS frame and those tasks run concurrently, so without the lock two
     chunks of the same blob could append out of order and corrupt the sha. The
     lock is acquired before the first `await`, so waiters queue in frame order.
     """
 
-    def __init__(self, root: str = DEFAULT_BLOB_ROOT) -> None:
+    def __init__(self, root: str = DEFAULT_BLOB_ROOT, *, attachment_store=None) -> None:
         self._root = Path(root)
+        self.attachment_store = attachment_store
         self._tmp = self._root / ".tmp"
         self._uploads: dict[str, _Upload] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -134,11 +144,29 @@ class BlobStore:
         await self._await_ready()
         rid = str(msg.get("request_id") or "")
         owner = msg.get("_client_websocket")
+        purpose = msg.get("purpose")
+        filename = identity = None
+        max_bytes = TOTAL_MAX_BYTES
+        if purpose == CHAT_ATTACHMENT_PURPOSE:
+            if flavor is not Promptless:
+                return flavor.error(rid, "upload_purpose_invalid")
+            if any(key in msg for key in ("uploader", "generation", "seat_stream_id", "seat_generation", "credential_id", "auth_kind", "principal_id", "uploaded_at", "upload_id", "blob_sha", "origin")):
+                return flavor.error(rid, "upload_identity_not_allowed")
+            try:
+                identity = verified_uploader(msg.get("_auth_context"))
+                filename = sanitized_filename(msg.get("filename"))
+            except AttachmentError as exc:
+                return flavor.error(rid, exc.code)
+            if self.attachment_store is None:
+                return flavor.error(rid, "upload_provenance_unavailable")
+            max_bytes = ATTACHMENT_MAX_BYTES
+        elif purpose not in (None, "generic", "report"):
+            return flavor.error(rid, "upload_purpose_invalid")
         try:
             size_hint = int(msg.get("size_hint_bytes") or 0)
         except (TypeError, ValueError):
             size_hint = 0
-        if size_hint > TOTAL_MAX_BYTES:
+        if size_hint > max_bytes:
             return flavor.error(rid, flavor.code_too_large)
         # The per-upload lock is REUSED across an idempotent reset, never
         # replaced, so "one lock per request_id" holds even while a chunk task
@@ -154,16 +182,21 @@ class BlobStore:
             # Idempotent reset: an init for a request_id that still has a live
             # upload (client resent init) discards the prior partial first so its
             # open fd + temp file cannot leak and a client retry is trivial.
+            prior = self._uploads.get(rid)
+            if prior is not None and prior.purpose == CHAT_ATTACHMENT_PURPOSE and (
+                prior.owner is not owner or prior.identity != identity
+            ):
+                return flavor.error(rid, "upload_blob_forbidden")
             prior = self._uploads.pop(rid, None)
             if prior is not None:
                 self._drop_owner(rid, prior)
                 await self._run(self._discard, prior)
             try:
-                fd, tmp_path = await self._run(self._open_tmp, rid)
+                fd, tmp_path = await self._run(self._open_tmp, ("attachment-" + uuid.uuid4().hex) if purpose == CHAT_ATTACHMENT_PURPOSE else rid)
             except OSError:
                 self._locks.pop(rid, None)  # no live upload owns this rid now
                 return flavor.error(rid, flavor.code_disk_full)
-            self._uploads[rid] = _Upload(fd, tmp_path, owner)
+            self._uploads[rid] = _Upload(fd, tmp_path, owner, purpose=purpose, filename=filename, identity=identity, max_bytes=max_bytes)
             self._by_conn.setdefault(owner, set()).add(rid)
         return {"type": flavor.init_ok, "request_id": rid}
 
@@ -176,12 +209,19 @@ class BlobStore:
             up = self._uploads.get(rid)
             if up is None:
                 return flavor.error(rid, flavor.code_unknown)
+            if up.purpose == CHAT_ATTACHMENT_PURPOSE:
+                try:
+                    current_identity = verified_uploader(msg.get("_auth_context"))
+                except AttachmentError as exc:
+                    return flavor.error(rid, exc.code)
+                if up.owner is not msg.get("_client_websocket") or up.identity != current_identity:
+                    return flavor.error(rid, "upload_blob_forbidden")
             final = bool(msg.get("final"))
             data = _b64decode(msg.get("data_b64"))
             if len(data) > CHUNK_MAX_BYTES:
                 await self._abort(rid)
                 return flavor.error(rid, flavor.code_chunk_oversize)
-            if up.size + len(data) > TOTAL_MAX_BYTES:
+            if up.size + len(data) > up.max_bytes:
                 await self._abort(rid)
                 return flavor.error(rid, flavor.code_too_large)
             try:
@@ -203,7 +243,15 @@ class BlobStore:
             try:
                 # Joined for the same reason: fsync/close/replace must finish
                 # before a cancelled task releases the lock.
-                sha = await self._run_joined(self._finish, up)
+                managed_receipt = None
+                if up.purpose == CHAT_ATTACHMENT_PURPOSE:
+                    managed_receipt = await self._finish_managed(rid, up)
+                    sha = managed_receipt["blob_sha"]
+                else:
+                    sha = await self._run_joined(self._finish, up)
+            except AttachmentError as exc:
+                await self._abort(rid)
+                return flavor.error(rid, exc.code)
             except OSError:
                 await self._abort(rid)
                 return flavor.error(rid, flavor.code_disk_full)
@@ -212,7 +260,77 @@ class BlobStore:
             self._locks.pop(rid, None)
             self._drop_owner(rid, up)
             return {"type": flavor.upload_ok, "request_id": rid,
-                    flavor.sha_field: sha, "size_bytes": size}
+                    flavor.sha_field: sha, "size_bytes": size,
+                    **(managed_receipt or {})}
+
+    async def _finish_managed(self, rid: str, up: _Upload) -> dict:
+        metadata = await self._run_joined(self._managed_metadata, up)
+        task = asyncio.ensure_future(self.attachment_store.complete_attachment_upload(
+            root=self._root, request_id=rid, sha=metadata["sha"], size=up.size,
+            media_type=metadata["mime"], filename=up.filename, identity=up.identity,
+            materialize=partial(self._materialize_managed, up, metadata["sha"]),
+        ))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # The Store worker cannot be cancelled: retain the upload lock until
+            # pending/materialize/ready finishes, then let disconnect clean up.
+            with contextlib.suppress(BaseException):
+                await task
+            raise
+        except AttachmentError:
+            raise
+        except ValueError as exc:
+            raise AttachmentError("upload_request_conflict" if str(exc) == "upload_request_conflict" else "upload_provenance_failed") from exc
+        except Exception as exc:
+            raise AttachmentError("upload_provenance_failed") from exc
+
+    def _managed_metadata(self, up: _Upload) -> dict:
+        from comms import validate_send_attachments
+        os.fsync(up.fd)
+        os.close(up.fd)
+        up.fd = -1  # cancellation cleanup must not close a recycled descriptor
+        sha, size, prefix = self._file_identity(Path(up.tmp_path))
+        if size != up.size or sha != up.hasher.hexdigest():
+            raise AttachmentError("blob_digest_mismatch")
+        if size > ATTACHMENT_MAX_BYTES:
+            raise AttachmentError("upload_blob_too_large")
+        mime = validated_media_type(up.filename, prefix)
+        if mime.startswith("image/"):
+            validate_send_attachments([{"key": sha, "mime": mime, "bytes": size}])
+        return {"sha": sha, "mime": mime}
+
+    @staticmethod
+    def _file_identity(path: Path) -> tuple[str, int, bytes]:
+        hasher, size, prefix = hashlib.sha256(), 0, b""
+        with path.open("rb") as source:
+            while True:
+                block = source.read(CHUNK_MAX_BYTES)
+                if not block:
+                    break
+                if size == 0:
+                    prefix = block[:4]
+                size += len(block)
+                hasher.update(block)
+        return hasher.hexdigest(), size, prefix
+
+    def _materialize_managed(self, up: _Upload, sha: str) -> None:
+        # Called on the Store worker while its shared per-digest lock is held.
+        dest = self._path_for(sha)
+        if dest.exists():
+            existing_sha, existing_size, _ = self._file_identity(dest)
+            if existing_sha != sha or existing_size != up.size:
+                raise AttachmentError("blob_digest_mismatch")
+            os.unlink(up.tmp_path)
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.replace(up.tmp_path, dest)
+        os.chmod(dest, 0o600)
+        directory = os.open(dest.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     async def _abort(self, rid: str) -> None:
         """Discard an upload's state. The caller must already hold the per-upload
@@ -264,6 +382,8 @@ class BlobStore:
         sha = str(msg.get("blob_sha") or "")
         path = self._path_for(sha)
         size = await self._run(self._size_if_present, path)
+        if self.attachment_store is not None and not await self.attachment_store.attachment_blob_ready(sha.lower()):
+            size = None
         if size is None:
             return {"type": "fetch_blob.error", "request_id": rid, "error_code": "blob_unknown"}
         return self._stream_fetch(rid, sha, path, size)
@@ -296,6 +416,8 @@ class BlobStore:
         await self._await_ready()
         normalized = str(sha or "").lower()
         if not _SHA_RE.fullmatch(normalized):
+            raise ValueError("blob_unknown")
+        if self.attachment_store is not None and not await self.attachment_store.attachment_blob_ready(normalized):
             raise ValueError("blob_unknown")
         path = self._path_for(normalized)
         try:
