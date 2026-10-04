@@ -7,6 +7,7 @@ const {
   shouldShowAlwaysOn,
   computeSilentState,
   computeAnswerWindowState,
+  computeMicPanelView,
 } = require('../renderer/mic-state');
 
 test('test_busy_banner_state_other_caller', () => {
@@ -145,4 +146,17 @@ test('test_answer_window_waiting_and_cleared', () => {
     { waiting: true, ready: true, conversationId: 'C', lineId: 'L', expiresIn: 18 });
   assert.deepEqual(computeAnswerWindowState({ status: { speaker: { answer_window: { waiting: false } } } }),
     { waiting: false, ready: false, conversationId: null, lineId: null, expiresIn: null });
+});
+
+test('test_mic_panel_view_answer_window_and_silent', () => {
+  const waiting = computeMicPanelView({ status: { speaker: { answer_window: { waiting: true, ready: true } } } });
+  assert.equal(waiting.answerWindow.waiting, true);
+  assert.match(waiting.answerWindow.text, /say over/i);
+  const cleared = computeMicPanelView({ status: { speaker: { answer_window: { waiting: false } } } });
+  assert.equal(cleared.answerWindow.waiting, false);
+  assert.equal(cleared.answerWindow.text, '');
+  const off = computeMicPanelView({ status: { speaker: { silent: false } } });
+  assert.deepEqual({ on: off.silent.on, label: off.silent.label, nextOn: off.silent.nextOn }, { on: false, label: 'Silent', nextOn: true });
+  const on = computeMicPanelView({ status: { speaker: { silent: true } } });
+  assert.deepEqual({ on: on.silent.on, label: on.silent.label, nextOn: on.silent.nextOn }, { on: true, label: 'Silent: On', nextOn: false });
 });

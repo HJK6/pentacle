@@ -59,10 +59,35 @@ function computeAnswerWindowState({ status } = {}) {
   };
 }
 
+// The view model the mic panel renders for silent mode and the answer window:
+// the silent toggle button (label/active and the state a click should request)
+// and the waiting-for-answer indicator (shown while a window is open, cleared
+// when the status fixture clears it).
+function computeMicPanelView({ status } = {}) {
+  const silent = computeSilentState({ status });
+  const answer = computeAnswerWindowState({ status });
+  return {
+    silent: {
+      on: silent.on,
+      source: silent.source,
+      label: silent.on ? 'Silent: On' : 'Silent',
+      nextOn: !silent.on,
+    },
+    answerWindow: {
+      waiting: answer.waiting,
+      ready: answer.ready,
+      text: answer.waiting
+        ? (answer.ready ? 'Ready for Bart’s answer — say over.' : 'Getting ready for Bart’s answer…')
+        : '',
+    },
+  };
+}
+
 module.exports = {
   computeBusyBannerState,
   shouldShowAlwaysOn,
   shouldRenderAlwaysOnUi,
   computeSilentState,
   computeAnswerWindowState,
+  computeMicPanelView,
 };

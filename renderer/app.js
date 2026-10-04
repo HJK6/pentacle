@@ -24,6 +24,7 @@ const {
   computeBusyBannerState,
   shouldRenderAlwaysOnUi,
   shouldShowAlwaysOn,
+  computeMicPanelView,
 } = require('./mic-state');
 const { createRemoteClipboardPoller } = require('./remote-clipboard-poll');
 const { createWakeDelivery } = require('./wake_delivery');
@@ -7306,6 +7307,7 @@ function updateMicUI(data) {
   const btn = document.getElementById('mic-btn-toggle');
   const copyBtn = document.getElementById('mic-btn-copy');
   const meetingBtn = document.getElementById('mic-btn-meeting');
+  const silentBtn = document.getElementById('mic-btn-silent');
   const preview = document.getElementById('mic-transcript-preview');
   const showAlways = alwaysOnVisible();
   const renderAlwaysOnUi = shouldRenderAlwaysOnUi({
@@ -7316,10 +7318,12 @@ function updateMicUI(data) {
   dot.className = 'mic-status-dot';
   btn.style.display = showAlways ? '' : 'none';
   btn.disabled = !!micState.starting;
+  if (silentBtn) silentBtn.style.display = showAlways ? '' : 'none';
   if (micState.starting) {
     btn.textContent = 'Starting…';
     info.textContent = 'Starting microphone…';
     copyBtn.disabled = meetingBtn.disabled = true;
+    if (silentBtn) silentBtn.disabled = true;
     return;
   }
 
@@ -7336,6 +7340,7 @@ function updateMicUI(data) {
     meetingBtn.disabled = true;
     copyBtn.className = 'mic-btn mic-btn-copy';
     meetingBtn.className = 'mic-btn mic-btn-meeting';
+    if (silentBtn) { silentBtn.disabled = true; silentBtn.className = 'mic-btn mic-btn-silent'; silentBtn.textContent = 'Silent'; }
     micState.mode = 'offline';
     return;
   }
@@ -7371,6 +7376,18 @@ function updateMicUI(data) {
   meetingBtn.textContent = isMeeting && !busy.visible ? 'Stop Meeting' : 'Meeting';
   meetingBtn.className = 'mic-btn mic-btn-meeting' + (isMeeting ? ' active' : '');
   meetingBtn.disabled = busy.visible ? false : isCopy;
+
+  // Silent toggle and answer-window indicator (independent of the mic mode).
+  const panelView = computeMicPanelView({ status: data });
+  if (silentBtn) {
+    silentBtn.textContent = panelView.silent.label;
+    silentBtn.className = 'mic-btn mic-btn-silent' + (panelView.silent.on ? ' active' : '');
+    silentBtn.dataset.silentOn = String(panelView.silent.on);
+    silentBtn.disabled = false;
+  }
+  if (panelView.answerWindow.waiting) {
+    dot.classList.add('active-capturing');
+  }
 
   if (isCopy) {
     dot.classList.add('active-clipboard');
@@ -7562,6 +7579,16 @@ document.getElementById('mic-btn-meeting').addEventListener('click', async () =>
   micState.lastTranscriptIdx = 0;
   document.getElementById('mic-transcript-preview').innerHTML = '';
   setTimeout(fetchMicStatus, isMeeting ? 500 : 2000);
+});
+
+document.getElementById('mic-btn-silent')?.addEventListener('click', async () => {
+  if (micState.mode === 'offline') return;
+  // Silent mode is independent of the mic mode; toggle from the last rendered state.
+  const silentBtn = document.getElementById('mic-btn-silent');
+  const nextOn = silentBtn.dataset.silentOn !== 'true';
+  silentBtn.disabled = true;
+  await micApi('POST', '/mode/silent', { on: nextOn, source: 'web' });
+  setTimeout(fetchMicStatus, 300);
 });
 
 // ── Init ───────────────────────────────────────────────────────
