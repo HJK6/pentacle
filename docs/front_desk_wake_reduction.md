@@ -1,6 +1,6 @@
 # Front desk wake reduction
 
-Only Bart's bound direct-primary front desk uses this policy. Other parents and
+Only the primary assistant's bound direct-primary front desk uses this policy (the unprefixed `PENTACLE_ASSISTANT_*` composite, whatever you have titled it). Other parents and
 router-backed assistant seats keep their existing delivery behavior.
 
 Operator input and question answers, GATE and BLOCKER tells, child reports,

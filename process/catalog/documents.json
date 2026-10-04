@@ -1,5 +1,22 @@
 [
   {
+    "id": "agent_rules_assistant_baseline",
+    "path": "agents/assistant_baseline.md",
+    "title": "Assistant front desk baseline",
+    "type": "agent-rules",
+    "canonical": true,
+    "updated_at": "2026-10-04",
+    "source_path": "agents/assistant_baseline.md",
+    "tags": [
+      "pentacle",
+      "process"
+    ],
+    "summary": "Assistant front desk baseline.",
+    "related": [],
+    "status": "stable",
+    "role": "assistant"
+  },
+  {
     "id": "agent_rules_documentation_baseline",
     "path": "agents/documentation_baseline.md",
     "title": "Documentation baseline",
