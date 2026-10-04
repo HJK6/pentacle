@@ -682,6 +682,7 @@ body.chat-stream-degraded button[data-cleanup-action] {
 .mic-btn.mic-start:hover { background: var(--yellow); color: var(--bg); }
 .mic-btn-copy.active { background: var(--green); color: var(--bg); border-color: var(--green); }
 .mic-btn-meeting.active { background: var(--red); color: #fff; border-color: var(--red); }
+.mic-btn-silent.active { background: var(--yellow); color: var(--bg); border-color: var(--yellow); }
 .mic-btn:disabled { opacity: 0.25; cursor: not-allowed; pointer-events: none; }
 
 .mic-status-dot.active-on { background: var(--cyan); animation: mic-pulse 2s infinite; }

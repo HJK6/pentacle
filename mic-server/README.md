@@ -15,3 +15,5 @@ The standard listener needs caller-provisioned audio and ASR dependencies. MLX A
 Always-on capture detects missing callbacks from its existing idle processing loop after three seconds. It attempts one input-stream reopen per callback stall and rearms when frames resume, including silence. A stopped or replaced capture cannot apply a queued reopen. If the reopen fails after an audio-device topology change, health remains explicitly unhealthy; an authorized off/on transition or service restart refreshes the backend. This does not globally reset audio while a concurrent meeting stream may be open.
 
 Resident speech, conversation capabilities, policy reload, captured clips and null-sink validation are documented in [local spoken conversations](../docs/voice_speaker.md). `MIC_VOICE_SPEAKER_MODE=resident` is the default for local-action speech; explicitly configured script/SSH consumers retain their existing contract.
+
+The answer window (Bart asks, then listens without a fresh wake word) and silent mode (`POST /mode/silent`, voice phrases, restart-persistent flag) are documented in [answer window and silent mode](../docs/voice_answer_window_and_silent_mode.md).

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const {JSDOM} = require('jsdom');
+const {computeMicPanelView} = require('../renderer/mic-state');
 const source = fs.readFileSync(require.resolve('../renderer/app.js'),'utf8');
 const update = source.slice(source.indexOf('function updateMicUI(data) {'), source.indexOf('async function fetchMicStatus()'));
 function render(status) {
@@ -10,7 +11,7 @@ function render(status) {
   const ctx = {document:dom.window.document, window:{}, CONFIG:{mic:{alwaysOnEnabled:true}},
     micState:{}, voiceState:{}, wakeDelivery:null,
     alwaysOnVisible:()=>true, shouldRenderAlwaysOnUi:()=>true, resolveLocalMicCaller:()=> 'local',
-    computeBusyBannerState:()=>({visible:false}), stopRemoteClipboardPoller:()=>{}, esc:String};
+    computeBusyBannerState:()=>({visible:false}), computeMicPanelView, stopRemoteClipboardPoller:()=>{}, esc:String};
   vm.createContext(ctx);vm.runInContext(update,ctx);ctx.updateMicUI(status);
   return dom.window.document.getElementById('mic-status-dot').className;
 }

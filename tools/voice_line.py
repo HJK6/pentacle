@@ -20,6 +20,23 @@ def limit_refusal(text, limits):
     return None
 
 
+def check_expects_answer(text, limits=None):
+    """A line flagged expects_answer must be a single direct question.
+
+    Returns None when the line passes the ordinary checker and is exactly one
+    question ending in "?"; otherwise a reason. A statement (no "?") or a line
+    holding more than one question fails, so the evaluation run rejects it.
+    """
+    reason = check_line(text, limits)
+    if reason:
+        return reason
+    if not isinstance(text, str):
+        return "empty_text"
+    if text.count("?") != 1 or not text.rstrip().endswith("?"):
+        return "not_single_question"
+    return None
+
+
 def check_line(text, limits=None):
     if not isinstance(text, str) or not text.strip():
         return "empty_text"

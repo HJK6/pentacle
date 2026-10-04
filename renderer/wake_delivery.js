@@ -100,6 +100,10 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
     if (!enabled()) return 'Wake delivery is unavailable in this client.';
     if (status.local_actions?.enabled && status.local_actions?.last?.state === "speaking") return "Speaking a local reply…";
     if (status.capture_origin === 'followup') return 'Recording your answer — say over.';
+    if (status.capture_origin === 'answer') return 'Recording your answer for Bart — say over.';
+    if (status.speaker?.answer_window?.waiting) return status.speaker.answer_window.ready
+      ? 'Ready for Bart’s answer — say over.' : 'Getting ready for Bart’s answer…';
+    if (status.speaker?.silent) return 'Silent mode is on — Bart answers in chat. Say “Hey Bart” to speak.';
     if (status.local_actions?.pending?.state === 'waiting') return status.local_actions.pending.ready === true ? 'Ready for your answer — say over to finish.' : 'Getting ready for your answer…';
     if (status.local_actions?.pending?.state === 'in_flight') return 'Processing your answer…';
     return status.wake.error || note || (held ? 'Wake message waiting for the current assistant.'
@@ -182,7 +186,7 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
         return;
       }
       const capture = held;
-      const text = roomMicHeader(capture.conversation_id, capture.text, capture.voice_reply);
+      const text = roomMicHeader(capture.conversation_id, capture.text, capture.voice_reply, capture.answer_to);
       if (!text) {
         note = 'Wake conversation unavailable. Waiting for a valid microphone claim.';
         return;

@@ -1,9 +1,13 @@
 'use strict';
 
-function roomMicHeader(conversationId, text, contract) {
+function roomMicHeader(conversationId, text, contract, answerTo) {
   if (typeof conversationId !== 'string' || !conversationId.trim()
     || conversationId.length > 256 || /[\x00-\x1f\x7f]/.test(conversationId)) return null;
-  return `[pentacle-input ${JSON.stringify({origin:'room_mic',conversation_id:conversationId,...(contract ? {voice_reply:contract}: {})})}]\n\n${text}`;
+  // answer_to carries the line_id of the question this turn answers. Only a well-formed
+  // id is included; a non-answer turn (no answerTo) carries no answer_to at all.
+  const answer = typeof answerTo === 'string' && answerTo.trim()
+    && answerTo.length <= 256 && !/[\x00-\x1f\x7f]/.test(answerTo) ? {answer_to: answerTo} : {};
+  return `[pentacle-input ${JSON.stringify({origin:'room_mic',conversation_id:conversationId,...answer,...(contract ? {voice_reply:contract}: {})})}]\n\n${text}`;
 }
 
 // Only provider transcript roots and terminal signals establish a turn. Receipt

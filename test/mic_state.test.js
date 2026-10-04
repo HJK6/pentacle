@@ -5,6 +5,9 @@ const {
   computeBusyBannerState,
   shouldRenderAlwaysOnUi,
   shouldShowAlwaysOn,
+  computeSilentState,
+  computeAnswerWindowState,
+  computeMicPanelView,
 } = require('../renderer/mic-state');
 
 test('test_busy_banner_state_other_caller', () => {
@@ -126,4 +129,34 @@ test('test_should_render_always_on_ui_false_when_mode_off', () => {
     status: { mode: 'off' },
     alwaysOnEnabled: true,
   }), false);
+});
+
+test('test_silent_state_on_with_source', () => {
+  assert.deepEqual(computeSilentState({ status: { speaker: { silent: true, silent_source: 'voice', silent_changed_at: 123.5 } } }),
+    { on: true, source: 'voice', changedAt: 123.5, label: 'Silent mode on' });
+});
+
+test('test_silent_state_off_default', () => {
+  assert.deepEqual(computeSilentState({ status: { speaker: {} } }),
+    { on: false, source: null, changedAt: null, label: 'Silent mode off' });
+});
+
+test('test_answer_window_waiting_and_cleared', () => {
+  assert.deepEqual(computeAnswerWindowState({ status: { speaker: { answer_window: { waiting: true, ready: true, conversation_id: 'C', line_id: 'L', expires_in: 18 } } } }),
+    { waiting: true, ready: true, conversationId: 'C', lineId: 'L', expiresIn: 18 });
+  assert.deepEqual(computeAnswerWindowState({ status: { speaker: { answer_window: { waiting: false } } } }),
+    { waiting: false, ready: false, conversationId: null, lineId: null, expiresIn: null });
+});
+
+test('test_mic_panel_view_answer_window_and_silent', () => {
+  const waiting = computeMicPanelView({ status: { speaker: { answer_window: { waiting: true, ready: true } } } });
+  assert.equal(waiting.answerWindow.waiting, true);
+  assert.match(waiting.answerWindow.text, /say over/i);
+  const cleared = computeMicPanelView({ status: { speaker: { answer_window: { waiting: false } } } });
+  assert.equal(cleared.answerWindow.waiting, false);
+  assert.equal(cleared.answerWindow.text, '');
+  const off = computeMicPanelView({ status: { speaker: { silent: false } } });
+  assert.deepEqual({ on: off.silent.on, label: off.silent.label, nextOn: off.silent.nextOn }, { on: false, label: 'Silent', nextOn: true });
+  const on = computeMicPanelView({ status: { speaker: { silent: true } } });
+  assert.deepEqual({ on: on.silent.on, label: on.silent.label, nextOn: on.silent.nextOn }, { on: true, label: 'Silent: On', nextOn: false });
 });
