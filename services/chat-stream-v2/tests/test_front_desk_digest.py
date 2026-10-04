@@ -230,3 +230,29 @@ def test_operator_send_stays_alone_and_peer_send_is_held(tmp_path):
             assert result['delivery']=='landed' and provider.pastes==['operator command']
             assert len(await composite.front_desk_digest._rows(target))==1
     asyncio.run(run())
+
+
+def test_held_sends_preserve_rotated_request_dedupe_and_correlated_receipts(tmp_path):
+    from notification_answer_fixture import fixture
+    async def run():
+        async with fixture(tmp_path,host='fixture-host') as (_notify,_queue,comms,provider,sessions,store):
+            target='fixture-host:v2-test'
+            composite=_desk(store,target,sessions.get(target)['session_generation'])
+            comms.front_desk_digest=composite.front_desk_digest
+            common={'stream_id':target,'text':'START: one logical send','optimistic_id':'stable-optimistic'}
+            await comms.send({**common,'request_id':'r1'})
+            retry=await comms.send({**common,'request_id':'r2'})
+            assert len(await composite.front_desk_digest._rows(target))==1
+            assert retry['coalesced'] is True and retry['delivery']=='persisted'
+            for request in ['r1','r2']:
+                rows=await store.submit(lambda conn, request=request: [dict(r) for r in conn.execute(
+                    'SELECT * FROM v2_send_receipts WHERE request_id=?',(request,))])
+                assert rows and rows[-1]['delivery']=='persisted'
+            assert provider.pastes==[]
+            # The existing 60-second identity window still admits a new send.
+            await store.submit(lambda conn: (conn.execute('UPDATE v2_send_receipts SET created_at=?',
+                ('2000-01-01T00:00:00Z',)),conn.commit()))
+            await comms.send({**common,'request_id':'r3'})
+            assert len(await composite.front_desk_digest._rows(target))==2
+            assert provider.pastes==[]
+    asyncio.run(run())

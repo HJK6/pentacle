@@ -1927,12 +1927,6 @@ class Comms:
                 await self._record_blocked_input(msg, request_id, exc)
             raise
         target = str(plan.route["final_target"])
-        if self.front_desk_digest is not None:
-            held = await self.front_desk_digest.ingress(target_stream_id=target,
-                body=plan.body, msg=msg, verb="send")
-            if held is not None:
-                return {**held, "type":"send.result", "request_id":request_id,
-                        "to_stream_id":target, "delivery":"persisted"}
         target_host, target_name = self.sessions.split(target)
         target_row = await self.store.fetch_session(target_host, target_name) or {}
         # A composite backend turn already has immutable route, dispatch and
@@ -1972,6 +1966,16 @@ class Comms:
             return await self._coalesced_send_result(
                 plan, request_id=request_id, receipt_id=receipt_id, winner=claim["winner"],
             )
+        if self.front_desk_digest is not None:
+            held = await self.front_desk_digest.ingress(
+                target_stream_id=target, body=plan.body, msg=msg, verb="send",
+            )
+            if held is not None:
+                return await self._send_result(
+                    plan, request_id=request_id, receipt_id=receipt_id,
+                    state="accepted", delivery="persisted", submission_confirmed=False,
+                    reason="front_desk_held", action_committed=True,
+                )
         try:
             materialized = await self._materialize_send_plan(plan)
         except VerbError as exc:
