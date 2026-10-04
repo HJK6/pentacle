@@ -114,3 +114,8 @@ test('a terminal with another authoritative id never closes the active room root
  f.emit('ASSIST',{transport:'codex-rollout',phase:'final_answer'},{request_id:'other'});
  await flush();assert.equal(f.calls.length,0);
 });
+test('answer_to is included only for an answer turn, after conversation_id',()=>{
+  assert.equal(roomMicHeader('conv','ans','','line-9'),'[pentacle-input {"origin":"room_mic","conversation_id":"conv","answer_to":"line-9"}]\n\nans');
+  assert.equal(roomMicHeader('conv','msg'),'[pentacle-input {"origin":"room_mic","conversation_id":"conv"}]\n\nmsg');
+  assert.equal(roomMicHeader('conv','msg',null,'bad\nid'),'[pentacle-input {"origin":"room_mic","conversation_id":"conv"}]\n\nmsg');
+});

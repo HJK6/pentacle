@@ -182,7 +182,7 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
         return;
       }
       const capture = held;
-      const text = roomMicHeader(capture.conversation_id, capture.text, capture.voice_reply);
+      const text = roomMicHeader(capture.conversation_id, capture.text, capture.voice_reply, capture.answer_to);
       if (!text) {
         note = 'Wake conversation unavailable. Waiting for a valid microphone claim.';
         return;

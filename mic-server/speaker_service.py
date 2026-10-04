@@ -318,14 +318,23 @@ class SpeakerService:
                 elif reached:
                     item['closed'] = 'exhausted_conversation'
         if open_window:
-            # After the question finishes playing, play the listening tone and open the window.
-            if rules['replies']['listening_tone']:
-                self._clip('listening_tone', item, rules)
-            with self.lock:
-                window = item.get('window')
-                if window and window['line_id'] == lid:
-                    window['opens_at'] = self.clock()
-                    window['deadline'] = self.clock()+rules['replies']['answer_window_seconds']
+            la = getattr(listener, 'voice_actions', None)
+            if la is not None and callable(getattr(la, 'waiting', None)) and la.waiting():
+                # Never overlap a local-action answer window; the second window is refused.
+                with self.lock:
+                    if item.get('window') and item['window']['line_id'] == lid:
+                        item['window'] = None
+                self.emit(dict(subsystem='voice_speaker', bug_ref=BUG_REF, outcome='window_refused',
+                               reason='answer_window_busy', conversation_id=payload['conversation_id'], line_id=lid))
+            else:
+                # After the question finishes playing, play the listening tone and open the window.
+                if rules['replies']['listening_tone']:
+                    self._clip('listening_tone', item, rules)
+                with self.lock:
+                    window = item.get('window')
+                    if window and window['line_id'] == lid:
+                        window['opens_at'] = self.clock()
+                        window['deadline'] = self.clock()+rules['replies']['answer_window_seconds']
         return result
 
     def turn_ended(self, cid, meeting=False):
@@ -369,6 +378,59 @@ class SpeakerService:
             window['answered'] = True
             item['window'] = None
             item['lines_since_answer'] = 0
+            return True
+
+    def _ready_window_conversation(self):
+        for cid in reversed(self.conversations):
+            item = self.conversations[cid]
+            self._maybe_expire_window(item)
+            window = item.get('window')
+            if window and window['opens_at'] is not None and self.clock() >= window['opens_at']:
+                return cid, item, window
+        return None
+
+    def answer_captured(self, meeting=False):
+        """The operator answered an open Bart question without the wake word.
+
+        Returns delivery metadata (conversation_id + answer_to=line_id) for the wake
+        claim, acknowledges on the same conversation as any routed request, resets the
+        allowance and closes the window, keeping the conversation open. Returns None when
+        no window is ready, so the caller falls back to a fresh room-mic request.
+        """
+        with self.lock:
+            found = self._ready_window_conversation()
+            if not found:
+                return None
+            cid, item, window = found
+            line_id = window['line_id']
+            window['answered'] = True
+            item['window'] = None
+            item['lines_since_answer'] = 0
+        # Capture publishes immediately; the acknowledgement must not hold the claim.
+        self.mark(cid, 'capture_ended_at')
+        item['ack_done'].clear()
+        rules = self.rules.snapshot()
+        def acknowledge():
+            self._clip('acknowledgement', item, rules)
+        self.ack_threads = [thread for thread in self.ack_threads if thread.is_alive()]
+        thread = threading.Thread(target=acknowledge, name='answer-ack', daemon=True)
+        self.ack_threads.append(thread)
+        thread.start()
+        self.mark(cid, 'routed_at')
+        return dict(conversation_id=cid, answer_to=line_id)
+
+    def cancel_answer_window(self):
+        """A fresh wake word closes an open answer window; the conversation stays as is."""
+        with self.lock:
+            found = self._ready_window_conversation()
+            if not found:
+                # Also drop a not-yet-ready window (tone still playing) on a fresh wake.
+                for item in self.conversations.values():
+                    if item.get('window'):
+                        item['window'] = None
+                        return True
+                return False
+            found[1]['window'] = None
             return True
 
     def has_open_window(self):

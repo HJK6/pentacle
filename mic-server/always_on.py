@@ -315,6 +315,14 @@ class AlwaysOnListener:
         self.mode_phrases = None
         self.on_silent = None
 
+        # Bart answer window (no wake word after Bart asks a question).
+        # answer_window() -> truthy when the microphone may capture an answer;
+        # on_answer() -> delivery metadata (conversation_id + answer_to) or None;
+        # cancel_answer_window() closes an open window when a fresh wake preempts it.
+        self.answer_window = None
+        self.on_answer = None
+        self.cancel_answer_window = None
+
         # Calibration state
         self.cal_group = None
         self.cal_samples = []
@@ -802,6 +810,9 @@ class AlwaysOnListener:
                 match = local_match
             if match:
                 self.voice_actions.reset_dialogue()
+                # A fresh wake word starts a new request and closes any Bart answer window.
+                if self.cancel_answer_window:
+                    self.cancel_answer_window()
                 if not self.wake.can_start():
                     return
                 self.capture_origin = "local_action" if local_match or (self.voice_actions.enabled and self.voice_actions.policy == "shared") else "wake"
@@ -814,6 +825,13 @@ class AlwaysOnListener:
                 if pending and match_command(text) != 'end_copy':
                     self.capture_origin = 'followup'
                     self.followup_id = pending['id']
+                    self.state = 'CAPTURING'
+                    self.captured_texts = [text]
+                    self._emit('state', 'CAPTURING')
+                    return
+                # A Bart answer window captures an answer with no wake word.
+                if self.answer_window and self.answer_window() and match_command(text) != 'end_copy':
+                    self.capture_origin = 'answer'
                     self.state = 'CAPTURING'
                     self.captured_texts = [text]
                     self._emit('state', 'CAPTURING')
@@ -866,7 +884,7 @@ class AlwaysOnListener:
             else:
                 self.captured_texts.append(text)
                 self._log(f"[capturing] {text}")
-                self._emit("wake_capturing" if self.capture_origin in ("wake", "local_action", "followup") else "capturing", text)
+                self._emit("wake_capturing" if self.capture_origin in ("wake", "local_action", "followup", "answer") else "capturing", text)
                 if len(self.captured_texts) >= MAX_CAPTURE_SEGMENTS:
                     self._log("[warn] capture limit reached, auto-flushing to clipboard")
                     if self.capture_origin == 'followup':
@@ -921,7 +939,7 @@ class AlwaysOnListener:
     def _execute_command_locked(self, cmd):
         if cmd == 'start_copy' and self.recognition_stamp()[1]:
             raise ValueError('Local voice reply is playing; wait before recording.')
-        if cmd == "start_copy" and self.capture_origin in ("wake", "local_action", "followup"):
+        if cmd == "start_copy" and self.capture_origin in ("wake", "local_action", "followup", "answer"):
             raise ValueError("wake capture is active; finish it with over first")
         self._log(f"[command] {cmd}")
         self._emit("command", cmd)
@@ -937,7 +955,7 @@ class AlwaysOnListener:
         elif cmd == "end_copy":
             if self.captured_texts:
                 full_text = " ".join(self.captured_texts).strip()
-                if self.capture_origin in ("wake", "local_action", "followup"):
+                if self.capture_origin in ("wake", "local_action", "followup", "answer"):
                     origin = self.capture_origin
                     # Release CAPTURING before the acknowledgement takes the recognition fence.
                     self.state = "LISTENING"
@@ -958,6 +976,15 @@ class AlwaysOnListener:
                             self.meeting_active = False
                             if self.on_meeting_stop:
                                 self.on_meeting_stop()
+                    elif origin == 'answer':
+                        # An answer reuses the question's conversation and carries answer_to.
+                        answer_meta = self.on_answer() if self.on_answer else None
+                        if answer_meta:
+                            self.wake.complete(full_text, metadata=answer_meta)
+                        else:
+                            # The window lapsed before "over"; deliver as a fresh room-mic request.
+                            metadata = self.on_capture_end() if self.on_capture_end else {}
+                            self.wake.complete(full_text, metadata=metadata)
                     else:
                         metadata = self.on_capture_end() if self.on_capture_end else {}
                         if origin == 'followup':

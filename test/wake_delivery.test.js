@@ -186,3 +186,9 @@ test('bound generation mismatch holds wake',async()=>{
  await f.helper.tick(f.status);
  assert.deepEqual(f.sends,[]);
 });
+test('an answer claim delivers a header carrying answer_to',async()=>{
+  const f=fixture();
+  f.claims=[{id:'ans',generation:'one',text:'the answer',answer_to:'line-123'}];
+  await f.helper.tick(f.status);
+  assert.deepEqual(f.sends,[['bart:current','[pentacle-input {"origin":"room_mic","conversation_id":"conversation-ans","answer_to":"line-123"}]\n\nthe answer']]);
+});

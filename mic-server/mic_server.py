@@ -568,7 +568,7 @@ def always_on_event(kind, data):
             state["on_captured_texts"] = []
         elif data == "CAPTURING":
             state["on_captured_texts"] = []
-            if getattr(always_on_listener, "capture_origin", None) not in ("wake", "local_action", "followup"):
+            if getattr(always_on_listener, "capture_origin", None) not in ("wake", "local_action", "followup", "answer"):
                 state["on_last_copied"] = ""
 
 
@@ -623,6 +623,11 @@ def start_always_on(stop_existing=True):
     listener.mode_phrases = lambda: get_service().rules.snapshot()["modes"]
     listener.on_silent = lambda on: get_service().set_silent(
         on, "voice", listener=listener, meeting=state["meeting_active"] or state["mode"] == "meeting")
+    # Bart answer window: capture an answer without the wake word and deliver it tagged.
+    listener.answer_window = lambda: get_service().answer_window_status().get("ready", False)
+    listener.on_answer = lambda: get_service().answer_captured(
+        meeting=state["meeting_active"] or state["mode"] == "meeting")
+    listener.cancel_answer_window = lambda: get_service().cancel_answer_window()
 
     # Re-enumerate the audio backend so this long-running server opens the input
     # stream against the current CoreAudio device IDs. PortAudio caches the device
@@ -926,7 +931,7 @@ class MicHandler(BaseHTTPRequestHandler):
         elif self.path == "/copy/start":
             if not always_on_listener or not always_on_listener.running:
                 self._json({"error": "always-on listener not active"}, 400)
-            elif getattr(always_on_listener, "capture_origin", None) in ("wake", "local_action", "followup"):
+            elif getattr(always_on_listener, "capture_origin", None) in ("wake", "local_action", "followup", "answer"):
                 self._json({"error": "wake capture is active; finish it with over first"}, 409)
             elif always_on_listener.state == "CAPTURING":
                 self._json({"ok": True, "already": True})
@@ -940,7 +945,7 @@ class MicHandler(BaseHTTPRequestHandler):
         elif self.path == "/copy/stop":
             if not always_on_listener or not always_on_listener.running:
                 self._json({"error": "always-on listener not active"}, 400)
-            elif getattr(always_on_listener, "capture_origin", None) in ("wake", "local_action", "followup"):
+            elif getattr(always_on_listener, "capture_origin", None) in ("wake", "local_action", "followup", "answer"):
                 self._json({"ok": True, "copied": state.get("on_last_copied", ""), "already": True})
             elif always_on_listener.state != "CAPTURING":
                 self._json({"ok": True, "copied": state.get("on_last_copied", ""), "already": True})
