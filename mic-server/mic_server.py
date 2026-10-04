@@ -860,6 +860,21 @@ class MicHandler(BaseHTTPRequestHandler):
         elif self.path == "/mode/off":
             self._handle_mode_off()
 
+        elif self.path == "/mode/silent":
+            # Silent mode is a speaker-service flag, independent of the mic mode and of
+            # meeting mode. Web and mobile toggles post here; the voice path sets it directly.
+            on = body.get("on", body.get("silent")) if isinstance(body, dict) else None
+            source = body.get("source", "web") if isinstance(body, dict) else "web"
+            if not isinstance(on, bool):
+                self._json({"error": "on must be boolean"}, 400)
+            else:
+                result = get_service().set_silent(on, source, listener=always_on_listener,
+                                                  meeting=state["meeting_active"] or state["mode"] == "meeting")
+                if result.get("outcome") == "refused":
+                    self._json({"error": result.get("reason")}, 400)
+                else:
+                    self._json({"ok": True, **result})
+
         elif self.path == "/calibrate/start":
             if not always_on_listener or not always_on_listener.running:
                 self._json({"error": "always-on listener not active -- set mode to 'on' first"}, 400)

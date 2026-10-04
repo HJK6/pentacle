@@ -59,6 +59,28 @@ def test_silent_persists_across_service_restart(service, tmp_path, monkeypatch):
     assert second.silent is True and second.silent_source == 'mobile'
 
 
+def test_mode_silent_endpoint_sets_flag_and_source(service, monkeypatch):
+    import mic_server
+    from . import test_mic_server_coordination as harness
+    case = harness.MicServerTestCase(methodName='runTest')
+    case.setUp()
+    try:
+        monkeypatch.setattr(mic_server, 'get_service', lambda: service)
+        mic_server.always_on_listener = service.test_listener
+        code, data = case.post('/mode/silent', dict(on=True, source='web'))
+        assert code == 200 and data['ok'] is True and data['silent'] is True and data['source'] == 'web'
+        assert service.silent is True and service.silent_source == 'web'
+        code, data = case.post('/mode/silent', dict(on='yes', source='web'))
+        assert code == 400
+        code, data = case.post('/mode/silent', dict(on=False, source='mobile'))
+        assert code == 200 and data['silent'] is False and data['source'] == 'mobile'
+        assert service.silent is False
+        # Turning off played the confirmation clip.
+        assert service.last['receipt']['text'] == 'Silent mode is off.'
+    finally:
+        case.tearDown()
+
+
 def test_silent_is_independent_of_meeting(service):
     cid = opened(service)
     # Meeting active with silent off: the line is spoken (meeting suppresses no speech).
