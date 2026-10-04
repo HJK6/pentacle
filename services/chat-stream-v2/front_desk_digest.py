@@ -37,11 +37,23 @@ class FrontDeskDigest:
         return bool(binding and target == binding[0])
 
     @staticmethod
+    def enabled():
+        return os.environ.get('PENTACLE_FRONT_DESK_DIGEST_ENABLED', '1').strip().lower() not in {
+            '0', 'false', 'no', 'off',
+        }
+
+    @staticmethod
     def deadline_s():
         return max(0.0, env_number(os.environ, 'PENTACLE_FRONT_DESK_DIGEST_S', 3600.0, float))
 
     async def ingress(self, *, target_stream_id, body, msg, verb):
         if not self.matches(target_stream_id):
+            return None
+        if not self.enabled():
+            return None
+        # Comms.send_assistant_backend introduces this private marker. Server
+        # strips private wire fields, so a peer's copied header cannot use it.
+        if msg.get('_assistant_composite_backend_dispatch') is True:
             return None
         if msg.get('_front_desk_digest_token') is DIGEST_TOKEN:
             return None
@@ -104,12 +116,15 @@ class FrontDeskDigest:
                 pending = [dict(row) for row in conn.execute(
                     "SELECT * FROM v2_outbound_notices WHERE kind=? AND recipient_stream_id=? "
                     "AND delivered_at IS NULL AND terminal_at IS NULL ORDER BY created_at,notice_id",
-                    (HELD_KIND, target))
-                    if json.loads(row['metadata']).get('root_generation') == generation]
+                    (HELD_KIND, target))]
                 if not pending:
                     return
                 oldest = datetime.fromisoformat(pending[0]['created_at'].replace('Z', '+00:00')).timestamp()
-                if now < oldest + deadline_s:
+                # Turning admission off also drains the pre-existing backlog
+                # on the next sweep. A restart retains the original deadline;
+                # held rows from a prior generation of this same target are
+                # folded for its current binding rather than stranded forever.
+                if self.enabled() and now < oldest + deadline_s:
                     return
                 nid, body = self._block(pending)
                 _insert_outbound_notice_conn(conn, notice_id=nid, tell_id=nid, kind='lane_digest', dedupe_key=nid,

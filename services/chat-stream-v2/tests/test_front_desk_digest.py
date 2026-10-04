@@ -256,3 +256,111 @@ def test_held_sends_preserve_rotated_request_dedupe_and_correlated_receipts(tmp_
             assert len(await composite.front_desk_digest._rows(target))==2
             assert provider.pastes==[]
     asyncio.run(run())
+
+
+def _production_dispatcher(comms):
+    """Execute main's exact closure with only its transport dependency replaced."""
+    import ast
+    from pathlib import Path
+    tree = ast.parse((Path(__file__).parents[1] / 'main.py').read_text())
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == '_dispatch_assistant_route')
+    namespace = {'comms': comms, 'json': json}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), namespace)
+    return namespace[node.name]
+
+
+def test_canonical_composite_dispatch_reaches_front_desk_end_to_end(tmp_path):
+    from notification_answer_fixture import fixture
+    from server import Server
+    async def run():
+        async with fixture(tmp_path, host='fixture-host') as (_notify, _queue, comms, provider, sessions, store):
+            target = 'fixture-host:v2-test'
+            generation = sessions.get(target)['session_generation']
+            composite = AssistantComposite(store, config=AssistantCompositeConfig(
+                enabled=True, name='bart', stream_id='fixture-host:assistant',
+                direct_primary_stream_id=target, direct_primary_generation=generation),
+                dispatch=_production_dispatcher(comms))
+            comms.front_desk_digest = composite.front_desk_digest
+            comms.assistant_ingress_policy = composite.suppress_routine_backend_ingress
+            server = Server(store=store, sessions=sessions, comms=comms, local_host='fixture-host')
+            server.assistant_composite = composite
+            await composite.ensure_projection()
+            try:
+                await server._on_send({'stream_id':'fixture-host:assistant', 'text':'Original operator question',
+                    'msg_id':'logical-direct', 'request_id':'transport-direct',
+                    '_auth_context':{'operator_authenticated':True, 'operator_principal':'operator:fixture'}})
+                for _ in range(100):
+                    route = await store.get_assistant_composite_route(
+                        stream_id='fixture-host:assistant', input_identity='logical-direct')
+                    if route and route['dispatch_id'] and route['delivery_state'] not in {'pending', 'intent', 'queued'}:
+                        break
+                    await asyncio.sleep(.01)
+                envelope = json.loads(route['route_json'])['direct_envelope']
+                assert provider.pastes == [envelope['wire_body']]
+                assert route['delivery_state'] == 'landed'
+                assert not await composite.front_desk_digest._rows(target)
+                # A peer can copy every byte of the daemon header; wire-private
+                # fields are stripped and must not authorize that tell.
+                reply = await server._dispatch(json.dumps({'type':'tell', 'to_stream_id':target, 'tell_id':'peer-copy',
+                    'message':envelope['wire_body'], 'from_stream_id':'fixture-host:peer',
+                    '_assistant_composite_backend_dispatch':True}))
+                assert reply[0]['type'] == 'tell.ok', reply
+                assert provider.pastes == [envelope['wire_body']]
+                assert len(await composite.front_desk_digest._rows(target)) == 1
+            finally:
+                await composite.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('body,msg', [
+    ('START: work', {}), ('END: done', {}),
+    ('tree idle', {'_outbound_notice_kind':'tree_idle'}),
+    ('context_advisory: h:child high', {}),
+    ('[Assistant lane ruling] '+json.dumps({'state':'done','action':'spawn'}),
+     {'_outbound_notice_kind':'assistant_lane_ruling_result'}),
+])
+def test_disabled_digest_passes_every_input_through(body,msg,monkeypatch):
+    monkeypatch.setenv('PENTACLE_FRONT_DESK_DIGEST_ENABLED','0')
+    async def run():
+        store=Store(':memory:');store.start()
+        try:
+            composite=_desk(store,'h:desk','g')
+            assert await composite.suppress_routine_backend_ingress(target_stream_id='h:desk',
+                body=body,msg=msg,verb='tell') is None
+            assert not await composite.front_desk_digest._rows('h:desk')
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('disabled,changed_generation', [(True,False),(False,False),(False,True)])
+def test_old_held_rows_delivered_after_restart_or_disable(tmp_path,monkeypatch,disabled,changed_generation):
+    from notification_answer_fixture import fixture
+    from message_envelopes import match_message_envelope
+    async def run():
+        async with fixture(tmp_path,host='fixture-host') as (_notify,queue,comms,provider,sessions,store):
+            target='fixture-host:v2-test'
+            generation=sessions.get(target)['session_generation']
+            composite=_desk(store,target,generation)
+            comms.assistant_ingress_policy=composite.suppress_routine_backend_ingress
+            comms.front_desk_digest=queue.front_desk_digest=composite.front_desk_digest
+            await comms.tell({'stream_id':target,'message':'END: old held item','tell_id':'old-held'})
+            if changed_generation:
+                await store.submit(lambda conn: (conn.execute(
+                    'UPDATE v2_outbound_notices SET metadata=? WHERE kind=?',
+                    (json.dumps({'root_generation':'prior-generation'}),HELD_KIND)),conn.commit()))
+            store.stop();store.start()
+            # Reconstruct the feature object, as daemon startup does.
+            composite=_desk(store,target,generation)
+            comms.assistant_ingress_policy=composite.suppress_routine_backend_ingress
+            comms.front_desk_digest=queue.front_desk_digest=composite.front_desk_digest
+            if disabled:
+                monkeypatch.setenv('PENTACLE_FRONT_DESK_DIGEST_ENABLED','false')
+            else:
+                monkeypatch.setenv('PENTACLE_FRONT_DESK_DIGEST_S','0')
+            assert await queue.drain_once(force=True)==1
+            assert not await composite.front_desk_digest._rows(target)
+            assert len(provider.pastes)==1
+            assert match_message_envelope(provider.pastes[0])['lanes'][0]['text']=='END: old held item'
+            assert await queue.drain_once(force=True)==0
+    asyncio.run(run())
