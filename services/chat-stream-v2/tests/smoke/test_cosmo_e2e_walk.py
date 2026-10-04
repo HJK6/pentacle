@@ -13,6 +13,7 @@ apply REAL mutations.  Cleanup is proven on normal AND failure paths.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 
 import pytest
@@ -184,13 +185,54 @@ def test_photo_real_blob_roundtrip_and_publish_attachment(tmp_path):
                 await mob.rpc("send", request_id="r-photo", to_stream_id=H.DAFF_CHAT,
                               text="see photo", msg_id="m-photo")
                 did = await hz.resolved_dispatch_id("m-photo")
+                # The authenticated mobile uploader obtains a server-issued
+                # managed receipt. Preserve the generic upload/download above.
+                init = await mob.rpc("upload_blob_init", request_id="managed-photo",
+                                     purpose="chat_attachment", filename="fixture-photo.png",
+                                     size_hint_bytes=len(content))
+                assert init["type"] == "upload_blob.init.ok", init
+                managed = await mob.rpc("upload_blob_chunk", request_id="managed-photo",
+                                        data_b64=base64.b64encode(content).decode(), final=True)
+                assert managed["type"] == "upload_blob.ok", managed
+                assert managed["blob_sha"] == sha and managed["bytes"] == len(content)
+                assert managed["auth_kind"] == "scoped" and managed["assistant_scope"] == H.DAFF_CHAT
+                assert managed["upload_id"] != sha
+                await mob.rpc("send", request_id="r-photo-raw-negative", to_stream_id=H.DAFF_CHAT,
+                              text="reject raw photo receipt", msg_id="m-photo-raw-negative")
+                negative_dispatch = await hz.resolved_dispatch_id("m-photo-raw-negative")
+                assert negative_dispatch != did
+                before = await hz.store.submit(lambda c: (
+                    c.execute('SELECT count(*) FROM v2_assistant_composite_publications').fetchone()[0],
+                    c.execute('SELECT count(*) FROM v2_attachment_refs').fetchone()[0]))
+                tail_before = _publishes(await hz.store.fetch_session_event_tail(H.DAFF_CHAT, limit=50))
+                rejected = await seat.publish(dispatch_id=negative_dispatch, reply_to_message_id="m-photo-raw-negative",
+                                              message="got it", attachment_ids=[sha])
+                assert rejected["type"] == "assistant.publish.error", rejected
+                assert rejected["error_code"] == "assistant_publish_attachment_unverified", rejected
+                assert await hz.store.submit(lambda c: (
+                    c.execute('SELECT count(*) FROM v2_assistant_composite_publications').fetchone()[0],
+                    c.execute('SELECT count(*) FROM v2_attachment_refs').fetchone()[0])) == before
+                assert _publishes(await hz.store.fetch_session_event_tail(H.DAFF_CHAT, limit=50)) == tail_before
                 pub = await seat.publish(dispatch_id=did, reply_to_message_id="m-photo",
-                                         message="got it", attachment_ids=[sha])
+                                         message="got it", attachment_ids=[managed["upload_id"]])
                 assert pub["type"] == "assistant.publish.ok", pub
                 tail = await hz.store.fetch_session_event_tail(H.DAFF_CHAT, limit=50)
                 reply = _publishes(tail)[-1]
-                assert any(sha in json.dumps(a) for a in reply["raw"].get("attachments", [])) \
-                    or sha in json.dumps(reply["raw"]), reply  # attachment resolved on the reply
+                attachments = reply["attachments"]
+                assert len(attachments) == 1
+                attachment = attachments[0]
+                assert (attachment["upload_id"], attachment["key"], attachment["mime"],
+                        attachment["size"], attachment["filename"]) == (
+                    managed["upload_id"], sha, "image/png", len(content), "fixture-photo.png")
+                assert attachment["uploader"]["credential_id"] == managed["credential_id"]
+                assert attachment["uploader"]["principal_id"] == managed["uploader"]
+                seat_row = await hz.store.fetch_session(*H.DAFF_SEAT.split(":", 1))
+                assert attachment["publisher"]["stream_id"] == H.DAFF_SEAT
+                assert attachment["publisher"]["generation"] == seat_row["session_generation"]
+                refs = await hz.store.submit(lambda c: list(c.execute(
+                    'SELECT upload_id,blob_sha,stream_id FROM v2_attachment_refs WHERE upload_id=?',
+                    (managed["upload_id"],))))
+                assert [tuple(r) for r in refs] == [(managed["upload_id"], sha, H.DAFF_CHAT)]
         finally:
             await hz.stop()
     _run(run)
