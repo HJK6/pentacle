@@ -420,6 +420,10 @@ def test_negative_control_receipt_mutation_breaks_lookup(tmp_path):
 
                     def _drop(conn):
                         conn.execute("DELETE FROM v2_send_receipts")
+                        # Admission now commits request ownership atomically.
+                        # Commit the deliberate fixture mutation too, so the
+                        # restored send can begin its own admission transaction.
+                        conn.commit()
                         return None
 
                     await hz.store.submit(_drop)  # receipt persistence fails
@@ -428,19 +432,22 @@ def test_negative_control_receipt_mutation_breaks_lookup(tmp_path):
                 hz.store.admit_assistant_composite_input = mutated  # APPLY mutation
                 try:
                     before = len(_users(await hz.store.fetch_session_event_tail(H.DAFF_CHAT, limit=50)))
-                    await mob.rpc("send", request_id="r-rcpt", to_stream_id=H.DAFF_CHAT,
-                                  text="hi", msg_id="m-rcpt")
+                    sent = await mob.rpc("send", request_id="r-rcpt", to_stream_id=H.DAFF_CHAT,
+                                         text="hi", msg_id="m-rcpt")
+                    assert sent["type"] == "send.result", sent
                     await asyncio.sleep(0.1)
                     assert applied["hit"] is True                       # mutation target found/applied
                     after = len(_users(await hz.store.fetch_session_event_tail(H.DAFF_CHAT, limit=50)))
                     assert after == before + 1                          # message still landed
                     rc = await mob.rpc("send.receipt.get", request_id="r-rcpt", to_stream_id=H.DAFF_CHAT)
-                    assert rc.get("found") is not True                  # receipt oracle goes RED
+                    assert rc["type"] == "send.receipt.get.ok", rc
+                    assert rc.get("found") is False                  # receipt oracle goes RED
                 finally:
                     hz.store.admit_assistant_composite_input = real_admit  # RESTORE
                 # Restored: a fresh send's receipt is found again (proves the mutation).
-                await mob.rpc("send", request_id="r-rcpt2", to_stream_id=H.DAFF_CHAT,
-                              text="hi2", msg_id="m-rcpt2")
+                restored = await mob.rpc("send", request_id="r-rcpt2", to_stream_id=H.DAFF_CHAT,
+                                        text="hi2", msg_id="m-rcpt2")
+                assert restored["type"] == "send.result", restored
                 await asyncio.sleep(0.1)
                 rc2 = await mob.rpc("send.receipt.get", request_id="r-rcpt2", to_stream_id=H.DAFF_CHAT)
                 assert rc2.get("found") is True, rc2
