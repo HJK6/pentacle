@@ -73,3 +73,5 @@ must never open an audio device. Evaluation fixtures use a disposable assistant
 seat with a test mirror sink, never the operator chat or live assistant binding.
 
 The connected client polls mic status every 100 ms with at most one status read in flight. Delivery reads state and binding together before claim, then reads status, state and binding together after claim. Generation, mode, unique target, binding handoff and at-most-once checks remain required. Without a connected eligible client the service retains the capture; a later client claims it once. The delivery budget applies only with an eligible client connected. Submit the spoken line as the first tool action using the header contract; do not read helper usage.
+
+The answer window (Bart asks a question and listens for the reply without a fresh wake word, delivering the answer with an `answer_to` header) and silent mode are documented in [answer window and silent mode](voice_answer_window_and_silent_mode.md).
