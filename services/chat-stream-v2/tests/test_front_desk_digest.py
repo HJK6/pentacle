@@ -308,6 +308,14 @@ def test_canonical_composite_dispatch_reaches_front_desk_end_to_end(tmp_path):
                 assert reply[0]['type'] == 'tell.ok', reply
                 assert provider.pastes == [envelope['wire_body']]
                 assert len(await composite.front_desk_digest._rows(target)) == 1
+                # The addressed-composite tell path introduces the same private
+                # marker itself. It still must not promote a peer's body.
+                reply = await server._on_tell({'to_stream_id':'fixture-host:assistant',
+                    'tell_id':'peer-composite-copy', 'message':envelope['wire_body'],
+                    '_auth_context':{'token_verified':True, 'stream_id':'fixture-host:peer'}})
+                assert reply['delivery_status'] == 'persisted'
+                assert provider.pastes == [envelope['wire_body']]
+                assert len(await composite.front_desk_digest._rows(target)) == 2
             finally:
                 await composite.stop()
     asyncio.run(run())

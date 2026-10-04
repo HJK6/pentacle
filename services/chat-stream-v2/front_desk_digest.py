@@ -51,9 +51,10 @@ class FrontDeskDigest:
             return None
         if not self.enabled():
             return None
-        # Comms.send_assistant_backend introduces this private marker. Server
-        # strips private wire fields, so a peer's copied header cannot use it.
-        if msg.get('_assistant_composite_backend_dispatch') is True:
+        # Only marked sends come from Comms.send_assistant_backend. Composite
+        # peer tells also carry this marker, but are not operator dispatches.
+        # Server strips private wire fields, so a copied header cannot use it.
+        if verb == 'send' and msg.get('_assistant_composite_backend_dispatch') is True:
             return None
         if msg.get('_front_desk_digest_token') is DIGEST_TOKEN:
             return None

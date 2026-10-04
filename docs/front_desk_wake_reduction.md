@@ -29,8 +29,10 @@ The resulting digest uses the normal queue's delivery and recovery rules.
 
 Canonical direct operator dispatches bypass admission using the private marker
 introduced by `Comms.send_assistant_backend`, before any hold/drop decision.
-Wire clients cannot supply that marker; copying the daemon dispatch header in a
-peer tell does not make it operator input. GATE/BLOCKER classification applies
+The bypass applies only to marked sends; forwarded composite peer tells also
+carry the marker but remain subject to admission. Wire clients cannot supply
+that marker; copying the daemon dispatch header in a peer tell, addressed to
+either the desk or its composite, does not make it operator input. GATE/BLOCKER classification applies
 to the tell's leading label (after the notice prefix), not references to another
 seat's GATE buried in a progress update.
 
