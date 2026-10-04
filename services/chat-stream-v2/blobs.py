@@ -249,6 +249,15 @@ class BlobStore:
                 if up.purpose == CHAT_ATTACHMENT_PURPOSE:
                     managed_receipt = await self._finish_managed(rid, up)
                     sha = managed_receipt["blob_sha"]
+                elif self.attachment_store is not None:
+                    task = asyncio.ensure_future(self.attachment_store.complete_unmanaged_upload(
+                        root=self._root, sha=up.hasher.hexdigest(), materialize=partial(self._finish, up)))
+                    try:
+                        sha = await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        with contextlib.suppress(BaseException):
+                            await task
+                        raise
                 else:
                     sha = await self._run_joined(self._finish, up)
             except AttachmentError as exc:

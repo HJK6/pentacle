@@ -74,6 +74,7 @@ test('daemon blob_unknown survives actual bridge reply adapter and shows unavail
   const s=downloadSetup((key:string)=>fetchBlobReply({fetchBlob:async()=>{throw {error_code:'blob_unknown'};}},key));
   await s.hydrator.hydrate(s.root);
   assert.equal(s.anchor.dataset.fileState,'unavailable');
+  assert.equal(s.anchor.getAttribute('aria-disabled'),'true');
   assert.match(s.root.textContent||'',/File expired or unavailable/);
   assert.equal(s.anchor.getAttribute('href'),null);s.hydrator.dispose();
 });
@@ -82,9 +83,11 @@ test('temporary fetch failure offers retry, does not claim expired',async()=>{
   let calls=0;
   const s=downloadSetup(async()=>++calls===1?{ok:false,error_code:'fetch_failed'}:{ok:true,content_b64:bytes.toString('base64')});
   await s.hydrator.hydrate(s.root);
+  assert.equal(s.anchor.getAttribute('aria-disabled'),'false');
   assert.equal(s.anchor.dataset.fileState,'failed');assert.doesNotMatch(s.root.textContent||'',/expired/);
   s.anchor.dispatchEvent(new s.dom.window.MouseEvent('click',{bubbles:true,cancelable:true}));
   for(let i=0;i<30&&s.anchor.dataset.fileState!=='ready';i++)await new Promise(r=>setTimeout(r,5));
+  assert.equal(s.anchor.getAttribute('aria-disabled'),'false');
   assert.equal(s.anchor.dataset.fileState,'ready');assert.equal(calls,2);s.hydrator.dispose();
 });
 

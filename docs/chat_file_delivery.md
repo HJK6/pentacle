@@ -257,3 +257,10 @@ metadata remains unsupported/inert. Full npm suite in a fresh public checkout:
 Exact-head CI/browser verification must be repeated on the repaired candidate.
 - m4-full-node.log: `fbb4c8c88722f47b3b82726a81a777b47959d4f967c99c45c5c3769a2f2db977`
 - m4-repair-focused.log: `0e6899249ffc58b33b6c374ec597f1802b6d735cd320102d749b4f75e6493a6d`
+
+## Retention and final native fixture
+
+See [managed retention and runtime gate](chat_file_delivery_retention.md) for
+managed-only ownership checks, crash recovery, concurrency tests and the new
+exclusive synthetic fixture preparer. Native/simulator and physical-device
+qualification remain separate from source checks.

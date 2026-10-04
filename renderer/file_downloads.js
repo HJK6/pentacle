@@ -61,6 +61,7 @@ function createFileDownloads({ fetchBlob, urlApi = globalThis.URL, cryptoApi = g
       if (record.disposed || !node.isConnected) return;
       node.removeAttribute('href');
       const unavailable = error?.unavailable === true;
+      node.setAttribute('aria-disabled', unavailable ? 'true' : 'false');
       node.dataset.fileState = record.state = unavailable ? 'unavailable' : 'failed';
       if (status) status.textContent = unavailable ? 'File expired or unavailable' : 'Download failed · click filename to retry';
     }

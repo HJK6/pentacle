@@ -204,3 +204,39 @@ class AttachmentStoreMixin:
             rows = conn.execute("SELECT state,legacy_protected FROM v2_attachment_uploads WHERE blob_sha=?", (sha,)).fetchall()
             return not rows or any(row["state"] == "ready" or row["legacy_protected"] for row in rows)
         return await self.submit(operation)
+
+    async def complete_unmanaged_upload(self, *, root, sha, materialize):
+        """Generic/report/prompt reuse permanently excludes shared bytes from GC."""
+        def operation(conn):
+            with digest_lock(root, sha):
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    conn.execute("UPDATE v2_attachment_uploads SET legacy_protected=1 WHERE blob_sha=?", (sha,))
+                    conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
+                # Failed materialization retains conservative protection. With
+                # no managed row, a future managed upload detects legacy bytes.
+                return materialize()
+        return await self.submit(operation)
+
+    @contextmanager
+    def input_attachment_guard(self, conn, attachments):
+        root = getattr(self, '_attachment_root', None)
+        if not root or not attachments:
+            yield
+            return
+        keys = sorted({a['key'] for a in attachments})
+        with ExitStack() as stack:
+            for sha in keys:
+                stack.enter_context(digest_lock(root, sha))
+                rows = conn.execute("SELECT * FROM v2_attachment_uploads WHERE blob_sha=?", (sha,)).fetchall()
+                ready = [row for row in rows if row['state'] == 'ready']
+                if rows and not ready:
+                    raise ValueError('attachment_missing')
+                if ready:
+                    verify_publication_bytes(root, ready[0])
+                elif not (Path(root) / sha[:2] / sha).is_file():
+                    raise ValueError('attachment_missing')
+            yield  # Held through input route/event/receipt commit.

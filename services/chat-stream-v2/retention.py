@@ -509,8 +509,8 @@ class RetentionConfig:
     backoff_max_s: float = DEFAULT_BACKOFF_MAX_S
     statuses: tuple[str, ...] = TERMINAL_STATUSES
     archive_path: Path | None = None
-    # Read-only visibility into unreclaimed schedule prompt blobs.  Retention
-    # never deletes from this shared content-addressed root.
+    # Managed chat uploads have a separate GC class. Generic/report/prompt
+    # and legacy blobs remain excluded from deletion.
     blob_root: Path | None = None
 
     @classmethod
@@ -547,6 +547,9 @@ class PassResult:
     schedule_receipts_purged: int = 0
     schedule_blobs_unreclaimed: int = 0
     schedule_blob_bytes_unreclaimed: int = 0
+    managed_blobs_deleted: int = 0
+    managed_uploads_reconciled: int = 0
+    managed_uploads_promoted: int = 0
 
     @property
     def events_moved(self) -> int:
@@ -645,6 +648,19 @@ class RetentionJob:
             ev_moved = await self._drain_pairs(budget, _events)
             result.events_terminal_moved, result.events_tail_moved = ev_moved
             budget -= result.events_moved
+
+        if cfg.blob_root is not None:
+            from attachment_retention import sweep_managed
+            # Advance past pinned digests so bounded batches cannot starve later
+            # orphans. Inspect archive owners only after this pass's migration.
+            cursor = getattr(self, "_managed_attachment_cursor", "")
+            counts = await self._submit(lambda conn: sweep_managed(
+                conn, cfg.blob_root, archive_path=archive_path,
+                limit=min(cfg.batch_size, 500), after_sha=cursor))
+            self._managed_attachment_cursor = counts["next_cursor"]
+            result.managed_blobs_deleted = counts["deleted"]
+            result.managed_uploads_reconciled = counts["reconciled"]
+            result.managed_uploads_promoted = counts["promoted"]
 
         result._capped = budget <= 0 or any(
             count >= SCHEDULE_RETENTION_BATCH
@@ -754,6 +770,10 @@ class RetentionJob:
             schedule_ids = [str(row[0]) for row in schedule_rows]
             blob_ids = [str(row[1]) for row in schedule_rows if row[1]]
             blob_bytes = 0
+            # Preserve prompt exclusion before the last schedule owner is purged.
+            if blob_ids and has_table(conn, "v2_attachment_uploads"):
+                marks = ",".join("?" for _ in blob_ids)
+                conn.execute(f"UPDATE v2_attachment_uploads SET legacy_protected=1 WHERE blob_sha IN ({marks})", blob_ids)
             if cfg.blob_root is not None:
                 for blob_id in blob_ids:
                     try:

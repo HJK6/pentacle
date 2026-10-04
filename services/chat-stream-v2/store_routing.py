@@ -846,7 +846,10 @@ class _RoutingStoreMixin:
                 conn.rollback()
                 raise
 
-        return await self.submit(_op)
+        def _guarded(conn):
+            with self.input_attachment_guard(conn, attachments):
+                return _op(conn)
+        return await self.submit(_guarded)
 
     async def claim_assistant_composite_route(
         self, *, stream_id: str, owner: str, lease_seconds: float = 60.0,
