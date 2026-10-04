@@ -90,3 +90,16 @@ def test_silent_is_independent_of_meeting(service):
     # Setting silent does not touch meeting state and vice versa (meeting is external state).
     service.set_silent(True, 'web')
     assert service.status()['silent'] is True
+
+
+def test_silent_still_accepts_room_request_and_suppresses_ack(service):
+    # Silent stops Bart's audio but the microphone keeps working: a room-mic request is
+    # still accepted (delivered to the assistant, answered in chat); its acknowledgement
+    # clip is suppressed and nothing renders.
+    service.set_silent(True, 'web')
+    renders = len(service.speaker.renderer.calls)
+    meta = service.capture_ended('room_mic', service.test_listener)
+    assert isinstance(meta, dict) and meta.get('conversation_id')
+    for thread in service.ack_threads:
+        thread.join(timeout=2)
+    assert len(service.speaker.renderer.calls) == renders

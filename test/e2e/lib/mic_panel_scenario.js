@@ -1,10 +1,10 @@
 'use strict';
-// Headless render of the mic panel's silent toggle and waiting-for-answer
-// indicator against status fixtures, using the SHIPPED renderer/mic-state.js
-// view model (no logic duplicated). Proves the waiting state is shown and clears
-// when the fixture clears, and the silent toggle reflects state. Runs inside the
-// already-loaded web client page over CDP; it appends an isolated probe node and
-// removes it afterwards so neighbouring scenarios are unaffected.
+// Headless render of the mic panel against /status fixtures, driving the ACTUAL
+// served controls (#mic-btn-silent, #mic-status-dot) in the loaded web client with
+// the SHIPPED renderer/mic-state.js view model (no logic duplicated). Proves the
+// waiting-for-answer state is shown and clears when the fixture clears, and the
+// silent toggle reflects state. Restores the controls afterwards so neighbouring
+// scenarios are unaffected.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -12,64 +12,72 @@ const path = require('node:path');
 const MIC_STATE_SRC = fs.readFileSync(
   path.join(__dirname, '..', '..', '..', 'renderer', 'mic-state.js'), 'utf8');
 
-async function micPanelAnswerWindow({ session, report }) {
+async function micPanelAnswerWindow({ session, report, cdp }) {
+  // The served client ships the mic panel markup even when the feature is hidden; wait
+  // for the real controls to be present before rendering against them.
+  let present = false;
+  for (let i = 0; i < 40 && !present; i++) {
+    present = await session.eval(`!!(document.getElementById('mic-btn-silent') && document.getElementById('mic-status-dot'))`);
+    if (!present) await cdp.sleep(100);
+  }
+  assert.equal(present, true, 'served mic-panel controls (#mic-btn-silent, #mic-status-dot) are present');
+
   await session.eval(`(() => {
     const module = { exports: {} };
     (function (module, exports) {\n${MIC_STATE_SRC}\n})(module, module.exports);
     window.__micPanel = module.exports;
-    // Render into real but detached DOM nodes (no dependency on document.body),
-    // mirroring how app.js paints the mic panel's silent button and answer line.
-    const silent = document.createElement('button');
-    const answer = document.createElement('div');
-    window.__micProbe = { silent, answer };
+    const silent = document.getElementById('mic-btn-silent');
+    const dot = document.getElementById('mic-status-dot');
+    window.__micPanelRestore = { silentText: silent.textContent, silentClass: silent.className, dotClass: dot.className };
+    // Paint exactly as app.js's updateMicUI does for these controls.
     window.__paintMicPanel = (status) => {
       const v = window.__micPanel.computeMicPanelView({ status });
       silent.textContent = v.silent.label;
-      silent.dataset.on = String(v.silent.on);
-      silent.dataset.next = String(v.silent.nextOn);
-      answer.dataset.waiting = String(v.answerWindow.waiting);
-      answer.dataset.ready = String(v.answerWindow.ready);
-      answer.textContent = v.answerWindow.text;
+      silent.className = 'mic-btn mic-btn-silent' + (v.silent.on ? ' active' : '');
+      silent.dataset.silentOn = String(v.silent.on);
+      dot.className = 'mic-status-dot' + (v.answerWindow.waiting ? ' active-capturing' : '');
     };
     return typeof window.__micPanel.computeMicPanelView === 'function';
   })()`).then(ok => assert.equal(ok, true, 'mic-state view model loaded in the page'));
 
   const read = () => session.eval(`(() => ({
-    silent: window.__micProbe.silent.dataset.on,
-    silentNext: window.__micProbe.silent.dataset.next,
-    silentLabel: window.__micProbe.silent.textContent,
-    waiting: window.__micProbe.answer.dataset.waiting,
-    ready: window.__micProbe.answer.dataset.ready,
-    answerText: window.__micProbe.answer.textContent,
+    silentText: document.getElementById('mic-btn-silent').textContent,
+    silentClass: document.getElementById('mic-btn-silent').className,
+    silentOn: document.getElementById('mic-btn-silent').dataset.silentOn,
+    dotClass: document.getElementById('mic-status-dot').className,
   }))()`);
 
-  // Answer window open and ready → the waiting-for-answer state is shown.
+  // Answer window open and ready → the served panel shows the waiting-for-answer state.
   await session.eval(`window.__paintMicPanel({ speaker: { answer_window: { waiting: true, ready: true, conversation_id: 'C', line_id: 'L', expires_in: 18 } } })`);
   let r = await read();
-  assert.equal(r.waiting, 'true', 'answer window waiting should render');
-  assert.equal(r.ready, 'true');
-  assert.match(r.answerText, /say over/i);
+  assert.match(r.dotClass, /active-capturing/, 'the served status dot shows waiting-for-answer');
 
-  // Fixture clears → the indicator clears.
+  // Fixture clears → the served indicator clears.
   await session.eval(`window.__paintMicPanel({ speaker: { answer_window: { waiting: false } } })`);
   r = await read();
-  assert.equal(r.waiting, 'false', 'answer window should clear when the fixture clears');
-  assert.equal(r.answerText, '');
+  assert.doesNotMatch(r.dotClass, /active-capturing/, 'the served status dot clears when the fixture clears');
 
-  // Silent toggle reflects state and the next requested value.
+  // The served silent toggle reflects state.
   await session.eval(`window.__paintMicPanel({ speaker: { silent: false } })`);
   r = await read();
-  assert.equal(r.silent, 'false');
-  assert.equal(r.silentNext, 'true');
-  assert.equal(r.silentLabel, 'Silent');
+  assert.equal(r.silentText, 'Silent');
+  assert.equal(r.silentOn, 'false');
+  assert.doesNotMatch(r.silentClass, /active/);
   await session.eval(`window.__paintMicPanel({ speaker: { silent: true, silent_source: 'web' } })`);
   r = await read();
-  assert.equal(r.silent, 'true');
-  assert.equal(r.silentNext, 'false');
-  assert.equal(r.silentLabel, 'Silent: On');
+  assert.equal(r.silentText, 'Silent: On');
+  assert.equal(r.silentOn, 'true');
+  assert.match(r.silentClass, /active/);
 
-  await session.eval(`delete window.__micProbe; delete window.__paintMicPanel; delete window.__micPanel; true`);
-  report.note('mic-panel render: waiting-for-answer shows and clears; silent toggle reflects state');
+  // Restore the served controls and clean up.
+  await session.eval(`(() => {
+    const s = document.getElementById('mic-btn-silent'); const d = document.getElementById('mic-status-dot');
+    const r = window.__micPanelRestore || {};
+    if (s) { s.textContent = r.silentText ?? 'Silent'; s.className = r.silentClass ?? 'mic-btn mic-btn-silent'; delete s.dataset.silentOn; }
+    if (d) { d.className = r.dotClass ?? 'mic-status-dot'; }
+    delete window.__paintMicPanel; delete window.__micPanel; delete window.__micPanelRestore; return true;
+  })()`);
+  report.note('mic-panel render: served controls show waiting-for-answer and clear; silent toggle reflects state');
 }
 
 module.exports = { micPanelAnswerWindow };

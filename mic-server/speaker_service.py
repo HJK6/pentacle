@@ -124,6 +124,11 @@ class SpeakerService:
             return None, 'exhausted_conversation'
         return conversation, None
 
+    def _window_event(self, event, conversation_id, line_id, **extra):
+        # Answer-window telemetry, keyed to this spec so each journey is auditable.
+        self.emit(dict(subsystem='voice.answer_window', bug_ref='spec_pentacle__voice_answer_window_2026_09',
+                       event=event, conversation_id=conversation_id, line_id=line_id, **extra))
+
     def _maybe_expire_window(self, conversation):
         # A window that ends with no answer closes the conversation only if the allowance
         # limit had already been reached when it opened (deferred closure); otherwise the
@@ -133,6 +138,19 @@ class SpeakerService:
             conversation['window'] = None
             if window['close_on_expire'] and not conversation['closed']:
                 conversation['closed'] = 'exhausted_conversation'
+            self._window_event('expired', conversation['cid'], window['line_id'],
+                               closed=conversation['closed'] if window['close_on_expire'] else None)
+
+    def _other_window_open(self, cid):
+        # True when a conversation OTHER than cid already holds a live answer window
+        # (one Bart answer window service-wide at a time).
+        for other_cid, item in self.conversations.items():
+            if other_cid == cid:
+                continue
+            self._maybe_expire_window(item)
+            if item.get('window'):
+                return True
+        return False
 
     def open(self, origin, listener, meeting=False, *, acknowledge=True):
         with self.lock:
@@ -297,6 +315,7 @@ class SpeakerService:
                 return self.speaker.speak(text, deadline, on_first_frame=lambda: self.mark(cid, 'first_audio_at'))
             result = self._play(listener, render, after=item)
         open_window = False
+        window_refused = None
         with self.lock:
             item['in_flight'] = False
             if result['outcome'] in ('spoken', 'suppressed'):
@@ -311,10 +330,16 @@ class SpeakerService:
                 if final:
                     item['closed'] = 'closed_conversation'
                 elif expects_answer and result['outcome'] == 'spoken':
-                    # A spoken question defers closure until its window ends; a suppressed one opens no window.
-                    item['window'] = dict(line_id=lid, opens_at=None, deadline=None,
-                                          close_on_expire=reached, answered=False, tone=rules['replies']['listening_tone'])
-                    open_window = True
+                    if self._other_window_open(item['cid']):
+                        # One Bart answer window service-wide at a time; the second is refused.
+                        window_refused = 'answer_window_busy'
+                        if reached:
+                            item['closed'] = 'exhausted_conversation'
+                    else:
+                        # A spoken question defers closure until its window ends.
+                        item['window'] = dict(line_id=lid, opens_at=None, deadline=None,
+                                              close_on_expire=reached, answered=False, tone=rules['replies']['listening_tone'])
+                        open_window = True
                 elif reached:
                     item['closed'] = 'exhausted_conversation'
         if open_window:
@@ -324,8 +349,7 @@ class SpeakerService:
                 with self.lock:
                     if item.get('window') and item['window']['line_id'] == lid:
                         item['window'] = None
-                self.emit(dict(subsystem='voice_speaker', bug_ref=BUG_REF, outcome='window_refused',
-                               reason='answer_window_busy', conversation_id=payload['conversation_id'], line_id=lid))
+                window_refused = 'local_action_window'
             else:
                 # After the question finishes playing, play the listening tone and open the window.
                 if rules['replies']['listening_tone']:
@@ -335,6 +359,11 @@ class SpeakerService:
                     if window and window['line_id'] == lid:
                         window['opens_at'] = self.clock()
                         window['deadline'] = self.clock()+rules['replies']['answer_window_seconds']
+                self._window_event('opened', payload['conversation_id'], lid,
+                                   tone=rules['replies']['listening_tone'],
+                                   window_seconds=rules['replies']['answer_window_seconds'])
+        if window_refused:
+            self._window_event('refused', payload['conversation_id'], lid, reason=window_refused)
         return result
 
     def turn_ended(self, cid, meeting=False):
@@ -378,7 +407,8 @@ class SpeakerService:
             window['answered'] = True
             item['window'] = None
             item['lines_since_answer'] = 0
-            return True
+        self._window_event('answered', cid, line_id)
+        return True
 
     def _ready_window_conversation(self):
         for cid in reversed(self.conversations):
@@ -406,6 +436,7 @@ class SpeakerService:
             window['answered'] = True
             item['window'] = None
             item['lines_since_answer'] = 0
+        self._window_event('answered', cid, line_id)
         # Capture publishes immediately; the acknowledgement must not hold the claim.
         self.mark(cid, 'capture_ended_at')
         item['ack_done'].clear()

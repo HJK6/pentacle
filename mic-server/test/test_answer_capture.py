@@ -77,3 +77,27 @@ def test_no_capture_when_window_not_ready(monkeypatch):
     hear(listener, 'some room chatter')
     assert listener.state == 'LISTENING' and listener.capture_origin is None
     assert listener.wake.claim() is None
+
+
+def test_question_audio_during_playback_produces_no_capture(monkeypatch):
+    import time
+    _, listener, stub = wired(monkeypatch, {'conversation_id': 'C', 'answer_to': 'L'})
+    stub.ready = True
+    # The recognition fence is held during the question's playback; the window is not
+    # yet open to capture. Audio heard while fenced must produce no answer capture.
+    listener.suppress_recognition_until(time.monotonic() + 30)
+    hear(listener, 'this is the question audio bleeding back')
+    assert listener.capture_origin is None and listener.state == 'LISTENING'
+    assert listener.wake.claim() is None
+
+
+def test_closed_conversation_answer_becomes_fresh_request(monkeypatch):
+    # answer_captured returns None for a closed/expired window; the answer is then a
+    # fresh room-mic request (new id, no answer_to).
+    _, listener, stub = wired(monkeypatch, None)
+    stub.ready = True
+    hear(listener, 'the late answer')
+    hear(listener, 'over')
+    claim = listener.wake.claim()
+    assert claim['text'] == 'the late answer'
+    assert 'answer_to' not in claim and not claim.get('conversation_id')
