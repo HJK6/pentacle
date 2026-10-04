@@ -39,6 +39,12 @@ TLS-fronted client from a local plain-ws client, and the "refused over plain ws"
 property would not hold. Terminating TLS in the daemon makes it a real,
 non-spoofable boundary.
 
+The TLS listener, like the plain listener, also enforces the WebSocket Origin
+containment guard (H1) at the opening handshake — any `Origin`/`Sec-Fetch-*`
+upgrade is refused before `hello`. The supported Dot client is agent-orch over
+`wss://` (below), which sends neither header, so the guard does not affect it.
+See [ws-origin-containment.md](ws-origin-containment.md).
+
 ## Read scope (v1: denied by default; toggle-gated)
 
 Effective reachable verbs for a Dot principal are `_dot_allowed_verbs`:

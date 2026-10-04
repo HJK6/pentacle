@@ -26,6 +26,7 @@ import errno
 import functools
 import hmac
 import hashlib
+import http
 import ipaddress
 import json
 import logging
@@ -179,6 +180,33 @@ SEAT_OPERATOR_AUTHORITY_ENV = "PENTACLE_SEAT_OPERATOR_AUTHORITY"
 #: app-level chunk-size check answer `upload_blob_chunk_oversize`. 4 MiB clears
 #: one legal chunk with margin while still rejecting absurd frames at the wire.
 WS_MAX_SIZE = 4 * 1024 * 1024
+
+
+def _browser_origin_signal(headers: Any) -> str | None:
+    """Return the offending header NAME if a WS upgrade request carries any
+    browser-issued cross-origin signature, else None (H1 containment, advisor
+    435d2d15).
+
+    DEFAULT DENY: any `Origin` header (including null/empty/malformed/duplicate
+    values) OR any `Sec-Fetch-*` header. Comparison is case-insensitive on the
+    header NAME only; the value is never inspected, trusted, or logged (an empty
+    allowlist means no value could make an Origin acceptable). Legitimate daemon
+    clients — agent-orch and the web-service bridge (python `websockets.connect`
+    / node `new WebSocket(url)` with no `origin`/headers), and the native mobile
+    client — send neither header and are unaffected. There is deliberately NO
+    `X-Forwarded-*` identity exemption: a forwarded header is a wire claim, not a
+    transport fact. `headers.raw_items()` preserves duplicates and original case
+    so a duplicated or oddly-cased `Origin` cannot slip past."""
+    try:
+        items = headers.raw_items()
+    except AttributeError:  # pragma: no cover - non-Headers mapping
+        items = headers.items()
+    for name, _value in items:
+        lname = name.lower()
+        if lname == "origin" or lname.startswith("sec-fetch-"):
+            return lname
+    return None
+
 
 Handler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -690,6 +718,26 @@ class Server:
 
     # -- lifecycle ---------------------------------------------------------
 
+    def _reject_browser_origin(self, connection: Any, request: Any) -> Any:
+        """WS opening-handshake gate (H1, advisor 435d2d15): refuse — before the
+        connection is accepted and before `_handle_client` (welcome / hello
+        activation / snapshot / broadcast / RPC) runs — any upgrade carrying a
+        browser cross-origin signature. Installed on EVERY daemon WS listener
+        (the plain fleet listener and the daemon-TLS/Dot listener). Returning a
+        Response aborts the handshake with that HTTP status; returning None lets
+        the handshake proceed. The loopback exemption is applied only AFTER a
+        connection is accepted, so a hostile browser page on the host can no
+        longer reach it by opening a raw loopback socket."""
+        offending = _browser_origin_signal(request.headers)
+        if offending is None:
+            return None
+        peer = getattr(connection, "remote_address", None)
+        peer_ip = peer[0] if isinstance(peer, (tuple, list)) and peer else "?"
+        # Metadata only: the header NAME and peer IP, never the Origin value.
+        log.warning("v2 ws upgrade denied: browser cross-origin signal header=%s peer=%s",
+                    offending, peer_ip)
+        return connection.respond(http.HTTPStatus.FORBIDDEN, "origin not permitted\n")
+
     async def bind(self) -> int:
         """Bind every interface in `self.binds` on one port and start accepting.
         Returns the bound port. Call FIRST (spec constraint 1). A list host binds
@@ -699,6 +747,7 @@ class Server:
         try:
             self._ws_server = await serve(
                 self._handle_client, target, self.port, max_size=WS_MAX_SIZE,
+                process_request=self._reject_browser_origin,
             )
         except OSError as exc:
             bind_errno = exc.errno or errno.EADDRNOTAVAIL
@@ -763,6 +812,7 @@ class Server:
             self._tls_ws_server = await serve(
                 self._handle_tls_client, target, self.dot_tls_port,
                 ssl=ssl_context, max_size=WS_MAX_SIZE,
+                process_request=self._reject_browser_origin,
             )
         except OSError as exc:
             # A failed TLS bind must not take the plain listener down; the daemon
