@@ -17,30 +17,30 @@ async function micPanelAnswerWindow({ session, report }) {
     const module = { exports: {} };
     (function (module, exports) {\n${MIC_STATE_SRC}\n})(module, module.exports);
     window.__micPanel = module.exports;
-    let host = document.getElementById('mic-panel-render-probe');
-    if (!host) { host = document.createElement('div'); host.id = 'mic-panel-render-probe'; document.body.appendChild(host); }
-    host.innerHTML = '<button id="probe-silent"></button><div id="probe-answer"></div>';
+    // Render into real but detached DOM nodes (no dependency on document.body),
+    // mirroring how app.js paints the mic panel's silent button and answer line.
+    const silent = document.createElement('button');
+    const answer = document.createElement('div');
+    window.__micProbe = { silent, answer };
     window.__paintMicPanel = (status) => {
       const v = window.__micPanel.computeMicPanelView({ status });
-      const s = document.getElementById('probe-silent');
-      s.textContent = v.silent.label;
-      s.dataset.on = String(v.silent.on);
-      s.dataset.next = String(v.silent.nextOn);
-      const a = document.getElementById('probe-answer');
-      a.dataset.waiting = String(v.answerWindow.waiting);
-      a.dataset.ready = String(v.answerWindow.ready);
-      a.textContent = v.answerWindow.text;
+      silent.textContent = v.silent.label;
+      silent.dataset.on = String(v.silent.on);
+      silent.dataset.next = String(v.silent.nextOn);
+      answer.dataset.waiting = String(v.answerWindow.waiting);
+      answer.dataset.ready = String(v.answerWindow.ready);
+      answer.textContent = v.answerWindow.text;
     };
     return typeof window.__micPanel.computeMicPanelView === 'function';
   })()`).then(ok => assert.equal(ok, true, 'mic-state view model loaded in the page'));
 
   const read = () => session.eval(`(() => ({
-    silent: document.getElementById('probe-silent').dataset.on,
-    silentNext: document.getElementById('probe-silent').dataset.next,
-    silentLabel: document.getElementById('probe-silent').textContent,
-    waiting: document.getElementById('probe-answer').dataset.waiting,
-    ready: document.getElementById('probe-answer').dataset.ready,
-    answerText: document.getElementById('probe-answer').textContent,
+    silent: window.__micProbe.silent.dataset.on,
+    silentNext: window.__micProbe.silent.dataset.next,
+    silentLabel: window.__micProbe.silent.textContent,
+    waiting: window.__micProbe.answer.dataset.waiting,
+    ready: window.__micProbe.answer.dataset.ready,
+    answerText: window.__micProbe.answer.textContent,
   }))()`);
 
   // Answer window open and ready → the waiting-for-answer state is shown.
@@ -68,7 +68,7 @@ async function micPanelAnswerWindow({ session, report }) {
   assert.equal(r.silentNext, 'false');
   assert.equal(r.silentLabel, 'Silent: On');
 
-  await session.eval(`document.getElementById('mic-panel-render-probe')?.remove(); delete window.__paintMicPanel; delete window.__micPanel; true`);
+  await session.eval(`delete window.__micProbe; delete window.__paintMicPanel; delete window.__micPanel; true`);
   report.note('mic-panel render: waiting-for-answer shows and clears; silent toggle reflects state');
 }
 
