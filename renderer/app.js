@@ -2486,6 +2486,7 @@ function openChatImageViewer(src, alt) {
 
 async function hydrateChatAttachmentMedia(root) {
   if (!root || !window.cc || typeof window.cc.chatFetchBlob !== 'function') return;
+  void window.PentacleChatView?.hydrateFileAttachments(root);
   const imgs = Array.from(root.querySelectorAll('.slot-chat-media-img[data-needs-blob="1"]'));
   for (const img of imgs) {
     const button = img.closest('.slot-chat-media-button');

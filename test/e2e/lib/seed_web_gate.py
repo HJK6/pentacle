@@ -20,6 +20,7 @@ import asyncio
 import json
 import hashlib
 import os
+from pathlib import Path
 import sys
 
 # Import the daemon's own store/ingest so the seed goes through the exact code
@@ -52,7 +53,7 @@ def _event(stream_id: str, kind: str, text: str, index: int) -> dict:
     }
 
 
-async def seed(db: str, host: str, session: str, objective: str, token_file: str | None = None) -> dict:
+async def seed(db: str, host: str, session: str, objective: str, token_file: str | None = None, blob_root: str | None = None) -> dict:
     store = Store(db)
     store.start()
     try:
@@ -81,6 +82,22 @@ async def seed(db: str, host: str, session: str, objective: str, token_file: str
             )
             if result:
                 appended += 1
+        if blob_root and session == 'web-gate-1':
+            fixtures = [
+                ('web-gate-file.pdf', 'application/pdf', b'%PDF synthetic web download', True),
+                ('web-gate-file.zip', 'application/zip', b'PK\x03\x04 synthetic web download', True),
+                ('web-gate-expired.pdf', 'application/pdf', b'%PDF synthetic missing download', False),
+            ]
+            for index, (filename, mime, body, present) in enumerate(fixtures, start=100):
+                digest = hashlib.sha256(body).hexdigest()
+                if present:
+                    path = Path(blob_root) / digest[:2] / digest
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(body)
+                event = _event(stream_id, 'ASSIST_TEXT', '', index)
+                event['attachments'] = [dict(key=digest, mime=mime, size=len(body), filename=filename)]
+                if await store.append_session_event(stream_id, event, identity=_identity_key(event), limit=500):
+                    appended += 1
         return {"stream_id": stream_id, "events": appended}
     finally:
         store.stop()
@@ -93,8 +110,9 @@ def main() -> int:
     parser.add_argument("--session", default="web-gate-1")
     parser.add_argument("--objective", default="web gate fixture")
     parser.add_argument("--token-file")
+    parser.add_argument("--blob-root")
     args = parser.parse_args()
-    result = asyncio.run(seed(args.db, args.host, args.session, args.objective, args.token_file))
+    result = asyncio.run(seed(args.db, args.host, args.session, args.objective, args.token_file, args.blob_root))
     print(json.dumps(result))
     return 0
 

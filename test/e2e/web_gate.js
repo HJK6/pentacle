@@ -196,7 +196,7 @@ async function startDaemon(args, scratch, runtime, fixtures = [
     fs.writeFileSync(tokenFile, token, { mode: 0o600 });
     runtime.fixtureTokens[fixture.streamId] = token;
     return execFileSync(args.python, [SEEDER, '--db', db, '--host', fixture.host,
-      '--session', fixture.sessionName, '--token-file', tokenFile], { encoding: 'utf8', cwd: ROOT });
+      '--session', fixture.sessionName, '--token-file', tokenFile, '--blob-root', path.join(scratch, 'blobs')], { encoding: 'utf8', cwd: ROOT });
   }).join('');
   const daemonLog = fs.openSync(path.join(scratch, 'daemon.log'), 'a');
 

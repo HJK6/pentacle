@@ -672,11 +672,14 @@ class _RoutingStoreMixin:
         reply_to_message_id: str | None,
         reply_to_question_id: str | None,
         actor_stream_id: str | None,
+        scoped_credential_id: str | None = None,
         direct_primary: bool = False,
         direct_target_stream_id: str | None = None,
         direct_target_generation: str | None = None,
     ) -> dict[str, Any]:
         """Atomically append the visible USER event and its routing receipt."""
+        if scoped_credential_id is not None and (not scoped_credential_id or actor_stream_id != f"scoped:{scoped_credential_id}"):
+            raise ValueError("assistant_scoped_actor_invalid")
         if not input_identity:
             raise ValueError("assistant_input_identity_required")
         canonical_attachments = json.dumps(attachments, sort_keys=True, separators=(",", ":"))
@@ -725,15 +728,44 @@ class _RoutingStoreMixin:
             )
             return receipt_id
 
+        def _claim_scoped_request(conn: sqlite3.Connection) -> None:
+            if scoped_credential_id is None:
+                return
+            # This write shares admission's transaction. Any later failure rolls
+            # it back; a preexisting receipt/route cannot be adopted by ID.
+            owner = conn.execute(
+                "SELECT credential_id FROM v2_scoped_ownership WHERE kind='request' AND key=?",
+                (input_request_id,),
+            ).fetchone()
+            if owner is not None and owner[0] != scoped_credential_id:
+                raise ValueError("assistant_request_owner_conflict")
+            prior_receipts = conn.execute(
+                "SELECT actor_stream_id FROM v2_send_receipts WHERE request_id=?",
+                (input_request_id,),
+            ).fetchall()
+            prior_routes = conn.execute(
+                "SELECT actor_stream_id FROM v2_assistant_composite_routes WHERE input_request_id=?",
+                (input_request_id,),
+            ).fetchall()
+            if any(row[0] != actor_stream_id for row in [*prior_receipts, *prior_routes]):
+                raise ValueError("assistant_request_owner_conflict")
+            conn.execute(
+                "INSERT OR IGNORE INTO v2_scoped_ownership(kind,key,credential_id,created_at) VALUES('request',?,?,?)",
+                (input_request_id, scoped_credential_id, _routing_iso_now()),
+            )
+
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
             conn.execute("BEGIN IMMEDIATE")
             try:
+                _claim_scoped_request(conn)
                 prior = conn.execute(
                     "SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND input_identity=?",
                     (stream_id, input_identity),
                 ).fetchone()
                 if prior is not None:
                     record = dict(prior)
+                    if scoped_credential_id is not None and record["actor_stream_id"] != actor_stream_id:
+                        raise ValueError("assistant_request_owner_conflict")
                     if record["payload_digest"] != digest:
                         raise ValueError("assistant_input_idempotency_conflict")
                     record["receipt_id"] = _ensure_receipt(conn, _routing_iso_now()) if direct_primary else None
@@ -814,7 +846,10 @@ class _RoutingStoreMixin:
                 conn.rollback()
                 raise
 
-        return await self.submit(_op)
+        def _guarded(conn):
+            with self.input_attachment_guard(conn, attachments):
+                return _op(conn)
+        return await self.submit(_guarded)
 
     async def claim_assistant_composite_route(
         self, *, stream_id: str, owner: str, lease_seconds: float = 60.0,
@@ -1104,7 +1139,7 @@ class _RoutingStoreMixin:
         if not separator or not host or not session_name:
             raise ValueError("assistant_composite_invalid_stream_id")
 
-        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+        def _locked_op(conn: sqlite3.Connection) -> dict[str, Any]:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 if actor_generation is not None:
@@ -1235,6 +1270,9 @@ class _RoutingStoreMixin:
                         json.dumps(evidence_refs, separators=(",", ":")), event_id, stamp,
                     ),
                 )
+                for attachment in event.get('attachments') or []:
+                    conn.execute("INSERT INTO v2_attachment_refs(owner_kind,owner_id,stream_id,upload_id,blob_sha) VALUES ('publication',?,?,?,?)",
+                        (publication_key, stream_id, attachment['upload_id'], attachment['key']))
                 stored = dict(conn.execute(
                     "SELECT * FROM v2_assistant_composite_publications WHERE publication_key=?", (publication_key,),
                 ).fetchone())
@@ -1245,6 +1283,11 @@ class _RoutingStoreMixin:
                 conn.rollback()
                 raise
 
+        def _op(conn):
+            with self.publication_attachment_guard(conn, attachment_ids, stream_id,
+                    event.get('attachments') or [],
+                    {'stream_id': actor_stream_id, 'generation': actor_generation}):
+                return _locked_op(conn)
         return await self.submit(_op)
 
     async def apply_assistant_composite_operation(

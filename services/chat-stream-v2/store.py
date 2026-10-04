@@ -38,6 +38,7 @@ from typing import Any, Callable
 import uuid
 
 import store_exchange
+import store_attachments
 import store_usage
 import store_qa
 import store_lifecycle_authority as lifecycle_authority
@@ -1312,7 +1313,7 @@ def _iso_epoch(value: object) -> float | None:
         return None
 
 
-class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin):
+class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000) -> None:
@@ -1400,13 +1401,19 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
 
     def _run(self) -> None:
         try:
-            conn = sqlite3.connect(self._path)
+            # Escape the literal store filename while enabling no-create URI
+            # ATTACH for configured retention archives. Memory stores stay local.
+            from pathlib import Path
+            database = self._path if self._path in (':memory:', '') else Path(self._path).absolute().as_uri()
+            conn = sqlite3.connect(database, uri=True)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("BEGIN")
             conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
             conn.execute(SESSIONS_DDL)
+            for ddl in store_attachments.DDL:
+                conn.execute(ddl)
             for ddl in store_usage.DDL:
                 conn.execute(ddl)
             if "no_watch" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:

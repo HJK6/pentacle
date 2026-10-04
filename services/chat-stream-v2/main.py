@@ -280,7 +280,7 @@ async def run(args: argparse.Namespace) -> int:
     # Build the prompt blob store before spawnctl so blob-backed
     # `initial_prompt_file` requests can be dereferenced at the same durable
     # handoff boundary as inline prompts.
-    blobs = BlobStore(args.blob_root)
+    blobs = BlobStore(args.blob_root, attachment_store=store)
     submission_proof = DurableUserEventProof(
         store, local_host=args.local_host,
     )

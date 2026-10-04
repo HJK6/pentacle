@@ -3917,6 +3917,12 @@ def _detect_image_mime(data: bytes) -> str | None:
     return None
 
 
+def send_file(args: argparse.Namespace) -> int:
+    from .file_delivery import run
+    return run(args, load_config=load_config, upload_blob_once=upload_blob_once,
+               assistant_once=assistant_once)
+
+
 def send_image(args: argparse.Namespace) -> int:
     """Attach a local PNG/JPEG to your OWN conversation so the operator sees the
     real image in Pentacle chat (mobile + desktop), openable in the viewer.
@@ -5006,6 +5012,27 @@ def build_parser() -> argparse.ArgumentParser:
     send_parser.add_argument("msg_id", type=int)
     send_parser.add_argument("prompt_text")
     send_parser.set_defaults(func=send)
+
+    send_file_parser = subparsers.add_parser(
+        "send-file", help="upload a managed file or publish a server-issued upload ID",
+        description="Upload-only by default. --to requests daemon-authorized assistant.publish; it grants no authority. Path checks do not detect secrets inside file contents.",
+    )
+    file_source = send_file_parser.add_mutually_exclusive_group(required=True)
+    file_source.add_argument("path", nargs="?", help="Local allowlisted file, <=25 MiB")
+    file_source.add_argument("--upload-id")
+    file_source.add_argument("--from-receipt", help="Inline JSON or receipt file; only upload_id is used")
+    send_file_parser.add_argument("--to", help="Target assistant composite for authorized publication")
+    send_file_parser.add_argument("--dispatch-id")
+    send_file_parser.add_argument("--reply-to-message-id")
+    send_file_parser.add_argument("--reply-to-question-id")
+    send_file_parser.add_argument("--evidence-refs-json", help="Existing operation/report receipt IDs required by non-prose publication")
+    send_file_parser.add_argument("--publish-kind", choices=("prose", "question", "result", "status"))
+    send_file_parser.add_argument("--request-id", help="Existing publication key; prose defaults to publish:<dispatch-id>")
+    send_file_parser.add_argument("--upload-request-id", help="Reuse for retry of the same upload bytes and metadata")
+    send_file_parser.add_argument("--response-state", choices=("acknowledged", "final"))
+    send_file_parser.add_argument("--caption", default="")
+    send_file_parser.add_argument("--timeout", type=float, default=30.0)
+    send_file_parser.set_defaults(func=send_file)
 
     send_image_parser = subparsers.add_parser(
         "send-image",

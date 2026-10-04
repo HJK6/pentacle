@@ -1,4 +1,5 @@
 'use strict';
+const { fetchBlobReply } = require('./blob_fetch_reply');
 
 // ── Shared `window.cc` handler registration ──────────────────────────────────
 // One definition, two transports. `main.js` registers these on Electron's
@@ -210,7 +211,7 @@ function createCcHandlers({
       }
       return chatStreamClient.uploadBlob({ ...payload, data, sizeHintBytes: data.length });
     }));
-    target.handle('chat-stream:fetch-blob', (_event, blobSha) => command(() => chatStreamClient.fetchBlob({ blobSha })));
+    target.handle('chat-stream:fetch-blob', (_event, blobSha) => fetchBlobReply(chatStreamClient, blobSha));
 
     registerAssetIpcHandlers(target, chatStreamClient, normalizeChatStreamError, assetPopouts);
     registerScheduleIpcHandlers(target, chatStreamClient, normalizeChatStreamError);

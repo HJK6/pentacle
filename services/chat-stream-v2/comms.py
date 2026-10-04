@@ -76,7 +76,7 @@ log = logging.getLogger("chat_streamd_v2.comms")
 
 ROUTE_MAX_DEPTH = 8
 
-ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
+from chat_attachment_types import ATTACHMENT_MAX_BYTES
 ATTACHMENT_ROOT = Path.home() / ".local/share/pentacle-stream/attachments"
 SUPPORTED_ATTACHMENT_MIME = {"image/jpeg": "jpg", "image/png": "png"}
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")

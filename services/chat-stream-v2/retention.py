@@ -246,9 +246,10 @@ def _detach(conn: sqlite3.Connection) -> None:
         pass
 
 
-def ensure_archive_table(archive_path: Path, create_sql: str, table: str) -> None:
+def ensure_archive_table(archive_path: Path, create_sql: str, table: str, *, require_existing: bool = False) -> None:
     """Create `table`, or append missing source columns when the archive is a prefix."""
-    conn = sqlite3.connect(str(archive_path))
+    target = archive_path.absolute().as_uri() + '?mode=rw' if require_existing else str(archive_path.absolute())
+    conn = sqlite3.connect(target, uri=require_existing)
     try:
         exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
@@ -283,8 +284,8 @@ def ensure_archive_table(archive_path: Path, create_sql: str, table: str) -> Non
         conn.close()
 
 
-def ensure_archive(archive_path: Path, schema: Schema) -> None:
-    ensure_archive_table(archive_path, schema.create_sql, "sessions")
+def ensure_archive(archive_path: Path, schema: Schema, *, require_existing: bool = False) -> None:
+    ensure_archive_table(archive_path, schema.create_sql, "sessions", require_existing=require_existing)
 
 
 def archive_rows(
@@ -295,6 +296,7 @@ def archive_rows(
     keep: set[str],
     batch_size: int,
     max_rows: int | None = None,
+    *, require_existing: bool = False,
 ) -> int:
     """Move non-retained terminal rows to the archive DB, batch by batch.
 
@@ -307,11 +309,14 @@ def archive_rows(
     cadence job passes a batch-sized cap so each trip through the store thread
     is short and the remainder simply falls to the next call.
     """
-    ensure_archive(archive_path, schema)
+    ensure_archive(archive_path, schema, require_existing=require_existing)
     # ATTACH is illegal inside a transaction, and the daemon's store connection
     # is long-lived and shared with every other write.
     conn.commit()
-    conn.execute("ATTACH DATABASE ? AS arch", (str(archive_path),))
+    # Store enables URI handling, so mode=rw forbids creation even if the
+    # archive disappears after preflight or table preparation.
+    target = archive_path.absolute().as_uri() + '?mode=rw' if require_existing else str(archive_path.absolute())
+    conn.execute("ATTACH DATABASE ? AS arch", (target,))
     cols = _q(schema.columns)
     keys = schema.key_columns
     key_sel = _q(keys)
@@ -360,6 +365,7 @@ def archive_events(
     batch_size: int,
     max_rows: int | None = None,
     protected_stream_ids: set[str] | None = None,
+    *, require_existing: bool = False,
 ) -> tuple[int, int]:
     """Move archivable event rows out. Requires temp.hot_streams loaded.
 
@@ -371,9 +377,12 @@ def archive_events(
     `max_rows` is a budget shared across BOTH passes, so a capped call spends it
     on terminal rows first and only then on trimming open sessions' tails.
     """
-    ensure_archive_table(archive_path, ev.create_sql, ev.table)
+    ensure_archive_table(archive_path, ev.create_sql, ev.table, require_existing=require_existing)
     conn.commit()  # see archive_rows: ATTACH cannot run inside a transaction
-    conn.execute("ATTACH DATABASE ? AS arch", (str(archive_path),))
+    # Store enables URI handling, so mode=rw forbids creation even if the
+    # archive disappears after preflight or table preparation.
+    target = archive_path.absolute().as_uri() + '?mode=rw' if require_existing else str(archive_path.absolute())
+    conn.execute("ATTACH DATABASE ? AS arch", (target,))
     cols = _q(ev.columns)
     key = f'"{ev.row_key}"' if ev.row_key != "rowid" else "rowid"
     tbl = f'"{ev.table}"'
@@ -509,8 +518,8 @@ class RetentionConfig:
     backoff_max_s: float = DEFAULT_BACKOFF_MAX_S
     statuses: tuple[str, ...] = TERMINAL_STATUSES
     archive_path: Path | None = None
-    # Read-only visibility into unreclaimed schedule prompt blobs.  Retention
-    # never deletes from this shared content-addressed root.
+    # Managed chat uploads have a separate GC class. Generic/report/prompt
+    # and legacy blobs remain excluded from deletion.
     blob_root: Path | None = None
 
     @classmethod
@@ -547,6 +556,9 @@ class PassResult:
     schedule_receipts_purged: int = 0
     schedule_blobs_unreclaimed: int = 0
     schedule_blob_bytes_unreclaimed: int = 0
+    managed_blobs_deleted: int = 0
+    managed_uploads_reconciled: int = 0
+    managed_uploads_promoted: int = 0
 
     @property
     def events_moved(self) -> int:
@@ -590,6 +602,20 @@ class RetentionJob:
             return result
         db = Path(db_path)
         archive_path = cfg.archive_path or db.parent / "sessions_archive.db"
+        # An explicitly configured archive is part of the owner inventory.
+        # Never replace an unavailable archive with a new empty database, even
+        # before GC: schedule/session mutations must also wait for recovery.
+        if cfg.archive_path is not None:
+            def check_archive(_conn):
+                try:
+                    existing = sqlite3.connect(Path(archive_path).absolute().as_uri() + '?mode=ro', uri=True)
+                    try:
+                        existing.execute('SELECT name FROM sqlite_master LIMIT 1').fetchall()
+                    finally:
+                        existing.close()
+                except sqlite3.Error as exc:
+                    raise RetentionError('configured archive unavailable; retention aborted') from exc
+            await self._submit(check_archive)
         result.size_before = db_size(db)
 
         # Schedule durability shares this 6h cadence but has an independent
@@ -617,7 +643,8 @@ class RetentionJob:
         moved = await self._drain(
             budget,
             lambda conn, limit: archive_rows(
-                conn, Schema(conn), archive_path, cfg.statuses, keep, cfg.batch_size, max_rows=limit
+                conn, Schema(conn), archive_path, cfg.statuses, keep, cfg.batch_size, max_rows=limit,
+                require_existing=cfg.archive_path is not None
             ),
         )
         result.sessions_moved = moved
@@ -640,11 +667,25 @@ class RetentionJob:
                 return archive_events(
                     conn, EventSchema(conn), archive_path, cfg.tail_keep,
                     cfg.batch_size, max_rows=limit, protected_stream_ids=protected,
+                    require_existing=cfg.archive_path is not None,
                 )
 
             ev_moved = await self._drain_pairs(budget, _events)
             result.events_terminal_moved, result.events_tail_moved = ev_moved
             budget -= result.events_moved
+
+        if cfg.blob_root is not None:
+            from attachment_retention import sweep_managed
+            # Advance past pinned digests so bounded batches cannot starve later
+            # orphans. Inspect archive owners only after this pass's migration.
+            cursor = getattr(self, "_managed_attachment_cursor", "")
+            counts = await self._submit(lambda conn: sweep_managed(
+                conn, cfg.blob_root, archive_path=archive_path,
+                limit=min(cfg.batch_size, 500), after_sha=cursor))
+            self._managed_attachment_cursor = counts["next_cursor"]
+            result.managed_blobs_deleted = counts["deleted"]
+            result.managed_uploads_reconciled = counts["reconciled"]
+            result.managed_uploads_promoted = counts["promoted"]
 
         result._capped = budget <= 0 or any(
             count >= SCHEDULE_RETENTION_BATCH
@@ -754,6 +795,10 @@ class RetentionJob:
             schedule_ids = [str(row[0]) for row in schedule_rows]
             blob_ids = [str(row[1]) for row in schedule_rows if row[1]]
             blob_bytes = 0
+            # Preserve prompt exclusion before the last schedule owner is purged.
+            if blob_ids and has_table(conn, "v2_attachment_uploads"):
+                marks = ",".join("?" for _ in blob_ids)
+                conn.execute(f"UPDATE v2_attachment_uploads SET legacy_protected=1 WHERE blob_sha IN ({marks})", blob_ids)
             if cfg.blob_root is not None:
                 for blob_id in blob_ids:
                     try:

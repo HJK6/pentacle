@@ -243,17 +243,29 @@ class AssistantBindingStoreMixin:
         return await self.submit(_op)
 
     async def blob_referenced_in_stream(self, *, sha: str, stream_id: str) -> bool:
-        """Whether any event in ``stream_id`` references blob ``sha``.
+        """Only validated publication provenance grants another uploader's bytes.
 
-        Lets a scoped client fetch a blob that the assistant posted into its own
-        chat, without owning it.  Bounded JSON scan of the stream's event tail.
+        Transcript/import/event.push content is not authorization, even when it
+        has attachment-shaped fields. The reference row is inserted atomically
+        by the authorized publication path after ready-receipt/byte validation.
+        Unknown historical envelopes fail closed; own uploads use ownership.
         """
+        if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{64}', sha):
+            return False
         def _op(conn: sqlite3.Connection) -> bool:
-            row = conn.execute(
-                "SELECT 1 FROM session_event_tail WHERE stream_id=? AND event_json LIKE ? LIMIT 1",
-                (stream_id, f"%{sha}%"),
-            ).fetchone()
-            return row is not None
+            return conn.execute(
+                """SELECT 1 FROM v2_attachment_refs AS reference
+                JOIN v2_assistant_composite_publications AS publication
+                  ON publication.publication_key=reference.owner_id
+                 AND publication.stream_id=reference.stream_id
+                JOIN v2_attachment_uploads AS upload
+                  ON upload.upload_id=reference.upload_id
+                 AND upload.blob_sha=reference.blob_sha
+                WHERE reference.owner_kind='publication'
+                  AND reference.stream_id=? AND reference.blob_sha=?
+                  AND upload.state='ready' AND upload.purpose='chat_attachment'
+                LIMIT 1""", (stream_id, sha),
+            ).fetchone() is not None
         return await self.submit(_op)
 
     async def enqueue_composite_tell(

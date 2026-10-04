@@ -403,7 +403,7 @@ class FoundationHarness:
 
         sessions = Sessions(store, tmux=None, local_host=LOCAL)
         await sessions.refresh()
-        blob_store = BlobStore(self.blob_root)
+        blob_store = BlobStore(self.blob_root, attachment_store=store)
         await blob_store.start()
         self.blob_store = blob_store
         comms = Comms(store, sessions, None, blob_store=blob_store)
