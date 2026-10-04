@@ -6,6 +6,14 @@ the applicable local gates, independent review and exact-SHA CI checks.
 
 ## Private-data exceptions
 
+> **Note (2026-10-04):** the former `HJK6/pentacle-private` source repository is
+> retired and archived read-only; public `main` is the sole source of truth.
+> The private→public reconciliation/publish flow and the private-line merge-back
+> described in this section are **historical** — there is no active private repo
+> to project from. The guidance below is retained for context and for the general
+> rule that private data (credentials, host profiles, signing inputs) stays out of
+> the public tree.
+
 Use a private branch only for a named need involving private data. Prefer local,
 gitignored configuration when that is enough: deployment settings, credentials,
 host profiles and signing inputs stay outside the public tree. Private code is
