@@ -2101,7 +2101,8 @@ class Server:
     async def _scoped_blob_readable(self, credential_id: str, sha: str, scope_stream: str) -> bool:
         """A scoped credential may read only blobs it owns or that its own stream
         references (e.g. an image the assistant posted into the scoped chat)."""
-        if not sha or self.store is None:
+        if (not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha)
+                or not credential_id or self.store is None):
             return False
         if await self.store.scoped_owner(kind="blob", key=sha) == credential_id:
             return True
