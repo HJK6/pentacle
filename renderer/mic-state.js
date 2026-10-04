@@ -30,8 +30,39 @@ function shouldRenderAlwaysOnUi({ status, alwaysOnEnabled } = {}) {
   return !!(status && status.mode === 'on' && alwaysOnEnabled === true);
 }
 
+// Silent mode is reported by the speaker service and shown wherever the mic status is.
+// Silent mode is independent of the mic mode, so its state is available in any mode.
+function computeSilentState({ status } = {}) {
+  const speaker = (status && status.speaker) || {};
+  const on = speaker.silent === true;
+  const source = typeof speaker.silent_source === 'string' ? speaker.silent_source : null;
+  const changedAt = typeof speaker.silent_changed_at === 'number' ? speaker.silent_changed_at : null;
+  return {
+    on,
+    source,
+    changedAt,
+    label: on ? 'Silent mode on' : 'Silent mode off',
+  };
+}
+
+// Whether the microphone is waiting for the operator's answer to a Bart question.
+function computeAnswerWindowState({ status } = {}) {
+  const speaker = (status && status.speaker) || {};
+  const window = (speaker.answer_window && typeof speaker.answer_window === 'object') ? speaker.answer_window : {};
+  const waiting = window.waiting === true;
+  return {
+    waiting,
+    ready: waiting && window.ready === true,
+    conversationId: waiting && typeof window.conversation_id === 'string' ? window.conversation_id : null,
+    lineId: waiting && typeof window.line_id === 'string' ? window.line_id : null,
+    expiresIn: waiting && typeof window.expires_in === 'number' ? window.expires_in : null,
+  };
+}
+
 module.exports = {
   computeBusyBannerState,
   shouldShowAlwaysOn,
   shouldRenderAlwaysOnUi,
+  computeSilentState,
+  computeAnswerWindowState,
 };

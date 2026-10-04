@@ -192,3 +192,11 @@ test('an answer claim delivers a header carrying answer_to',async()=>{
   await f.helper.tick(f.status);
   assert.deepEqual(f.sends,[['bart:current','[pentacle-input {"origin":"room_mic","conversation_id":"conversation-ans","answer_to":"line-123"}]\n\nthe answer']]);
 });
+test('mic status surfaces the answer window and silent mode',async()=>{
+  const f=fixture();
+  const base={mode:'on',wake:{enabled:true,generation:'one'}};
+  assert.equal(f.helper.message({...base,speaker:{answer_window:{waiting:true,ready:true}}}),'Ready for Bart’s answer — say over.');
+  assert.equal(f.helper.message({...base,speaker:{answer_window:{waiting:true,ready:false}}}),'Getting ready for Bart’s answer…');
+  assert.equal(f.helper.message({...base,capture_origin:'answer'}),'Recording your answer for Bart — say over.');
+  assert.equal(f.helper.message({...base,speaker:{silent:true}}),'Silent mode is on — Bart answers in chat. Say “Hey Bart” to speak.');
+});
