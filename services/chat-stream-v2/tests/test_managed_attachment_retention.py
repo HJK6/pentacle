@@ -142,12 +142,13 @@ def test_distinct_store_workers_serialize_both_interleavings(tmp_path,monkeypatc
                     assert await asyncio.to_thread(entered.wait,5)
                     following=asyncio.create_task(sweep(second,tmp_path))
                 else:
-                    original=Path.unlink
+                    import attachment_retention
+                    original=attachment_retention._unlink_owned
                     def held(p,*args,**kw):
                         result=original(p,*args,**kw)
-                        if p==path(tmp_path,r):entered.set();assert release.wait(5)
+                        if p.sha==r['blob_sha']:entered.set();assert release.wait(5)
                         return result
-                    monkeypatch.setattr(Path,'unlink',held)
+                    monkeypatch.setattr(attachment_retention,'_unlink_owned',held)
                     leading=asyncio.create_task(sweep(second,tmp_path))
                     assert await asyncio.to_thread(entered.wait,5)
                     following=asyncio.create_task(upload(blobs,rid='racing-rebuild'))
@@ -224,12 +225,13 @@ def test_publication_gc_interleaving_never_commits_a_missing_file(tmp_path,monke
                     assert await asyncio.to_thread(entered.wait,5)
                     following=asyncio.create_task(sweep(second,tmp_path))
                 else:
-                    original=Path.unlink
+                    import attachment_retention
+                    original=attachment_retention._unlink_owned
                     def held(p,*args,**kwargs):
                         result=original(p,*args,**kwargs)
-                        if p==path(tmp_path,r):entered.set();assert release.wait(5)
+                        if p.sha==r['blob_sha']:entered.set();assert release.wait(5)
                         return result
-                    monkeypatch.setattr(Path,'unlink',held)
+                    monkeypatch.setattr(attachment_retention,'_unlink_owned',held)
                     leading=asyncio.create_task(sweep(second,tmp_path))
                     assert await asyncio.to_thread(entered.wait,5)
                     following=asyncio.create_task(server._on_assistant_publish(msg))
@@ -295,4 +297,146 @@ def test_missing_blob_root_does_not_erase_provenance(tmp_path):
             assert (await sweep(store,tmp_path))['reconciled']==0
             assert await store.attachment_upload(r['upload_id'])
             assert not (tmp_path/'blobs').exists()
+    asyncio.run(run())
+
+@pytest.mark.parametrize('state', ['ready', 'pending'])
+def test_symlinked_shard_preserves_external_bytes_and_provenance(tmp_path, state):
+    async def run():
+        async with fixture(tmp_path) as (blobs, store):
+            r = await upload(blobs); await age(store, r, state=state)
+            shard = path(tmp_path, r).parent
+            outside = tmp_path / 'outside'
+            shard.rename(outside)
+            shard.symlink_to(outside, target_is_directory=True)
+            before = await store.attachment_upload(r['upload_id'], ready_only=False)
+            result = await sweep(store, tmp_path)
+            assert result['deleted'] == result['reconciled'] == result['promoted'] == 0
+            assert (outside / r['blob_sha']).is_file()
+            assert await store.attachment_upload(r['upload_id'], ready_only=False) == before
+    asyncio.run(run())
+
+@pytest.mark.parametrize('entrypoint', ['direct', 'run_pass'])
+def test_configured_missing_archive_fails_before_any_mutation(tmp_path, entrypoint):
+    async def run():
+        from retention import RetentionJob, RetentionConfig, RetentionError
+        from test_retention import seed_schedule_row
+        async with fixture(tmp_path) as (blobs, store):
+            r = await upload(blobs); await age(store, r)
+            archive = tmp_path / 'unavailable-archive.db'
+            def seed(c):
+                seed_schedule_row(c, 'must-retain', state='fired', terminal_days=-40)
+                c.commit()
+                return list(c.iterdump())
+            before = await store.submit(seed)
+            with pytest.raises((sqlite3.OperationalError, RetentionError)):
+                if entrypoint == 'direct':
+                    await sweep(store, tmp_path, archive_path=archive)
+                else:
+                    await RetentionJob(store, RetentionConfig(blob_root=tmp_path/'blobs', archive_path=archive)).run_pass()
+            assert not archive.exists()
+            assert path(tmp_path, r).is_file()
+            assert await store.submit(lambda c: list(c.iterdump())) == before
+    asyncio.run(run())
+
+@pytest.mark.parametrize('component', ['ancestor', 'root', 'locks', 'missing-shard'])
+def test_unavailable_or_symlinked_components_fail_closed(tmp_path, component):
+    async def run():
+        base = tmp_path / 'base'; base.mkdir()
+        async with fixture(base) as (blobs, store):
+            r = await upload(blobs); await age(store, r)
+            original = path(base, r).read_bytes()
+            if component == 'ancestor':
+                base.rename(tmp_path/'moved'); base.symlink_to(tmp_path/'moved', target_is_directory=True)
+            else:
+                target = base/'blobs' if component == 'root' else base/'blobs'/'.attachment-locks' if component == 'locks' else path(base,r).parent
+                moved = tmp_path/'moved'; target.rename(moved)
+                if component != 'missing-shard': target.symlink_to(moved, target_is_directory=True)
+            result = await sweep(store, base)
+            assert result['deleted'] == result['reconciled'] == result['promoted'] == 0
+            assert await store.attachment_upload(r['upload_id'])
+            if component != 'missing-shard': assert path(base,r).read_bytes() == original
+            else: assert (moved/r['blob_sha']).read_bytes() == original
+    asyncio.run(run())
+
+
+def test_shard_substitution_after_open_cannot_redirect_unlink(tmp_path, monkeypatch):
+    import attachment_retention
+    async def run():
+        async with fixture(tmp_path) as (blobs,store):
+            r=await upload(blobs); await age(store,r)
+            shard=path(tmp_path,r).parent
+            outside=tmp_path/'outside'; outside.mkdir()
+            external=outside/r['blob_sha']; external.write_bytes(b'outside must survive')
+            moved=tmp_path/'pinned-original'
+            original=attachment_retention._unlink_owned
+            def substitute(blob):
+                shard.rename(moved); shard.symlink_to(outside, target_is_directory=True)
+                return original(blob)
+            monkeypatch.setattr(attachment_retention,'_unlink_owned',substitute)
+            assert (await sweep(store,tmp_path))['deleted']==1
+            assert external.read_bytes()==b'outside must survive'
+            assert not (moved/r['blob_sha']).exists()
+    asyncio.run(run())
+
+@pytest.mark.parametrize('moment', ['after-preflight', 'after-schema', 'available'])
+def test_configured_archive_reopen_never_creates_replacement(tmp_path, monkeypatch, moment):
+    async def run():
+        import retention
+        async with fixture(tmp_path) as (blobs, store):
+            r=await upload(blobs); await age(store,r)
+            archive=tmp_path/'archive.db'
+            c=sqlite3.connect(archive)
+            c.execute('CREATE TABLE session_event_tail(event_json TEXT)')
+            c.execute('INSERT INTO session_event_tail VALUES(?)',(r['blob_sha'],)); c.commit(); c.close()
+            job=retention.RetentionJob(store,retention.RetentionConfig(blob_root=tmp_path/'blobs',archive_path=archive))
+            if moment=='after-preflight':
+                original=job._purge_schedule_classes
+                def disappear(c,cfg):
+                    archive.rename(tmp_path/'saved-archive.db')
+                    return original(c,cfg)
+                monkeypatch.setattr(job,'_purge_schedule_classes',disappear)
+            elif moment=='after-schema':
+                original=retention.ensure_archive
+                def disappear(*args,**kwargs):
+                    original(*args,**kwargs)
+                    archive.rename(tmp_path/'saved-archive.db')
+                monkeypatch.setattr(retention,'ensure_archive',disappear)
+            if moment=='available':
+                # Avoid an unrelated event-archive schema mismatch in this
+                # minimal owner-inventory fixture.
+                monkeypatch.setattr(job,'_prepare',lambda c,cfg:(set(),False))
+                result=await job.run_pass()
+                assert result.managed_blobs_deleted==0
+            else:
+                with pytest.raises(sqlite3.OperationalError):await job.run_pass()
+                assert not archive.exists()
+            assert path(tmp_path,r).is_file()
+            assert await store.attachment_upload(r['upload_id'])
+    asyncio.run(run())
+
+@pytest.mark.parametrize('filename', [':memory:', '', 'literal?#%.db', 'file:literal.db'])
+def test_store_uri_support_preserves_literal_and_temporary_paths(tmp_path, filename):
+    from store import Store
+    async def run():
+        target=filename if filename in (':memory:', '') else str(tmp_path/filename)
+        store=Store(target); store.start()
+        try:
+            assert await store.submit(lambda c:c.execute('SELECT 1').fetchone()[0])==1
+        finally: store.stop()
+        if filename not in (':memory:', ''): assert (tmp_path/filename).is_file()
+    asyncio.run(run())
+
+
+def test_default_archive_in_literal_file_prefix_directory(tmp_path, monkeypatch):
+    from retention import RetentionJob
+    from store import Store
+    async def run():
+        monkeypatch.chdir(tmp_path)
+        Path('file:parent').mkdir()
+        store=Store('file:parent/fixture.db');store.start()
+        try:
+            await RetentionJob(store).run_pass()
+            assert Path('file:parent/sessions_archive.db').is_file()
+            assert not Path('parent').exists()
+        finally:store.stop()
     asyncio.run(run())

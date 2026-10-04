@@ -1401,7 +1401,11 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
 
     def _run(self) -> None:
         try:
-            conn = sqlite3.connect(self._path)
+            # Escape the literal store filename while enabling no-create URI
+            # ATTACH for configured retention archives. Memory stores stay local.
+            from pathlib import Path
+            database = self._path if self._path in (':memory:', '') else Path(self._path).absolute().as_uri()
+            conn = sqlite3.connect(database, uri=True)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")

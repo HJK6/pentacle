@@ -43,9 +43,19 @@ upload retry can repair the row sooner through the upload path.
 Unowned ready rows with absent bytes are reconciled. A retained owner's missing
 file keeps its validated receipt as a tombstone so an authorized fetch continues
 to return `blob_unknown`. That preserves honest unavailable UI and does not
-silently remove the retained publication. A missing blob root, missing managed lock directory, unexpected symlink
-or unreadable archive fails closed. Retention never creates an empty replacement
-root to decide that its files disappeared.
+silently remove the retained publication. GC opens every blob-root ancestor,
+managed lock directory and digest shard with no-follow directory descriptors.
+Verification and unlink use the pinned shard descriptor, so replacing a shard
+with a symlink cannot redirect deletion outside the root. Missing directories,
+symlink components and non-regular leaves retain provenance for recovery.
+Retention never creates an empty replacement root to infer that files disappeared.
+
+A supplied archive path is required owner inventory: direct GC opens it read-only
+and fails if unavailable. The cadence job checks an explicitly configured archive
+before purging schedules or moving sessions, so a missing archive cannot silently
+be replaced with an empty one. With `archive_path=None`, direct GC has no archive;
+the cadence job retains its existing default-archive initialization behavior.
+An unavailable configured archive must be restored before retrying retention.
 
 The deletion sequence can crash after unlink but before row commit. Repeating
 reconciliation handles that ready/missing state. The add sequence remains
@@ -57,7 +67,9 @@ no migration that infers read authority from historical event content.
 `tests/test_managed_attachment_retention.py` covers age boundaries, mtime
 independence, dedup/shared owners, archived owners, report/prompt/evidence pins,
 generic/report/prompt transport reuse, pending/ready crash points, invalid bytes,
-missing-root/symlink guards, cursor progress, failed-delete recovery and two
+missing-root/ancestor/shard/lock symlink guards, descriptor-pinned shard replacement,
+configured missing archive failures at direct and cadence entry points, cursor
+progress, failed-delete recovery and two
 independent Store workers contending across both upload/GC and publication/GC
 orders. These use only disposable SQLite stores and synthetic files.
 

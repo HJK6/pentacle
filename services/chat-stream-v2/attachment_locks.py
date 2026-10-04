@@ -12,12 +12,15 @@ import time
 
 
 @contextmanager
-def digest_lock(root: str | Path, sha: str, *, timeout: float = 30.0):
+def digest_lock(root: str | Path, sha: str, *, timeout: float = 30.0, directory_fd: int | None = None):
     if not re.fullmatch(r"[0-9a-f]{64}", sha):
         raise ValueError("invalid blob digest")
     directory = Path(root) / ".attachment-locks"
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(directory / sha, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    if directory_fd is None:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(directory / sha if directory_fd is None else sha,
+                 os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600,
+                 dir_fd=directory_fd)
     try:
         deadline = time.monotonic() + timeout
         while True:

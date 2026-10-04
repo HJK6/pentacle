@@ -86,12 +86,13 @@ def publication_attachment(row, stream_id, publisher=None):
     return result
 
 
-def verify_publication_bytes(root, row):
+def verify_publication_bytes(root, row, *, directory_fd=None):
     """Final bounded byte verification runs on Store worker inside digest lock."""
     sha = row['blob_sha']
     path = Path(root) / sha[:2] / sha
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path if directory_fd is None else sha,
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
         with os.fdopen(fd, 'rb') as handle:
             before = os.fstat(handle.fileno())
             if not stat.S_ISREG(before.st_mode) or before.st_size != row['size_bytes']:
