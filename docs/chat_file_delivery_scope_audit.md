@@ -98,3 +98,26 @@ external-principal denial, authorized publication positive and honest missing
 bytes. Combined scoped/external/publication/roundtrip/transcribe selection: 117 passing tests.
 The original RED log is retained as private synthetic test evidence; no live data
 or internal machine paths are included in this document.
+
+## Separate receipt-admission repair
+
+The follow-on synthetic RED established receipt-read authority after a failed
+admission collision: the old code returned the operator's same-stream receipt.
+It did not establish a new message replay or backend submission. The old claim
+also persisted beyond the failed call; no assumption about live exploitation is
+made. Existing operator retries retain their independent operator authority.
+
+The separate repair passes verified `scoped_credential_id` as an internal method
+argument, never a client event field. `admit_assistant_composite_input` checks
+existing request ownership and receipt/route principals, then writes ownership
+inside the same SQLite transaction as route, event and receipt admission. Any
+failure rolls back the claim. A foreign caller also cannot adopt an existing
+input identity by rotating the request ID. Same-owner duplicates and rotated-ID
+retries retain their original event identity.
+
+Five synthetic RPC tests cover the original operator-receipt collision,
+same-owner concurrent retry/rotation, different-principal race, receipt-insert
+rollback, and foreign replay identity. Legitimate owner retry after contention
+continues to work. The targeted admission/scoped/attachment/direct/rebind/server
+regression selection has 58 passes. No live database migration or cleanup of
+historically poisoned ownership rows is performed by this source change.

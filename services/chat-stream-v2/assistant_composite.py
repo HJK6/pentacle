@@ -556,12 +556,12 @@ class AssistantComposite:
         })
         return projected
 
-    async def accept_input(self, msg: dict[str, Any], *, operator_principal: str | None = None) -> dict[str, Any]:
+    async def accept_input(self, msg: dict[str, Any], *, operator_principal: str | None = None, scoped_credential_id: str | None = None) -> dict[str, Any]:
         """Accept literal operator input once and wake the routing consumer."""
         async with self._binding_lock:
-            return await self._accept_input_locked(msg, operator_principal=operator_principal)
+            return await self._accept_input_locked(msg, operator_principal=operator_principal, scoped_credential_id=scoped_credential_id)
 
-    async def _accept_input_locked(self, msg: dict[str, Any], *, operator_principal: str | None = None) -> dict[str, Any]:
+    async def _accept_input_locked(self, msg: dict[str, Any], *, operator_principal: str | None = None, scoped_credential_id: str | None = None) -> dict[str, Any]:
         if not self.enabled:
             raise ValueError("assistant_composite_disabled")
         body = msg.get("text") if "text" in msg else msg.get("message")
@@ -608,6 +608,7 @@ class AssistantComposite:
             reply_to_message_id=_optional_id(msg.get("reply_to_message_id")),
             reply_to_question_id=_optional_id(msg.get("reply_to_question_id")),
             actor_stream_id=operator_principal,
+            scoped_credential_id=scoped_credential_id,
             direct_primary=self.config.direct_primary,
             direct_target_stream_id=self.config.direct_primary_stream_id if self.config.direct_primary else None,
             direct_target_generation=self.config.direct_primary_generation if self.config.direct_primary else None,

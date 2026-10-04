@@ -2895,12 +2895,9 @@ class Server:
                     attachments = await self._validate_assistant_input_attachments(
                         msg.get("attachments"), owner_credential_id=cred,
                     )
-                    if request_id:
-                        await self.store.record_scoped_owner(
-                            kind="request", key=request_id, credential_id=cred,
-                        )
                     accepted = await composite.accept_input(
                         {**msg, "attachments": attachments}, operator_principal=f"scoped:{cred}",
+                        scoped_credential_id=cred,
                     )
                 except ValueError as exc:
                     raise VerbError(str(exc), str(exc)) from exc
