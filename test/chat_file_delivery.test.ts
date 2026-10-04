@@ -130,3 +130,9 @@ test('blob-forbidden stays a refusal and never enables a link',async()=>{
   assert.equal(s.created.length,0);assert.doesNotMatch(s.root.textContent||'',/DO_NOT_PRINT/);
   s.hydrator.dispose();
 });
+
+test('incomplete historical file metadata stays unsupported instead of becoming a download',()=>{
+  const {root}=render('application/pdf','legacy','legacy.pdf','a'.repeat(64),NaN);
+  assert.equal(root.querySelectorAll('.slot-chat-file-download').length,0);
+  assert.match(root.textContent||'',/unavailable preview/);
+});

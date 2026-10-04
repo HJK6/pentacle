@@ -248,3 +248,12 @@ Private evidence hashes:
 - m3-legacy-fixture-red.log: `600e206b05d49096e27c88558e6e347066483c3731d74a522b32bead3f1b3b4e`
 - m3-review-repair.log: `6839f1893d54d52e5aa48488de6de846c1052775c62b971b5f535f7476fa9498`
 - m4-python-regression.log: `ef84bcf84db36cde21ac063c9de8034df82f0ab4e93e7af04244d125cbd832da`
+
+M4 CI repair checkpoint: complete npm suite exposed an eager browser-global
+lookup during VM bundle import and a historical PDF lacking required size
+metadata. Browser globals now use safe globalThis lookups; incomplete legacy
+metadata remains unsupported/inert. Full npm suite in a fresh public checkout:
+1155 passed, 3 skipped; prestart passed. Focused DOM/parity gate: 43 passed.
+Exact-head CI/browser verification must be repeated on the repaired candidate.
+- m4-full-node.log: `fbb4c8c88722f47b3b82726a81a777b47959d4f967c99c45c5c3769a2f2db977`
+- m4-repair-focused.log: `0e6899249ffc58b33b6c374ec597f1802b6d735cd320102d749b4f75e6493a6d`

@@ -5,7 +5,7 @@ const FILE_TYPES = new Set(['application/pdf', 'application/zip', 'model/3mf', '
 
 // One instance per renderer. URLs are scoped to mounted nodes, never globally
 // reused by hash across conversations or credential changes.
-function createFileDownloads({ fetchBlob, urlApi = URL, cryptoApi = globalThis.crypto, decode = atob, BlobClass = Blob } = {}) {
+function createFileDownloads({ fetchBlob, urlApi = globalThis.URL, cryptoApi = globalThis.crypto, decode = globalThis.atob, BlobClass = globalThis.Blob } = {}) {
   const records = new Map();
   let observer;
   function revoke(node, record) {

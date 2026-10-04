@@ -412,9 +412,10 @@ function renderAttachmentHtml(attachment: RenderAttachment, index: number): stri
   const alt = attachment.name || `Image attachment ${index + 1}`;
   const mime = String(attachment.mime || '').toLowerCase();
   const fileTypes = ['application/pdf', 'application/zip', 'model/3mf', 'model/stl', 'model/step', 'application/x-openscad'];
-  if (fileTypes.includes(mime) && /^[0-9a-f]{64}$/.test(key)) {
+  const fileSize = Number(attachment.size ?? attachment.bytes);
+  if (fileTypes.includes(mime) && /^[0-9a-f]{64}$/.test(key) && Number.isSafeInteger(fileSize) && fileSize > 0 && fileSize <= 25 * 1024 * 1024) {
     const name = String(attachment.filename || attachment.name || 'Attachment').split(/[\\/]/).pop()!.replace(/[\u0000-\u001f\u007f]/g, '') || 'Attachment';
-    const size = Number(attachment.size ?? attachment.bytes);
+    const size = fileSize;
     return `<div class="slot-chat-file-attachment"><a class="slot-chat-file-download" data-attachment-key="${escapeHtml(key)}" data-attachment-mime="${escapeHtml(mime)}"${Number.isSafeInteger(size) && size >= 0 ? ` data-attachment-size="${size}"` : ''} download="${escapeHtml(name)}" aria-disabled="true" tabindex="0">${escapeHtml(name)}</a> <span class="slot-chat-file-type">${escapeHtml(mime)}</span><span class="slot-chat-file-status" role="status">Loading file</span></div>`;
   }
   if (mime !== 'image/jpeg' && mime !== 'image/png') {
