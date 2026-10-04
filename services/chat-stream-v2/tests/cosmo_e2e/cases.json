@@ -1,0 +1,55 @@
+{
+  "schema": {
+    "doc": "The ONE shared scenario source for the Cosmo E2E disposable Foundation harness. One row per case. See work/in_progress/pentacle__cosmo_e2e_foundation_harness_2026_10/spec.md.",
+    "fields": [
+      "case_id",
+      "server",
+      "maestro_input (OWNED BY COSMO LEAD; filled at handoff)",
+      "fixture (optional; media rows only: {key,path,sha256} under tests/cosmo_e2e/fixtures/)",
+      "setup (manifest-owned deterministic pre-actions run before action)",
+      "action (authorized verb/endpoint the harness drives)",
+      "boundary (named seam)",
+      "verify (expected outcome as exact observable oracle)"
+    ]
+  },
+  "fixtures": {
+    "photo": {"key": "photo", "path": "tests/cosmo_e2e/fixtures/photo.png", "sha256": "b1ff9c8ea3a780bad09b346c423d2d0e46815926879b18e841d928376a946640"},
+    "voice": {"key": "voice", "path": "tests/cosmo_e2e/fixtures/voice.m4a", "sha256": "c5527746f6174e1d706cc4da8c3264c1d6cd5696721b29619fe5a0120557ec87"}
+  },
+  "cases": [
+    {"case_id": "text", "server": "foundation", "maestro_input": "pending (Cosmo lead)", "setup": "none",
+     "action": "scoped send -> accept_input; backend assistant.publish", "boundary": "composite publish",
+     "verify": "1 stored user message + 1 published reply; send.receipt.get returns committed receipt; broadcast carries reply text"},
+    {"case_id": "fail-once", "server": "foundation", "maestro_input": "pending (Cosmo lead)", "setup": "one user input admitted (route resolved, first dispatch pending)",
+     "action": "backend assistant.publish; first dispatch gated to fail then succeed", "boundary": "accepted-but-ack-lost (post-admission)",
+     "verify": "messages==1 unchanged across retry; receipts==1; replay publish returns duplicate==True; exactly-once delivery"},
+    {"case_id": "reconnect", "server": "foundation", "maestro_input": "pending (Cosmo lead)", "setup": "one durably-admitted input (ack not yet delivered)",
+     "action": "client drops; reconnects on a new connection; re-sends same input_identity/request_id", "boundary": "accepted-but-ack-lost (client side)",
+     "verify": "admit idempotent -> no 2nd route, messages unchanged; send.receipt.get reconciles the existing receipt on the new connection"},
+    {"case_id": "photo", "server": "foundation", "maestro_input": "pending (Cosmo lead)", "fixture": "photo",
+     "setup": "materialize fixture photo (assert sha256)",
+     "action": "upload_blob_init/chunk (REAL bytes) -> assistant.publish w/ attachment; fetch_blob", "boundary": "real BlobStore",
+     "verify": "uploaded sha == read_verified sha == fixture.sha256; downloaded bytes == fixture bytes"},
+    {"case_id": "voice", "server": "foundation", "maestro_input": "pending (Cosmo lead)", "fixture": "voice",
+     "setup": "materialize fixture voice (assert sha256)",
+     "action": "upload voice blob (REAL) -> transcribe_blob (STUB poster)", "boundary": "real blob + stubbed transcriber",
+     "verify": "blob sha == fixture.sha256; transcriber returns stub transcript; real _urllib_post never called; sha-cache idempotent"},
+    {"case_id": "voice-fail-once", "server": "foundation", "maestro_input": "pending (Cosmo lead)", "fixture": "voice",
+     "setup": "materialize fixture voice",
+     "action": "transcribe_blob where stub poster fails once (503) then succeeds; same request_id", "boundary": "transcriber error mapping + idempotency",
+     "verify": "first call 503->error; retry same request_id succeeds; request-id rebinding to a different blob -> bad_request"},
+    {"case_id": "history", "server": "foundation", "maestro_input": "pending (Cosmo lead)", "setup": "N prior committed turns (seed via N x send+assistant.publish)",
+     "action": "request_stream_events / snapshot", "boundary": "store persistence",
+     "verify": "snapshot/history returns exactly the N committed messages in order; counts match store rows"},
+    {"case_id": "working", "server": "foundation", "maestro_input": "pending (Cosmo lead)", "setup": "none",
+     "action": "drive a turn so composite pending_count>0, then publish", "boundary": "composite working activity field (assistant_composite.py:542)",
+     "verify": "snapshot working==true while in flight (pending_count>0); working==false after assistant.publish"},
+    {"case_id": "calendar", "server": "cosmo", "maestro_input": "pending (Cosmo lead)", "setup": "authenticated synthetic token; empty events collection",
+     "action": "POST /events (201) then DELETE /events/{id} (204)", "boundary": "real Cosmo server",
+     "verify": "after add: event present in GET /events?from=&to= with server-owned id; after delete: absent"},
+    {"case_id": "list-undo", "server": "cosmo", "maestro_input": "pending (Cosmo lead)",
+     "setup": "seed list L with TWO items via POST /lists/{L}/items then PATCH /lists/items/{id}/done at clock T0: I_undo and I_expire",
+     "action": "(a) PATCH /lists/items/{I_undo}/undone within window; (b) advance clock to T0+WINDOW+eps; (c) PATCH /lists/items/{I_expire}/undone", "boundary": "server-owned done_at/expiry/undo window (lists.py:26, completion.expired)",
+     "verify": "(a) I_undo restored (done_at NULL), present in GET /lists/{L}/items; (b) I_expire expired; (c) undo I_expire -> HTTP 410 'item expired'"}
+  ]
+}
