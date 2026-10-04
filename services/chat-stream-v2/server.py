@@ -3118,16 +3118,21 @@ class Server:
         blob_store = getattr(self.comms, "blob_store", None)
         if blob_store is None or not callable(getattr(blob_store, "read_verified", None)):
             raise ValueError("assistant_publish_attachment_validation_unavailable")
-        originals = {item["key"]: item for item in json.loads(route.get("attachments_json") or "[]")}
+        from store_attachments import publication_attachment
+        from chat_attachment_types import validated_media_type, sanitized_filename
         attachments = []
-        for key in attachment_ids:
+        for upload_id in attachment_ids:
+            row = await self.store.attachment_upload(upload_id)
+            attachment = publication_attachment(row, str(route.get('stream_id') or ''))
             try:
-                data = await blob_store.read_verified(key, max_bytes=ATTACHMENT_MAX_BYTES)
+                data = await blob_store.read_verified(row['blob_sha'], max_bytes=ATTACHMENT_MAX_BYTES)
+                if (len(data) != row['size_bytes']
+                        or sanitized_filename(row['filename']) != row['filename']
+                        or validated_media_type(row['filename'], data[:16]) != row['media_type']):
+                    raise ValueError('metadata mismatch')
             except (ValueError, KeyError) as exc:
-                raise ValueError("assistant_publish_attachment_unverified") from exc
-            # Input references retain their validated envelope. A generated blob
-            # without declared metadata is downloadable, never mislabeled as an image.
-            attachments.append(originals.get(key) or {"key": key, "mime": "application/octet-stream", "size": len(data)})
+                raise ValueError('assistant_publish_attachment_unverified') from exc
+            attachments.append(attachment)
         return attachments
 
     def _get_transcriber(self) -> Any:
@@ -3168,11 +3173,24 @@ class Server:
     async def _on_assistant_publish(self, msg: dict[str, Any]) -> dict[str, Any]:
         composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if msg.get("attachment_ids") and (
+            auth.get("token_verified") is not True
+            or not isinstance(auth.get("session_generation"), str)
+            or not auth["session_generation"].strip()
+        ):
+            raise VerbError("publish_not_authorized", "file publication requires a verified publisher generation")
         if composite is None or not auth.get("token_verified"):
+            if msg.get("attachment_ids"):
+                raise VerbError("publish_not_authorized", "file publication requires an authorized current publisher")
             raise VerbError("assistant_publish_unauthorized", "assistant.publish requires a verified backend stream token")
         try:
             return await composite.publish(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
         except ValueError as exc:
+            if msg.get("attachment_ids") and str(exc) in {
+                "assistant_publish_provenance_unverified", "assistant_actor_generation_unverified",
+                "assistant_direct_actor_unverified", "assistant_direct_dispatch_unverified",
+            }:
+                raise VerbError("publish_not_authorized", "file publication requires an authorized current publisher") from exc
             raise VerbError(str(exc), str(exc)) from exc
 
     async def _assistant_question_operation(self, operation: str, msg: dict[str, Any]) -> dict[str, Any]:

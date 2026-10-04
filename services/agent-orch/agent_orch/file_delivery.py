@@ -50,8 +50,10 @@ def guarded_path(value):
         roots += [Path(xdg).expanduser() / p for p in ('pentacle-stream', 'pentacle', 'agent-orch', 'dot', 'gcloud', 'gh', 'op')]
     explicit = [Path(os.environ[k]).expanduser() for k in
         ('AGENT_ORCH_STREAM_TOKEN_FILE', 'AWS_SHARED_CREDENTIALS_FILE',
-         'AWS_CONFIG_FILE', 'GOOGLE_APPLICATION_CREDENTIALS', 'KUBECONFIG')
+         'AWS_CONFIG_FILE', 'GOOGLE_APPLICATION_CREDENTIALS')
         if os.environ.get(k)]
+    explicit += [Path(value).expanduser() for value in
+                 os.environ.get('KUBECONFIG', '').split(os.pathsep) if value]
     for candidate in (lexical, canonical):
         if any(candidate == root or candidate.is_relative_to(root) or
                candidate == root.resolve() or candidate.is_relative_to(root.resolve()) for root in roots):
@@ -204,6 +206,8 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
             _print(result)
             return 0
         code = response.get('error_code') if isinstance(response, dict) else None
+        if code in ('scope_denied', 'assistant_publish_unauthorized'):
+            code = 'publish_not_authorized'
         safe = code if code in ('publish_not_authorized', 'upload_unknown', 'blob_unknown',
             'attachment_invalid', 'publish_correlation_invalid', 'publish_replay_conflict') else 'publish_failed'
         _print({'type': 'assistant.publish.error', 'error_code': safe, 'upload_id': upload_id})

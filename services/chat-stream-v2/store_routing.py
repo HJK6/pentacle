@@ -1104,7 +1104,7 @@ class _RoutingStoreMixin:
         if not separator or not host or not session_name:
             raise ValueError("assistant_composite_invalid_stream_id")
 
-        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+        def _locked_op(conn: sqlite3.Connection) -> dict[str, Any]:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 if actor_generation is not None:
@@ -1235,6 +1235,9 @@ class _RoutingStoreMixin:
                         json.dumps(evidence_refs, separators=(",", ":")), event_id, stamp,
                     ),
                 )
+                for attachment in event.get('attachments') or []:
+                    conn.execute("INSERT INTO v2_attachment_refs(owner_kind,owner_id,stream_id,upload_id,blob_sha) VALUES ('publication',?,?,?,?)",
+                        (publication_key, stream_id, attachment['upload_id'], attachment['key']))
                 stored = dict(conn.execute(
                     "SELECT * FROM v2_assistant_composite_publications WHERE publication_key=?", (publication_key,),
                 ).fetchone())
@@ -1245,6 +1248,11 @@ class _RoutingStoreMixin:
                 conn.rollback()
                 raise
 
+        def _op(conn):
+            with self.publication_attachment_guard(conn, attachment_ids, stream_id,
+                    event.get('attachments') or [],
+                    {'stream_id': actor_stream_id, 'generation': actor_generation}):
+                return _locked_op(conn)
         return await self.submit(_op)
 
     async def apply_assistant_composite_operation(

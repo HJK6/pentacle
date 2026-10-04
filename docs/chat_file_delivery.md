@@ -160,3 +160,51 @@ RED were reproduced before their corresponding fixes. Private evidence hashes:
 
 M3 preflight exposed two CLI omissions: non-prose operation evidence forwarding
 and publication event/duplicate output. Both reproduced RED before repair.
+
+## M3: managed publication and durable references (source stage)
+
+assistant.publish now resolves upload IDs from daemon-owned ready provenance,
+uses read_verified, and rechecks canonical type, size and filename. Raw blob
+hashes and invented IDs cannot substitute for receipts. Scoped uploads remain
+within their original assistant scope. Attachment-only replies use the existing
+bounded 16-item envelope; empty posts, caller provenance fields, stale/missing
+publisher generation and uncorrelated publications remain refused.
+
+Each published attachment retains distinct uploader auth kind/principal/seat
+(or explicit non-seat nulls), server upload time, and verified publisher
+stream/generation. Event insertion, publication idempotency and an additive
+publication reference row commit in one transaction. A sorted per-digest guard
+rechecks ready rows, expected metadata and actual bytes immediately before the
+transaction and stays held through commit, preparing the shared boundary for
+M7 GC. No GC runs in this milestone. Changing the direct binding does not rewrite
+historical dispatch authority or create another card on retry.
+
+The executable test_file_delivery_roundtrip.py runs the exact CLI Step A,
+nonpublisher refusal, Step B upload-ID handoff, advisory receipt carrier retry,
+and fetch_blob journey for all ten supported extensions. It exercises real JSON
+RPC framing/daemon dispatch/blob and SQLite handlers. Networking/hello is replaced
+by a synthetic verified connection adapter; this is an in-process gate, not a
+claim of deployed transport or device acceptance. Existing auth/scoped regression
+tests remain in the selected suite; M6 extends published-file read authorization.
+
+M3 evidence: 31 new publication cases plus 10 CLI/daemon roundtrip cases;
+204 selected regressions passed; compileall passed. Tests cover corruption,
+missing/pending bytes, mismatched metadata, scope, reference-insert rollback,
+concurrent retry and hot rebind. REDs reproduced attachment-only refusal,
+raw-hash acceptance, the required stable nonpublisher error, and missing verified
+publisher generation before fixes. Fixture setup corrections are not product REDs.
+
+M2 review repair included here: KUBECONFIG is split with os.pathsep, empty entries
+ignored, and every listed path is canonicalized. A failing synthetic test proved
+that an external first entry previously uploaded; first/second entries and a
+symlink alias now refuse before upload. Existing server scope_denied remains
+unchanged on the wire; send-file reports that publication refusal as
+publish_not_authorized. CLI suite now has 59 cases.
+
+Private evidence hashes:
+- m3-publish-red.log: `3459e5b67e2a1be5f3708eb005d37d732077d3eb4b1afba6a0650e5d359c3299`
+- m3-generation-red.log: `8254826c596106390f380bc617a80e5a8e11100c46753b76dda73757e85d64e4`
+- m3-collected.log: `6c9d458dfeef2b27cd8c8b52110d336aa733e566d5f80d9c306f3882fd42cf12`
+- m3-regression.log: `5e27b45e933b6e3417e2804615e334ff70c51466337690779e6f414fcbca9618`
+- m2-kubeconfig-red.log: `0bb3f20eda277a2dc009393cacd1fc8a7037dfed52ab1f30ca384dd2aaba7244`
+- m2-kubeconfig-green.log: `f6eec9b16af98e64764fadfa47259289059a0f06ab6ede25054452161091e7e8`

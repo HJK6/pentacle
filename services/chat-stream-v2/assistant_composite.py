@@ -1325,7 +1325,8 @@ class AssistantComposite:
         dispatch_id = _optional_id(msg.get("dispatch_id"))
         body = msg.get("message")
         body = "" if body is None else str(body)
-        if not publication_key or not dispatch_id or not body:
+        attachment_ids = _id_list(msg.get("attachment_ids"), "assistant_publish_attachment_ids_invalid")
+        if not publication_key or not dispatch_id or (not body and not attachment_ids):
             raise ValueError("assistant_publish_required_fields")
         kind = str(msg.get("publish_kind") or "")
         if kind not in {"prose", "question", "result", "status"}:
@@ -1359,13 +1360,14 @@ class AssistantComposite:
             raise ValueError("assistant_publish_reply_unverified")
         if kind != "question" and reply_to_question_id != _optional_id(route.get("reply_to_question_id")):
             raise ValueError("assistant_publish_question_unverified")
-        attachment_ids = _id_list(msg.get("attachment_ids"), "assistant_publish_attachment_ids_invalid")
         evidence_refs = _id_list(msg.get("evidence_refs"), "assistant_publish_evidence_refs_invalid")
         attachments = []
         if attachment_ids:
             if self.publication_attachments is None:
                 raise ValueError("assistant_publish_attachment_validation_unavailable")
             attachments = await self.publication_attachments(attachment_ids, route)
+            for attachment in attachments:
+                attachment["publisher"] = {"stream_id": actor_stream_id, "generation": actor_generation}
         canonical_payload = {
             "composite_stream_id": self.config.stream_id,
             "dispatch_id": dispatch_id,

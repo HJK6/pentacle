@@ -316,3 +316,23 @@ def test_publication_receipt_retains_event_and_duplicate(monkeypatch,wire,capsys
     assert cli.send_file(publish_args('--upload-id','synthetic-upload'))==0
     result=json.loads(capsys.readouterr().out)
     assert result['event_id']==123 and result['duplicate'] is True
+
+
+def test_kubeconfig_path_list_each_entry_and_symlink_refused(tmp_path,monkeypatch,wire,capsys):
+    import os
+    first=tmp_path/'first.pdf';second=tmp_path/'second.pdf'
+    first.write_bytes(PDF);second.write_bytes(PDF)
+    alias=tmp_path/'alias.pdf';alias.symlink_to(second)
+    monkeypatch.setenv('KUBECONFIG',os.pathsep.join([str(first),'',str(second)]))
+    for p in (first,second,alias):
+        assert cli.send_file(args(p))==2
+        assert json.loads(capsys.readouterr().out)['error_code']=='secret_path_refused'
+    assert not wire
+
+
+@pytest.mark.parametrize('code',['scope_denied','assistant_publish_unauthorized'])
+def test_existing_server_scope_refusals_report_publish_not_authorized(monkeypatch,wire,capsys,code):
+    async def denied(*a,**kw): return {'type':'assistant.publish.error','error_code':code}
+    monkeypatch.setattr(cli,'assistant_once',denied)
+    assert cli.send_file(publish_args('--upload-id','synthetic-upload'))==1
+    assert json.loads(capsys.readouterr().out)['error_code']=='publish_not_authorized'

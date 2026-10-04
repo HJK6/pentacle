@@ -5,13 +5,18 @@ not authority to publish or fetch. Pending rows are not referenceable.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
+import re
+import stat
 from pathlib import Path
 import uuid
 
 from attachment_locks import digest_lock
+from chat_attachment_types import ATTACHMENT_MAX_BYTES, validated_media_type, sanitized_filename
 
 DDL = (
     """CREATE TABLE IF NOT EXISTS v2_attachment_uploads (
@@ -38,6 +43,12 @@ DDL = (
            OR (auth_kind != 'seat' AND seat_stream_id IS NULL AND seat_generation IS NULL AND credential_id IS NOT NULL))
     )""",
     "CREATE INDEX IF NOT EXISTS v2_attachment_uploads_digest ON v2_attachment_uploads(blob_sha, state, uploaded_at)",
+    """CREATE TABLE IF NOT EXISTS v2_attachment_refs (
+        owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL,
+        stream_id TEXT NOT NULL, upload_id TEXT NOT NULL, blob_sha TEXT NOT NULL,
+        PRIMARY KEY(owner_kind,owner_id,upload_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS v2_attachment_refs_digest ON v2_attachment_refs(blob_sha)",
 )
 
 
@@ -58,7 +69,86 @@ def receipt(row):
             "credential_id": row["credential_id"], "assistant_scope": row["assistant_scope"]}
 
 
+def publication_attachment(row, stream_id, publisher=None):
+    """Only persisted, ready, correctly scoped provenance can become an event."""
+    if (not row or row['state'] != 'ready' or row['purpose'] != 'chat_attachment'
+            or not re.fullmatch(r'[0-9a-f]{64}', row['blob_sha'])
+            or not 0 < row['size_bytes'] <= ATTACHMENT_MAX_BYTES
+            or (row['auth_kind'] == 'scoped' and row['assistant_scope'] != stream_id)):
+        raise ValueError('assistant_publish_attachment_unverified')
+    result = dict(key=row['blob_sha'], mime=row['media_type'], size=row['size_bytes'],
+        filename=row['filename'], upload_id=row['upload_id'], uploaded_at=row['uploaded_at'],
+        uploader=dict(auth_kind=row['auth_kind'], principal_id=row['principal_id'],
+            stream_id=row['seat_stream_id'], generation=row['seat_generation'],
+            credential_id=row['credential_id'], assistant_scope=row['assistant_scope']))
+    if publisher is not None:
+        result['publisher'] = publisher
+    return result
+
+
+def verify_publication_bytes(root, row):
+    """Final bounded byte verification runs on Store worker inside digest lock."""
+    sha = row['blob_sha']
+    path = Path(root) / sha[:2] / sha
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_size != row['size_bytes']:
+                raise ValueError('assistant_publish_attachment_unverified')
+            hasher, size, prefix = hashlib.sha256(), 0, b''
+            while chunk := handle.read(1024 * 1024):
+                size += len(chunk)
+                if size > ATTACHMENT_MAX_BYTES:
+                    raise ValueError('assistant_publish_attachment_unverified')
+                hasher.update(chunk)
+                if not prefix: prefix = chunk[:16]
+            after = os.fstat(handle.fileno())
+            if ((before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+                    (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                    or size != row['size_bytes'] or hasher.hexdigest() != sha
+                    or sanitized_filename(row['filename']) != row['filename']
+                    or validated_media_type(row['filename'], prefix) != row['media_type']):
+                raise ValueError('assistant_publish_attachment_unverified')
+    except (OSError, ValueError) as exc:
+        raise ValueError('assistant_publish_attachment_unverified') from exc
+
+
 class AttachmentStoreMixin:
+    def configure_attachment_root(self, root):
+        root = Path(root).resolve()
+        previous = getattr(self, '_attachment_root', None)
+        if previous is not None and previous != root:
+            raise ValueError('attachment_root_conflict')
+        self._attachment_root = root
+
+    @contextmanager
+    def publication_attachment_guard(self, conn, upload_ids, stream_id, expected, publisher):
+        if not upload_ids:
+            yield
+            return
+        root = getattr(self, '_attachment_root', None)
+        if root is None:
+            raise ValueError('assistant_publish_attachment_validation_unavailable')
+        rows = [conn.execute('SELECT * FROM v2_attachment_uploads WHERE upload_id=?', (key,)).fetchone() for key in upload_ids]
+        if any(row is None for row in rows):
+            raise ValueError('assistant_publish_attachment_unverified')
+        with ExitStack() as stack:
+            for sha in sorted({row['blob_sha'] for row in rows}):
+                stack.enter_context(digest_lock(root, sha))
+            # Recheck after locking. GC or another process may have changed rows
+            # while the lock was acquired. Never publish from a stale lookup.
+            current = [conn.execute('SELECT * FROM v2_attachment_uploads WHERE upload_id=?', (key,)).fetchone() for key in upload_ids]
+            for original, row in zip(rows, current):
+                if row is None or dict(original) != dict(row):
+                    raise ValueError('assistant_publish_attachment_unverified')
+            actual = [publication_attachment(row, stream_id, publisher) for row in current]
+            if actual != expected:
+                raise ValueError('assistant_publish_attachment_unverified')
+            for row in current:
+                verify_publication_bytes(root, row)
+            yield  # Held through BEGIN IMMEDIATE, event/reference insert, commit.
+
     async def complete_attachment_upload(self, *, root, request_id, sha, size, media_type,
                                          filename, identity, materialize):
         """Two-phase add under one digest lock; callback materializes verified bytes."""

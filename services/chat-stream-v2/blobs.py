@@ -91,6 +91,8 @@ class BlobStore:
     def __init__(self, root: str = DEFAULT_BLOB_ROOT, *, attachment_store=None) -> None:
         self._root = Path(root)
         self.attachment_store = attachment_store
+        if attachment_store is not None:
+            attachment_store.configure_attachment_root(self._root)
         self._tmp = self._root / ".tmp"
         self._uploads: dict[str, _Upload] = {}
         self._locks: dict[str, asyncio.Lock] = {}
