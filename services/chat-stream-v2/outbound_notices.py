@@ -161,6 +161,7 @@ class OutboundNoticeQueue:
         self.comms = comms
         self.config = config or OutboundNoticeConfig.from_env()
         self.owner = owner or f"outbound:{os.getpid()}:{uuid.uuid4().hex}"
+        self.front_desk_digest = None
         self._guards: dict[str, Guard] = {}
         self._terminal_callbacks: dict[str, TerminalCallback] = {}
         self._delivered_callbacks: dict[str, Callable[[dict[str, Any]], Awaitable[None]]] = {}
@@ -248,6 +249,8 @@ class OutboundNoticeQueue:
         force: bool = False,
     ) -> int:
         """Claim due notices atomically and process one bounded batch."""
+        if self.front_desk_digest is not None:
+            await self.front_desk_digest.tick()
         cap = max(1, int(limit or NOTICE_MAX_PER_PASS))
         kind_set = set(kinds) if kinds is not None else None
         notice_ids = await self.store.list_outbound_notice_ids(
@@ -297,6 +300,7 @@ class OutboundNoticeQueue:
             if self.comms is None:
                 raise RuntimeError("outbound transport unavailable")
             message = {
+                "_outbound_notice_kind": kind,
                 "tell_id": str(row["tell_id"]),
                 "stream_id": str(row["recipient_stream_id"]),
                 "to_stream_id": str(row["recipient_stream_id"]),
@@ -306,6 +310,12 @@ class OutboundNoticeQueue:
                 # an in-flight provider turn.
                 "urgent": kind not in _NON_URGENT_KINDS,
             }
+            import json
+            metadata = row.get('metadata') or '{}'
+            metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+            if metadata.get('front_desk_digest'):
+                from front_desk_digest import DIGEST_TOKEN
+                message['_front_desk_digest_token'] = DIGEST_TOKEN
             if kind == NOTICE_KIND_NOTIFICATION_ANSWER:
                 import json
                 metadata = row.get("metadata") or "{}"

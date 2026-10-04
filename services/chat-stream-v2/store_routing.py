@@ -2262,6 +2262,7 @@ class _RoutingStoreMixin:
             clauses = [
                 "delivered_at IS NULL",
                 "terminal_at IS NULL",
+                "kind != 'front_desk_held'",
                 "(lease_until IS NULL OR lease_until <= ?)",
             ]
             params: list[Any] = [stamp]
@@ -2302,7 +2303,7 @@ class _RoutingStoreMixin:
             cur = conn.execute(
                 """UPDATE v2_outbound_notices
                    SET lease_owner=?, lease_until=?, attempts=attempts+1
-                   WHERE notice_id=? AND delivered_at IS NULL AND terminal_at IS NULL
+                   WHERE notice_id=? AND kind != 'front_desk_held' AND delivered_at IS NULL AND terminal_at IS NULL
                      AND (lease_until IS NULL OR lease_until <= ?)""" + due_clause,
                 params,
             )

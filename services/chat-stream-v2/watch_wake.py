@@ -147,9 +147,12 @@ class WatchWake:
             metadata = row.get("metadata")
             if isinstance(metadata, str):
                 metadata = json.loads(metadata)
-            env = "PENTACLE_TREE_IDLE_S" if row["kind"] == "tree_idle" else "PENTACLE_LANE_DIGEST_S"
+            if (metadata or {}).get('front_desk_digest'):
+                env = None
+            else:
+                env = "PENTACLE_TREE_IDLE_S" if row["kind"] == "tree_idle" else "PENTACLE_LANE_DIGEST_S"
             if (not binding or tuple(binding) != (row.get("recipient_stream_id"), (metadata or {}).get("root_generation"))
-                    or os.environ.get(env) == "0"):
+                    or (env is not None and os.environ.get(env) == "0")):
                 return NoticeDecision("terminal", "fleet_root_rebound_or_disabled", "use current root generation")
             host, _, name = row["recipient_stream_id"].partition(":")
             root = await self.store.fetch_session(host, name)

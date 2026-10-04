@@ -476,6 +476,8 @@ async def run(args: argparse.Namespace) -> int:
         return None
 
     comms.assistant_ingress_policy = _assistant_ingress_policy
+    comms.front_desk_digest = assistant_composite.front_desk_digest
+    outbound.front_desk_digest = assistant_composite.front_desk_digest
 
     # Cosmo reply push: one Expo push to the scoped CosmoPushTokens audience when
     # a DAFF reply commits.  Wired to the Daff composite ONLY — Bart must never

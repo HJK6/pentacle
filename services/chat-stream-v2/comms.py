@@ -401,6 +401,7 @@ class Comms:
         # Bound by main only when a composite is configured. The callback is a
         # narrow target filter; ordinary Comms users remain unchanged.
         self.assistant_ingress_policy: Any = None
+        self.front_desk_digest: Any = None
         # The observer seam is attached after bind-first construction. A single
         # queue/drain serializes buffered replays with live arrivals even while
         # an observer awaits broadcasts, so receipt order cannot invert.
@@ -1926,6 +1927,12 @@ class Comms:
                 await self._record_blocked_input(msg, request_id, exc)
             raise
         target = str(plan.route["final_target"])
+        if self.front_desk_digest is not None:
+            held = await self.front_desk_digest.ingress(target_stream_id=target,
+                body=plan.body, msg=msg, verb="send")
+            if held is not None:
+                return {**held, "type":"send.result", "request_id":request_id,
+                        "to_stream_id":target, "delivery":"persisted"}
         target_host, target_name = self.sessions.split(target)
         target_row = await self.store.fetch_session(target_host, target_name) or {}
         # A composite backend turn already has immutable route, dispatch and

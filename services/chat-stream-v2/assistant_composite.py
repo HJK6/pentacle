@@ -273,6 +273,8 @@ class AssistantComposite:
         publication_attachments: Callable[..., Awaitable[list[dict[str, Any]]]] | None = None,
     ) -> None:
         self.store = store
+        from front_desk_digest import FrontDeskDigest
+        self.front_desk_digest = FrontDeskDigest(store, lambda: self.config)
         self.env_config = config
         self.config = config
         self.router = router
@@ -396,6 +398,13 @@ class AssistantComposite:
         Explicit blocker/escalation/decision gates and terminal END/report
         notices remain actionable and therefore pass through unchanged.
         """
+        direct = await self.front_desk_digest.ingress(
+            target_stream_id=target_stream_id, body=body, msg=msg, verb=verb,
+        )
+        if direct is not None:
+            return direct
+        if self.front_desk_digest.matches(target_stream_id):
+            return None
         from outbound_notices import ASSISTANT_AUTHORITY_REQUEST_TOKEN
         if msg.get("_assistant_authority_request_token") is ASSISTANT_AUTHORITY_REQUEST_TOKEN:
             from sessions import VerbError

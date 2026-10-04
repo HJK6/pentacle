@@ -6,6 +6,8 @@ import json
 import logging
 import time
 
+import pytest
+
 from context_adapters import ContextReading, context_fields
 from routing_integrity import RoutingIntegrity
 from test_context_nudges import _context_harness
@@ -871,3 +873,40 @@ def test_compact_defer_reason_logged_once_bounded(caplog):
     message = deferred[0].getMessage()
     assert "reason=composer_not_proven_empty" in message
     assert "just compact now" not in message  # never log composer text
+
+@pytest.mark.parametrize("late_proof", [False, True])
+def test_expired_unproven_attempt_preserves_draft_or_accepts_late_proof(late_proof):
+    from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig, NudgeJob
+
+    async def run():
+        store = _new_store()
+        try:
+            h = await _context_harness(store, parent=False, config=NudgeConfig(compact_enabled=True))
+            observer = RoutingIntegrity(store, h.sessions)
+            sid = f"{HOST}:child"
+            now = time.time()
+            for tokens, offset in [(450_000, -8), (500_000, -7)]:
+                await observer.observe_context(HOST, "child", provider="claude",
+                    reading=ContextReading(tokens, model="claude-fable-5-1"), observed_at=_iso(now+offset))
+                h.tmux.set_capture("child", h.tmux.IDLE)
+                await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            h.job = NudgeJob(h.sessions, h.comms, store,
+                NudgeConfig(compact_enabled=True, compact_cooldown_s=0.0))
+            draft = "❯ actual user draft\n────────────────────────\n⏵⏵ bypass permissions on (bypass)\n"
+            h.tmux.set_capture("child", h.tmux.IDLE if late_proof else draft)
+            if late_proof:
+                await store.append_session_event(sid, {"stream_id":sid, "provider":"claude", "kind":"USER",
+                    "text":CONTEXT_COMPACT_COMMAND, "timestamp":_iso(time.time())}, identity="expired-late-proof", limit=500)
+            await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            if late_proof:
+                basis = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+                assert basis["attempt"]["outcome"] == "submitted"
+                await h.job.run_pass()
+                assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            else:
+                assert await h.tmux.capture("child") == draft
+        finally:
+            store.stop()
+    asyncio.run(run())

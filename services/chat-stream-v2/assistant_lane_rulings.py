@@ -588,6 +588,12 @@ class AssistantLaneRulings:
                 "outcome": json.loads(latest["outcome_json"]) if latest.get("outcome_json") else None}
 
     async def _result_notice(self, request: dict[str, Any]) -> None:
+        composite = getattr(self.server, "assistant_composite", None)
+        digest = getattr(composite, "front_desk_digest", None)
+        if (digest is not None and digest.matches(request["requester_stream_id"])
+                and request["state"] == "done" and request["action"] == "spawn"
+                and not request.get("conditions")):
+            return
         rid = request["ruling_request_id"]
         await self.store.enqueue_outbound_notice(
             notice_id="assistant-lane-ruling-result:" + rid,
