@@ -277,6 +277,7 @@ def test_canonical_composite_dispatch_reaches_front_desk_end_to_end(tmp_path):
         async with fixture(tmp_path, host='fixture-host') as (_notify, _queue, comms, provider, sessions, store):
             target = 'fixture-host:v2-test'
             generation = sessions.get(target)['session_generation']
+            await store.update_session('fixture-host', 'v2-test', pane_pid='4242')
             composite = AssistantComposite(store, config=AssistantCompositeConfig(
                 enabled=True, name='bart', stream_id='fixture-host:assistant',
                 direct_primary_stream_id=target, direct_primary_generation=generation),
@@ -286,6 +287,26 @@ def test_canonical_composite_dispatch_reaches_front_desk_end_to_end(tmp_path):
             server = Server(store=store, sessions=sessions, comms=comms, local_host='fixture-host')
             server.assistant_composite = composite
             await composite.ensure_projection()
+            from codex_rollout_norm import normalize_codex_rollout_record
+            from v2_runtime import iso_now
+            async def ingest(role, text, identity):
+                event = normalize_codex_rollout_record({
+                    'type':'response_item', 'timestamp':iso_now(),
+                    'payload':{'type':'message', 'id':identity, 'role':role,
+                        'phase':'final_answer' if role == 'assistant' else 'commentary',
+                        'content':[{'type':'output_text' if role == 'assistant' else 'input_text',
+                                    'text':text}]}},
+                    host='fixture-host', session_name='v2-test', session_id='dispatch-transcript')[0]
+                inserted = await store.append_session_events_lifecycle_cas([
+                    {'stream_id':target, 'event':event, 'identity':identity,
+                     'lifecycle':await store.fetch_open_session_lifecycle(target, pane_pid='4242')}], limit=100)
+                assert inserted and isinstance(inserted[0], int)
+                return inserted[0]
+            # The provider counterpart emits the real normalized USER shape so
+            # the mirror can correlate the eventual final to this dispatch.
+            async def user(text):
+                await ingest('user', text, 'dispatch-user')
+            provider.user = user
             try:
                 await server._on_send({'stream_id':'fixture-host:assistant', 'text':'Original operator question',
                     'msg_id':'logical-direct', 'request_id':'transport-direct',
@@ -300,6 +321,24 @@ def test_canonical_composite_dispatch_reaches_front_desk_end_to_end(tmp_path):
                 assert provider.pastes == [envelope['wire_body']]
                 assert route['delivery_state'] == 'landed'
                 assert not await composite.front_desk_digest._rows(target)
+                publication = await composite.publish({
+                    'request_id':'publish:'+route['dispatch_id'],
+                    'composite_stream_id':'fixture-host:assistant', 'dispatch_id':route['dispatch_id'],
+                    'reply_to_message_id':'logical-direct', 'reply_to_question_id':None,
+                    'publish_kind':'prose', 'response_state':'final', 'message':'**The answer**',
+                    'attachment_ids':[], 'evidence_refs':[]}, actor_stream_id=target)
+                assert publication['duplicate'] is False
+                # A differently formatted provider final exercises structured
+                # turn correlation rather than exact-text deduplication.
+                source_seq = await ingest('assistant', 'The answer', 'dispatch-final')
+                assert await store.assistant_mirror_event_for_source(source_seq) is None
+                canonical = await store.fetch_session_event_tail('fixture-host:assistant', limit=100)
+                answers = [e for e in canonical if e['kind'] == 'ASSIST_TEXT']
+                assert len(answers) == 1 and answers[0]['text'] == '**The answer**'
+                publications = await store.submit(lambda conn: list(conn.execute(
+                    'SELECT publication_key FROM v2_assistant_composite_publications WHERE stream_id=?',
+                    ('fixture-host:assistant',))))
+                assert len(publications) == 1
                 # A peer can copy every byte of the daemon header; wire-private
                 # fields are stripped and must not authorize that tell.
                 reply = await server._dispatch(json.dumps({'type':'tell', 'to_stream_id':target, 'tell_id':'peer-copy',
