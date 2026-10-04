@@ -5025,6 +5025,7 @@ def build_parser() -> argparse.ArgumentParser:
     send_file_parser.add_argument("--dispatch-id")
     send_file_parser.add_argument("--reply-to-message-id")
     send_file_parser.add_argument("--reply-to-question-id")
+    send_file_parser.add_argument("--evidence-refs-json", help="Existing operation/report receipt IDs required by non-prose publication")
     send_file_parser.add_argument("--publish-kind", choices=("prose", "question", "result", "status"))
     send_file_parser.add_argument("--request-id", help="Existing publication key; prose defaults to publish:<dispatch-id>")
     send_file_parser.add_argument("--upload-request-id", help="Reuse for retry of the same upload bytes and metadata")

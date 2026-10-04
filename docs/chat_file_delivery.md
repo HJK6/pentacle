@@ -127,7 +127,9 @@ receipt is printed before attempting publication and remains available if
 publication is refused or the transport fails. No automatic publication retry
 is performed; reuse the receipt and stable publication key.
 
-`--caption` supplies optional text. Prose defaults to the existing
+`--evidence-refs-json` forwards existing operation/report receipt IDs required by
+non-prose publications; it creates no authority. Successful publication output
+retains the daemon event_id and duplicate flag. `--caption` supplies optional text. Prose defaults to the existing
 `publish:<dispatch-id>` key and `response_state=final`; other kinds require an
 explicit stable request key. `--response-state` and `--reply-to-question-id`
 remain available for the existing protocol. No dispatch or input ID is invented.
@@ -147,11 +149,14 @@ nonpublisher receipt preservation, correlation, and both managed/generic upload
 wire frames. Server publication and full roundtrip enforcement are **M3 gates**;
 M2 unit transport tests are not a deployed end-to-end claim.
 
-Evidence: 54 new CLI cases; 114 selected CLI/M1 regression tests passed, with
+Evidence: 56 new CLI cases; 116 selected CLI/M1 regression tests passed, with
 compileall passing. Initial missing-command RED and direct-primary final-state
 RED were reproduced before their corresponding fixes. Private evidence hashes:
 
 - Initial RED: `7da2fd911bb252d2e8fd4bbce381b54b6425767ed36446ff5d255a577414fd16`
 - Direct-prose RED: `829d1dfad7331fe47be0ccc837b7400d9b7b8cdf683484e1af4aa61612db9400`
-- Collection: `7c2d20351984ae0c7ae2564b4477de977c43359d11202c0ac23d6f808425cf26`
-- Selected test log: `ba4d67f1e5eaf9a3cfb793fdde69c71fe060890b7d8c74cce78812c787887432`
+- Collection: `11d8a66fd11fd1786149694399a6309330c056e64637ffdc7b2ae05adefa0672`
+- Selected test log: `1174d7ce395d71e8261f66885342d3d41a257e4a6044f599727721f369635d3c`
+
+M3 preflight exposed two CLI omissions: non-prose operation evidence forwarding
+and publication event/duplicate output. Both reproduced RED before repair.

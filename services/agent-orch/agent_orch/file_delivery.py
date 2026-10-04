@@ -154,6 +154,13 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
                 raise AttachmentError('publish_request_id_required')
         elif any(correlation.values()) or not args.path:
             raise AttachmentError('publish_target_required')
+        evidence = None
+        if getattr(args, 'evidence_refs_json', None):
+            evidence = json.loads(args.evidence_refs_json)
+            if not isinstance(evidence, list) or len(evidence) > 16 or any(not _nonempty(v) for v in evidence) or len(set(evidence)) != len(evidence):
+                raise AttachmentError('publish_evidence_invalid')
+            if not target:
+                raise AttachmentError('publish_target_required')
         data = None
         if args.path:
             filename = sanitized_filename(Path(args.path).name)
@@ -184,10 +191,17 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
                 payload[field] = getattr(args, field)
         if correlation['publish_kind'] == 'prose' and 'response_state' not in payload:
             payload['response_state'] = 'final'
+        if evidence is not None:
+            payload['evidence_refs'] = evidence
         response = asyncio.run(assistant_once(config, payload, timeout=args.timeout))
         # Never echo arbitrary server text or advisory receipt fields.
         if isinstance(response, dict) and response.get('type') == 'assistant.publish.ok':
-            _print({'type': 'assistant.publish.ok', 'request_id': correlation['request_id'], 'upload_id': upload_id})
+            result = {'type': 'assistant.publish.ok', 'request_id': correlation['request_id'], 'upload_id': upload_id}
+            if type(response.get('event_id')) is int:
+                result['event_id'] = response['event_id']
+            if type(response.get('duplicate')) is bool:
+                result['duplicate'] = response['duplicate']
+            _print(result)
             return 0
         code = response.get('error_code') if isinstance(response, dict) else None
         safe = code if code in ('publish_not_authorized', 'upload_unknown', 'blob_unknown',

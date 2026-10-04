@@ -300,3 +300,19 @@ def test_server_receipt_unknown_fields_not_printed(tmp_path,monkeypatch,capsys,w
     monkeypatch.setattr(cli,'upload_blob_once',upload)
     assert cli.send_file(args(p))==0
     assert 'DO_NOT_PRINT' not in capsys.readouterr().out
+
+
+def test_nonprose_operation_evidence_passes_through(wire):
+    ns=publish_args('--upload-id','synthetic-upload')
+    ns.evidence_refs_json='["real-operation-receipt"]'
+    assert cli.send_file(ns)==0
+    assert wire[0][1]['evidence_refs']==['real-operation-receipt']
+
+
+def test_publication_receipt_retains_event_and_duplicate(monkeypatch,wire,capsys):
+    async def publish(*a,**kw):
+        return {'type':'assistant.publish.ok','event_id':123,'duplicate':True,'publication_key':'existing-request'}
+    monkeypatch.setattr(cli,'assistant_once',publish)
+    assert cli.send_file(publish_args('--upload-id','synthetic-upload'))==0
+    result=json.loads(capsys.readouterr().out)
+    assert result['event_id']==123 and result['duplicate'] is True
