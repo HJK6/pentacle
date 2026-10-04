@@ -2818,11 +2818,18 @@ async def upload_blob_once(
     timeout: float = 30.0,
     request_id: str | None = None,
     chunk_size: int = 1024 * 1024,
+    purpose: str | None = None,
+    filename: str | None = None,
 ) -> dict[str, Any]:
     ws = await _connect_rpc_ready(config)
     request_id = request_id or f"upload-{uuid.uuid4()}"
     try:
-        await ws.send(json.dumps({"type": "upload_blob_init", "request_id": request_id, "size_hint_bytes": len(data)}, separators=(",", ":")))
+        init_payload = {"type": "upload_blob_init", "request_id": request_id, "size_hint_bytes": len(data)}
+        if purpose is not None:
+            init_payload["purpose"] = purpose
+        if filename is not None:
+            init_payload["filename"] = filename
+        await ws.send(json.dumps(init_payload, separators=(",", ":")))
         deadline = time.monotonic() + timeout
         init = await _read_rpc_frame(
             ws,

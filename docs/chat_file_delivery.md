@@ -103,3 +103,55 @@ remain outside the public source tree; their content hashes are below.
 - m1-collected.log: `3c38e5460bcf7c61ab6c43ae7f9364a78e0b02d913408ba1833314a9738bf384`
 - m1-compile.log: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
 - dependencies.txt: `34ce759edef7a4c4697e24d6be2e704c2fb300f2041497deccd963cdf5f529a4`
+
+## M2: receipt handoff CLI (source stage)
+
+`agent-orch send-file sample.pdf` validates a supported file and uploads with
+`purpose=chat_attachment`. It prints only the server-issued receipt. It does
+not post to a composite. Optional `--upload-request-id` reuses the original
+upload request for a retry with identical bytes, metadata, and identity.
+
+An already-authorized publisher uses its actual dispatch context:
+
+```
+agent-orch send-file --upload-id <server-upload-id> --to <composite> \
+  --dispatch-id <actual-dispatch> --reply-to-message-id <actual-input> \
+  --publish-kind result --request-id <existing-publication-key>
+```
+
+`--from-receipt '<receipt-json>'` or `--from-receipt receipt.json` is an
+alternative carrier of **only upload_id**. Other fields are neither forwarded
+nor echoed. The daemon owns provenance resolution and authorization. `--to`
+grants no authority. A publisher may instead supply a local path; its upload
+receipt is printed before attempting publication and remains available if
+publication is refused or the transport fails. No automatic publication retry
+is performed; reuse the receipt and stable publication key.
+
+`--caption` supplies optional text. Prose defaults to the existing
+`publish:<dispatch-id>` key and `response_state=final`; other kinds require an
+explicit stable request key. `--response-state` and `--reply-to-question-id`
+remain available for the existing protocol. No dispatch or input ID is invented.
+
+The path guard checks lexical and canonical credential directories, configured
+token-file paths and .env names, before reading; descriptor-relative no-follow
+opens refuse symlink replacement, and nonregular files are refused. Reads are
+bounded to 25 MiB, with mutation checks. This is location-based refusal only:
+it cannot certify arbitrary ZIP/PDF/CAD contents are secret-free. Files are not
+executed or unpacked. Unknown response fields and transport exception details
+are not printed. Generic blob upload wire frames and send-image are unchanged.
+
+M2 source tests cover all ten extensions, prefix mismatches, real oversize,
+symlink escape/replacement, token/receipt locations, FIFO refusal, invalid and
+forged advisory receipts, non-seat null-generation receipts, upload replay keys,
+nonpublisher receipt preservation, correlation, and both managed/generic upload
+wire frames. Server publication and full roundtrip enforcement are **M3 gates**;
+M2 unit transport tests are not a deployed end-to-end claim.
+
+Evidence: 54 new CLI cases; 114 selected CLI/M1 regression tests passed, with
+compileall passing. Initial missing-command RED and direct-primary final-state
+RED were reproduced before their corresponding fixes. Private evidence hashes:
+
+- Initial RED: `7da2fd911bb252d2e8fd4bbce381b54b6425767ed36446ff5d255a577414fd16`
+- Direct-prose RED: `829d1dfad7331fe47be0ccc837b7400d9b7b8cdf683484e1af4aa61612db9400`
+- Collection: `7c2d20351984ae0c7ae2564b4477de977c43359d11202c0ac23d6f808425cf26`
+- Selected test log: `ba4d67f1e5eaf9a3cfb793fdde69c71fe060890b7d8c74cce78812c787887432`
