@@ -1,10 +1,11 @@
 # Daily retrospective review
 
 The launchd producer runs at 05:00 America/Chicago. It freezes eligible terminal
-retros, commissions one Codex GPT-6 Sol/medium draft and one GPT-6 Astra/high
+and explicitly tagged active retros, commissions one Codex GPT-6 Sol/medium draft and one GPT-6 Astra/high
 finalization, then sends a retained REPORT notice to the current assistant binding.
 assistant reviews immediately, records dispositions, and uses normal work records for
-decisions and observed outcomes. Quiet days produce no operator chat message.
+decisions and observed outcomes. Quiet ordinary days produce no operator chat message;
+material results and the due weekly account use supported visible delivery.
 Historical backfill is a separate bounded, explicitly approved scope.
 
 The producer reuses `tools/live_window` operator authentication, as the scheduled
@@ -29,7 +30,10 @@ Local JSON configuration (absolute paths; keep credentials outside source):
   "state_root": "/absolute/local-state/daily-retro",
   "ws_url": "ws://127.0.0.1:7791",
   "token_path": "/absolute/private/operator-token",
-  "host": "configured-host"
+  "host": "configured-host",
+  "primary_store": "/absolute/private/sessions.db",
+  "primary_archive": "/absolute/private/sessions_archive.db",
+  "primary_composite": "bart:assistant"
 }
 ```
 
@@ -38,6 +42,74 @@ Collection manifests commit before their rebuildable enrollment index. Older
 first-run history is explicitly **not reviewed**; unreadable sources and whole
 originals exceeding 40 sources/64 KiB stay explicit pending coverage. Daily retry
 reuses immutable inputs, worker/report identities and frozen delivery keys.
+
+## Continuing Bart and DOT work
+
+The capture owner adds the exact `continuous-retro` tag to the existing Bart
+portfolio and each DOT-owning spec. Other active work remains excluded. Keep the
+lesson in the existing `## Retro`, with one dated capture-window marker:
+
+```markdown
+## Retro
+<!-- continuous-retro-window {"start":"2026-10-04T00:00:00-05:00","end":"2026-10-05T04:00:00-05:00"} -->
+Outcome and quality; what worked; avoidable stops and observed blocked time
+(unknown when unmeasured); correction cause/rounds; an evidence-backed change
+and evaluation measure when one is warranted.
+```
+
+Both timestamps need offsets, an ordered range ending by collection cutoff,
+and overlap with the collection window starting at previous local midnight.
+Missing, invalid, future or stale windows and missing/empty sections remain
+coverage gaps. A marker alone is not a lesson. These are section contents, so
+no shared frontmatter schema change is required. Capture at material milestones,
+incidents and corrections; continue the next unblocked milestone during review.
+No extra message or improvement quota is introduced.
+
+The fingerprint covers the exact Retro section and survives path/status moves.
+Changed eligible sections enroll once; unchanged sections and unrelated edits
+skip. Whole-source overflow remains pending, never enrolled. Terminal and
+explicit historical intake retain their existing rules. A frozen same-day
+manifest is reused on retry; adoption after that cutoff enters the next pass.
+
+## Primary evidence and coverage
+
+`primary_store` and `primary_archive` are explicit local paths, opened with
+SQLite `mode=ro`, `query_only` and a read transaction. Missing configuration or
+unavailable projections are gaps, never all-clear. Primary coverage runs from
+previous local midnight through exact collection cutoff; the terminal date
+window remains separately labelled.
+
+The packet reads metadata from the current binding, successful rebind audit,
+retained session/archived-session states, terminal reports addressed to Bart,
+canonical publication references, send receipts, outbound notices and structured
+lane digests. It projects identifiers, timestamps, typed states, plan statuses
+and checkpoint fields. Report/publication/status step/send text, provider/tool
+logs and credential fields are excluded. A report is correlated with operator
+delivery only by an exact report-ID publication reference; otherwise publication
+is **unknown**. Transport delivery to Bart and operator publication remain
+different observations. Current badges do not reconstruct historical state.
+The provider `working` flag distinguishes active execution; the specific tool
+remains unknown. Only the exact routine suppression codes `persisted_suppressed`
+and `folded_into_digest` are excluded from delivery failures, with a coverage
+count. Other recorded errors still require inspection.
+
+Each projection counts its observed denominator and reads at most 1,000 rows;
+failures are prioritized. One primary original enters the existing worker packet,
+with a 24 KiB bound, at most 100 routine observations and explicit deferred counts
+by kind and urgent count. It shares the existing 40-source/64 KiB intake bound.
+Observed failures and unexplained stalls that fit precede routine samples.
+Overflow and unavailable binding/recipient/hold provenance remain visible.
+This is a bounded sample, not complete fleet health or historical coverage.
+
+At the first digest with an expired checkpoint or more than two hours idle
+without an evidenced wait, inspect the exact dependency/report and act or record
+a reason plus next checkpoint. A live tool, retained planner, terminal report
+and an exact generation-bound waiting lane are distinct classes. An expired
+checkpoint still needs a reason/next checkpoint during a live tool or hold.
+Later unchanged age increments do not restart inspection. A closed reviewer or
+delivery refusal requires handling on receipt. Hidden prose never establishes
+delivery. Existing digests and the daily pass supply these checks; they add no
+timer, service, model stage or termination grant.
 
 From the installed release, using its pinned interpreter:
 
@@ -61,6 +133,14 @@ no_change, investigate, authorized, propose, defer. Action/investigation/defer a
 requires `work_id`, `proposal_id` and `version`, matching a normal work proposal.
 Create or reuse that item with the existing triage process before recording review.
 
+New daily packets use `schema_version: 2`. Each candidate has
+`recommendation_kind`: `no_change`, `resolved`, `duplicate`, `future_work`,
+`immediate_work` or `investigate`. A future recommendation cannot become
+`no_change`; an unassigned backlog does not suppress it. `resolved` requires
+`outcome_evidence` with `receipt`, aware `observed_at` and observed `measure`.
+`duplicate` requires `existing_work_evidence` with `work_id`, `owner` and
+`acceptance_receipt`. Legacy receipts and historical packets remain immutable.
+
 ```sh
 python services/chat-stream-v2/tools/daily_retro.py record-review --config C --run-id YYYY-MM-DD --result REVIEW_JSON_FILE
 python services/chat-stream-v2/tools/daily_retro.py decision --config C --work-id spec_existing_item --proposal PROPOSAL_JSON_FILE
@@ -75,6 +155,70 @@ The helper locks `state_root/locks/<work_id>.lock`, outside shared memory, and
 checks the `spec.md` byte preimage before each update so concurrent edits survive.
 Approval remains authorization until an observed success or honest blocker is
 recorded there through the normal delivery process.
+
+New defers and proposals linked by schema-2 review also carry `schema_version: 2`
+and explicit acceptance/checkpoint fields:
+
+```json
+{
+  "schema_version": 2,
+  "id": "bounded-followup",
+  "disposition": "defer",
+  "scope": "Recheck the defect at the accepted release checkpoint.",
+  "citations": ["spec_existing_item"],
+  "owner": "accepting-owner",
+  "owner_acceptance": {
+    "owner": "accepting-owner",
+    "receipt": "accepted-commission-or-report-reference",
+    "accepted_at": "2026-10-05T16:00:00Z"
+  },
+  "checkpoint": {"owner": "accepting-owner", "at": "2026-10-09T10:00:00Z"},
+  "success_measure": "The original journey and negative controls pass."
+}
+```
+
+A named event checkpoint uses `owner`, a stable `event` identifier and a
+checkable `trigger_ref`, optionally dated `review_at`. A prose “next touch” does
+not qualify. Acceptance cites an actual accepted owner commission or receipt;
+the independent reviewer checks it. Schema-2 version hashes include ownership,
+acceptance, checkpoint, disposition, measure, authority and citations. Changing
+those fields cannot reuse an old approval. Review binds the same disposition
+and exact current proposal version. Existing schema-1 decisions can still be
+reconciled; they cannot establish schema-2 accountable ownership.
+
+The helper retains an immutable local decision receipt pointer; the normal work
+proposal remains the authority. Record an observed result through the same
+helper with `outcome_evidence`. A grant or source commit alone is not observed
+success. `shipped_at` counts only with an observed receipt. Routine work uses
+existing authority; only a missing decision uses the versioned question path.
+
+## Weekly accounting
+
+`record-review` saves a rolling seven-day summary and, on Sunday or the next
+review catching up that week, one immutable ISO-week receipt. It returns
+`weekly_summary.due` for Bart to publish the compact account once through its
+supported completion path. Use its stable `publication_key` and frozen summary
+bytes for identical retries. Replay creates no second weekly receipt. No extra
+model call, timer or question is used.
+
+The summary distinguishes collected/reviewed runs and source/candidate
+denominators, dispositions, accepted current work, approval-needed work,
+observed outcomes, oldest unresolved work and checkpoint state. It reports
+missing days, historical semantic limits, scan/packet overflow and unknown
+publication or event-trigger coverage. Overlapping windows count observed
+samples, not unique fleet incidents. Unmeasured DOT blocked time/rework remains
+unknown. Inspect retained receipts without changing them:
+
+When an outcome receipt measures a DOT milestone, use
+`measurement_scope: "dot_milestone"` and measured `blocked_seconds`,
+`correction_rounds` and/or `avoidable_stops`. Each measure retains its observed
+sample count and total; absent values remain unknown, including unmeasured days.
+Only observed outcome receipts within the named week count as that week's
+verified/shipped results. Older retained unresolved work remains visible.
+
+```sh
+python services/chat-stream-v2/tools/daily_retro.py summary --config C --end-day YYYY-MM-DD
+```
 
 Before asking, assistant reconciles all prior questions. Existing live questions remain
 live across a hot rebind. After expiry, one current-generation question replaces
@@ -131,6 +275,8 @@ test ! -L "$RETRO_RELEASE"
 install -d -m 0755 "$RETRO_RELEASE"
 git -C "$RETRO_CHECKOUT" archive "$RETRO_CANDIDATE" \
   services/chat-stream-v2/tools/daily_retro.py \
+  services/chat-stream-v2/message_envelopes.py \
+  services/chat-stream-v2/provider_wrappers.py \
   services/chat-stream-v2/tools/live_window services/_shared/operator_auth.py \
   services/agent-orch/agent_orch \
   services/chat-stream-v2/deploy/com.pentacle.daily-retro.plist \

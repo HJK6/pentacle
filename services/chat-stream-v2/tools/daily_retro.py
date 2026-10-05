@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import sys
 import tempfile
 from time import monotonic
@@ -27,6 +28,7 @@ from agent_orch.config import Config  # noqa: E402
 from agent_orch.triage import parse_frontmatter  # noqa: E402
 from agent_orch import prompt_protocol, wsclient  # noqa: E402
 from tools.live_window import authenticated_operator_connection  # noqa: E402
+from message_envelopes import match_message_envelope  # noqa: E402
 
 ZONE = ZoneInfo("America/Chicago")
 DISPOSITIONS = {"resolved", "duplicate", "no_change", "investigate", "authorized", "propose", "defer"}
@@ -35,6 +37,8 @@ ATTENTION = {"no_owning_work", "new_grant", "recurrence", "changed_evidence", "o
 CHANGED = {"recurrence", "changed_evidence", "ownership_gap", "revised_action"}
 PROPOSAL_START = "<!-- daily-retro-proposals -->"
 PROPOSAL_END = "<!-- /daily-retro-proposals -->"
+ACTIVE_STATUSES = ("backlog", "analysis", "ready_for_dev", "in_progress", "needs_qa", "blocked")
+RECOMMENDATIONS = {"no_change", "resolved", "duplicate", "future_work", "immediate_work", "investigate"}
 
 
 def encoded(value):
@@ -90,6 +94,9 @@ class Settings:
     host: str
     isolated: bool = False
     config_path: Path | None = None
+    primary_store: Path | None = None
+    primary_archive: Path | None = None
+    primary_composite: str = "bart:assistant"
 
     @classmethod
     def load(cls, path):
@@ -110,8 +117,14 @@ class Settings:
             raise ValueError("state must live outside shared memory")
         if data.get("sink"):
             raise ValueError("fixed sink bypass is unsupported; resolve the current binding")
+        for key in ("primary_store", "primary_archive"):
+            if data.get(key) and not Path(data[key]).is_absolute():
+                raise ValueError(f"{key} must be absolute")
         return cls(memory, state, data["ws_url"], Path(data["token_path"]), data["host"],
-                   bool(data.get("isolated")), path)
+                   bool(data.get("isolated")), path,
+                   Path(data["primary_store"]) if data.get("primary_store") else None,
+                   Path(data["primary_archive"]) if data.get("primary_archive") else None,
+                   data.get("primary_composite", "bart:assistant"))
 
     def rpc(self):
         return Config(self.ws_url, self.token_path.read_text().strip(), self.host,
@@ -128,12 +141,28 @@ def timer_due(stamp):
     return stamp.astimezone(ZONE).time() >= time(5)
 
 
-def scan(settings):
+def aware(value):
+    stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if stamp.utcoffset() is None:
+        raise ValueError("offset-aware timestamp required")
+    return stamp
+
+
+def continuous_tag(meta):
+    tags = meta.get("tags", [])
+    if isinstance(tags, str) and tags.startswith("[") and tags.endswith("]"):
+        tags = [s.strip().strip("\"'") for s in tags[1:-1].split(",")]
+    return isinstance(tags, list) and "continuous-retro" in tags
+
+
+def scan(settings, stamp=None):
     sources, gaps, duplicate, seen = {}, [], set(), set()
-    for folder in ("completed", "deprecated"):
+    for folder in ("completed", "deprecated", *(ACTIVE_STATUSES if stamp else ())):
+        active = folder in ACTIVE_STATUSES
         root = settings.memory_root / "work" / folder
         if not root.is_dir():
-            gaps.append({"path": str(root), "reason": "terminal directory unavailable"})
+            if not active:
+                gaps.append({"path": str(root), "reason": "terminal directory unavailable"})
             continue
         try:
             paths = sorted(root.rglob("spec.md"))
@@ -144,8 +173,10 @@ def scan(settings):
             relative = str(path.relative_to(settings.memory_root))
             try:
                 meta = parse_frontmatter(path)
+                if active and not continuous_tag(meta):
+                    continue
                 identity = meta.get("id")
-                if not identity or meta.get("status") not in {"completed", "deprecated"}:
+                if not identity or (meta.get("status") != folder if active else meta.get("status") not in {"completed", "deprecated"}):
                     raise ValueError("missing stable ID or nonterminal status")
                 if identity in seen or identity in duplicate:
                     duplicate.add(identity)
@@ -159,18 +190,269 @@ def scan(settings):
                     raise ValueError("missing Retro")
                 original = match.group(0).strip()
                 body = re.sub(r"^##\s+Retro\b\s*[:—-]?\s*", "", original, count=1, flags=re.IGNORECASE).strip()
+                window = None
+                if active:
+                    markers = re.findall(r"<!-- continuous-retro-window (\{[^\n]*\}) -->", original)
+                    if len(markers) != 1:
+                        raise ValueError("active Retro requires one continuous-retro-window JSON marker")
+                    window = json.loads(markers[0])
+                    start, end = aware(window["start"]), aware(window["end"])
+                    previous = datetime.combine(stamp.astimezone(ZONE).date() - timedelta(days=1), time(), ZONE)
+                    if not start <= end <= stamp or end < previous or start > stamp:
+                        raise ValueError("stale or future active Retro capture window")
+                    body = re.sub(r"<!-- continuous-retro-window .*? -->", "", body).strip()
                 if not body:
                     raise ValueError("empty Retro")
-                raw_day = meta.get(f"{meta['status']}_at") or meta.get("closed_at") or meta.get("updated_at")
+                raw_day = None if active else meta.get(f"{meta['status']}_at") or meta.get("closed_at") or meta.get("updated_at")
                 day = None
                 if raw_day:
                     terminal = datetime.fromisoformat(str(raw_day).replace("Z", "+00:00"))
                     day = (terminal.astimezone(ZONE) if terminal.utcoffset() is not None else terminal).date().isoformat()
                 sources[identity] = {"id": identity, "path": relative, "status": meta["status"],
                                      "terminal_date": day, "fingerprint": digest(original), "original": original}
-            except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+                if active:
+                    sources[identity].update(intake="continuous-retro", capture_window=window)
+            except (OSError, UnicodeError, ValueError, RuntimeError, KeyError, TypeError) as exc:
                 gaps.append({"path": relative, "reason": str(exc)})
     return sources, gaps
+
+
+def digest_action(lane, evaluated_at, *, plan_statuses=(), waiting=False):
+    """Evidence class and required next action, never a progress claim from a badge."""
+    eta = lane.get("eta_at")
+    expired = bool(eta and aware(eta) <= aware(evaluated_at))
+    if lane.get("open_terminal_reports", 0):
+        return "terminal_report", "inspect_report"
+    if lane.get("working") is True:
+        return "live_tool", "inspect_expired_checkpoint_and_record_reason_and_next_checkpoint" if expired else None
+    if waiting:
+        return "intentional_hold", "inspect_expired_checkpoint_and_record_reason_and_next_checkpoint" if expired else None
+    if plan_statuses and all(s == "done" for s in plan_statuses):
+        return "terminal_plan", "inspect_terminal_report"
+    if lane.get("role") == "planner":
+        return "retained_planner", "inspect_expired_checkpoint_and_record_reason_and_next_checkpoint" if expired else None
+    idle = lane.get("idle_age_s")
+    if expired or (isinstance(idle, (int, float)) and not isinstance(idle, bool) and idle > 7200):
+        return ("expired_checkpoint" if expired else "unexplained_idle"), "inspect_dependency_and_record_action_or_reason_and_checkpoint"
+    return "unknown" if lane.get("working") is None else "below_checkpoint", None
+
+
+def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576):
+    """One bounded, read-only metadata snapshot of the existing receipt stores."""
+    packet = {"window": {"start": start.isoformat(), "end": cutoff.isoformat()},
+              "snapshot_at": now_iso(), "store": str(settings.primary_store) if settings.primary_store else None,
+              "coverage": {}, "gaps": [], "observations": [], "deferred": {"count": 0, "by_kind": {}}}
+    if not settings.primary_store:
+        packet["gaps"].append({"source": "primary_store", "reason": "not configured"})
+        return packet
+    connections = []
+    observations = []
+    try:
+        def connect(path):
+            conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+            connections.append(conn)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            return conn
+
+        conn = connect(settings.primary_store)
+        archive = None
+        if settings.primary_archive:
+            try:
+                archive = connect(settings.primary_archive)
+            except sqlite3.Error:
+                packet["gaps"].append({"source": "primary_archive", "reason": "unavailable"})
+        else:
+            packet["gaps"].append({"source": "primary_archive", "reason": "not configured; retired recipients unknown"})
+
+        def query(db, name, columns, table, where="1", args=(), order="1"):
+            try:
+                total = db.execute(f"SELECT count(*) FROM {table} WHERE {where}", args).fetchone()[0]
+                packet["coverage"][name] = {"observed": total, "scanned": 0, "overflow": total}
+                rows = [dict(r) for r in db.execute(
+                    f"SELECT {columns} FROM {table} WHERE {where} ORDER BY {order} LIMIT ?", (*args, max_rows))]
+                packet["coverage"][name] = {"observed": total, "scanned": len(rows), "overflow": total - len(rows)}
+                return rows
+            except sqlite3.Error:
+                packet["gaps"].append({"source": name, "reason": "table or required projection unavailable"})
+                return []
+
+        bindings = query(conn, "binding", "name,stream_id,generation,revision,updated_at",
+                         "v2_assistant_direct_binding", "name='bart'")
+        roots = {r["stream_id"] for r in bindings if r["stream_id"] and aware(r["updated_at"]) <= cutoff}
+        packet["binding"] = bindings
+        rebinds = query(conn, "rebind_audit", "audit_id,outcome,created_at,"
+            "json_extract(old_binding_json,'$.stream_id') AS old_stream_id,"
+            "json_extract(old_binding_json,'$.generation') AS old_generation,"
+            "json_extract(new_binding_json,'$.stream_id') AS new_stream_id,"
+            "json_extract(new_binding_json,'$.generation') AS new_generation", "v2_assistant_rebind_audit",
+            "outcome='ok' AND julianday(created_at)<=julianday(?)", (cutoff.isoformat(),), "created_at,audit_id")
+        packet["rebind_provenance"] = rebinds
+        for r in rebinds:
+            for prefix in ("old", "new"):
+                stream, generation = r[prefix + "_stream_id"], r[prefix + "_generation"]
+                if isinstance(stream, str) and stream and isinstance(generation, str) and generation:
+                    roots.add(stream)
+                else:
+                    packet["gaps"].append({"source": "rebind:" + str(r["audit_id"]), "reason": prefix + " binding provenance incomplete"})
+        packet["roots"] = sorted(roots)
+        packet["scope_limit"] = "Current/prior configured Bart roots and their retained descendants; no universal fleet or historical-state claim."
+        if not roots:
+            packet["gaps"].append({"source": "binding", "reason": "no scoped Bart root"})
+            return packet
+        placeholders = ",".join("?" for _ in roots)
+        args = tuple(sorted(roots))
+        nodes = "SELECT host||':'||session_name AS sid,parent_stream_id AS parent FROM sessions"
+        if archive:
+            try:
+                conn.execute("ATTACH DATABASE ? AS retro_archive", (settings.primary_archive.resolve().as_uri() + "?mode=ro",))
+                conn.execute("SELECT host,session_name,parent_stream_id FROM retro_archive.sessions LIMIT 0")
+                nodes += " UNION SELECT host||':'||session_name,parent_stream_id FROM retro_archive.sessions"
+            except sqlite3.Error:
+                packet["gaps"].append({"source": "archive_membership", "reason": "retired scope unavailable"})
+        seeds = " UNION ".join("SELECT ? AS sid" for _ in roots)
+        scope_sql = f"""WITH RECURSIVE nodes(sid,parent) AS ({nodes}), scope(sid) AS (
+            {seeds} UNION SELECT nodes.sid FROM nodes JOIN scope ON nodes.parent=scope.sid)
+            SELECT sid FROM scope"""
+        sessions = query(conn, "sessions", "host||':'||session_name AS stream_id,status,closed_at,created_at,"
+            "json_extract(CASE WHEN json_valid(status_card) THEN status_card ELSE '{}' END,'$.updated_at') AS plan_updated_at,"
+            "(SELECT json_group_array(json_extract(p.value,'$.status')) FROM json_each("
+            "CASE WHEN json_valid(status_card) THEN status_card ELSE '{}' END,'$.plan') p) AS plan_statuses",
+            "sessions", f"host||':'||session_name IN ({scope_sql})", args)
+        session_map = {r["stream_id"]: r for r in sessions}
+        text_window = "julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?)"
+        window_args = (start.isoformat(), cutoff.isoformat())
+        reports = query(conn, "reports", "report_id,from_stream_id,to_stream_id,session_generation,status,created_at",
+            "v2_reports", f"to_stream_id IN ({placeholders}) AND status IN ('done','error','aborted') AND created_at>=? AND created_at<=?",
+            (*args, start.timestamp(), cutoff.timestamp()), "CASE WHEN status='done' THEN 1 ELSE 0 END,created_at,report_id")
+        publications = query(conn, "publications", "publication_key,stream_id,publish_kind,event_id,created_at,evidence_refs_json",
+            "v2_assistant_composite_publications", "stream_id=? AND " + text_window,
+            (settings.primary_composite, *window_args), "created_at,publication_key")
+        correlated = {}
+        for pub in publications:
+            try:
+                refs = json.loads(pub.pop("evidence_refs_json"))
+                if not isinstance(refs, list):
+                    raise ValueError()
+                for ref in refs:
+                    if isinstance(ref, str) and any(r["report_id"] == ref for r in reports):
+                        correlated.setdefault(ref, []).append(pub)
+            except (ValueError, TypeError):
+                packet["gaps"].append({"source": "publication:" + pub["publication_key"], "reason": "invalid evidence references"})
+        correlated = {r["report_id"]: [p for p in correlated.get(r["report_id"], [])
+            if aware(p["created_at"]).timestamp() >= r["created_at"]] for r in reports}
+        correlated = {key: pubs for key, pubs in correlated.items() if pubs}
+        packet["coverage"]["completion_correlation"] = {"observed_done": sum(r["status"] == "done" for r in reports),
+            "explicitly_published": sum(r["status"] == "done" and r["report_id"] in correlated for r in reports),
+            "unknown": sum(r["status"] == "done" and r["report_id"] not in correlated for r in reports)}
+        for r in reports:
+            pubs = [p for p in correlated.get(r["report_id"], []) if aware(p["created_at"]).timestamp() >= r["created_at"]]
+            entry = {"kind": "completion" if r["status"] == "done" else "terminal_failure", "source": "v2_reports:" + r["report_id"],
+                     **r, "publication": pubs, "delivery": "correlated" if pubs else "unknown"}
+            if pubs:
+                entry["completion_to_publication_seconds"] = min(aware(p["created_at"]).timestamp() for p in pubs) - r["created_at"]
+            observations.append(entry)
+        for pub in publications[:100]:
+            observations.append({"kind": "publication", "source": "v2_assistant_composite_publications:" + pub["publication_key"], **pub})
+        sends = query(conn, "send_receipts", "receipt_id,request_id,from_stream_id,to_stream_id,state,delivery,submission_confirmed,created_at",
+            "v2_send_receipts r", f"(from_stream_id IN ({scope_sql}) OR to_stream_id IN ({placeholders})) AND {text_window} "
+            "AND r.rowid=(SELECT max(latest.rowid) FROM v2_send_receipts latest WHERE latest.to_stream_id=r.to_stream_id "
+            "AND latest.request_id=r.request_id AND julianday(latest.created_at)<=julianday(?))",
+            (*args, *args, *window_args, cutoff.isoformat()), "CASE WHEN state='not_landed' THEN 0 ELSE 1 END,created_at,receipt_id")
+        # Only the latest retained state per exact request matters; a transient
+        # accepted row cannot turn a later landed receipt into a failure.
+        latest = {}
+        for send in sends:
+            key = (send["to_stream_id"], send["request_id"])
+            if key not in latest or send["created_at"] >= latest[key]["created_at"]:
+                latest[key] = send
+        destinations = {r["to_stream_id"] for r in latest.values()} - set(session_map)
+        for db, name in ((conn, "recipient_sessions"), (archive, "archived_recipients")):
+            if destinations and db:
+                marks = ",".join("?" for _ in destinations)
+                for r in query(db, name, "host||':'||session_name AS stream_id,status,closed_at,created_at", "sessions",
+                    f"host||':'||session_name IN ({marks})", tuple(sorted(destinations))):
+                    session_map[r["stream_id"]] = r
+                destinations -= set(session_map)
+        packet["coverage"]["recipient_state"] = {"unknown": len(destinations), "looked_up": len({r["to_stream_id"] for r in latest.values()})}
+        for r in latest.values():
+            target = session_map.get(r["to_stream_id"], {})
+            closed = target.get("closed_at")
+            after_close = bool(closed and aware(closed) <= aware(r["created_at"]))
+            if r["state"] == "not_landed" or after_close:
+                observations.append({"kind": "delivery_failure" if r["state"] == "not_landed" else "closed_recipient",
+                    "source": "v2_send_receipts:" + r["receipt_id"], **r,
+                    "recipient_closed_at": closed, "next_action": "inspect_delivery_or_closed_dependency_immediately"})
+        waits = query(conn, "waiting_lanes", "lane_id,bound_stream_id,bound_generation,phase,version,updated_at",
+            "v2_assistant_composite_lanes", f"phase='waiting' AND bound_stream_id IN ({scope_sql})", args)
+        notices = query(conn, "notices", "notice_id,kind,recipient_stream_id,source_stream_id,created_at,delivered_at,terminal_at,"
+            "terminal_reason IS NOT NULL AS has_terminal_reason,attempts,last_error IS NOT NULL AS has_error,"
+            "CASE WHEN terminal_reason IN ('persisted_suppressed','folded_into_digest') THEN terminal_reason ELSE NULL END AS suppression,"
+            "CASE WHEN kind='lane_digest' THEN body ELSE NULL END AS digest_body", "v2_outbound_notices",
+            f"recipient_stream_id IN ({placeholders}) AND {text_window}", (*args, *window_args),
+            "CASE WHEN last_error IS NOT NULL AND coalesce(terminal_reason,'') NOT IN ('persisted_suppressed','folded_into_digest') THEN 0 ELSE 1 END,created_at,notice_id")
+        packet["coverage"]["expected_notice_suppression"] = {"scanned": sum(bool(n["suppression"]) for n in notices),
+            "limit": "Only explicit persisted_suppressed/folded_into_digest are routine suppression; other errors require inspection."}
+        episodes = {}
+        for n in sorted(notices, key=lambda r: (r["created_at"], r["notice_id"])):
+            body = n.pop("digest_body")
+            if n["has_error"] and not n["suppression"]:
+                observations.append({**n, "kind": "delivery_failure", "notice_kind": n["kind"],
+                    "source": "v2_outbound_notices:" + n["notice_id"], "next_action": "inspect_delivery_immediately"})
+            if n["kind"] != "lane_digest":
+                continue
+            envelope = match_message_envelope(body)
+            if not envelope or envelope["kind"] != "lane_digest":
+                packet["gaps"].append({"source": "notice:" + n["notice_id"], "reason": "unreadable registered lane digest"})
+                continue
+            for raw in envelope["lanes"]:
+                lane = {k: raw.get(k) for k in ("stream_id", "generation", "role", "working", "idle_age_s", "eta_at", "open_terminal_reports")}
+                if not lane.get("stream_id"):
+                    continue
+                session = session_map.get(lane["stream_id"], {})
+                statuses = json.loads(session.get("plan_statuses") or "[]") if session.get("plan_updated_at") and aware(session["plan_updated_at"]) <= aware(n["created_at"]) else []
+                waiting = any(w["bound_stream_id"] == lane["stream_id"] and w["bound_generation"] == lane["generation"]
+                    and aware(w["updated_at"]) <= aware(n["created_at"]) for w in waits)
+                try:
+                    classification, action = digest_action(lane, envelope["evaluated_at"], plan_statuses=statuses, waiting=waiting)
+                except (ValueError, TypeError):
+                    classification, action = "invalid_checkpoint", "inspect_dependency_and_record_action_or_reason_and_checkpoint"
+                # Age increments are not a fresh episode. A live tool/hold or
+                # terminal state changes classification and permits reevaluation.
+                episode = (lane["stream_id"], lane["generation"], classification, lane["eta_at"], tuple(statuses), waiting)
+                key = (lane["stream_id"], lane["generation"])
+                if episodes.get(key) == episode:
+                    continue
+                episodes[key] = episode
+                observations.append({"kind": "digest", "source": "v2_outbound_notices:" + n["notice_id"],
+                    "created_at": n["created_at"], "lane": lane, "classification": classification, "next_action": action,
+                    "plan_evidence": "known" if statuses else "unknown", "waiting_evidence": waiting,
+                    "execution_evidence": "provider_working_flag; specific tool unknown" if lane["working"] is True else "no live-tool proof"})
+    except (sqlite3.Error, OSError):
+        packet["gaps"].append({"source": "primary_store", "reason": "unavailable"})
+    finally:
+        for db in connections:
+            db.close()
+    urgent = lambda r: bool(r.get("next_action") or r["kind"] == "terminal_failure")
+    if len(packet["gaps"]) > 50:
+        packet["coverage"]["gap_references"] = {"observed": len(packet["gaps"]), "overflow": len(packet["gaps"]) - 50}
+        packet["gaps"] = packet["gaps"][:50]
+    observations.sort(key=lambda r: (not urgent(r), str(r.get("created_at", "")), r["source"]))
+    packet["coverage"]["observations"] = {"observed": len(observations), "selected": 0,
+        "urgent": sum(urgent(r) for r in observations)}
+    routine = 0
+    for row in observations:
+        if (not urgent(row) and routine >= 100) or len(encoded({**packet, "observations": packet["observations"] + [row]})) > max_bytes - 1024:
+            packet["deferred"]["count"] += 1
+            counts = packet["deferred"]["by_kind"]
+            counts[row["kind"]] = counts.get(row["kind"], 0) + 1
+        else:
+            packet["observations"].append(row)
+            routine += int(not urgent(row))
+    packet["coverage"]["observations"]["selected"] = len(packet["observations"])
+    packet["coverage"]["observations"]["deferred_urgent"] = sum(urgent(r) for r in observations) - sum(urgent(r) for r in packet["observations"])
+    return packet
 
 
 def rebuild_index(settings):
@@ -195,14 +477,22 @@ def collect(settings, stamp, *, max_sources=40, max_bytes=65536):
         if path.exists():
             atomic(settings.state_root / "index.json", index)
             return read(path)
-        sources, gaps = scan(settings)
+        sources, gaps = scan(settings, stamp)
+        start = datetime.combine(local.date() - timedelta(days=1), time(), ZONE)
+        primary = primary_evidence(settings, start, stamp)
+        if settings.primary_store:
+            original = "## Retro\nPrimary Bart receipts (metadata only)\n" + encoded(primary).decode()
+            identity = "primary:bart:" + run_id
+            sources = {identity: {"id": identity, "path": str(settings.primary_store), "status": "primary",
+                "intake": "primary", "terminal_date": local.date().isoformat(),
+                "fingerprint": digest(original), "original": original}, **sources}
         baseline, selected, deferred, size = {}, [], [], 0
         previous = local.date() - timedelta(days=1)
-        for identity, source in sorted(sources.items()):
+        for identity, source in sorted(sources.items(), key=lambda item: (item[1].get("intake") != "primary", item[0])):
             prior = index["entries"].get(identity)
             if prior and prior["fingerprint"] == source["fingerprint"]:
                 continue
-            if not index["initialized"] and (not source["terminal_date"] or source["terminal_date"] < previous.isoformat()):
+            if not source.get("intake") and not index["initialized"] and (not source["terminal_date"] or source["terminal_date"] < previous.isoformat()):
                 baseline[identity] = {"fingerprint": source["fingerprint"], "reviewed": False,
                                       "reason": "older or unknown-date initial history"}
                 continue
@@ -217,9 +507,9 @@ def collect(settings, stamp, *, max_sources=40, max_bytes=65536):
             size += source_size
         start = datetime.combine(previous, time(), ZONE)
         end = datetime.combine(local.date(), time(), ZONE)
-        manifest = {"run_id": run_id, "timezone": ZONE.key, "cutoff": stamp.isoformat(), "collected_at": now_iso(),
+        manifest = {"schema_version": 2, "run_id": run_id, "timezone": ZONE.key, "cutoff": stamp.isoformat(), "collected_at": now_iso(),
                     "window": {"start": start.isoformat(), "end": end.isoformat()},
-                    "sources": selected, "baseline": baseline, "gaps": gaps, "deferred": deferred,
+                    "sources": selected, "baseline": baseline, "gaps": gaps, "deferred": deferred, "primary": primary,
                     "coverage": {"readable_retros": len(sources), "selected": len(selected),
                                  "baseline_not_reviewed": len(baseline), "gaps": len(gaps), "deferred": len(deferred)}}
         atomic(path, manifest)  # This commits enrollment; index is a rebuildable projection.
@@ -341,6 +631,8 @@ def validate_packet(packet, manifest):
     for candidate in candidates:
         if required - candidate.keys() or not candidate["id"] or not candidate["citations"]:
             raise ValueError("incomplete recommendation")
+        if manifest.get("schema_version") == 2 and candidate.get("recommendation_kind") not in RECOMMENDATIONS:
+            raise ValueError("schema2 candidate requires explicit recommendation_kind")
         citations = candidate["citations"]
         if not isinstance(citations, list) or any(not isinstance(ref, str) for ref in citations):
             raise ValueError("citation IDs must be strings")
@@ -353,6 +645,8 @@ def validate_packet(packet, manifest):
             candidate["evidence_citations"] = list(dict.fromkeys(candidate.get("evidence_citations", []) + supplemental))
             packet.setdefault("normalization_notes", []).append({"candidate_id": candidate["id"], "evidence_refs": supplemental,
                 "note": "Supplemental references retained as evidence labels; they do not expand original coverage."})
+    if manifest.get("schema_version") == 2:
+        packet["schema_version"] = 2
     return packet
 
 
@@ -594,6 +888,8 @@ For every alias_id return exactly one keep/drop selection with reason and curren
 Return agent-orch report --msg-id 0 --status done --report-id {report_id} --result JSON (ReportPayloadV1 summary/findings/next_action/extras). extras.daily_retro={{run_id:"{manifest['run_id']}",input_digest:"{digest(manifest['consolidation']['catalogue'])}",selections:[{{alias_id,disposition:"keep"|"drop",reason,bart_attention,candidate(optional override)}}]}}. No omitted/invented aliases. Prior checkpoint actions are historical custody, never a new commission. Preserve recurrence/changed evidence and genuine uncertainty.
 """
     history_duty = ""
+    if manifest.get("schema_version") == 2:
+        history_duty = """\nContinuous intake: each candidate MUST include recommendation_kind=no_change|resolved|duplicate|future_work|immediate_work|investigate. No_change means evidence establishes no change is needed; future work is future_work even if an unassigned backlog exists. Verify accepting owner receipt, checkable dated/named-event checkpoint and success measure. Challenge missing acceptance, overdue triggers and recurrence using existing work; never scan free-text keywords to infer dispositions. Primary Bart metadata is independent evidence from the same bounded window. Read every observed failure/unexplained-stall entry and state next action at the first applicable digest. Report overflow, missing provenance and unknown correlation explicitly; a report, terminal badge or PID never proves operator publication. No provider/tool logs. Preserve live-tool, evidenced-wait and retained-planner distinctions. Old Retro text never establishes today's health.\n"""
     if manifest.get("cumulative_context"):
         context = manifest["cumulative_context"]
         history_duty = f"""\nHistorical serial context: read {context['path']} (SHA256 {context['sha256']}); all prior findings, source hashes, reviews and work references are retained there. Read every new original for coverage, but skip renewed detailed investigation of an equivalent unchanged known finding; disposition cites prior finding key/version and current original. A new recurrence/evidence/owner/action/grant is a new version and must be evaluated. A known issue alone is not proof of deprecation. No silent truncation.
@@ -605,6 +901,207 @@ READ ONLY: no edits, questions, publication, new lanes or feedback pass. No auth
 Return one durable report: agent-orch report --msg-id 0 --status done --report-id {report_id} --result JSON. ReportPayloadV1 summary/findings/next_action/extras; extras.daily_retro is the packet object.
 Packet: run_id; dispositions [{{id,fingerprint,reason}}] EXACTLY once for each original, including no-action; candidates unique prioritized [{{id,problem,consequence,citations:[source IDs],prior_occurrences,existing,action,benefit,effort,risk,uncertainty,owner,decision}}]. decision describes exact needed grant/recommended option/meaningful alternatives, or existing authorization/no decision. Candidates.citations contain ONLY IDs from collection.sources; put verification labels, file paths and related-work references in evidence_sources/evidence_citations or existing, never in original citations. Each recommendation needs at least one collected original ID. Existing fields name authoritative fixes/rules/work and current state. No-new sources is an explicit successful empty packet; coverage gaps never imply all-clear. Preserve prior materially changed recommendations/actions needing attention. Keep front concise, no silent source truncation.
 """
+
+
+def validate_proposal(proposal, *, require_v2=False):
+    if not require_v2 and proposal.get("schema_version") != 2:
+        return
+    if proposal.get("schema_version") != 2:
+        raise ValueError("new deferral requires schema_version 2")
+    owner = proposal.get("owner")
+    acceptance = proposal.get("owner_acceptance")
+    if not isinstance(owner, str) or not owner.strip() or not isinstance(acceptance, dict):
+        raise ValueError("accepting owner receipt required")
+    if acceptance.get("owner") != owner or not isinstance(acceptance.get("receipt"), str) or not acceptance["receipt"].strip():
+        raise ValueError("owner acceptance must match the responsible owner and cite a receipt")
+    if aware(acceptance.get("accepted_at")) > datetime.now(timezone.utc):
+        raise ValueError("owner acceptance must already have occurred")
+    checkpoint = proposal.get("checkpoint")
+    if not isinstance(checkpoint, dict) or checkpoint.get("owner") != owner:
+        raise ValueError("checkpoint requires responsible owner")
+    if bool(checkpoint.get("at")) == bool(checkpoint.get("event")):
+        raise ValueError("checkpoint requires one date or named event")
+    if checkpoint.get("at"):
+        aware(checkpoint["at"])
+    elif (not isinstance(checkpoint["event"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{1,99}", checkpoint["event"])
+          or not checkpoint.get("trigger_ref")):
+        raise ValueError("named checkpoint requires stable event and checkable trigger_ref")
+    if checkpoint.get("review_at"):
+        aware(checkpoint["review_at"])
+    if not isinstance(proposal.get("success_measure"), str) or not proposal["success_measure"].strip():
+        raise ValueError("concrete success_measure required")
+    if proposal.get("disposition") == "resolved":
+        validate_outcome(proposal.get("outcome_evidence"))
+
+
+def validate_outcome(evidence):
+    if not isinstance(evidence, dict) or not isinstance(evidence.get("receipt"), str) or not evidence["receipt"].strip() or not evidence.get("measure"):
+        raise ValueError("resolved requires observed outcome_evidence receipt and measure")
+    if aware(evidence.get("observed_at")) > datetime.now(timezone.utc):
+        raise ValueError("outcome must already have been observed")
+
+
+def proposal_version(proposal):
+    fields = ("scope", "title", "body", "options")
+    if proposal.get("schema_version") == 2:
+        fields += ("schema_version", "disposition", "owner", "owner_acceptance", "checkpoint", "success_measure", "authority", "citations")
+    return digest({k: proposal.get(k) for k in fields})
+
+
+def weekly_summary(settings, end_day):
+    """Account from retained receipts; missing measurements stay unknown."""
+    end = datetime.fromisoformat(end_day).date()
+    days = [(end - timedelta(days=n)).isoformat() for n in range(6, -1, -1)]
+    result = {"window": {"start": days[0], "end": days[-1]}, "runs_collected": 0, "runs_reviewed": 0,
+        "missing_runs": [], "unreviewed_runs": [], "sources_selected": 0, "sources_reviewed": 0,
+        "candidates_observed": 0, "candidates_reviewed": 0, "dispositions": {k: 0 for k in sorted(DISPOSITIONS)},
+        "legacy_review_runs": [], "retro_coverage": {"gaps": 0, "deferred": 0, "baseline_not_reviewed": 0},
+        "primary_coverage": {"runs_with_primary": 0, "gaps": 0, "scan_overflow": 0, "packet_deferred": 0,
+                             "done_sampled": 0, "publication_unknown": 0},
+        "completion_to_publication_seconds": {"observed": 0, "values": []},
+        "dot_blocked_time": "unknown unless measured in owning milestone receipts",
+        "dot_rework": "unknown unless measured in owning milestone receipts",
+        "current_work": [], "current_work_counts": {"defer": 0, "propose": 0, "authorized": 0, "investigate": 0},
+        "verified_outcomes": 0, "shipped_observed": 0, "unverified_ownership": 0, "oldest_unresolved": None,
+        "dot_measurements": {"sample_receipts": [], "blocked_seconds": [], "correction_rounds": [], "avoidable_stops": []}}
+    linked = {}
+    for day in days:
+        root = settings.state_root / "runs" / day
+        collection = read(root / "collection.json")
+        if not collection:
+            result["missing_runs"].append(day)
+            continue
+        result["runs_collected"] += 1
+        result["sources_selected"] += len(collection["sources"])
+        for key in result["retro_coverage"]:
+            result["retro_coverage"][key] += collection.get("coverage", {}).get(key, 0)
+        primary = collection.get("primary")
+        if primary:
+            pc = result["primary_coverage"]
+            pc["runs_with_primary"] += int(bool(primary.get("store")))
+            pc["gaps"] += len(primary.get("gaps", []))
+            pc["scan_overflow"] += sum(c.get("overflow", 0) for c in primary.get("coverage", {}).values())
+            pc["packet_deferred"] += primary.get("deferred", {}).get("count", 0)
+            correlation = primary.get("coverage", {}).get("completion_correlation", {})
+            pc["done_sampled"] += correlation.get("observed_done", 0)
+            pc["publication_unknown"] += correlation.get("unknown", 0)
+            values = [o["completion_to_publication_seconds"] for o in primary.get("observations", []) if "completion_to_publication_seconds" in o]
+            result["completion_to_publication_seconds"]["values"].extend(values)
+        else:
+            result["primary_coverage"]["gaps"] += 1
+        final, review = read(root / "astra.json"), read(root / "review.json")
+        if final:
+            result["candidates_observed"] += len(final["packet"]["candidates"])
+        if not review:
+            result["unreviewed_runs"].append(day)
+            continue
+        if not final or review["result"].get("packet_hash") != final.get("packet_hash"):
+            raise ValueError("weekly retained review/packet hash mismatch")
+        result["runs_reviewed"] += 1
+        result["sources_reviewed"] += len(collection["sources"])
+        if final["packet"].get("schema_version") != 2:
+            result["legacy_review_runs"].append(day)
+        for row in review["result"]["dispositions"]:
+            result["candidates_reviewed"] += 1
+            result["dispositions"][row["disposition"]] += 1
+            if row.get("work_id") and row.get("proposal_id"):
+                linked[(row["work_id"], row["proposal_id"])] = review["reviewed_at"]
+    # Older retained work can still be the oldest unresolved issue; the daily
+    # denominators above remain bounded to this week's receipts.
+    for path in sorted((settings.state_root / "runs").glob("*/review.json")):
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.parent.name) or path.parent.name > end_day:
+            continue
+        review = read(path)
+        for row in review["result"]["dispositions"]:
+            if row.get("work_id") and row.get("proposal_id"):
+                key = (row["work_id"], row["proposal_id"])
+                linked[key] = min(linked.get(key, review["reviewed_at"]), review["reviewed_at"])
+    # These immutable pointers are helper receipts, not a second authority
+    # ledger. The proposal in the normal work record remains authoritative.
+    for path in sorted((settings.state_root / "decision-receipts").glob("*.json")):
+        receipt = read(path)
+        local_day = aware(receipt["recorded_at"]).astimezone(ZONE).date().isoformat()
+        if local_day <= days[-1]:
+            key = (receipt["work_id"], receipt["proposal_id"])
+            linked[key] = min(linked.get(key, receipt["recorded_at"]), receipt["recorded_at"])
+    for (work_id, identity), first_seen in sorted(linked.items()):
+        try:
+            record = proposals(work_path(settings, work_id).read_text()).get(identity)
+        except (ValueError, OSError):
+            record = None
+        if not record:
+            result["current_work"].append({"work_id": work_id, "proposal_id": identity, "coverage": "proposal unavailable"})
+            continue
+        entry = {"work_id": work_id, "proposal_id": identity, "version": record["version"],
+            "state": record.get("state"), "disposition": record.get("disposition"), "first_observed_at": first_seen,
+            "owner": record.get("owner"), "owner_acceptance": record.get("owner_acceptance"),
+            "checkpoint": record.get("checkpoint"), "success_measure": record.get("success_measure")}
+        try:
+            validate_proposal(record, require_v2=True)
+            entry["ownership_coverage"] = "schema2 receipt; independent verification required"
+        except (ValueError, TypeError):
+            entry["ownership_coverage"] = "legacy or unverified acceptance/checkpoint"
+            result["unverified_ownership"] += 1
+        outcome = record.get("outcome_evidence")
+        if record.get("disposition") in result["current_work_counts"] and record.get("state") not in {"resolved", "shipped", "rejected", "answered"}:
+            result["current_work_counts"][record["disposition"]] += 1
+        try:
+            validate_outcome(outcome)
+            entry["outcome_evidence"] = outcome
+            observed_day = aware(outcome["observed_at"]).astimezone(ZONE).date().isoformat()
+            result["verified_outcomes"] += int(days[0] <= observed_day <= days[-1])
+            if outcome.get("shipped_at") and days[0] <= aware(outcome["shipped_at"]).astimezone(ZONE).date().isoformat() <= days[-1]:
+                aware(outcome["shipped_at"])
+                result["shipped_observed"] += 1
+            if outcome.get("measurement_scope") == "dot_milestone" and days[0] <= observed_day <= days[-1]:
+                measurements = result["dot_measurements"]
+                measurements["sample_receipts"].append(outcome["receipt"])
+                for key in ("blocked_seconds", "correction_rounds", "avoidable_stops"):
+                    value = outcome.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                        measurements[key].append(value)
+        except (ValueError, TypeError):
+            entry["outcome"] = "unverified"
+            if not result["oldest_unresolved"] or first_seen < result["oldest_unresolved"]["first_observed_at"]:
+                result["oldest_unresolved"] = {"work_id": work_id, "proposal_id": identity, "first_observed_at": first_seen}
+        checkpoint = record.get("checkpoint")
+        if isinstance(checkpoint, dict):
+            due = checkpoint.get("at") or checkpoint.get("review_at")
+            entry["checkpoint_state"] = ("met by observed outcome" if "outcome_evidence" in entry else
+                "overdue" if due and aware(due).astimezone(ZONE).date() <= end else
+                "future" if due else "event occurrence unknown")
+            if checkpoint.get("event"):
+                entry["event_occurrence"] = "unknown; inspect trigger_ref"
+        else:
+            entry["checkpoint_state"] = "legacy/uncheckable"
+        result["current_work"].append(entry)
+    result["completion_to_publication_seconds"]["observed"] = len(result["completion_to_publication_seconds"]["values"])
+    for key in ("blocked_seconds", "correction_rounds", "avoidable_stops"):
+        values = result["dot_measurements"][key]
+        result["dot_measurements"][key] = {"observed": len(values), "total": sum(values) if values else None}
+    result["coverage_limit"] = "Observed retained daily samples, not universal health. Windows can overlap; counts are sampled receipts, not unique fleet incidents. Legacy reasons were not semantically validated."
+    return result
+
+
+def retain_weekly_summary(settings, run_id):
+    day = datetime.fromisoformat(run_id).date()
+    rolling = weekly_summary(settings, run_id)
+    atomic(settings.state_root / "runs" / run_id / "summary.json", rolling)
+    # Sunday closes the local week. A later first review catches up the prior
+    # week; no timer or additional model is admitted.
+    week_end = day if day.weekday() == 6 else day - timedelta(days=day.weekday() + 1)
+    year, week, _ = week_end.isocalendar()
+    path = settings.state_root / "weekly" / f"{year}-W{week:02}.json"
+    with locked(settings.state_root / "weekly.lock"):
+        old = read(path)
+        if old:
+            return {"path": str(path), "sha256": digest(old), "publication_key": "daily-retro-weekly-" + old["week"],
+                    "due": old["generated_by_run"] == run_id, "summary": old["summary"]}
+        summary = rolling if week_end == day else weekly_summary(settings, week_end.isoformat())
+        receipt = {"week": f"{year}-W{week:02}", "generated_by_run": run_id, "summary": summary}
+        atomic(path, receipt)
+        return {"path": str(path), "sha256": digest(receipt), "publication_key": "daily-retro-weekly-" + receipt["week"],
+                "due": True, "summary": summary}
 
 
 class Pipeline:
@@ -729,7 +1226,9 @@ class Pipeline:
                         f"Ingest once and review now under the accepted daily retro contract. Record every disposition with "
                         f"{Path(__file__).resolve()} record-review --config {self.settings.config_path} --run-id {manifest['run_id']} --result RESULT_JSON. "
                         "Use normal work proposal records and decision helper to recover still-open decisions after generation replacement. "
-                        "Quiet/no-action days: retain review receipt, emit no chat prose or questions. Surface only real decisions via durable prompt ask. No assistant.publish obligation.")
+                        "Quiet ordinary days: retain review receipt. Publish material decisions and observed results in the same handling turn through supported visible delivery; hidden prose is never delivery. "
+                        "If record-review returns a due weekly_summary, publish its compact accounting once, including denominators and coverage limits. "
+                        "Ask only for an actual missing grant through the existing versioned decision helper; routine authorized work needs no operator permission.")
             host, session = target.split(":", 1)
             attempt = {"target": target, "generation": generation, "request_id": key,
                        "payload": {"host": host, "session_name": session, "text": body,
@@ -968,27 +1467,51 @@ class Pipeline:
             if not final or result.get("packet_hash") != final.get("packet_hash"):
                 raise ValueError("review must bind exact final packet hash")
             rows = result.get("dispositions", [])
-            candidates = {c["id"] for c in final["packet"]["candidates"]}
+            candidate_map = {c["id"]: c for c in final["packet"]["candidates"]}
+            candidates = set(candidate_map)
             if len(rows) != len(candidates) or {r.get("id") for r in rows} != candidates:
                 raise ValueError("one assistant disposition per recommendation required")
             for row in rows:
                 if row.get("disposition") not in DISPOSITIONS or not row.get("reason"):
                     raise ValueError("explicit assistant disposition/reason required")
+                schema2 = final["packet"].get("schema_version") == 2
+                kind = candidate_map[row["id"]].get("recommendation_kind")
+                if schema2:
+                    if kind not in RECOMMENDATIONS:
+                        raise ValueError("schema2 candidate requires recommendation_kind")
+                    if row["disposition"] == "no_change" and kind != "no_change":
+                        raise ValueError("future/actionable work cannot be suppressed as no_change")
+                    if row["disposition"] == "resolved":
+                        validate_outcome(row.get("outcome_evidence"))
+                    if row["disposition"] == "duplicate":
+                        evidence = row.get("existing_work_evidence")
+                        if not isinstance(evidence, dict) or not evidence.get("owner") or not evidence.get("acceptance_receipt"):
+                            raise ValueError("duplicate requires accepted existing-work evidence")
+                        work_path(self.settings, evidence.get("work_id"))
                 if row["disposition"] in {"investigate", "authorized", "propose", "defer"}:
                     path = work_path(self.settings, row.get("work_id"))
                     records = proposals(path.read_text())
                     proposal = records.get(row.get("proposal_id"))
                     if not proposal or proposal.get("version") != row.get("version") or not proposal.get("citations"):
                         raise ValueError("action needs durable proposal/version/citations in normal work")
+                    if schema2:
+                        validate_proposal(proposal, require_v2=True)
+                        if proposal_version(proposal) != proposal["version"] or row["disposition"] != proposal.get("disposition"):
+                            raise ValueError("disposition must match exact current schema2 proposal")
             old = read(root / "review.json")
             if old:
                 if old["result"] != result:
                     raise ValueError("run already reviewed; amend normal work rather than repeat ingestion")
+                if final["packet"].get("schema_version") == 2:
+                    old = {**old, "weekly_summary": retain_weekly_summary(self.settings, run_id)}
                 return old
             receipt = {"result": result, "actor": binding, "reviewed_at": now_iso(), "decision_ready_at": now_iso()}
             manifest = read(root / "collection.json")
             receipt["collection_to_decision_ready_seconds"] = (datetime.fromisoformat(receipt["decision_ready_at"]) - datetime.fromisoformat(manifest["collected_at"])).total_seconds()
             atomic(root / "review.json", receipt)
+            if final["packet"].get("schema_version") == 2:
+                receipt["weekly_summary"] = retain_weekly_summary(self.settings, run_id)
+                atomic(root / "review.json", receipt)
             return receipt
 
     async def _blocked_report(self, path, preimage, records, record, attempt):
@@ -1032,12 +1555,13 @@ class Pipeline:
                     raise ValueError(f"operator decision requires {field}")
         if disposition in {"authorized", "investigate"} and not proposal.get("authority"):
             raise ValueError("existing authority reference required")
-        version = digest({k: proposal.get(k) for k in ("scope", "title", "body", "options")})
+        version = proposal_version(proposal)
         with locked(self.settings.state_root / "locks" / f"{work_id}.lock"):
             preimage = path.read_bytes()
             text = preimage.decode()
             records = proposals(text)
             record = records.get(identity, {"attempts": []})
+            validate_proposal(proposal, require_v2=disposition == "defer" and identity not in records)
             old_version = record.get("version")
             attempts = record["attempts"]
             # Query all historical attempts, including terminal ones: an answer
@@ -1114,6 +1638,10 @@ class Pipeline:
                 attempt.update(state="asked", receipt=reply, asked_at=now_iso())
             records[identity] = record
             save_proposals(path, preimage, records)
+            receipt_path = self.settings.state_root / "decision-receipts" / (digest([work_id, identity, version, record["state"]]) + ".json")
+            if not receipt_path.exists():
+                atomic(receipt_path, {"work_id": work_id, "proposal_id": identity, "version": version,
+                                     "state": record["state"], "recorded_at": now_iso(), "path": str(path)})
             return record
 
 
@@ -1308,7 +1836,7 @@ async def rehearse(settings, workers, evidence_dir):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("collect", "run", "record-review", "decision", "rehearse", "history-collect", "history-run", "history-consolidate"):
+    for name in ("collect", "run", "record-review", "decision", "summary", "rehearse", "history-collect", "history-run", "history-consolidate"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--config", required=True)
         if name.startswith("history-"):
@@ -1332,6 +1860,8 @@ def main():
             cmd.add_argument("--work-id", required=True)
             cmd.add_argument("--proposal", required=True, help="JSON file path")
             cmd.add_argument("--retry-blocked", action="store_true", help="Resume one blocked ask after daemon admission is live")
+        elif name == "summary":
+            cmd.add_argument("--end-day", required=True, help="last local date of a seven-day retained-receipt summary")
         else:
             cmd.add_argument("--workers-config", required=True)
             cmd.add_argument("--evidence-dir", required=True)
@@ -1339,6 +1869,8 @@ def main():
     settings = Settings.load(args.config)
     if args.command == "collect":
         result = collect(settings, datetime.fromisoformat(args.now))
+    elif args.command == "summary":
+        result = weekly_summary(settings, args.end_day)
     elif args.command == "history-collect":
         result = history_collect(settings, args.baseline, args.batch)
     elif args.command == "rehearse":
