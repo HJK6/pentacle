@@ -331,3 +331,59 @@ def test_same_request_replay_retains_original_meta(tmp_path):
             store.stop()
 
     asyncio.run(go())
+
+
+
+def test_same_request_replay_after_rotated_retry_keeps_original_meta(tmp_path):
+    from test_send_semantics import FakeTmux, _new_comms, _open, HOST, NAME
+    from ingest import append_ingested_event
+
+    async def go():
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        target = f"{HOST}:{NAME}"
+        try:
+            await _open(comms, sessions)
+            base = {"stream_id": target, "text": "voice transcript", "optimistic_id": "opt-interleaved"}
+            await comms.send({**base, "request_id": "send-interleaved-original",
+                              "meta": {"voice": {"duration_s": 5.0}}})
+            original_rows = await store.submit(lambda conn: [dict(row) for row in conn.execute(
+                "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
+                (target, "send-interleaved-original"),
+            )])
+            casts = []
+            async def broadcast(frame):
+                casts.append(frame)
+            event = {
+                "kind": "USER", "stream_id": target, "provider": "claude",
+                "text": "voice transcript", "request_id": "send-interleaved-original",
+                "timestamp": "2026-10-05T16:00:00Z",
+                "raw": {"jsonl_record_uuid": "interleaved-voice", "jsonl_event_index": 0},
+            }
+            await append_ingested_event(store, broadcast, event, recent_limit=50)
+            await comms.send({**base, "request_id": "send-interleaved-rotated",
+                              "meta": {"voice": {"duration_s": 8.0}}})
+            await store.append_send_receipt(
+                to_stream_id="other:seat", request_id="send-interleaved-original", receipt_id="other",
+                state="landed", wire_text="voice transcript", display_text="voice transcript",
+                attachments=[], delivery="landed", submission_confirmed=True,
+                meta_json=json.dumps({"voice": {"duration_s": 99.0}}),
+            )
+            replay = await comms.send({**base, "request_id": "send-interleaved-original"})
+            assert replay["coalesced"] is True
+            assert len(tmux.pastes) == 1
+            assert (await store.get_send_receipt(target, "send-interleaved-original"))["meta"] == {"voice": {"duration_s": 5.0}}
+            assert (await store.get_send_receipt(target, "send-interleaved-rotated"))["meta"] == {"voice": {"duration_s": 8.0}}
+            history = await store.fetch_session_event_tail(target, limit=50)
+            assert history[0]["meta"] == {"voice": {"duration_s": 5.0}}
+            assert (await store.stamp_event_with_send_receipt(history[0]))["meta"] == {"voice": {"duration_s": 5.0}}
+            assert casts[0]["event"]["meta"] == {"voice": {"duration_s": 5.0}}
+            after = await store.submit(lambda conn: [dict(row) for row in conn.execute(
+                "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
+                (target, "send-interleaved-original"),
+            )])
+            assert after[:len(original_rows)] == original_rows
+        finally:
+            store.stop()
+
+    asyncio.run(go())

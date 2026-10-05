@@ -1912,11 +1912,11 @@ class Comms:
         winner_request_id = str(winner.get("request_id") or request_id)
         # Replaying this physical request retains its original validated meta.
         # A rotated request owns its own meta, even when its delivery coalesces.
-        if (
-            winner_request_id == request_id
-            and winner.get("to_stream_id") == str(plan.route["final_target"])
-        ):
-            plan = replace(plan, meta=normalize_send_meta(winner.get("meta")))
+        own_receipt = await self.store.get_send_receipt(
+            str(plan.route["final_target"]), request_id,
+        )
+        if own_receipt is not None:
+            plan = replace(plan, meta=normalize_send_meta(own_receipt.get("meta")))
         winner_attempts = winner.get("attempts")
         winner_attempts = winner_attempts if isinstance(winner_attempts, int) else None
         # A replay of a send the provider holds in its native queue stays queued.
