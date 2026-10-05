@@ -43,7 +43,7 @@ const {createTransport}=require('../renderer/web_cc');
 const {WebSocketServer}=require('ws');
 test('every browser mic call shape survives real JSON websocket transport',async()=>{
  const previousWebSocket=global.WebSocket;
- global.WebSocket=require('ws');
+ global.WebSocket=previousWebSocket||require('ws');
  let backend,wire,ws,bridge,transport;
  try {
  const seen=[];backend=http.createServer((req,res)=>{let body='';req.on('data',c=>body+=c);req.on('end',()=>{seen.push([req.method,req.url,body]);res.setHeader('Content-Type','application/json');res.end('{"ok":true,"mode":"off"}');});});
