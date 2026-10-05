@@ -5,6 +5,7 @@ from pathlib import Path
 import asyncio
 import json
 import re
+import sqlite3
 
 import pytest
 
@@ -313,6 +314,509 @@ def proposal():
             "owner": "fixture:owner", "checkpoint": "2026-09-29", "success_measure": "output matches fixture"}
 
 
+def continuous_source(config, name="bart", body="Observed delivery refusal.", window=True):
+    path = source(config.memory_root, name, body=body, status="in_progress")
+    text = path.read_text().replace("completed_at:", "tags: [continuous-retro]\ncompleted_at:")
+    if window:
+        text = text.replace("## Retro\n", '## Retro\n<!-- continuous-retro-window {"start":"2026-09-27T00:00:00-05:00","end":"2026-09-28T04:00:00-05:00"} -->\n')
+    path.write_text(text)
+    return path
+
+
+def test_continuous_intake_changed_unchanged_status_move_and_unrelated_edit(config):
+    path = continuous_source(config)
+    source(config.memory_root, "unselected", status="in_progress")
+    first = retro.collect(config, at())
+    assert [s["id"] for s in first["sources"]] == ["spec_bart"]
+    path.write_text(path.read_text().replace("Observed delivery refusal.", "Observed refusal corrected."))
+    second = retro.collect(config, at("2026-09-29T05:00:00-05:00"))
+    assert [s["id"] for s in second["sources"]] == ["spec_bart"]
+    path.write_text(path.read_text().replace("status: in_progress", "status: completed") + "\n## Outside\nUnrelated note.")
+    moved = config.memory_root / "work/completed/bart/spec.md"
+    moved.parent.mkdir(parents=True)
+    path.rename(moved)
+    third = retro.collect(config, at("2026-09-30T05:00:00-05:00"))
+    assert third["sources"] == []
+    assert not third["baseline"]
+    assert retro.collect(config, at("2026-09-30T08:00:00-05:00")) == third
+
+
+@pytest.mark.parametrize("damage", ["missing", "stale", "future", "empty", "tag_substring", "wrong_status", "duplicate"])
+def test_continuous_intake_limits_are_explicit(config, damage):
+    path = continuous_source(config, window=damage != "missing", body="" if damage == "empty" else "Lesson")
+    text = path.read_text()
+    if damage == "stale":
+        text = text.replace("2026-09-28T04", "2026-09-26T04").replace("2026-09-27T00", "2026-09-25T00")
+    elif damage == "future":
+        text = text.replace("2026-09-28T04", "2026-09-28T06")
+    elif damage == "tag_substring":
+        text = text.replace("[continuous-retro]", "[not-continuous-retro]")
+    elif damage == "wrong_status":
+        text = text.replace("status: in_progress", "status: blocked")
+    elif damage == "duplicate":
+        other = source(config.memory_root, "duplicate")
+        other.write_text(other.read_text().replace("spec_duplicate", "spec_bart"))
+    path.write_text(text)
+    manifest = retro.collect(config, at())
+    assert not manifest["sources"]
+    if damage == "tag_substring":
+        assert not manifest["gaps"]
+    else:
+        assert manifest["gaps"]
+    assert not manifest["baseline"]
+
+
+def test_continuous_overflow_never_enrolls_and_multiline_tag(config):
+    path = continuous_source(config)
+    path.write_text(path.read_text().replace("tags: [continuous-retro]", "tags:\n- continuous-retro\n- bart"))
+    first = retro.collect(config, at(), max_bytes=1)
+    assert first["coverage"]["deferred"] == 1 and not first["sources"]
+    assert "spec_bart" not in retro.rebuild_index(config)["entries"]
+    second = retro.collect(config, at("2026-09-29T05:00:00-05:00"))
+    assert [s["id"] for s in second["sources"]] == ["spec_bart"]
+
+
+def primary_fixture(config):
+    from store import SESSIONS_DDL, REPORTS_DDL, SEND_RECEIPT_DDL
+    from store_routing import OUTBOUND_NOTICE_DDL, ASSISTANT_COMPOSITE_PUBLICATIONS_DDL, ASSISTANT_COMPOSITE_LANES_DDL
+    from store_assistant_binding import ASSISTANT_BINDING_DDL, ASSISTANT_REBIND_AUDIT_DDL
+    from message_envelopes import build_message_envelope
+    path, archive = config.state_root.parent / "primary.db", config.state_root.parent / "archive.db"
+    with sqlite3.connect(path) as conn:
+        for ddl in (SESSIONS_DDL, REPORTS_DDL, SEND_RECEIPT_DDL, OUTBOUND_NOTICE_DDL,
+                    ASSISTANT_COMPOSITE_PUBLICATIONS_DDL, ASSISTANT_COMPOSITE_LANES_DDL, ASSISTANT_BINDING_DDL, ASSISTANT_REBIND_AUDIT_DDL):
+            conn.execute(ddl)
+        conn.execute("INSERT INTO v2_assistant_direct_binding VALUES ('bart','fixture:fd','g1',1,'2026-09-27T00:00:00Z')")
+        for name, parent in (("fd", None), ("lead", "fixture:fd")):
+            card = json.dumps({"updated_at": "2026-09-27T00:00:00Z", "plan": [{"status": "active", "text": "PRIVATE_SENTINEL"}]})
+            conn.execute("INSERT INTO sessions(host,session_name,parent_stream_id,visibility,created_at,status,status_card) VALUES ('fixture',?,?, 'hidden','2026-09-27T00:00:00Z','open',?)", (name, parent, card))
+        for identity, stamp in (("visible", "2026-09-27T12:00:00Z"), ("unknown", "2026-09-27T13:00:00Z"), ("future", "2026-09-29T12:00:00Z")):
+            conn.execute("INSERT INTO v2_reports(report_id,from_stream_id,to_stream_id,status,summary,ingested_at,created_at) VALUES (?,'fixture:lead','fixture:fd','done','PRIVATE_SENTINEL',?,?)", (identity, stamp, retro.aware(stamp).timestamp()))
+        conn.execute("INSERT INTO v2_assistant_composite_publications(publication_key,stream_id,payload_digest,canonical_payload_json,dispatch_id,publish_kind,evidence_refs_json,event_id,created_at) VALUES ('pub-visible','bart:assistant','h','{\"text\":\"PRIVATE_SENTINEL\"}','','result','[\"visible\"]',1,'2026-09-27T12:00:30Z')")
+        conn.execute("INSERT INTO v2_send_receipts(to_stream_id,request_id,receipt_id,state,display_text,content_kind,delivery,created_at,from_stream_id) VALUES ('fixture:reviewer','request','receipt','not_landed','PRIVATE_SENTINEL','send','not_landed','2026-09-27T07:00:00Z','fixture:lead')")
+        for n, stamp, age in ((1, "2026-09-27T07:40:00Z", 7000), (2, "2026-09-27T08:01:00Z", 7300), (3, "2026-09-27T08:31:00Z", 9100)):
+            key = "d2:" + str(n) * 64
+            body = build_message_envelope("lane_digest", notice_id=key, evaluated_at=stamp,
+                lanes=[{"stream_id": "fixture:lead", "generation": "g2", "role": "lead", "working": False,
+                        "idle_age_s": age, "open_terminal_reports": 0, "eta_at": None, "title": "PRIVATE_SENTINEL"}])
+            conn.execute("INSERT INTO v2_outbound_notices(notice_id,kind,dedupe_key,recipient_stream_id,tell_id,body,payload_digest,created_at) VALUES (?,'lane_digest',?,'fixture:fd',?,?,'h',?)", (key, key, key, body, stamp))
+    with sqlite3.connect(archive) as conn:
+        conn.execute(SESSIONS_DDL)
+        conn.execute("INSERT INTO sessions(host,session_name,visibility,created_at,status,closed_at) VALUES ('fixture','reviewer','hidden','2026-09-26T00:00:00Z','closed','2026-09-27T06:00:00Z')")
+    return replace(config, primary_store=path, primary_archive=archive)
+
+
+def test_primary_receipts_cutoff_safe_projection_readonly_and_first_digest(config):
+    settings = primary_fixture(config)
+    before = settings.primary_store.read_bytes(), settings.primary_archive.read_bytes()
+    packet = retro.primary_evidence(settings, at("2026-09-27T00:00:00-05:00"), at())
+    text = json.dumps(packet)
+    assert "PRIVATE_SENTINEL" not in text and "future" not in text
+    assert before == (settings.primary_store.read_bytes(), settings.primary_archive.read_bytes())
+    completions = {o["report_id"]: o for o in packet["observations"] if o["kind"] == "completion"}
+    assert completions["visible"]["delivery"] == "correlated" and completions["visible"]["completion_to_publication_seconds"] == 30
+    assert completions["unknown"]["delivery"] == "unknown"
+    failures = [o for o in packet["observations"] if o["kind"] == "delivery_failure"]
+    assert failures[0]["recipient_closed_at"] == "2026-09-27T06:00:00Z"
+    stalls = [o for o in packet["observations"] if o.get("classification") == "unexplained_idle"]
+    assert len(stalls) == 1 and stalls[0]["created_at"] == "2026-09-27T08:01:00Z" and stalls[0]["next_action"]
+    assert packet["coverage"]["reports"]["observed"] == 2
+
+
+def test_primary_missing_archive_stores_overflow_and_wait_provenance(config):
+    settings = primary_fixture(config)
+    missing = retro.primary_evidence(replace(settings, primary_archive=None), at("2026-09-27T00:00:00-05:00"), at())
+    assert missing["coverage"]["recipient_state"]["unknown"] == 1
+    assert any(g["source"] == "primary_archive" for g in missing["gaps"])
+    limited = retro.primary_evidence(settings, at("2026-09-27T00:00:00-05:00"), at(), max_rows=1)
+    assert limited["coverage"]["reports"]["overflow"] == 1
+    assert any(o["kind"] == "delivery_failure" for o in limited["observations"])
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("INSERT INTO v2_assistant_composite_lanes(lane_id,stream_id,phase,bound_stream_id,bound_generation,version,created_at,updated_at) VALUES ('hold','bart:assistant','waiting','fixture:lead','g2',1,'2026-09-27T06:00:00Z','2026-09-27T06:00:00Z')")
+    held = retro.primary_evidence(settings, at("2026-09-27T00:00:00-05:00"), at())
+    assert any(o.get("classification") == "intentional_hold" and o["next_action"] is None for o in held["observations"])
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("UPDATE v2_assistant_composite_lanes SET bound_generation='wrong'")
+        conn.execute("DROP TABLE v2_assistant_composite_publications")
+    unknown = retro.primary_evidence(settings, at("2026-09-27T00:00:00-05:00"), at())
+    assert any(o.get("classification") == "unexplained_idle" for o in unknown["observations"])
+    assert any(g["source"] == "publications" for g in unknown["gaps"])
+
+
+def test_primary_root_provenance_excludes_spec_guesses_failed_and_future_rebinds(config):
+    settings = primary_fixture(config)
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("INSERT INTO sessions(host,session_name,visibility,created_at,spec_id) VALUES ('fixture','unrelated-qa','hidden','2026-09-27T00:00:00Z','portfolio-spec')")
+        conn.execute("UPDATE sessions SET spec_id='portfolio-spec' WHERE session_name='fd'")
+        for key, old, outcome, stamp in (("good", "former-root", "ok", "2026-09-27T06:00:00Z"),
+                ("failed", "failed-root", "denied", "2026-09-27T06:00:00Z"), ("future", "future-root", "ok", "2026-09-29T06:00:00Z")):
+            conn.execute("INSERT INTO v2_assistant_rebind_audit(request_id,payload_digest,actor_stream_id,actor_generation,old_binding_json,new_binding_json,outcome,created_at) VALUES (?,'h','fixture:fd','g1',?,?,?,?)",
+                (key, json.dumps({"stream_id": "fixture:" + old, "generation": "g0"}), json.dumps({"stream_id": "fixture:fd", "generation": "g1"}), outcome, stamp))
+        for key in ("former-root", "failed-root", "future-root", "unrelated-qa"):
+            conn.execute("INSERT INTO v2_reports(report_id,from_stream_id,to_stream_id,status,ingested_at,created_at) VALUES (?,'fixture:worker',?,'done','2026-09-27T12:00:00Z',?)",
+                (key, "fixture:" + key, retro.aware("2026-09-27T12:00:00Z").timestamp()))
+    packet = retro.primary_evidence(settings, at("2026-09-27T00:00:00-05:00"), at())
+    assert set(packet["roots"]) == {"fixture:fd", "fixture:former-root"}
+    assert {o["report_id"] for o in packet["observations"] if o["kind"] == "completion"} == {"visible", "unknown", "former-root"}
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("DROP TABLE v2_assistant_rebind_audit")
+    limited = retro.primary_evidence(settings, at("2026-09-27T00:00:00-05:00"), at(), max_rows=1)
+    assert limited["roots"] == ["fixture:fd"]
+    assert any(g["source"] == "rebind_audit" for g in limited["gaps"])
+    assert any(o["kind"] == "delivery_failure" for o in limited["observations"])
+
+
+def test_primary_packet_bound_prioritizes_failure_and_discloses_urgent_overflow(config):
+    settings = primary_fixture(config)
+    with sqlite3.connect(settings.primary_store) as conn:
+        for n in range(160):
+            conn.execute("INSERT INTO v2_send_receipts(to_stream_id,request_id,receipt_id,state,content_kind,delivery,created_at,from_stream_id) VALUES ('fixture:reviewer',?,?,'not_landed','send','not_landed','2026-09-27T07:00:00Z','fixture:lead')", ("r" + str(n), "receipt" + str(n)))
+    packet = retro.primary_evidence(settings, at("2026-09-27T00:00:00-05:00"), at())
+    assert len(retro.encoded(packet)) <= 24576
+    assert packet["observations"][0]["kind"] == "delivery_failure"
+    assert packet["deferred"]["count"] > 0 and packet["coverage"]["observations"]["deferred_urgent"] > 0
+
+
+def test_primary_suppression_is_not_failure_and_predating_publication_is_unknown(config):
+    settings = primary_fixture(config)
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("UPDATE v2_assistant_composite_publications SET created_at='2026-09-27T11:00:00Z'")
+        for n, reason in enumerate(("persisted_suppressed", "folded_into_digest", "configured assistant authority changed")):
+            conn.execute("INSERT INTO v2_outbound_notices(notice_id,kind,dedupe_key,recipient_stream_id,tell_id,body,payload_digest,created_at,terminal_at,terminal_reason,last_error) VALUES (?,'watch',?,'fixture:fd',?,'PRIVATE_SENTINEL','h','2026-09-27T09:00:00Z','2026-09-27T09:01:00Z',?,'PRIVATE_SENTINEL')",
+                (f"suppression-{n}", f"suppression-{n}", f"suppression-{n}", reason))
+    packet = retro.primary_evidence(settings, at("2026-09-27T00:00:00-05:00"), at())
+    failures = {o["source"] for o in packet["observations"] if o["kind"] == "delivery_failure"}
+    assert "v2_outbound_notices:suppression-0" not in failures
+    assert "v2_outbound_notices:suppression-1" not in failures
+    assert "v2_outbound_notices:suppression-2" in failures
+    assert packet["coverage"]["expected_notice_suppression"]["scanned"] == 2
+    assert packet["coverage"]["completion_correlation"] == {"observed_done": 2, "explicitly_published": 0, "unknown": 2}
+    assert "PRIVATE_SENTINEL" not in json.dumps(packet)
+
+
+def test_primary_latest_receipt_selection_precedes_projection_cap(config):
+    settings = primary_fixture(config)
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("INSERT INTO v2_send_receipts(to_stream_id,request_id,receipt_id,state,content_kind,delivery,created_at,from_stream_id) VALUES ('fixture:reviewer','request','landed','landed','send','delivered','2026-09-27T05:30:00Z','fixture:lead')")
+        conn.execute("UPDATE v2_send_receipts SET created_at='2026-09-27T05:00:00Z' WHERE receipt_id='receipt'")
+    packet = retro.primary_evidence(settings, at("2026-09-27T00:00:00Z"), at(), max_rows=1)
+    assert packet["coverage"]["send_receipts"]["observed"] == 1
+    assert not any(o["source"] == "v2_send_receipts:receipt" for o in packet["observations"])
+
+
+@pytest.mark.parametrize("lane,kwargs,expected", [
+    ({"working": True, "idle_age_s": 9999}, {}, "live_tool"),
+    ({"working": False, "open_terminal_reports": 1}, {}, "terminal_report"),
+    ({"working": True, "open_terminal_reports": 1}, {}, "terminal_report"),
+    ({"working": False, "idle_age_s": 9999}, {"waiting": True}, "intentional_hold"),
+    ({"working": False}, {"plan_statuses": ["done"]}, "terminal_plan"),
+    ({"role": "planner", "working": False, "idle_age_s": 9999}, {}, "retained_planner"),
+    ({"working": False, "eta_at": "2026-09-28T04:00:00-05:00"}, {}, "expired_checkpoint"),
+    ({"working": None}, {}, "unknown"),
+])
+def test_primary_stall_classes(lane, kwargs, expected):
+    assert retro.digest_action(lane, at().isoformat(), **kwargs)[0] == expected
+
+
+def proposal2(disposition="defer"):
+    return {**proposal(), "schema_version": 2, "disposition": disposition,
+        "owner_acceptance": {"owner": "fixture:owner", "receipt": "accepted-commission:fixture", "accepted_at": "2026-09-28T10:00:00Z"},
+        "checkpoint": {"owner": "fixture:owner", "at": "2026-09-29T10:00:00Z"},
+        "authority": "fixture standing repair grant"}
+
+
+def test_future_work_requires_honest_defer_helper_and_observed_outcome(config, monkeypatch):
+    source(config.memory_root, "one")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    manifest = retro.collect(config, at())
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "astra.json", {"packet_hash": "frozen", "packet": {"schema_version": 2,
+        "candidates": [{"id": "wanted-later", "recommendation_kind": "future_work"}]}})
+    wrong = {"packet_hash": "frozen", "dispositions": [{"id": "wanted-later", "disposition": "no_change", "reason": "Unassigned backlog exists."}]}
+    with pytest.raises(ValueError, match="suppressed"):
+        asyncio.run(pipeline.record_review(manifest["run_id"], wrong))
+    record = asyncio.run(pipeline.decision("spec_one", proposal2()))
+    row = {"id": "wanted-later", "disposition": "defer", "reason": "Accepted owner defers until the dated checkpoint.",
+        "work_id": "spec_one", "proposal_id": record["id"], "version": record["version"]}
+    reviewed = asyncio.run(pipeline.record_review(manifest["run_id"], {"packet_hash": "frozen", "dispositions": [row]}))
+    assert reviewed["weekly_summary"]["due"]
+    approved = asyncio.run(pipeline.decision("spec_one", proposal2("authorized")))
+    assert approved["state"] == "authorized" and not pipeline.rpc.questions
+    resolved = {**proposal2("resolved"), "outcome_evidence": {"receipt": "observed-fixture-output", "observed_at": "2026-09-28T11:00:00Z", "measure": "Output matches fixture.", "shipped_at": "2026-09-28T11:00:00Z"}}
+    done = asyncio.run(pipeline.decision("spec_one", resolved))
+    assert done["state"] == "resolved"
+    summary = retro.weekly_summary(config, "2026-09-28")
+    assert summary["sources_reviewed"] == 1 and summary["candidates_reviewed"] == 1 and summary["dispositions"]["defer"] == 1
+    assert summary["verified_outcomes"] == 1 and summary["shipped_observed"] == 1
+    assert len(summary["missing_runs"]) == 6 and summary["legacy_review_runs"] == []
+
+
+@pytest.mark.parametrize("damage", ["missing_acceptance", "wrong_owner", "vague_checkpoint", "event_no_ref", "naive_date"])
+def test_defer_contract_refuses_unaccepted_or_uncheckable_work(config, monkeypatch, damage):
+    source(config.memory_root, "one")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    payload = proposal2()
+    if damage == "missing_acceptance": payload.pop("owner_acceptance")
+    elif damage == "wrong_owner": payload["owner_acceptance"]["owner"] = "unassigned"
+    elif damage == "vague_checkpoint": payload["checkpoint"] = "next owned touch"
+    elif damage == "event_no_ref": payload["checkpoint"] = {"owner": "fixture:owner", "event": "next-release"}
+    else: payload["checkpoint"]["at"] = "2026-09-29"
+    with pytest.raises(ValueError):
+        asyncio.run(retro.Pipeline(config, Transport()).decision("spec_one", payload))
+    assert not retro.proposals((config.memory_root / "work/completed/one/spec.md").read_text())
+
+
+def test_schema2_owner_checkpoint_change_refuses_old_approval(config, monkeypatch):
+    source(config.memory_root, "one")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    rpc = Transport(); pipeline = retro.Pipeline(config, rpc)
+    pending = asyncio.run(pipeline.decision("spec_one", proposal2("propose")))
+    qid = pending["attempts"][0]["question_id"]
+    rpc.questions[qid].update(state="answered", answer={"selections": ["approve"]})
+    changed = proposal2("propose"); changed["checkpoint"]["at"] = "2026-09-30T10:00:00Z"
+    current = asyncio.run(pipeline.decision("spec_one", changed))
+    assert current["state"] == "pending" and "answer" not in current
+    assert current["attempts"][0]["stale_answer_refused"]
+
+
+def test_weekly_retention_is_once_per_week_and_quiet_daily_stays_quiet(config, monkeypatch):
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    for day in ("2026-09-28", "2026-09-29"):
+        manifest = retro.collect(config, at(day + "T05:00:00-05:00"))
+        root = config.state_root / "runs" / day
+        retro.atomic(root / "astra.json", {"packet_hash": day, "packet": {"schema_version": 2, "candidates": []}})
+        receipt = asyncio.run(pipeline.record_review(day, {"packet_hash": day, "dispositions": []}))
+        assert receipt["weekly_summary"]["due"] == (day == "2026-09-28")
+    assert len(list((config.state_root / "weekly").glob("*.json"))) == 1
+    assert not pipeline.rpc.sent and not pipeline.rpc.questions
+    summary = retro.weekly_summary(config, "2026-09-29")
+    assert summary["runs_collected"] == summary["runs_reviewed"] == 2
+    assert summary["primary_coverage"]["gaps"] == 2
+
+
+def test_weekly_oldest_unresolved_and_explicit_dot_measures(config):
+    path = source(config.memory_root, "one")
+    old = {**proposal2(), "version": "v1", "state": "defer",
+        "checkpoint": {"owner": "fixture:owner", "event": "release-candidate", "trigger_ref": "accepted-release-commission"}}
+    done = {**proposal2("resolved"), "id": "dot-result", "version": "v2", "state": "resolved",
+        "outcome_evidence": {"receipt": "observed-milestone", "observed_at": "2026-09-28T12:00:00Z", "measure": "Milestone accepted.",
+            "measurement_scope": "dot_milestone", "blocked_seconds": 0, "correction_rounds": 2, "shipped_at": "2026-09-28T12:00:00Z"}}
+    retro.save_proposals(path, path.read_bytes(), {old["id"]: old, done["id"]: done})
+    for identity, stamp in ((old["id"], "2026-09-01T12:00:00Z"), (done["id"], "2026-09-28T12:00:00Z")):
+        retro.atomic(config.state_root / "decision-receipts" / (identity + ".json"), {
+            "work_id": "spec_one", "proposal_id": identity, "recorded_at": stamp})
+    summary = retro.weekly_summary(config, "2026-09-28")
+    assert summary["oldest_unresolved"]["first_observed_at"] == "2026-09-01T12:00:00Z"
+    assert summary["current_work_counts"]["defer"] == 1
+    assert summary["dot_measurements"]["blocked_seconds"] == {"observed": 1, "total": 0}
+    assert summary["dot_measurements"]["correction_rounds"] == {"observed": 1, "total": 2}
+    assert summary["dot_measurements"]["avoidable_stops"] == {"observed": 0, "total": None}
+    assert summary["verified_outcomes"] == summary["shipped_observed"] == 1
+    assert next(w for w in summary["current_work"] if w["proposal_id"] == old["id"])["event_occurrence"] == "unknown; inspect trigger_ref"
+    following = retro.weekly_summary(config, "2026-10-05")
+    assert following["verified_outcomes"] == following["shipped_observed"] == 0
+
+
+@pytest.mark.parametrize("mode", ["working", "waiting", "planner"])
+def test_primary_expiry_crossing_emits_once_with_unchanged_lane_identity(config, mode):
+    from message_envelopes import build_message_envelope
+    settings = primary_fixture(config)
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("DELETE FROM v2_outbound_notices")
+        if mode == "waiting":
+            conn.execute("INSERT INTO v2_assistant_composite_lanes(lane_id,stream_id,phase,bound_stream_id,bound_generation,version,created_at,updated_at) VALUES ('hold','bart:assistant','waiting','fixture:lead','g2',1,'2026-09-27T06:00:00Z','2026-09-27T06:00:00Z')")
+        for n, stamp in enumerate(("2026-09-27T08:00:00Z", "2026-09-27T09:01:00Z", "2026-09-27T09:31:00Z")):
+            key = "d2:" + str(n) * 64
+            body = build_message_envelope("lane_digest", notice_id=key, evaluated_at=stamp,
+                lanes=[{"stream_id": "fixture:lead", "generation": "g2", "role": "planner" if mode == "planner" else "lead",
+                    "working": mode == "working", "idle_age_s": 0, "eta_at": "2026-09-27T09:00:00Z", "open_terminal_reports": 0}])
+            conn.execute("INSERT INTO v2_outbound_notices(notice_id,kind,dedupe_key,recipient_stream_id,tell_id,body,payload_digest,created_at) VALUES (?,'lane_digest',?,'fixture:fd',?,?,'h',?)", (key, key, key, body, stamp))
+    packet = retro.primary_evidence(settings, at("2026-09-27T00:00:00Z"), at())
+    observations = [o for o in packet["observations"] if o["kind"] == "digest"]
+    assert len(observations) == 2
+    due = [o for o in observations if o["next_action"]]
+    assert len(due) == 1 and due[0]["created_at"] == "2026-09-27T09:01:00Z"
+    assert due[0]["next_action"] == "inspect_expired_checkpoint_and_record_reason_and_next_checkpoint"
+
+
+def test_continuous_duplicate_retro_heading_is_gap(config):
+    path = continuous_source(config)
+    path.write_text(path.read_text() + "\n## Retro\nSecond lesson.\n")
+    manifest = retro.collect(config, at())
+    assert not manifest["sources"] and not manifest["baseline"]
+    assert any("exactly one Retro" in gap["reason"] for gap in manifest["gaps"])
+
+
+@pytest.mark.parametrize("fence", ["```markdown", "~~~markdown"])
+def test_continuous_fenced_retro_example_is_not_a_section(config, fence):
+    path = continuous_source(config)
+    text = path.read_text()
+    example = "\n## Example\n" + fence + "\n## Retro\nExample only.\n" + fence[:3] + "\n"
+    path.write_text(text.replace("\n## Retro\n", example + "\n## Retro\n", 1))
+    manifest = retro.collect(config, at())
+    assert [s["id"] for s in manifest["sources"]] == ["spec_bart"]
+    assert not manifest["gaps"] and "Example only" not in manifest["sources"][0]["original"]
+
+
+@pytest.mark.parametrize("weekly_exists", [True, False])
+def test_schema2_review_retry_persists_missing_weekly_pointer(config, monkeypatch, weekly_exists):
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    manifest = retro.collect(config, at())
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "astra.json", {"packet_hash": "frozen", "packet": {"schema_version": 2, "candidates": []}})
+    result = {"packet_hash": "frozen", "dispositions": []}
+    first = asyncio.run(pipeline.record_review(manifest["run_id"], result))
+    first.pop("weekly_summary")
+    retro.atomic(root / "review.json", first)
+    if not weekly_exists:
+        for path in (config.state_root / "weekly").glob("*.json"):
+            path.unlink()
+    recovered = asyncio.run(pipeline.record_review(manifest["run_id"], result))
+    assert retro.read(root / "review.json") == recovered
+    assert recovered["weekly_summary"]["sha256"] and recovered["weekly_summary"]["due"]
+    assert {k: v for k, v in recovered.items() if k != "weekly_summary"} == first
+    preimage = (root / "review.json").read_bytes()
+    assert asyncio.run(pipeline.record_review(manifest["run_id"], result)) == recovered
+    assert (root / "review.json").read_bytes() == preimage
+
+
+
+def test_primary_wait_requires_configured_composite_and_retains_exact_provenance(config):
+    settings = primary_fixture(config)
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("INSERT INTO v2_assistant_composite_lanes(lane_id,stream_id,phase,bound_stream_id,bound_generation,version,created_at,updated_at) VALUES ('hold','other:assistant','waiting','fixture:lead','g2',7,'2026-09-27T06:00:00Z','2026-09-27T06:00:00Z')")
+    wrong = retro.primary_evidence(settings, at("2026-09-27T00:00:00Z"), at())
+    assert any(o.get("classification") == "unexplained_idle" for o in wrong["observations"])
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("UPDATE v2_assistant_composite_lanes SET stream_id='bart:assistant'")
+    held = retro.primary_evidence(settings, at("2026-09-27T00:00:00Z"), at())
+    observation = next(o for o in held["observations"] if o.get("classification") == "intentional_hold")
+    assert observation["waiting_provenance"] == [{"lane_id": "hold", "stream_id": "bart:assistant", "bound_stream_id": "fixture:lead", "bound_generation": "g2", "phase": "waiting", "version": 7, "updated_at": "2026-09-27T06:00:00Z"}]
+
+
+@pytest.mark.parametrize("side", ["recipient", "source"])
+def test_primary_descendant_notice_failure_survives_session_projection_cap(config, side):
+    settings = primary_fixture(config)
+    with sqlite3.connect(settings.primary_store) as conn:
+        recipient, sender = ("fixture:lead", "fixture:unrelated") if side == "recipient" else ("fixture:unrelated", "fixture:lead")
+        conn.execute("INSERT INTO v2_outbound_notices(notice_id,kind,dedupe_key,recipient_stream_id,source_stream_id,tell_id,body,payload_digest,created_at,last_error) VALUES ('descendant-failure','watch','descendant-failure',?,?,'descendant-failure','PRIVATE_SENTINEL','h','2026-09-27T09:00:00Z','PRIVATE_SENTINEL')", (recipient, sender))
+    packet = retro.primary_evidence(settings, at("2026-09-27T00:00:00Z"), at(), max_rows=1)
+    assert any(o["source"] == "v2_outbound_notices:descendant-failure" and o["kind"] == "delivery_failure" and o["next_action"] for o in packet["observations"])
+    assert packet["coverage"]["notices"] == {"observed": 4, "scanned": 1, "overflow": 3}
+    assert "PRIVATE_SENTINEL" not in json.dumps(packet)
+
+
+def test_primary_archived_terminal_plan_metadata_is_safe_and_readonly(config):
+    settings = primary_fixture(config)
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("DELETE FROM sessions WHERE session_name='lead'")
+    with sqlite3.connect(settings.primary_archive) as conn:
+        card = json.dumps({"updated_at": "2026-09-27T06:00:00Z", "plan": [{"status": "done", "text": "PRIVATE_SENTINEL"}]})
+        conn.execute("INSERT INTO sessions(host,session_name,parent_stream_id,visibility,created_at,status,closed_at,status_card) VALUES ('fixture','lead','fixture:fd','hidden','2026-09-27T00:00:00Z','closed','2026-09-27T07:00:00Z',?)", (card,))
+    before = settings.primary_store.read_bytes(), settings.primary_archive.read_bytes()
+    packet = retro.primary_evidence(settings, at("2026-09-27T00:00:00Z"), at())
+    assert any(o.get("classification") == "terminal_plan" and o["plan_provenance"]["source"] == "primary_archive.sessions" for o in packet["observations"])
+    assert not any(o.get("classification") == "unexplained_idle" for o in packet["observations"])
+    assert before == (settings.primary_store.read_bytes(), settings.primary_archive.read_bytes())
+    assert "PRIVATE_SENTINEL" not in json.dumps(packet)
+
+
+def test_weekly_primary_retains_scan_sample_and_correlation_denominators(config, monkeypatch):
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    for n, day in enumerate(("2026-09-28", "2026-09-29"), 1):
+        manifest = retro.collect(config, at(day + "T05:00:00-05:00"))
+        manifest["primary"] = {"store": "fixture", "gaps": [], "coverage": {
+            "reports": {"observed": 2 * n + 3, "scanned": n + 2, "overflow": n + 1},
+            "observations": {"observed": 10 * n, "selected": 4 * n, "urgent": 3 * n, "deferred_urgent": n},
+            "completion_correlation": {"observed_done": 4 * n, "explicitly_published": n, "unknown": 3 * n}},
+            "deferred": {"count": 6 * n, "by_kind": {"digest": 6 * n}}}
+        root = config.state_root / "runs" / day
+        retro.atomic(root / "collection.json", manifest)
+        retro.atomic(root / "astra.json", {"packet_hash": day, "packet": {"schema_version": 2, "candidates": []}})
+        asyncio.run(pipeline.record_review(day, {"packet_hash": day, "dispositions": []}))
+    coverage = retro.weekly_summary(config, "2026-09-29")["primary_coverage"]
+    assert coverage["tables"]["reports"] == {"observed": 12, "scanned": 7, "overflow": 5}
+    assert coverage["observations"] == {"observed": 30, "selected": 12, "urgent": 9, "deferred_urgent": 3, "deferred": 18}
+    assert coverage["completion_correlation"] == {"observed_done": 12, "explicitly_published": 3, "unknown": 9}
+    assert coverage["deferred_by_kind"] == {"digest": 18}
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_weekly_direct_resolved_outcome_is_counted_once_per_receipt(config, monkeypatch, linked):
+    source(config.memory_root, "one")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    outcome = {"receipt": "observed-owning-milestone", "observed_at": "2026-09-28T11:00:00Z", "shipped_at": "2026-09-28T11:00:00Z", "measure": "Output confirmed.", "measurement_scope": "dot_milestone", "blocked_seconds": 0, "correction_rounds": 1}
+    if linked:
+        asyncio.run(pipeline.decision("spec_one", {**proposal2("resolved"), "outcome_evidence": outcome}))
+    manifest = retro.collect(config, at())
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "astra.json", {"packet_hash": "frozen", "packet": {"schema_version": 2, "candidates": [{"id": "observed", "recommendation_kind": "resolved"}]}})
+    row = {"id": "observed", "disposition": "resolved", "reason": "Observed result.", "outcome_evidence": outcome}
+    asyncio.run(pipeline.record_review(manifest["run_id"], {"packet_hash": "frozen", "dispositions": [row]}))
+    summary = retro.weekly_summary(config, manifest["run_id"])
+    assert summary["verified_outcomes"] == summary["shipped_observed"] == 1
+    assert summary["dot_measurements"]["sample_receipts"] == [outcome["receipt"]]
+    assert summary["dot_measurements"]["blocked_seconds"] == {"observed": 1, "total": 0}
+    assert summary["dot_measurements"]["correction_rounds"] == {"observed": 1, "total": 1}
+
+
+def test_primary_provenance_packet_bound_does_not_limit_root_membership(config):
+    settings = primary_fixture(config)
+    with sqlite3.connect(settings.primary_store) as conn:
+        for n in range(300):
+            conn.execute("INSERT INTO v2_assistant_rebind_audit(request_id,payload_digest,actor_stream_id,actor_generation,old_binding_json,new_binding_json,outcome,created_at) VALUES (?,'h','fixture:fd','g1',?,?,'ok','2026-09-27T06:00:00Z')", (str(n), json.dumps({"stream_id": "fixture:former-root-" + str(n), "generation": "g" * 64}), json.dumps({"stream_id": "fixture:next-root-" + str(n), "generation": "h" * 64})))
+    packet = retro.primary_evidence(settings, at("2026-09-27T00:00:00Z"), at())
+    assert len(retro.encoded(packet)) <= 24576
+    assert packet["reference_coverage"]["roots"]["observed"] == 601
+    assert packet["reference_coverage"]["roots"]["deferred"] > 0
+    assert any(o["source"] == "v2_send_receipts:receipt" for o in packet["observations"])
+    assert packet["coverage"]["rebind_audit"]["scanned"] == 300
+
+
+@pytest.mark.parametrize("damage", ["future_observation", "future_shipment", "invalid_shipment"])
+def test_outcome_requires_observed_times_before_counting_success(damage):
+    from datetime import timedelta, timezone
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    outcome = {"receipt": "observed", "observed_at": "2026-09-28T11:00:00Z", "measure": "Output confirmed."}
+    if damage == "future_observation":
+        outcome["observed_at"] = future
+    else:
+        outcome["shipped_at"] = future if damage == "future_shipment" else "unknown"
+    with pytest.raises(ValueError):
+        retro.validate_outcome(outcome)
+
+
+def test_changed_schema2_scope_does_not_inherit_old_observed_outcome(config, monkeypatch):
+    source(config.memory_root, "one")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    old = {**proposal2("resolved"), "outcome_evidence": {"receipt": "old-scope-result", "observed_at": "2026-09-28T11:00:00Z", "measure": "Old output confirmed."}}
+    asyncio.run(pipeline.decision("spec_one", old))
+    changed = {**proposal2("authorized"), "scope": "Repair a different current defect."}
+    current = asyncio.run(pipeline.decision("spec_one", changed))
+    assert "outcome_evidence" not in current
+    summary = retro.weekly_summary(config, "2026-10-05")
+    assert summary["oldest_unresolved"]["proposal_id"] == current["id"]
+    assert summary["current_work"][0]["checkpoint_state"] == "overdue"
+
+
+def test_existing_schema2_proposal_cannot_downgrade_to_legacy_on_replay(config, monkeypatch):
+    path = source(config.memory_root, "one")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    asyncio.run(pipeline.decision("spec_one", proposal2()))
+    preimage = path.read_bytes()
+    legacy = {**proposal(), "disposition": "defer"}
+    with pytest.raises(ValueError, match="schema_version 2"):
+        asyncio.run(pipeline.decision("spec_one", legacy))
+    assert path.read_bytes() == preimage
+
+
 def test_rehearsal_and_daily_worker_identities_are_separate(config):
     from dataclasses import replace
     from spawnctl import SpawnCtl
@@ -582,7 +1086,7 @@ def test_authorized_work_and_review_require_durable_version(config, monkeypatch)
         assert await pipeline.decision("spec_one", authorized) == record
         manifest = retro.collect(config, at())
         candidate = {k: "fixture" for k in ("id", "problem", "consequence", "prior_occurrences", "existing", "action", "benefit", "effort", "risk", "uncertainty", "owner", "decision")}
-        candidate.update(id="c-one", citations=["spec_one"])
+        candidate.update(id="c-one", citations=["spec_one"], recommendation_kind="immediate_work")
         packet = {"run_id": manifest["run_id"], "dispositions": [{"id": s["id"], "fingerprint": s["fingerprint"], "reason": "Existing authorized work"} for s in manifest["sources"]], "candidates": [candidate]}
         retro.validate_packet(packet, manifest)
         root = config.state_root / "runs" / manifest["run_id"]
