@@ -193,3 +193,141 @@ def test_meta_not_part_of_dedup_identity() -> None:
             store.stop()
 
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("meta,expected", [
+    ({"voice": {"duration_s": 7.923, "extra": "drop"}, "extra": True},
+     {"voice": {"duration_s": 7.923}}),
+    ({"voice": {"duration_s": "invalid"}}, {}),
+    (None, {}),
+])
+def test_ordinary_send_outcomes_history_and_replay_keep_request_meta(tmp_path, meta, expected):
+    """Run the actual send lane; only the provider counterpart is simulated."""
+    from ingest import append_ingested_event
+    from test_send_semantics import FakeTmux, _new_comms, _open, HOST, NAME
+
+    async def go():
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        target = f"{HOST}:{NAME}"
+        try:
+            await _open(comms, sessions)
+            result = await comms.send({
+                "stream_id": target, "text": "voice transcript",
+                "request_id": "send-voice-outcome", "meta": meta,
+            })
+            assert result["submission_confirmed"] is True
+            original_rows = await store.submit(lambda conn: [dict(row) for row in conn.execute(
+                "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
+                (target, "send-voice-outcome"),
+            )])
+            assert [row["state"] for row in original_rows] == ["accepted", "landed"]
+            assert [json.loads(row["meta_json"]) for row in original_rows] == [expected, expected]
+            event = {
+                "kind": "USER", "stream_id": target, "provider": "claude",
+                "text": "voice transcript", "request_id": "send-voice-outcome",
+                "timestamp": "2026-10-05T16:00:00Z",
+                "raw": {"jsonl_record_uuid": "voice-outcome", "jsonl_event_index": 0},
+            }
+            casts = []
+            async def broadcast(frame):
+                casts.append(frame)
+            assert await append_ingested_event(store, broadcast, event, recent_limit=50) is not None
+            history = await store.fetch_session_event_tail(target, limit=50)
+            assert history[0].get("meta", {}) == expected
+            assert casts[0]["event"].get("meta", {}) == expected
+            # Identical body under another request and stream must never lend metadata.
+            for other_target, other_request in [(target, "send-other-voice"), ("other:seat", "send-voice-outcome")]:
+                await store.append_send_receipt(
+                    to_stream_id=other_target, request_id=other_request, receipt_id="other",
+                    state="landed", wire_text="voice transcript", display_text="voice transcript",
+                    attachments=[], delivery="landed", submission_confirmed=True,
+                    meta_json=json.dumps({"voice": {"duration_s": 99.0}}),
+                )
+            replay = await store.stamp_event_with_send_receipt(history[0])
+            assert replay["request_id"] == "send-voice-outcome"
+            assert replay.get("meta", {}) == expected
+            unchanged = await store.submit(lambda conn: [dict(row) for row in conn.execute(
+                "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
+                (target, "send-voice-outcome"),
+            )])
+            assert unchanged == original_rows
+        finally:
+            store.stop()
+
+    asyncio.run(go())
+
+
+def test_ordinary_failed_send_keeps_validated_meta(tmp_path):
+    from test_send_semantics import FakeTmux, _new_comms, _open, HOST, NAME
+
+    async def go():
+        comms, store, sessions = _new_comms(FakeTmux(fail_phase="not_started"), tmp_path)
+        try:
+            await _open(comms, sessions)
+            await comms.send({"stream_id": f"{HOST}:{NAME}", "text": "voice transcript",
+                              "request_id": "send-voice-failed", "meta": {"voice": {"duration_s": 3.0}}})
+            receipt = await store.get_send_receipt(f"{HOST}:{NAME}", "send-voice-failed")
+            assert receipt["state"] == "not_landed"
+            assert receipt["meta"] == {"voice": {"duration_s": 3.0}}
+        finally:
+            store.stop()
+
+    asyncio.run(go())
+
+
+def test_coalesced_request_keeps_its_own_meta_without_borrowing_winner(tmp_path):
+    from test_send_semantics import FakeTmux, _new_comms, _open, HOST, NAME
+
+    async def go():
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        target = f"{HOST}:{NAME}"
+        try:
+            await _open(comms, sessions)
+            base = {"stream_id": target, "text": "same transcript", "optimistic_id": "opt-voice"}
+            await comms.send({**base, "request_id": "send-voice-winner", "meta": {"voice": {"duration_s": 5.0}}})
+            retry = await comms.send({**base, "request_id": "send-voice-retry", "meta": {"voice": {"duration_s": 8.0}}})
+            assert retry["coalesced"] is True
+            assert len(tmux.pastes) == 1
+            assert (await store.get_send_receipt(target, "send-voice-winner"))["meta"] == {"voice": {"duration_s": 5.0}}
+            assert (await store.get_send_receipt(target, "send-voice-retry"))["meta"] == {"voice": {"duration_s": 8.0}}
+            replay = await comms.send({**base, "request_id": "send-voice-no-meta"})
+            assert replay["coalesced"] is True
+            assert "meta" not in await store.get_send_receipt(target, "send-voice-no-meta")
+        finally:
+            store.stop()
+
+    asyncio.run(go())
+
+
+
+def test_same_request_replay_retains_original_meta(tmp_path):
+    from test_send_semantics import FakeTmux, _new_comms, _open, HOST, NAME
+
+    async def go():
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        target = f"{HOST}:{NAME}"
+        try:
+            await _open(comms, sessions)
+            base = {"stream_id": target, "text": "voice transcript", "request_id": "send-original-meta"}
+            await comms.send({**base, "meta": {"voice": {"duration_s": 4.5}}})
+            original = await store.submit(lambda conn: [dict(row) for row in conn.execute(
+                "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
+                (target, "send-original-meta"),
+            )])
+            for meta in [None, {"voice": {"duration_s": 77.0}}]:
+                assert (await comms.send({**base, "meta": meta}))["coalesced"] is True
+                receipt = await store.get_send_receipt(target, "send-original-meta")
+                assert receipt["meta"] == {"voice": {"duration_s": 4.5}}
+            assert len(tmux.pastes) == 1
+            after = await store.submit(lambda conn: [dict(row) for row in conn.execute(
+                "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
+                (target, "send-original-meta"),
+            )])
+            assert after[:len(original)] == original
+        finally:
+            store.stop()
+
+    asyncio.run(go())

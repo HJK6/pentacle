@@ -168,14 +168,20 @@ must keep that identity. An empty transcript is not a text send.
 
 The subsequent `send`, including sends to assistant composites, accepts optional
 `meta: {voice: {duration_s: number}}`. Metadata is stored in the send receipt's
-`meta_json`, attached to the USER echo/history event and preserved by receipt
-replay. It is additive: clients without voice UI can ignore it. The send
+`meta_json` on each append-only receipt state row, attached to the USER
+echo/history event and preserved by receipt replay. It is additive: clients without voice UI can ignore it. The send
 contains the transcript as text, with no audio attachment; optimistic_id and
 request_id retain the ordinary send deduplication contract.
+Ordinary send outcomes retain the validated metadata from their send plan. A
+replay of the same request and stream retains that request's durable metadata;
+a rotated request uses its own validated metadata when delivery coalesces.
+Receipt history remains immutable, and identical transcript text in another
+request or stream cannot replace the metadata of a request-stamped USER event.
+
 Composite sends whitelist only finite numeric `voice.duration_s` with
 `0 < duration_s <= 600`, normalized to milliseconds (a value that rounds to 0 is dropped). Other metadata is dropped;
 the receipt retains its internal `assistant_composite` marker. Ordinary-stream
-metadata behavior is unchanged. Voice metadata does not alter send identity.
+metadata validation is unchanged. Voice metadata does not alter send identity.
 
 ### Web composer recording
 

@@ -38,7 +38,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
@@ -1702,6 +1702,7 @@ class Comms:
             from_stream_id=from_stream_id,
             actor_stream_id=actor_stream_id,
             actor_trusted=actor_trusted,
+            meta_json=json.dumps(plan.meta, separators=(",", ":"), sort_keys=True),
         )
 
     async def _send_result(
@@ -1909,6 +1910,13 @@ class Comms:
         winner_delivery = str(winner.get("delivery") or winner_state)
         winner_confirmed = bool(winner.get("submission_confirmed"))
         winner_request_id = str(winner.get("request_id") or request_id)
+        # Replaying this physical request retains its original validated meta.
+        # A rotated request owns its own meta, even when its delivery coalesces.
+        if (
+            winner_request_id == request_id
+            and winner.get("to_stream_id") == str(plan.route["final_target"])
+        ):
+            plan = replace(plan, meta=normalize_send_meta(winner.get("meta")))
         winner_attempts = winner.get("attempts")
         winner_attempts = winner_attempts if isinstance(winner_attempts, int) else None
         # A replay of a send the provider holds in its native queue stays queued.
