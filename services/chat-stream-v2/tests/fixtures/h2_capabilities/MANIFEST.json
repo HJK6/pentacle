@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "path": "tests/fixtures/h2_capabilities/changed_tests.json",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "bytes": 4673,
+      "sha256": "ccfb99016ec1add1d66083a77e131fa5c44b49217e17c6338093058ea235fdcd",
+      "purpose": "Authored synthetic portability fixture or pinned source-contract metadata for TH-H2"
+    },
+    {
+      "path": "tests/fixtures/h2_capabilities/descriptor_template.txt",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "bytes": 52,
+      "sha256": "aebfc500e58e23ef03476ee2f5a597c64f421239a4d880b6dcb72cf19a189e55",
+      "purpose": "Authored synthetic portability fixture or pinned source-contract metadata for TH-H2"
+    },
+    {
+      "path": "tests/fixtures/h2_capabilities/original_assertions.json",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "bytes": 4932,
+      "sha256": "e841aa5ed2da6a607f918a8f99b965eb2f53b2b27878ff09355991546bb8717e",
+      "purpose": "Authored synthetic portability fixture or pinned source-contract metadata for TH-H2"
+    },
+    {
+      "path": "tests/fixtures/h2_capabilities/process_rows.txt",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "bytes": 164,
+      "sha256": "1377967fc768ab3b184e79365f32321b6e8a71df4cbf703fd08a19c624015872",
+      "purpose": "Authored synthetic portability fixture or pinned source-contract metadata for TH-H2"
+    },
+    {
+      "path": "tests/fixtures/h2_capabilities/ps_birth.txt",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "bytes": 71,
+      "sha256": "a389bba4561df75fdaf2a0b73707ffc7754200d56d51814cefa362f00afc4ff4",
+      "purpose": "Authored synthetic portability fixture or pinned source-contract metadata for TH-H2"
+    },
+    {
+      "path": "tests/fixtures/h2_capabilities/transcript.jsonl",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "bytes": 415,
+      "sha256": "5143d89d5d4d6e434677b9269ab810e8e6ad09e2b3626cdac8ef98f115b24107",
+      "purpose": "Authored synthetic portability fixture or pinned source-contract metadata for TH-H2"
+    }
+  ]
+}

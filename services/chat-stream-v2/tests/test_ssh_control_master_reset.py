@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import tempfile
 import textwrap
 import time
 from pathlib import Path
@@ -17,12 +16,12 @@ from machines import MachineConfig
 
 
 class FakeSSH:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, control_dir: Path) -> None:
         self.target = "user@peer"
         self.state = root / "state.json"
         self.events_file = root / "events.jsonl"
         self.bin = root / "ssh"
-        self.control_dir = Path(tempfile.mkdtemp(prefix="pentacle-cm-min-", dir="/tmp"))
+        self.control_dir = control_dir
         self.state.write_text(json.dumps({
             "fresh_rc": 0, "mux": "nonzero", "exit": "success", "pid": 4242,
             "check": "master", "auto_create": "ok",
@@ -109,8 +108,9 @@ class FakeSSH:
 
 
 @pytest.fixture()
-def fake_ssh(tmp_path: Path) -> FakeSSH:
-    fake = FakeSSH(tmp_path)
+def fake_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeSSH:
+    monkeypatch.chdir(tmp_path)
+    fake = FakeSSH(tmp_path, control_dir=Path("cm"))
     try:
         yield fake
     finally:
@@ -389,3 +389,20 @@ def test_no_persistent_master_reachable_host_does_not_churn_or_falsely_reset(
     assert len(legs) == 1 and "ControlMaster=no" in legs[0] and "ControlMaster=auto" not in legs[0]
     assert _exit_events(fake_ssh) == []  # no reset attempted
     assert unlinks == [] and not path.exists()  # nothing churned into existence
+
+
+@pytest.mark.requires("short-path unix-socket directory writable")
+@pytest.mark.timeout(10)
+def test_additional_owned_unix_socket_capability(requires):
+    """Additional host proof; the six fake-SSH unit cases need no real socket."""
+    import os
+    import socket
+    import tempfile
+    result = requires("short-path unix-socket directory writable")
+    with tempfile.TemporaryDirectory(prefix="th2-", dir=result.value) as directory:
+        path = Path(directory) / "s"
+        assert len(os.fsencode(path)) < 100
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.bind(str(path))
+            assert path.exists()
+    assert not Path(directory).exists()

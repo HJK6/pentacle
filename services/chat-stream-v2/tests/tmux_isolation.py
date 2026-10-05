@@ -19,7 +19,7 @@ def isolate_tmux(tmp_path: Path, monkeypatch) -> tuple[str, Path]:
     wrapper = bindir / 'tmux'
     socket = 'pentacle-test-' + uuid.uuid4().hex
     wrapper.write_text('#!/bin/sh\nunset TMUX TMUX_TMPDIR\n'
-                       f'exec {shlex.quote(real)} -L {socket} "$@"\n')
+                       f'exec {shlex.quote(real)} -L {socket} -f /dev/null "$@"\n')
     wrapper.chmod(0o700)
     monkeypatch.setenv('PATH', str(bindir) + os.pathsep + os.environ['PATH'])
     return str(wrapper), resolve_tmux_socket(socket)

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("isolated_tmux_env")
+pytestmark = pytest.mark.timeout(60)
 
 from tools.run_gate import _process_group_exists
 
@@ -80,11 +80,30 @@ def _start_owner(manifest: Path) -> tuple[subprocess.Popen[str], dict]:
         text=True,
     )
     assert proc.stdout is not None
-    line = proc.stdout.readline().strip()
-    if not line:
-        stderr = proc.stderr.read() if proc.stderr is not None else ""
-        raise AssertionError(f"owner failed to start: {stderr}")
-    return proc, json.loads(line)
+    try:
+        import select
+        deadline = time.monotonic() + 10
+        data = b""
+        while b"\n" not in data:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([proc.stdout], [], [], remaining)[0]:
+                raise AssertionError("owned owner readiness timed out")
+            chunk = os.read(proc.stdout.fileno(), 4096)
+            if not chunk:
+                raise AssertionError("owned owner exited before readiness")
+            data += chunk
+            if len(data) > 65536:
+                raise AssertionError("owned owner readiness exceeded byte limit")
+        line = data.split(b"\n", 1)[0].decode("utf-8")
+        return proc, json.loads(line)
+    except BaseException:
+        if proc.poll() is None:
+            proc.terminate()
+            try: proc.wait(timeout=2)
+            except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=2)
+        from tools.gate_owner_manifest import reap_manifest
+        if manifest.exists(): reap_manifest(manifest)
+        raise
 
 
 def _socket_path(socket_name: str) -> Path:
@@ -95,7 +114,7 @@ def _socket_path(socket_name: str) -> Path:
 
 def _descendant_commands(root_pid: int) -> list[str]:
     rows = subprocess.check_output(
-        ["ps", "axww", "-o", "pid=,ppid=,command="], text=True,
+        ["ps", "axww", "-o", "pid=,ppid=,command="], text=True, timeout=2,
     ).splitlines()
     children: dict[int, list[tuple[int, str]]] = {}
     for row in rows:
@@ -130,11 +149,12 @@ def _process_command(pid: int) -> str:
         except OSError:
             pass
     return subprocess.check_output(
-        ["ps", "-ww", "-p", str(pid), "-o", "command="], text=True,
+        ["ps", "-ww", "-p", str(pid), "-o", "command="], text=True, timeout=2,
     )
 
 
-@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
+@pytest.mark.requires("tmux usable", "process start identity readable")
+@pytest.mark.usefixtures("isolated_tmux_env")
 def test_sigterm_reaps_owned_processes(tmp_path: Path) -> None:
     manifest = tmp_path / ".owned.json"
     proc, info = _start_owner(manifest)
@@ -149,8 +169,8 @@ def test_sigterm_reaps_owned_processes(tmp_path: Path) -> None:
     finally:
         if proc.poll() is None:
             proc.kill()
-            proc.wait()
-        subprocess.run(["tmux", "-L", info["socket"], "kill-server"], check=False)
+            proc.wait(timeout=2)
+        subprocess.run(["tmux", "-L", info["socket"], "kill-server"], check=False, timeout=3)
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
@@ -236,7 +256,9 @@ def test_sigkill_then_reap_manifest_cleans(tmp_path: Path) -> None:
             proc.wait()
 
 
-@pytest.mark.timeout(0)
+@pytest.mark.timeout(90)
+@pytest.mark.requires("tmux usable", "ps argv readable", "process start identity readable")
+@pytest.mark.usefixtures("isolated_tmux_env")
 def test_hermetic_soak_child_env_makes_no_remote_calls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -317,6 +339,7 @@ def _sleeper() -> subprocess.Popen[str]:
                             start_new_session=True)
 
 
+@pytest.mark.requires("process start identity readable")
 def test_recycled_pgid_with_different_start_time_is_not_signalled(tmp_path: Path) -> None:
     """A pgid whose recorded leader is gone must never be signalled.
 
@@ -345,6 +368,7 @@ def test_recycled_pgid_with_different_start_time_is_not_signalled(tmp_path: Path
 
 
 @pytest.mark.parametrize("identity", [None, ""])
+@pytest.mark.requires("process start identity readable")
 def test_missing_leader_start_identity_is_not_signalled(
     tmp_path: Path, identity: str | None,
 ) -> None:
@@ -371,6 +395,7 @@ def test_missing_leader_start_identity_is_not_signalled(
             victim.wait()
 
 
+@pytest.mark.requires("process start identity readable")
 def test_reap_signals_entry_whose_identity_still_matches(tmp_path: Path) -> None:
     """The positive half: a fully-matching entry is still reaped."""
     from tools.gate_owner_manifest import process_start_identity, reap_manifest
@@ -393,6 +418,7 @@ def test_reap_signals_entry_whose_identity_still_matches(tmp_path: Path) -> None
             victim.wait()
 
 
+@pytest.mark.requires("process start identity readable")
 def test_reap_is_scoped_to_the_calling_run(tmp_path: Path) -> None:
     """A foreign run's entry survives, and so does the manifest holding it."""
     from tools.gate_owner_manifest import process_start_identity, reap_manifest
@@ -415,6 +441,7 @@ def test_reap_is_scoped_to_the_calling_run(tmp_path: Path) -> None:
         victim.wait()
 
 
+@pytest.mark.requires("process start identity readable")
 def test_record_refuses_unavailable_leader_start_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -433,6 +460,7 @@ def test_record_refuses_unavailable_leader_start_identity(
         victim.wait()
 
 
+@pytest.mark.requires("process start identity readable")
 def test_record_refuses_the_recorders_own_process_group(tmp_path: Path) -> None:
     """Closes the getpgid/setsid race that could record the test session."""
     from tools.gate_owner_manifest import ManifestError, initialize_manifest, record

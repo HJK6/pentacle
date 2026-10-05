@@ -12,6 +12,10 @@ import subprocess
 import sys
 import tempfile
 
+import pytest
+
+pytestmark = pytest.mark.requires_environment
+
 
 # Reuse the accepted path-isolation fixture: both resolvers, before imports.
 BOOTSTRAP = r'''

@@ -103,7 +103,7 @@ def _actual_provider_descriptor_case(tmp_path, mode, expected):
     transcript.parent.mkdir(parents=True)
     transcript.write_bytes((FIXTURES/"codex_rollout_foreign_session.jsonl").read_bytes())
     ready=tmp_path/"ready"
-    actor_executable=subprocess.check_output(["ps","-p",str(os.getpid()),"-o","comm="],text=True).strip()
+    actor_executable=subprocess.check_output(["ps","-p",str(os.getpid()),"-o","comm="],text=True,timeout=2).strip()
     # Darwin comm is an executable path; Linux comm is only a basename.
     if not os.path.isabs(actor_executable):
         actor_executable=os.path.realpath(sys.executable)
@@ -115,7 +115,7 @@ def _actual_provider_descriptor_case(tmp_path, mode, expected):
         class Tmux:
             async def pane_pid(self,name): return str(proc.pid)
         try:
-            started_at=subprocess.check_output(["ps","-p",str(proc.pid),"-o","lstart="],text=True).strip()
+            started_at=subprocess.check_output(["ps","-p",str(proc.pid),"-o","lstart="],text=True,timeout=2).strip()
             sessions=Sessions(store,local_host="h")
             await sessions.open("h","v2-descriptor",provider="codex",pane_pid=str(proc.pid),
                 observer_binding={"executable":os.path.realpath(actor_executable),
@@ -142,10 +142,14 @@ def _actual_provider_descriptor_case(tmp_path, mode, expected):
     assert proc.poll() is not None
 
 
+@pytest.mark.requires("ps argv readable", "ps birth readable", "lsof descriptor readable")
+@pytest.mark.timeout(20)
 def test_actual_readonly_provider_descriptor_cannot_first_bind(tmp_path):
     _actual_provider_descriptor_case(tmp_path,"r",0)
 
 
+@pytest.mark.requires("ps argv readable", "ps birth readable", "lsof descriptor readable")
+@pytest.mark.timeout(20)
 def test_actual_writable_provider_descriptor_binds(tmp_path):
     _actual_provider_descriptor_case(tmp_path,"a",1)
 
@@ -169,11 +173,13 @@ def test_native_codex_agents_bootstrap_is_not_an_operator_turn(provider, receipt
     assert (operator_user_epoch(event, "2026-09-09T20:25:54Z") is not None) is expected
 
 
+@pytest.mark.requires("ps birth readable", "ps argv readable")
+@pytest.mark.timeout(10)
 def test_spawn_retains_readable_current_process_birth():
     import os
     import subprocess
     from spawnctl import SpawnCtl
-    expected=subprocess.check_output(["ps","-p",str(os.getpid()),"-o","lstart="],text=True).strip()
+    expected=subprocess.check_output(["ps","-p",str(os.getpid()),"-o","lstart="],text=True,timeout=2).strip()
     async def run():
         store=Store(":memory:"); store.start()
         try:

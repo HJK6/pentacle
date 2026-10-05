@@ -202,6 +202,7 @@ class TmuxNamespace:
             env=self.child_env(),
             capture_output=True,
             text=True,
+            timeout=5,
         )
 
     def session_names(self) -> list[str]:
