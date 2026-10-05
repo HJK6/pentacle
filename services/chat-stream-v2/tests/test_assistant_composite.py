@@ -798,3 +798,69 @@ def test_decision_and_terminal_report_enqueue_one_authority_wake_each() -> None:
             store.stop()
 
     asyncio.run(_go())
+
+
+def _daff_inventory_fixture():
+    from server import Server
+
+    store = Store(":memory:")
+    server = Server()
+    server.assistant_composites = {
+        name: AssistantComposite(store, config=AssistantCompositeConfig(stream_id=f"{name}:assistant"))
+        for name in ("bart", "daff")
+    }
+    rows = [
+        {"stream_id": "bart:assistant", "provider": "composite", "visibility": "default"},
+        {"stream_id": "daff:assistant", "provider": "composite", "visibility": "default"},
+        {"stream_id": "fixture:ordinary", "provider": "codex", "visibility": "default"},
+        {"stream_id": "fixture:hidden", "provider": "codex", "visibility": "hidden"},
+    ]
+    return server, rows
+
+
+def test_operator_inventory_hides_daff_and_keeps_bart_and_other_rows() -> None:
+    server, rows = _daff_inventory_fixture()
+    projected = server._filter_sessions_for_client(rows, False, None, include_assistant_composite=True)
+    assert [row["stream_id"] for row in projected] == ["bart:assistant", "fixture:ordinary"]
+    # This policy belongs only to inventories; direct-access visibility stays intact.
+    assert server._session_is_visible_to_client(rows[1], False, None, True)
+
+
+def test_inventory_daff_exception_requires_its_own_scope() -> None:
+    server, rows = _daff_inventory_fixture()
+    for scope in (None, "bart:assistant", "other:assistant", "daff:assistant"):
+        projected = server._filter_sessions_for_client(
+            rows, True, None, include_assistant_composite=True, scoped_stream_id=scope,
+        )
+        expected = ["bart:assistant"]
+        if scope == "daff:assistant":
+            expected.append("daff:assistant")
+        expected.extend(["fixture:ordinary", "fixture:hidden"])
+        assert [row["stream_id"] for row in projected] == expected
+
+
+def test_authenticated_cosmo_scope_preserves_daff_inventory_and_history(tmp_path) -> None:
+    from tests.cosmo_e2e import harness as H
+
+    async def run():
+        hz = await H.FoundationHarness(tmp_path).start()
+        try:
+            async with hz.mobile_client() as mobile:
+                server = hz.server
+                websocket = next(iter(server._client_scoped_connections))
+                assert server._connection_trust[websocket].scope == {"stream": H.DAFF_CHAT}
+                assert server._scoped_stream_for(websocket) == H.DAFF_CHAT
+                rows = server.sessions.list_open()
+                projected = server._filter_sessions_for_client(
+                    rows, False, None, True, server._scoped_stream_for(websocket),
+                )
+                assert H.DAFF_CHAT in [row["stream_id"] for row in projected]
+                frame = server._frame_for_client(websocket, "session.inventory", {"type": "session.inventory", "sessions": rows})
+                assert [row["stream_id"] for row in frame["sessions"]] == [H.DAFF_CHAT]
+                active = await server._on_list_sessions({"_client_websocket": websocket})
+                assert H.DAFF_CHAT in [row["stream_id"] for row in active["active"]]
+                await mobile.stream_events()  # Real scoped direct-access RPC still succeeds.
+        finally:
+            await hz.stop()
+
+    asyncio.run(run())

@@ -1875,11 +1875,19 @@ class Server:
         include_subagents: bool,
         opened_by_host_ids: frozenset[str] | None,
         include_assistant_composite: bool = False,
+        scoped_stream_id: str | None = None,
     ) -> list[dict[str, Any]]:
         return [
             self._project_assistant_composite_session(session)
             for session in sessions
             if isinstance(session, dict)
+            # Daff is listed only for its authenticated Cosmo scope. Keep this
+            # inventory policy out of the shared direct-access visibility checks.
+            and not (
+                session.get("provider") == "composite"
+                and session.get("stream_id") == "daff:assistant"
+                and scoped_stream_id != "daff:assistant"
+            )
             and self._session_is_visible_to_client(
                 session, include_subagents, opened_by_host_ids, include_assistant_composite,
             )
@@ -2054,6 +2062,7 @@ class Server:
             projected = self._filter_sessions_for_client(
                 sessions, include_subagents, opened_by_host_ids,
                 bool(self._client_assistant_composite_v1.get(websocket, False)),
+                self._scoped_stream_for(websocket),
             )
             # A summary-mode (mobile) client gets the SAME compact rows on the
             # broadcast path as it already gets in its hello snapshot — the
@@ -2316,6 +2325,7 @@ class Server:
         snapshot_sessions = self._filter_sessions_for_client(
             sessions, include_subagents, opened_by_host_ids,
             self._assistant_composite_capable_for_message(msg),
+            self._scoped_stream_for(websocket),
         )
         # `agent-orch list` consumes this snapshot (summary mode), so the role
         # provenance projection must ride the snapshot rows, not only the
@@ -2439,6 +2449,7 @@ class Server:
         active = self._filter_sessions_for_client(
             self.sessions.list_open(), include_subagents, opened_by_host_ids,
             self._assistant_composite_capable_for_message(msg),
+            self._scoped_stream_for(msg.get("_client_websocket")),
         )
         sources = await self.store.all_role_sources() if self.store is not None else {}
         active = [
