@@ -79,6 +79,36 @@ def test_trigger_provenance(kind, text, record, target, mirrors, caplog):
         asyncio.run(go())
 
 
+# Normalizers strip the peer envelope from TELL text and carry its identity in
+# raw.tell_id (claude_jsonl_norm / codex_rollout_norm), so live TELLs never
+# show the envelope to the trigger classifier.
+@pytest.mark.parametrize('tell_id,record,target,mirrors', [
+    ('trusted', 'tell', ROOT, False),
+    ('notice-tell', 'notice', ROOT, False),
+    ('trusted', None, ROOT, True),
+    ('trusted', 'tell', 'other:seat', True),
+    (None, 'tell', ROOT, True),
+])
+def test_normalized_tell_uses_raw_tell_id(tell_id, record, target, mirrors, caplog):
+    async def go():
+        store, composite, _ = await setup()
+        try:
+            await trust(store, record, target)
+            raw = {'sender': 'peer:seat', 'peer_payload': 'hi', 'enqueued_at': ''}
+            if tell_id is not None:
+                raw['tell_id'] = tell_id
+            await append(store, 'TELL', 'hi', 'trigger', **raw)
+            seq = await append(store, 'ASSIST_TEXT', 'final', 'final', phase='final_answer')
+            assert bool(await store.assistant_mirror_event_for_source(seq)) == mirrors
+            if mirrors:
+                assert 'assistant_mirror_unknown_trigger' in caplog.text
+        finally:
+            await composite.stop()
+            store.stop()
+    with caplog.at_level('INFO'):
+        asyncio.run(go())
+
+
 @pytest.mark.parametrize('queued', [False, True])
 def test_operator_interleaving_and_glyph(queued):
     async def go():

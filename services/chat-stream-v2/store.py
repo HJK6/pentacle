@@ -1786,19 +1786,25 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             (composite_stream_id, source_stream_id, source_generation, text),
         ).fetchone() is not None:
             return "operator"
+        # Normalized TELLs carry the stripped envelope identity in raw.tell_id.
+        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+        tell_id = raw.get("tell_id") if event.get("kind") == "TELL" else None
         peer = re.match(r"^\[from [^\]\r\n]+\]\s+\[(?:tell|send):([^\]\s]+)\]", text)
         notice = re.match(r"^\[pentacle-notice:([^\]\s]+)\]", text)
-        marker = peer or notice
-        if marker is None:
+        if isinstance(tell_id, str) and tell_id:
+            peer_id = tell_id
+        else:
+            peer_id = peer.group(1) if peer else None
+        identifier = peer_id or (notice.group(1) if notice else None)
+        if identifier is None:
             return "unknown"
-        identifier = marker.group(1)
         if conn.execute(
             "SELECT 1 FROM v2_outbound_notices WHERE recipient_stream_id=? "
             "AND (notice_id=? OR tell_id=?) LIMIT 1",
             (source_stream_id, identifier, identifier),
         ).fetchone() is not None:
             return "excluded"
-        if peer and conn.execute(
+        if peer_id and conn.execute(
             "SELECT 1 FROM v2_tell_deliveries WHERE tell_id=? "
             "AND (json_extract(reply,'$.delivery.to_stream_id')=? "
             "OR json_extract(reply,'$.reply.to_stream_id')=?)",

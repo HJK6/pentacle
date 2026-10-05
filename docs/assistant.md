@@ -231,7 +231,8 @@ The mirror classifies each primary assistant event by the nearest preceding
 non-sidechain USER or TELL in the same session lifecycle and source transcript.
 A USER matching this binding's resolved direct-primary wire envelope is an
 operator trigger (including queued-command USER rows). Peer tell/send envelopes
-and daemon notice markers suppress mirroring only when their ID resolves to a
+(on a normalized TELL, the envelope ID is `raw.tell_id`) and daemon notice
+markers suppress mirroring only when their ID resolves to a
 durable tell delivery or outbound notice addressed to the source seat. This
 covers notices, child reports, digests, wakes and Dot messages. Envelope-shaped
 text without that provenance and other unknown triggers still mirror and emit
