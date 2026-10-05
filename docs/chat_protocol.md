@@ -131,7 +131,11 @@ the session's close kind, `close_audit`, and `deferred_reap` (or null).
 and prints the reply including `reap_status`. `agent-orch inspect` shows the
 close kind and deferred state; `--json` retains the complete record.
 
+`send` replies with `send.result` (`delivery`, `submission_confirmed`, receipt identifiers). When the target provider holds the prompt in its native queue, the result also carries `provider_queued: true`; see [send receipt surfacing](send_receipt_surfacing_governance.md#provider-native-queue-provider_queued) for caption rules.
+
 ## Event handling
+
+Claude transcript normalization maps a non-empty `thinking` content block to `ASSIST_TEXT` (with `raw.claude_block_type: "thinking"`): Claude Code stores model reasoning signature-only and prints a thinking block that carries text as an ordinary assistant paragraph. An empty block remains a `THINKING` placeholder.
 
 Clients should treat snapshots as authoritative for the keys they contain and apply later events in sequence order. Unknown event types are safely ignored after logging a bounded diagnostic. A reconnect should create a new request correlation scope and reconcile optimistic UI rows from the snapshot before replaying only requests that the implementation marks retry-safe.
 
