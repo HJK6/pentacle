@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "fixture_policy": "Synthetic tooling fixtures only; no copied traffic, contacts, credentials or host identities",
+  "files": [
+    {
+      "path": "test/fixtures/root_runner/base-discovered.json",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "759e5163dae93350f1af165b73f3152f73e6ad861491914c80c03790afa333ee",
+      "bytes": 5543,
+      "purpose": "Runner negative control or pinned repository discovery expectation; authored for TH-H1"
+    },
+    {
+      "path": "test/fixtures/root_runner/build_failed.ts",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "1fa6cbf84b3ff902bdd2ac3a5a1fe4cd81a6ee1a2c158d0a353ce9d8a25c8582",
+      "bytes": 102,
+      "purpose": "Runner negative control or pinned repository discovery expectation; authored for TH-H1"
+    },
+    {
+      "path": "test/fixtures/root_runner/child_left.js",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "ae22fde8eba5c934beb4022e1be42b5b9a4fc13222fa6dfa0dd7ac611ae28024",
+      "bytes": 277,
+      "purpose": "Runner negative control or pinned repository discovery expectation; authored for TH-H1"
+    },
+    {
+      "path": "test/fixtures/root_runner/fail.js",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "dacc8d31ade18b264b23d44442621f2576f966a553c2942302fd25d2bb743d50",
+      "bytes": 174,
+      "purpose": "Runner negative control or pinned repository discovery expectation; authored for TH-H1"
+    },
+    {
+      "path": "test/fixtures/root_runner/hang.js",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "ad260e298aed1593f83769ca2837f91327c9bce55dd32aa24499180e2f0285bc",
+      "bytes": 82,
+      "purpose": "Runner negative control or pinned repository discovery expectation; authored for TH-H1"
+    },
+    {
+      "path": "test/fixtures/root_runner/pass.js",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "32395f88cee0141869d3e5ea80d5d9b6ea3d8d335a1cf5cb4074ed0f845daf63",
+      "bytes": 83,
+      "purpose": "Runner negative control or pinned repository discovery expectation; authored for TH-H1"
+    },
+    {
+      "path": "test/fixtures/root_runner/remove_global_websocket.cjs",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "4f17d6e02d37609b24319a77958cfdce7bc02608ef82735ab0d5780ec99c77fc",
+      "bytes": 115,
+      "purpose": "Runner negative control or pinned repository discovery expectation; authored for TH-H1"
+    },
+    {
+      "path": "test/fixtures/root_runner/term_zero.js",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "7249d212d57c7438433168a1fb39b94e83a79ee0741aa0efb52af18a466631c5",
+      "bytes": 133,
+      "purpose": "Runner negative control or pinned repository discovery expectation; authored for TH-H1"
+    },
+    {
+      "path": "test/fixtures/root_runner/large_output.js",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "b2ef970e16f5a30605a2da32bc52aa5e74212b49ddd0b301f73b9bc9ae151951",
+      "bytes": 145,
+      "purpose": "Synthetic oversized output and final-tail timeout control"
+    }
+  ]
+}
