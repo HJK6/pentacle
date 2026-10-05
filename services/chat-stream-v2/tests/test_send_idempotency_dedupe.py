@@ -291,3 +291,35 @@ def test_coalesced_replay_of_provider_queued_send_keeps_queued(tmp_path: Path) -
             store.stop()
 
     _run(go())
+
+
+def test_chained_coalesced_replays_of_provider_queued_send_stay_queued(tmp_path: Path) -> None:
+    """Two successive rotated retries: the second coalesces onto the first
+    replay's receipt (newest by rowid), whose reason carries the queued marker
+    as a suffix. Both replays must keep provider_queued, with no re-paste.
+    spec_pentacle__chat_queued_message_state_2026_10 (final QA re-read finding)."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open_claude(sessions)
+            await store.append_send_receipt(
+                to_stream_id=STREAM, request_id="queued-first", receipt_id="receipt-queued-first",
+                state="landed", wire_text=BODY, display_text=BODY, attachments=[],
+                delivery="landed", submission_confirmed=True, optimistic_id="optimistic_q_2",
+                reason="provider_queued", created_at=iso_now(),
+                actor_stream_id="operator:op-1", actor_trusted=True,
+            )
+            for request_id in ("queued-replay-1", "queued-replay-2"):
+                result = await comms.send({
+                    "stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
+                    "optimistic_id": "optimistic_q_2", "request_id": request_id})
+                assert result.get("coalesced") is True, request_id
+                assert result.get("provider_queued") is True, request_id
+                rec = await store.get_send_receipt(STREAM, request_id)
+                assert rec is not None and rec["reason"].endswith(";provider_queued"), (request_id, rec)
+            assert len(tmux.pastes) == 0
+        finally:
+            store.stop()
+
+    _run(go())

@@ -1912,7 +1912,9 @@ class Comms:
         winner_attempts = winner.get("attempts")
         winner_attempts = winner_attempts if isinstance(winner_attempts, int) else None
         # A replay of a send the provider holds in its native queue stays queued.
-        winner_queued = str(winner.get("reason") or "") == "provider_queued"
+        # The winner may itself be a replay ("coalesced_replay:<id>;provider_queued").
+        winner_reason = str(winner.get("reason") or "")
+        winner_queued = winner_reason == "provider_queued" or winner_reason.endswith(";provider_queued")
         await self._append_send_receipt(
             plan, request_id=request_id, receipt_id=receipt_id,
             state=winner_state, delivery=winner_delivery,
