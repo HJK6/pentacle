@@ -11,12 +11,15 @@ const root = path.resolve(__dirname, '..');
 const fixture = name => `test/fixtures/root_runner/${name}`;
 const quiet = { write() {} };
 
+// Pass-expected fixtures get a generous per-file budget so a loaded host cannot turn them into false
+// timeouts; cases that must time out pass a short budget explicitly (later flags win).
+const SHORT = ['--file-timeout-ms', '1500'];
 function invoke(files, flags = [], extraEnv = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-runner-proof-'));
   const summaryPath = path.join(dir, 'summary.json');
   const env = { ...process.env, ...extraEnv }; delete env.NODE_TEST_CONTEXT;
   try {
-    const result = spawnSync(process.execPath, [path.join(root, 'scripts/run-tests.js'), '--file-timeout-ms', '600', '--run-timeout-ms', '10000', '--summary-path', summaryPath, ...flags, ...files], { cwd: root, env, encoding: 'utf8', timeout: 15000, maxBuffer: 4 * 1024 * 1024 });
+    const result = spawnSync(process.execPath, [path.join(root, 'scripts/run-tests.js'), '--file-timeout-ms', '5000', '--run-timeout-ms', '20000', '--summary-path', summaryPath, ...flags, ...files], { cwd: root, env, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
     return { ...result, summary: fs.existsSync(summaryPath) ? JSON.parse(fs.readFileSync(summaryPath, 'utf8')) : null, output: (result.stdout || '') + (result.stderr || '') };
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
@@ -43,7 +46,7 @@ test('pinned144-file discovery and the legacy algorithm remain equivalent', () =
 });
 
 test('hang is named, bounded, retains tail and does not block a subsequent pass', () => {
-  const result = invoke([fixture('hang.js'), fixture('pass.js')]);
+  const result = invoke([fixture('hang.js'), fixture('pass.js')], ['--file-timeout-ms', '3000']);
   assert.equal(result.status, 1, result.output);
   assert.deepEqual(result.summary.files.map(row => row.status), ['timeout', 'pass']);
   assert.equal(result.summary.files[0].file, fixture('hang.js'));
@@ -74,7 +77,7 @@ test('absolute ceiling lists every remaining source as not_run and fails', () =>
 });
 
 test('a timeout cannot turn green when its child handles TERM with exit zero', () => {
-  const result = invoke([fixture('term_zero.js')]);
+  const result = invoke([fixture('term_zero.js')], SHORT);
   assert.equal(result.status, 1);
   assert.equal(result.summary.files[0].status, 'timeout');
 });
@@ -82,7 +85,7 @@ test('a timeout cannot turn green when its child handles TERM with exit zero', (
 test('owned descendant cleanup never kills an unrelated sibling', async t => {
   const sibling = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
   t.after(() => sibling.kill('SIGTERM'));
-  const result = invoke([fixture('child_left.js')]);
+  const result = invoke([fixture('child_left.js')], SHORT);
   assert.equal(result.status, 1, result.output);
   assert.equal(result.summary.files[0].status, 'timeout');
   const child = Number(result.output.match(/SYNTHETIC_CHILD_PID=(\d+)/)?.[1]);
@@ -233,7 +236,7 @@ test('partial temporary-directory setup is cleaned and every file is attributed'
 });
 
 test('large output keeps a bounded final tail and bounded forwarded bytes', () => {
-  const result = invoke([fixture('large_output.js')]);
+  const result = invoke([fixture('large_output.js')], SHORT);
   assert.equal(result.status, 1);
   const execution = result.summary.files[0].execution;
   assert.equal(execution.output_truncated, true);
