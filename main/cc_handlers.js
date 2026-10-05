@@ -182,7 +182,7 @@ function createCcHandlers({
     });
     target.handle('chat-stream:send', (_event, host, sessionName, text, requestId, optimisticId, attachments, reply = {}) =>
       command(async () => {
-        const receipt = await chatStreamClient.sendMessage({ host, sessionName, streamId: reply?.stream_id, text, requestId, optimisticId, attachments, replyToMessageId: reply?.reply_to_message_id, replyToQuestionId: reply?.reply_to_question_id });
+        const receipt = await chatStreamClient.sendMessage({ host, sessionName, streamId: reply?.stream_id, text, requestId, optimisticId, attachments, meta: reply?.meta, replyToMessageId: reply?.reply_to_message_id, replyToQuestionId: reply?.reply_to_question_id });
         return { ...receipt, ok: receipt.delivery === 'landed' || receipt.action_committed === true,
           ...(receipt.delivery === 'not_landed' && !receipt.action_committed ? { error: receipt.reason || 'Message was not delivered' } : {}) };
       }));
@@ -211,6 +211,10 @@ function createCcHandlers({
       }
       return chatStreamClient.uploadBlob({ ...payload, data, sizeHintBytes: data.length });
     }));
+    target.handle('chat-stream:transcribe-blob', async (_event, payload) => {
+      try { return { ...(await chatStreamClient.transcribeBlob(payload || {})), ok: true }; }
+      catch (error) { return { ok: false, error_code: error?.error_code || error?.code || normalizeChatStreamError(error) }; }
+    });
     target.handle('chat-stream:fetch-blob', (_event, blobSha) => fetchBlobReply(chatStreamClient, blobSha));
 
     registerAssetIpcHandlers(target, chatStreamClient, normalizeChatStreamError, assetPopouts);

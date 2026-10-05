@@ -116,3 +116,18 @@
 .cosmic .slot-chat-shell.is-status-card-open > .slot-chat-question { display: none !important; }
 .cosmic .slot-chat-shell.is-status-card-open > .slot-chat-jump-latest { display: none !important; }
 @media (max-width: 600px) { .cosmic .slot-chat-scroll { padding-inline: 16px; } .cosmic .slot-chat-dock { padding-inline: 16px; } .cosmic .slot-chat-question { right: 16px; } .cosmic .slot-chat-row.is-user { max-width: 86%; } }
+
+/* Browser voice take: one pending row, then the normal text-send row. */
+.slot-chat-voice-take:not([hidden]) {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin: 6px 0;
+  border: 1px solid var(--cosmic-border-subtle, #4d4268);
+  border-radius: 12px;
+  font-size: 13px;
+}
+.slot-chat-voice-take span { flex: 1; }
+.slot-chat-voice-take button { cursor: pointer; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 8px; padding: 4px 8px; }
+.slot-chat-compose-mic.is-recording { color: #ff6b81; box-shadow: 0 0 0 2px currentColor; }

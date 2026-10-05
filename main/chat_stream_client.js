@@ -630,7 +630,7 @@ try {
     return this.sendCommand({ type: 'spawn_catalog_get' }, 'spawn_catalog_get', { timeoutMs: this._spawnCatalogRpcTimeoutMs });
   }
 
-  sendMessage({ host, sessionName, streamId, text, requestId, optimisticId, attachments, replyToMessageId, replyToQuestionId } = {}) {
+  sendMessage({ host, sessionName, streamId, text, requestId, optimisticId, attachments, meta, replyToMessageId, replyToQuestionId } = {}) {
     // requestId (optional) flows through to sendCommand so a renderer-owned
     // optimistic send_id is used on the wire. Absent → legacy main-generated id.
     const targetId = streamId || `${host}:${sessionName}`;
@@ -646,12 +646,19 @@ try {
     if (Array.isArray(attachments) && attachments.length > 0) payload.attachments = attachments;
     if (typeof replyToMessageId === 'string' && replyToMessageId) payload.reply_to_message_id = replyToMessageId;
     if (typeof replyToQuestionId === 'string' && replyToQuestionId) payload.reply_to_question_id = replyToQuestionId;
+    if (meta?.voice && Number.isFinite(meta.voice.duration_s) && meta.voice.duration_s > 0 && meta.voice.duration_s <= 300) {
+      payload.meta = { voice: { duration_s: meta.voice.duration_s } };
+    }
     this.noteInteraction();
     return this.sendCommand(
       payload,
       'send',
       { requestId },
     );
+  }
+
+  transcribeBlob({ request_id, blob_sha, mime } = {}) {
+    return this.sendCommand({ type: 'transcribe_blob', blob_sha, mime }, 'transcribe_blob', { requestId: request_id, timeoutMs: 120000 });
   }
 
   async uploadBlob({ data, sizeHintBytes, requestId, timeoutMs = 120000 } = {}) {

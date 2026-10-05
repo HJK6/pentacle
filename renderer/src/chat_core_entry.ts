@@ -13,10 +13,10 @@ function target(streamId: string) {
   if (colon < 1) throw new Error('A host-qualified stream is required');
   return { host: streamId.slice(0, colon), session: streamId.slice(colon + 1) };
 }
-store.setSendBridge(async ({ streamId, text, requestId, optimisticId, attachments, replyToMessageId, replyToQuestionId }) => {
+store.setSendBridge(async ({ streamId, text, requestId, optimisticId, attachments, meta, replyToMessageId, replyToQuestionId }) => {
   const { host, session } = target(streamId);
   return browser.cc.chatSendCorrelated(host, session, text, requestId, optimisticId, attachments,
-    { stream_id: streamId, reply_to_message_id: replyToMessageId, reply_to_question_id: replyToQuestionId });
+    { stream_id: streamId, ...(meta ? { meta } : {}), reply_to_message_id: replyToMessageId, reply_to_question_id: replyToQuestionId });
 });
 store.setCancelBridge(async ({ streamId, expectedSessionGeneration }) => {
   const { host, session } = target(streamId);

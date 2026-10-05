@@ -147,7 +147,7 @@ A session snapshot may carry four context-usage fields, projected by the server 
 
 This contract intentionally uses synthetic client, host, and stream examples. It does not describe a private fleet, managed endpoint, deployment channel, or credential location.
 
-## Mobile voice transcription
+## Voice transcription
 
 The authenticated v2 command `transcribe_blob` takes `request_id`, `blob_sha`
 from the existing upload protocol and `mime` (`audio/mp4` or `audio/wav`). It
@@ -176,3 +176,26 @@ Composite sends whitelist only finite numeric `voice.duration_s` with
 `0 < duration_s <= 600`, normalized to milliseconds. Other metadata is dropped;
 the receipt retains its internal `assistant_composite` marker. Ordinary-stream
 metadata behavior is unchanged. Voice metadata does not alter send identity.
+
+### Web composer recording
+
+In web mode the chat composer microphone starts a take in the viewer's browser.
+Tap it again to stop; the pending take displays recording duration, Cancel,
+Transcribing, and a visible failure with Retry. Permission denial can be retried
+after the browser permission is changed. The chat button never toggles the host
+room microphone; Electron keeps its existing room-mic binding.
+
+Capture uses `audio/mp4` when MediaRecorder supports it, otherwise mono PCM WAV
+through Web Audio, reduced to at most 16 kHz to fit the daemon 16 MiB audio cap. A take stops automatically at five minutes and releases its
+media tracks. Microphone capture needs a secure context and `getUserMedia`;
+unavailable browsers show a disabled button with an explanation.
+
+The browser reuses `chat-stream:upload-blob`, then calls the authenticated
+`chat-stream:transcribe-blob` bridge (a passthrough to `transcribe_blob`). A failed
+take retains its audio and stable transcription request identity for Retry.
+An empty transcript shows “Nothing was recognized.” and sends no message.
+Once text is dispatched, the ordinary optimistic send store owns delivery,
+reconnect reconciliation and Retry; audio is released and text retries retain
+`meta.voice.duration_s`. The destination is captured when recording starts,
+so selecting another chat cannot redirect a take. Closing the originating slot
+cancels capture or a pending transcription.

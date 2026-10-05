@@ -1,3 +1,4 @@
+const { bindComposerMic, uploadVoiceBlob } = require('./web_voice');
 /* global Terminal, FitAddon */
 
 // Load xterm.js and fit addon via require (Electron renderer with nodeIntegration off — use dynamic import)
@@ -2790,7 +2791,21 @@ function ensureSlotChatSurface(slot) {
 	  });
 	  document.addEventListener('pointerdown', (event) => { if (!plusWrapEl.contains(event.target)) closePlusMenu(); });
 	  plusWrapEl.addEventListener('keydown', (event) => { if (event.key === 'Escape') { closePlusMenu(); attachEl.focus(); } });
-	  micEl.addEventListener('click', () => document.getElementById('mic-btn-toggle')?.click());
+	  const voicePanel = document.createElement('div');
+      voicePanel.hidden = true;
+      dockEl.insertBefore(voicePanel, composeEl);
+      const voiceController = bindComposerMic({
+        web: window.HOST.isWeb === true, env: window, button: micEl, panel: voicePanel, takeMount: scrollEl,
+        roomToggle: () => document.getElementById('mic-btn-toggle')?.click(),
+        getStreamId: () => {
+          const target = chatControlTargetForSlot(slot);
+          return target && !target.error ? target.streamSession?.stream_id : null;
+        },
+        upload: blob => uploadVoiceBlob(window.cc, blob),
+        transcribe: payload => window.cc.chatTranscribeBlob(payload),
+        send: ({ streamId, text, meta }) => window.PentacleChatStore.sendTurn(streamId, text, [], { meta }),
+        telemetry: (event, tags) => window.PentacleChatCore?.logTelemetry?.(event, tags),
+      });
 	  fileInputEl.addEventListener('change', () => {
 	    addSlotAttachmentFiles(slot, fileInputEl.files).catch((error) => {
 	      setSlotSendError(slot, error instanceof Error ? error.message : String(error || 'Attachment failed.'));
@@ -2834,7 +2849,7 @@ function ensureSlotChatSurface(slot) {
   shell.appendChild(statusMount);
   container.appendChild(shell);
 
-	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, dockEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, micEl, menuEl, inputEl, sendEl, syncComposerLayout: autoSize };
+	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, dockEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, micEl, menuEl, inputEl, sendEl, voiceController, syncComposerLayout: autoSize };
   return state.slotChatRefs[slot];
 }
 
@@ -5279,6 +5294,7 @@ function detachSlot(slot) {
   state.slotViewModes[slot] = 'terminal';
   syncChatHistoryPins();
   state.slotActiveAsset[slot] = null;
+  void state.slotChatRefs[slot]?.voiceController?.cancel();
   state.slotChatRefs[slot] = null;
   state.slotChatLastListHtml[slot] = null;
   state.slotChatPendingListRender[slot] = null;

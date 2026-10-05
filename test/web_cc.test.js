@@ -207,6 +207,7 @@ test('window.HOST mirrors preload’s synchronous host metadata', () => {
   assert.deepEqual(
     buildHost({ hostname: 'amaterasu', platform: 'linux', isClient: false, dashboardHub: { url: 'http://h' } }),
     {
+      isWeb: true,
       hostname: 'amaterasu',
       platform: 'linux',
       isClient: false,

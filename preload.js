@@ -129,6 +129,7 @@ window.cc = {
   // daemon's send.result echoes the same id back on the frame channel. Additive;
   // legacy chatSend (above) is untouched and still the default composer path.
   chatSendCorrelated: (hostId, sessionName, text, requestId, optimisticId, attachments, reply) => ipcRenderer.invoke('chat-stream:send', hostId || 'local', sessionName, text, requestId, optimisticId, attachments, reply),
+  chatTranscribeBlob: (payload) => ipcRenderer.invoke('chat-stream:transcribe-blob', payload || {}),
   chatUploadBlob: (payload) => ipcRenderer.invoke('chat-stream:upload-blob', payload || {}),
   chatFetchBlob: (blobSha) => ipcRenderer.invoke('chat-stream:fetch-blob', blobSha),
   // B3 (chat_send_turn_lifecycle_batch2): interrupt/cancel the latest in-flight

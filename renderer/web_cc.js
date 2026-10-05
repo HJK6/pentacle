@@ -360,6 +360,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
     chatSpawnCatalog: () => call('chat-stream:spawn-catalog'),
     chatSend: (hostId, sessionName, text) => call('chat-stream:send', hostId || 'local', sessionName, text),
     chatSendCorrelated: (hostId, sessionName, text, requestId, optimisticId, attachments, reply) => call('chat-stream:send', hostId || 'local', sessionName, text, requestId, optimisticId, attachments, reply),
+    chatTranscribeBlob: (payload) => call('chat-stream:transcribe-blob', payload || {}),
     chatUploadBlob: (payload) => call('chat-stream:upload-blob', payload || {}),
     chatFetchBlob: (blobSha) => call('chat-stream:fetch-blob', blobSha),
     chatInterrupt: (hostId, sessionName, expectedSessionGeneration) => call('chat-stream:interrupt', hostId || 'local', sessionName, expectedSessionGeneration),
@@ -456,6 +457,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
 
 function buildHost(config) {
   return {
+    isWeb: true,
     hostname: config.hostname || '',
     platform: config.platform || 'linux',
     isClient: config.isClient !== undefined ? !!config.isClient : !!config.remote,

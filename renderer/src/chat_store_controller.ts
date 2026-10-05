@@ -132,12 +132,15 @@ export type ChatStoreDiagnosticsHook = (info: {
 // renderer OWNS request_id; main passes it through (chat-stream:send →
 // chatStreamClient.sendMessage({ ..., requestId })). Returns the IPC result so
 // the controller can mark dispatched/failed. Injectable for tests.
+type VoiceMeta = { voice: { duration_s: number } };
+
 export type ChatSendBridge = (args: {
   streamId: string;
   text: string;
   requestId: string;
   optimisticId: string;
   attachments?: ChatAttachment[];
+  meta?: VoiceMeta;
   replyToMessageId?: string;
   replyToQuestionId?: string;
 }) => Promise<{ ok?: boolean; error?: string; provider_queued?: boolean } | undefined>;
@@ -198,6 +201,7 @@ export class ChatStoreController {
   // the current generation so onReconnect re-arms only the right ones.
   private socketGeneration = 0;
   private optimisticCounter = 0;
+  private voiceMetas = new Map<string, VoiceMeta>();
   private sendBridge: ChatSendBridge | null = null;
   private cancelBridge: ChatCancelBridge | null = null;
   private interruptStates: Record<string, ChatInterruptState> = {};
@@ -364,6 +368,10 @@ export class ChatStoreController {
   private setState(next: PentacleStreamState): void {
     if (next === this.state) return;
     this.state = next;
+    for (const id of this.voiceMetas.keys()) {
+      const send = next.optimisticSends?.[id];
+      if (!send || send.status === 'acked' || send.status === 'cancelled') this.voiceMetas.delete(id);
+    }
     this.notifyListeners();
   }
 
@@ -559,7 +567,7 @@ export class ChatStoreController {
    *      the visible running turn.
    * Returns the optimistic_id ('' only on empty/invalid input).
    */
-  sendTurn(streamId: string, text: string, attachments: ChatAttachment[] = [], reply: { reply_to_message_id?: string; reply_to_question_id?: string } = {}): string {
+  sendTurn(streamId: string, text: string, attachments: ChatAttachment[] = [], reply: { reply_to_message_id?: string; reply_to_question_id?: string; meta?: VoiceMeta } = {}): string {
     const literal = String(text || '');
     const composite = this.state.sessions.find(item => item.stream_id === streamId)?.session_kind === 'assistant_composite';
     const sendText = composite ? literal : literal.trim();
@@ -595,6 +603,7 @@ export class ChatStoreController {
       request_id: requestId,
     });
 
+    if (reply.meta?.voice) this.voiceMetas.set(optimisticId, reply.meta);
     this.dispatchOptimistic(streamId, optimisticId, requestId, sendText, generation, sendAttachments);
 
     return optimisticId;
@@ -649,6 +658,7 @@ export class ChatStoreController {
         text,
         requestId,
         optimisticId,
+        meta: this.voiceMetas.get(optimisticId),
         replyToMessageId: this.state.optimisticSends?.[optimisticId]?.reply_to_message_id,
         replyToQuestionId: this.state.optimisticSends?.[optimisticId]?.reply_to_question_id,
         ...(attachments.length ? { attachments } : {}),

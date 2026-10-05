@@ -7,6 +7,7 @@ const { questionFreeText } = require('./question_free_text_scenario');
 const { runGridSplit } = require('./grid_split_scenario');
 const { publicChatRendererContracts } = require('./public_chat_renderer_contracts');
 const { micPanelAnswerWindow } = require('./mic_panel_scenario');
+const { webVoice } = require('./web_voice_scenario');
 const { chatFileDelivery } = require('./chat_file_delivery_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
@@ -486,6 +487,7 @@ const SCENARIOS = [
   ['slot-attach-type-resize-kill', slotAttachTypeResizeKill],
   ['chat-transcript-paint', chatTranscriptPaint],
   ['chat-file-delivery', chatFileDelivery],
+  ['web-chat-voice', webVoice],
   ['public-chat-renderer-contracts', publicChatRendererContracts],
   // Self-contained: appends and removes its own probe node; renders the shipped
   // mic-state view model against status fixtures (answer window + silent toggle).

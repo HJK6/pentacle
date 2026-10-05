@@ -159,3 +159,25 @@ browser path; macOS uses the standard Google Chrome application path by default.
 Evidence is a small object containing the test name, candidate identifier, timestamps, and pass/fail assertions. Do not paste transcripts, environment dumps, absolute home paths, or tokens into evidence. Synthetic prompts and responses should be short and recognizable, for example `fixture-question` and `fixture-answer`.
 
 Retired provider-specific launchers and live operational evidence are outside this public harness. If a scenario needs a private service, keep it in a local-only test package rather than weakening this contract.
+
+### Web voice composer
+
+`node test/e2e/web_gate.js` includes `web-chat-voice`. It uses a synthetic
+browser media stream and stubbed ASR/provider replies, while exercising the
+shipped composer, browser recorder, real blob upload, and optimistic send store.
+It checks recording duration/Cancel, visible `backend_unavailable`, Retry with
+the same transcription identity, one text row with voice metadata, media-track
+release, and no host room-mic click. It never records the host microphone or
+sends to a live provider. Live backend availability and assistant-composite
+receipt/USER-event persistence are separate release checks.
+
+Focused coverage:
+
+```sh
+node scripts/run-tests.js test/web_voice.test.js test/web_voice_integration.test.js test/web_voice_store.test.ts test/cc_handlers_parity.test.js test/web_cc.test.js
+```
+
+These cover
+permission denial, unsupported browsers, MP4/WAV codecs, empty transcription,
+cancellation, stream binding, bridge error propagation and text Retry metadata.
+Use the daemon's provisioned Python environment for the web gate prerequisites.
