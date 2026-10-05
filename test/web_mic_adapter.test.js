@@ -42,16 +42,19 @@ test('offline backend preserves renderer recovery path without leaking diagnosti
 const {createTransport}=require('../renderer/web_cc');
 const {WebSocketServer}=require('ws');
 test('every browser mic call shape survives real JSON websocket transport',async()=>{
- const seen=[];const backend=http.createServer((req,res)=>{let body='';req.on('data',c=>body+=c);req.on('end',()=>{seen.push([req.method,req.url,body]);res.setHeader('Content-Type','application/json');res.end('{"ok":true,"mode":"off"}');});});
+ const previousWebSocket=global.WebSocket;
+ global.WebSocket=previousWebSocket||require('ws');
+ let backend,wire,ws,bridge,transport;
+ try {
+ const seen=[];backend=http.createServer((req,res)=>{let body='';req.on('data',c=>body+=c);req.on('end',()=>{seen.push([req.method,req.url,body]);res.setHeader('Content-Type','application/json');res.end('{"ok":true,"mode":"off"}');});});
  await new Promise(r=>backend.listen(0,'127.0.0.1',r));
  const request=createMicRequest({features:{mic:true},micServerUrl:`http://127.0.0.1:${backend.address().port}`});
- const bridge=createWsBridge({table:{'mic:request':{mode:'invoke',handler:(_e,...args)=>request(...args)},'mic:start-server':{mode:'invoke',handler:()=>true}}});
- const wire=http.createServer();const ws=new WebSocketServer({server:wire});
+ bridge=createWsBridge({table:{'mic:request':{mode:'invoke',handler:(_e,...args)=>request(...args)},'mic:start-server':{mode:'invoke',handler:()=>true}}});
+ wire=http.createServer();ws=new WebSocketServer({server:wire});
  ws.on('connection',socket=>{bridge.addSocket(socket,{micStartAllowed:true});socket.on('message',raw=>bridge.handleMessage(socket,raw));socket.on('close',()=>bridge.removeSocket(socket));});
  await new Promise(r=>wire.listen(0,'127.0.0.1',r));
- const transport=createTransport({url:`ws://127.0.0.1:${wire.address().port}`});
+ transport=createTransport({url:`ws://127.0.0.1:${wire.address().port}`});
  const cc=buildCc(transport,{config:{features:{mic:true}},clipboard:{}});
- try {
   assert.equal(await cc.startMicServer(),true);
   for(const [method,path,body] of [['GET','/status'],['GET','/transcript/since/0'],['GET','/clipboard/since/0'],['GET','/calibration'],['GET','/logs'],['GET','/transcripts'],['GET','/transcript'],['GET','/wake/last-claim'],['POST','/mode/on'],['POST','/mode/clipboard',{}],['POST','/mode/meeting',{}],['POST','/mode/off',{}],['POST','/copy/start'],['POST','/copy/stop'],['POST','/wake/claim',{actions_version:2}],['POST','/conversation/timing',{conversation_id:'fixture',stage:'delivered_at'}],['POST','/actions/outcome',{id:'fixture',outcome:'delivered'}],['POST','/calibrate/start',{group:'wake'}],['POST','/calibrate/stop',{}],['POST','/audio/keep',{seconds:1}]] ) {
    assert.equal((await cc.micRequest(method,path,body)).ok,true,`${method} ${path}`);
@@ -62,5 +65,12 @@ test('every browser mic call shape survives real JSON websocket transport',async
   assert.equal(seen.length,count,'invalid bodies must not reach configured backend');
   assert.ok(seen.some(([m,p,b])=>m==='GET'&&p==='/status'&&b===''));
   assert.ok(seen.some(([m,p,b])=>m==='POST'&&p==='/copy/start'&&b===''));
- }finally {transport.close();bridge.closeAll();await new Promise(r=>ws.close(r));await new Promise(r=>wire.close(r));await new Promise(r=>backend.close(r));}
+ }finally {
+  try {
+   transport?.close();bridge?.closeAll();
+   if(ws)await new Promise(r=>ws.close(r));
+   if(wire?.listening)await new Promise(r=>wire.close(r));
+   if(backend?.listening)await new Promise(r=>backend.close(r));
+  }finally {global.WebSocket=previousWebSocket;}
+ }
 });
