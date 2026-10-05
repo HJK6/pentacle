@@ -807,24 +807,44 @@ export function markOptimisticDispatchedByRequestId(
   dispatchedAt: number,
   socketGeneration?: number,
 ): PentacleStreamState {
-  return updateOptimisticSendByRequestId(state, requestId, (send) => ({
-    ...send,
-    status: 'dispatched',
-    dispatched_at: dispatchedAt,
-    window_started_at: send.window_started_at ?? dispatchedAt,
-    socket_generation: socketGeneration ?? send.socket_generation,
-  }));
+  return updateOptimisticSendByRequestId(state, requestId, (send) => {
+    // The send bridge promise resolves after the daemon's send.result frame, so
+    // dispatch must only advance a still-unacknowledged send: never regress
+    // acked/indeterminate/echoed/reconciled or a terminal failed/cancelled row.
+    if (send.status !== 'queued' && send.status !== 'dispatched') return null;
+    return {
+      ...send,
+      status: 'dispatched',
+      dispatched_at: dispatchedAt,
+      window_started_at: send.window_started_at ?? dispatchedAt,
+      socket_generation: socketGeneration ?? send.socket_generation,
+    };
+  });
+}
+
+// The provider holds this prompt in its native queue. Never cleared by a later
+// plain ack/dispatch: only the correlated USER echo (which drops the optimistic
+// row) ends it.
+export function markOptimisticProviderQueuedByRequestId(
+  state: PentacleStreamState,
+  requestId: string,
+): PentacleStreamState {
+  return updateOptimisticSendByRequestId(state, requestId, (send) => (
+    send.provider_queued === true ? null : { ...send, provider_queued: true }
+  ));
 }
 
 export function markOptimisticAckedByRequestId(
   state: PentacleStreamState,
   requestId: string,
   ackedAt: number,
+  opts: { providerQueued?: boolean } = {},
 ): PentacleStreamState {
   return updateOptimisticSendByRequestId(state, requestId, (send) => ({
     ...send,
     status: 'acked',
     acked_at: ackedAt,
+    ...(opts.providerQueued === true ? { provider_queued: true } : {}),
   }));
 }
 

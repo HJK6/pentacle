@@ -544,6 +544,12 @@ export interface OptimisticSendState {
   // stream returns to idle. Absent/false for an ordinary in-flight send.
   turn_queued?: boolean;
   queued_at?: number;
+  // The daemon confirmed landing (send.result delivery 'landed') while the
+  // provider holds the prompt in its own native queue (provider_queued: true).
+  // Distinct from turn_queued (client-side hold): it never gates a flush and
+  // does not change PentacleSendState; it only drives the 'queued' receipt
+  // caption until the correlated USER echo arrives.
+  provider_queued?: boolean;
   // Image attachments the user sent with this message (spec ## Attachment
   // model). Populated on the optimistic send so the queued/sending bubble can
   // render thumbnails before the daemon echoes the message back. FIFO order.

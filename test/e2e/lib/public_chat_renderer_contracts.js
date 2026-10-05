@@ -121,6 +121,66 @@ async function publicChatRendererContracts(ctx) {
     report.ok('returned-to-prompt restores draft without a duplicate transcript bubble',
       returned.recovery?.text === returned.draft && !returned.text.includes('Synthetic returned draft')
         && returned.forbidden.length === 0, returned);
+
+    // Provider-queued send (spec_pentacle__chat_queued_message_state_2026_10 C6):
+    // the daemon's send.result for a prompt held in the provider's native queue
+    // arrives BEFORE the send bridge promise resolves; the row must read Queued
+    // (not "sending…", and not regressed by the late bridge resolution) and flip
+    // to Sent when the correlated USER echo lands. Renderer frames only: this
+    // makes no provider or daemon queue-detection claim.
+    // Probe of THIS message's row (earlier rows keep their own labels).
+    const probe = `(() => {
+      const rows = [...document.querySelectorAll('#cell-0 .slot-chat-row.is-user')]
+        .filter(row => (row.textContent || '').includes('Synthetic provider queued'));
+      const node = rows.length ? rows[rows.length - 1].querySelector('.slot-chat-send-status') : null;
+      return { text: node ? node.textContent : null, cls: node ? node.className : '',
+        sending: !!(node && node.classList.contains('is-sending')),
+        queued: !!(node && node.classList.contains('is-queued')) };
+    })()`;
+    await session.eval(`(() => {
+      window.__publicRenderer.resolveQueuedBridge = null;
+      window.PentacleChatStore.setSendBridge(args => new Promise(resolve => {
+        window.__publicRenderer.sends.push(args);
+        window.__publicRenderer.resolveQueuedBridge = () => resolve({ ok: true, provider_queued: true });
+      }));
+      return true;
+    })()`);
+    await send('Synthetic provider queued');
+    await waitForValue(session, cdp, 'window.__publicRenderer.sends.length', n => n === 3,
+      { timeoutMs, label: 'provider-queued composer send captured' });
+    await waitForValue(session, cdp, probe, value => value?.text === 'sending…',
+      { timeoutMs, label: 'unacknowledged send reads sending…' });
+    await session.eval(`(() => {
+      const request = window.__publicRenderer.sends[2];
+      window.PentacleChatStore.applyFrame({ type: 'send.result', request_id: request.requestId, delivery: 'landed',
+        submission_confirmed: true, provider_queued: true, reason: 'provider_queued' });
+      window.__publicRenderer.resolveQueuedBridge();
+      return true;
+    })()`);
+    const queued = await waitForValue(session, cdp, probe, value => value?.text === 'Queued',
+      { timeoutMs, label: 'provider-queued send reads Queued' });
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const stillQueued = await session.eval(probe);
+    report.ok('provider-queued send.result shows Queued and survives the late send-bridge resolution',
+      queued.queued === true && queued.sending === false && stillQueued.text === 'Queued' && stillQueued.queued === true,
+      { queued, stillQueued });
+    await session.eval(`(() => {
+      const request = window.__publicRenderer.sends[2];
+      const store = window.PentacleChatStore;
+      const row = store.getState().sessions.find(row => row.stream_id === ${stream});
+      store.applyFrame({ type: 'chat.event', event: {
+        daemon_seq: 5, stream_id: ${stream}, host: row.host, provider: row.provider,
+        session_name: row.session_name, session_id: 'synthetic-renderer-session',
+        timestamp: new Date().toISOString(), kind: 'USER', text: request.text,
+        optimistic_id: request.optimisticId,
+        raw: { receipt_state: 'landed', receipt_delivery: 'landed' },
+      } });
+      return true;
+    })()`);
+    const sent = await waitForValue(session, cdp, probe, value => value?.text === 'Sent',
+      { timeoutMs, label: 'correlated USER echo flips Queued to Sent' });
+    report.ok('correlated USER echo flips the provider-queued row to Sent with no is-queued left',
+      sent.queued === false, sent);
   } finally {
     await reload();
   }

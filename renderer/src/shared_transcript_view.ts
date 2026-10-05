@@ -382,7 +382,7 @@ const ACTIONABLE_ASSISTANT_STATES = new Set(['waiting_for_operator', 'waiting_fo
 
 function renderUserSendStatus(sendState: PentacleSendState | 'sent', optimisticId?: string): string {
   const label = sendState === 'sent' ? 'Sent' : sendState === 'queued'
-    ? 'queued'
+    ? 'Queued'
     : sendState === 'sending'
       ? 'sending…'
       : sendState === 'cancelled'
@@ -494,7 +494,7 @@ function renderTranscriptItemBodyHtml(
     const sendState = item.sendState;
     const rowClass = sendState ? ` is-${sendState}` : '';
     const receipt = sendState === 'cancelled' || sendState === 'failed' || sendState === 'indeterminate'
-      ? sendState : item.receiptCaption || (item.queuedWhileWorking && (sendState === 'queued' || sendState === 'sending') ? 'queued' : sendState);
+      ? sendState : item.receiptCaption || (item.providerQueued ? 'queued' : item.queuedWhileWorking && (sendState === 'queued' || sendState === 'sending') ? 'queued' : sendState);
     const status = receipt ? renderUserSendStatus(receipt, item.optimisticId) : '';
     // Progress and latency are shown by the slot working indicator; only a
     // pending operator action or a delivery failure is labelled per message.
@@ -790,7 +790,8 @@ function gateKeyForStream(store: SubscribableStore | null, streamId: string | nu
     // Include turn_queued: activateQueuedSend flips it true→false while leaving
     // status 'queued' (no content-version bump), so without it a queued→sending
     // transition would not repaint until the later dispatched status change.
-    .map((id) => `${id}:${sends[id]?.status ?? ''}:${sends[id]?.turn_queued ? 'q' : ''}`)
+    // provider_queued can land via the send bridge with no status change.
+    .map((id) => `${id}:${sends[id]?.status ?? ''}:${sends[id]?.turn_queued ? 'q' : ''}${sends[id]?.provider_queued ? 'p' : ''}`)
     .join(',');
   return `${version}|${sig}`;
 }

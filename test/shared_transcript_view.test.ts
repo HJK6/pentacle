@@ -128,7 +128,74 @@ test('B1: failed and cancelled rows render their affordances', () => {
 test('B4: a queued row renders a "queued" affordance + is-queued class', () => {
   const html = renderTranscriptItemHtml(userItem({ sendState: 'queued' }), CHROME);
   assert.ok(/is-user is-queued/.test(html), 'row carries is-queued');
-  assert.ok(/slot-chat-send-status is-queued/.test(html) && />queued</.test(html), 'queued label');
+  assert.ok(/slot-chat-send-status is-queued/.test(html) && />Queued</.test(html), 'queued label');
+});
+
+test('C4: a provider-queued row renders Queued (is-queued), not sending…, via receiptCaption or providerQueued', () => {
+  const byCaption = renderTranscriptItemHtml(userItem({ sendState: undefined, receiptCaption: 'queued', providerQueued: true }), CHROME);
+  assert.ok(/slot-chat-send-status is-queued/.test(byCaption) && />Queued</.test(byCaption), byCaption);
+  assert.ok(!/sending…/.test(byCaption));
+  assert.ok(!/is-user is-queued/.test(byCaption), 'row class stays tied to the client-side hold sendState');
+  // Non-latest rows carry no receiptCaption but still flag providerQueued.
+  const byFlag = renderTranscriptItemHtml(userItem({ sendState: undefined, providerQueued: true }), CHROME);
+  assert.ok(/slot-chat-send-status is-queued/.test(byFlag) && />Queued</.test(byFlag), byFlag);
+  // Once the echo correlates the caption is Sent and the flag is gone.
+  const sent = renderTranscriptItemHtml(userItem({ sendState: undefined, receiptCaption: 'sent' }), CHROME);
+  assert.ok(/is-sent/.test(sent) && !/is-queued/.test(sent), sent);
+});
+
+test('C4/C12: send.result provider_queued shows Queued through the controller, even when the send bridge resolves afterwards; echo then flips to Sent', async () => {
+  const controller = new ChatStoreController();
+  let resolveBridge: (v: { ok: boolean; provider_queued?: boolean }) => void = () => {};
+  controller.setSendBridge(() => new Promise((r) => { resolveBridge = r; }));
+  controller.applyFrame({ type: 'snapshot', events: [], sessions: [makeSession()], drafts: {} });
+  const a = newDom();
+  mountSlotTranscript(a.container, STREAM, { store: controller as never, chrome: CHROME });
+  const optimisticId = controller.sendTurn(STREAM, 'mid-turn message');
+  await new Promise((r) => setTimeout(r, 0));
+  const requestId = controller.getState().optimisticSends?.[optimisticId]?.request_id as string;
+  assert.ok(a.container.querySelector('.slot-chat-send-status.is-sending'), 'sending before the daemon replies');
+
+  controller.applyFrame({ type: 'send.result', request_id: requestId, delivery: 'landed', submission_confirmed: true, provider_queued: true, reason: 'provider_queued' });
+  resolveBridge({ ok: true, provider_queued: true });
+  await new Promise((r) => setTimeout(r, 0));
+  const queued = a.container.querySelector('.slot-chat-send-status.is-queued');
+  assert.ok(queued, a.container.innerHTML);
+  assert.equal(queued!.textContent, 'Queued');
+  assert.equal(a.container.querySelector('.slot-chat-send-status.is-sending'), null);
+  assert.equal(controller.getState().optimisticSends?.[optimisticId]?.status, 'acked');
+
+  controller.applyFrame({ type: 'chat.event', event: makeEvent({ daemon_seq: 9, kind: 'USER', text: 'mid-turn message', stream_id: STREAM, optimistic_id: optimisticId, raw: { receipt_state: 'landed', receipt_delivery: 'landed' } }) });
+  assert.equal(a.container.querySelector('.slot-chat-send-status.is-queued'), null, 'no is-queued after the echo');
+  assert.equal(a.container.querySelector('.slot-chat-send-status')?.textContent, 'Sent');
+});
+
+test('C4: provider_queued arriving only on the send bridge result also shows Queued', async () => {
+  const controller = new ChatStoreController();
+  controller.setSendBridge(async () => ({ ok: true, provider_queued: true }));
+  controller.applyFrame({ type: 'snapshot', events: [], sessions: [makeSession()], drafts: {} });
+  const a = newDom();
+  mountSlotTranscript(a.container, STREAM, { store: controller as never, chrome: CHROME });
+  const optimisticId = controller.sendTurn(STREAM, 'bridge-only');
+  const requestId = controller.getState().optimisticSends?.[optimisticId]?.request_id as string;
+  await new Promise((r) => setTimeout(r, 0));
+  controller.applyFrame({ type: 'send.result', request_id: requestId, delivery: 'landed', submission_confirmed: true });
+  assert.equal(controller.getState().optimisticSends?.[optimisticId]?.provider_queued, true, 'bridge result provider_queued retained across the later plain ack');
+  assert.equal(a.container.querySelector('.slot-chat-send-status.is-queued')?.textContent, 'Queued');
+});
+
+test('C12: an idle landed send.result (no provider_queued) shows Sent before the echo', async () => {
+  const controller = new ChatStoreController();
+  controller.setSendBridge(async () => ({ ok: true }));
+  controller.applyFrame({ type: 'snapshot', events: [], sessions: [makeSession()], drafts: {} });
+  const a = newDom();
+  mountSlotTranscript(a.container, STREAM, { store: controller as never, chrome: CHROME });
+  const optimisticId = controller.sendTurn(STREAM, 'idle message');
+  const requestId = controller.getState().optimisticSends?.[optimisticId]?.request_id as string;
+  controller.applyFrame({ type: 'send.result', request_id: requestId, delivery: 'landed', submission_confirmed: true });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(a.container.querySelector('.slot-chat-send-status')?.textContent, 'Sent');
+  assert.equal(a.container.querySelector('.slot-chat-send-status.is-queued'), null);
 });
 
 test('native queue: mountSlotTranscript shows mid-turn sends as sending immediately', async () => {

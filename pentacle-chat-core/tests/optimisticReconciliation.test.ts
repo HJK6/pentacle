@@ -1353,3 +1353,89 @@ test('render-stability telemetry exports the transcript-mounted harness event an
     CHAT_RENDER_STABILITY_REF,
   );
 });
+
+// --- spec_pentacle__chat_queued_message_state_2026_10 (C3, C4, C5, C12) ---
+
+function firstRow(state: PentacleStreamState) {
+  return selectSessionDetail(state, STREAM_ID, { visibleCount: 'all' })?.transcriptItems[0];
+}
+
+test('C3: dispatched after acked keeps acked and provider_queued', () => {
+  const dispatched = markOptimisticDispatchedByRequestId(createOptimistic(), REQUEST_ID, CREATED_AT + 10);
+  const acked = markOptimisticAckedByRequestId(dispatched, REQUEST_ID, CREATED_AT + 20, { providerQueued: true });
+  const again = markOptimisticDispatchedByRequestId(acked, REQUEST_ID, CREATED_AT + 30);
+  const send = again.optimisticSends?.[OPTIMISTIC_ID];
+  assert.equal(send?.status, 'acked');
+  assert.equal(send?.provider_queued, true);
+  assert.equal(send?.acked_at, CREATED_AT + 20);
+});
+
+test('C3: dispatched never downgrades indeterminate/failed/cancelled but still advances queued', () => {
+  const base = createOptimistic();
+  assert.equal(markOptimisticDispatchedByRequestId(base, REQUEST_ID, CREATED_AT + 10).optimisticSends?.[OPTIMISTIC_ID]?.status, 'dispatched');
+  const indeterminate = markOptimisticIndeterminateByRequestId(base, REQUEST_ID, CREATED_AT + 15);
+  assert.equal(markOptimisticDispatchedByRequestId(indeterminate, REQUEST_ID, CREATED_AT + 20).optimisticSends?.[OPTIMISTIC_ID]?.status, 'indeterminate');
+  const failed = markOptimisticFailedByRequestId(base, REQUEST_ID, 'send_error', CREATED_AT + 15);
+  assert.equal(markOptimisticDispatchedByRequestId(failed, REQUEST_ID, CREATED_AT + 20).optimisticSends?.[OPTIMISTIC_ID]?.status, 'failed');
+  const cancelled = markOptimisticCancelledByRequestId(base, REQUEST_ID, CREATED_AT + 15);
+  assert.equal(markOptimisticDispatchedByRequestId(cancelled, REQUEST_ID, CREATED_AT + 20).optimisticSends?.[OPTIMISTIC_ID]?.status, 'cancelled');
+});
+
+test('C3: ack without the flag does not set provider_queued', () => {
+  const acked = markOptimisticAckedByRequestId(createOptimistic(), REQUEST_ID, CREATED_AT + 20);
+  assert.equal(acked.optimisticSends?.[OPTIMISTIC_ID]?.provider_queued, undefined);
+});
+
+test('C4: provider_queued send derives queued caption + providerQueued until its correlated echo, then Sent', () => {
+  const dispatched = markOptimisticDispatchedByRequestId(createOptimistic(), REQUEST_ID, CREATED_AT + 10);
+  const acked = markOptimisticAckedByRequestId(dispatched, REQUEST_ID, CREATED_AT + 20, { providerQueued: true });
+  // The send bridge resolves after send.result: must not regress the row.
+  const afterBridge = markOptimisticDispatchedByRequestId(acked, REQUEST_ID, CREATED_AT + 30);
+  const row = firstRow(afterBridge);
+  assert.equal(row?.receiptCaption, 'queued');
+  assert.equal(row?.providerQueued, true);
+  assert.notEqual(row?.sendState, 'queued', 'PentacleSendState must not look like the client-side hold');
+
+  const echoed = applyPentacleEvent(afterBridge, serverUserEvent({
+    optimistic_id: OPTIMISTIC_ID,
+    raw: { receipt_state: 'landed', receipt_delivery: 'landed' },
+  }));
+  const echoedRow = firstRow(echoed);
+  assert.equal(echoedRow?.receiptCaption, 'sent');
+  assert.notEqual(echoedRow?.providerQueued, true);
+});
+
+test('C4: provider_queued is also set from the sendBridge result path (same helper, flag via opts)', () => {
+  const dispatched = markOptimisticDispatchedByRequestId(createOptimistic(), REQUEST_ID, CREATED_AT + 10);
+  const acked = markOptimisticAckedByRequestId(dispatched, REQUEST_ID, CREATED_AT + 20, { providerQueued: false });
+  assert.equal(acked.optimisticSends?.[OPTIMISTIC_ID]?.provider_queued, undefined);
+});
+
+test('C4: a failed or cancelled provider_queued row is never captioned queued', () => {
+  const acked = markOptimisticAckedByRequestId(createOptimistic(), REQUEST_ID, CREATED_AT + 20, { providerQueued: true });
+  const failed = markOptimisticFailedByRequestId(acked, REQUEST_ID, 'send_error', CREATED_AT + 30);
+  const failedRow = firstRow(failed);
+  assert.notEqual(failedRow?.receiptCaption, 'queued');
+  assert.notEqual(failedRow?.providerQueued, true);
+  const cancelled = markOptimisticCancelledByRequestId(acked, REQUEST_ID, CREATED_AT + 30);
+  const cancelledRow = firstRow(cancelled);
+  assert.notEqual(cancelledRow?.receiptCaption, 'queued');
+  assert.notEqual(cancelledRow?.providerQueued, true);
+});
+
+test('C12: an acked send without provider_queued captions Sent before its echo', () => {
+  const dispatched = markOptimisticDispatchedByRequestId(createOptimistic(), REQUEST_ID, CREATED_AT + 10);
+  const acked = markOptimisticAckedByRequestId(dispatched, REQUEST_ID, CREATED_AT + 20);
+  const afterBridge = markOptimisticDispatchedByRequestId(acked, REQUEST_ID, CREATED_AT + 30);
+  const row = firstRow(afterBridge);
+  assert.equal(row?.receiptCaption, 'sent');
+  assert.equal(row?.providerQueued, undefined);
+});
+
+test('C12: dispatched/indeterminate/unacked sends still caption sending', () => {
+  assert.equal(firstRow(createOptimistic())?.receiptCaption, 'sending');
+  const dispatched = markOptimisticDispatchedByRequestId(createOptimistic(), REQUEST_ID, CREATED_AT + 10);
+  assert.equal(firstRow(dispatched)?.receiptCaption, 'sending');
+  const indeterminate = markOptimisticIndeterminateByRequestId(dispatched, REQUEST_ID, CREATED_AT + 20);
+  assert.equal(firstRow(indeterminate)?.receiptCaption, 'sending');
+});

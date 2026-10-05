@@ -11,6 +11,7 @@ import {
   applySnapshotWithOptimisticReconciliation,
   sendOptimisticMessage,
   markOptimisticDispatchedByRequestId,
+  markOptimisticProviderQueuedByRequestId,
   markOptimisticAckedByRequestId,
   markOptimisticFailedByRequestId,
   markOptimisticIndeterminateByRequestId,
@@ -139,7 +140,7 @@ export type ChatSendBridge = (args: {
   attachments?: ChatAttachment[];
   replyToMessageId?: string;
   replyToQuestionId?: string;
-}) => Promise<{ ok?: boolean; error?: string } | undefined>;
+}) => Promise<{ ok?: boolean; error?: string; provider_queued?: boolean } | undefined>;
 
 // B3 (chat_send_turn_lifecycle_batch2): how the controller asks main to
 // interrupt the RUNNING turn for a stream (daemon injects Escape into the agent
@@ -657,7 +658,9 @@ export class ChatStoreController {
           this.resolveSendDispatchError(streamId, optimisticId, requestId, String(result.error || 'send_error'));
           return;
         }
-        this.setState(markOptimisticDispatchedByRequestId(this.state, requestId, Date.now(), generation));
+        let next = markOptimisticDispatchedByRequestId(this.state, requestId, Date.now(), generation);
+        if (result?.provider_queued === true) next = markOptimisticProviderQueuedByRequestId(next, requestId);
+        this.setState(next);
       })
       .catch((error: unknown) => {
         this.resolveSendDispatchError(streamId, optimisticId, requestId, error instanceof Error ? error.message : String(error || 'send_error'));
@@ -982,7 +985,7 @@ export class ChatStoreController {
       // the optimistic was already reconciled/pruned by the server USER echo.
       const requestId = frame.request_id as string;
       if (frame.delivery === 'landed') {
-        this.setState(markOptimisticAckedByRequestId(this.state, requestId, Date.now()));
+        this.setState(markOptimisticAckedByRequestId(this.state, requestId, Date.now(), { providerQueued: frame.provider_queued === true }));
       } else if (frame.action_committed === true || frame.confirmation_pending === true) {
         this.setState(markOptimisticIndeterminateByRequestId(this.state, requestId, Date.now()));
       } else {

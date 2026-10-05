@@ -37,7 +37,7 @@ import {
 
 export type PentacleSessionStatus = 'unresponsive' | 'working' | 'sending' | 'live' | 'idle' | 'offline';
 export type PentacleTranscriptTone = 'user' | 'agent' | 'assistant' | 'tool' | 'thinking' | 'system';
-export type PentacleReceiptCaption = 'sending' | 'sent' | 'failed';
+export type PentacleReceiptCaption = 'sending' | 'queued' | 'sent' | 'failed';
 
 export type PentacleMachineCard = {
   host: string;
@@ -144,6 +144,10 @@ export type PentacleTranscriptItem = {
   // bubble). Absent for server-origin rows.
   sendState?: PentacleSendState;
   queuedWhileWorking?: boolean;
+  // True while the daemon confirmed landing but the provider holds the prompt in
+  // its native queue and no correlated USER echo exists yet. Independent of
+  // sendState (which stays tied to the client-side hold).
+  providerQueued?: boolean;
   eventKey?: string;
   optimisticId?: string;
   correlatedDaemonSeq?: number | null;
@@ -356,9 +360,27 @@ function isDirectMatchedUserEcho(event: PentacleEvent): boolean {
     hasCorrelatedDaemonSeq(event);
 }
 
-function receiptCaptionForLatestUserEvent(event: PentacleEvent): PentacleReceiptCaption | undefined {
+// A provider-native-queued send (daemon landed it, provider holds it) that has
+// not yet been correlated to its USER echo. Failed/cancelled rows never show it.
+function isProviderQueuedAwaitingEcho(
+  event: PentacleEvent,
+  send: { status?: OptimisticSendStatus; provider_queued?: boolean } | undefined,
+): boolean {
+  return send?.provider_queued === true &&
+    send.status !== 'failed' && send.status !== 'cancelled' &&
+    !hasCorrelatedDaemonSeq(event);
+}
+
+function receiptCaptionForLatestUserEvent(
+  event: PentacleEvent,
+  send?: { status?: OptimisticSendStatus; provider_queued?: boolean },
+): PentacleReceiptCaption | undefined {
   if (!event.client_origin || !event.optimistic_id) return undefined;
-  if (!hasCorrelatedDaemonSeq(event)) return 'sending';
+  if (!hasCorrelatedDaemonSeq(event)) {
+    if (isProviderQueuedAwaitingEcho(event, send)) return 'queued';
+    // The daemon confirmed landing: show Sent now instead of waiting for the echo.
+    return send?.status === 'acked' ? 'sent' : 'sending';
+  }
   if (!isDirectMatchedUserEcho(event)) return undefined;
   if (normalizedReceiptField(event, 'receipt_state') === 'landed') return 'sent';
   if (normalizedReceiptField(event, 'receipt_delivery') === 'proof_unavailable') return 'failed';
@@ -775,6 +797,7 @@ function sameTranscriptItem(a: PentacleTranscriptItem, b: PentacleTranscriptItem
     a.receiptCaption === b.receiptCaption &&
     a.sendState === b.sendState &&
     a.queuedWhileWorking === b.queuedWhileWorking &&
+    a.providerQueued === b.providerQueued &&
     a.attachments === b.attachments
   );
 }
@@ -1836,8 +1859,11 @@ function buildSessionTranscriptRows(
       // the latest matching durable USER echo.
       nextItem.sendState = sendState;
     }
+    if (event.client_origin === true && isProviderQueuedAwaitingEcho(event, send)) {
+      nextItem.providerQueued = true;
+    }
     if (event === latestUserEvent && send?.status !== 'cancelled') {
-      const receiptCaption = receiptCaptionForLatestUserEvent(event);
+      const receiptCaption = receiptCaptionForLatestUserEvent(event, send);
       if (receiptCaption) nextItem.receiptCaption = receiptCaption;
     }
     transcriptItems.push(reuseTranscriptItem(previousItems, nextItem));
