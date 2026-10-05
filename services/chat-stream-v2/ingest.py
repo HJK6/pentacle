@@ -55,8 +55,8 @@ log = logging.getLogger("chat_streamd_v2.ingest")
 
 DEFAULT_INTERVAL_S = 1.5
 #: Per-pass work cap (loop rule 2): at most this many newly-appended events per
-#: pass, so a stream that just replayed a huge transcript cannot monopolize the
-#: pump; the remainder is picked up next pass.
+#: pass. Rotating the starting stream prevents a replay from monopolizing
+#: successive passes; the remainder is picked up on its next rotation.
 DEFAULT_MAX_EVENTS_PER_PASS = 500
 #: Cap the bytes read from one transcript per pass so a multi-GB log never lands
 #: on the loop thread in one gulp; the tail advances over successive passes.
@@ -274,6 +274,8 @@ class Ingest:
         self.routing_integrity = routing_integrity
         self.inventory_emitter = inventory_emitter
         self._streams: dict[str, _StreamIngest] = {}
+        self._last_visited_sid: str | None = None
+        self._previous_inventory: tuple[str, ...] = ()
 
     # -- loop --------------------------------------------------------------
 
@@ -303,7 +305,13 @@ class Ingest:
 
     async def run_pass(self) -> int:
         """One bounded ingest pass. Returns the number of events newly appended.
-        Also the test-only forced trigger (called directly)."""
+        Also the test-only forced trigger (called directly).
+
+        For a fixed finite inventory of N continuously eligible streams, each
+        gets an attempt within N completed passes while this actor runs. Churn,
+        restart and whole-pass backoff do not inherit that bound; neither does
+        the time to reach a prompt buried in a stream's own replay backlog.
+        """
         cfg = self.config
         rows = [
             r for r in self.sessions.list_open()
@@ -319,6 +327,25 @@ class Ingest:
                 if stale is not None:
                     _close_stream(stale)
 
+        # Scheduling state uses identities, not indices into a mutable registry.
+        # If the cursor disappeared, follow its previous cyclic successors to
+        # the first survivor, rather than restarting at the inventory head.
+        ids = tuple(r["stream_id"] for r in rows)
+        start_sid = None
+        if self._last_visited_sid in open_ids:
+            start_sid = ids[(ids.index(self._last_visited_sid) + 1) % len(ids)]
+        elif self._last_visited_sid in self._previous_inventory:
+            prior = self._previous_inventory
+            after = prior.index(self._last_visited_sid) + 1
+            start_sid = next(
+                (sid for sid in prior[after:] + prior[:after] if sid in open_ids),
+                None,
+            )
+        self._previous_inventory = ids
+        if start_sid is not None:
+            start = ids.index(start_sid)
+            rows = rows[start:] + rows[:start]
+
         now = asyncio.get_running_loop().time()
         budget = cfg.max_events_per_pass
         appended = 0
@@ -326,6 +353,9 @@ class Ingest:
             if budget <= 0:
                 break
             sid = row["stream_id"]
+            # A backoff skip is a visit, not an ingest attempt. It must still
+            # advance the frontier, as must zero inserts and handled failures.
+            self._last_visited_sid = sid
             st = self._streams.setdefault(sid, _StreamIngest())
             if now < st.next_attempt_monotonic:
                 continue  # this stream is in its own backoff window
