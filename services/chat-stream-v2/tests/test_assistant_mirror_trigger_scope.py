@@ -191,7 +191,7 @@ def test_proactive_refusals(case):
     asyncio.run(go())
 
 
-@pytest.mark.parametrize('duration,expected', [(4.12345, 4.123), (600, 600.0), (0, None), (-1, None), (601, None), (float('nan'), None), (float('inf'), None), (True, None), ('4', None)])
+@pytest.mark.parametrize('duration,expected', [(4.12345, 4.123), (600, 600.0), (0.0004, None), (0.0005, 0.001), (0, None), (-1, None), (601, None), (float('nan'), None), (float('inf'), None), (True, None), ('4', None)])
 def test_composite_voice_receipt_and_event(duration, expected):
     async def go():
         store, composite, _ = await setup()

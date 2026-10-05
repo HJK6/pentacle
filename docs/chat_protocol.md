@@ -173,7 +173,7 @@ replay. It is additive: clients without voice UI can ignore it. The send
 contains the transcript as text, with no audio attachment; optimistic_id and
 request_id retain the ordinary send deduplication contract.
 Composite sends whitelist only finite numeric `voice.duration_s` with
-`0 < duration_s <= 600`, normalized to milliseconds. Other metadata is dropped;
+`0 < duration_s <= 600`, normalized to milliseconds (a value that rounds to 0 is dropped). Other metadata is dropped;
 the receipt retains its internal `assistant_composite` marker. Ordinary-stream
 metadata behavior is unchanged. Voice metadata does not alter send identity.
 

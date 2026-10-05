@@ -1856,7 +1856,8 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
         if trigger == "unknown":
             log.info("assistant_mirror_unknown_trigger source_stream_id=%s source_event_id=%s",
                      source_stream_id, source_event_id,
-                     extra={"subsystem": "assistant_mirror"})
+                     extra={"subsystem": "assistant_mirror",
+                            "bug_ref": "spec_pentacle__front_desk_mirror_trigger_scope_2026_10"})
         composite_host, _, composite_name = binding[0].partition(":")
         composite = conn.execute(
             "SELECT created_at FROM sessions WHERE host=? AND session_name=? "

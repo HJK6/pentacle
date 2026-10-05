@@ -691,7 +691,8 @@ class _RoutingStoreMixin:
         voice = meta.get("voice") if isinstance(meta, dict) else None
         duration = voice.get("duration_s") if isinstance(voice, dict) else None
         if (not isinstance(duration, bool) and isinstance(duration, (int, float))
-                and 0 < duration <= 600 and math.isfinite(duration)):
+                and 0 < duration <= 600 and math.isfinite(duration)
+                and round(float(duration), 3) > 0):
             voice_meta = {"voice": {"duration_s": round(float(duration), 3)}}
         canonical_attachments = json.dumps(attachments, sort_keys=True, separators=(",", ":"))
         material = json.dumps({
