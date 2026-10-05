@@ -279,6 +279,19 @@ The daemon stores `handoff_from_stream_id` on the session row and echoes it in `
 
 Fleet activation uses `deploy/install_fleet_spawn_tooling.py --commit <full-main-sha> --host-config /path/to/release-hosts.json --hosts coordinator,workstation --run-host coordinator`. The installer stages and verifies every immutable release before switching any active pointer, then reads every pointer back; daemon-side handoff rejection must not deploy until all configured targets report the same CLI SHA.
 
+Staging resumes an existing release only when its complete manifest and CLI
+runtime verify. If verification fails and any same-SHA release entry exists,
+staging refuses with `existing_release_failed_verification:<host>` (or the
+existing `active_release_failed_verification:<host>` for the CLI active release)
+before changing release or staging contents. This includes files and dangling
+symlinks. Web and other consumers may use `release/app` directly, so the CLI
+active pointer alone cannot authorize replacement. Generated assets,
+`node_modules` and consumer pointers stay untouched. Fresh staging still works
+when the release path is absent. Recovery of an unverified existing release
+requires a separately coordinated recovery or a distinct reviewed release;
+do not remove it merely to retry this installer. Coordinate competing writers
+through the rollout lock and shared-resource ownership.
+
 The spawned session inherits `PENTACLE_STREAM_ID=<host>:<session_name>` in its provider process environment, with the value computed from the actual session name passed to tmux. It also receives `AGENT_ORCH_STREAM_ID` with the same value. This lets the new leader call `agent-orch report --terminate` without depending on tmux-name snapshot discovery.
 
 Initial prompt delivery is daemon-owned and reconciled independently from readiness. For provider and remote spawns, a prompt-bearing `spawn.ok` requires `DurableUserEventProof`: a durable USER event from the authoritative current-generation Store, strictly newer than the pre-paste watermark, whose normalized text exactly matches the submitted brief or staged pointer. Pane echo, history, queue, and transcript observations cannot settle `delivered` or authorize a pane-driven retry. A local explicit-command spawn retains its anchored line-echo receipt because that line-oriented test/tool path emits an echo only after submission. Missing proof leaves the durable admitted handle in `starting`; a confirmed failure is `spawn.error`. Never infer submission from `delivery_status`, bounded inspect text, or pane liveness, and never launch a replacement logical spawn while its obligation is pending.

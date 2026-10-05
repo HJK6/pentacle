@@ -1052,3 +1052,81 @@ def test_custom_map_without_local_requires_explicit_selection(monkeypatch, tmp_p
     with pytest.raises(SystemExit) as error:
         installer.main()
     assert error.value.code == 2
+
+
+
+def _release_preimage(root: Path):
+    """Identity and bytes: rebuilding byte-equal assets still replaces consumers."""
+    return {
+        str(path.relative_to(root)): (
+            path.lstat().st_ino, path.lstat().st_mtime_ns, path.lstat().st_mode,
+            os.readlink(path) if path.is_symlink() else path.read_bytes() if path.is_file() else None,
+        ) for path in [root, *sorted(root.rglob("*"))]
+    }
+
+
+def test_repeated_same_sha_stage_refuses_shared_app_without_mutation(tmp_path):
+    commit = "c" * 40
+    root = tmp_path / "home/.local/share/pentacle/releases"
+    target = installer.Target("test", "localhost", str(root))
+    bundle, manifest = _localhost_bundle(tmp_path, commit)
+    app = root / commit / "app"
+    for name, data in [("renderer/dist/web/bundle.js", b"generated web"),
+                       ("node_modules/native/spawn-helper", b"native dependency")]:
+        path = app / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    # CLI active is deliberately elsewhere: web's direct path was the missed consumer.
+    (root / "active").symlink_to(root / ("d" * 40))
+    (root / "web-current").symlink_to(app)
+    stale = root / (commit + ".staging")
+    stale.mkdir()
+    (stale / "sentinel").write_bytes(b"must remain on refusal")
+    before = _release_preimage(root)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="existing_release_failed_verification:test"):
+            installer.stage(target, bundle, commit, manifest, dry_run=False, runner=_localhost_runner)
+        assert _release_preimage(root) == before
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink", "dangling_symlink"])
+def test_unverified_existing_release_entry_is_never_replaced(tmp_path, kind):
+    commit = "e" * 40
+    root = tmp_path / "home/.local/share/pentacle/releases"
+    root.mkdir(parents=True)
+    target = installer.Target("test", "localhost", str(root))
+    bundle, manifest = _localhost_bundle(tmp_path, commit)
+    destination = root / commit
+    if kind == "file":
+        destination.write_bytes(b"consumer-owned file")
+    else:
+        other = tmp_path / "consumer"
+        if kind == "symlink":
+            other.mkdir()
+            (other / "asset").write_bytes(b"consumer asset")
+        destination.symlink_to(other)
+    before = _release_preimage(root)
+    with pytest.raises(RuntimeError, match="existing_release_failed_verification:test"):
+        installer.stage(target, bundle, commit, manifest, dry_run=False, runner=_localhost_runner)
+    assert _release_preimage(root) == before
+
+
+def test_same_sha_verified_resume_preserves_shared_generated_assets(tmp_path):
+    commit = "f" * 40
+    root = tmp_path / "home/.local/share/pentacle/releases"
+    target = installer.Target("test", "localhost", str(root))
+    bundle, manifest = _localhost_bundle(tmp_path, commit)
+    assert installer.stage(target, bundle, commit, manifest, dry_run=False, runner=_localhost_runner) == "staged_verified"
+    app = root / commit / "app"
+    for name in ["renderer/dist/web/bundle.js", "node_modules/native/spawn-helper"]:
+        path = app / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"generated consumer asset")
+    (root / "active").symlink_to(root / commit)
+    (root / "web-current").symlink_to(app)
+    before = _release_preimage(root / commit)
+    pointers = {name: os.readlink(root / name) for name in ["active", "web-current"]}
+    for _ in range(2):
+        assert installer.stage(target, bundle, commit, manifest, dry_run=False, runner=_localhost_runner) == "resumed_verified"
+        assert _release_preimage(root / commit) == before
+        assert {name: os.readlink(root / name) for name in pointers} == pointers

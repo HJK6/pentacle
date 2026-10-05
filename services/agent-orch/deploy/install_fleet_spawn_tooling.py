@@ -728,8 +728,23 @@ def stage(
         active = _read_pointer(target, "active", dry_run=dry_run, runner=runner)
         if active == release:
             raise RuntimeError(f"active_release_failed_verification:{target.name}")
+        # Other consumers can use release/app directly without the CLI pointer.
+        # An unverified release is never ours to replace, including a dangling link.
+        exists = _remote(
+            target,
+            f"if test -e {_remote_quote(release)} || test -L {_remote_quote(release)}; then printf existing; fi",
+            dry_run=dry_run, runner=runner,
+        )
+        if exists:
+            raise RuntimeError(f"existing_release_failed_verification:{target.name}")
         staging = release + ".staging"
-        _remote(target, f"mkdir -p {_remote_quote(target.root)} && rm -rf {_remote_quote(staging)} {_remote_quote(release)} && mkdir -m 700 {_remote_quote(staging)}", dry_run=dry_run, runner=runner)
+        _remote(target, " && ".join((
+            f"test ! -e {_remote_quote(release)}",
+            f"test ! -L {_remote_quote(release)}",
+            f"mkdir -p {_remote_quote(target.root)}",
+            f"rm -rf {_remote_quote(staging)}",
+            f"mkdir -m 700 {_remote_quote(staging)}",
+        )), dry_run=dry_run, runner=runner)
         if not dry_run:
             if target.local and not target.loopback:
                 staging_path = Path(staging)
@@ -756,6 +771,7 @@ def stage(
             f"mkdir {_remote_quote(staging + '/app')}",
             f"tar -xf {_remote_quote(staging + '/pentacle.tar')} -C {_remote_quote(staging + '/app')}",
             f"test ! -e {_remote_quote(release)}",
+            f"test ! -L {_remote_quote(release)}",
             f"mv {_remote_quote(staging)} {_remote_quote(release)}",
         )), dry_run=dry_run, runner=runner)
         _remote(target, _runtime_prepare_command(release, str(dict(manifest["runtime_package"])["requires_python"])), dry_run=dry_run, runner=runner)
