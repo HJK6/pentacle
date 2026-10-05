@@ -282,6 +282,50 @@ def claude_prompt_submitted(pane_text: str, prompt: str) -> bool:
     return _claude_post_submit_marker_after(lines, input_start)
 
 
+_CLAUDE_NATIVE_QUEUE_HINT = "ctrl+x ctrl+s to send now"
+
+
+def claude_prompt_in_native_queue(pane_text: str, prompt: str) -> bool:
+    """True when `prompt` sits in Claude Code's native queued-message region.
+
+    Input sent while a turn runs is held above the spinner as ``❯ <text>``
+    followed by the hint ``ctrl+x ctrl+s to send now`` (Claude Code 2.1.x) and
+    only becomes a turn when the current one ends. Such a prompt also satisfies
+    `claude_prompt_submitted` (it sits above the composer caret), so this
+    predicate is what tells "queued" apart from "submitted".
+    """
+    lines = pane_text.splitlines()
+    input_start = _last_claude_input_start(lines)
+    history = lines if input_start is None else lines[:input_start]
+    for index, line in enumerate(history):
+        if line.strip().lower() != _CLAUDE_NATIVE_QUEUE_HINT:
+            continue
+        block: list[str] = []
+        for candidate in reversed(history[:index]):
+            stripped = candidate.strip()
+            if not stripped or stripped.startswith(_CLAUDE_SUBMISSION_MARKERS) or set(stripped) == {"─"}:
+                break
+            block.insert(0, candidate)
+            if stripped.startswith("❯") and not candidate.startswith(" "):
+                # Keep walking: several queued messages stack above one hint.
+                continue
+        if not any(item.strip().startswith("❯") for item in block):
+            continue
+        queued = [item.strip().removeprefix("❯").strip() for item in block]
+        if _claude_prompt_in_lines(queued, prompt) or _claude_active_draft_has_collapsed_paste(queued, 0):
+            return True
+    return False
+
+
+def prompt_in_native_queue(pane_text: str, prompt: str, provider: str) -> bool:
+    """Provider dispatch for native-queue detection after a delivered paste."""
+    if provider == "claude":
+        return claude_prompt_in_native_queue(pane_text, prompt)
+    if provider == "codex":
+        return _codex_prompt_in_native_queue(pane_text, prompt)
+    return False
+
+
 def _claude_active_draft_has_collapsed_paste(lines: list[str], input_start: int) -> bool:
     return any(
         re.search(r"\[Pasted text #\d+(?: [^\]]*)?\]", line)
@@ -389,7 +433,7 @@ def _codex_non_draft_line_after_input(line: str) -> bool:
 
 
 _CODEX_NATIVE_QUEUE_HEADER_RE = re.compile(
-    r"^messages to be submitted after next tool call\b", re.IGNORECASE,
+    r"^(?:[•◦]\s*)?messages to be submitted after next tool call\b", re.IGNORECASE,
 )
 
 

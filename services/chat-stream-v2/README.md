@@ -106,6 +106,10 @@ Run the final merge gate from a clean checkout; it produces a source-bound evide
 
 The launchd template under `deploy/` runs every 12 hours and sets the machine-file path. The deploy helper also passes the installed daemon’s machine-file setting explicitly to its immediate full smoke, clearing inherited JSON configuration and host-subset overrides. A missing or invalid setting remains a post-activation smoke failure (exit 6); the activated SHA/PID stamp and do-not-retry instruction are preserved. A full run closes each spawned session, including after cell failure; a failed teardown is reported as a failure even if the provider is over quota. The explicit `<url> <host>` post-deploy canary remains a single Codex promptless cell.
 
+### Busy-seat send probe
+
+`tools/busy_seat_send_probe.py --provider claude|codex [--host H --ssh USER@HOST]` reproduces a send to a working seat without a UI: it spawns one low-cost hidden seat, holds it in a ~75 s foreground command, sends once through `send`, and compares `send.result` with the pane's native-queue chrome. Verdicts: `queued_reported` (0), `queued_unreported` (1), `not_queued` (2), `harness_error` (3, including a failed cleanup close). The seat is always closed unless `--keep`. Codex 0.159 needs a working sandbox on the seat host (`bwrap` on Linux).
+
 ### Router replay harness
 
 `tools/router_replay.py` measures the same `_router_input` builder and SSH

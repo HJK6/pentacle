@@ -258,3 +258,36 @@ def test_mobile_launch_id_scheme_unaffected(tmp_path: Path) -> None:
             store.stop()
 
     _run(go())
+
+
+def test_coalesced_replay_of_provider_queued_send_keeps_queued(tmp_path: Path) -> None:
+    """A rotated retry (e.g. a reconnect replay) of a send the provider still
+    holds in its native queue must keep reporting provider_queued, or the client
+    would caption Sent while the message has not become a turn.
+    spec_pentacle__chat_queued_message_state_2026_10 (final QA finding 2)."""
+    async def go() -> None:
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await _open_claude(sessions)
+            await store.append_send_receipt(
+                to_stream_id=STREAM, request_id="queued-first", receipt_id="receipt-queued-first",
+                state="landed", wire_text=BODY, display_text=BODY, attachments=[],
+                delivery="landed", submission_confirmed=True, optimistic_id="optimistic_q_1",
+                reason="provider_queued", created_at=iso_now(),
+                actor_stream_id="operator:op-1", actor_trusted=True,
+            )
+            result = await comms.send({
+                "stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
+                "optimistic_id": "optimistic_q_1", "request_id": "queued-replay"})
+            assert len(tmux.pastes) == 0
+            assert result.get("coalesced") is True
+            assert result.get("delivery") == "landed"
+            assert result.get("provider_queued") is True
+            rec = await store.get_send_receipt(STREAM, "queued-replay")
+            assert rec is not None
+            assert rec["reason"] == "coalesced_replay:queued-first;provider_queued"
+        finally:
+            store.stop()
+
+    _run(go())

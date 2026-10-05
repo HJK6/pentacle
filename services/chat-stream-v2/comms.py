@@ -56,6 +56,7 @@ from boot_ready import (
     codex_prompt_in_active_draft,
     codex_reset_interstitial_visible,
     codex_tui_session_visible,
+    prompt_in_native_queue,
     submission_proven_after,
 )
 from mirror import _extract_live_state
@@ -1716,6 +1717,7 @@ class Comms:
         attempts: int | None = None,
         action_committed: bool = False,
         confirmation_pending: bool = False,
+        provider_queued: bool = False,
     ) -> dict[str, Any]:
         projection = await self._append_send_receipt(
             plan,
@@ -1743,6 +1745,8 @@ class Comms:
             result["attempts"] = attempts
         if reason:
             result["reason"] = reason
+        if provider_queued:
+            result["provider_queued"] = True
         if action_committed:
             result.update({
                 "action_status": "committed",
@@ -1799,6 +1803,10 @@ class Comms:
                         )
                 await self._assert_claude_send_ready(plan.route)
                 confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)
+                provider_queued = (
+                    not active_draft and pane_mode_reason is None
+                    and await self._prompt_in_native_queue(target, provider, plan.wire_text)
+                )
         except VerbError as exc:
             phase = str(exc.extra.get("phase") or "body_maybe_pasted")
             if phase == "not_started":
@@ -1823,10 +1831,17 @@ class Comms:
 
         reason = pane_mode_reason or ("active_draft" if active_draft else "submit_unconfirmed")
         if confirmed:
+            # A prompt held in the provider's native queue is delivered (the TUI
+            # owns it and will submit it when the running turn ends) but is not a
+            # turn yet. ``delivery`` stays ``landed`` for every existing consumer;
+            # the additive ``provider_queued`` flag (receipt reason) lets chat
+            # clients show Queued until the transcript echo arrives.
             return await self._send_result(
                 plan, request_id=request_id, receipt_id=receipt_id,
                 state="landed", delivery="landed", submission_confirmed=True,
                 attempts=attempts,
+                reason="provider_queued" if provider_queued else None,
+                provider_queued=provider_queued,
             )
         # A native-queue TUI (claude, codex — the SUBMIT_PREDICATES providers) queues
         # mid-turn input natively: once the brief has left the active draft, it is
@@ -1851,7 +1866,24 @@ class Comms:
             state="accepted", delivery=COMMITTED_PENDING_PROOF, submission_confirmed=False,
             reason=reason, attempts=attempts,
             action_committed=True, confirmation_pending=True,
+            provider_queued=provider_queued,
         )
+
+    async def _prompt_in_native_queue(self, target: str, provider: str, wire_text: str) -> bool:
+        """One post-delivery capture: is the prompt held in the native queue?
+
+        Purely informational; any capture failure answers False so the send's
+        delivery classification is never affected.
+        """
+        if provider not in ("claude", "codex"):
+            return False
+        try:
+            host, name = self.sessions.split(target)
+            tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
+            pane = await tmux.capture(name)
+        except Exception:  # noqa: BLE001 - informational probe only
+            return False
+        return isinstance(pane, str) and prompt_in_native_queue(pane, wire_text, provider)
 
     @staticmethod
     def _send_dedupe_window_floor() -> str:
@@ -1879,11 +1911,13 @@ class Comms:
         winner_request_id = str(winner.get("request_id") or request_id)
         winner_attempts = winner.get("attempts")
         winner_attempts = winner_attempts if isinstance(winner_attempts, int) else None
+        # A replay of a send the provider holds in its native queue stays queued.
+        winner_queued = str(winner.get("reason") or "") == "provider_queued"
         await self._append_send_receipt(
             plan, request_id=request_id, receipt_id=receipt_id,
             state=winner_state, delivery=winner_delivery,
             submission_confirmed=winner_confirmed,
-            reason=f"coalesced_replay:{winner_request_id}",
+            reason=f"coalesced_replay:{winner_request_id}" + (";provider_queued" if winner_queued else ""),
             attempts=winner_attempts,
         )
         target = str(plan.route["final_target"])
@@ -1907,6 +1941,8 @@ class Comms:
         }
         if winner_confirmed and winner_attempts is not None:
             result["attempt"] = winner_attempts
+        if winner_queued:
+            result["provider_queued"] = True
         return result
 
     async def send(self, msg: dict[str, Any]) -> dict[str, Any]:

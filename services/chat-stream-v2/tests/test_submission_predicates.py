@@ -210,3 +210,72 @@ def test_codex_stale_history_is_vetoed_by_current_active_composer() -> None:
     pane = "› run the delivery check now\n• old reply\n› run the delivery check now\n"
     assert codex_prompt_submitted(pane, BRIEF) is True  # history alone is ambiguous
     assert submission_proven_after(pane, baseline, BRIEF, "codex") is False
+
+
+# -- Claude native queue (spec_pentacle__chat_queued_message_state_2026_10) ----
+from boot_ready import claude_prompt_in_native_queue  # noqa: E402
+
+CLAUDE_LIVE_QUEUED = (
+    "● Bash(python3 -c 'import time; time.sleep(300)')\n"
+    "  ⎿  Running… (2m 26s · timeout 10m)\n"
+    "❯ run the delivery check now\n"
+    "  ctrl+x ctrl+s to send now\n"
+    "· Computing… (2m 29s · ↓ 89 tokens)\n"
+    "─────────\n"
+    "❯ Press up to edit queued messages\n"
+    "─────────\n"
+)
+CLAUDE_TWO_QUEUED = (
+    "✻ Computing… (10s)\n"
+    "❯ an earlier queued message\n"
+    "❯ run the delivery check now that wraps onto\n"
+    "  a second line\n"
+    "  ctrl+x ctrl+s to send now\n"
+    "─────────\n"
+    "❯ \n"
+)
+
+
+def test_claude_live_queue_shape_is_queued_and_also_submitted() -> None:
+    # The queued prompt sits above the composer, which the submit predicate
+    # (correctly, for delivery) accepts; the queue predicate tells them apart.
+    assert claude_prompt_submitted(CLAUDE_LIVE_QUEUED, BRIEF) is True
+    assert claude_prompt_in_native_queue(CLAUDE_LIVE_QUEUED, BRIEF) is True
+
+
+def test_claude_stacked_and_wrapped_queue_entries_match() -> None:
+    assert claude_prompt_in_native_queue(CLAUDE_TWO_QUEUED, BRIEF + " that wraps onto a second line") is True
+    assert claude_prompt_in_native_queue(CLAUDE_TWO_QUEUED, "an earlier queued message") is True
+
+
+def test_claude_submitted_history_draft_and_boot_are_not_queued() -> None:
+    assert claude_prompt_in_native_queue(CLAUDE_SUBMITTED_HISTORY, BRIEF) is False
+    assert claude_prompt_in_native_queue(CLAUDE_SUBMITTED_MARKER, BRIEF) is False
+    assert claude_prompt_in_native_queue(CLAUDE_DRAFT, BRIEF) is False
+    assert claude_prompt_in_native_queue(CLAUDE_BOOT, BRIEF) is False
+    # A different message is queued: this prompt is not.
+    assert claude_prompt_in_native_queue(CLAUDE_LIVE_QUEUED, "something else entirely") is False
+
+
+# Codex 0.159.0, captured live on a macOS peer 2026-10-05 (busy_seat_send_probe pane):
+# the queue header gained a "• " bullet and wraps at the pane width.
+from boot_ready import prompt_in_native_queue  # noqa: E402
+
+CODEX_159_QUEUED = (
+    "› You are a disposable test target.\n"
+    "• Working (23s • esc to interrupt) · 1 background terminal running · /ps to vie…\n"
+    "• Messages to be submitted after next tool call (press esc to interrupt and send\n"
+    "  immediately)\n"
+    "  ↳ [from hostb:v2-0000aaaa] [send:send-b71b9a74-64f5-402d-bf9f-\n"
+    "    0d0ebf32a897]\n"
+    "    probe busyprobe-f376b075d6 while busy\n"
+    "› Ask Codex to do anything\n"
+    "  GPT-6-Luna low · ~/agent-workspace · Run foregroun…  ⚠ 1 warning · f2 to view\n"
+)
+
+
+def test_codex_159_bulleted_queue_header_is_native_queue() -> None:
+    assert prompt_in_native_queue(CODEX_159_QUEUED, "probe busyprobe-f376b075d6 while busy", "codex") is True
+    assert prompt_in_native_queue(CODEX_159_QUEUED, "some other message", "codex") is False
+    # The pre-0.159 unbulleted shape still matches.
+    assert prompt_in_native_queue(SAMPLE_QUEUED, SAMPLE_BODY, "codex") is True

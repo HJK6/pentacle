@@ -437,7 +437,16 @@ def normalize_claude_jsonl_record(
             events.append(make("ASSIST_TEXT", str(block.get("text") or "")))
         elif btype == "thinking":
             thinking = str(block.get("thinking") or "")
-            events.append(make("THINKING", thinking or "Thinking", {"thinking": thinking}))
+            if thinking.strip():
+                # Claude Code stores real reasoning signature-only (empty text);
+                # a thinking block that carries text is a short progress update
+                # the TUI prints as an ordinary assistant paragraph, so chat shows
+                # it as assistant text too. The block type stays in raw.
+                events.append(make("ASSIST_TEXT", thinking, {
+                    "thinking": thinking, "claude_block_type": "thinking",
+                }))
+            else:
+                events.append(make("THINKING", "Thinking", {"thinking": thinking}))
         elif btype == "tool_use":
             name = str(block.get("name") or "Tool")
             tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}

@@ -859,3 +859,130 @@ def test_claude_no_live_composer_is_not_landed_not_silently_committed(
         assert projected is not None and projected["state"] == "not_landed"
     finally:
         store.stop()
+
+
+# -- provider native queue (spec_pentacle__chat_queued_message_state_2026_10) --
+
+# Claude Code 2.1.289, captured from a live pane 2026-10-05:
+# input sent mid-turn is held above the spinner with a "send now" hint.
+CLAUDE_BUSY = (
+    "● Bash(python3 -c 'import time; time.sleep(300)')\n"
+    "  ⎿  Running… (2m 20s · timeout 10m)\n"
+    "     (ctrl+b ctrl+b (twice) to run in background)\n"
+    "✽ Computing… (2m 22s · ↓ 89 tokens)\n"
+    "─────────────────────────────\n"
+    "❯ \n"
+    "─────────────────────────────\n"
+    "  ⏵⏵ bypass permissions on · 1 shell · esc to interrupt\n"
+)
+
+
+def _claude_queued(text: str) -> str:
+    return (
+        "● Bash(python3 -c 'import time; time.sleep(300)')\n"
+        "  ⎿  Running… (2m 26s · timeout 10m)\n"
+        "     (ctrl+b ctrl+b (twice) to run in background)\n"
+        f"❯ {text}\n"
+        "  ctrl+x ctrl+s to send now\n"
+        "· Computing… (2m 29s · ↓ 89 tokens)\n"
+        "─────────────────────────────\n"
+        "❯ Press up to edit queued messages\n"
+        "─────────────────────────────\n"
+        "  ⏵⏵ bypass permissions on · 1 shell · esc to interrupt\n"
+    )
+
+
+class ClaudeQueueTmux(FakeTmux):
+    def __init__(self) -> None:
+        super().__init__(submit_on_paste=False)
+        self.screen = CLAUDE_BUSY
+
+    async def paste(self, _name: str, text: str) -> None:
+        self.pastes.append(text)
+        self.screen = _claude_queued(text)
+
+
+def test_claude_native_queue_send_result_carries_provider_queued(tmp_path: Path) -> None:
+    """A send held in Claude's native queue is delivered but not yet a turn: the
+    result stays landed for existing consumers and adds provider_queued, and the
+    durable receipt records reason provider_queued."""
+    async def go() -> tuple[dict, Store]:
+        tmux = ClaudeQueueTmux()
+        comms_obj, store, sessions = _new_comms(tmux, tmp_path)
+        await sessions.open(HOST, NAME, provider="claude", bootstrap_state="ready")
+        result = await comms_obj.send({
+            "stream_id": f"{HOST}:{NAME}", "message": "queued repro message alpha one",
+            "request_id": "send-claude-provider-queued",
+        })
+        return result, store
+
+    result, store = _run(go())
+    try:
+        assert result["delivery"] == "landed"
+        assert result["submission_confirmed"] is True
+        assert result["provider_queued"] is True
+        receipt = asyncio.run(store.get_send_receipt(f"{HOST}:{NAME}", "send-claude-provider-queued"))
+        assert receipt is not None and receipt["state"] == "landed"
+        assert receipt["reason"] == "provider_queued"
+    finally:
+        store.stop()
+
+
+def test_idle_landed_send_has_no_provider_queued(tmp_path: Path) -> None:
+    async def go() -> tuple[dict, Store]:
+        tmux = FakeTmux()
+        comms_obj, store, sessions = _new_comms(tmux, tmp_path)
+        await sessions.open(HOST, NAME, provider="claude", bootstrap_state="ready")
+        result = await comms_obj.send({
+            "stream_id": f"{HOST}:{NAME}", "message": "plain idle send",
+            "request_id": "send-claude-idle",
+        })
+        return result, store
+
+    result, store = _run(go())
+    try:
+        assert result["delivery"] == "landed"
+        assert "provider_queued" not in result
+        receipt = asyncio.run(store.get_send_receipt(f"{HOST}:{NAME}", "send-claude-idle"))
+        assert receipt is not None and not receipt.get("reason")
+    finally:
+        store.stop()
+
+
+class CodexQueueTmux(FakeTmux):
+    def __init__(self) -> None:
+        super().__init__(submit_on_paste=False)
+        self.screen = "OpenAI Codex\n• Running python3 -c 'import time; time.sleep(75)'\n─────────\n› \n  gpt-6-luna low"
+
+    async def paste(self, _name: str, text: str) -> None:
+        self.pastes.append(text)
+        self.screen = (
+            "OpenAI Codex\n"
+            "• Running python3 -c 'import time; time.sleep(75)'\n"
+            "Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n"
+            f"↳ {text}\n"
+            "─────────\n"
+            "› \n"
+            "  gpt-6-luna low"
+        )
+
+
+def test_codex_native_queue_send_result_carries_provider_queued(tmp_path: Path) -> None:
+    async def go() -> tuple[dict, Store]:
+        tmux = CodexQueueTmux()
+        comms_obj, store, sessions = _new_comms(tmux, tmp_path)
+        await sessions.open(HOST, NAME, provider="codex")
+        result = await comms_obj.send({
+            "stream_id": f"{HOST}:{NAME}", "message": "codex queued probe",
+            "request_id": "send-codex-provider-queued",
+        })
+        return result, store
+
+    result, store = _run(go())
+    try:
+        assert result["delivery"] == "landed"
+        assert result["provider_queued"] is True
+        receipt = asyncio.run(store.get_send_receipt(f"{HOST}:{NAME}", "send-codex-provider-queued"))
+        assert receipt is not None and receipt["reason"] == "provider_queued"
+    finally:
+        store.stop()
