@@ -155,6 +155,28 @@ def continuous_tag(meta):
     return isinstance(tags, list) and "continuous-retro" in tags
 
 
+def active_retro(text):
+    """Select one real Markdown section; fenced examples are not headings."""
+    visible, fence = [], None
+    for line in text.splitlines(keepends=True):
+        if fence:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(fence[1]) + r",}\s*", line):
+                fence = None
+            visible.append(re.sub(r"[^\n]", " ", line))
+            continue
+        opening = re.match(r"^ {0,3}(`{3,}|~{3,})([^\n]*)", line)
+        if opening and not (opening[1][0] == "`" and "`" in opening[2]):
+            fence = (opening[1][0], len(opening[1]))
+            visible.append(re.sub(r"[^\n]", " ", line))
+        else:
+            visible.append(line)
+    matches = list(re.finditer(r"^ {0,3}##\s+Retro\b[^\n]*\n?(.*?)(?=^ {0,3}#{1,2}\s|\Z)",
+                              "".join(visible), re.MULTILINE | re.DOTALL | re.IGNORECASE))
+    if len(matches) != 1:
+        raise ValueError("active source requires exactly one Retro section")
+    return text[matches[0].start():matches[0].end()].strip()
+
+
 def scan(settings, stamp=None):
     sources, gaps, duplicate, seen = {}, [], set(), set()
     for folder in ("completed", "deprecated", *(ACTIVE_STATUSES if stamp else ())):
@@ -184,11 +206,14 @@ def scan(settings, stamp=None):
                     raise ValueError(f"duplicate stable ID: {identity}")
                 seen.add(identity)
                 text = path.read_text().replace("\r\n", "\n")
-                match = re.search(r"^##\s+Retro\b[^\n]*\n?(.*?)(?=^#{1,2}\s|\Z)", text,
-                                  re.MULTILINE | re.DOTALL | re.IGNORECASE)
-                if not match:
-                    raise ValueError("missing Retro")
-                original = match.group(0).strip()
+                if active:
+                    original = active_retro(text)
+                else:
+                    match = re.search(r"^##\s+Retro\b[^\n]*\n?(.*?)(?=^#{1,2}\s|\Z)", text,
+                                      re.MULTILINE | re.DOTALL | re.IGNORECASE)
+                    if not match:
+                        raise ValueError("missing Retro")
+                    original = match.group(0).strip()
                 body = re.sub(r"^##\s+Retro\b\s*[:—-]?\s*", "", original, count=1, flags=re.IGNORECASE).strip()
                 window = None
                 if active:
@@ -304,23 +329,30 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
         placeholders = ",".join("?" for _ in roots)
         args = tuple(sorted(roots))
         nodes = "SELECT host||':'||session_name AS sid,parent_stream_id AS parent FROM sessions"
+        archived_scope = False
         if archive:
             try:
                 conn.execute("ATTACH DATABASE ? AS retro_archive", (settings.primary_archive.resolve().as_uri() + "?mode=ro",))
                 conn.execute("SELECT host,session_name,parent_stream_id FROM retro_archive.sessions LIMIT 0")
                 nodes += " UNION SELECT host||':'||session_name,parent_stream_id FROM retro_archive.sessions"
+                archived_scope = True
             except sqlite3.Error:
                 packet["gaps"].append({"source": "archive_membership", "reason": "retired scope unavailable"})
-        seeds = " UNION ".join("SELECT ? AS sid" for _ in roots)
-        scope_sql = f"""WITH RECURSIVE nodes(sid,parent) AS ({nodes}), scope(sid) AS (
-            {seeds} UNION SELECT nodes.sid FROM nodes JOIN scope ON nodes.parent=scope.sid)
+        seeds = "VALUES " + ",".join("(?)" for _ in roots)
+        scope_sql = f"""WITH RECURSIVE nodes(sid,parent) AS ({nodes}), seed(sid) AS ({seeds}), scope(sid) AS (
+            SELECT sid FROM seed UNION SELECT nodes.sid FROM nodes JOIN scope ON nodes.parent=scope.sid)
             SELECT sid FROM scope"""
-        sessions = query(conn, "sessions", "host||':'||session_name AS stream_id,status,closed_at,created_at,"
+        session_columns = "host||':'||session_name AS stream_id,status,closed_at,created_at,"
+        session_columns += (
             "json_extract(CASE WHEN json_valid(status_card) THEN status_card ELSE '{}' END,'$.updated_at') AS plan_updated_at,"
             "(SELECT json_group_array(json_extract(p.value,'$.status')) FROM json_each("
-            "CASE WHEN json_valid(status_card) THEN status_card ELSE '{}' END,'$.plan') p) AS plan_statuses",
-            "sessions", f"host||':'||session_name IN ({scope_sql})", args)
-        session_map = {r["stream_id"]: r for r in sessions}
+            "CASE WHEN json_valid(status_card) THEN status_card ELSE '{}' END,'$.plan') p) AS plan_statuses")
+        sessions = query(conn, "sessions", session_columns, "sessions", f"host||':'||session_name IN ({scope_sql})", args)
+        archived_sessions = query(conn, "archived_sessions", session_columns, "retro_archive.sessions",
+            f"host||':'||session_name IN ({scope_sql}) AND host||':'||session_name NOT IN (SELECT host||':'||session_name FROM sessions)",
+            args) if archived_scope else []
+        session_map = {r["stream_id"]: {**r, "plan_source": "primary_archive.sessions"} for r in archived_sessions}
+        session_map.update({r["stream_id"]: {**r, "plan_source": "sessions"} for r in sessions})
         text_window = "julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?)"
         window_args = (start.isoformat(), cutoff.isoformat())
         reports = query(conn, "reports", "report_id,from_stream_id,to_stream_id,session_generation,status,created_at",
@@ -384,13 +416,15 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
                 observations.append({"kind": "delivery_failure" if r["state"] == "not_landed" else "closed_recipient",
                     "source": "v2_send_receipts:" + r["receipt_id"], **r,
                     "recipient_closed_at": closed, "next_action": "inspect_delivery_or_closed_dependency_immediately"})
-        waits = query(conn, "waiting_lanes", "lane_id,bound_stream_id,bound_generation,phase,version,updated_at",
-            "v2_assistant_composite_lanes", f"phase='waiting' AND bound_stream_id IN ({scope_sql})", args)
+        waits = query(conn, "waiting_lanes", "lane_id,stream_id,bound_stream_id,bound_generation,phase,version,updated_at",
+            "v2_assistant_composite_lanes", f"stream_id=? AND phase='waiting' AND bound_stream_id IN ({scope_sql}) "
+            "AND julianday(updated_at)<=julianday(?)", (settings.primary_composite, *args, cutoff.isoformat()))
         notices = query(conn, "notices", "notice_id,kind,recipient_stream_id,source_stream_id,created_at,delivered_at,terminal_at,"
             "terminal_reason IS NOT NULL AS has_terminal_reason,attempts,last_error IS NOT NULL AS has_error,"
             "CASE WHEN terminal_reason IN ('persisted_suppressed','folded_into_digest') THEN terminal_reason ELSE NULL END AS suppression,"
             "CASE WHEN kind='lane_digest' THEN body ELSE NULL END AS digest_body", "v2_outbound_notices",
-            f"recipient_stream_id IN ({placeholders}) AND {text_window}", (*args, *window_args),
+            f"(recipient_stream_id IN ({scope_sql}) OR source_stream_id IN ({scope_sql})) AND {text_window}",
+            (*args, *args, *window_args),
             "CASE WHEN last_error IS NOT NULL AND coalesce(terminal_reason,'') NOT IN ('persisted_suppressed','folded_into_digest') THEN 0 ELSE 1 END,created_at,notice_id")
         packet["coverage"]["expected_notice_suppression"] = {"scanned": sum(bool(n["suppression"]) for n in notices),
             "limit": "Only explicit persisted_suppressed/folded_into_digest are routine suppression; other errors require inspection."}
@@ -412,15 +446,18 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
                     continue
                 session = session_map.get(lane["stream_id"], {})
                 statuses = json.loads(session.get("plan_statuses") or "[]") if session.get("plan_updated_at") and aware(session["plan_updated_at"]) <= aware(n["created_at"]) else []
-                waiting = any(w["bound_stream_id"] == lane["stream_id"] and w["bound_generation"] == lane["generation"]
-                    and aware(w["updated_at"]) <= aware(n["created_at"]) for w in waits)
+                waiting_provenance = [w for w in waits if lane["generation"]
+                    and w["bound_stream_id"] == lane["stream_id"] and w["bound_generation"] == lane["generation"]
+                    and aware(w["updated_at"]) <= aware(n["created_at"])]
+                waiting = bool(waiting_provenance)
                 try:
                     classification, action = digest_action(lane, envelope["evaluated_at"], plan_statuses=statuses, waiting=waiting)
                 except (ValueError, TypeError):
                     classification, action = "invalid_checkpoint", "inspect_dependency_and_record_action_or_reason_and_checkpoint"
                 # Age increments are not a fresh episode. A live tool/hold or
                 # terminal state changes classification and permits reevaluation.
-                episode = (lane["stream_id"], lane["generation"], classification, lane["eta_at"], tuple(statuses), waiting)
+                episode = (lane["stream_id"], lane["generation"], classification, action, lane["eta_at"], tuple(statuses),
+                           tuple((w["lane_id"], w["version"], w["updated_at"]) for w in waiting_provenance))
                 key = (lane["stream_id"], lane["generation"])
                 if episodes.get(key) == episode:
                     continue
@@ -428,6 +465,8 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
                 observations.append({"kind": "digest", "source": "v2_outbound_notices:" + n["notice_id"],
                     "created_at": n["created_at"], "lane": lane, "classification": classification, "next_action": action,
                     "plan_evidence": "known" if statuses else "unknown", "waiting_evidence": waiting,
+                    "plan_provenance": {"source": session.get("plan_source"), "updated_at": session.get("plan_updated_at"),
+                        "statuses": statuses}, "waiting_provenance": waiting_provenance,
                     "execution_evidence": "provider_working_flag; specific tool unknown" if lane["working"] is True else "no live-tool proof"})
     except (sqlite3.Error, OSError):
         packet["gaps"].append({"source": "primary_store", "reason": "unavailable"})
@@ -438,6 +477,29 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
     if len(packet["gaps"]) > 50:
         packet["coverage"]["gap_references"] = {"observed": len(packet["gaps"]), "overflow": len(packet["gaps"]) - 50}
         packet["gaps"] = packet["gaps"][:50]
+    # Retained provenance references are samples, not the SQL membership set.
+    # Keep room for observations even after many successful root rebindings.
+    reference_counts = {name: len(packet.get(name, [])) for name in ("rebind_provenance", "roots", "binding")}
+    while len(encoded(packet)) > max_bytes // 3:
+        eligible = [name for name in reference_counts if packet.get(name)]
+        if not eligible:
+            break
+        name = max(eligible, key=lambda key: len(encoded(packet[key])))
+        rows = packet[name]
+        keep = rows[len(rows) // 2 + 1:]
+        if name == "roots":
+            current = {r["stream_id"] for r in packet.get("binding", [])}
+            keep = sorted(set(keep) | (set(rows) & current))
+            if keep == rows:
+                eligible.remove(name)
+                if not eligible:
+                    break
+                name = max(eligible, key=lambda key: len(encoded(packet[key])))
+                rows = packet[name]
+                keep = rows[len(rows) // 2 + 1:]
+        packet[name] = keep
+        packet.setdefault("reference_coverage", {})[name] = {
+            "observed": reference_counts[name], "retained": len(keep), "deferred": reference_counts[name] - len(keep)}
     observations.sort(key=lambda r: (not urgent(r), str(r.get("created_at", "")), r["source"]))
     packet["coverage"]["observations"] = {"observed": len(observations), "selected": 0,
         "urgent": sum(urgent(r) for r in observations)}
@@ -939,6 +1001,8 @@ def validate_outcome(evidence):
         raise ValueError("resolved requires observed outcome_evidence receipt and measure")
     if aware(evidence.get("observed_at")) > datetime.now(timezone.utc):
         raise ValueError("outcome must already have been observed")
+    if evidence.get("shipped_at") and aware(evidence["shipped_at"]) > datetime.now(timezone.utc):
+        raise ValueError("shipment must already have been observed")
 
 
 def proposal_version(proposal):
@@ -956,14 +1020,40 @@ def weekly_summary(settings, end_day):
         "missing_runs": [], "unreviewed_runs": [], "sources_selected": 0, "sources_reviewed": 0,
         "candidates_observed": 0, "candidates_reviewed": 0, "dispositions": {k: 0 for k in sorted(DISPOSITIONS)},
         "legacy_review_runs": [], "retro_coverage": {"gaps": 0, "deferred": 0, "baseline_not_reviewed": 0},
-        "primary_coverage": {"runs_with_primary": 0, "gaps": 0, "scan_overflow": 0, "packet_deferred": 0,
-                             "done_sampled": 0, "publication_unknown": 0},
+        "primary_coverage": {"runs_with_primary": 0, "gaps": 0, "tables": {}, "deferred_by_kind": {},
+            "observations": {"observed": 0, "selected": 0, "urgent": 0, "deferred_urgent": 0, "deferred": 0},
+            "completion_correlation": {"observed_done": 0, "explicitly_published": 0, "unknown": 0},
+            "reference_deferred": 0},
         "completion_to_publication_seconds": {"observed": 0, "values": []},
         "dot_blocked_time": "unknown unless measured in owning milestone receipts",
         "dot_rework": "unknown unless measured in owning milestone receipts",
         "current_work": [], "current_work_counts": {"defer": 0, "propose": 0, "authorized": 0, "investigate": 0},
         "verified_outcomes": 0, "shipped_observed": 0, "unverified_ownership": 0, "oldest_unresolved": None,
         "dot_measurements": {"sample_receipts": [], "blocked_seconds": [], "correction_rounds": [], "avoidable_stops": []}}
+    outcome_receipts = set()
+
+    def account_outcome(outcome):
+        try:
+            validate_outcome(outcome)
+        except (ValueError, TypeError):
+            return False
+        if outcome["receipt"] not in outcome_receipts:
+            outcome_receipts.add(outcome["receipt"])
+            observed_day = aware(outcome["observed_at"]).astimezone(ZONE).date().isoformat()
+            in_week = days[0] <= observed_day <= days[-1]
+            result["verified_outcomes"] += int(in_week)
+            if outcome.get("shipped_at"):
+                shipped_day = aware(outcome["shipped_at"]).astimezone(ZONE).date().isoformat()
+                result["shipped_observed"] += int(days[0] <= shipped_day <= days[-1])
+            if outcome.get("measurement_scope") == "dot_milestone" and in_week:
+                measurements = result["dot_measurements"]
+                measurements["sample_receipts"].append(outcome["receipt"])
+                for key in ("blocked_seconds", "correction_rounds", "avoidable_stops"):
+                    value = outcome.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                        measurements[key].append(value)
+        return True
+
     linked = {}
     for day in days:
         root = settings.state_root / "runs" / day
@@ -980,11 +1070,20 @@ def weekly_summary(settings, end_day):
             pc = result["primary_coverage"]
             pc["runs_with_primary"] += int(bool(primary.get("store")))
             pc["gaps"] += len(primary.get("gaps", []))
-            pc["scan_overflow"] += sum(c.get("overflow", 0) for c in primary.get("coverage", {}).values())
-            pc["packet_deferred"] += primary.get("deferred", {}).get("count", 0)
-            correlation = primary.get("coverage", {}).get("completion_correlation", {})
-            pc["done_sampled"] += correlation.get("observed_done", 0)
-            pc["publication_unknown"] += correlation.get("unknown", 0)
+            coverage = primary.get("coverage", {})
+            for name, counts in coverage.items():
+                if {"observed", "scanned", "overflow"} <= counts.keys():
+                    total = pc["tables"].setdefault(name, {"observed": 0, "scanned": 0, "overflow": 0})
+                    for key in total:
+                        total[key] += counts[key]
+            for key in pc["observations"]:
+                pc["observations"][key] += (primary.get("deferred", {}).get("count", 0) if key == "deferred"
+                                           else coverage.get("observations", {}).get(key, 0))
+            for kind, count in primary.get("deferred", {}).get("by_kind", {}).items():
+                pc["deferred_by_kind"][kind] = pc["deferred_by_kind"].get(kind, 0) + count
+            for key in pc["completion_correlation"]:
+                pc["completion_correlation"][key] += coverage.get("completion_correlation", {}).get(key, 0)
+            pc["reference_deferred"] += sum(c.get("deferred", 0) for c in primary.get("reference_coverage", {}).values())
             values = [o["completion_to_publication_seconds"] for o in primary.get("observations", []) if "completion_to_publication_seconds" in o]
             result["completion_to_publication_seconds"]["values"].extend(values)
         else:
@@ -1004,6 +1103,8 @@ def weekly_summary(settings, end_day):
         for row in review["result"]["dispositions"]:
             result["candidates_reviewed"] += 1
             result["dispositions"][row["disposition"]] += 1
+            if row["disposition"] == "resolved":
+                account_outcome(row.get("outcome_evidence"))
             if row.get("work_id") and row.get("proposal_id"):
                 linked[(row["work_id"], row["proposal_id"])] = review["reviewed_at"]
     # Older retained work can still be the oldest unresolved issue; the daily
@@ -1045,22 +1146,9 @@ def weekly_summary(settings, end_day):
         outcome = record.get("outcome_evidence")
         if record.get("disposition") in result["current_work_counts"] and record.get("state") not in {"resolved", "shipped", "rejected", "answered"}:
             result["current_work_counts"][record["disposition"]] += 1
-        try:
-            validate_outcome(outcome)
+        if account_outcome(outcome):
             entry["outcome_evidence"] = outcome
-            observed_day = aware(outcome["observed_at"]).astimezone(ZONE).date().isoformat()
-            result["verified_outcomes"] += int(days[0] <= observed_day <= days[-1])
-            if outcome.get("shipped_at") and days[0] <= aware(outcome["shipped_at"]).astimezone(ZONE).date().isoformat() <= days[-1]:
-                aware(outcome["shipped_at"])
-                result["shipped_observed"] += 1
-            if outcome.get("measurement_scope") == "dot_milestone" and days[0] <= observed_day <= days[-1]:
-                measurements = result["dot_measurements"]
-                measurements["sample_receipts"].append(outcome["receipt"])
-                for key in ("blocked_seconds", "correction_rounds", "avoidable_stops"):
-                    value = outcome.get(key)
-                    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
-                        measurements[key].append(value)
-        except (ValueError, TypeError):
+        else:
             entry["outcome"] = "unverified"
             if not result["oldest_unresolved"] or first_seen < result["oldest_unresolved"]["first_observed_at"]:
                 result["oldest_unresolved"] = {"work_id": work_id, "proposal_id": identity, "first_observed_at": first_seen}
@@ -1079,7 +1167,7 @@ def weekly_summary(settings, end_day):
     for key in ("blocked_seconds", "correction_rounds", "avoidable_stops"):
         values = result["dot_measurements"][key]
         result["dot_measurements"][key] = {"observed": len(values), "total": sum(values) if values else None}
-    result["coverage_limit"] = "Observed retained daily samples, not universal health. Windows can overlap; counts are sampled receipts, not unique fleet incidents. Legacy reasons were not semantically validated."
+    result["coverage_limit"] = "Observed retained daily samples, not universal health. Windows can overlap; counts are sampled receipts, not unique fleet incidents. Outcomes cover retained resolved review rows and current normal-work proposal metadata; prior proposal versions without retained outcome receipts are unknown. Legacy reasons were not semantically validated."
     return result
 
 
@@ -1502,8 +1590,9 @@ class Pipeline:
             if old:
                 if old["result"] != result:
                     raise ValueError("run already reviewed; amend normal work rather than repeat ingestion")
-                if final["packet"].get("schema_version") == 2:
+                if final["packet"].get("schema_version") == 2 and "weekly_summary" not in old:
                     old = {**old, "weekly_summary": retain_weekly_summary(self.settings, run_id)}
+                    atomic(root / "review.json", old)
                 return old
             receipt = {"result": result, "actor": binding, "reviewed_at": now_iso(), "decision_ready_at": now_iso()}
             manifest = read(root / "collection.json")
@@ -1561,7 +1650,8 @@ class Pipeline:
             text = preimage.decode()
             records = proposals(text)
             record = records.get(identity, {"attempts": []})
-            validate_proposal(proposal, require_v2=disposition == "defer" and identity not in records)
+            validate_proposal(proposal, require_v2=record.get("schema_version") == 2 or
+                              (disposition == "defer" and identity not in records))
             old_version = record.get("version")
             attempts = record["attempts"]
             # Query all historical attempts, including terminal ones: an answer
@@ -1594,6 +1684,8 @@ class Pipeline:
                 if status["question"]["state"] == "open":
                     raise RuntimeError("old-version live question cannot be retired")
                 live = []
+            if old_version != version and "outcome_evidence" not in proposal:
+                record.pop("outcome_evidence", None)
             record.update({k: proposal[k] for k in proposal if k not in {"attempts", "answer", "version", "state"}})
             record["version"] = version
             if answers:

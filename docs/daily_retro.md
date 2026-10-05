@@ -59,7 +59,7 @@ and evaluation measure when one is warranted.
 
 Both timestamps need offsets, an ordered range ending by collection cutoff,
 and overlap with the collection window starting at previous local midnight.
-Missing, invalid, future or stale windows and missing/empty sections remain
+Missing, invalid, future or stale windows and missing/empty or duplicate sections remain
 coverage gaps. A marker alone is not a lesson. These are section contents, so
 no shared frontmatter schema change is required. Capture at material milestones,
 incidents and corrections; continue the next unblocked milestone during review.
@@ -99,6 +99,11 @@ with a 24 KiB bound, at most 100 routine observations and explicit deferred coun
 by kind and urgent count. It shares the existing 40-source/64 KiB intake bound.
 Observed failures and unexplained stalls that fit precede routine samples.
 Overflow and unavailable binding/recipient/hold provenance remain visible.
+Large binding/rebind reference lists are sampled with observed, retained and
+deferred counts; this does not restrict recursive SQL membership. Notices cover
+both scoped senders and recipients. Archived plans use the same safe projection
+as live plans, with live rows authoritative. A waiting exemption retains the
+exact configured composite's matched lane, generation, version and timestamp.
 This is a bounded sample, not complete fleet health or historical coverage.
 
 At the first digest with an expired checkpoint or more than two hours idle
@@ -185,6 +190,8 @@ acceptance, checkpoint, disposition, measure, authority and citations. Changing
 those fields cannot reuse an old approval. Review binds the same disposition
 and exact current proposal version. Existing schema-1 decisions can still be
 reconciled; they cannot establish schema-2 accountable ownership.
+An existing schema-2 proposal cannot downgrade on replay. A changed proposal
+without new outcome evidence clears the previous scope's outcome.
 
 The helper retains an immutable local decision receipt pointer; the normal work
 proposal remains the authority. Record an observed result through the same
@@ -207,7 +214,8 @@ observed outcomes, oldest unresolved work and checkpoint state. It reports
 missing days, historical semantic limits, scan/packet overflow and unknown
 publication or event-trigger coverage. Overlapping windows count observed
 samples, not unique fleet incidents. Unmeasured DOT blocked time/rework remains
-unknown. Inspect retained receipts without changing them:
+unknown. Primary coverage has one set of per-table observed/scanned/overflow
+totals, observation counts and completion-correlation counts.
 
 When an outcome receipt measures a DOT milestone, use
 `measurement_scope: "dot_milestone"` and measured `blocked_seconds`,
@@ -215,6 +223,10 @@ When an outcome receipt measures a DOT milestone, use
 sample count and total; absent values remain unknown, including unmeasured days.
 Only observed outcome receipts within the named week count as that week's
 verified/shipped results. Older retained unresolved work remains visible.
+Outcome accounting deduplicates exact receipt references from retained resolved
+review rows and current normal-work proposals. Prior proposal versions without
+retained outcome receipts remain unknown. Inspect retained receipts without
+changing them:
 
 ```sh
 python services/chat-stream-v2/tools/daily_retro.py summary --config C --end-day YYYY-MM-DD
