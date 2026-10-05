@@ -8,6 +8,7 @@ from pathlib import Path
 
 from assistant_composite import AssistantComposite, AssistantCompositeConfig  # noqa: E402
 from outbound_notices import OutboundNoticeQueue  # noqa: E402
+from server import Server  # noqa: E402
 from store import Store  # noqa: E402
 
 
@@ -16,6 +17,44 @@ AUTHORITY_STREAM = "fixture-host-authority:authority"
 CONVERSATION_STREAM = "fixture-host-conversation:conversation"
 LEAD_STREAM = "fixture-host-lead:lead"
 ROUTER_ENDPOINT = "ssh://fixture-router/assistant-router-v1"
+DAFF_STREAM = "daff:assistant"
+BART_STREAM = "bart:assistant"
+
+
+def test_operator_composite_inventory_hides_daff_but_keeps_bart() -> None:
+    class Composite:
+        def __init__(self, stream_id: str) -> None:
+            self.stream_id = stream_id
+
+        def is_stream(self, stream_id: object) -> bool:
+            return stream_id == self.stream_id
+
+        def project_session(self, session: dict) -> dict:
+            return {**session, "session_kind": "assistant_composite"}
+
+    server = object.__new__(Server)
+    server.assistant_composite = None
+    server.assistant_composites = {
+        "bart": Composite(BART_STREAM),
+        "daff": Composite(DAFF_STREAM),
+    }
+    rows = [
+        {"stream_id": BART_STREAM, "provider": "composite", "visibility": "visible"},
+        {"stream_id": DAFF_STREAM, "provider": "composite", "visibility": "visible"},
+        {"stream_id": "thoth:operator-work", "provider": "claude", "visibility": "default"},
+    ]
+
+    operator_rows = server._filter_sessions_for_client(
+        rows, include_subagents=False, opened_by_host_ids=None,
+        include_assistant_composite=True,
+    )
+    assert [row["stream_id"] for row in operator_rows] == [BART_STREAM, "thoth:operator-work"]
+
+    daff_scope_row_is_visible = server._session_is_visible_to_client(
+        rows[1], include_subagents=False, opened_by_host_ids=None,
+        include_assistant_composite=True, scoped_stream_id=DAFF_STREAM,
+    )
+    assert daff_scope_row_is_visible is True
 
 
 async def _open_backend(store, stream_id: str):

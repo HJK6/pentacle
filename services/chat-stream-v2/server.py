@@ -86,6 +86,7 @@ SYSTEM_PRODUCER_STREAM_TOKEN_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN"
 SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE"
 SYSTEM_PRODUCER_STREAM_ID_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_ID"
 FIXED_SYSTEM_PRODUCER_STREAM_ID = "altum-bot-cd"
+DAFF_ASSISTANT_STREAM_ID = "daff:assistant"
 SYSTEM_NOTIFICATION_CREATE_FIELDS = frozenset({
     "type", "request_id", "from_stream_id", "stream_token", "producer",
     "title", "body", "severity", "dedup_key", "actions",
@@ -1841,14 +1842,21 @@ class Server:
         include_subagents: bool,
         opened_by_host_ids: frozenset[str] | None,
         include_assistant_composite: bool = False,
+        scoped_stream_id: str | None = None,
     ) -> bool:
         if session is None:
             return True
-        if (
+        stream_id = str(session.get("stream_id") or "")
+        composite = (
             str(session.get("provider") or "") == "composite"
-            and self._composite_for(session.get("stream_id")) is not None
-            and not include_assistant_composite
-        ):
+            and self._composite_for(stream_id) is not None
+        )
+        # Capability means "can render composites" (Bart); it does not grant
+        # the operator access to Aliyah's scoped Daff projection. Only the
+        # server-authenticated Daff stream scope may pass this row.
+        if composite and stream_id == DAFF_ASSISTANT_STREAM_ID and scoped_stream_id != DAFF_ASSISTANT_STREAM_ID:
+            return False
+        if composite and not include_assistant_composite:
             return False
         visibility = str(session.get("visibility") or "default").lower()
         if not include_subagents and visibility in {"hidden", "nested", "subagent"}:
@@ -1863,10 +1871,12 @@ class Server:
         include_subagents: bool,
         opened_by_host_ids: frozenset[str] | None,
         include_assistant_composite: bool = False,
+        scoped_stream_id: str | None = None,
     ) -> bool:
         session = self.sessions.get(stream_id) if self.sessions is not None and stream_id else None
         return self._session_is_visible_to_client(
             session, include_subagents, opened_by_host_ids, include_assistant_composite,
+            scoped_stream_id,
         )
 
     def _filter_sessions_for_client(
@@ -1875,6 +1885,7 @@ class Server:
         include_subagents: bool,
         opened_by_host_ids: frozenset[str] | None,
         include_assistant_composite: bool = False,
+        scoped_stream_id: str | None = None,
     ) -> list[dict[str, Any]]:
         return [
             self._project_assistant_composite_session(session)
@@ -1882,6 +1893,7 @@ class Server:
             if isinstance(session, dict)
             and self._session_is_visible_to_client(
                 session, include_subagents, opened_by_host_ids, include_assistant_composite,
+                scoped_stream_id,
             )
         ]
 
@@ -2054,6 +2066,7 @@ class Server:
             projected = self._filter_sessions_for_client(
                 sessions, include_subagents, opened_by_host_ids,
                 bool(self._client_assistant_composite_v1.get(websocket, False)),
+                self._scoped_stream_for(websocket),
             )
             # A summary-mode (mobile) client gets the SAME compact rows on the
             # broadcast path as it already gets in its hello snapshot — the
@@ -2316,6 +2329,7 @@ class Server:
         snapshot_sessions = self._filter_sessions_for_client(
             sessions, include_subagents, opened_by_host_ids,
             self._assistant_composite_capable_for_message(msg),
+            self._scoped_stream_for(websocket) if websocket is not None else None,
         )
         # `agent-orch list` consumes this snapshot (summary mode), so the role
         # provenance projection must ride the snapshot rows, not only the
@@ -2439,6 +2453,7 @@ class Server:
         active = self._filter_sessions_for_client(
             self.sessions.list_open(), include_subagents, opened_by_host_ids,
             self._assistant_composite_capable_for_message(msg),
+            self._scoped_stream_for(msg.get("_client_websocket")),
         )
         sources = await self.store.all_role_sources() if self.store is not None else {}
         active = [
