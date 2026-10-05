@@ -301,7 +301,6 @@ def test_coalesced_request_keeps_its_own_meta_without_borrowing_winner(tmp_path)
     asyncio.run(go())
 
 
-
 def test_same_request_replay_retains_original_meta(tmp_path):
     from test_send_semantics import FakeTmux, _new_comms, _open, HOST, NAME
 
@@ -331,7 +330,6 @@ def test_same_request_replay_retains_original_meta(tmp_path):
             store.stop()
 
     asyncio.run(go())
-
 
 
 def test_same_request_replay_after_rotated_retry_keeps_original_meta(tmp_path):
@@ -383,6 +381,93 @@ def test_same_request_replay_after_rotated_retry_keeps_original_meta(tmp_path):
                 (target, "send-interleaved-original"),
             )])
             assert after[:len(original_rows)] == original_rows
+        finally:
+            store.stop()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("original,latest,expected", [
+    ({"voice": {"duration_s": 5.0}, "discard": True}, {}, {"voice": {"duration_s": 5.0}}),
+    ({}, {"voice": {"duration_s": 88.0}}, {}),
+    ({"voice": {"duration_s": "invalid"}}, {"voice": {"duration_s": 88.0}}, {}),
+])
+def test_existing_receipt_history_projects_and_replays_first_request_meta(tmp_path, original, latest, expected):
+    """Synthetic pre-upgrade history, including the original reported shape."""
+    from test_send_semantics import FakeTmux, _new_comms, _open, HOST, NAME
+    from ingest import append_ingested_event
+
+    async def go():
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        target = f"{HOST}:{NAME}"
+        request = "send-existing-voice"
+        try:
+            await _open(comms, sessions)
+            for state, meta in [("accepted", original), ("landed", latest)]:
+                await store.append_send_receipt(
+                    to_stream_id=target, request_id=request, receipt_id="original",
+                    state=state, wire_text="existing transcript", display_text="existing transcript",
+                    attachments=[], delivery=state, submission_confirmed=state == "landed",
+                    meta_json=json.dumps(meta),
+                )
+            prior = await store.submit(lambda conn: [dict(row) for row in conn.execute(
+                "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
+                (target, request),
+            )])
+            # Strong negative controls: both other keys carry a different duration.
+            for other_target, other_request in [(target, "send-different-request"), ("other:seat", request)]:
+                await store.append_send_receipt(
+                    to_stream_id=other_target, request_id=other_request, receipt_id="other",
+                    state="landed", wire_text="existing transcript", display_text="existing transcript",
+                    attachments=[], delivery="landed", submission_confirmed=True,
+                    meta_json=json.dumps({"voice": {"duration_s": 99.0}}),
+                )
+            receipt = await store.get_send_receipt(target, request)
+            assert receipt["state"] == "landed"
+            assert receipt.get("meta", {}) == expected
+            # Projection works before any replay appends a new row.
+            casts = []
+            async def broadcast(frame):
+                casts.append(frame)
+            event = {
+                "kind": "USER", "stream_id": target, "provider": "claude",
+                "text": "existing transcript", "request_id": request,
+                "meta": {"voice": {"duration_s": 999.0}},
+                "timestamp": "2026-10-05T16:00:00Z",
+                "raw": {"jsonl_record_uuid": "existing-voice", "jsonl_event_index": 0},
+            }
+            # Simulate a canonical USER row persisted by the old runtime. Reads
+            # must recover its original metadata without rewriting that row.
+            old_event = {**event, "receipt_id": "original"}
+            old_event.pop("meta")
+            old_id = await store.append_session_event(target, old_event, identity="old-user", limit=50)
+            raw_before = await store.submit(lambda conn: conn.execute(
+                "SELECT event_json FROM session_event_tail WHERE event_id=?", (old_id,),
+            ).fetchone()[0])
+            assert (await store.fetch_projected_session_event(target, old_id)).get("meta", {}) == expected
+            assert (await store.project_session_events([old_event]))[0].get("meta", {}) == expected
+            assert (await store.fetch_session_event_tail(target, limit=50))[0].get("meta", {}) == expected
+            for unbound in [{**old_event, "receipt_id": "unrelated"}, {**old_event, "text": "different transcript"}]:
+                assert "meta" not in (await store.project_session_events([unbound]))[0]
+            assert await store.submit(lambda conn: conn.execute(
+                "SELECT event_json FROM session_event_tail WHERE event_id=?", (old_id,),
+            ).fetchone()[0]) == raw_before
+            await append_ingested_event(store, broadcast, event, recent_limit=50)
+            history = await store.fetch_session_event_tail(target, limit=50)
+            assert history[0].get("meta", {}) == expected
+            assert casts[0]["event"].get("meta", {}) == expected
+            assert (await store.stamp_event_with_send_receipt(history[0])).get("meta", {}) == expected
+            replay = await comms.send({"stream_id": target, "text": "existing transcript", "request_id": request})
+            assert replay["coalesced"] is True
+            assert tmux.pastes == []
+            assert (await store.get_send_receipt(target, request)).get("meta", {}) == expected
+            after = await store.submit(lambda conn: [dict(row) for row in conn.execute(
+                "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
+                (target, request),
+            )])
+            assert after[:len(prior)] == prior
+            assert json.loads(after[-1]["meta_json"]) == expected
         finally:
             store.stop()
 

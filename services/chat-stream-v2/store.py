@@ -37,6 +37,8 @@ import time
 from typing import Any, Callable
 import uuid
 
+from send_metadata import normalize_send_meta
+
 import store_exchange
 import store_attachments
 import store_usage
@@ -550,6 +552,60 @@ def _send_receipt_row(
     if include_display_text:
         result["display_text"] = str(row["display_text"] or "")
     return result
+
+
+def _project_send_receipt_row(
+    conn: sqlite3.Connection, row: sqlite3.Row, **options: bool,
+) -> dict[str, Any]:
+    """Keep latest outcome fields, but bind meta to the request's first row."""
+    result = _send_receipt_row(row, **options)
+    original = conn.execute(
+        "SELECT meta_json FROM v2_send_receipts "
+        "WHERE to_stream_id=? AND request_id=? ORDER BY rowid ASC LIMIT 1",
+        (row["to_stream_id"], row["request_id"]),
+    ).fetchone()
+    try:
+        raw = json.loads(str(original["meta_json"] or "{}")) if original is not None else {}
+    except (TypeError, ValueError):
+        raw = {}
+    meta = normalize_send_meta(raw)
+    # Composite admission owns this internal receipt marker and its stricter
+    # voice whitelist. Preserve the established composite receipt shape.
+    if isinstance(raw, dict) and raw.get("assistant_composite") is True:
+        meta["assistant_composite"] = True
+    result.pop("meta", None)
+    if meta:
+        result["meta"] = meta
+    return result
+
+
+def _project_session_events_conn(
+    conn: sqlite3.Connection, events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project immutable history, including metadata on old stamped USER rows."""
+    projected = _project_daemon_notice_events_conn(conn, events)
+    for index, event in enumerate(projected):
+        request_id = str(event.get("request_id") or "")
+        receipt_id = str(event.get("receipt_id") or "")
+        if event.get("kind") != "USER" or not receipt_id or not _SEND_REQUEST_ID_RE.fullmatch(request_id):
+            continue
+        row = conn.execute(
+            "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? "
+            "AND receipt_id=? ORDER BY rowid DESC LIMIT 1",
+            (str(event.get("stream_id") or ""), request_id, receipt_id),
+        ).fetchone()
+        if row is None:
+            continue
+        text = str(event.get("text") or "")
+        if text != str(row["display_text"] or "") and _send_wire_digest(text) != row["wire_digest"]:
+            continue
+        meta = normalize_send_meta(_project_send_receipt_row(conn, row).get("meta"))
+        copy = dict(event)
+        copy.pop("meta", None)
+        if meta:
+            copy["meta"] = meta
+        projected[index] = copy
+    return projected
 
 
 def _insert_send_receipt_row(
@@ -4869,7 +4925,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
                    ORDER BY rowid DESC LIMIT 1""",
                 (target, request),
             ).fetchone()
-            return _send_receipt_row(row) if row is not None else None
+            return _project_send_receipt_row(conn, row) if row is not None else None
 
         return await self.submit(_op)
 
@@ -5014,8 +5070,8 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
                     anchored is not None
                     and str(anchored["wire_digest"] or "") == _send_wire_digest(text)
                 ):
-                    return _send_receipt_row(
-                        anchored, include_attachments=True, include_display_text=True,
+                    return _project_send_receipt_row(
+                        conn, anchored, include_attachments=True, include_display_text=True,
                     )
                 return None
 
@@ -5032,8 +5088,8 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
                     exact is not None
                     and str(exact["wire_digest"] or "") == _send_wire_digest(text)
                 ):
-                    return _send_receipt_row(
-                        exact, include_attachments=True, include_display_text=True,
+                    return _project_send_receipt_row(
+                        conn, exact, include_attachments=True, include_display_text=True,
                     )
                 return None
 
@@ -5053,8 +5109,8 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             ).fetchall()
             for row in rows:
                 if str(row["wire_digest"] or "") and str(row["wire_digest"]) == _send_wire_digest(text):
-                    return _send_receipt_row(
-                        row, include_attachments=True, include_display_text=True,
+                    return _project_send_receipt_row(
+                        conn, row, include_attachments=True, include_display_text=True,
                     )
             return None
 
@@ -5085,6 +5141,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
         # Echo durable send metadata (meta.voice={duration_s}) so the voice-input
         # mic-glyph caption survives reload/reconcile. Additive; ignored by clients
         # that do not read it.
+        payload.pop("meta", None)
         if receipt.get("meta"):
             payload["meta"] = receipt["meta"]
         attachments = receipt.pop("attachments", [])
@@ -5255,7 +5312,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             return []
         copies = [dict(event) for event in events]
         return await self.submit(
-            lambda conn: _project_daemon_notice_events_conn(conn, copies)
+            lambda conn: _project_session_events_conn(conn, copies)
         )
 
     async def fetch_projected_session_event(
@@ -5281,7 +5338,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             if not isinstance(event, dict):
                 return None
             event["daemon_seq"] = int(event_id)
-            return _project_daemon_notice_events_conn(conn, [event])[0]
+            return _project_session_events_conn(conn, [event])[0]
 
         return await self.submit(_op)
 
@@ -5383,7 +5440,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
                     # value here as on its live broadcast (append_session_event).
                     event["daemon_seq"] = int(row["event_id"])
                     newest_first.append(event)
-            return list(reversed(_project_daemon_notice_events_conn(conn, newest_first)))
+            return list(reversed(_project_session_events_conn(conn, newest_first)))
 
         return await self.submit(_op)
 

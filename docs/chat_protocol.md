@@ -173,8 +173,11 @@ echo/history event and preserved by receipt replay. It is additive: clients with
 contains the transcript as text, with no audio attachment; optimistic_id and
 request_id retain the ordinary send deduplication contract.
 Ordinary send outcomes retain the validated metadata from their send plan. A
-replay of the same request and stream retains that request's durable metadata;
-a rotated request uses its own validated metadata when delivery coalesces.
+replay and receipt/USER projection use the first receipt row for that exact
+request and stream, sanitized through the ordinary-send whitelist. This also
+recovers metadata from older accepted→landed histories whose landed row is
+empty. An originally empty metadata value stays empty; a rotated request uses
+its own validated metadata when delivery coalesces.
 Receipt history remains immutable, and identical transcript text in another
 request or stream cannot replace the metadata of a request-stamped USER event.
 
