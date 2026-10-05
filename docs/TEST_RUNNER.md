@@ -41,7 +41,10 @@ those exact groups receive signals, including after a group leader exits.
 SIGINT/SIGTERM stop scheduling and clean the active group.
 
 Live surviving members are reported by their actual PIDs and file, and make the
-run fail. Inspection/signal errors are non-success. Dead unreaped zombie PIDs
+run fail. Known limit: a descendant that leaves the owned process group
+(`setsid` or a detached spawn) is neither signalled nor reported, because the
+runner never acts outside groups it started; such a file can show clean cleanup
+while the escapee lives on. Inspection/signal errors are non-success. Dead unreaped zombie PIDs
 are reported separately: they cannot execute or retain descriptors, cannot be
 killed again, and are not mislabeled as live survivors. No process-name matching
 or fleet-host operation is used. Linux inspects /proc; macOS uses a bounded,
@@ -120,7 +123,10 @@ proof. Its final counts, duration and slowest-ten table are in the PR receipt.
 Serial per-file isolation adds wall time compared with the old parallel call;
 it makes attribution, deadlines and cleanup deterministic.
 
-Install the unchanged lockfile dependencies. In this workspace the exercised
-installation is `npm ci --ignore-scripts --no-audit --no-fund`, followed by
+Install the unchanged lockfile dependencies. On a fleet host use plain `npm ci`:
+the root postinstall must run (on macOS it makes the node-pty spawn helper
+executable; without it `test/provider_relogin.test.js` and
+`test/web_server.test.js` fail). The sandbox-only variant exercised in the
+authoring workspace is `npm ci --ignore-scripts --no-audit --no-fund`, followed by
 `npm rebuild node-pty`; writable npm/node-gyp cache directories are environment
 settings only. No dependency, pin or workflow file changes are included.
