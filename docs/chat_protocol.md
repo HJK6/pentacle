@@ -166,9 +166,13 @@ identity bindings reset on daemon restart. An interrupted
 socket can replay the same transcription identity; explicit client retries
 must keep that identity. An empty transcript is not a text send.
 
-The subsequent ordinary `send` accepts optional
+The subsequent `send`, including sends to assistant composites, accepts optional
 `meta: {voice: {duration_s: number}}`. Metadata is stored in the send receipt's
 `meta_json`, attached to the USER echo/history event and preserved by receipt
 replay. It is additive: clients without voice UI can ignore it. The send
 contains the transcript as text, with no audio attachment; optimistic_id and
 request_id retain the ordinary send deduplication contract.
+Composite sends whitelist only finite numeric `voice.duration_s` with
+`0 < duration_s <= 600`, normalized to milliseconds. Other metadata is dropped;
+the receipt retains its internal `assistant_composite` marker. Ordinary-stream
+metadata behavior is unchanged. Voice metadata does not alter send identity.

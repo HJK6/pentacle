@@ -136,3 +136,21 @@ def test_authority_request_uses_existing_closed_operation_transport(monkeypatch)
     assert captured["operation"] == "authority.request"
     assert captured["payload"] == {"reason": "Needs authority coordination"}
     assert captured["dispatch_id"] == "dispatch-1" and captured.get("lane_id") is None
+
+
+def test_assistant_proactive_publish_omits_dispatch(monkeypatch):
+    args = cli.build_parser().parse_args([
+        'assistant', 'publish', '--proactive', '--request-id', 'proactive',
+        '--composite-stream-id', 'fixture:assistant', '--publish-kind', 'status', '--message', 'progress'])
+    captured = {}
+    monkeypatch.setattr(cli, '_assistant_call', lambda args, payload: captured.update(payload) or 0)
+    assert args.func(args) == 0
+    assert 'dispatch_id' not in captured and 'reply_to_message_id' not in captured
+
+
+def test_assistant_publish_requires_dispatch_or_proactive(monkeypatch):
+    args = cli.build_parser().parse_args([
+        'assistant', 'publish', '--request-id', 'bad', '--composite-stream-id', 'fixture:assistant',
+        '--publish-kind', 'prose', '--message', 'progress'])
+    monkeypatch.setattr(cli, '_assistant_call', lambda *args: 99)
+    assert args.func(args) == 2

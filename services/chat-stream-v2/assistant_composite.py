@@ -614,6 +614,7 @@ class AssistantComposite:
             input_request_id=request_id,
             body=body,
             attachments=attachments,
+            meta=msg.get("meta"),
             reply_to_message_id=_optional_id(msg.get("reply_to_message_id")),
             reply_to_question_id=_optional_id(msg.get("reply_to_question_id")),
             actor_stream_id=operator_principal,
@@ -1336,7 +1337,8 @@ class AssistantComposite:
         body = msg.get("message")
         body = "" if body is None else str(body)
         attachment_ids = _id_list(msg.get("attachment_ids"), "assistant_publish_attachment_ids_invalid")
-        if not publication_key or not dispatch_id or (not body and not attachment_ids):
+        if (not publication_key or (not body and not attachment_ids)
+                or "dispatch_id" in msg and not dispatch_id):
             raise ValueError("assistant_publish_required_fields")
         kind = str(msg.get("publish_kind") or "")
         if kind not in {"prose", "question", "result", "status"}:
@@ -1346,30 +1348,52 @@ class AssistantComposite:
                 or response_state is not None and kind == "question"
                 or response_state == "acknowledged" and kind == "result"):
             raise ValueError("assistant_publish_response_state_invalid")
-        route = await self.store.find_assistant_composite_route_by_dispatch(dispatch_id)
-        try:
-            route_payload = json.loads(str((route or {}).get("route_json") or "{}"))
-        except (TypeError, ValueError):
-            route_payload = {}
-        direct_route = route_payload.get("admission_mode") == "direct_primary"
-        if direct_route and kind == "prose" and (
-            response_state != "final" or publication_key != "publish:" + dispatch_id
-        ):
-            raise ValueError("assistant_direct_publication_identity_invalid")
-        if route is None or not await self._is_current_dispatch_actor(
-            route, str(actor_stream_id or ""),
-            allow_authority=kind != "question" and not direct_route,
-        ):
-            raise ValueError("assistant_publish_provenance_unverified")
-        if route["routing_state"] != "resolved":
-            raise ValueError("assistant_publish_dispatch_state_invalid")
-        actor_generation = await self._authenticated_generation(msg, actor_stream_id)
-        reply_to_message_id = _optional_id(msg.get("reply_to_message_id"))
-        reply_to_question_id = _optional_id(msg.get("reply_to_question_id"))
-        if reply_to_message_id != _optional_id(route.get("input_identity")):
-            raise ValueError("assistant_publish_reply_unverified")
-        if kind != "question" and reply_to_question_id != _optional_id(route.get("reply_to_question_id")):
-            raise ValueError("assistant_publish_question_unverified")
+        proactive = dispatch_id is None
+        if proactive:
+            auth = msg.get("_auth_context") or {}
+            if (auth.get("token_verified") is not True or auth.get("scoped_principal")
+                    or auth.get("dot_principal") or auth.get("stream_id") != actor_stream_id
+                    or not isinstance(auth.get("session_generation"), str)
+                    or not auth["session_generation"]):
+                raise ValueError("assistant_publish_provenance_unverified")
+            if (kind not in {"prose", "status"} or attachment_ids
+                    or msg.get("reply_to_message_id") is not None
+                    or msg.get("reply_to_question_id") is not None):
+                raise ValueError("assistant_publish_payload_invalid")
+            binding = await self.binding()
+            actor_generation = auth["session_generation"]
+            if (not self.config.direct_primary or binding.get("stream_id") != actor_stream_id
+                    or binding.get("generation") != actor_generation):
+                raise ValueError("assistant_publish_provenance_unverified")
+            dispatch_id = ""
+            reply_to_message_id = reply_to_question_id = None
+            direct_route = False
+            route = None
+        else:
+            route = await self.store.find_assistant_composite_route_by_dispatch(dispatch_id)
+            try:
+                route_payload = json.loads(str((route or {}).get("route_json") or "{}"))
+            except (TypeError, ValueError):
+                route_payload = {}
+            direct_route = route_payload.get("admission_mode") == "direct_primary"
+            if direct_route and kind == "prose" and (
+                response_state != "final" or publication_key != "publish:" + dispatch_id
+            ):
+                raise ValueError("assistant_direct_publication_identity_invalid")
+            if route is None or not await self._is_current_dispatch_actor(
+                route, str(actor_stream_id or ""),
+                allow_authority=kind != "question" and not direct_route,
+            ):
+                raise ValueError("assistant_publish_provenance_unverified")
+            if route["routing_state"] != "resolved":
+                raise ValueError("assistant_publish_dispatch_state_invalid")
+            actor_generation = await self._authenticated_generation(msg, actor_stream_id)
+            reply_to_message_id = _optional_id(msg.get("reply_to_message_id"))
+            reply_to_question_id = _optional_id(msg.get("reply_to_question_id"))
+            if reply_to_message_id != _optional_id(route.get("input_identity")):
+                raise ValueError("assistant_publish_reply_unverified")
+            if kind != "question" and reply_to_question_id != _optional_id(route.get("reply_to_question_id")):
+                raise ValueError("assistant_publish_question_unverified")
         evidence_refs = _id_list(msg.get("evidence_refs"), "assistant_publish_evidence_refs_invalid")
         attachments = []
         if attachment_ids:
@@ -1426,6 +1450,8 @@ class AssistantComposite:
             direct_target_stream_id=str(route.get("route_target") or "") if direct_route else None,
             direct_target_generation=str(route.get("route_target_generation") or "") if direct_route else None,
             direct_single_final=direct_route,
+            proactive_binding_name=self.config.name if proactive else None,
+            proactive_env_binding=self._env_binding() if proactive else None,
         )
         await self.refresh_activity()
         if not stored.get("duplicate"):

@@ -227,6 +227,33 @@ to that seat. A closed seat's questions expire as usual. A failed binding read
 omits the stamp and the wider scope; it never fails hello or a list. Lane
 `question.open` is not used in this mode.
 
+The mirror classifies each primary assistant event by the nearest preceding
+non-sidechain USER or TELL in the same session lifecycle and source transcript.
+A USER matching this binding's resolved direct-primary wire envelope is an
+operator trigger (including queued-command USER rows). Peer tell/send envelopes
+and daemon notice markers suppress mirroring only when their ID resolves to a
+durable tell delivery or outbound notice addressed to the source seat. This
+covers notices, child reports, digests, wakes and Dot messages. Envelope-shaped
+text without that provenance and other unknown triggers still mirror and emit
+`assistant_mirror_unknown_trigger` telemetry. SYSTEM, thinking, tool and
+assistant events do not replace the trigger. Lone glyph finals are dropped.
+
+The current direct-primary binding can explicitly publish a user-directed
+milestone after an excluded trigger:
+
+```sh
+agent-orch assistant publish --proactive --request-id <stable-id> \
+  --composite-stream-id <assistant-stream> --publish-kind status --message <text>
+```
+
+Proactive publication accepts prose/status only, without dispatch/reply IDs or
+attachments. A verified stream token must match the current binding and its
+live generation on every call, including retries. Unbound, stale, other and
+scoped/Dot callers are rejected with `assistant_publish_provenance_unverified`.
+Identical request ID and payload retries return the same event; changed payloads
+return `assistant_publish_conflict`. Rebinding or closing the seat revokes the
+old publisher. No glyph-only final is needed to hide notice-turn prose.
+
 The source transcript remains intact. In the same ingest transaction, the store
 omits a mirrored final when that source turn contains the route's exact frozen
 USER envelope and the same dispatch already has a final prose publication. It
@@ -243,7 +270,8 @@ routes retain prepublication suppression through ambiguous delivery; a proven
 failed delivery releases it. Unclassified events retain the existing short-lived
 exact-text fallback. Existing historical duplicate events are not rewritten.
 
-Focused coverage is in `tests/test_assistant_prose_mirror.py` and
+Focused coverage is in `tests/test_assistant_mirror_trigger_scope.py`,
+`tests/test_assistant_prose_mirror.py` and
 `tests/test_codex_rollout_norm.py` under `services/chat-stream-v2`, including an
 isolated authenticated WebSocket journey. Renderer coverage is in
 `test/shared_transcript_view.test.ts`. Tests use isolated streams/databases and

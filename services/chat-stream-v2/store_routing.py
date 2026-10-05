@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import sqlite3
 import time
 from typing import Any
@@ -673,6 +674,7 @@ class _RoutingStoreMixin:
         reply_to_question_id: str | None,
         actor_stream_id: str | None,
         scoped_credential_id: str | None = None,
+        meta: object = None,
         direct_primary: bool = False,
         direct_target_stream_id: str | None = None,
         direct_target_generation: str | None = None,
@@ -682,6 +684,15 @@ class _RoutingStoreMixin:
             raise ValueError("assistant_scoped_actor_invalid")
         if not input_identity:
             raise ValueError("assistant_input_identity_required")
+        # Composite voice metadata is additive and does not alter input identity.
+        # The transcription route caps takes at ten minutes. Ordinary sends keep
+        # their existing normalization contract.
+        voice_meta = {}
+        voice = meta.get("voice") if isinstance(meta, dict) else None
+        duration = voice.get("duration_s") if isinstance(voice, dict) else None
+        if (not isinstance(duration, bool) and isinstance(duration, (int, float))
+                and 0 < duration <= 600 and math.isfinite(duration)):
+            voice_meta = {"voice": {"duration_s": round(float(duration), 3)}}
         canonical_attachments = json.dumps(attachments, sort_keys=True, separators=(",", ":"))
         material = json.dumps({
             "body": body,
@@ -724,7 +735,7 @@ class _RoutingStoreMixin:
                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (stream_id, input_request_id, receipt_id, "landed", input_identity,
                  _send_wire_digest(body), body, kind, canonical_attachments, "landed", 1,
-                 stamp, actor_stream_id, 1, json.dumps({"assistant_composite": True}, sort_keys=True)),
+                 stamp, actor_stream_id, 1, json.dumps({"assistant_composite": True, **voice_meta}, sort_keys=True)),
             )
             return receipt_id
 
@@ -807,6 +818,8 @@ class _RoutingStoreMixin:
                         "actor_stream_id": actor_stream_id,
                     },
                 }
+                if voice_meta:
+                    event["meta"] = voice_meta
                 event_json = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                 event_key = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
                 cur = conn.execute(
@@ -1128,9 +1141,11 @@ class _RoutingStoreMixin:
         direct_target_stream_id: str | None = None,
         direct_target_generation: str | None = None,
         direct_single_final: bool = False,
+        proactive_binding_name: str | None = None,
+        proactive_env_binding: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Append one assistant event and its idempotency receipt together."""
-        if not publication_key or not dispatch_id:
+        if not publication_key or (not dispatch_id and proactive_binding_name is None):
             raise ValueError("assistant_publication_identity_required")
         canonical_json = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
@@ -1142,7 +1157,22 @@ class _RoutingStoreMixin:
         def _locked_op(conn: sqlite3.Connection) -> dict[str, Any]:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                if actor_generation is not None:
+                if proactive_binding_name is not None:
+                    from store_assistant_binding import _binding_conn
+                    binding = _binding_conn(conn, proactive_env_binding or {},
+                                            name=proactive_binding_name, include_target=False)
+                    if (not actor_stream_id or not actor_generation
+                            or binding.get("stream_id") != actor_stream_id
+                            or binding.get("generation") != actor_generation):
+                        raise ValueError("assistant_publish_provenance_unverified")
+                    try:
+                        _assistant_actor_conn(conn, actor_stream_id, actor_generation)
+                    except ValueError as exc:
+                        raise ValueError("assistant_publish_provenance_unverified") from exc
+                    if (dispatch_id or publish_kind not in {"prose", "status"}
+                            or attachment_ids or reply_to_message_id or reply_to_question_id):
+                        raise ValueError("assistant_publish_payload_invalid")
+                elif actor_generation is not None:
                     _assistant_actor_conn(conn, actor_stream_id, actor_generation)
                 if direct_single_final:
                     if (not direct_target_stream_id or not direct_target_generation
@@ -1173,7 +1203,8 @@ class _RoutingStoreMixin:
                 if prior is not None:
                     saved = dict(prior)
                     if saved["payload_digest"] != digest:
-                        raise ValueError("assistant_publication_idempotency_conflict")
+                        raise ValueError("assistant_publish_conflict" if proactive_binding_name is not None
+                                         else "assistant_publication_idempotency_conflict")
                     replay_event = json.loads(conn.execute(
                         "SELECT event_json FROM session_event_tail WHERE event_id=?", (saved["event_id"],),
                     ).fetchone()[0])
@@ -1181,7 +1212,7 @@ class _RoutingStoreMixin:
                     saved.update({"event": replay_event, "duplicate": True})
                     conn.commit()
                     return saved
-                if actor_generation is not None:
+                if actor_generation is not None and proactive_binding_name is None:
                     route = (dict(direct_route) if direct_single_final else _assistant_dispatch_conn(
                         conn, stream_id, dispatch_id, actor_stream_id, actor_generation,
                         authority=authority_stream_id if publish_kind != "question" else None,

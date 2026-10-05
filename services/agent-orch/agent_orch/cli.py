@@ -1551,6 +1551,12 @@ def assistant_publish(args: argparse.Namespace) -> int:
     if not isinstance(attachment_ids, list) or not isinstance(evidence_refs, list):
         print("agent-orch assistant publish: ID/ref options must be arrays", file=sys.stderr)
         return 2
+    proactive = getattr(args, "proactive", False)
+    if (proactive and (args.dispatch_id or args.reply_to_message_id or args.reply_to_question_id
+                       or attachment_ids or args.publish_kind not in {"prose", "status"})
+            or not proactive and (not args.dispatch_id or not args.reply_to_message_id)):
+        print("agent-orch assistant publish: use --proactive for prose/status without dispatch, reply or attachments; otherwise dispatch/reply IDs are required", file=sys.stderr)
+        return 2
     payload: dict[str, object] = {
         "type": "assistant.publish",
         "request_id": args.request_id,
@@ -1563,6 +1569,9 @@ def assistant_publish(args: argparse.Namespace) -> int:
         "attachment_ids": attachment_ids,
         "evidence_refs": evidence_refs,
     }
+    if proactive:
+        for key in ("dispatch_id", "reply_to_message_id", "reply_to_question_id"):
+            payload.pop(key)
     if getattr(args, "response_state", None) is not None:
         payload["response_state"] = args.response_state
     return _assistant_call(args, payload)
@@ -5096,8 +5105,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     assistant_publish_parser.add_argument("--request-id", required=True)
     assistant_publish_parser.add_argument("--composite-stream-id", required=True)
-    assistant_publish_parser.add_argument("--dispatch-id", required=True)
-    assistant_publish_parser.add_argument("--reply-to-message-id", required=True)
+    assistant_publish_parser.add_argument("--proactive", action="store_true", help="publish prose/status from the current direct-primary binding")
+    assistant_publish_parser.add_argument("--dispatch-id")
+    assistant_publish_parser.add_argument("--reply-to-message-id")
     assistant_publish_parser.add_argument("--reply-to-question-id")
     assistant_publish_parser.add_argument(
         "--publish-kind", choices=("prose", "question", "result", "status"), required=True,

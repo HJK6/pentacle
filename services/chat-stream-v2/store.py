@@ -1755,6 +1755,58 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
                 recorded_at=recorded_at,
             )
 
+    def _assistant_mirror_trigger_conn(
+        self, conn: sqlite3.Connection, *, composite_stream_id: str,
+        source_stream_id: str, source_generation: str, session_created_at: str,
+        source_event_id: int, transcript: Any,
+    ) -> str:
+        """Classify the nearest primary USER/TELL in this source transcript."""
+        if not isinstance(transcript, str) or not transcript:
+            return "unknown"
+        trigger = conn.execute(
+            "SELECT event_json FROM session_event_tail WHERE stream_id=? "
+            "AND session_created_at=? AND event_id<? "
+            "AND json_extract(event_json,'$.raw.source_session_identity')=? "
+            "AND json_extract(event_json,'$.kind') IN ('USER','TELL') "
+            "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
+            "ORDER BY event_id DESC LIMIT 1",
+            (source_stream_id, session_created_at, source_event_id, transcript),
+        ).fetchone()
+        if trigger is None:
+            return "unknown"
+        event = json.loads(trigger["event_json"])
+        text = event.get("text")
+        if not isinstance(text, str):
+            return "unknown"
+        if event.get("kind") == "USER" and conn.execute(
+            "SELECT 1 FROM v2_assistant_composite_routes WHERE stream_id=? "
+            "AND routing_state='resolved' AND route_target=? AND route_target_generation=? "
+            "AND json_extract(route_json,'$.admission_mode')='direct_primary' "
+            "AND json_extract(route_json,'$.direct_envelope.wire_body')=? LIMIT 1",
+            (composite_stream_id, source_stream_id, source_generation, text),
+        ).fetchone() is not None:
+            return "operator"
+        peer = re.match(r"^\[from [^\]\r\n]+\]\s+\[(?:tell|send):([^\]\s]+)\]", text)
+        notice = re.match(r"^\[pentacle-notice:([^\]\s]+)\]", text)
+        marker = peer or notice
+        if marker is None:
+            return "unknown"
+        identifier = marker.group(1)
+        if conn.execute(
+            "SELECT 1 FROM v2_outbound_notices WHERE recipient_stream_id=? "
+            "AND (notice_id=? OR tell_id=?) LIMIT 1",
+            (source_stream_id, identifier, identifier),
+        ).fetchone() is not None:
+            return "excluded"
+        if peer and conn.execute(
+            "SELECT 1 FROM v2_tell_deliveries WHERE tell_id=? "
+            "AND (json_extract(reply,'$.delivery.to_stream_id')=? "
+            "OR json_extract(reply,'$.reply.to_stream_id')=?)",
+            (identifier, source_stream_id, source_stream_id),
+        ).fetchone() is not None:
+            return "excluded"
+        return "unknown"
+
     def _mirror_source_event_for_binding(
         self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str], *,
         source_stream_id: str, source_event: dict[str, Any], source_event_id: int,
@@ -1784,6 +1836,21 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
         ).fetchone()
         if source is None or source["status"] != "open" or source["generation"] != source_generation:
             return
+        raw = source_event.get("raw")
+        raw = raw if isinstance(raw, dict) else {}
+        if raw.get("is_sidechain"):
+            return
+        trigger = self._assistant_mirror_trigger_conn(
+            conn, composite_stream_id=binding[0], source_stream_id=source_stream_id,
+            source_generation=source_generation, session_created_at=source["created_at"],
+            source_event_id=source_event_id, transcript=raw.get("source_session_identity"),
+        )
+        if trigger == "excluded":
+            return
+        if trigger == "unknown":
+            log.info("assistant_mirror_unknown_trigger source_stream_id=%s source_event_id=%s",
+                     source_stream_id, source_event_id,
+                     extra={"subsystem": "assistant_mirror"})
         composite_host, _, composite_name = binding[0].partition(":")
         composite = conn.execute(
             "SELECT created_at FROM sessions WHERE host=? AND session_name=? "

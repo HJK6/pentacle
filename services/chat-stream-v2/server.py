@@ -3182,6 +3182,12 @@ class Server:
     async def _on_assistant_publish(self, msg: dict[str, Any]) -> dict[str, Any]:
         composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if not msg.get("dispatch_id") and (
+            composite is None or auth.get("token_verified") is not True
+            or auth.get("scoped_principal") or auth.get("dot_principal")
+        ):
+            raise VerbError("assistant_publish_provenance_unverified",
+                            "proactive publication requires a verified current binding")
         if msg.get("attachment_ids") and (
             auth.get("token_verified") is not True
             or not isinstance(auth.get("session_generation"), str)
