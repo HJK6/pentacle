@@ -106,6 +106,24 @@ Run the final merge gate from a clean checkout; it produces a source-bound evide
 
 The launchd template under `deploy/` runs every 12 hours and sets the machine-file path. The deploy helper also passes the installed daemon’s machine-file setting explicitly to its immediate full smoke, clearing inherited JSON configuration and host-subset overrides. A missing or invalid setting remains a post-activation smoke failure (exit 6); the activated SHA/PID stamp and do-not-retry instruction are preserved. A full run closes each spawned session, including after cell failure; a failed teardown is reported as a failure even if the provider is over quota. The explicit `<url> <host>` post-deploy canary remains a single Codex promptless cell.
 
+### Transcript ingest fairness
+
+Cold ingest replays open streams from the beginning. Each pass retains the shared
+500-new-event cap and starts after the last visited stream, using stream identity
+and inventory order. If that stream disappears, its first surviving successor
+from the previous inventory goes first. Backoff skips, zero inserts and handled
+failures advance the scheduling frontier; a backoff skip does not attempt ingest.
+Each snapshot row is visited at most once per pass. Per-stream offsets, durable
+dedupe, lifecycle fences and byte limits remain intact, so finite old transcripts
+continue replaying without skipping history while fresh streams receive service.
+
+For a fixed finite inventory of N continuously eligible streams, each receives
+an ingest attempt within N completed passes while the actor runs. Churn, actor
+restart and whole-pass backoff do not inherit this bound. Wall time is conditional
+on bounded pass duration; a prompt buried within its own stream's history may
+still need more service before its durable USER proof appears. This scheduling
+bound alone does not guarantee readiness within the prompt-proof deadline.
+
 ### Busy-seat send probe
 
 `tools/busy_seat_send_probe.py --provider claude|codex [--host H --ssh USER@HOST]` reproduces a send to a working seat without a UI: it spawns one low-cost hidden seat, holds it in a ~75 s foreground command, sends once through `send`, and compares `send.result` with the pane's native-queue chrome. Verdicts: `queued_reported` (0), `queued_unreported` (1), `not_queued` (2), `harness_error` (3, including a failed cleanup close). The seat is always closed unless `--keep`. Codex 0.159 needs a working sandbox on the seat host (`bwrap` on Linux).
