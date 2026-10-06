@@ -705,10 +705,7 @@ class SpawnCtl:
             raise VerbError(
                 "resume_foreign_target", "retained row is not a Claude lifecycle",
             )
-        if prior is not None and str(prior.get("status") or "") == "open":
-            raise VerbError(
-                "resume_session_already_live", "Claude session is already open",
-            )
+        prior_open = prior is not None and str(prior.get("status") or "") == "open"
 
         machine = self._launch_machine(host, "claude")
         if machine is None:
@@ -726,11 +723,40 @@ class SpawnCtl:
             str(prior.get("session_name") or "")
             if prior else f"v2-resume-{session_id}"
         )
-        if prior is not None and await tmux.has_session(name):
+        if prior_open:
+            await self._close_open_prior_if_pane_gone(host, name, prior, tmux)
+        elif prior is not None and await tmux.has_session(name):
             raise VerbError(
                 "resume_session_already_live", "Claude session still has a live pane",
             )
         return name, transcript_path, resume_cwd, prior
+
+    async def _close_open_prior_if_pane_gone(
+        self, host: str, name: str, prior: dict[str, Any], tmux: "tmux_transport.Tmux",
+    ) -> None:
+        """Retire an open row whose pane a fresh probe proves gone (host reboot).
+
+        Only an affirmative ``gone`` is death proof; a live pane, lost contact,
+        a live spawn reservation or a protected seat keep the row open and
+        refuse. The close is the reconciler's own CAS, so history and the
+        generation fence are unchanged and the resume opens a new generation.
+        """
+        refusal = VerbError(
+            "resume_session_already_live", "Claude session is already open",
+        )
+        if await tmux.session_state(name) != "gone":
+            raise refusal
+        now = iso_now()
+        closed = await self.sessions.mark_reconciled_dead(
+            host, name, presumed_dead_at=now, closed_at=now,
+            expected_generation=str(prior.get("session_generation") or ""),
+        )
+        if closed is None:
+            raise refusal
+        await self.store.upsert_session_reap(
+            f"{host}:{name}", reap_status="unknown", survivors=[],
+            attempts=0, updated_at=now,
+        )
 
     async def _brief_from_message(self, msg: dict[str, Any]) -> str:
         inline_keys = ("prompt", "brief", "initial_prompt")

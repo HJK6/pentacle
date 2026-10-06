@@ -279,7 +279,10 @@ class RemotePresence:
             status = "degraded" if reason.endswith("_after_online") else "offline"
             return self._apply_host_status(rows, status, reason)
         if observation.confirms_absence:
-            return (self._apply_host_status(rows, "online", "")
+            # Reachable host, tmux server explicitly gone (reboot): every row's
+            # pane is observed dead. Host reachability must not read as seat
+            # liveness; the reconciler still owns the durable close.
+            return (self._apply(rows, {}, confirmed_absent=True)
                     + self._invalidate_capture_rows(rows))
         if observation.state != "host_online_tmux_present":
             return self._invalidate_capture_rows(rows)
@@ -450,7 +453,10 @@ class RemotePresence:
             alive=alive, raw_sessions=tuple(raw_sessions),
         )
 
-    def _apply(self, hrows: list[dict[str, Any]], alive: dict[str, str]) -> int:
+    def _apply(
+        self, hrows: list[dict[str, Any]], alive: dict[str, str], *,
+        confirmed_absent: bool = False,
+    ) -> int:
         n = 0
         for r in hrows:
             sid = str(r["stream_id"])
@@ -468,9 +474,9 @@ class RemotePresence:
                 self._known_live.add(key)
                 self._death_emitted.discard(key)
                 self._last_seen[key] = (time.time(), alive[sname])
-            elif alive:
-                # Host reachable AND tmux enumerated real sessions, yet this pane
-                # is absent -> observed dead. Observation only: stamp the field,
+            elif alive or confirmed_absent:
+                # Host reachable AND tmux enumerated real sessions (or its server
+                # is explicitly absent), yet this pane is absent -> observed dead. Observation only: stamp the field,
                 # never close the row or kill anything. Guarded by `alive` being
                 # non-empty so an empty result can't false-death a whole host.
                 prior_live = (

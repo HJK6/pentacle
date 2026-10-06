@@ -308,6 +308,7 @@ def test_resume_rejects_missing_foreign_cross_host_and_live_targets(tmp_path: Pa
                 "localhost", "v2-live", provider="claude",
                 claude_session_id=RESUME_ID, jsonl_path=str(path),
             )
+            tmux.alive.add("v2-live")
             ctl = SpawnCtl(
                 live_store,
                 Sessions(live_store, tmux=tmux, local_host="localhost"),
@@ -572,3 +573,89 @@ def test_launch_failure_releases_resume_reservation_for_new_request(tmp_path: Pa
     assert reservations == []
     assert reply["ok"] is True and reply["stream_id"] == "localhost:v2-original-fable"
     assert attempts == 2
+
+
+class _StateTmux(ResumeTmux):
+    """ResumeTmux whose tri-state liveness probe is scripted."""
+
+    def __init__(self, state: str) -> None:
+        super().__init__()
+        self.state = state
+
+    async def session_state(self, name: str) -> str:
+        return self.state
+
+
+async def _open_prior(store: Store, path: Path) -> dict:
+    row = await store.open_session(
+        "localhost", "v2-original-fable", provider="claude",
+        claude_session_id=RESUME_ID, jsonl_path=str(path), role="lead",
+        title="Fable Altum", objective="Preserve the original discussion",
+        objective_source="explicit",
+    )
+    assert row is not None
+    return row
+
+
+def test_open_row_with_confirmed_gone_pane_resumes_same_stream(tmp_path: Path) -> None:
+    """Host reboot: the row is still open but the pane is proven gone."""
+    async def _go() -> tuple[dict, dict, dict, list[str]]:
+        machine = _machine(tmp_path)
+        path = _write_transcript(machine)
+        store = Store(":memory:")
+        store.start()
+        try:
+            prior = await _open_prior(store, path)
+            tmux = _StateTmux("gone")
+            sessions = Sessions(store, tmux=tmux, local_host="localhost")
+            ctl = SpawnCtl(store, sessions, tmux=tmux, machine=machine)
+            commands = _install_successful_spawn(ctl, sessions, tmux)
+            await ctl.spawn(
+                {
+                    "provider": "claude", "model": "claude-fable-5-1",
+                    "effort": "high", "resume_session_id": RESUME_ID,
+                    "request_id": "resume-after-reboot", "objective": "x",
+                },
+                "localhost",
+            )
+            row = await store.fetch_session("localhost", "v2-original-fable")
+            audit = (await store.submit(lambda conn: [dict(r) for r in conn.execute(
+                "SELECT * FROM v2_close_audit WHERE session_name='v2-original-fable'"
+            )]))[0]
+            return prior, row, audit, commands
+        finally:
+            store.stop()
+
+    prior, row, audit, commands = asyncio.run(_go())
+    assert row["status"] == "open" and row["title"] == "Fable Altum"
+    assert row["session_generation"] != prior["session_generation"]
+    assert audit["close_kind"] == "reconciler_dead"
+    assert len(commands) == 1 and f"--resume {RESUME_ID}" in commands[0]
+
+
+@pytest.mark.parametrize("state", ["alive", "unreachable"])
+def test_open_row_without_death_proof_still_refuses_resume(tmp_path: Path, state: str) -> None:
+    """Controls: a live pane, or lost contact, is never proof of death."""
+    async def _go() -> tuple[str, str]:
+        machine = _machine(tmp_path)
+        path = _write_transcript(machine)
+        store = Store(":memory:")
+        store.start()
+        try:
+            await _open_prior(store, path)
+            tmux = _StateTmux(state)
+            ctl = SpawnCtl(
+                store, Sessions(store, tmux=tmux, local_host="localhost"),
+                tmux=tmux, machine=machine,
+            )
+            with pytest.raises(VerbError) as raised:
+                await ctl._resolve_resume_target(
+                    {"provider": "claude", "resume_session_id": RESUME_ID},
+                    "localhost", tmux,
+                )
+            row = await store.fetch_session("localhost", "v2-original-fable")
+            return raised.value.code, row["status"]
+        finally:
+            store.stop()
+
+    assert asyncio.run(_go()) == ("resume_session_already_live", "open")

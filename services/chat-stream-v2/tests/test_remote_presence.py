@@ -617,6 +617,78 @@ def test_absent_pane_in_nonempty_set_is_observed_dead_not_closed() -> None:
     assert sessions.get("hostc:v2-gone") is not None
 
 
+def test_reboot_tmux_server_absent_marks_rows_dead_without_closing() -> None:
+    """A reachable host whose tmux server is explicitly absent (post-reboot)
+    is affirmative pane death: the stale open row must not stay online/alive.
+    Observation only: the row stays in the inventory for the reconciler."""
+    sessions = _sessions_with([{
+        **_row("hostc", "v2-rebooted"),
+        "session_generation": "generation-1",
+        "pane_status": "pane_alive", "online": True, "pane_pid": "100",
+    }])
+    tmux = _FakeTmux((1, "no server running on /tmp/tmux-1000/default"))
+    hosts = _FakeHosts(LOCAL, {"hostc": tmux}, online={"hostc": True})
+    frames: list[dict[str, object]] = []
+
+    async def broadcast(frame: dict[str, object]) -> None:
+        frames.append(frame)
+
+    presence = RemotePresence(sessions, hosts, broadcast=broadcast)
+    asyncio.run(_observe_and_apply(presence))
+
+    row = sessions.get("hostc:v2-rebooted")
+    assert row is not None
+    assert row["online"] is False and row["pane_status"] == "pane_dead"
+    assert row["host_status"] == "online"
+    assert [f["stream_id"] for f in frames if f["type"] == "session.died"] == [
+        "hostc:v2-rebooted"
+    ]
+
+
+def test_unreachable_host_is_not_death_evidence_for_stale_rows() -> None:
+    """Control: loss of contact (breaker open after online) marks the host
+    degraded but must never stamp pane_dead or emit a death."""
+    sessions = _sessions_with([{
+        **_row("hostc", "v2-rebooted"),
+        "session_generation": "generation-1",
+        "pane_status": "pane_alive", "online": True, "pane_pid": "100",
+    }])
+    tmux = _FakeTmux((1, "no server running on /tmp/tmux-1000/default"))
+    hosts = _FakeHosts(
+        LOCAL, {"hostc": tmux}, online={"hostc": False},
+        reasons={"hostc": "circuit_open_after_online"},
+    )
+    frames: list[dict[str, object]] = []
+
+    async def broadcast(frame: dict[str, object]) -> None:
+        frames.append(frame)
+
+    presence = RemotePresence(sessions, hosts, broadcast=broadcast)
+    asyncio.run(_observe_and_apply(presence))
+
+    row = sessions.get("hostc:v2-rebooted")
+    assert row["pane_status"] == "pane_alive"
+    assert row["host_status"] == "degraded"
+    assert not [f for f in frames if f["type"] == "session.died"]
+
+
+def test_server_return_after_absence_restores_the_live_pane() -> None:
+    sessions = _sessions_with([{
+        **_row("hostc", "v2-rebooted"),
+        "session_generation": "generation-1",
+        "pane_status": "pane_alive", "online": True, "pane_pid": "100",
+    }])
+    tmux = _FakeTmux((1, "no server running on /tmp/tmux-1000/default"))
+    hosts = _FakeHosts(LOCAL, {"hostc": tmux}, online={"hostc": True})
+    presence = RemotePresence(sessions, hosts)
+    asyncio.run(_observe_and_apply(presence))
+    tmux.result = (0, "v2-rebooted\t200\n")
+    asyncio.run(_observe_and_apply(presence))
+
+    row = sessions.get("hostc:v2-rebooted")
+    assert row["online"] is True and row["pane_status"] == "pane_alive"
+
+
 def test_empty_alive_set_is_inconclusive_no_false_death() -> None:
     """rc==0 but zero panes (e.g. a transient server-up/zero-panes race) must not
     false-death a whole host of rows — nothing is stamped."""
