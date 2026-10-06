@@ -195,7 +195,10 @@ def _tmux_in_directory(executable, folder, target, run):
             if cleaned.returncode and not any(text in cleaned.stderr.lower() for text in absent_messages):
                 raise RuntimeError("owned tmux cleanup failed")
             remaining = run([executable, "-f", os.devnull, "-S", target, "has-session", "-t", "=th2-probe"], env=env, capture_output=True, text=True, timeout=2)
-            if remaining.returncode != 1 or not any(text in remaining.stderr.lower() for text in absent_messages):
+            # Linux tmux can answer a has-session that races the dying server with "server exited unexpectedly":
+            # the owned server is gone, which is what this step verifies.
+            gone_messages = absent_messages + ("server exited unexpectedly",)
+            if remaining.returncode != 1 or not any(text in remaining.stderr.lower() for text in gone_messages):
                 raise RuntimeError("owned tmux cleanup could not be verified")
 
 

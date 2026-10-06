@@ -21,6 +21,7 @@
     "test_capabilities.py::test_probe_registry_caches_true_false_and_error",
     "test_capabilities.py::test_scope_manifest_covers_all_new_portability_tests",
     "test_capabilities.py::test_socket_cleanup_failure_is_error_not_absence",
+    "test_capabilities.py::test_tmux_probe_accepts_server_exited_race_after_owned_kill",
     "test_capabilities.py::test_tmux_probe_recovers_from_long_first_directory_without_host_paths",
     "test_capabilities.py::test_tmux_probe_retries_permission_denied_directory_after_cleanup",
     "test_capabilities.py::test_tmux_probe_uses_only_its_disposable_socket",

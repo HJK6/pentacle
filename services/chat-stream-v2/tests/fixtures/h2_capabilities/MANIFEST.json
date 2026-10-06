@@ -5,8 +5,8 @@
       "path": "tests/fixtures/h2_capabilities/changed_tests.json",
       "synthetic": true,
       "contains_real_traffic": false,
-      "bytes": 4843,
-      "sha256": "258a614fdba263c5860165412a6df3118a9594c63bfba2ae38acb82bcfff52ff",
+      "bytes": 4932,
+      "sha256": "e4d17d1b1b878feb0e458ac9fef83378fdf4045e2bb61e98c975b42a4d3434b1",
       "purpose": "Authored synthetic portability fixture or pinned source-contract metadata for TH-H2"
     },
     {
