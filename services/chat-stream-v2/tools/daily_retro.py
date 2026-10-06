@@ -1060,14 +1060,21 @@ def weekly_gap_accounting(settings, days):
     comparison = prior[-1] if prior else week[0] if week else None
     observed = set().union(*(row["keys"] for row in week)) if week else set()
     current_keys = current["keys"] if current else set()
-    return {"status": "unavailable" if not current else "current" if current["run_id"] == days[-1] else "stale",
+    status = "unavailable" if not current else "current" if current["run_id"] == days[-1] else "stale"
+    additions = len(observed - comparison["keys"]) if week and comparison else None
+    actionable = len(current_keys - baseline) if current else None
+    baseline_current = len(current_keys & baseline) if current else None
+    number = lambda value: "unknown" if value is None else str(value)
+    headline = (f"New this week: {number(additions)}; actionable current: {number(actionable)} ({status}).\n"
+                f"Retained initial terminal-format baseline: {number(baseline_current)}.")
+    return {"status": status, "headline": headline,
             "distinct_current": len(current_keys) if current else None,
             "current": pointer(current), "baseline": pointer(seed),
             "baseline_kind": "retained initial terminal-format inventory; age before convention unproven",
             "baseline_initial": len(baseline),
-            "baseline_current": len(current_keys & baseline) if current else None,
-            "actionable_current": len(current_keys - baseline) if current else None,
-            "new_this_week": len(observed - comparison["keys"]) if week and comparison else None,
+            "baseline_current": baseline_current,
+            "actionable_current": actionable,
+            "new_this_week": additions,
             "comparison": pointer(comparison),
             "comparison_mode": "prior_snapshot" if prior and week else "first_observed" if week else "unavailable",
             "missing_dates": [day for day in days if day not in {row["run_id"] for row in week}],
@@ -1380,7 +1387,7 @@ class Pipeline:
                         f"{Path(__file__).resolve()} record-review --config {self.settings.config_path} --run-id {manifest['run_id']} --result RESULT_JSON. "
                         "Use normal work proposal records and decision helper to recover still-open decisions after generation replacement. "
                         "Quiet ordinary days: retain review receipt. Publish material decisions and observed results in the same handling turn through supported visible delivery; hidden prose is never delivery. "
-                        "If record-review returns a due weekly_summary, publish its compact accounting once, including denominators and coverage limits. "
+                        "If record-review returns a due weekly_summary, publish its compact accounting once, leading with gap_accounting.headline (new-this-week and actionable current, baseline as one separate labelled line), then denominators and coverage limits; never sum repeated daily source gaps. "
                         "Ask only for an actual missing grant through the existing versioned decision helper; routine authorized work needs no operator permission.")
             host, session = target.split(":", 1)
             attempt = {"target": target, "generation": generation, "request_id": key,

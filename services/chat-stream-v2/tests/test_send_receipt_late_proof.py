@@ -377,3 +377,24 @@ def test_plain_read_and_valid_proof_preserve_access_guard(tmp_path, monkeypatch)
         finally:
             store.stop()
     asyncio.run(run())
+
+
+def test_qa_precedence_checks_lifecycle_birth(tmp_path):
+    async def run():
+        store, key, proof = await setup_receipt(tmp_path)
+        try:
+            await add_proof(store, key)
+            assert (await read_receipt(store, key, proof))["state"] == "landed"
+            await store.append_send_receipt(to_stream_id=TARGET, request_id=key,
+                receipt_id="synthetic-receipt", state="accepted", wire_text=BODY,
+                display_text=BODY, attachments=[], delivery="committed_pending_proof",
+                submission_confirmed=False, reason="submit_unconfirmed", attempts=1)
+            def change_birth(c):
+                c.execute("UPDATE sessions SET created_at='2026-10-05T11:00:00Z'")
+                c.commit()
+            await store.submit(change_birth)
+            assert (await store.get_send_receipt(TARGET, key))["state"] == "accepted"
+            assert (await read_receipt(store, key, proof))["state"] == "accepted"
+        finally:
+            store.stop()
+    asyncio.run(run())

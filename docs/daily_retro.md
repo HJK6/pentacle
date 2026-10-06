@@ -426,3 +426,8 @@ snapshot, including transient gaps. With no prior snapshot, the first observed
 inventory supplies the comparison and the left boundary remains unknown.
 Retained daily, review and weekly receipts are immutable; projecting a past week
 does not rewrite its published receipt.
+
+Publish the weekly gap headline with new-this-week and actionable current first.
+Keep the retained initial terminal-format baseline on one labelled line; never
+combine it into a summed daily-gap headline. Unknown and stale inventory labels
+remain visible.

@@ -4979,15 +4979,15 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             if (current is None or current["generation"] != original_generation or
                     not proof.pending(latest) or len({r["receipt_id"] for r in rows}) != 1):
                 return {"ready": False, "result": result}
+            claim, birth_time = proof.epoch(rows[0]["created_at"]), proof.epoch(current["created_at"])
+            if claim is None or birth_time is None or birth_time >= claim:
+                return {"ready": False, "result": result}
             prior, conflict = proof.proved_pending_precedence(rows)
             if prior is not None:
                 return {"ready": False, "result": _project_send_receipt_row(conn, prior)}
             if conflict or any(not proof.pending(r) or
                                proof.immutable_identity(r) != proof.immutable_identity(latest)
                                for r in rows):
-                return {"ready": False, "result": result}
-            claim, birth_time = proof.epoch(rows[0]["created_at"]), proof.epoch(current["created_at"])
-            if claim is None or birth_time is None or birth_time >= claim:
                 return {"ready": False, "result": result}
             birth = str(current["created_at"])
             if peers(conn, latest, birth) != 1:

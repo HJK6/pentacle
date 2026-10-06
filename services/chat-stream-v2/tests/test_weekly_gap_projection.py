@@ -116,3 +116,11 @@ def test_pre_week_inventory_is_stale_with_no_week_additions_measure(settings):
     assert result['gap_accounting']['status'] == 'stale'
     assert result['gap_accounting']['new_this_week'] is None
     assert result['retro_coverage']['gaps'] == 1
+
+
+def test_headline_leads_additions_and_actionable_with_baseline_separate(settings):
+    snapshot(settings, '2026-09-28', [gap(), gap('work/in_progress/live/spec.md')])
+    a = retro.weekly_summary(settings, '2026-09-28')['gap_accounting']
+    assert a['headline'].splitlines() == [
+        'New this week: 0; actionable current: 1 (current).',
+        'Retained initial terminal-format baseline: 1.']
