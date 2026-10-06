@@ -5,8 +5,8 @@
       "path": "tests/fixtures/h2_capabilities/changed_tests.json",
       "synthetic": true,
       "contains_real_traffic": false,
-      "bytes": 4673,
-      "sha256": "ccfb99016ec1add1d66083a77e131fa5c44b49217e17c6338093058ea235fdcd",
+      "bytes": 4843,
+      "sha256": "258a614fdba263c5860165412a6df3118a9594c63bfba2ae38acb82bcfff52ff",
       "purpose": "Authored synthetic portability fixture or pinned source-contract metadata for TH-H2"
     },
     {
@@ -21,8 +21,8 @@
       "path": "tests/fixtures/h2_capabilities/original_assertions.json",
       "synthetic": true,
       "contains_real_traffic": false,
-      "bytes": 4932,
-      "sha256": "e841aa5ed2da6a607f918a8f99b965eb2f53b2b27878ff09355991546bb8717e",
+      "bytes": 5040,
+      "sha256": "b2beb8e356a7a996056e3d7627c8b9561e0efacc1b8abf2802c9fe89658954bb",
       "purpose": "Authored synthetic portability fixture or pinned source-contract metadata for TH-H2"
     },
     {

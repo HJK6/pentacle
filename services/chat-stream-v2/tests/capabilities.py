@@ -71,15 +71,23 @@ def command_probe(kind, *, run=subprocess.run, which=shutil.which, child_factory
                 args = [executable, "-p", str(child.pid), "-o", "lstart="]
             else:
                 args = [executable, "-ww", "-p", str(child.pid), "-o", "args="]
-            reply = run(args, capture_output=True, text=True, timeout=2)
+            try:
+                reply = run(args, capture_output=True, text=True, timeout=2)
+            except PermissionError:
+                # A sandbox that forbids exec of ps/lsof is the canonical unavailable capability.
+                return ProbeResult("absent", f"{binary} cannot be executed here (permission denied)")
             if child.poll() is not None:
                 raise RuntimeError("owned child exited during capability probe")
             if reply.returncode != 0:
-                if reply.returncode == 1 and (not reply.stderr.strip() or "permission denied" in reply.stderr.lower()):
+                if reply.returncode == 1 and (not reply.stderr.strip() or any(text in reply.stderr.lower() for text in ("permission denied", "operation not permitted"))):
                     return ProbeResult("absent", f"{binary} cannot inspect the owned child")
                 raise RuntimeError(f"{binary} probe returned unexpected exit {reply.returncode}")
             if kind == "lsof":
-                found = f"n{target}" in reply.stdout and any(line.startswith("a") and line[1:] in {"w", "u"} for line in reply.stdout.splitlines())
+                # lsof prints the resolved path; macOS temp dirs sit behind /var -> /private/var.
+                names = {line[1:] for line in reply.stdout.splitlines() if line.startswith("n")}
+                found = bool(names & {str(target), os.path.realpath(target)}) and any(line.startswith("a") and line[1:] in {"w", "u"} for line in reply.stdout.splitlines())
+                if names and not names & {str(target), os.path.realpath(target)}:
+                    raise RuntimeError("lsof reported a different path for the owned descriptor")
             elif kind == "birth":
                 import re
                 found = bool(re.fullmatch(r"\S+\s+\S+\s+\d{1,2}\s+\d\d:\d\d:\d\d\s+\d{4}", reply.stdout.strip()))

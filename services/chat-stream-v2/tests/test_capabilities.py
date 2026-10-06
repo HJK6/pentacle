@@ -160,7 +160,8 @@ def test_original_assertions_and_tracked_skip_are_unchanged():
         filename, name = key.split("::")
         source = (root / filename).read_text()
         node = next(n for n in ast.parse(source).body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
-        assertions = [ast.dump(n, include_attributes=False) for n in ast.walk(node) if isinstance(n, ast.Assert)]
+        # ast.unparse is stable across interpreter versions; ast.dump changed its default output in 3.13.
+        assertions = [ast.unparse(n) for n in ast.walk(node) if isinstance(n, ast.Assert)]
         assert hashlib.sha256(json.dumps(assertions, sort_keys=True).encode()).hexdigest() == expected, key
         if name == "test_sigkill_then_reap_manifest_cleans":
             first = min([node.lineno] + [d.lineno for d in node.decorator_list])
@@ -188,6 +189,25 @@ def test_lsof_probe_matches_existing_standard_path_fallback():
     result = cap.command_probe("lsof", run=run, which=lambda _: None, child_factory=child_stub,
         isfile=lambda path: path == "/usr/sbin/lsof", access=lambda path, mode: path == "/usr/sbin/lsof")
     assert result.status == "available" and calls[0][0] == "/usr/sbin/lsof"
+
+
+def test_lsof_probe_accepts_resolved_path_and_rejects_a_foreign_one(monkeypatch):
+    import os
+    # lsof prints the resolved path; a temp dir behind a symlink (macOS /var -> /private/var) must still verify.
+    monkeypatch.setattr(os.path, "realpath", lambda path: "/resolved" + str(path))
+    resolved = lambda args, **kwargs: SimpleNamespace(returncode=0, stdout=f"p42420\nf3\naw\nn/resolved{args[-1]}\n", stderr="")
+    assert cap.command_probe("lsof", run=resolved, which=lambda _: "synthetic-lsof", child_factory=child_stub).status == "available"
+    foreign = lambda args, **kwargs: SimpleNamespace(returncode=0, stdout="p42420\nf3\naw\nn/somewhere/else.txt\n", stderr="")
+    registry = cap.Registry({"lsof": lambda: cap.command_probe("lsof", run=foreign, which=lambda _: "synthetic-lsof", child_factory=child_stub)})
+    assert registry.check("lsof").status == "error"
+
+
+def test_exec_permission_denied_is_absent_not_error():
+    def denied(args, **kwargs):
+        raise PermissionError(1, "Operation not permitted")
+    assert cap.command_probe("argv", run=denied, which=lambda _: "synthetic-ps", child_factory=child_stub).status == "absent"
+    refused = lambda args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="ps: Operation not permitted\n")
+    assert cap.command_probe("argv", run=refused, which=lambda _: "synthetic-ps", child_factory=child_stub).status == "absent"
 
 
 def test_scope_manifest_covers_all_new_portability_tests():
