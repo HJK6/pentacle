@@ -411,3 +411,18 @@ cleanup, input or delivery failure. Retain the exact packets and raw usage,
 including incomplete counters, coverage, checkpoint yield and cleanup receipts.
 Do not run an older delivery-only tool on new quiet-mode state during rollback;
 that could send the private per-batch packets individually.
+
+Weekly source-gap totals now describe the latest valid retained inventory rather
+than adding the same gaps across daily samples. The projection reports distinct
+current gaps, additions observed during the week, and snapshot coverage. A
+missing or invalid inventory remains unknown; an older inventory is marked stale.
+Primary-store gaps retain their separate sampled denominators.
+
+The initial retained inventory baselines only `missing Retro` gaps under
+`work/completed/` or `work/deprecated/`. This is a terminal-format baseline; its
+age before the convention is unproven. Active, operational and provenance gaps
+remain actionable. Additions use set differences against the latest prior
+snapshot, including transient gaps. With no prior snapshot, the first observed
+inventory supplies the comparison and the left boundary remains unknown.
+Retained daily, review and weekly receipts are immutable; projecting a past week
+does not rewrite its published receipt.

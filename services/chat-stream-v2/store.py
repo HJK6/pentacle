@@ -4929,6 +4929,129 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
 
         return await self.submit(_op)
 
+    async def reconcile_send_receipt(
+        self, to_stream_id: str, request_id: str, *, original_generation: str,
+    ) -> dict[str, Any] | None:
+        """Append evidence-only landed proof; never perform another delivery."""
+        import asyncio
+        import receipt_proof as proof
+        from pathlib import Path
+        from retention import default_archive_path
+
+        target, request = str(to_stream_id or "").strip(), str(request_id or "").strip()
+        if not target or not request or self.path == ":memory:":
+            return await self.get_send_receipt(target, request)
+
+        def rows_for(conn):
+            return conn.execute(
+                "SELECT rowid AS receipt_rowid,* FROM v2_send_receipts "
+                "WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
+                (target, request)).fetchall()
+
+        def lifecycle(conn):
+            if ":" not in target:
+                return None
+            host, name = target.split(":", 1)
+            return conn.execute(
+                "SELECT s.created_at,g.generation FROM sessions s "
+                "JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
+                "WHERE s.host=? AND s.session_name=?", (host, name)).fetchone()
+
+        def sequence(conn):
+            row = conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name='session_event_tail'").fetchone()
+            return int(row[0]) if row else 0
+
+        def peers(conn, row, birth):
+            return conn.execute(
+                "SELECT COUNT(*) FROM v2_send_receipts r JOIN "
+                "(SELECT request_id,MAX(rowid) AS rid FROM v2_send_receipts "
+                "WHERE to_stream_id=? GROUP BY request_id) x ON x.rid=r.rowid "
+                "WHERE r.state!='not_landed' AND r.wire_digest=? AND r.created_at>=?",
+                (target, row["wire_digest"], birth)).fetchone()[0]
+
+        def observe(conn):
+            rows = rows_for(conn)
+            if not rows:
+                return {"ready": False, "result": None}
+            latest, current = rows[-1], lifecycle(conn)
+            result = _project_send_receipt_row(conn, latest)
+            if (current is None or current["generation"] != original_generation or
+                    not proof.pending(latest) or len({r["receipt_id"] for r in rows}) != 1):
+                return {"ready": False, "result": result}
+            prior, conflict = proof.proved_pending_precedence(rows)
+            if prior is not None:
+                return {"ready": False, "result": _project_send_receipt_row(conn, prior)}
+            if conflict or any(not proof.pending(r) or
+                               proof.immutable_identity(r) != proof.immutable_identity(latest)
+                               for r in rows):
+                return {"ready": False, "result": result}
+            claim, birth_time = proof.epoch(rows[0]["created_at"]), proof.epoch(current["created_at"])
+            if claim is None or birth_time is None or birth_time >= claim:
+                return {"ready": False, "result": result}
+            birth = str(current["created_at"])
+            if peers(conn, latest, birth) != 1:
+                return {"ready": False, "result": result}
+            events = conn.execute(
+                "SELECT * FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+                "ORDER BY event_id DESC LIMIT ?", (target, birth, proof.HOT_ROW_LIMIT + 1)).fetchall()
+            if len(events) > proof.HOT_ROW_LIMIT:
+                return {"ready": False, "result": result}
+            hot = [{**dict(r), "proof_store": "hot"} for r in events if float(r["recorded_at"]) >= claim]
+            return {"ready": True, "result": result, "hot": hot, "sequence": sequence(conn),
+                    "birth": birth, "claim": claim, "signature": proof.immutable_identity(latest),
+                    "first": (rows[0]["receipt_rowid"], rows[0]["created_at"], rows[0]["receipt_id"])}
+
+        observed = await self.submit(observe)
+        if not observed["ready"]:
+            return observed["result"]
+        archive, complete = await asyncio.to_thread(
+            proof.scan_archive, default_archive_path(Path(self.path)),
+            target, observed["birth"], observed["claim"])
+        if not complete:
+            return await self.get_send_receipt(target, request)
+
+        def finish(conn):
+            rows = rows_for(conn)
+            if not rows:
+                return None
+            latest, current = rows[-1], lifecycle(conn)
+            result = _project_send_receipt_row(conn, latest)
+            if latest["state"] == "landed":
+                return result
+            if (current is None or current["generation"] != original_generation or
+                    current["created_at"] != observed["birth"] or
+                    sequence(conn) != observed["sequence"] or
+                    (rows[0]["receipt_rowid"], rows[0]["created_at"], rows[0]["receipt_id"]) != observed["first"] or
+                    len({r["receipt_id"] for r in rows}) != 1 or
+                    proof.immutable_identity(latest) != observed["signature"] or
+                    not proof.pending(latest) or peers(conn, latest, observed["birth"]) != 1):
+                return result
+            prior, conflict = proof.proved_pending_precedence(rows)
+            if prior is not None:
+                return _project_send_receipt_row(conn, prior)
+            if conflict or any(not proof.pending(r) or
+                               proof.immutable_identity(r) != observed["signature"]
+                               for r in rows):
+                return result
+            valid, _reason = proof.decide(
+                observed["hot"] + archive, latest, observed["birth"], observed["claim"], _send_wire_digest)
+            if not valid:
+                return result
+            inserted = _insert_send_receipt_row(
+                conn, to_stream_id=target, request_id=request, receipt_id=latest["receipt_id"],
+                state="landed", optimistic_id=latest["optimistic_id"], wire_digest=latest["wire_digest"],
+                display_text=latest["display_text"], content_kind=latest["content_kind"],
+                attachments_json=latest["attachments_json"], delivery="landed", submission_confirmed=True,
+                reason="late_user_proof", attempts=latest["attempts"], created_at=iso_now(),
+                from_stream_id=latest["from_stream_id"], actor_stream_id=latest["actor_stream_id"],
+                actor_trusted=bool(latest["actor_trusted"]), meta_json=latest["meta_json"])
+            row = conn.execute("SELECT rowid AS receipt_rowid,* FROM v2_send_receipts WHERE rowid=?",
+                               (inserted["receipt_rowid"],)).fetchone()
+            return _project_send_receipt_row(conn, row)
+
+        return await self.submit(finish)
+
     async def claim_or_coalesce_send(
         self,
         *,

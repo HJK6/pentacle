@@ -1012,6 +1012,69 @@ def proposal_version(proposal):
     return digest({k: proposal.get(k) for k in fields})
 
 
+def weekly_gap_accounting(settings, days):
+    """Project distinct source inventories, retaining unknown scan coverage."""
+    snapshots, excluded = [], []
+    for path in sorted((settings.state_root / "runs").glob("*/collection.json")):
+        day = path.parent.name
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            continue
+        try:
+            parsed_day = datetime.fromisoformat(day).date()
+        except ValueError:
+            excluded.append({"run_id": day, "reason": "invalid run date"})
+            continue
+        if day > days[-1]:
+            continue
+        try:
+            collection = read(path)
+            captured = aware(collection["collected_at"])
+            if (collection.get("run_id") != day or collection.get("timezone") != ZONE.key
+                    or captured.astimezone(ZONE).date() != parsed_day):
+                raise ValueError("snapshot metadata mismatch")
+            gaps = collection.get("gaps")
+            if not isinstance(gaps, list):
+                raise ValueError("source inventory unavailable")
+            keys = set()
+            for gap in gaps:
+                if not isinstance(gap, dict):
+                    raise ValueError("invalid gap row")
+                source, reason = gap.get("path") or gap.get("source"), gap.get("reason")
+                if not isinstance(source, str) or not source or not isinstance(reason, str) or not reason:
+                    raise ValueError("invalid gap key")
+                keys.add((source, reason))
+            snapshots.append({"run_id": day, "collected_at": collection["collected_at"],
+                              "sha256": digest(collection), "keys": keys})
+        except (ValueError, TypeError, KeyError, AttributeError, OSError):
+            excluded.append({"run_id": day, "reason": "snapshot inventory unavailable or invalid"})
+
+    def pointer(snapshot):
+        return {k: snapshot[k] for k in ("run_id", "collected_at", "sha256")} if snapshot else None
+
+    current = snapshots[-1] if snapshots else None
+    seed = snapshots[0] if snapshots else None
+    baseline = {key for key in seed["keys"] if key[1] == "missing Retro"
+                and key[0].startswith(("work/completed/", "work/deprecated/"))} if seed else set()
+    week = [row for row in snapshots if days[0] <= row["run_id"] <= days[-1]]
+    prior = [row for row in snapshots if row["run_id"] < days[0]]
+    comparison = prior[-1] if prior else week[0] if week else None
+    observed = set().union(*(row["keys"] for row in week)) if week else set()
+    current_keys = current["keys"] if current else set()
+    return {"status": "unavailable" if not current else "current" if current["run_id"] == days[-1] else "stale",
+            "distinct_current": len(current_keys) if current else None,
+            "current": pointer(current), "baseline": pointer(seed),
+            "baseline_kind": "retained initial terminal-format inventory; age before convention unproven",
+            "baseline_initial": len(baseline),
+            "baseline_current": len(current_keys & baseline) if current else None,
+            "actionable_current": len(current_keys - baseline) if current else None,
+            "new_this_week": len(observed - comparison["keys"]) if week and comparison else None,
+            "comparison": pointer(comparison),
+            "comparison_mode": "prior_snapshot" if prior and week else "first_observed" if week else "unavailable",
+            "missing_dates": [day for day in days if day not in {row["run_id"] for row in week}],
+            "excluded_snapshots": excluded,
+            "coverage_limit": "Distinct source inventories, not resolved work or fleet health. Missing scans cannot prove resolution. First-observed comparison has an unknown left boundary; stale snapshots are not current scans. Primary gaps have separate sampled denominators."}
+
+
 def weekly_summary(settings, end_day):
     """Account from retained receipts; missing measurements stay unknown."""
     end = datetime.fromisoformat(end_day).date()
@@ -1063,7 +1126,7 @@ def weekly_summary(settings, end_day):
             continue
         result["runs_collected"] += 1
         result["sources_selected"] += len(collection["sources"])
-        for key in result["retro_coverage"]:
+        for key in ("deferred", "baseline_not_reviewed"):
             result["retro_coverage"][key] += collection.get("coverage", {}).get(key, 0)
         primary = collection.get("primary")
         if primary:
@@ -1163,6 +1226,8 @@ def weekly_summary(settings, end_day):
         else:
             entry["checkpoint_state"] = "legacy/uncheckable"
         result["current_work"].append(entry)
+    result["gap_accounting"] = weekly_gap_accounting(settings, days)
+    result["retro_coverage"]["gaps"] = result["gap_accounting"]["distinct_current"] or 0
     result["completion_to_publication_seconds"]["observed"] = len(result["completion_to_publication_seconds"]["values"])
     for key in ("blocked_seconds", "correction_rounds", "avoidable_stops"):
         values = result["dot_measurements"][key]

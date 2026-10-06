@@ -49,6 +49,10 @@ SCHEDULE_TERMINAL_STATES = ("fired", "cancelled", "failed", "indeterminate", "ex
 log = logging.getLogger("chat_streamd_v2.retention")
 
 
+def default_archive_path(db: Path) -> Path:
+    return Path(db).parent / "sessions_archive.db"
+
+
 class RetentionError(Exception):
     """A pass cannot proceed safely (bad schema, mismatched archive, ...)."""
 
@@ -601,7 +605,7 @@ class RetentionJob:
             result.skipped = "in_memory_db"
             return result
         db = Path(db_path)
-        archive_path = cfg.archive_path or db.parent / "sessions_archive.db"
+        archive_path = cfg.archive_path or default_archive_path(db)
         # An explicitly configured archive is part of the owner inventory.
         # Never replace an unavailable archive with a new empty database, even
         # before GC: schedule/session mutations must also wait for recovery.

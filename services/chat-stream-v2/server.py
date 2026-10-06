@@ -3445,7 +3445,15 @@ class Server:
             self._assistant_composite_capable_for_message(msg),
         ):
             raise VerbError("unknown_session", "Unknown or inactive session")
-        receipt = await self.store.get_send_receipt(target, request_id)
+        from receipt_proof import verified_original_generation
+        try:
+            generation = verified_original_generation(msg.get("original_request"), target, request_id)
+            receipt = (await self.store.reconcile_send_receipt(
+                target, request_id, original_generation=generation)
+                if generation else await self.store.get_send_receipt(target, request_id))
+        except Exception as exc:
+            log.warning("receipt proof unavailable kind=%s", type(exc).__name__)
+            receipt = await self.store.get_send_receipt(target, request_id)
         return {
             "type": "send.receipt.get.ok",
             "found": receipt is not None,
