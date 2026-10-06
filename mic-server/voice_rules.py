@@ -29,8 +29,31 @@ DEFAULTS = {
 }
 
 
+# Keys this spec added to the shipped schema. A voice-rules.json persisted before this
+# spec lacks them; backfill the shipped defaults so an older file keeps loading instead
+# of being rejected, while unknown keys and invalid values remain rejected below.
+_ADDITIVE_REPLIES = ('answer_window_seconds', 'listening_tone', 'questions_per_conversation')
+
+
+def _backfill(value):
+    if not isinstance(value, dict):
+        return value
+    value = copy.deepcopy(value)
+    replies = value.get('replies')
+    if isinstance(replies, dict):
+        for key in _ADDITIVE_REPLIES:
+            replies.setdefault(key, DEFAULTS['replies'][key])
+    clips = value.get('clips')
+    if isinstance(clips, dict):
+        clips.setdefault('listening_tone', list(DEFAULTS['clips']['listening_tone']))
+    return value
+
+
 def validate(value):
-    if not isinstance(value, dict) or set(value) != set(DEFAULTS):
+    if not isinstance(value, dict):
+        raise ValueError('Rules sections must match the shipped schema')
+    value = _backfill(value)
+    if set(value) != set(DEFAULTS):
         raise ValueError('Rules sections must match the shipped schema')
     replies = value['replies']
     if not isinstance(replies, dict) or set(replies) != set(DEFAULTS['replies']):
