@@ -5390,6 +5390,59 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
 
         return await self.submit(_op)
 
+    async def tell_event_identity(
+        self, stream_id: str, identity: str, event: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Probe, and when `event` is given atomically append, one backend-tell
+        routine event by its retained `(stream_id, session_created_at, identity)`.
+
+        Returns `{"state": "existing"|"absent"|"inserted", "event": ...}`. An
+        existing row is returned untouched so the caller can compare it with the
+        retried payload; nothing is ever overwritten. Tell-only: the original
+        `append_session_event` stays the writer for every other verb."""
+        event_json = (
+            json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+            if event is not None else None
+        )
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            session_created_at = ""
+            if ":" in stream_id:
+                host, session_name = stream_id.split(":", 1)
+                row = conn.execute(
+                    "SELECT created_at FROM sessions WHERE host = ? AND session_name = ?",
+                    (host, session_name),
+                ).fetchone()
+                session_created_at = str(row["created_at"] or "") if row else ""
+            retained = conn.execute(
+                "SELECT event_json FROM session_event_tail "
+                "WHERE stream_id = ? AND session_created_at = ? AND identity = ?",
+                (stream_id, session_created_at, identity),
+            ).fetchone()
+            if retained is not None:
+                try:
+                    prior = json.loads(retained["event_json"])
+                except (TypeError, ValueError):
+                    prior = None
+                return {"state": "existing", "event": prior if isinstance(prior, dict) else {}}
+            if event_json is None:
+                return {"state": "absent", "event": None}
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO session_event_tail(
+                    stream_id, session_created_at, event_key, event_json, event_ts,
+                    recorded_at, identity
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (stream_id, session_created_at,
+                 hashlib.sha256(event_json.encode("utf-8")).hexdigest(), event_json,
+                 event.get("timestamp"), time.time(), identity),
+            )
+            conn.commit()
+            return {"state": "inserted", "event": event}
+
+        return await self.submit(_op)
+
     async def fetch_session_event_page(
         self,
         stream_id: str,

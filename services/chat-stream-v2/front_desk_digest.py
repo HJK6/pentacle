@@ -58,6 +58,13 @@ class FrontDeskDigest:
             return None
         if msg.get('_front_desk_digest_token') is DIGEST_TOKEN:
             return None
+        # A caller-keyed tell's retained hold is checked BEFORE wake/drop
+        # classification, so a changed body cannot reuse the key to wake.
+        tell_key = str(msg.get('tell_id') or '') if verb == 'tell' else ''
+        if tell_key:
+            held = await self._retained_tell_hold(target_stream_id, body, msg, tell_key)
+            if held is not None:
+                return held
         kind = msg.get('_outbound_notice_kind')
         text = re.sub(r'^\[pentacle-notice:[^\]]+\]\s*', '', body).lstrip()
         drop = kind == 'tree_idle' or (
@@ -80,16 +87,49 @@ class FrontDeskDigest:
         if not drop and wake:
             return None
         identity = str(msg.get('tell_id') or msg.get('request_id') or hashlib.sha256(body.encode()).hexdigest())
-        nid = 'frontdesk-held:'+hashlib.sha256((target_stream_id+'\0'+verb+'\0'+identity).encode()).hexdigest()
+        nid = self._held_id(target_stream_id, verb, identity)
         if not drop:
-            await self.store.enqueue_outbound_notice(notice_id=nid, tell_id=nid,
-                kind=HELD_KIND, dedupe_key=nid, recipient_stream_id=target_stream_id,
-                source_stream_id=msg.get('from_stream_id'), body=body,
-                metadata={'root_generation':self.binding()[1]})
+            try:
+                await self.store.enqueue_outbound_notice(notice_id=nid, tell_id=nid,
+                    kind=HELD_KIND, dedupe_key=nid, recipient_stream_id=target_stream_id,
+                    source_stream_id=msg.get('from_stream_id'), body=body,
+                    metadata={'root_generation':self.binding()[1]})
+            except ValueError as exc:
+                if tell_key and str(exc).startswith('outbound_notice_conflict'):
+                    from comms import Comms
+                    raise Comms._conflict(tell_key) from None
+                raise
         log.info('subsystem=front_desk_digest bug_ref=front_desk_wake_reduction action=%s target=%s',
                  'drop' if drop else 'hold', target_stream_id)
+        return self._held_reply(verb)
+
+    @staticmethod
+    def _held_id(target, verb, identity):
+        return 'frontdesk-held:'+hashlib.sha256((target+'\0'+verb+'\0'+identity).encode()).hexdigest()
+
+    @staticmethod
+    def _held_reply(verb):
         return {'type':verb+'.ok', 'delivery_status':'persisted', 'submission_confirmed':False,
                 'action_committed':True, 'assistant_backend_ingress':'persisted_suppressed'}
+
+    async def _retained_tell_hold(self, target, body, msg, tell_key):
+        """Recover or refuse a caller-keyed tell whose deterministic hold exists.
+
+        Identical retained body/recipient/source recovers the persisted outcome
+        without a second enqueue; anything else is `tell_id_conflict`. The hold
+        carries no caller-key or digest metadata, so only what it retained can be
+        compared (a cross-recipient change is not detectable here)."""
+        nid = self._held_id(target, 'tell', tell_key)
+        row = await self.store.submit(lambda conn: conn.execute(
+            "SELECT body, recipient_stream_id, source_stream_id FROM v2_outbound_notices WHERE notice_id=?",
+            (nid,)).fetchone())
+        if row is None:
+            return None
+        if (row['body'], row['recipient_stream_id'], row['source_stream_id'] or '') != (
+                body, target, msg.get('from_stream_id') or ''):
+            from comms import Comms
+            raise Comms._conflict(tell_key)
+        return self._held_reply('tell')
 
     async def _rows(self, target):
         return await self.store.submit(lambda conn: [dict(row) for row in conn.execute(

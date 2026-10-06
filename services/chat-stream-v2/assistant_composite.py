@@ -420,6 +420,16 @@ class AssistantComposite:
             return None
         if not self.is_backend_stream(target_stream_id):
             return None
+        # A caller-keyed tell's retained event identity is probed BEFORE any wake
+        # exemption or forward classification: an exemption cannot waive an
+        # identity this backend already retained. Send and notice skip this.
+        tell_key = str(msg.get("tell_id") or "").strip() if verb == "tell" else ""
+        if tell_key:
+            retained = await self.store.tell_event_identity(
+                target_stream_id, f"assistant-ingress:tell:{tell_key}",
+            )
+            if retained["state"] == "existing":
+                return self._tell_event_recovered(retained["event"], target_stream_id, body, msg, tell_key)
         if msg.get("_assistant_composite_backend_dispatch") is True:
             return None
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
@@ -459,11 +469,51 @@ class AssistantComposite:
         # Existing event persistence gives auditors a durable record while
         # avoiding a pane paste/agent wake. It is intentionally bounded by the
         # ordinary session retention path, not a new inbox or transcript store.
-        await self.store.append_session_event(
-            target_stream_id, event, identity=f"assistant-ingress:{verb}:{identity}", limit=2000,
-        )
+        if tell_key:
+            # The retained digest lets a crash-gap retry compare the exact input
+            # bytes, not only the lstripped display text.
+            from comms import payload_digest
+            event["raw"]["body_digest"] = payload_digest(target_stream_id, body)
+            appended = await self.store.tell_event_identity(
+                target_stream_id, f"assistant-ingress:tell:{tell_key}", event,
+            )
+            if appended["state"] == "existing":
+                return self._tell_event_recovered(appended["event"], target_stream_id, body, msg, tell_key)
+        else:
+            await self.store.append_session_event(
+                target_stream_id, event, identity=f"assistant-ingress:{verb}:{identity}", limit=2000,
+            )
         return {
             "type": f"{verb}.ok",
+            "delivery_status": "persisted",
+            "submission_confirmed": False,
+            "action_committed": True,
+            "assistant_backend_ingress": "persisted_suppressed",
+        }
+
+    @staticmethod
+    def _tell_event_recovered(
+        retained: dict[str, Any], target_stream_id: str, body: str, msg: dict[str, Any], tell_key: str,
+    ) -> dict[str, Any]:
+        """Outcome for a caller-keyed tell whose routine event was already retained.
+
+        The same payload recovers the persisted outcome without a second write or
+        paste; anything else is `tell_id_conflict`. An event recorded with the
+        original body digest is compared exactly. A legacy event has only the
+        lstripped text and source, so identical retained text is accepted and the
+        original leading whitespace is unknown, not reconstructed."""
+        from comms import Comms, payload_digest
+        raw = retained.get("raw") if isinstance(retained.get("raw"), dict) else {}
+        digest = raw.get("body_digest")
+        same = (
+            raw.get("from_stream_id") == str(msg.get("from_stream_id") or "")
+            and (digest == payload_digest(target_stream_id, body) if digest is not None
+                 else retained.get("text") == str(body or "").lstrip())
+        )
+        if not same:
+            raise Comms._conflict(tell_key)
+        return {
+            "type": "tell.ok",
             "delivery_status": "persisted",
             "submission_confirmed": False,
             "action_committed": True,

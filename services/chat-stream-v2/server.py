@@ -2745,14 +2745,8 @@ class Server:
         composite = self._composite_for(target_stream_id)
         if composite is not None:
             return await self._composite_tell(composite, target_stream_id, msg)
-        primary = self.assistant_composite
-        if primary is not None:
-            suppressed = await primary.suppress_routine_backend_ingress(
-                target_stream_id=target_stream_id, body=str(msg.get("text") or msg.get("message") or ""),
-                msg=msg, verb="tell",
-            )
-            if suppressed is not None:
-                return suppressed
+        # Suppression is applied by Comms.tell, after its route/body/Codex guards
+        # and under the tell_id idempotency ledger.
         return await self.comms.tell(msg)
 
     async def _composite_tell(

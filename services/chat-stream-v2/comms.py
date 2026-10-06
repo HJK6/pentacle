@@ -590,26 +590,32 @@ class Comms:
                 raise value
             return {**value, "duplicate": True}
 
-        policy = self.assistant_ingress_policy
-        if callable(policy):
-            suppressed = await policy(
-                target_stream_id=str(route["final_target"]), body=body,
-                msg={**msg, "tell_id": tell_id}, verb="tell",
-            )
-            if isinstance(suppressed, dict):
-                reply = {**suppressed, "tell_id": tell_id}
-                ledger_row_id = await self.store.put_tell_delivery(tell_id, {
-                    "payload_digest": digest,
-                    "reply": reply,
-                    "delivery": {"tell_id": tell_id, "delivery_status": suppressed["delivery_status"]},
-                })
-                reply["ledger_row_id"] = ledger_row_id
-                return reply
-
+        # Registered with no await since the lookup above, so a concurrent same-key
+        # tell waits on (or conflicts with) this one even while the ingress policy
+        # below is still awaiting its durable hold.
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._inflight[tell_id] = (digest, fut)
         outcome: tuple[str, Any] = ("error", VerbError("delivery_failed", "tell did not complete"))
         try:
+            policy = self.assistant_ingress_policy
+            if callable(policy):
+                # The policy sees the caller's tell_id only when one was supplied;
+                # a keyless tell keeps its request_id/body-hash policy identity.
+                suppressed = await policy(
+                    target_stream_id=str(route["final_target"]), body=body,
+                    msg={**msg, "tell_id": tell_id} if str(msg.get("tell_id") or "").strip() else msg,
+                    verb="tell",
+                )
+                if isinstance(suppressed, dict):
+                    reply = {**suppressed, "tell_id": tell_id}
+                    ledger_row_id = await self.store.put_tell_delivery(tell_id, {
+                        "payload_digest": digest,
+                        "reply": reply,
+                        "delivery": {"tell_id": tell_id, "delivery_status": suppressed["delivery_status"]},
+                    })
+                    reply["ledger_row_id"] = ledger_row_id
+                    outcome = ("ok", reply)
+                    return reply
             async with self._pane_input_lock(str(route["final_target"])):
                 await self._validate_assistant_request_target(msg, route)
                 reply = await self._deliver_tell(msg, tell_id, route, wire, digest)

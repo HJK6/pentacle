@@ -29,7 +29,18 @@ class _Comms:
         self.sent.append(dict(msg))
         return {"type": "send.result", "delivery": "landed"}
 
+    assistant_ingress_policy = None
+
     async def tell(self, msg):
+        # Like the real Comms.tell, suppression is the ingress policy's call and
+        # a suppressed tell is never delivered.
+        if self.assistant_ingress_policy is not None:
+            suppressed = await self.assistant_ingress_policy(
+                target_stream_id=str(msg.get("to_stream_id") or ""),
+                body=str(msg.get("text") or msg.get("message") or ""), msg=msg, verb="tell",
+            )
+            if isinstance(suppressed, dict):
+                return suppressed
         self.told.append(dict(msg))
         return {"type": "tell.ok"}
 
@@ -187,6 +198,7 @@ def test_configured_backend_suppresses_routine_ingress_but_forwards_explicit_esc
                 ),
             )
             await composite.ensure_projection()
+            comms.assistant_ingress_policy = composite.suppress_routine_backend_ingress
             server = Server(store=store, sessions=sessions, comms=comms, local_host=COMPOSITE_HOST)
             server.assistant_composite = composite
 
