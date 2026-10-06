@@ -385,7 +385,21 @@ def test_main_quota_exhausted_smoke_is_untested_with_operator_line(monkeypatch, 
     assert "hostb" in err and "UNTESTED" in err
 
 
-def test_apply_post_activation_captures_schedule_install_error_without_raising(monkeypatch) -> None:
+@pytest.fixture
+def synthetic_smoke_pass(tmp_path, monkeypatch) -> str:
+    """Explicit passing evidence for stamp/schedule tests, not an empty rc=0 oracle."""
+    machines_file = tmp_path / "synthetic-machines.json"
+    machines_file.write_text(json.dumps([{"name": "local-fixture", "ssh_target": None}]))
+    monkeypatch.setattr(deploy_mod, "_launchd_environment", lambda _label: {
+        "PENTACLE_MACHINES_FILE": str(machines_file),
+    })
+    return json.dumps({"ok": True, "status": "PASS", "failures": [], "untested": [], "cells": [
+        {"host": "local-fixture", "provider": provider, "prompt_mode": mode, "outcome": "passed"}
+        for provider in ("claude", "codex") for mode in ("prompted", "promptless")
+    ]})
+
+
+def test_apply_post_activation_captures_schedule_install_error_without_raising(monkeypatch, synthetic_smoke_pass) -> None:
     """A raise from the recurring-smoke schedule install (post-activation) is captured, not
     propagated: it would otherwise reach main() as EXIT_REFUSED with the stamp already lost."""
     def boom(_repo, _runner):
@@ -393,7 +407,7 @@ def test_apply_post_activation_captures_schedule_install_error_without_raising(m
 
     monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", boom)
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, _stamp: None)
-    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (0, "", "")})
+    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (0, synthetic_smoke_pass, "")})
     stamp: dict = {"sha": TARGET_SHA}
     deploy_mod._apply_post_activation(
         V2_SERVICE,
@@ -411,11 +425,11 @@ def test_apply_post_activation_captures_schedule_install_error_without_raising(m
     assert stamp["post_activation_error"].startswith("DeployError")
 
 
-def test_apply_post_activation_persists_the_classified_stamp(monkeypatch) -> None:
+def test_apply_post_activation_persists_the_classified_stamp(monkeypatch, synthetic_smoke_pass) -> None:
     writes: list[dict] = []
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, stamp: writes.append(dict(stamp)))
     monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda _repo, _runner: None)
-    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (0, "", "")})
+    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (0, synthetic_smoke_pass, "")})
     stamp: dict = {"sha": TARGET_SHA}
     deploy_mod._apply_post_activation(
         V2_SERVICE, Path("/release"), TARGET_SHA, stamp,
@@ -427,7 +441,7 @@ def test_apply_post_activation_persists_the_classified_stamp(monkeypatch) -> Non
     assert "post_activation_error" not in stamp
 
 
-def test_apply_post_activation_survives_stamp_write_failure(monkeypatch) -> None:
+def test_apply_post_activation_survives_stamp_write_failure(monkeypatch, synthetic_smoke_pass) -> None:
     """A post-commit stamp-write failure must not escape deploy() (main catches only DeployError)
     nor lose the in-memory record — this was the r2 REJECT boundary."""
     monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda _repo, _runner: None)
@@ -436,7 +450,7 @@ def test_apply_post_activation_survives_stamp_write_failure(monkeypatch) -> None
         raise OSError("disk full")
 
     monkeypatch.setattr(deploy_mod, "_write_stamp", raising_write)
-    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (0, "", "")})
+    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (0, synthetic_smoke_pass, "")})
     stamp: dict = {"sha": TARGET_SHA}
     deploy_mod._apply_post_activation(  # must not raise
         V2_SERVICE, Path("/release"), TARGET_SHA, stamp,
@@ -520,6 +534,15 @@ def test_post_activation_smoke_uses_installed_machine_file(
             ]
             result = subprocess.run(parts, cwd=cwd, text=True, capture_output=True, check=False)
             smoke_results.append(result)
+            if result.returncode == 0:
+                # smoke_plan validates configuration only. Supply synthetic successful cell
+                # execution separately; a bare plan is not evidence of a successful smoke.
+                plan = json.loads(result.stdout)
+                payload = {"ok": True, "status": "PASS", "failures": [], "untested": [], "cells": [
+                    {"host": host, "provider": provider, "prompt_mode": mode, "outcome": "passed"}
+                    for host, provider, mode in plan["cells"]
+                ]}
+                return subprocess.CompletedProcess(result.args, 0, json.dumps(payload), result.stderr)
             return result
         return subprocess.CompletedProcess(parts, 0, "", "")
 

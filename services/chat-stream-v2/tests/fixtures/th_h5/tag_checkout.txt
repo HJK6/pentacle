@@ -1,0 +1,6 @@
+2026-01-01T00:00:00.000Z ##[group]Fetching the repository
+2026-01-01T00:00:00.001Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:refs/tags/v2-gate/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+2026-01-01T00:00:00.002Z ##[endgroup]
+2026-01-01T00:00:00.003Z ##[group]Checking out the ref
+2026-01-01T00:00:00.004Z [command]/usr/bin/git checkout --progress --force refs/tags/v2-gate/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+2026-01-01T00:00:00.005Z ##[endgroup]
