@@ -85,8 +85,10 @@ def command_probe(kind, *, run=subprocess.run, which=shutil.which, child_factory
             if kind == "lsof":
                 # lsof prints the resolved path; macOS temp dirs sit behind /var -> /private/var.
                 names = {line[1:] for line in reply.stdout.splitlines() if line.startswith("n")}
-                found = bool(names & {str(target), os.path.realpath(target)}) and any(line.startswith("a") and line[1:] in {"w", "u"} for line in reply.stdout.splitlines())
-                if names and not names & {str(target), os.path.realpath(target)}:
+                owned = {str(target), os.path.realpath(target)}
+                found = bool(names & owned) and any(line.startswith("a") and line[1:] in {"w", "u"} for line in reply.stdout.splitlines())
+                if names - owned:
+                    # Any path beyond the owned file means the reply is not about the owned descriptor alone.
                     raise RuntimeError("lsof reported a different path for the owned descriptor")
             elif kind == "birth":
                 import re

@@ -200,6 +200,9 @@ def test_lsof_probe_accepts_resolved_path_and_rejects_a_foreign_one(monkeypatch)
     foreign = lambda args, **kwargs: SimpleNamespace(returncode=0, stdout="p42420\nf3\naw\nn/somewhere/else.txt\n", stderr="")
     registry = cap.Registry({"lsof": lambda: cap.command_probe("lsof", run=foreign, which=lambda _: "synthetic-lsof", child_factory=child_stub)})
     assert registry.check("lsof").status == "error"
+    mixed = lambda args, **kwargs: SimpleNamespace(returncode=0, stdout=f"p42420\nf3\naw\nn{args[-1]}\nf4\naw\nn/somewhere/else.txt\n", stderr="")
+    registry = cap.Registry({"lsof": lambda: cap.command_probe("lsof", run=mixed, which=lambda _: "synthetic-lsof", child_factory=child_stub)})
+    assert registry.check("lsof").status == "error"
 
 
 def test_tmux_probe_accepts_server_exited_race_after_owned_kill():
