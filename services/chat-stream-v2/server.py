@@ -1736,6 +1736,7 @@ class Server:
             or not isinstance(msg.get("title"), str)
             or not msg["title"].strip()
             or ("body" in msg and not isinstance(msg.get("body"), str))
+            or not isinstance(msg.get("severity"), str)
             or msg.get("severity") not in {"info", "warning", "critical"}
             or ("actions" in msg and msg.get("actions") != [])
             or not isinstance(msg.get("dedup_key"), str)

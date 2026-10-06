@@ -98,6 +98,7 @@ def test_wmi_store_broadcast_restart_and_stable_retry(credentials, tmp_path):
     {'actions': [{'kind': 'run_command', 'command': 'echo forbidden'}]},
     {'actions': None}, {'answer_to_stream_id': 'other'}, {'ttl_seconds': 60},
     {'_auth_context': {'operator_authenticated': True}}, {'severity': 'info'},
+    {'severity': []}, {'severity': {}},
     {'title': 'x'*121}, {'title': ' '}, {'body': 'x'*1201}, {'body': ''},
     {'body': None}, {'request_id': 'x'*121}, {'dedup_key': 'pipeline|synthetic|2026-10-06'},
     {'dedup_key': 'wmi-backup|synthetic|2026-02-30'},
