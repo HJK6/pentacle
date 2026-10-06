@@ -12,7 +12,7 @@
       "path": "test/web_runtime_directory.test.js",
       "synthetic": true,
       "contains_real_traffic": false,
-      "sha256": "1855c1cfbad00e1ed65fa19d732dc6a6bd990836453232889571dca4a80248b5",
+      "sha256": "7a10b715527d128fa12ac1377eb5ec9ff091211a0a3fd5b3b4a9dba575f2b2ee",
       "purpose": "Authored inline synthetic runtime marker and isolated fake gate inputs"
     },
     {

@@ -21,3 +21,8 @@ New synthetic tests execute the real handshake and gate source through injected 
 The baseline writer from c56afde5 was replayed through the same injected test harness: 8 passed, 4 failed, proving it ignored the override and lacked the requested diagnostics. Candidate focused tests pass. Final-head install, root-subset and syntax receipts are in the PR.
 
 Dot does not run the full Chrome/daemon web gate. Fleet owns that exact-head E2E receipt. The root local gate explicitly leaves three unchanged files unrun: web_server.test.js (default tmux/unowned loopback), web_auth.test.js (unowned loopback), and pre_push_hook.test.js (real ps fallback). They remain in default discovery; no skip or assertion weakening was introduced.
+
+
+## Real hosts
+
+Leave PENTACLE_RUNTIME_DIR unset on real desktop and fleet hosts. Deploy and update tooling outside this repository reads the marker at the default path; with the variable set those readbacks would not see it and would time out. The override exists for gates, tests and sandboxes. The web gate gives both its main run and its chained history-retention stage their own owned temporary runtime directory.

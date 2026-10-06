@@ -25,7 +25,7 @@ const { spawn, execFileSync } = require('child_process');
 
 const cdp = require('./lib/cdp');
 const scenarios = require('./lib/web_scenarios');
-const { withRuntimeDirectory } = require('./lib/runtime_directory');
+const { withRuntimeDirectory, execWithRuntimeDirectory } = require('./lib/runtime_directory');
 const { main: startHost } = require('../../server');
 
 const ROOT = path.join(__dirname, '..', '..');
@@ -440,10 +440,11 @@ function allocateReportDir(now = () => new Date(), root = path.join(__dirname, '
 
 if (require.main === module) {
   const args = parseArgs(process.argv.slice(2));
-  run(args).then(code => {
+  run(args).then(async code => {
     if (code === 0 && !args.profile) {
       try {
-        execFileSync(process.execPath, [path.join(__dirname, 'web_chat_history_retention_gate.cjs'),
+        // The retention gate starts its own host: it runs in its own owned runtime directory.
+        await execWithRuntimeDirectory(execFileSync, process.execPath, [path.join(__dirname, 'web_chat_history_retention_gate.cjs'),
           path.join(allocateReportDir(), 'history-retention')], {
           stdio: 'inherit', env: { ...process.env, PENTACLE_TEST_BROWSER: resolveChrome() },
         });

@@ -7,7 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const { createRequire } = require('node:module');
-const { withRuntimeDirectory } = require('./e2e/lib/runtime_directory');
+const { withRuntimeDirectory, execWithRuntimeDirectory } = require('./e2e/lib/runtime_directory');
 
 for (const keep of [false, true]) {
   for (const failure of [null, 'setup', 'scenario', 'cleanup']) {
@@ -83,3 +83,33 @@ for (const keep of [false, true]) {
     });
   }
 }
+
+
+test('chained child gate runs in its own owned runtime directory, removed afterwards', async () => {
+  const scopeEnv = { PENTACLE_RUNTIME_DIR: '/synthetic/caller-runtime' };
+  const seen = [];
+  const exec = (command, args, options) => {
+    const directory = options.env.PENTACLE_RUNTIME_DIR;
+    seen.push({ command, args, directory, exists: fs.statSync(directory).isDirectory(), browser: options.env.PENTACLE_TEST_BROWSER, stdio: options.stdio });
+    fs.writeFileSync(path.join(directory, 'desktop-runtime.json'), '{"synthetic":true}');
+    return 'synthetic-child-result';
+  };
+  const result = await execWithRuntimeDirectory(exec, 'synthetic-node', ['synthetic-gate.cjs'],
+    { stdio: 'inherit', env: { PENTACLE_TEST_BROWSER: 'synthetic-chrome', PENTACLE_RUNTIME_DIR: '/synthetic/inherited' } }, { env: scopeEnv });
+  assert.equal(result, 'synthetic-child-result');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].exists, true);
+  assert.ok(path.basename(seen[0].directory).startsWith('pentacle-web-runtime-'));
+  assert.notEqual(seen[0].directory, '/synthetic/inherited');
+  assert.deepEqual([seen[0].command, seen[0].args, seen[0].browser, seen[0].stdio], ['synthetic-node', ['synthetic-gate.cjs'], 'synthetic-chrome', 'inherit']);
+  assert.equal(fs.existsSync(seen[0].directory), false);
+  assert.equal(scopeEnv.PENTACLE_RUNTIME_DIR, '/synthetic/caller-runtime');
+  await assert.rejects(execWithRuntimeDirectory(() => { throw new Error('synthetic child failure'); }, 'n', [], {}, { env: scopeEnv }), /synthetic child failure/);
+  assert.equal(scopeEnv.PENTACLE_RUNTIME_DIR, '/synthetic/caller-runtime');
+});
+
+test('web gate launches the history-retention stage through the owned runtime scope', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, 'e2e/web_gate.js'), 'utf8');
+  const launch = source.slice(source.indexOf("web_chat_history_retention_gate.cjs") - 200, source.indexOf("web_chat_history_retention_gate.cjs"));
+  assert.match(launch, /await execWithRuntimeDirectory\(execFileSync, process\.execPath/);
+});

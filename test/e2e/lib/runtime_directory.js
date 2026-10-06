@@ -23,4 +23,10 @@ async function withRuntimeDirectory(run, { env = process.env, filesystem = fs, t
     cleanup();
   }
 }
-module.exports = { withRuntimeDirectory };
+// A child gate that starts its own in-process host gets its own owned runtime directory, so its
+// handshake cannot write the marker to the caller's (or the real default) location.
+function execWithRuntimeDirectory(exec, command, args, options = {}, scope = {}) {
+  return withRuntimeDirectory(async directory => exec(command, args,
+    { ...options, env: { ...(options.env || process.env), PENTACLE_RUNTIME_DIR: directory } }), scope);
+}
+module.exports = { withRuntimeDirectory, execWithRuntimeDirectory };
