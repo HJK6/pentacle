@@ -303,12 +303,25 @@ export class ChatStoreController {
       next = mutatePentacleEventBuckets(next, { type: 'set-pin', streamId, pin: 'focused', pinned: false });
     }
     this.focusedChatStreams = focused;
+    // History expansion lasts only while the chat stays attached.
+    const expanded = next.historyExpandedStreamIds ?? [];
+    if (expanded.some((streamId) => !focused.has(streamId))) {
+      next = { ...next, historyExpandedStreamIds: expanded.filter((streamId) => focused.has(streamId)) };
+    }
     if (next !== this.state) {
       logTelemetry('chat.history.pins_changed', {
         subsystem: 'chat_history', bug_ref: 'web_stream_history_recurrence', stream_ids: [...focused],
       });
       this.setState(next);
     }
+  }
+
+  // The operator paged older history for this stream: lift its per-stream event
+  // cap (otherwise the cap evicts the just-fetched older pages) until detached.
+  setHistoryExpanded(streamId: string): void {
+    const current = this.state.historyExpandedStreamIds ?? [];
+    if (current.includes(streamId)) return;
+    this.setState({ ...this.state, historyExpandedStreamIds: [...current, streamId] });
   }
 
   /** Current immutable read-path state. */

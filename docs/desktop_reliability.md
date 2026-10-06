@@ -71,7 +71,13 @@ run it after `npm run build:web` with:
 PENTACLE_TEST_BROWSER=/path/to/chrome node test/e2e/web_chat_history_retention_gate.cjs /temporary/evidence
 ```
 
-The hermetic CLI `test/e2e/web_gate.js` includes this check
+`test/e2e/web_chat_history_paging_gate.cjs` proves "Load earlier messages" pages
+older daemon history (`request_stream_events` with `before_daemon_seq`, 500-event
+windows) to the first message of a chat larger than the newest-events window and the
+store's per-stream cap; the store lifts that cap only for an attached, paged chat.
+`PENTACLE_GATE_EXPECT_LEGACY=1` records the pre-fix RED.
+
+The hermetic CLI `test/e2e/web_gate.js` includes the retention check
 in the existing Public checks workflow. It uses a loopback fixture daemon and
 actual Chrome/CDP, forces reconnect and unrelated-stream cache pressure, checks
 reopen/reload, and advertises changed builds to the old page while preserving

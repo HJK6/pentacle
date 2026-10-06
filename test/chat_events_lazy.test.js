@@ -7,6 +7,9 @@ const {
   scheduleHistoryRetry,
   chatHistoryStatus,
   HISTORY_RETRY_DELAYS_MS,
+  HISTORY_PAGE_EVENTS,
+  historyHasOlder,
+  requestOlderHistory,
 } = require('../renderer/chat_events_lazy');
 
 function makeStreamState({ connected = true } = {}) {
@@ -318,4 +321,60 @@ test('chatHistoryStatus never leaves a row-less view without a status line while
   assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'loaded', exhausted: true }, hasRows: false, hasRendered: false }), { message: 'No messages yet.', retry: true });
   assert.deepEqual(chatHistoryStatus({ connected: true, load: loaded, hasRows: false, hasRendered: false }), { message: 'Loading messages…', retry: false });
   assert.deepEqual(chatHistoryStatus({ connected: true, load: { status: 'error', exhausted: true }, hasRows: false, hasRendered: false }), { message: 'Messages could not be loaded.', retry: true });
+});
+
+// ---- older-history paging (beforeDaemonSeq) ----
+const tick = () => new Promise(resolve => setImmediate(resolve));
+async function loaded(reply, streamId = 'a') {
+  const state = makeStreamState();
+  const cc = makeCc(() => ({ ok: true, ...reply }));
+  ensureChatEventsLoaded(state, streamId, cc, silentLogger);
+  await tick();
+  return { state, cc };
+}
+
+test('a full newest window seeds the older-history cursor; a short one means nothing older', async () => {
+  const full = await loaded({ count: 500, received: HISTORY_PAGE_EVENTS, nextBeforeDaemonSeq: 900 });
+  assert.equal(historyHasOlder(full.state, 'a'), true);
+  assert.equal(full.state.historyPaging.a.cursor, 900);
+  const short = await loaded({ count: 40, received: 40, nextBeforeDaemonSeq: 10 });
+  assert.equal(historyHasOlder(short.state, 'a'), false);
+  const empty = await loaded({ count: 0, received: 0, nextBeforeDaemonSeq: null });
+  assert.equal(historyHasOlder(empty.state, 'a'), false);
+});
+
+test('a reconnect refetch keeps the deeper older-history cursor', async () => {
+  const { state, cc } = await loaded({ count: 500, received: 500, nextBeforeDaemonSeq: 900 });
+  state.historyPaging.a.cursor = 300;
+  state.eventsLoadedFor.clear(); state.historyLoads = {};
+  ensureChatEventsLoaded(state, 'a', cc, silentLogger);
+  await tick();
+  assert.equal(state.historyPaging.a.cursor, 300);
+});
+
+test('requestOlderHistory pages backwards by cursor until a message row is revealed', async () => {
+  const { state } = await loaded({ count: 500, received: 500, nextBeforeDaemonSeq: 900 });
+  const pages = [{ nextBeforeDaemonSeq: 400, exhausted: false }, { nextBeforeDaemonSeq: 100, exhausted: false }, { nextBeforeDaemonSeq: 50, exhausted: true }];
+  const cc = makeCc((_args, index) => ({ ok: true, ...pages[index] }));
+  const expanded = [];
+  await requestOlderHistory(state, 'a', cc, silentLogger, {
+    expand: id => expanded.push(id),
+    hasNewRows: () => cc.calls.length >= 2,
+  });
+  assert.deepEqual(cc.calls.map(call => call.beforeDaemonSeq), [900, 400]);
+  assert.ok(cc.calls.every(call => call.limit === HISTORY_PAGE_EVENTS && call.streamId === 'a'));
+  assert.deepEqual(expanded, ['a']);
+  assert.equal(state.historyPaging.a.cursor, 100);
+  assert.equal(state.historyPaging.a.loading, false);
+  assert.equal(historyHasOlder(state, 'a'), true);
+});
+
+test('a short or empty page marks the history start', async () => {
+  for (const reply of [{ nextBeforeDaemonSeq: 10, exhausted: true }, { nextBeforeDaemonSeq: null }]) {
+    const { state } = await loaded({ count: 500, received: 500, nextBeforeDaemonSeq: 900 });
+    const cc = makeCc(() => ({ ok: true, ...reply }));
+    await requestOlderHistory(state, 'a', cc, silentLogger, { hasNewRows: () => false });
+    assert.equal(historyHasOlder(state, 'a'), false, JSON.stringify(reply));
+    assert.equal(cc.calls.length, 1);
+  }
 });

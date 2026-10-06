@@ -131,12 +131,16 @@ function activeInFlightPin(state: PentacleStreamState, streamId: string) {
   return (state.workingByStream?.[streamId]?.phase ?? 'idle') !== 'idle';
 }
 
+// Streams exempt from the per-stream cap: assistant composites, plus streams
+// whose operator explicitly paged older history (see historyExpandedStreamIds).
 function assistantCompositeStreamIds(state: PentacleStreamState) {
-  return new Set(
+  const ids = new Set(
     state.sessions
       .filter((session) => session.session_kind === 'assistant_composite')
       .map((session) => session.stream_id),
   );
+  for (const streamId of state.historyExpandedStreamIds ?? []) ids.add(streamId);
+  return ids;
 }
 
 function effectivePins(

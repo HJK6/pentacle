@@ -453,6 +453,15 @@ function assistantCompositeStreamIds(sessions: readonly PentacleSessionSummary[]
   );
 }
 
+// Streams whose per-stream event cap is lifted: assistant composites, plus
+// streams whose operator explicitly paged older history (the older pages would
+// otherwise be the first rows the cap evicts).
+function uncappedStreamIds(state: PentacleStreamState, sessions: readonly PentacleSessionSummary[] = state.sessions) {
+  const ids = assistantCompositeStreamIds(sessions);
+  for (const streamId of state.historyExpandedStreamIds ?? []) ids.add(streamId);
+  return ids;
+}
+
 function optimisticEventFromSend(
   state: PentacleStreamState,
   send: OptimisticSendState,
@@ -2196,7 +2205,7 @@ export function applyPentacleEvent(
       dedupeRecentEventsByStream(
         [...state.events, frozenEvent],
         limit,
-        assistantCompositeStreamIds(state.sessions),
+        uncappedStreamIds(state),
       ),
     );
 
@@ -2426,7 +2435,7 @@ function applyLiveFetchedStreamEvents(
       return applyFetchedStreamEvents(state, incoming, { limit });
     }
     if (
-      !assistantCompositeStreamIds(state.sessions).has(streamId) &&
+      !uncappedStreamIds(state).has(streamId) &&
       (countsByStream.get(streamId) || 0) >= limit
     ) {
       return applyFetchedStreamEvents(state, incoming, { limit });
@@ -2661,7 +2670,7 @@ export function applyFetchedStreamEvents(
   const events = dedupeRecentEventsByStream(
     [...state.events, ...acceptedIncoming.map(freezeEventInDev)],
     limit,
-    assistantCompositeStreamIds(state.sessions),
+    uncappedStreamIds(state),
   );
 
   let eventContentVersionByStream = state.eventContentVersionByStream ?? {};
@@ -2771,7 +2780,7 @@ export function applyPentacleSnapshotMessage(
       event.kind !== 'WORKING' &&
       !isHelperSuggestionEvent(event) &&
       (isClaudeJsonlEvent(event) || (event.attachments?.length ?? 0) > 0 || !isTransientTranscriptNoise(event.text))
-    )), limit, assistantCompositeStreamIds(sessions)).map(freezeEventInDev)
+    )), limit, uncappedStreamIds(state, sessions)).map(freezeEventInDev)
     : state.events.filter((event) => survivingStreamIds.has(event.stream_id));
   const drafts: Record<string, PentacleEvent> = {};
   for (const [streamId, draft] of Object.entries(message.drafts || {})) {

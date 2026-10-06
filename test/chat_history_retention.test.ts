@@ -55,3 +55,36 @@ test('focus changes preserve every attached pane and repeated synchronization is
   assert.equal(store.getState().eventBucketsByStream?.[target]?.pins.focused, undefined);
   assert.equal(store.getState().eventBucketsByStream?.[noise]?.pins.focused, true);
 });
+
+function bulk(streamId: string, count: number) {
+  return Array.from({ length: count }, (_value, index) => row(streamId, 1000 + index, index % 6 === 0 ? 'USER' : 'TOOL_RESULT', `event ${index}`));
+}
+
+test('an attached chat that paged older history keeps more than the per-stream cap', () => {
+  const store = fixture();
+  store.setFocusedChatStreams([target]);
+  store.setHistoryExpanded(target);
+  store.applyFrame({ type: 'stream_events', stream_id: target, events: bulk(target, 900) });
+  store.applyFrame({ type: 'stream_events', stream_id: target, events: bulk(target, 900).map(event => ({ ...event, daemon_seq: event.daemon_seq - 900 })) });
+  assert.equal(store.getState().events.filter(event => event.stream_id === target).length, 1800);
+  assert.equal(store.getState().eventBucketsByStream?.[target]?.events.length, 1800);
+  store.applyFrame({ type: 'chat.event', event: row(target, 5000, 'ASSIST_TEXT', 'live after paging') });
+  assert.equal(store.getState().eventBucketsByStream?.[target]?.events.length, 1801);
+});
+
+test('without paging the per-stream cap still evicts the oldest events', () => {
+  const store = fixture();
+  store.setFocusedChatStreams([target]);
+  store.applyFrame({ type: 'stream_events', stream_id: target, events: bulk(target, 900) });
+  store.applyFrame({ type: 'stream_events', stream_id: target, events: bulk(target, 900).map(event => ({ ...event, daemon_seq: event.daemon_seq + 900 })) });
+  assert.equal(store.getState().events.filter(event => event.stream_id === target).length, 1200);
+});
+
+test('detaching a paged chat releases its expansion', () => {
+  const store = fixture();
+  store.setFocusedChatStreams([target, noise]);
+  store.setHistoryExpanded(target);
+  assert.deepEqual(store.getState().historyExpandedStreamIds, [target]);
+  store.setFocusedChatStreams([noise]);
+  assert.deepEqual(store.getState().historyExpandedStreamIds, []);
+});
