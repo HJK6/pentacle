@@ -245,7 +245,7 @@ class SpeakerService:
                 on_stopped(listener.recognition_stamp()[0])
         return self._outcome('spoken', receipt=receipt)
 
-    def _clip(self, group, item, rules):
+    def _clip(self, group, item, rules, after=None):
         try:
             reason = self._suppressed('clips', item['meeting'], rules)
             if reason:
@@ -256,7 +256,7 @@ class SpeakerService:
                         self.mark(item['cid'], 'acknowledgement_started_at')
                 return self.clips.play(group, rules['clips'][group], deadline, on_start=started)
             stopped = (lambda epoch: item.update(ack_epoch=epoch)) if group == 'acknowledgement' else None
-            return self._play(item['listener'], play, on_stopped=stopped)
+            return self._play(item['listener'], play, after=after, on_stopped=stopped)
         finally:
             if group == 'acknowledgement':
                 item['ack_done'].set()
@@ -313,7 +313,11 @@ class SpeakerService:
             def render(deadline):
                 self.mark(cid, 'line_accepted_at')
                 return self.speaker.speak(text, deadline, on_first_frame=lambda: self.mark(cid, 'first_audio_at'))
-            result = self._play(listener, render, after=item)
+            # A question's own listening tone follows immediately, inside the 1s post-line
+            # self-fence; record this line's post-render fence epoch so that tone plays
+            # through its own fence (same own-fence credential used for ack -> reply).
+            record_fence = (lambda epoch: item.update(ack_epoch=epoch)) if expects_answer else None
+            result = self._play(listener, render, after=item, on_stopped=record_fence)
         open_window = False
         window_refused = None
         with self.lock:
@@ -352,15 +356,18 @@ class SpeakerService:
                 window_refused = 'local_action_window'
             else:
                 # After the question finishes playing, play the listening tone and open the window.
+                # The tone carries this line's own-fence credential (after=item) so it is not
+                # refused as listener_busy by the question's own 1s post-line recognition fence.
+                tone_played = False
                 if rules['replies']['listening_tone']:
-                    self._clip('listening_tone', item, rules)
+                    tone_played = self._clip('listening_tone', item, rules, after=item)['outcome'] == 'spoken'
                 with self.lock:
                     window = item.get('window')
                     if window and window['line_id'] == lid:
                         window['opens_at'] = self.clock()
                         window['deadline'] = self.clock()+rules['replies']['answer_window_seconds']
                 self._window_event('opened', payload['conversation_id'], lid,
-                                   tone=rules['replies']['listening_tone'],
+                                   tone=rules['replies']['listening_tone'], tone_played=tone_played,
                                    window_seconds=rules['replies']['answer_window_seconds'])
         if window_refused:
             self._window_event('refused', payload['conversation_id'], lid, reason=window_refused)
