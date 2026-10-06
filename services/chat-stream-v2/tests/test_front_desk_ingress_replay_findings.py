@@ -11,7 +11,6 @@ from front_desk_ingress_replay import harness, DESK
 pytestmark = pytest.mark.timeout(20)
 
 
-@pytest.mark.xfail(strict=True, reason="spec_pentacle__held_tell_payload_identity_2026_10: a held tell_id is not bound to its payload before suppression")
 def test_held_tell_identity_cannot_be_reused_to_publish_changed_wake_body(tmp_path):
     async def run():
         async with harness(tmp_path) as h:
