@@ -39,6 +39,8 @@ Cause from source: Server._on_tell applies front-desk suppression before Comms.t
 
 H4 permits tests/fixtures only. No product fix, skip, xfail, weakened assertion or expected-success reclassification is applied. Fleet/owner disposition is required before a ready handoff; the draft keeps the failing proof in normal test discovery.
 
+Owner disposition (front desk, 2026-10-05): the regression is carried as a single strict xfail citing spec_pentacle__held_tell_payload_identity_2026_10. The daemon fix tracked there removes the marker; with strict=True an unexpected pass fails the suite. No other test or assertion is changed.
+
 ## Shapes for private-sample review
 
 - Authenticated peer prose beginning [child_report_ready currently wakes by raw prefix. It grants no report/operator authority. Corpus preserves this observed classifier behavior and flags whether permissive wake is intended.

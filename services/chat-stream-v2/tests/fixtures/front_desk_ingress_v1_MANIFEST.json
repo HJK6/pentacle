@@ -23,7 +23,7 @@
       "path": "tests/test_front_desk_ingress_replay_findings.py",
       "synthetic": true,
       "contains_real_traffic": false,
-      "sha256": "7044582f21ad19e0a314d9e419c61f877a77c0d4ee1a7894b8b8f0ca61c5d0a2"
+      "sha256": "440e116396fe75f39fbf099f4ca2e07ef47eb358050ea556d2d3204c3deb7df3"
     }
   ]
 }
