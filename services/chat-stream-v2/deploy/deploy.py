@@ -326,27 +326,138 @@ def _terminal_command_detail(result: subprocess.CompletedProcess[str]) -> str:
     return detail[-1200:]
 
 
-def _smoke_quota_note(result: subprocess.CompletedProcess[str]) -> dict[str, object]:
-    """The fleet smoke's environmental `UNTESTED` cells, if any, parsed best-effort.
-
-    A codex account over its usage limit is environmental, not a daemon fault:
-    the smoke must not call it a pass, and the record names the affected host(s)
-    so the deploy operator sees the actionable line. Any parse failure yields no note.
-    """
-    try:
-        payload = json.loads(result.stdout or "{}")
-        rows = payload.get("untested") or payload.get("quota_exhausted") or []
-        return {"untested": rows} if rows else {}
-    except (ValueError, TypeError, AttributeError):
-        return {}
-
-
 def _smoke_payload(result: subprocess.CompletedProcess[str]) -> dict[str, object]:
     try:
         payload = json.loads(result.stdout or "{}")
     except (ValueError, TypeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _fleet_smoke_hosts(machines_file: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Read identity from the installed machine file, never ambient host overrides.
+
+    Match machines.py's list/object schema and ssh_target=None local marker. Do not
+    fall back to its implicit localhost when the installed file is absent: missing
+    configuration is missing acceptance evidence, not proof of a healthy fleet.
+    """
+    if not machines_file.strip():
+        raise ValueError("installed PENTACLE_MACHINES_FILE is missing")
+    payload = json.loads(Path(machines_file).expanduser().read_text(encoding="utf-8"))
+    rows = payload.get("machines") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("installed machine file must contain a nonempty machines list")
+    hosts, local_hosts = [], []
+    for row in rows:
+        if not isinstance(row, dict) or not str(row.get("name") or "").strip():
+            raise ValueError("installed machine entry has no name")
+        name = str(row["name"]).strip()
+        if name in hosts:
+            raise ValueError("installed machine file contains duplicate names")
+        hosts.append(name)
+        if row.get("ssh_target") is None:
+            local_hosts.append(name)
+        elif not str(row["ssh_target"]).strip():
+            raise ValueError("installed remote machine has a blank ssh_target")
+    return tuple(hosts), tuple(local_hosts)
+
+
+def _fleet_smoke_verdict(
+    result: subprocess.CompletedProcess[str], machines_file: str,
+) -> dict[str, object]:
+    """Combine every smoke evidence channel; missing cells can never turn green.
+
+    spawn_fleet_smoke emits passes/UNTESTED in `cells`, but reds may appear only
+    in `failures`. Duplicate observations merge by host/provider/prompt_mode,
+    with failure dominating and all original rows/reasons retained in the stamp.
+    """
+    payload = _smoke_payload(result)
+    issues: list[str] = []
+    try:
+        hosts, local_hosts = _fleet_smoke_hosts(machines_file)
+    except (OSError, ValueError, TypeError) as exc:
+        hosts, local_hosts = (), ()
+        issues.append(f"installed_machine_configuration: {type(exc).__name__}: {exc}")
+    if not local_hosts:
+        issues.append("installed_local_host_not_identified")
+    # This is the full deployed smoke matrix, matching spawn_fleet_smoke's
+    # PROVIDERS/PROMPT_MODES. Exclusions never prove full-fleet acceptance.
+    expected = {
+        (host, provider, mode)
+        for host in hosts for provider in ("claude", "codex")
+        for mode in ("prompted", "promptless")
+    }
+    cells: dict[tuple[str, str, str], dict[str, object]] = {}
+    severity = {"passed": 0, "unreachable": 1, "untested": 2, "failed": 3}
+    for source in ("cells", "untested", "quota_exhausted", "failures"):
+        rows = payload.get(source, [])
+        if not isinstance(rows, list):
+            issues.append(f"invalid_{source}_evidence")
+            rows = [rows] if rows else []
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                issues.append(f"invalid_{source}_row:{index}")
+                row = {}
+            key = tuple(str(row.get(field) or "").strip() for field in ("host", "provider", "prompt_mode"))
+            if key not in expected:
+                issues.append(f"unconfigured_or_invalid_cell:{'/'.join(key)}")
+            outcome = str(row.get("outcome") or "").lower()
+            classification = str(row.get("class") or "").lower()
+            reason = str(row.get("reason") or row.get("stage") or "")
+            if source == "failures" or outcome in {"fail", "failed", "failure"} or classification in {"fail", "failed", "failure"}:
+                outcome = "failed"
+            elif source == "quota_exhausted" or reason == "quota_exhausted" or classification == "quota_exhausted":
+                outcome, reason = "untested", reason or "quota_exhausted"
+            elif outcome == "unreachable" or reason == "host_unavailable":
+                outcome = "unreachable"
+            elif source == "untested" or outcome == "untested" or classification == "untested":
+                outcome = "untested"
+            elif outcome in {"pass", "passed"}:
+                outcome = "passed"
+            else:
+                outcome, reason = "untested", reason or "unrecognized_evidence"
+            reason = reason or {"passed": "cell_passed", "failed": "cell_failed",
+                                "unreachable": "host_unavailable", "untested": "untested"}[outcome]
+            if key not in cells:
+                cells[key] = {**row, "host": key[0], "provider": key[1], "prompt_mode": key[2],
+                              "outcome": outcome, "reason": reason, "reasons": [reason]}
+            else:
+                cell = cells[key]
+                if reason not in cell["reasons"]:
+                    cell["reasons"].append(reason)
+                if severity[outcome] > severity[cell["outcome"]]:
+                    cell.update({**row, "host": key[0], "provider": key[1], "prompt_mode": key[2],
+                                 "outcome": outcome, "reason": reason, "reasons": cell["reasons"]})
+    for key in sorted(expected - cells.keys()):
+        cells[key] = {"host": key[0], "provider": key[1], "prompt_mode": key[2],
+                      "outcome": "untested", "reason": "missing_evidence", "reasons": ["missing_evidence"]}
+    reports = list(cells.values())
+    untested = [row for row in reports if row["outcome"] in {"untested", "unreachable"}]
+    unreachable_hosts = sorted({row["host"] for row in reports if row["outcome"] == "unreachable"})
+    status = str(payload.get("status") or "").upper()
+    if (any(row["outcome"] == "failed" for row in reports)
+            or payload.get("failures") or status == "FAIL" or result.returncode not in (0, 2)):
+        outcome = FLEET_SMOKE_FAILED
+    elif issues or not reports or any(row["outcome"] == "untested" for row in reports):
+        outcome = FLEET_SMOKE_UNTESTED
+    elif unreachable_hosts:
+        local_passed = all(cells[key]["outcome"] == "passed" for key in expected if key[0] in local_hosts)
+        outcome = FLEET_SMOKE_PARTIAL if local_passed else FLEET_SMOKE_UNTESTED
+    elif result.returncode == 2 or status == "UNTESTED":
+        outcome = FLEET_SMOKE_UNTESTED
+        issues.append("smoke_reported_untested_without_cell_reason")
+    elif payload.get("ok") is False:
+        outcome = FLEET_SMOKE_FAILED
+        issues.append("smoke_reported_not_ok_without_cell_reason")
+    else:
+        outcome = FLEET_SMOKE_PASSED
+    return {
+        "outcome": outcome, "cells": reports, "local_hosts": list(local_hosts),
+        "unreachable_hosts": unreachable_hosts, "untested": untested,
+        "evidence": payload, "issues": issues, "returncode": result.returncode,
+        "detail": _terminal_command_detail(result),
+        **({"raw_stdout": result.stdout, "raw_stderr": result.stderr} if not payload else {}),
+    }
 
 
 def run_gate_and_write_evidence(
@@ -718,6 +829,7 @@ RUNTIME_SHA_NOT_CONFIRMED = "sha_not_confirmed"
 FLEET_SMOKE_PASSED = "passed"
 FLEET_SMOKE_FAILED = "failed"
 FLEET_SMOKE_UNTESTED = "untested"
+FLEET_SMOKE_PARTIAL = "partial"
 SLOW_CONSUMER_PASSED = "passed"
 SLOW_CONSUMER_FAILED = "failed"
 
@@ -1118,7 +1230,14 @@ def _apply_post_activation(
             }
             if runtime_confirmed:
                 # Full smoke follows installed configuration, independent of caller overrides.
-                machines_file = _launchd_environment(service.launchd_label).get("PENTACLE_MACHINES_FILE", "")
+                machines_file = _launchd_environment(service.launchd_label).get("PENTACLE_MACHINES_FILE", "").strip()
+                if machines_file:
+                    # The child runs in repo, not the caller's working directory. Resolve
+                    # once so execution and verdict cannot read different relative files.
+                    machines_path = Path(machines_file).expanduser()
+                    if not machines_path.is_absolute():
+                        machines_path = repo / machines_path
+                    machines_file = str(machines_path.resolve())
                 smoke = runner(
                     (
                         "/usr/bin/env",
@@ -1131,23 +1250,9 @@ def _apply_post_activation(
                     repo,
                 )
                 stamp["slow_consumer"] = _scan_slow_consumer_window(service, prior_log_size)
-                smoke_payload = _smoke_payload(smoke)
-                smoke_untested = smoke_payload.get("untested") or smoke_payload.get("quota_exhausted") or []
-                smoke_failures = smoke_payload.get("failures") or []
-                if smoke_untested and not smoke_failures:
-                    stamp["fleet_smoke"] = {
-                        "outcome": FLEET_SMOKE_UNTESTED,
-                        "untested": smoke_untested,
-                        "detail": _terminal_command_detail(smoke),
-                    }
-                elif smoke.returncode == 0:
-                    stamp["fleet_smoke"] = {"outcome": FLEET_SMOKE_PASSED, **_smoke_quota_note(smoke)}
+                stamp["fleet_smoke"] = _fleet_smoke_verdict(smoke, machines_file)
+                if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED:
                     _install_fleet_smoke_schedule(repo, runner)
-                else:
-                    stamp["fleet_smoke"] = {
-                        "outcome": FLEET_SMOKE_FAILED,
-                        "detail": _terminal_command_detail(smoke),
-                    }
         # Persist the classified record inside the same never-raising boundary. A stamp-write
         # failure after activation must not escape as a refusal either — record it and make one
         # best-effort retry so the error itself is captured; main() still prints the returned
@@ -1458,7 +1563,9 @@ def build_parser() -> argparse.ArgumentParser:
 # retry/force double-restart of a healthy fabric, 2026-07-26 windows 9127fa2, fe7e7e7), 5 for a
 # runtime-SHA readback that never confirmed the target, 6 for a post-boot fleet-smoke miss (the
 # 2026-09-05 laneM/laneN bounces, a workstation peer), 7 for any other post-activation error (the
-# restart or schedule install itself raised). None of 3-7 is a refusal: do NOT retry/force.
+# restart or schedule install itself raised), 8 for slow consumers, 9 for untested smoke,
+# and 10 for complete local pass with unreachable satellites. Partial (10) is NOT full-fleet
+# success and cannot satisfy a release gate. None of 3-10 is a refusal: do NOT retry/force.
 EXIT_OK = 0
 EXIT_REFUSED = 2
 EXIT_BOOT_LINE_NOT_OBSERVED = 3
@@ -1468,6 +1575,7 @@ EXIT_FLEET_SMOKE_FAILED = 6
 EXIT_POST_ACTIVATION_ERROR = 7
 EXIT_SLOW_CONSUMER_FAILED = 8
 EXIT_FLEET_SMOKE_UNTESTED = 9
+EXIT_FLEET_SMOKE_PARTIAL = 10
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1542,6 +1650,14 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     smoke = stamp.get("fleet_smoke") or {}
+    if smoke.get("outcome") == FLEET_SMOKE_PARTIAL:
+        print(
+            "deploy applied; post-boot fleet smoke is PARTIAL: local cells passed; "
+            f"unreachable satellites: {', '.join(smoke.get('unreachable_hosts') or [])}. "
+            "This is not full-fleet release acceptance; do NOT retry the deploy.",
+            file=sys.stderr,
+        )
+        return EXIT_FLEET_SMOKE_PARTIAL
     if smoke.get("outcome") == FLEET_SMOKE_UNTESTED:
         print(
             "deploy applied; post-boot fleet smoke is UNTESTED: "

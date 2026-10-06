@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "path": "tests/fixtures/th_h5/tag_checkout.txt",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "98cb42a35137eafc8943300c73c3373fe1fb1f627033986832c2dea37c1d1aba",
+      "purpose": "Authored synthetic ops evidence; checkout log is source-derived, not captured traffic"
+    },
+    {
+      "path": "tests/test_merge_gate_polling.py",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "5349fedaad9d1b94a4ebb5be9ae3a8a93d3c52fd3985df9b42c1c753726ddbb7",
+      "purpose": "Authored synthetic ops evidence; checkout log is source-derived, not captured traffic"
+    },
+    {
+      "path": "tests/test_deploy_fleet_verdict.py",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "ecc6699fd91035eba23d5a0e921f69d20095385885213d2f50b50ea9e688f225",
+      "purpose": "Authored synthetic ops evidence; checkout log is source-derived, not captured traffic"
+    }
+  ]
+}
