@@ -1264,7 +1264,7 @@ class Notify:
             refuse_privileged_dedup_refresh=bool(
                 (msg.get("_auth_context") or {}).get("service_authenticated")
                 and (msg.get("_auth_context") or {}).get("service_actor")
-                == FIXED_SYSTEM_PRODUCER_STREAM_ID
+                in {FIXED_SYSTEM_PRODUCER_STREAM_ID, "amaterasu:wmi-pg-dailybackup"}
             ),
         )
         client_record = await self._serialize(record)

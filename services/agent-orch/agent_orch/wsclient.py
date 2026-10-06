@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 AGENT_ORCH_CAPABILITY_FLAGS = ["spec_id", "stream_token", "status"]
 FIXED_SYSTEM_NOTIFICATION_PRODUCER_ID = "altum-bot-cd"
+WMI_BACKUP_NOTIFICATION_PRODUCER_ID = "amaterasu:wmi-pg-dailybackup"
+SYSTEM_NOTIFICATION_PRODUCER_IDS = frozenset({
+    FIXED_SYSTEM_NOTIFICATION_PRODUCER_ID, WMI_BACKUP_NOTIFICATION_PRODUCER_ID,
+})
 
 
 def _agent_orch_capabilities_payload() -> dict[str, Any]:
@@ -1440,7 +1444,7 @@ def _attach_agent_identity(payload: dict[str, Any]) -> str | None:
     if "stream_token" not in payload:
         stream_token = (
             _stream_token_from_file()
-            if stream_id == FIXED_SYSTEM_NOTIFICATION_PRODUCER_ID
+            if stream_id in SYSTEM_NOTIFICATION_PRODUCER_IDS
             else _stream_token_from_env()
         )
         if stream_token:
@@ -1764,7 +1768,7 @@ async def notification_create_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
     from_stream_id = _attach_agent_identity(payload)
-    service_identity = from_stream_id == FIXED_SYSTEM_NOTIFICATION_PRODUCER_ID
+    service_identity = from_stream_id in SYSTEM_NOTIFICATION_PRODUCER_IDS
     identity_token = payload.get("stream_token") if isinstance(payload.get("stream_token"), str) else None
     ws = await _connect_rpc_ready(
         config,

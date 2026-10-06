@@ -86,6 +86,12 @@ SYSTEM_PRODUCER_STREAM_TOKEN_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN"
 SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE"
 SYSTEM_PRODUCER_STREAM_ID_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_ID"
 FIXED_SYSTEM_PRODUCER_STREAM_ID = "altum-bot-cd"
+WMI_BACKUP_PRODUCER_STREAM_ID = "amaterasu:wmi-pg-dailybackup"
+WMI_BACKUP_STREAM_TOKEN_FILE_ENV = "PENTACLE_WMI_BACKUP_STREAM_TOKEN_FILE"
+WMI_BACKUP_NOTIFICATION_DESTINATION = "pentacle-updates"
+WMI_BACKUP_DEDUP_RE = re.compile(
+    r"^wmi-backup\|[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\|([0-9]{4}-[0-9]{2}-[0-9]{2})$"
+)
 SYSTEM_NOTIFICATION_CREATE_FIELDS = frozenset({
     "type", "request_id", "from_stream_id", "stream_token", "producer",
     "title", "body", "severity", "dedup_key", "actions",
@@ -1279,7 +1285,7 @@ class Server:
                         verb, request_id, "system_producer_auth_required"
                     )]
                 if verb == "hello":
-                    if not self._valid_system_producer_hello(msg):
+                    if not self._valid_system_producer_hello(msg, service_auth["service_actor"]):
                         return [self._auth_error_frame(
                             verb, request_id, "system_producer_auth_required"
                         )]
@@ -1287,7 +1293,7 @@ class Server:
                     return [self._auth_error_frame(
                         verb, request_id, "system_producer_forbidden"
                     )]
-                elif not self._valid_system_notification_create(msg):
+                elif not self._valid_system_notification_create(msg, service_auth["service_actor"]):
                     return [self._auth_error_frame(
                         verb, request_id, "system_producer_payload_invalid"
                     )]
@@ -1487,8 +1493,18 @@ class Server:
             token_was_supplied = "stream_token" in msg
             credentials_changed = bool(
                 (claim and claim != bound_system_actor)
-                or (token_was_supplied and not self._verify_system_producer_token(msg.get("stream_token")))
+                or (token_was_supplied and not self._verify_system_producer_token(
+                    msg.get("stream_token"), bound_system_actor
+                ))
             )
+            if bound_system_actor == WMI_BACKUP_PRODUCER_STREAM_ID:
+                # Re-read the credential even on tokenless bound connections.
+                # Removal/rotation must revoke old sockets as well as new ones.
+                expected = self._system_producer_token(bound_system_actor)
+                credentials_changed = credentials_changed or not expected or (
+                    hashlib.sha256(expected.encode("utf-8")).hexdigest()
+                    != self._client_token_hashes.get(websocket)
+                )
             context.update({
                 "service_attempted": True,
                 "service_authenticated": not credentials_changed,
@@ -1500,24 +1516,33 @@ class Server:
         cached_hash = self._client_token_hashes.get(websocket)
         claim = str(msg.get("from_stream_id") or "").strip()
         producer = str(msg.get("producer") or "").strip()
-        token_matches = self._verify_system_producer_token(msg.get("stream_token"))
+        cd_token_matches = self._verify_system_producer_token(msg.get("stream_token"))
+        wmi_token_matches = self._verify_system_producer_token(
+            msg.get("stream_token"), WMI_BACKUP_PRODUCER_STREAM_ID
+        )
         service_attempted = bool(
-            claim == FIXED_SYSTEM_PRODUCER_STREAM_ID
-            or producer == FIXED_SYSTEM_PRODUCER_STREAM_ID
-            or token_matches
+            claim in {FIXED_SYSTEM_PRODUCER_STREAM_ID, WMI_BACKUP_PRODUCER_STREAM_ID}
+            or producer in {FIXED_SYSTEM_PRODUCER_STREAM_ID, WMI_BACKUP_PRODUCER_STREAM_ID}
+            or cd_token_matches or wmi_token_matches
         )
         if service_attempted:
-            configured_id = str(os.environ.get(SYSTEM_PRODUCER_STREAM_ID_ENV) or "").strip()
+            if claim == WMI_BACKUP_PRODUCER_STREAM_ID:
+                configured_id = WMI_BACKUP_PRODUCER_STREAM_ID
+                enabled = wmi_token_matches
+            else:
+                configured_id = str(os.environ.get(SYSTEM_PRODUCER_STREAM_ID_ENV) or "").strip()
+                enabled = configured_id == FIXED_SYSTEM_PRODUCER_STREAM_ID and cd_token_matches
             authenticated = bool(
-                configured_id == FIXED_SYSTEM_PRODUCER_STREAM_ID
-                and claim == configured_id
-                and token_matches
+                enabled and claim == configured_id
                 and msg.get("type") == "hello"
-                and self._valid_system_producer_hello(msg)
+                and self._valid_system_producer_hello(msg, configured_id)
             )
             if authenticated:
-                # Bind only after the entire restricted hello is accepted.
                 self._client_system_producers[websocket] = configured_id
+                if configured_id == WMI_BACKUP_PRODUCER_STREAM_ID:
+                    self._client_token_hashes[websocket] = hashlib.sha256(
+                        msg["stream_token"].encode("utf-8")
+                    ).hexdigest()
             context.update({
                 "service_attempted": True,
                 "service_authenticated": authenticated,
@@ -1642,17 +1667,39 @@ class Server:
         return context
 
     @staticmethod
-    def _verify_system_producer_token(token: Any) -> bool:
-        # The fixed producer uses the configured file only; never fall back
-        # to an inline daemon token when that file is absent or unreadable.
-        expected = None
-        token_file = os.environ.get(SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV)
-        if token_file:
-            try:
-                expected = Path(token_file).expanduser().read_text(encoding="utf-8").strip()
-            except OSError:
-                expected = None
-        return bool(expected and isinstance(token, str) and hmac.compare_digest(expected, token))
+    def _system_producer_token(actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID) -> str | None:
+        # Exactly two fixed principals; no registry or generic service authority.
+        if actor == WMI_BACKUP_PRODUCER_STREAM_ID:
+            token_file = os.environ.get(WMI_BACKUP_STREAM_TOKEN_FILE_ENV)
+        elif actor == FIXED_SYSTEM_PRODUCER_STREAM_ID:
+            token_file = os.environ.get(SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV)
+        else:
+            return None
+        if not token_file:
+            return None
+        try:
+            path = Path(token_file).expanduser()
+            if actor == WMI_BACKUP_PRODUCER_STREAM_ID:
+                metadata = path.stat()
+                if not path.is_file() or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+                    return None
+            expected = path.read_text(encoding="utf-8").strip()
+        except (OSError, ValueError, UnicodeError):
+            return None
+        if not expected:
+            return None
+        if actor == WMI_BACKUP_PRODUCER_STREAM_ID:
+            cd_token = Server._system_producer_token(FIXED_SYSTEM_PRODUCER_STREAM_ID)
+            if cd_token and hmac.compare_digest(expected.encode("utf-8"), cd_token.encode("utf-8")):
+                return None
+        return expected
+
+    @staticmethod
+    def _verify_system_producer_token(
+        token: Any, actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID
+    ) -> bool:
+        expected = Server._system_producer_token(actor)
+        return bool(expected and isinstance(token, str) and hmac.compare_digest(expected.encode("utf-8"), token.encode("utf-8")))
 
     @staticmethod
     def _auth_error_frame(verb: str, request_id: Any, code: str) -> dict[str, Any]:
@@ -1661,34 +1708,52 @@ class Server:
             frame["request_id"] = request_id
         return frame
 
-    def _valid_system_producer_hello(self, msg: dict[str, Any]) -> bool:
+    def _valid_system_producer_hello(
+        self, msg: dict[str, Any], actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID
+    ) -> bool:
         subscribe = msg.get("subscribe")
         return bool(
-            msg.get("from_stream_id") == FIXED_SYSTEM_PRODUCER_STREAM_ID
-            and self._verify_system_producer_token(msg.get("stream_token"))
+            msg.get("from_stream_id") == actor
+            and self._verify_system_producer_token(msg.get("stream_token"), actor)
             and isinstance(subscribe, dict)
             and subscribe.get("snapshot") is False
             and subscribe.get("mode") == "rpc"
         )
 
-    def _valid_system_notification_create(self, msg: dict[str, Any]) -> bool:
-        if not set(msg).issubset(SYSTEM_NOTIFICATION_CREATE_FIELDS):
+    def _valid_system_notification_create(
+        self, msg: dict[str, Any], actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID
+    ) -> bool:
+        wmi = actor == WMI_BACKUP_PRODUCER_STREAM_ID
+        fields = SYSTEM_NOTIFICATION_CREATE_FIELDS | {"destination"} if wmi else SYSTEM_NOTIFICATION_CREATE_FIELDS
+        if not set(msg).issubset(fields):
             return False
         if (
-            msg.get("from_stream_id") != FIXED_SYSTEM_PRODUCER_STREAM_ID
-            or not self._verify_system_producer_token(msg.get("stream_token"))
-            or msg.get("producer") != FIXED_SYSTEM_PRODUCER_STREAM_ID
+            msg.get("from_stream_id") != actor
+            or not self._verify_system_producer_token(msg.get("stream_token"), actor)
+            or msg.get("producer") != actor
             or not isinstance(msg.get("request_id"), str)
             or not msg["request_id"]
             or not isinstance(msg.get("title"), str)
             or not msg["title"].strip()
             or ("body" in msg and not isinstance(msg.get("body"), str))
+            or not isinstance(msg.get("severity"), str)
             or msg.get("severity") not in {"info", "warning", "critical"}
             or ("actions" in msg and msg.get("actions") != [])
             or not isinstance(msg.get("dedup_key"), str)
         ):
             return False
-        match = SYSTEM_NOTIFICATION_DEDUP_RE.fullmatch(msg["dedup_key"])
+        if wmi and (
+            msg.get("destination") != WMI_BACKUP_NOTIFICATION_DESTINATION
+            or len(msg["request_id"]) > 120
+            or len(msg["title"]) > 120
+            or not isinstance(msg.get("body"), str)
+            or not msg["body"].strip()
+            or len(msg["body"]) > 1200
+            or msg.get("severity") not in {"warning", "critical"}
+        ):
+            return False
+        pattern = WMI_BACKUP_DEDUP_RE if wmi else SYSTEM_NOTIFICATION_DEDUP_RE
+        match = pattern.fullmatch(msg["dedup_key"])
         if match is None:
             return False
         try:

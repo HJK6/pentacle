@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from argparse import Namespace
 
+import pytest
+
 from agent_orch import cli
 from agent_orch.config import Config
 
@@ -191,3 +193,25 @@ def test_notify_payload_is_provider_agnostic():
         payload.pop("answer_to_stream_id")
         payload.pop("from_stream_id")
     assert claude_payload == codex_payload
+
+
+def test_wmi_notify_cli_contract():
+    args = cli.build_parser().parse_args([
+        "notify", "--message", "Synthetic WMI receipt", "--title", "Synthetic WMI backup failure",
+        "--from", "amaterasu:wmi-pg-dailybackup", "--producer", "amaterasu:wmi-pg-dailybackup",
+        "--destination", "pentacle-updates", "--severity", "critical",
+        "--dedup-key", "wmi-backup|synthetic|2026-10-06",
+    ])
+    payload = cli._notification_create_payload_from_args(args, caller_stream_id=args.from_stream_id)
+    assert payload["destination"] == "pentacle-updates"
+    assert payload["body"] == "Synthetic WMI receipt"
+    assert payload["actions"] == []
+
+
+@pytest.mark.parametrize("missing", ["title", "destination", "dedup_key", "message"])
+def test_wmi_notify_requires_operational_card_fields(missing):
+    args = _args(title="Synthetic failure", destination="pentacle-updates",
+                 dedup_key="wmi-backup|synthetic|2026-10-06")
+    setattr(args, missing, None)
+    with pytest.raises(ValueError, match="WMI backup notify requires"):
+        cli._notification_create_payload_from_args(args, caller_stream_id="amaterasu:wmi-pg-dailybackup")

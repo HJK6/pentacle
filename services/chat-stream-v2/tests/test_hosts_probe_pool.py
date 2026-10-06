@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 
 import pytest
@@ -210,12 +209,10 @@ def test_peer_tmux_quotes_exact_target_for_zsh() -> None:
     assert "-t '=x:'" in argv[-1]
 
 
-def test_ssh_command_drops_multiplexing_when_the_socket_path_would_overflow(tmp_path) -> None:
+def test_ssh_command_drops_multiplexing_when_the_socket_path_would_overflow(tmp_path, monkeypatch) -> None:
     long_dir = tmp_path / ("x" * 120)
-    os.environ["PENTACLE_SSH_CONTROL_DIR"] = str(long_dir)
-    try:
-        argv = ssh_command("user@example.local", "true")
-        assert "ControlMaster=auto" not in argv  # multiplexing skipped, ssh still valid
-        assert "BatchMode=yes" in argv
-    finally:
-        del os.environ["PENTACLE_SSH_CONTROL_DIR"]
+    # Restore an inherited harness override instead of deleting it for later tests.
+    monkeypatch.setenv("PENTACLE_SSH_CONTROL_DIR", str(long_dir))
+    argv = ssh_command("user@example.local", "true")
+    assert "ControlMaster=auto" not in argv  # multiplexing skipped, ssh still valid
+    assert "BatchMode=yes" in argv
