@@ -75,6 +75,11 @@ DEFAULT_COMMANDS = {
 }
 
 AWAKE_TIMEOUT = 10.0  # seconds to wait for a command after wake word
+# An open wake capture (capture_origin == 'wake') drops if no accepted speech
+# segment arrives for this long. Bound must exceed the 15 s forced-split cap
+# (line ~705) + ASR latency + pause headroom; 30.0 s = 1.5x the measured normal
+# max gap of 19.78 s. Derivation + measurement: spec_pentacle__voice_wake_capture_timeout_2026_10.
+WAKE_CAPTURE_IDLE_TIMEOUT = 30.0
 
 # Calibratable phrase groups -- keys match calibration.json
 PHRASE_GROUPS = {
@@ -304,6 +309,10 @@ class AlwaysOnListener:
         self.captured_texts = []
         self.last_command_time = 0
         self.awake_since = 0
+        # Idle bound for an open wake capture. Injectable clock so tests can
+        # advance time without moving the module-wide callback-stall watchdog.
+        self._clock = time.monotonic
+        self._wake_capture_deadline = 0.0
 
         # Meeting state
         self.meeting_active = False
@@ -475,6 +484,37 @@ class AlwaysOnListener:
         if not self._finish_done.wait(timeout):
             raise TimeoutError("Microphone is still finishing transcription")
 
+    def _maybe_expire_wake_capture(self):
+        """Drop an open wake capture that has idled past WAKE_CAPTURE_IDLE_TIMEOUT.
+
+        Runs on the process-loop thread. Lock-free fast path, then takes
+        wake.lock and re-checks before mutating, to serialize with the
+        transcribe thread's _handle_text (which holds wake.lock).
+        """
+        if not (self.state == "CAPTURING" and self.capture_origin == "wake"
+                and self._wake_capture_deadline
+                and self._clock() >= self._wake_capture_deadline):
+            return
+        with self.wake.lock:
+            if (self.state == "CAPTURING" and self.capture_origin == "wake"
+                    and self._wake_capture_deadline
+                    and self._clock() >= self._wake_capture_deadline):
+                self._expire_wake_capture()
+
+    def _expire_wake_capture(self):
+        """Discard an idle wake capture: no delivery, no clipboard. Caller holds wake.lock."""
+        self._log("[capture] wake capture idle timeout -- dropping, back to LISTENING")
+        self.state = "LISTENING"
+        self.captured_texts = []
+        self.capture_origin = None
+        self._wake_capture_deadline = 0.0
+        # Invalidate any utterance queued or mid-transcribe before expiry so it
+        # cannot land in LISTENING, open a capture, or act as a wake. Bumping the
+        # recognition epoch drops it at the enqueue-epoch checks (process loop and
+        # _handle_utterance). wake.pending (completed, undelivered messages) is left intact.
+        self._recognition_epoch += 1
+        self._emit("state", "LISTENING")
+
 
     def _open_stream(self):
         self._device_selection = resolve_mic_device()
@@ -606,6 +646,7 @@ class AlwaysOnListener:
                     self._log("[awake] Timed out (silence) -- back to LISTENING")
                     self.state = "LISTENING"
                     self._emit("state", "LISTENING")
+                self._maybe_expire_wake_capture()
                 continue
 
             if chunk is _FINISH_CAPTURE:
@@ -630,6 +671,10 @@ class AlwaysOnListener:
                 continue
 
             chunk_epoch, chunk = chunk if isinstance(chunk, tuple) else (self.recognition_stamp()[0], chunk)
+            # Check before the suppression/epoch skip below: with a live mic the
+            # queue is never empty, and suppressed chunks continue before any
+            # later timeout check would run.
+            self._maybe_expire_wake_capture()
             current_epoch, suppressed = self.recognition_stamp()
             if suppressed or chunk_epoch != current_epoch:
                 continue
@@ -802,8 +847,11 @@ class AlwaysOnListener:
         if self.voice_actions.pending and normalize(text) == 'cancel':
             self.voice_actions.reset_dialogue()
             return
-        if self.wake.enabled and (self.state == "LISTENING" or self.capture_origin == 'followup'):
+        if self.wake.enabled and (self.state == "LISTENING" or self.capture_origin in ('followup', 'wake')):
             # Fresh wake preempts a direct answer, including a partial answer capture.
+            # A repeated leading "Hey Bart" inside an open wake capture re-arms:
+            # it falls through to the entry path below, which discards prior
+            # captured_texts, keeps the post-wake tail, and re-inits the idle clock.
             match = re.match(r"^\s*hey(?:[^\w]+)bart\b(?!['’]\w)", text, re.IGNORECASE)
             local_match = re.match(r"^\s*hey(?:[^\w]+)pentacle\b(?!['’]\w)", text, re.IGNORECASE) if self.voice_actions.enabled and self.voice_actions.policy == 'separate' else None
             if local_match:
@@ -819,6 +867,8 @@ class AlwaysOnListener:
                 self.state = "CAPTURING"
                 tail = text[match.end():].lstrip(" \t.,!?:;—–-")
                 self.captured_texts = [tail] if tail else []
+                if self.capture_origin == "wake":
+                    self._wake_capture_deadline = self._clock() + WAKE_CAPTURE_IDLE_TIMEOUT
                 self._emit("state", "CAPTURING")
                 return
             if self.state == 'LISTENING':
@@ -877,6 +927,11 @@ class AlwaysOnListener:
             return
 
         if self.state == "CAPTURING":
+            # An accepted, non-empty segment reached the capture: refresh the idle
+            # clock (under wake.lock, held by the caller). Silence, <0.3 s, empty
+            # transcript and suppressed/stale-epoch audio never reach here.
+            if self.capture_origin == "wake":
+                self._wake_capture_deadline = self._clock() + WAKE_CAPTURE_IDLE_TIMEOUT
             MAX_CAPTURE_SEGMENTS = 60
             cmd = match_command(text)
             if cmd == "end_copy":
