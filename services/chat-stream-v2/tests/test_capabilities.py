@@ -202,7 +202,7 @@ def test_lsof_probe_accepts_resolved_path_and_rejects_a_foreign_one(monkeypatch)
     assert registry.check("lsof").status == "error"
 
 
-def test_tmux_probe_accepts_server_exited_race_after_owned_kill(tmp_path):
+def test_tmux_probe_accepts_server_exited_race_after_owned_kill():
     # After kill-server, Linux tmux may report the dying owned server as "server exited unexpectedly".
     def run(args, **kwargs):
         verb = next(word for word in args if word in {"new-session", "has-session", "kill-server"})
@@ -211,11 +211,11 @@ def test_tmux_probe_accepts_server_exited_race_after_owned_kill(tmp_path):
             return SimpleNamespace(returncode=1, stdout="", stderr="server exited unexpectedly\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
     run.calls = []
-    result = cap.tmux_probe(run=run, which=lambda _: "synthetic-tmux", candidates=[str(tmp_path)])
+    result = cap.tmux_probe(run=run, which=lambda _: "synthetic-tmux", candidates=["/tmp"])
     assert result.status == "available" and run.calls == ["new-session", "has-session", "kill-server", "has-session"]
     # A server that is still answering after the kill remains a cleanup failure.
     alive = lambda args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr="")
-    registry = cap.Registry({"tmux": lambda: cap.tmux_probe(run=alive, which=lambda _: "synthetic-tmux", candidates=[str(tmp_path)])})
+    registry = cap.Registry({"tmux": lambda: cap.tmux_probe(run=alive, which=lambda _: "synthetic-tmux", candidates=["/tmp"])})
     assert registry.check("tmux").status == "error"
 
 
