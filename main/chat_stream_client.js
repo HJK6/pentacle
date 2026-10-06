@@ -849,7 +849,7 @@ try {
         this._forwardFrame({ type: 'stream_events', stream_id, events });
       }
       const exhausted = Number.isFinite(limit) && events.length < Number(limit);
-      return { ok: true, stream_id, count: merged, exhausted, nextBeforeDaemonSeq: events.length ? Math.min(...events.map((event) => Number(event?.daemon_seq)).filter(Number.isFinite)) : null };
+      return { ok: true, stream_id, count: merged, received: events.length, exhausted, nextBeforeDaemonSeq: events.length ? Math.min(...events.map((event) => Number(event?.daemon_seq)).filter(Number.isFinite)) : null };
     } catch (err) {
       return { ok: false, error: err?.error || err?.message || String(err) };
     }

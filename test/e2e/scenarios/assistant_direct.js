@@ -43,6 +43,9 @@ async function startDaemon({ artifactsDir, includeReport = false }) {
   const blobs = new Map();
   let durableQuestion = null;
   let targetHistoryReplyDelayMs = 0;
+  // Daemon-faithful history window (server.py request_stream_events): the newest
+  // `limit` events below before_daemon_seq, clamped to the recent limit.
+  let historyWindow = 0;
   const reportBody = JSON.stringify({ schema_version: 1, title: 'Disposable popout report', sections: [{
     id: 'report-section', title: 'Findings', status: 'in_progress', blocks: [{
       id: 'report-block', type: 'para', runs: [{ type: 'text', text: 'Disposable report body for popout proof.' }],
@@ -98,8 +101,14 @@ async function startDaemon({ artifactsDir, includeReport = false }) {
         send(socket, { type: 'asset.review.set.ok', request_id: msg.request_id, asset: { ...report } });
         for (const client of server.clients) send(client, { type: 'asset.update', ...report });
       } else if (msg.type === 'request_stream_events') {
+        const targetRows = () => {
+          if (!historyWindow) return events;
+          const before = Number.isFinite(msg.before_daemon_seq) ? msg.before_daemon_seq : Infinity;
+          const limit = Math.min(Number.isFinite(msg.limit) ? msg.limit : historyWindow, historyWindow);
+          return events.filter(row => row.daemon_seq < before).slice(-limit);
+        };
         const reply = () => send(socket, { type: 'request_stream_events.ok', request_id: msg.request_id,
-          stream_id: msg.stream_id, events: msg.stream_id === targetId ? events : msg.stream_id === sourceId ? assistantEvents
+          stream_id: msg.stream_id, events: msg.stream_id === targetId ? targetRows() : msg.stream_id === sourceId ? assistantEvents
             : msg.stream_id === noiseId ? noiseEvents : extraEvents.get(msg.stream_id) || [], has_more: false });
         if (msg.stream_id === targetId && targetHistoryReplyDelayMs > 0) setTimeout(reply, targetHistoryReplyDelayMs);
         else reply();
@@ -180,6 +189,17 @@ async function startDaemon({ artifactsDir, includeReport = false }) {
       events.push(row);
       for (const socket of server.clients) send(socket, { type: 'chat.event', event: row });
       return row;
+    },
+    // Tool-heavy chat: `turns` x (USER, ASSIST_TEXT, 2 tool pairs), served through a daemon-faithful window.
+    seedWindowedHistory({ turns = 240, window = 500 } = {}) {
+      if (requests.length) throw new Error('seed history before the web host connects');
+      historyWindow = window;
+      for (let turn = 1; turn <= turns; turn++) {
+        events.push(event('USER', `Paged turn ${turn} user`));
+        events.push(event('TOOL_USE', 'tool call'), event('TOOL_RESULT', 'tool result'));
+        events.push(event('TOOL_USE', 'tool call'), event('TOOL_RESULT', 'tool result'));
+        events.push(event('ASSIST_TEXT', `Paged turn ${turn} assistant`));
+      }
     },
     setTargetHistoryReplyDelay(ms) { targetHistoryReplyDelayMs = Math.max(0, Number(ms) || 0); },
     setGeneration(value) { target.session_generation = value; inventory(); },

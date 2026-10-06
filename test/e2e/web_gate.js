@@ -449,6 +449,12 @@ if (require.main === module) {
           stdio: 'inherit', env: { ...process.env, PENTACLE_TEST_BROWSER: resolveChrome() },
         });
       } catch (error) { console.error('History retention gate failed:', error.message); code = 1; }
+      try {
+        await execWithRuntimeDirectory(execFileSync, process.execPath, [path.join(__dirname, 'web_chat_history_paging_gate.cjs'),
+          path.join(allocateReportDir(), 'history-paging')], {
+          stdio: 'inherit', env: { ...process.env, PENTACLE_TEST_BROWSER: resolveChrome() },
+        });
+      } catch (error) { console.error('History paging gate failed:', error.message); code = 1; }
     }
     process.exit(code);
   });

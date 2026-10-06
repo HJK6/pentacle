@@ -49,6 +49,8 @@ const {
   refetchEventsForActiveChatSlots: _refetchEventsForActiveChatSlots,
   scheduleHistoryRetry: _scheduleHistoryRetry,
   chatHistoryStatus,
+  historyHasOlder,
+  requestOlderHistory,
 } = require('./chat_events_lazy');
 const { reattachTerminalSlotsAfterReconnect, preserveOpenSlotSessionsInSnapshot } = require('./slot_reconnect');
 const {
@@ -2996,7 +2998,10 @@ function loadEarlierChat(slot) {
   if (!streamId) return;
   const detail = selectSlotSessionDetail(streamId, showTurnDurationEnabled(), false, rel.visibleCount);
   const remaining = detail ? (detail.remainingCount || 0) : 0;
-  if (!reliability.hasEarlierHistory(remaining)) return;
+  if (!reliability.hasEarlierHistory(remaining)) {
+    loadEarlierDaemonHistory(slot, streamId);
+    return;
+  }
   state.slotChatPendingPrepend[slot] = {
     prevScrollHeight: refs.scrollEl ? refs.scrollEl.scrollHeight : 0,
     prevScrollTop: refs.scrollEl ? refs.scrollEl.scrollTop : 0,
@@ -3007,6 +3012,40 @@ function loadEarlierChat(slot) {
     streamId,
     data: { visibleCount: rel.visibleCount, revealed: reliability.earlierPageSize(remaining) },
   });
+  renderSlotChat(slot);
+}
+
+// Every row the store holds is already shown: page older events from the daemon
+// (beforeDaemonSeq) until a message row appears above the window, then reveal it
+// like a held page. The store lifts this stream's event cap first so the older
+// pages are kept.
+async function loadEarlierDaemonHistory(slot, streamId) {
+  const refs = state.slotChatRefs[slot];
+  const rel = ensureSlotReliability(slot);
+  const reliability = window.PentacleChatReliability;
+  if (!refs || !rel || !reliability) return;
+  if (!historyHasOlder(state.chatStream, streamId)) return;
+  const remainingNow = () => {
+    const detail = selectSlotSessionDetail(streamId, showTurnDurationEnabled(), false, rel.visibleCount);
+    return detail ? (detail.remainingCount || 0) : 0;
+  };
+  const anchor = {
+    prevScrollHeight: refs.scrollEl ? refs.scrollEl.scrollHeight : 0,
+    prevScrollTop: refs.scrollEl ? refs.scrollEl.scrollTop : 0,
+  };
+  await requestOlderHistory(state.chatStream, streamId, window?.cc, console, {
+    onChange: onChatHistoryChanged,
+    expand: id => window.PentacleChatStore?.setHistoryExpanded?.(id),
+    hasNewRows: () => remainingNow() > 0,
+  });
+  const remaining = remainingNow();
+  if (remaining > 0 && state.slotChatBoundStream[slot] === streamId) {
+    state.slotChatPendingPrepend[slot] = anchor;
+    rel.visibleCount = reliability.visibleCountForEarlierPage(rel, remaining);
+    window.PentacleHarness?.emit?.('chat:history_page', {
+      slot, streamId, data: { visibleCount: rel.visibleCount, revealed: reliability.earlierPageSize(remaining), source: 'daemon' },
+    });
+  }
   renderSlotChat(slot);
 }
 
@@ -3455,9 +3494,10 @@ function renderSlotChat(slot) {
   // hides it (final short page).
   if (refs.loadEarlierEl) {
     const remaining = detail ? (detail.remainingCount || 0) : 0;
-    const showEarlier = !!(detail && window.PentacleChatReliability
+    const heldEarlier = !!(detail && window.PentacleChatReliability
       && window.PentacleChatReliability.hasEarlierHistory(remaining));
-    refs.loadEarlierEl.style.display = showEarlier ? '' : 'none';
+    const daemonEarlier = !!(detail && historyHasOlder(state.chatStream, detail.streamId));
+    refs.loadEarlierEl.style.display = heldEarlier || daemonEarlier ? '' : 'none';
   }
 
   // Scope 2: reconcile pinned/unread for this render and drive the jump pill.
@@ -5283,6 +5323,7 @@ function detachSlot(slot) {
     // the cache while the pane was detached. Cancel the old request identity.
     state.chatStream.eventsLoadedFor.delete(detachedStreamId);
     delete state.chatStream.historyLoads?.[detachedStreamId];
+    delete state.chatStream.historyPaging?.[detachedStreamId];
   }
   state.slots[slot] = null;
   state.slotReplies[slot] = null;

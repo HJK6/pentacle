@@ -630,6 +630,9 @@ export interface PentacleStreamState {
   // incrementally to bucket/index accessors.
   eventBucketsByStream?: Record<string, PentacleEventBucket>;
   eventBucketMutationRevision?: number;
+  // Streams whose operator paged older history; their per-stream event cap is
+  // lifted so the older pages are not the first rows evicted.
+  historyExpandedStreamIds?: readonly string[];
   drafts: Record<string, PentacleEvent>;
   hosts: Record<string, PentacleHostStatus>;
   machineStats: Record<string, PentacleMachineStats>;
