@@ -47,3 +47,19 @@ def test_shell_preflight_refuses_ambient_tmux():
                             capture_output=True, text=True)
     assert result.returncode == 2
     assert 'ambient_tmux' in result.stderr
+
+
+@pytest.mark.parametrize('preset, expected', [(None, '1'), ('0', '0'), ('1', '1')])
+def test_gate_runs_tiers_with_strict_capabilities_unless_opted_out(preset, expected, tmp_path, monkeypatch):
+    monkeypatch.delenv('TMUX', raising=False)
+    if preset is None:
+        monkeypatch.delenv('PENTACLE_TEST_STRICT_CAPABILITIES', raising=False)
+    else:
+        monkeypatch.setenv('PENTACLE_TEST_STRICT_CAPABILITIES', preset)
+    seen = {}
+    def capture(command, *, env, log_path, timeout):
+        seen.update(env)
+        return 0, False
+    monkeypatch.setattr(run_gate, '_run_process', capture)
+    run_gate._run_tier('unit', tmp_path, 1, basetemp=tmp_path, manifest=tmp_path / 'owned.json')
+    assert seen['PENTACLE_TEST_STRICT_CAPABILITIES'] == expected

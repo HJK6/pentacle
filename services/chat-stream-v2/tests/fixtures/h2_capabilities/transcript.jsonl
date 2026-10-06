@@ -1,0 +1,2 @@
+{"timestamp":"2026-10-01T00:00:00.000Z","type":"session_meta","payload":{"id":"th-h2-synthetic-session","session_id":"th-h2-synthetic-session","cwd":"/workspace/synthetic"},"ordinal":0}
+{"timestamp":"2026-10-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","id":"th-h2-synthetic-message","role":"user","content":[{"type":"input_text","text":"Synthetic portability fixture task."}]},"ordinal":1}

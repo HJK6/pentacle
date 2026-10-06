@@ -1,0 +1,7 @@
+p42420
+f3
+a{access}
+tREG
+D{device}
+i{inode}
+n{path}

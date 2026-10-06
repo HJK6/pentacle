@@ -14,6 +14,8 @@ TESTS_DIR = Path(__file__).resolve().parent
 SERVICES_ROOT = SERVICE_DIR.parent
 AGENT_ORCH_DIR = SERVICES_ROOT / "agent-orch"
 TOOLS_DIR = SERVICE_DIR / "tools"
+pytest_plugins = ["capabilities"]
+
 PUBLIC_SHARED_DIR = Path(__file__).resolve().parents[2] / "_shared"
 
 for _path in reversed((SERVICE_DIR, TESTS_DIR, SERVICES_ROOT, AGENT_ORCH_DIR, TOOLS_DIR, PUBLIC_SHARED_DIR)):
@@ -70,5 +72,5 @@ def isolated_tmux_env(tmp_path):
         try:
             yield wrapper
         finally:
-            subprocess.run([wrapper, "kill-server"], check=False, capture_output=True)
+            subprocess.run([wrapper, "kill-server"], check=False, capture_output=True, timeout=5)
             socket.unlink(missing_ok=True)
