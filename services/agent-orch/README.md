@@ -161,6 +161,42 @@ agent-orch notify --ask "Re-run the scrape?" --button Yes --button No --await-an
 
 The non-seat CD path is deliberately narrower. Set `PENTACLE_SYSTEM_PRODUCER_STREAM_ID=altum-bot-cd` on the daemon alongside `PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE`; invoke `notify --message ... --from altum-bot-cd --producer altum-bot-cd` with the matching secret available only through a user-owned mode-0600 `AGENT_ORCH_STREAM_TOKEN_FILE`. Its RPC hello must use `snapshot:false` and `mode:rpc`. Create accepts only ordinary card fields, absent or empty actions, and dedup keys `pipeline|<failure_class>|YYYY-MM-DD`, `census|<function>|<invariant>|YYYY-MM-DD`, or `infra-census|<stack>|YYYY-MM-DD`. It has no list, resolve, answer, prompt, TTL, spawn, schedule, grant, asset, or arbitrary producer authority. A collision with an existing actionable or answer-bound row fails closed.
 
+The WMI backup path is a second fixed principal, `amaterasu:wmi-pg-dailybackup`.
+Enable it on the daemon with `PENTACLE_WMI_BACKUP_STREAM_TOKEN_FILE` pointing to a
+separately issued, user-owned private file (mode 0600). No second identity setting
+is needed. Keep both host copies outside synced/memory trees; never reuse a CD,
+operator or seat credential. The systemd unit sets only
+`Environment=AGENT_ORCH_STREAM_TOKEN_FILE=/private/local/wmi-backup-token` and
+invokes the installed CLI with a labelled, sanitized operational message:
+
+```sh
+agent-orch notify --from amaterasu:wmi-pg-dailybackup \
+  --producer amaterasu:wmi-pg-dailybackup --destination pentacle-updates \
+  --title 'Synthetic WMI backup failure' --message 'Synthetic receipt; no real failure forced.' \
+  --severity critical --dedup-key 'wmi-backup|synthetic|2026-10-06'
+```
+
+This principal can only create message cards. The daemon requires that exact
+producer and destination, a nonempty title of at most 120 characters, body of at
+most 1200 characters, warning/critical severity, no actions, and a key
+`wmi-backup|<failure_class>|YYYY-MM-DD` (valid date; failure class is 1–64 ASCII
+letters/digits/dot/underscore/hyphen, beginning with a letter or digit). No TTL,
+answer target, tell, listing or resolution authority is granted. Missing required
+CLI fields exit 2; denied credentials return an auth failure. File removal,
+rotation or insecure permissions deny old and new connections; rotate by replacing
+the daemon/client private files through their owners. CD configuration stays separate.
+
+`destination=pentacle-updates` is a fixed admission sentinel introduced for this
+path, not a stored routing field. Delivery uses the existing notification
+broadcast/list and operator Updates UI. `notification.create.ok` proves admission
+and persistence only; acceptance also needs a rendered card readback tied to its
+notification ID and dedup receipt. Notification-to-agent delivery is unsupported:
+there is no FD wake, operator-read guarantee or automatic investigation. Existing
+FD hourly pull and ops daily readbacks remain ongoing coverage. Stable retries
+retain the identity while the card is open; resolved/expired cards create a new
+identity. Default expiry is 30 days for critical and 7 days for warning. Privileged
+dedup collisions fail closed. Reserve the principal name; do not spawn a seat with it.
+
 `--title`, `--producer`, `--severity`, and `--ttl` map directly to the notification create fields. If `--producer` is omitted, the CLI uses the discovered caller stream id, falling back to `agent-orch`. The verb is provider-agnostic; it uses the caller stream identity and the daemon notification RPC, not Claude- or Codex-specific state.
 
 With `--await-answer`, the CLI requires a discoverable publishing stream (or `--from STREAM_ID`), stores it as `answer_to_stream_id`, then blocks on `notification.await` for the created notification id. On success it prints only the typed answer object:

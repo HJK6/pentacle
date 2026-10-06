@@ -1904,6 +1904,16 @@ def _notification_create_payload_from_args(
     }
     if caller_stream_id:
         payload["from_stream_id"] = caller_stream_id
+    destination = getattr(args, "destination", None)
+    if destination is not None:
+        payload["destination"] = str(destination)
+    if caller_stream_id == "amaterasu:wmi-pg-dailybackup" and (
+        not getattr(args, "title", None)
+        or not destination
+        or not getattr(args, "dedup_key", None)
+        or getattr(args, "message", None) is None
+    ):
+        raise ValueError("WMI backup notify requires --message, --title, --destination and --dedup-key")
     if getattr(args, "message", None) is not None:
         message = str(args.message)
         payload["title"] = str(getattr(args, "title", None) or message)
@@ -5275,6 +5285,7 @@ def build_parser() -> argparse.ArgumentParser:
     notify_mode.add_argument("--resolve-dedup-key", dest="resolve_dedup_key")
     notify_parser.add_argument("--title")
     notify_parser.add_argument("--producer")
+    notify_parser.add_argument("--destination")
     notify_parser.add_argument(
         "--severity", default="info", choices=("info", "warning", "critical")
     )
