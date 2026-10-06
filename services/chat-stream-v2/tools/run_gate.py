@@ -183,7 +183,8 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     env, soak = os.environ.copy(), None
     env[MANIFEST_ENV] = str(manifest)
     # The fleet gate is strict: a capability a managed test requires must be present, never a green skip.
-    # A sandbox opts out by exporting PENTACLE_TEST_STRICT_CAPABILITIES=0.
+    # Only a sandbox that truly lacks tmux/ps/lsof may opt out by exporting PENTACLE_TEST_STRICT_CAPABILITIES=0;
+    # never a fleet, merge or deploy gate, and never CI (see docs/TEST_CAPABILITIES.md).
     env.setdefault("PENTACLE_TEST_STRICT_CAPABILITIES", "1")
     if tier == "soak":
         env["SOAK_TIER"] = os.environ.get("SOAK_TIER", "full")
