@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const WebSocket = require('ws');
 const perf = require('./perf_telemetry');
+const { runtimeDirectory, desktopRuntimePath } = require('./runtime_paths');
 const {
   SOURCE_STATE_TO_UI,
   SCHEDULE_LIFECYCLE_EVENT_SOURCE_STATE,
@@ -1193,12 +1194,21 @@ try {
     this._clearWelcomeTimer();
     if (this._heartbeatTimer) clearInterval(this._heartbeatTimer);
     this._heartbeatTimer = setInterval(() => this._heartbeatTick(), this._heartbeatMs);
-    fs.mkdirSync(path.join(os.homedir(), '.pentacle'), { recursive: true });
-    fs.writeFileSync(path.join(os.homedir(), '.pentacle', 'desktop-runtime.json'), JSON.stringify({
-      sha: this._buildSha,
-      pid: process.pid,
-      connected_at: new Date().toISOString(),
-    }) + '\n');
+    const runtimeDir = runtimeDirectory();
+    const runtimeFile = desktopRuntimePath();
+    try {
+      fs.mkdirSync(runtimeDir, { recursive: true });
+      fs.writeFileSync(runtimeFile, JSON.stringify({
+        sha: this._buildSha,
+        pid: process.pid,
+        connected_at: new Date().toISOString(),
+      }) + '\n');
+    } catch (error) {
+      if (!process.env.PENTACLE_RUNTIME_DIR) throw error;
+      const failure = new Error(`PENTACLE_RUNTIME_DIR cannot write ${runtimeFile}: ${error.code || error.message}`, { cause: error });
+      failure.code = error.code;
+      throw failure;
+    }
   }
 
   _queueHandshakeLimitsUpdate(msg) {

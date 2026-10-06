@@ -25,6 +25,7 @@ const { spawn, execFileSync } = require('child_process');
 
 const cdp = require('./lib/cdp');
 const scenarios = require('./lib/web_scenarios');
+const { withRuntimeDirectory, execWithRuntimeDirectory } = require('./lib/runtime_directory');
 const { main: startHost } = require('../../server');
 
 const ROOT = path.join(__dirname, '..', '..');
@@ -234,6 +235,10 @@ async function startDaemon(args, scratch, runtime, fixtures = [
 }
 
 async function run(args) {
+  return withRuntimeDirectory((runtimeDir, cleanupRuntime) => runIsolated(args, runtimeDir, cleanupRuntime));
+}
+
+async function runIsolated(args, runtimeDir, cleanupRuntime) {
   const report = new Report(allocateReportDir());
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-gate-')));
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-gate-chrome-'));
@@ -251,8 +256,8 @@ async function run(args) {
     try { if (runtime.freezeTmux) tmux(['kill-session', '-t', `=${runtime.freezeTmux}`], { stdio: 'ignore' }); } catch {}
     try { if (host) await host.close(); } catch {}
     // A restarted host runs as a subprocess (see restartHost); kill it too.
-    try { if (runtime.hostProc) runtime.hostProc.kill('SIGTERM'); } catch {}
-    await onceExit(runtime.hostProc);
+    let hostCleanupError = null;
+    try { await stopOwnedProcess(runtime.hostProc); } catch (error) { hostCleanupError = error; }
     // Kill the daemon via the runtime handle FIRST: it always tracks the live
     // daemon (startDaemon sets it, and startDaemonSamePort replaces it on a
     // restart, whereas daemon.proc still points at the original), so preferring
@@ -273,6 +278,7 @@ async function run(args) {
     }
     runtime.fixtureAuthCleanup = { generated_credential_count: generatedCount, retained_for_debug: args.keep, registry_removed: !fs.existsSync(registryPath), token_removed: !fs.existsSync(tokenPath), remaining_credential_count: fs.existsSync(registryPath) ? Object.keys(JSON.parse(fs.readFileSync(registryPath, 'utf8')).credentials || {}).length : 0 };
     if (daemonCleanupError) throw daemonCleanupError;
+    if (hostCleanupError) throw hostCleanupError;
     if (!args.keep && (!runtime.fixtureAuthCleanup.registry_removed || !runtime.fixtureAuthCleanup.token_removed)) throw new Error('CLEANUP_FAIL: isolated credential artifacts remain');
   };
 
@@ -309,7 +315,7 @@ async function run(args) {
       for (let i = 0; i < 40; i++) {
         const hostLog = fs.openSync(path.join(scratch, 'host.log'), 'a');
         const proc = spawn(process.execPath, [path.join(ROOT, 'server'), '--profile', profile, '--port', String(hostPort)],
-          { cwd: ROOT, stdio: ['ignore', hostLog, hostLog] });
+          { cwd: ROOT, stdio: ['ignore', hostLog, hostLog], env: { ...process.env, PENTACLE_RUNTIME_DIR: runtimeDir } });
         runtime.hostProc = proc;
         let dead = false;
         proc.once('exit', () => { dead = true; });
@@ -321,8 +327,7 @@ async function run(args) {
     const stopHost = async () => {
       try { if (host) await host.close(); } catch {}
       host = null;
-      try { if (runtime.hostProc) runtime.hostProc.kill('SIGTERM'); } catch {}
-      await onceExit(runtime.hostProc);
+      await stopOwnedProcess(runtime.hostProc);
       runtime.hostProc = null;
     };
     const startHostSamePort = async () => { await startHostProcess(); return hostPort; };
@@ -412,6 +417,7 @@ async function run(args) {
     let cleanupError = null;
     try { await cleanup(); } catch (e) { cleanupError = e; }
     finally {
+      try { cleanupRuntime(); } catch (error) { cleanupError = cleanupError || error; }
       const verdictPath = path.join(report.dir, 'verdict.json');
       if (fs.existsSync(verdictPath)) {
         const verdict = JSON.parse(fs.readFileSync(verdictPath, 'utf8'));
@@ -434,10 +440,11 @@ function allocateReportDir(now = () => new Date(), root = path.join(__dirname, '
 
 if (require.main === module) {
   const args = parseArgs(process.argv.slice(2));
-  run(args).then(code => {
+  run(args).then(async code => {
     if (code === 0 && !args.profile) {
       try {
-        execFileSync(process.execPath, [path.join(__dirname, 'web_chat_history_retention_gate.cjs'),
+        // The retention gate starts its own host: it runs in its own owned runtime directory.
+        await execWithRuntimeDirectory(execFileSync, process.execPath, [path.join(__dirname, 'web_chat_history_retention_gate.cjs'),
           path.join(allocateReportDir(), 'history-retention')], {
           stdio: 'inherit', env: { ...process.env, PENTACLE_TEST_BROWSER: resolveChrome() },
         });
