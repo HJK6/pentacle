@@ -186,7 +186,7 @@ async function run(repoRoot, options, injected = {}) {
     fs.mkdirSync(cacheRoot, { recursive: true });
     outDir = deps.makeTemporaryDirectory(path.join(cacheRoot, 'pentacle-tests-'));
     testHome = deps.makeTemporaryDirectory(path.join(os.tmpdir(), 'pentacle-test-home-'));
-    const env = { ...process.env, HOME: testHome, USERPROFILE: testHome };
+    const env = { ...process.env, HOME: testHome, USERPROFILE: testHome, PENTACLE_RUNTIME_DIR: path.join(testHome, '.pentacle') };
     for (let index = 0; index < entries.length; index++) {
       const file = entries[index], fileStart = deps.now();
       const row = { file, status: 'not_run', duration_ms: 0, cleanup: { status: 'not_started', survivor_pids: [] }, reason: null };

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "path": "test/runtime_paths.test.js",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "53e6c3d73639da58f1e62c1dfe4b761991e00ebb6462919a7fa807b8346ab5ca",
+      "purpose": "Authored inline synthetic runtime marker and isolated fake gate inputs"
+    },
+    {
+      "path": "test/web_runtime_directory.test.js",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "1855c1cfbad00e1ed65fa19d732dc6a6bd990836453232889571dca4a80248b5",
+      "purpose": "Authored inline synthetic runtime marker and isolated fake gate inputs"
+    },
+    {
+      "path": "test/fixtures/runner_home_probe.js",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "d4980f65112a00ffa8dd7dc3b8f6ef7761911a96017163802930607e13ec2c7a",
+      "purpose": "Authored inline synthetic runtime marker and isolated fake gate inputs"
+    }
+  ]
+}

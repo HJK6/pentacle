@@ -16,13 +16,18 @@ for (const failing of [false, true]) {
     const parentHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-runner-parent-'));
     const parentMarker = path.join(parentHome, '.pentacle', 'desktop-runtime.json');
     const sentinel = Buffer.from('operator-sentinel\n');
+    const inheritedRuntime = path.join(parentHome, 'inherited-runtime');
+    const inheritedMarker = path.join(inheritedRuntime, 'desktop-runtime.json');
     try {
       fs.mkdirSync(path.dirname(parentMarker));
       fs.writeFileSync(parentMarker, sentinel);
+      fs.mkdirSync(inheritedRuntime);
+      fs.writeFileSync(inheritedMarker, sentinel);
       const childEnv = {
         ...process.env,
         HOME: parentHome,
         USERPROFILE: parentHome,
+        PENTACLE_RUNTIME_DIR: inheritedRuntime,
         PENTACLE_MARKER_PROBE_FAIL: failing ? '1' : '0',
       };
       // Node marks a test-file process with this private recursion guard.
@@ -42,6 +47,7 @@ for (const failing of [false, true]) {
       assert.equal(path.resolve(child.HOME), path.resolve(child.home));
       assert.equal(path.resolve(child.USERPROFILE), path.resolve(child.home));
       assert.deepEqual(fs.readFileSync(parentMarker), sentinel, 'caller marker must remain byte-identical');
+      assert.deepEqual(fs.readFileSync(inheritedMarker), sentinel, 'inherited runtime marker must remain byte-identical');
       assert.equal(fs.existsSync(child.home), false, 'owned child home must be removed after the test');
     } finally {
       fs.rmSync(parentHome, { recursive: true, force: true });
