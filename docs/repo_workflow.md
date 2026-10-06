@@ -49,7 +49,7 @@ the tag after promotion. The private repository has its own mapped smoke
 workflow; an unknown or mismatched repository is refused.
 
 The tag push starts another required workflow run. The helper now waits in
-one invocation under a single absolute checks budget (default 300 seconds;
+one invocation under a single absolute checks budget (default 900 seconds, above the eight to ten minutes a real tag run takes;
 --checks-timeout-seconds). It pushes a missing annotated tag once, then considers
 only the newest matching push run/attempt for the exact candidate SHA, tag name,
 mapped workflow and repository. An older or unrelated green run cannot satisfy
@@ -103,9 +103,10 @@ this packet does not invent an audited private checkout contract.
 
 A workflow run's short head_branch plus push event does not distinguish a tag
 from a same-named branch. The public gate therefore retrieves only the selected
-attempt's successful first checkout step through GitHub's single-step log
-endpoint. It validates the first fetch and checkout groups against the exact
-candidate and refs/tags/v2-gate/<sha>. A branch-style checkout, later forged
+attempt's whole job log (GitHub serves no per-step log endpoint; gh needs
+--allow-escape-sequences to print it) and parses a bounded leading prefix. It
+validates the first fetch and checkout groups, which belong to the first
+checkout step, against the exact candidate and refs/tags/v2-gate/<sha>. A branch-style checkout, later forged
 favorable text, missing job identity, inaccessible log, or malformed evidence
 cannot establish green. The existing workflow digest proves that checkout is
 the first action and has no repository/ref override.

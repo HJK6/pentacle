@@ -12,7 +12,7 @@
       "path": "tests/test_merge_gate_polling.py",
       "synthetic": true,
       "contains_real_traffic": false,
-      "sha256": "978aeccea0772ff828c9378a0c2b974da5ffb49ce570c84180c49f36c34398c1",
+      "sha256": "5349fedaad9d1b94a4ebb5be9ae3a8a93d3c52fd3985df9b42c1c753726ddbb7",
       "purpose": "Authored synthetic ops evidence; checkout log is source-derived, not captured traffic"
     },
     {

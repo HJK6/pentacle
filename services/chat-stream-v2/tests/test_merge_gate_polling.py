@@ -34,7 +34,7 @@ def scripted(monkeypatch, snapshots, *, job_payload=None, late=False, timeout=Fa
         calls.append((args,timeout))
         if late: clock.now += 6
         if scripted_timeout: raise subprocess.TimeoutExpired(args,timeout)
-        if "/steps/1/logs" in args[2]: return _result(args,log)
+        if args[2].endswith("/logs"): return _result(args,log)
         if "/workflows/" in args[2]:
             value=snapshots[min(index[0],len(snapshots)-1)];index[0]+=1
             payload=value if isinstance(value,dict) else {"total_count":len(value),"workflow_runs":value}
@@ -174,7 +174,7 @@ def test_checkout_metadata_is_bound_before_log_read(monkeypatch,mutation):
     else:payload["jobs"]=[None]
     clock,calls=scripted(monkeypatch,[[run_row()]],job_payload=payload)
     with pytest.raises(merge_gate.GateError):wait(clock)
-    assert not any("/steps/1/logs" in args[2] for args,_ in calls)
+    assert not any(args[2].endswith("/logs") for args,_ in calls)
 
 
 def test_documented_job_without_attempt_field_uses_attempt_endpoint(monkeypatch):
@@ -188,7 +188,7 @@ def test_log_timeout_cannot_extend_absolute_budget(monkeypatch):
     clock,calls=scripted(monkeypatch,[[run_row()]])
     original=merge_gate._command
     def command(args,**kwargs):
-        if "/steps/1/logs" in args[2]: raise subprocess.TimeoutExpired(args,kwargs["timeout"])
+        if args[2].endswith("/logs"): raise subprocess.TimeoutExpired(args,kwargs["timeout"])
         return original(args,**kwargs)
     monkeypatch.setattr(merge_gate,"_command",command)
     with pytest.raises(merge_gate.GateError,match="timeout"):wait(clock)
@@ -198,7 +198,7 @@ def test_log_unavailable_is_missing_evidence_not_green(monkeypatch):
     clock,_=scripted(monkeypatch,[[run_row()]])
     original=merge_gate._command
     def command(args,**kwargs):
-        if "/steps/1/logs" in args[2]: return _result(args,returncode=1)
+        if args[2].endswith("/logs"): return _result(args,returncode=1)
         return original(args,**kwargs)
     monkeypatch.setattr(merge_gate,"_command",command)
     with pytest.raises(merge_gate.GateError,match="required_checks_missing"):wait(clock)
@@ -236,6 +236,45 @@ def test_history_and_wait_share_one_deadline(monkeypatch):
     with pytest.raises(merge_gate.GateError,match="timeout during tag history"):
         merge_gate.promote(CANDIDATE,123,checks_timeout_s=5,clock=clock,sleep=clock.sleep)
     assert not any(args[:2]==["git","push"] for args in calls)
+
+
+LATER_OUTPUT = "".join(f"2026-01-01T00:00:00.0000000Z gate output line {n}\n" for n in range(40000))
+
+def test_whole_job_log_reads_jobs_endpoint_with_escape_flag_and_bounded_prefix(monkeypatch):
+    # A real job log is the checkout groups followed by far more gate output than the parsed prefix.
+    log=CHECKOUT_LOG+LATER_OUTPUT
+    assert len(log) > 4*merge_gate.CHECKOUT_PROOF_PREFIX_CHARS
+    clock,calls=scripted(monkeypatch,[[run_row()]],log=log)
+    assert wait(clock)["status"]=="green"
+    reads=[args for args,_ in calls if args[2].endswith("/logs")]
+    assert reads==[["gh","api",f"repos/{REPO}/actions/jobs/2000/logs","--allow-escape-sequences"]]
+    assert all(args[-1]!="--allow-escape-sequences" for args,_ in calls if not args[2].endswith("/logs"))
+
+
+@pytest.mark.parametrize("log",[
+    CHECKOUT_LOG.replace(CANDIDATE, OLD)+LATER_OUTPUT+CHECKOUT_LOG,
+    CHECKOUT_LOG.replace("refs/tags/" + TAG, "refs/heads/" + TAG)+LATER_OUTPUT+CHECKOUT_LOG,
+    LATER_OUTPUT+CHECKOUT_LOG,
+])
+def test_later_favorable_text_in_job_log_cannot_establish_green(monkeypatch,log):
+    clock,_=scripted(monkeypatch,[[run_row()]],log=log)
+    with pytest.raises(merge_gate.GateError,match="checkout proof absent"):wait(clock)
+
+
+def test_prefix_keeps_whole_lines_and_parser_refuses_oversized_input():
+    log=CHECKOUT_LOG+LATER_OUTPUT
+    prefix=merge_gate._checkout_log_prefix(log)
+    assert prefix.endswith("\n") and log.startswith(prefix)
+    assert len(prefix) <= merge_gate.CHECKOUT_PROOF_PREFIX_CHARS
+    assert merge_gate._checkout_log_prefix(CHECKOUT_LOG)==CHECKOUT_LOG
+    assert not merge_gate.checkout_tag_proof(log,CANDIDATE,TAG)
+
+
+def test_default_budget_exceeds_observed_tag_run_duration():
+    import inspect
+    assert merge_gate.DEFAULT_CHECKS_TIMEOUT_S >= 900
+    for function,name in ((merge_gate.promote,"checks_timeout_s"),(merge_gate.wait_for_promotion_checks,"timeout_s")):
+        assert inspect.signature(function).parameters[name].default == merge_gate.DEFAULT_CHECKS_TIMEOUT_S
 
 
 def test_h5_synthetic_fixture_manifest_is_complete_and_hash_pinned():

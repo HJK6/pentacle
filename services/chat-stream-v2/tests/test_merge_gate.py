@@ -89,7 +89,7 @@ def _fake_evidence(monkeypatch: pytest.MonkeyPatch, *, repository: str = "HJK6/p
             return _result(args, json.dumps({"total_count":1,"workflow_runs":[promoted]}))
         if args == ["gh", "api", f"repos/{repository}/actions/runs/124/attempts/1/jobs?per_page=100"]:
             return _result(args, json.dumps({**jobs, "jobs":[{**job, "id":1240, "run_id":124, "run_attempt":1, "steps":job["steps"] + [{"name":"Set up job","number":1,"status":"completed","conclusion":"success"},{"name":"Run actions/checkout@v4","number":2,"status":"completed","conclusion":"success"}]} for job in jobs["jobs"]]}))
-        if args == ["gh", "api", f"repos/{repository}/actions/jobs/1240/steps/1/logs"]:
+        if args == ["gh", "api", f"repos/{repository}/actions/jobs/1240/logs", "--allow-escape-sequences"]:
             return _result(args, CHECKOUT_LOG)
         if args == ["gh", "api", f"repos/{repository}/actions/runs/123"]:
             return _result(args, json.dumps(run))

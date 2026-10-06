@@ -236,9 +236,25 @@ def verify_tag(candidate: str) -> dict[str, str]:
     return fields
 
 
+# Real tag-triggered runs of the public workflow take about eight to ten minutes.
+DEFAULT_CHECKS_TIMEOUT_S = 900
+
+# GitHub serves no per-step log endpoint, so the proof reads the whole job log.
+# Checkout is step 2, so its groups sit in the first few KiB; only a bounded
+# prefix (whole lines) is parsed, whatever the later gate output weighs.
+CHECKOUT_PROOF_PREFIX_CHARS = 256 * 1024
+
+
+def _checkout_log_prefix(log: str) -> str:
+    if len(log) <= CHECKOUT_PROOF_PREFIX_CHARS:
+        return log
+    prefix = log[:CHECKOUT_PROOF_PREFIX_CHARS]
+    return prefix[:prefix.rfind("\n") + 1]
+
+
 def checkout_tag_proof(log: str, candidate: str, tag: str) -> bool:
     """Parse only the audited checkout step's first fetch/checkout groups."""
-    if len(log.encode("utf-8")) > 1024 * 1024:
+    if len(log) > CHECKOUT_PROOF_PREFIX_CHARS:
         return False
     lines = [re.sub(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z ", "", line)
              for line in log.splitlines()]
@@ -306,7 +322,7 @@ def _historical_promotion_runs(repository, workflow_id, candidate, tag, *, deadl
 
 
 def wait_for_promotion_checks(candidate: str, tag: str, repository: str, workflow_id: int,
-                              *, timeout_s: float = 300, poll_s: float = 2,
+                              *, timeout_s: float = DEFAULT_CHECKS_TIMEOUT_S, poll_s: float = 2,
                               clock=time.monotonic, sleep=time.sleep, deadline: float | None = None) -> dict[str, object]:
     """Only a stable newest exact-tag attempt may satisfy this absolute budget."""
     if not math.isfinite(timeout_s) or timeout_s <= 0 or not math.isfinite(poll_s) or poll_s <= 0:
@@ -325,7 +341,9 @@ def wait_for_promotion_checks(candidate: str, tag: str, repository: str, workflo
 
     def read(endpoint, *, text=False):
         try:
-            response = _command(["gh", "api", endpoint], timeout=remaining())
+            # Job logs carry terminal escapes, which gh refuses to print by default.
+            args = ["gh", "api", endpoint] + (["--allow-escape-sequences"] if text else [])
+            response = _command(args, timeout=remaining())
             raw = _require(response, "promotion checks")
             if text: raw = response.stdout
         except subprocess.TimeoutExpired as exc:
@@ -430,11 +448,11 @@ def wait_for_promotion_checks(candidate: str, tag: str, repository: str, workflo
                 or len(setup) != 1 or setup[0].get("number") != 1):
             return "required_checks_missing"
         try:
-            log = read(f"repos/{repository}/actions/jobs/{job['id']}/steps/1/logs", text=True)
+            log = read(f"repos/{repository}/actions/jobs/{job['id']}/logs", text=True)
         except GateError as exc:
             if "timeout" in str(exc): raise
-            raise GateError("promotion checks required_checks_missing: checkout step logs unavailable") from exc
-        if not checkout_tag_proof(log, candidate, tag):
+            raise GateError("promotion checks required_checks_missing: checkout job log unavailable") from exc
+        if not checkout_tag_proof(_checkout_log_prefix(log), candidate, tag):
             raise GateError("promotion checks required_checks_missing: exact tag checkout proof absent")
         return "green"
 
@@ -460,7 +478,7 @@ def wait_for_promotion_checks(candidate: str, tag: str, repository: str, workflo
         sleep(min(poll_s, remaining()))
 
 
-def promote(candidate: str, run_id: int, *, checks_timeout_s: float = 300,
+def promote(candidate: str, run_id: int, *, checks_timeout_s: float = DEFAULT_CHECKS_TIMEOUT_S,
             poll_s: float = 2, clock=time.monotonic, sleep=time.sleep) -> dict[str, object]:
     """Tag verified exact-head smoke evidence, then CAS fast-forward main."""
     if not math.isfinite(checks_timeout_s) or checks_timeout_s <= 0 or not math.isfinite(poll_s) or poll_s <= 0:
@@ -530,7 +548,7 @@ def main(argv: list[str] | None = None) -> int:
     promote_parser = commands.add_parser("promote", help="guardedly fast-forward origin/main")
     promote_parser.add_argument("--candidate", required=True)
     promote_parser.add_argument("--run-id", type=int, required=True)
-    promote_parser.add_argument("--checks-timeout-seconds", type=float, default=300)
+    promote_parser.add_argument("--checks-timeout-seconds", type=float, default=DEFAULT_CHECKS_TIMEOUT_S)
     verify_parser = commands.add_parser("verify-tag", help="verify a gate-passed candidate tag")
     verify_parser.add_argument("--candidate", required=True)
     args = parser.parse_args(argv)
