@@ -21,6 +21,21 @@ HELD_KIND = 'front_desk_held'
 DIGEST_TOKEN = object()
 
 
+def legacy_sanitize_source(msg, body):
+    """The pre-sanitize caller text an upgrade-era record may have retained, or None.
+
+    Before caller-keyed identity, `Server._on_tell` held/recorded a sanitize=true
+    tell's RAW text. An identical retry now arrives with the routed (cleaned) `body`,
+    so only for such old records the raw text is an alternate match. It qualifies
+    only when sanitizing it reproduces exactly the already-validated routed body,
+    so a differing message/text pair or a changed payload cannot use this branch."""
+    if not msg.get('sanitize'):
+        return None
+    from tmux_transport import sanitize_injectable
+    raw = str(msg.get('text') or msg.get('message') or '')
+    return raw if raw != body and sanitize_injectable(raw) == body else None
+
+
 class FrontDeskDigest:
     def __init__(self, store, config):
         self.store = store
@@ -125,8 +140,9 @@ class FrontDeskDigest:
             (nid,)).fetchone())
         if row is None:
             return None
-        if (row['body'], row['recipient_stream_id'], row['source_stream_id'] or '') != (
-                body, target, msg.get('from_stream_id') or ''):
+        if (row['body'] not in (body, legacy_sanitize_source(msg, body))
+                or (row['recipient_stream_id'], row['source_stream_id'] or '') != (
+                    target, msg.get('from_stream_id') or '')):
             from comms import Comms
             raise Comms._conflict(tell_key)
         return self._held_reply('tell')

@@ -501,15 +501,22 @@ class AssistantComposite:
         paste; anything else is `tell_id_conflict`. An event recorded with the
         original body digest is compared exactly. A legacy event has only the
         lstripped text and source, so identical retained text is accepted and the
-        original leading whitespace is unknown, not reconstructed."""
+        original leading whitespace is unknown, not reconstructed. A legacy event of a
+        sanitize=true tell holds the raw text; see `legacy_sanitize_source`."""
         from comms import Comms, payload_digest
+        from front_desk_digest import legacy_sanitize_source
         raw = retained.get("raw") if isinstance(retained.get("raw"), dict) else {}
         digest = raw.get("body_digest")
-        same = (
-            raw.get("from_stream_id") == str(msg.get("from_stream_id") or "")
-            and (digest == payload_digest(target_stream_id, body) if digest is not None
-                 else retained.get("text") == str(body or "").lstrip())
-        )
+        if digest is not None:
+            same_body = digest == payload_digest(target_stream_id, body)
+        else:
+            # A legacy sanitize=true event retained the raw (pre-sanitize) text.
+            accepted = [str(body or "").lstrip()]
+            raw_text = legacy_sanitize_source(msg, body)
+            if raw_text is not None:
+                accepted.append(raw_text.lstrip())
+            same_body = retained.get("text") in accepted
+        same = raw.get("from_stream_id") == str(msg.get("from_stream_id") or "") and same_body
         if not same:
             raise Comms._conflict(tell_key)
         return {

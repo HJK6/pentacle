@@ -455,3 +455,144 @@ def test_codex_pending_target_refuses_instead_of_holding(tmp_path, state):
         finally:
             store.stop()
     _run(run)
+
+
+# -- upgrade compatibility: sanitize=true tells held/recorded RAW before this change ----------
+# The previous Server._on_tell held (or recorded) the caller's RAW text and wrote no ledger.
+# An identical same-key retry must recover; any change must still be a typed conflict.
+
+RAW = "status: \x1b[31mred\x1b[0m relay"
+CLEAN = "status: red relay"
+
+
+def _legacy_front_desk_hold(composite, target, key, raw=RAW, sender=PEER):
+    msg = _tell(target, key, raw, sanitize=True, from_stream_id=sender)
+    return composite.suppress_routine_backend_ingress(
+        target_stream_id=target, body=str(msg.get("text") or msg.get("message") or ""), msg=msg, verb="tell")
+
+
+def _legacy_backend_event(target, key, text=RAW.lstrip(), sender=PEER, **raw_extra):
+    return {"stream_id": target, "provider": "composite", "kind": "SYSTEM", "text": text,
+            "timestamp": "2026-10-01T00:00:00Z",
+            "raw": {"assistant_composite_routine_ingress": True, "verb": "tell",
+                    "from_stream_id": sender, "identity": key, **raw_extra}}
+
+
+def test_legacy_raw_front_desk_hold_recovers_identical_sanitize_retry_across_restart(tmp_path):
+    async def run():
+        store, h, composite, target = await _front_desk(tmp_path)
+        try:
+            assert (await _legacy_front_desk_hold(composite, target, "u1"))["delivery_status"] == "persisted"
+            assert await store.get_tell_delivery("u1") is None
+            rows = await composite.front_desk_digest._rows(target)
+            assert len(rows) == 1 and rows[0]["body"] == RAW
+            store.stop(); store.start(); await h.sessions.refresh()
+            first = await h.server._on_tell(_tell(target, "u1", RAW, sanitize=True))
+            assert first["delivery_status"] == "persisted" and not h.tmux.pasted
+            assert await composite.front_desk_digest._rows(target) == rows   # old record untouched
+            ledger = await store.get_tell_delivery("u1")
+            assert ledger["payload_digest"] == payload_digest(target, CLEAN)
+            again = await h.server._on_tell(_tell(target, "u1", RAW, sanitize=True))
+            assert again.get("duplicate") is True and not h.tmux.pasted
+            assert await composite.front_desk_digest._rows(target) == rows
+        finally:
+            store.stop()
+    _run(run)
+
+
+def test_legacy_raw_backend_event_recovers_identical_sanitize_retry_across_restart(tmp_path):
+    async def run():
+        store, h, composite, target = await _backend(tmp_path)
+        try:
+            await store.append_session_event(target, _legacy_backend_event(target, "u2"),
+                                             identity="assistant-ingress:tell:u2", limit=2000)
+            before = await _events(store, target)
+            store.stop(); store.start(); await h.sessions.refresh()
+            first = await h.comms.tell(_tell(target, "u2", RAW, sanitize=True))
+            assert first["assistant_backend_ingress"] == "persisted_suppressed" and not h.tmux.pasted
+            assert await _events(store, target) == before                     # old record untouched
+            assert (await store.get_tell_delivery("u2"))["payload_digest"] == payload_digest(target, CLEAN)
+            again = await h.comms.tell(_tell(target, "u2", RAW, sanitize=True))
+            assert again.get("duplicate") is True and await _events(store, target) == before
+        finally:
+            store.stop()
+    _run(run)
+
+
+@pytest.mark.parametrize("changed", [
+    "status: \x1b[32mred\x1b[0m relay",   # same visible text, different raw escape bytes
+    "status: \x1b[31mblue\x1b[0m relay",  # different visible text
+    "status: red relay",                   # the cleaned form itself is not the retained raw text
+])
+def test_legacy_raw_changed_payload_conflicts_before_enqueue_or_paste(tmp_path, changed):
+    async def run():
+        store, h, composite, target = await _front_desk(tmp_path)
+        try:
+            await _legacy_front_desk_hold(composite, target, "u3")
+            rows = await composite.front_desk_digest._rows(target)
+            await _conflict(h.server._on_tell(_tell(target, "u3", changed, sanitize=True)))
+            assert await composite.front_desk_digest._rows(target) == rows
+            assert await store.get_tell_delivery("u3") is None and not h.tmux.pasted
+        finally:
+            store.stop()
+    _run(run)
+
+
+def test_legacy_raw_backend_changed_payload_and_new_digest_events_are_never_relaxed(tmp_path):
+    async def run():
+        store, h, composite, target = await _backend(tmp_path)
+        try:
+            await store.append_session_event(target, _legacy_backend_event(target, "u4"),
+                                             identity="assistant-ingress:tell:u4", limit=2000)
+            await _conflict(h.comms.tell(_tell(target, "u4", "status: \x1b[31mblue\x1b[0m relay", sanitize=True)))
+            await _conflict(h.comms.tell(_tell(target, "u4", RAW, sanitize=True, from_stream_id=f"{HOST}:other")))
+            # A digest-bearing event holding the same raw text but another digest never uses the raw fallback.
+            await store.append_session_event(
+                target, _legacy_backend_event(target, "u5", body_digest=payload_digest(target, "something else")),
+                identity="assistant-ingress:tell:u5", limit=2000)
+            await _conflict(h.comms.tell(_tell(target, "u5", RAW, sanitize=True)))
+            assert len(await _events(store, target)) == 2 and not h.tmux.pasted
+        finally:
+            store.stop()
+    _run(run)
+
+
+def test_legacy_raw_compat_needs_a_valid_sanitize_request_and_the_validated_body(tmp_path):
+    async def run():
+        store, h, composite, target = await _front_desk(tmp_path)
+        try:
+            await _legacy_front_desk_hold(composite, target, "u6")
+            rows = await composite.front_desk_digest._rows(target)
+            # sanitize=false: the raw ESC still refuses at the route guard (not a conflict, no new hold).
+            with pytest.raises(VerbError) as guard:
+                await h.server._on_tell(_tell(target, "u6", RAW))
+            assert guard.value.code != "tell_id_conflict"
+            # message/text pair whose routed body is NOT what the raw text sanitizes to: no smuggling.
+            await _conflict(h.server._on_tell(_tell(target, "u6", "status: other", text=RAW, sanitize=True)))
+            # Different sender under the same key.
+            await _conflict(h.server._on_tell(_tell(target, "u6", RAW, sanitize=True, from_stream_id=f"{HOST}:other")))
+            assert await composite.front_desk_digest._rows(target) == rows
+            assert await store.get_tell_delivery("u6") is None and not h.tmux.pasted
+            # Identical message/text pair that cleans to the same body is the same payload and recovers.
+            ok = await h.server._on_tell(_tell(target, "u6", CLEAN, text=RAW, sanitize=True))
+            assert ok["delivery_status"] == "persisted"
+        finally:
+            store.stop()
+    _run(run)
+
+
+def test_new_sanitize_tell_records_cleaned_body_and_compares_exactly(tmp_path):
+    async def run():
+        store, h, composite, target = await _front_desk(tmp_path)
+        try:
+            await _fail_ledger_once(store)
+            with pytest.raises(RuntimeError):
+                await h.server._on_tell(_tell(target, "n1", RAW, sanitize=True))
+            rows = await composite.front_desk_digest._rows(target)
+            assert rows[0]["body"] == CLEAN
+            await _conflict(h.server._on_tell(_tell(target, "n1", "status: blue relay", sanitize=True)))
+            ok = await h.server._on_tell(_tell(target, "n1", RAW, sanitize=True))
+            assert ok["delivery_status"] == "persisted" and await composite.front_desk_digest._rows(target) == rows
+        finally:
+            store.stop()
+    _run(run)
