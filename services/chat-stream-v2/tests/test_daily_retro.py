@@ -792,6 +792,7 @@ def test_outcome_requires_observed_times_before_counting_success(damage):
 
 
 def test_changed_schema2_scope_does_not_inherit_old_observed_outcome(config, monkeypatch):
+    monkeypatch.setattr(retro, "now_iso", lambda: "2026-10-05T12:00:00+00:00")
     source(config.memory_root, "one")
     monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
     pipeline = retro.Pipeline(config, Transport())
