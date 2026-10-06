@@ -48,13 +48,20 @@ then advances `main` with a compare-and-swap push. Read back remote `main` and
 the tag after promotion. The private repository has its own mapped smoke
 workflow; an unknown or mismatched repository is refused.
 
-The tag push can start another required `Public checks` run. If branch
-protection holds `main` while that check is queued, wait for its result before
-re-entering the helper with the original successful branch-push run ID. On
-re-entry the helper skips a redundant tag push only when the remote annotated
-tag object and peel exactly match its locally validated tag; conflicting or
-unreadable tag state refuses before the `main` push. Keep the pre-push guard
-enabled and preserve the original tag and refusal receipts.
+The tag push starts another required workflow run. The helper now waits in
+one invocation under a single absolute checks budget (default 300 seconds;
+--checks-timeout-seconds). It pushes a missing annotated tag once, then considers
+only the newest matching push run/attempt for the exact candidate SHA, tag name,
+mapped workflow and repository. An older or unrelated green run cannot satisfy
+the gate. Each polling request is bounded by the remaining budget, including
+late-response rejection. Public required job/step coverage remains mandatory.
+
+It reports still_running, required_checks_missing, final_red and timeout as
+non-success; only stable green evidence allows the existing main CAS. The exact
+remote annotated tag object and peel are revalidated after waiting. Re-entry
+still skips a redundant tag push only when remote and local tag objects match.
+Keep the pre-push guard enabled and preserve refusal receipts. This source
+change does not authorize dot to execute a promotion or mutate main.
 
 ## Push guard
 
@@ -87,3 +94,47 @@ and PID of what is actually running; a checkout at the right commit is not a
 deployment. Documentation and guard-only changes do not require a runtime restart.
 
 Historical private exclusions are reviewed by content; ordinary source and portable tests move through the same public gates. See [Public source boundary](public_boundary.md) for the shipped batch and retained private inputs.
+
+### TH-H5 promotion evidence details
+
+The new bounded wait applies to the audited public HJK6/pentacle workflow.
+The separately mapped private workflow's existing promotion behavior is unchanged;
+this packet does not invent an audited private checkout contract.
+
+A workflow run's short head_branch plus push event does not distinguish a tag
+from a same-named branch. The public gate therefore retrieves only the selected
+attempt's successful first checkout step through GitHub's single-step log
+endpoint. It validates the first fetch and checkout groups against the exact
+candidate and refs/tags/v2-gate/<sha>. A branch-style checkout, later forged
+favorable text, missing job identity, inaccessible log, or malformed evidence
+cannot establish green. The existing workflow digest proves that checkout is
+the first action and has no repository/ref override.
+
+The run high-water mark survives temporarily regressed or omitted API snapshots.
+A newly absent remote tag also requires complete pre-push history with no matching
+historical runs; deleted/recreated tag identity is refused rather than reusing
+stale green. Existing exact annotated-tag re-entry remains supported. History,
+polling, job/step proof and final tag revalidation share one absolute deadline.
+If the API does not expose the documented proof, the gate fails closed. No
+workflow, required-check, permission or token change is made.
+
+API assumptions and source-derived fixture references:
+- https://docs.github.com/en/rest/actions/workflow-runs
+- https://docs.github.com/en/rest/actions/workflow-jobs#download-step-logs-for-a-workflow-run-job
+- https://raw.githubusercontent.com/actions/checkout/v4/src/input-helper.ts
+- https://raw.githubusercontent.com/actions/checkout/v4/src/ref-helper.ts
+- https://raw.githubusercontent.com/actions/checkout/v4/src/git-command-manager.ts
+
+The step endpoint returns redirected plain text; gh api follows the redirect.
+Its step position is zero-based (1 for the checkout step whose metadata number is
+2). Attempt-specific job retrieval supplies attempt provenance; job.run_attempt
+is validated when present but is not assumed to exist in the documented payload.
+
+Synthetic validation uses only the existing fake-gh seam. The previous
+queued-check/re-entry test is intentionally updated: the former two main-push
+attempts become one main push after checks finish in one invocation; tag push
+remains exactly once. Other existing test assertions are preserved. Baseline
+replay of that journey failed on the premature main push (1 failed, 0.09s).
+The new polling tests exercise latest/superseded attempts, red/missing/timeout,
+late replies, tag mutation, branch/log spoofing, stale history and incomplete
+evidence. No real promotion, remote tag update, main push or deploy was executed.

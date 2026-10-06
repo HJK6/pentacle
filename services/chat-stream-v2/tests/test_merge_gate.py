@@ -24,6 +24,7 @@ CANDIDATE = "b" * 40
 TAG_OBJECT = "c" * 40
 WORKFLOW_TEXT = "name: Public checks\non:\n  push:\njobs:\n  checks:\n    steps:\n      - run: npm test\n"
 EXPECTED_PUBLIC_SHA256 = "401ac4338e921171d7037966d1b671b8feb42722cff395952bc7034e60767104"
+CHECKOUT_LOG = (Path(__file__).parent / "fixtures/th_h5/tag_checkout.txt").read_text()
 EXPECTED_PUBLIC_STEPS = {
     "Run npm test", "Run python3 scripts/test_check_public_residue.py",
     "Run python3 scripts/check_public_residue.py", "Source integrity after Chrome install",
@@ -60,12 +61,13 @@ def _fake_evidence(monkeypatch: pytest.MonkeyPatch, *, repository: str = "HJK6/p
         "name": "checks", "head_sha": CANDIDATE, "status": "completed", "conclusion": "success",
         "steps": [{"name": step, "status": "completed", "conclusion": "success"}
                   for step in sorted(EXPECTED_PUBLIC_STEPS)],
+
     }]}
     calls: list[list[str]] = []
     monkeypatch.setenv("PENTACLE_GITHUB_REPOSITORY", repository)
     monkeypatch.setattr(merge_gate, "PUBLIC_WORKFLOW_SHA256", hashlib.sha256(WORKFLOW_TEXT.encode()).hexdigest())
 
-    def command(args: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def command(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
         calls.append(args)
         if args == ["git", "remote", "get-url", "origin"]:
             return _result(args, f"git@github.com:{repository}.git")
@@ -79,6 +81,16 @@ def _fake_evidence(monkeypatch: pytest.MonkeyPatch, *, repository: str = "HJK6/p
             return _result(args, OLD if args[-1] == "origin/main" else CANDIDATE)
         if args == ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"]:
             return _result(args, f"{OLD}\trefs/heads/main\n")
+        if args == ["gh", "api", f"repos/{repository}/actions/workflows/7/runs?event=push&head_sha={CANDIDATE}&per_page=100&page=1"]:
+            return _result(args,json.dumps({"total_count":0,"workflow_runs":[]}))
+        if args == ["gh", "api", f"repos/{repository}/actions/workflows/7/runs?event=push&head_sha={CANDIDATE}&per_page=100"]:
+            promoted = {**run, "id":124, "run_number":2, "head_branch":f"v2-gate/{CANDIDATE}",
+                        "path":path, "html_url":f"https://github.com/{repository}/actions/runs/124"}
+            return _result(args, json.dumps({"total_count":1,"workflow_runs":[promoted]}))
+        if args == ["gh", "api", f"repos/{repository}/actions/runs/124/attempts/1/jobs?per_page=100"]:
+            return _result(args, json.dumps({**jobs, "jobs":[{**job, "id":1240, "run_id":124, "run_attempt":1, "steps":job["steps"] + [{"name":"Set up job","number":1,"status":"completed","conclusion":"success"},{"name":"Run actions/checkout@v4","number":2,"status":"completed","conclusion":"success"}]} for job in jobs["jobs"]]}))
+        if args == ["gh", "api", f"repos/{repository}/actions/jobs/1240/steps/1/logs"]:
+            return _result(args, CHECKOUT_LOG)
         if args == ["gh", "api", f"repos/{repository}/actions/runs/123"]:
             return _result(args, json.dumps(run))
         if args == ["gh", "api", f"repos/{repository}/actions/workflows/7"]:
@@ -111,10 +123,10 @@ def test_promote_tags_before_cas_fast_forward(monkeypatch: pytest.MonkeyPatch) -
     main_reads = iter((OLD, CANDIDATE))
     tag = f"refs/tags/v2-gate/{CANDIDATE}"
     tag_object = TAG_OBJECT
-    tag_reads = iter(("", f"{tag_object}\t{tag}\n{CANDIDATE}\t{tag}^{{}}\n"))
+    tag_reads = iter(("", f"{tag_object}\t{tag}\n{CANDIDATE}\t{tag}^{{}}\n", f"{tag_object}\t{tag}\n{CANDIDATE}\t{tag}^{{}}\n"))
     original = merge_gate._command
 
-    def command(args: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def command(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
         if args == ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"]:
             calls.append(args)
             return _result(args, next(main_reads) + "\trefs/heads/main\n")
@@ -124,7 +136,7 @@ def test_promote_tags_before_cas_fast_forward(monkeypatch: pytest.MonkeyPatch) -
         if args == ["git", "rev-parse", f"{tag}^{{tag}}"]:
             calls.append(args)
             return _result(args, tag_object)
-        return original(args, input_text=input_text)
+        return original(args, input_text=input_text, timeout=timeout)
 
     monkeypatch.setattr(merge_gate, "_command", command)
     result = merge_gate.promote(CANDIDATE, 123)
@@ -144,7 +156,7 @@ def test_existing_exact_remote_tag_skips_noop_push_before_cas(monkeypatch: pytes
     main_reads = iter((OLD, CANDIDATE))
     original = merge_gate._command
 
-    def command(args: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def command(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
         if args == ["git", "show-ref", "--verify", "--quiet", tag_ref]:
             calls.append(args)
             return _result(args)
@@ -166,7 +178,7 @@ def test_existing_exact_remote_tag_skips_noop_push_before_cas(monkeypatch: pytes
         if args == ["git", "push", "origin", tag_ref]:
             calls.append(args)
             return _result(args, returncode=1)  # installed hook rejects no-op stdin
-        return original(args, input_text=input_text)
+        return original(args, input_text=input_text, timeout=timeout)
 
     monkeypatch.setattr(merge_gate, "_command", command)
     result = merge_gate.promote(CANDIDATE, 123)
@@ -183,7 +195,7 @@ def _existing_tag_case(
     ref = f"refs/tags/v2-gate/{CANDIDATE}"
     original = merge_gate._command
 
-    def command(args: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def command(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
         if args == ["git", "show-ref", "--verify", "--quiet", ref]:
             calls.append(args)
             return _result(args)
@@ -199,7 +211,7 @@ def _existing_tag_case(
         if args == ["git", "ls-remote", "--tags", "origin", ref, f"{ref}^{{}}"]:
             calls.append(args)
             return _result(args, remote_rows or "", 0 if remote_rows is not None else 1)
-        return original(args, input_text=input_text)
+        return original(args, input_text=input_text, timeout=timeout)
 
     monkeypatch.setattr(merge_gate, "_command", command)
     return calls
@@ -242,19 +254,28 @@ def test_invalid_local_tag_refuses_before_any_push(monkeypatch: pytest.MonkeyPat
     assert not any(args[:2] == ["git", "push"] for args in calls)
 
 
-def test_tag_check_queued_then_guarded_reentry_succeeds_without_second_tag_push(
+def test_tag_check_queued_then_green_succeeds_in_one_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """GH006 after first tag push may be retried only after that check succeeds."""
+    """The tag-triggered check is awaited before the first and only main push."""
     _, _, _, calls = _fake_evidence(monkeypatch)
     ref = f"refs/tags/v2-gate/{CANDIDATE}"
     state: dict[str, object] = {
         "local_tag": False, "remote_tag": False, "tag_check": "queued",
-        "main": OLD, "main_pushes": 0, "annotation": "",
+        "main": OLD, "main_pushes": 0, "annotation": "", "polls":0,
     }
     original = merge_gate._command
 
-    def command(args: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def command(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["gh", "api"] and "/workflows/7/runs?" in args[2] and not args[2].endswith("&page=1"):
+            response = original(args, input_text=input_text, timeout=timeout)
+            payload = json.loads(response.stdout)
+            state["polls"] += 1
+            if state["polls"] == 1:
+                payload["workflow_runs"][0].update(status="queued", conclusion=None)
+            else:
+                state["tag_check"] = "success"
+            return _result(args, json.dumps(payload))
         if args == ["git", "show-ref", "--verify", "--quiet", ref]:
             calls.append(args)
             return _result(args, returncode=0 if state["local_tag"] else 1)
@@ -290,17 +311,15 @@ def test_tag_check_queued_then_guarded_reentry_succeeds_without_second_tag_push(
                 return _result(args, returncode=1)  # GH006 required check queued
             state["main"] = CANDIDATE
             return _result(args)
-        return original(args, input_text=input_text)
+        return original(args, input_text=input_text, timeout=timeout)
 
     monkeypatch.setattr(merge_gate, "_command", command)
-    with pytest.raises(merge_gate.GateError, match="git push --force-with-lease"):
-        merge_gate.promote(CANDIDATE, 123)
-    assert state["main"] == OLD and state["remote_tag"] is True
-    assert calls.count(["git", "push", "origin", ref]) == 1
-    state["tag_check"] = "success"
-    result = merge_gate.promote(CANDIDATE, 123)
+    clock = [0.0]
+    result = merge_gate.promote(CANDIDATE, 123, checks_timeout_s=10, poll_s=1,
+                               clock=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0]+seconds))
     assert result["candidate"] == CANDIDATE and state["main"] == CANDIDATE
-    assert state["main_pushes"] == 2
+    assert state["main_pushes"] == 1
+    assert state["polls"] >= 3
     assert calls.count(["git", "push", "origin", ref]) == 1
 
 
@@ -315,12 +334,12 @@ def test_bad_public_evidence_refuses_before_push(monkeypatch: pytest.MonkeyPatch
     if change in ("unknown_origin", "non_github_origin"):
         original = merge_gate._command
 
-        def command(args: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+        def command(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
             if args == ["git", "remote", "get-url", "origin"]:
                 calls.append(args)
                 origin = "git@github.com:other/pentacle.git" if change == "unknown_origin" else "git@example.com:HJK6/pentacle.git"
                 return _result(args, origin)
-            return original(args, input_text=input_text)
+            return original(args, input_text=input_text, timeout=timeout)
 
         monkeypatch.setattr(merge_gate, "_command", command)
     elif change == "missing_selector":
@@ -370,11 +389,11 @@ def test_superseded_branch_tip_refuses_before_push(monkeypatch: pytest.MonkeyPat
     _run, _workflow, _jobs, calls = _fake_evidence(monkeypatch)
     original = merge_gate._command
 
-    def command(args: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def command(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
         if args == ["git", "ls-remote", "--exit-code", "origin", "refs/heads/codex/candidate"]:
             calls.append(args)
             return _result(args, f"{OLD}\trefs/heads/codex/candidate\n")
-        return original(args, input_text=input_text)
+        return original(args, input_text=input_text, timeout=timeout)
 
     monkeypatch.setattr(merge_gate, "_command", command)
     with pytest.raises(merge_gate.GateError, match="branch no longer resolves"):
@@ -388,7 +407,7 @@ def test_verify_tag_refuses_annotation_for_a_different_candidate(monkeypatch: py
         f"headSha: {OLD}", f"old_main_sha: {OLD}", f"candidate_sha: {OLD}", "timestamp: 2026-08-21T00:00:00Z",
     ))
 
-    def command(args: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def command(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
         if args[0:2] == ["git", "show-ref"]:
             return _result(args)
         if args[0:2] == ["git", "ls-remote"]:
