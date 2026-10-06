@@ -182,6 +182,9 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     junit.unlink(missing_ok=True)
     env, soak = os.environ.copy(), None
     env[MANIFEST_ENV] = str(manifest)
+    # The fleet gate is strict: a capability a managed test requires must be present, never a green skip.
+    # A sandbox opts out by exporting PENTACLE_TEST_STRICT_CAPABILITIES=0.
+    env.setdefault("PENTACLE_TEST_STRICT_CAPABILITIES", "1")
     if tier == "soak":
         env["SOAK_TIER"] = os.environ.get("SOAK_TIER", "full")
         _apply_strict_full_soak(env)

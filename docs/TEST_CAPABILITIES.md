@@ -18,7 +18,7 @@ Changed tests use existing pytest-timeout: module limits are 20/30/60 seconds, w
 
 ## Strict fleet gate
 
-Add --strict-capabilities or PENTACLE_TEST_STRICT_CAPABILITIES=1 to the same pytest invocation. Any required capability absence becomes an error. Normal sandbox mode permits only requires(...) skips for actual unavailable capabilities. The changed-node guard rejects direct skips; unrelated existing skips are not rewritten.
+`tools/run_gate.py` runs every tier with PENTACLE_TEST_STRICT_CAPABILITIES=1 unless the caller already exported a value; a sandbox opts out with PENTACLE_TEST_STRICT_CAPABILITIES=0. For a direct pytest run, add --strict-capabilities or PENTACLE_TEST_STRICT_CAPABILITIES=1 to the same pytest invocation. Any required capability absence becomes an error. Normal sandbox mode permits only requires(...) skips for actual unavailable capabilities. The changed-node guard rejects direct skips; unrelated existing skips are not rewritten.
 
 The pre-existing test_sigkill_then_reap_manifest_cleans unconditional tracked skip is outside the changed surface and remains byte-for-byte pinned. It is not a new capability skip and is explicitly distinguished in receipts.
 
