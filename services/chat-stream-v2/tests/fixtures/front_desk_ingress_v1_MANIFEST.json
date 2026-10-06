@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "path": "tests/fixtures/front_desk_ingress_v1_cases.json",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "4d66df698c489ebfb82b76c8dc1e82d1d00eac918e0ea4334111402e69fdafd4"
+    },
+    {
+      "path": "tests/front_desk_ingress_replay.py",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "3984b284b9531987c392d9399758217a2e21599d52907b590af2a40168a5e23d"
+    },
+    {
+      "path": "tests/test_front_desk_ingress_replay.py",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "28a4e7dfc81679c4781656a6d7cad366e930e9891665fb1cd4992108e6600c00"
+    },
+    {
+      "path": "tests/test_front_desk_ingress_replay_findings.py",
+      "synthetic": true,
+      "contains_real_traffic": false,
+      "sha256": "7044582f21ad19e0a314d9e419c61f877a77c0d4ee1a7894b8b8f0ca61c5d0a2"
+    }
+  ]
+}
