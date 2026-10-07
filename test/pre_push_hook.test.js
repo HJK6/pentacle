@@ -614,3 +614,30 @@ test('fleet guard checks every non-deletion tip in a multi-ref push', () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /fleet.host/);
 });
+test('fleet guard refuses zero-exit checkers with invalid or mismatched receipts', () => {
+  const sb = sandbox();
+  git(sb.work, [...ID, 'checkout', '-b', 'receipt']);
+  commitFile(sb.work, 'clean.txt', 'clean\n', 'clean');
+  const isolatedHooks = path.join(sb.dir, 'hooks');
+  fs.mkdirSync(isolatedHooks);
+  fs.copyFileSync(hookPath, path.join(isolatedHooks, 'pre-push'));
+  fs.chmodSync(path.join(isolatedHooks, 'pre-push'), 0o755);
+  const checker = path.join(sb.dir, 'check_public_residue.py');
+  const good = `import json, sys\na = sys.argv\nr = {'passed': True, 'unexcepted_match_count': 0, 'rule_hits': [], 'base': a[a.index('--fleet-base')+1], 'tip': a[a.index('--fleet-tip')+1]}\n`;
+  const probes = [
+    `print('')\n`, `print('not json')\n`,
+    good + `r['passed'] = False\nprint(json.dumps(r))\n`,
+    good + `r['base'] = '0' * 40\nprint(json.dumps(r))\n`,
+    good + `r['tip'] = '0' * 40\nprint(json.dumps(r))\n`,
+    good + `r['unexcepted_match_count'] = False\nprint(json.dumps(r))\n`,
+    good + `r['rule_hits'] = [{}]\nprint(json.dumps(r))\n`,
+  ];
+  for (const body of probes) {
+    fs.writeFileSync(checker, body);
+    const r = tryGit(sb.work, ['-c', `core.hooksPath=${isolatedHooks}`, ...ID, 'push', 'public', 'receipt:refs/heads/receipt'], pub(sb.remote));
+    assert.notEqual(r.status, 0, 'zero-exit scanner without a matching clean receipt must refuse');
+    assert.match(r.stderr, /fleet.host receipt/);
+  }
+  fs.writeFileSync(checker, good + `print(json.dumps(r))\n`);
+  assert.equal(tryGit(sb.work, ['-c', `core.hooksPath=${isolatedHooks}`, ...ID, 'push', 'public', 'receipt:refs/heads/receipt'], pub(sb.remote)).status, 0);
+});
