@@ -62,6 +62,7 @@ from .wsclient import (
     send_receipt_once,
     send_once,
     set_visibility_once,
+    todo_once,
     spec_update_once,
     status_card_once,
     SPAWN_RPC_TIMEOUT_DEFAULT_S,
@@ -670,6 +671,76 @@ def _schedule_actor_payload(
     if mutation:
         payload["request_id"] = getattr(args, "request_id", None) or str(uuid.uuid4())
     return payload
+
+
+def _todo_ok(response: dict[str, object]) -> bool:
+    return str(response.get("type") or "").startswith("todo.") and str(response.get("type") or "").endswith(".ok")
+
+
+def _print_todo_table(items: list[dict[str, object]]) -> None:
+    print("item_id                               priority  state  text")
+    for item in items:
+        print(f"{item.get('item_id', '')}  {item.get('priority', ''):<8}  {item.get('state', ''):<5}  {item.get('text', '')}")
+
+
+def _todo_run(args: argparse.Namespace, payload: dict[str, object]) -> int:
+    """Send one `todo.*` verb as this seat (or the operator) and render the reply."""
+    actor = getattr(args, "from_stream_id", None)
+    if not actor:
+        try:
+            actor = discover_leader_stream_id_short(load_config())
+        except Exception:
+            actor = None
+    if actor:
+        payload["from_stream_id"] = actor
+    payload["request_id"] = str(uuid.uuid4())
+    timeout = float(getattr(args, "timeout", 30.0) or 30.0)
+    transport_exit = None
+    try:
+        response = asyncio.run(todo_once(load_config(), payload, timeout=timeout))
+    except Exception as exc:
+        response, transport_exit, transport_message = _direct_rpc_transport_error(
+            "todo", payload["request_id"], exc,
+        )
+        print(f"agent-orch {payload['type'].replace('.', ' ')}: {transport_message}", file=sys.stderr)
+    if getattr(args, "json", False) or not _todo_ok(response):
+        _print_response(response)
+    elif payload["type"] == "todo.list":
+        rows = response.get("items") if isinstance(response.get("items"), list) else []
+        _print_todo_table([row for row in rows if isinstance(row, dict)])
+    else:
+        item = response.get("item") if isinstance(response.get("item"), dict) else {}
+        print(f"{payload['type']} ok {response.get('item_id') or item.get('item_id', '')} "
+              f"{item.get('priority', '')} {item.get('state', '')} {item.get('text', '')}".rstrip())
+    if transport_exit is not None:
+        return transport_exit
+    return 0 if _todo_ok(response) else 1
+
+
+def todo_list(args: argparse.Namespace) -> int:
+    payload: dict[str, object] = {"type": "todo.list"}
+    if args.include_done:
+        payload["include_done"] = True
+    return _todo_run(args, payload)
+
+
+def todo_add(args: argparse.Namespace) -> int:
+    payload: dict[str, object] = {"type": "todo.add", "text": args.text}
+    if args.priority:
+        payload["priority"] = args.priority
+    return _todo_run(args, payload)
+
+
+def todo_set(args: argparse.Namespace) -> int:
+    return _todo_run(args, {"type": "todo.set", "item_id": args.item_id, "priority": args.priority})
+
+
+def todo_check(args: argparse.Namespace) -> int:
+    return _todo_run(args, {"type": "todo.check", "item_id": args.item_id})
+
+
+def todo_remove(args: argparse.Namespace) -> int:
+    return _todo_run(args, {"type": "todo.remove", "item_id": args.item_id})
 
 
 def schedule_list(args: argparse.Namespace) -> int:
@@ -4981,6 +5052,41 @@ def build_parser() -> argparse.ArgumentParser:
     schedule_receipt_parser.add_argument("--from", dest="from_stream_id")
     schedule_receipt_parser.add_argument("--timeout", type=float, default=30.0)
     schedule_receipt_parser.set_defaults(func=schedule_receipt)
+
+    todo_parser = subparsers.add_parser("todo", description="Shared personal to-do list with priority.")
+    todo_sub = todo_parser.add_subparsers(dest="todo_command", required=True)
+
+    def _todo_common(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--json", action="store_true")
+        sub.add_argument("--from", dest="from_stream_id")
+        sub.add_argument("--timeout", type=float, default=30.0)
+
+    todo_list_parser = todo_sub.add_parser("list", description="List open items, high priority first.")
+    todo_list_parser.add_argument("--include-done", action="store_true")
+    _todo_common(todo_list_parser)
+    todo_list_parser.set_defaults(func=todo_list)
+
+    todo_add_parser = todo_sub.add_parser("add")
+    todo_add_parser.add_argument("text")
+    todo_add_parser.add_argument("--priority", choices=["high", "normal", "low"])
+    _todo_common(todo_add_parser)
+    todo_add_parser.set_defaults(func=todo_add)
+
+    todo_set_parser = todo_sub.add_parser("set", description="Set an item's priority.")
+    todo_set_parser.add_argument("item_id")
+    todo_set_parser.add_argument("--priority", choices=["high", "normal", "low"], required=True)
+    _todo_common(todo_set_parser)
+    todo_set_parser.set_defaults(func=todo_set)
+
+    todo_check_parser = todo_sub.add_parser("check", description="Mark an item done.")
+    todo_check_parser.add_argument("item_id")
+    _todo_common(todo_check_parser)
+    todo_check_parser.set_defaults(func=todo_check)
+
+    todo_remove_parser = todo_sub.add_parser("remove", description="Delete an item, open or done.")
+    todo_remove_parser.add_argument("item_id")
+    _todo_common(todo_remove_parser)
+    todo_remove_parser.set_defaults(func=todo_remove)
 
     send_parser = subparsers.add_parser(
         "send",

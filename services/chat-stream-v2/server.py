@@ -64,6 +64,7 @@ from seat_token_telemetry import (
 )
 from sessions import VerbError, _finish_despite_cancel, with_bootstrap_state
 from store import STREAM_TOKEN_HASH_VERSION, role_source_for
+from todo_list import TodoList
 from machine_stats import validate_machine_stats
 from submission_events import COMMITTED_PENDING_PROOF_STATUSES
 from assistant_lane_rulings import AssistantLaneRulings
@@ -194,7 +195,7 @@ CLIENT_SEND_QUEUE_MAX = int(os.environ.get("PENTACLE_CLIENT_SEND_QUEUE_MAX", "25
 CLIENT_SEND_QUEUE_WARN_RATIO = 0.80
 COALESCIBLE_BROADCAST_FRAME_TYPES = frozenset({
     "host.status", "session.inventory", "working.state",
-    "schedule.inventory",
+    "schedule.inventory", "todo.inventory",
     "hosts.stats",
     # A complete replacement: a slow client only needs the newest limits frame.
     "limits.update",
@@ -675,6 +676,8 @@ class Server:
         from watch_wake import WatchWake
         self.watch_wake = WatchWake(getattr(self.sessions, "store", None), self.sessions)
         self.handlers.update(self.watch_wake.wire_handlers())
+        self.todo_list = TodoList(self.store, self.sessions, broadcast=self.broadcast)
+        self.handlers.update(self.todo_list.wire_handlers())
         self.runtime_sha = ""
         self._host_stats: dict[str, dict[str, Any]] = {}
         self._host_stats_order_lock = asyncio.Lock()
@@ -2120,7 +2123,8 @@ class Server:
         # broadcast set happens before hello, so recipient eligibility must be
         # connection-bound and fail closed here rather than inferred from the
         # ordinary inventory subscription.
-        if frame_type.startswith("schedule.") and not self._operator_authenticated(websocket):
+        # The to-do list is operator data and takes the same gate.
+        if frame_type.startswith(("schedule.", "todo.")) and not self._operator_authenticated(websocket):
             return None
         if frame_type == "session.inventory":
             sessions = payload.get("sessions") if isinstance(payload.get("sessions"), list) else []

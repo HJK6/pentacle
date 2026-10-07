@@ -2307,6 +2307,14 @@ async def schedule_once(config: Config, payload: dict[str, Any], *, timeout: flo
     return await _one_shot_rpc(config, payload, prefix="schedule", timeout=timeout, from_stream_id=from_stream_id)
 
 
+async def todo_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+    from_stream_id = payload.get("from_stream_id") if isinstance(payload.get("from_stream_id"), str) else None
+    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
+        payload["stream_token"] = _stream_token_from_env()
+    payload.setdefault("request_id", str(uuid.uuid4()))
+    return await _one_shot_rpc(config, payload, prefix="todo", timeout=timeout, from_stream_id=from_stream_id)
+
+
 async def await_spawn_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     payload["type"] = "await_spawn"
     payload.setdefault("request_id", f"await-spawn-{uuid.uuid4()}")

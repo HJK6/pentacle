@@ -1085,6 +1085,22 @@ SCHEDULE_DDL = (
        ON v2_schedule_dispatches(phase)""",
 )
 
+# Personal to-do list (`todo_list.py`). One flat list: `position` is assigned at
+# insert (`MAX+1`, never reused while the max row lives), done rows are kept.
+TODO_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS v2_todo_items (
+      item_id TEXT PRIMARY KEY,
+      text TEXT NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('high','normal','low')),
+      state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open','done')),
+      position INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    """,
+)
+
 #: v1 `STREAM_TOKEN_HASH_VERSION`. grant_token persists only the hash.
 STREAM_TOKEN_HASH_VERSION = "sha256:v1"
 
@@ -1630,6 +1646,8 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             conn.execute(CLOSE_AUDIT_DDL)
             conn.execute(CLOSE_AUDIT_INDEX_DDL)
             for ddl in SCHEDULE_DDL:
+                conn.execute(ddl)
+            for ddl in TODO_DDL:
                 conn.execute(ddl)
             if "no_watch" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_schedules)")}:
                 conn.execute("ALTER TABLE v2_schedules ADD COLUMN no_watch INTEGER NOT NULL DEFAULT 0")

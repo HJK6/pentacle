@@ -65,6 +65,28 @@ Each implementation must document the exact fields and error codes it registers.
 
 Image attachments (both operator→agent and agent→operator) reuse one content-addressed blob path: the client uploads bytes with the chunked `upload_blob_init` / `upload_blob_chunk` verbs, then references the blob by its sha256 in an attachment descriptor `{key, mime, bytes, width?, height?}` (supported mime: `image/jpeg`, `image/png`; per-attachment and per-message size/count limits apply). `send_image` is the agent-authored form: the daemon authorizes the destination from the caller's verified stream token — a seat may attach only to its OWN conversation — confirms the referenced blob is present, and emits exactly one agent-authored transcript event carrying the attachment (no pane injection). It is idempotent by `request_id`, so a retry adds no second transcript row. Clients fetch the bytes for display through the existing blob-read path and render the same image bubble/viewer regardless of author. Agent-side usage: `agent-orch send-image` (see the agent-orch README "Send an image").
 
+## To-do list
+
+One shared list with a priority per item, kept in `v2_todo_items` (`item_id` uuid4, `text`, `priority`, `state`, `position`, `created_at`, `updated_at`). Done rows are kept; there is no retention sweep. Every item object on the wire carries exactly those seven fields.
+
+| Verb | Request fields | Success |
+|---|---|---|
+| `todo.list` | `include_done?` (bool, default false) | `todo.list.ok {items}` — open items only unless `include_done` is `true` |
+| `todo.add` | `text`, `priority?` (default `normal`) | `todo.add.ok {item}` |
+| `todo.set` | `item_id`, `priority` | `todo.set.ok {item}` — priority only; other fields are ignored |
+| `todo.check` | `item_id` | `todo.check.ok {item}` — state `done`; `updated_at` is bumped on the transition and a repeat returns the unchanged row |
+| `todo.remove` | `item_id` | `todo.remove.ok {item_id}` — deletes an open or done row |
+
+Lists are ordered `high`, `normal`, `low`, then `position` ascending; `position` is `MAX(position)+1` assigned at insert, so new items sort last within their priority. `text` is trimmed and must be 1–200 characters. An add whose trimmed, casefolded text equals an **open** item's text is a duplicate; a done item does not block re-adding it.
+
+Errors arrive as `<verb>.error` with `error_code`: `unauthorized`, `invalid_text`, `invalid_priority`, `invalid_update` (`todo.set` without `priority`), `not_found`, `duplicate`, `store_unavailable`. The caller is checked first; input validation precedes the item lookup.
+
+Authorization: operator-authenticated clients and live seats (kinds `seat` and `nexus`, with a verified stream token whose owner matches `from_stream_id`) may read and mutate. Service actors, unverified tokens, closed or unknown seats and unauthenticated connections receive `unauthorized` and nothing changes.
+
+After every committed mutation the daemon broadcasts `{"type":"todo.inventory","items":[...]}` (open items, same order). It is delivered only to operator-authenticated connections, by the same connection-bound gate as `schedule.*` frames, and is coalescible: a slow client keeps only the newest. A failed broadcast never fails the RPC. Clients read the current list with `todo.list` and follow `todo.inventory` afterwards.
+
+CLI: `agent-orch todo list [--include-done]`, `todo add "<text>" [--priority high|normal|low]`, `todo set <item_id> --priority high|normal|low`, `todo check <item_id>`, `todo remove <item_id>`; each accepts `--json`, `--from` and `--timeout`.
+
 ## Session interrupt
 
 `send.interrupt` names a session with `host` and `session_name`. For a configured
