@@ -343,6 +343,17 @@ def test_ws_notify_accepts_only_a_delivered_send_result(monkeypatch, tmp_path, r
         _REAL_WS_NOTIFY("GATE scheduled-test r", "r", "ws://x", tmp_path / "t")
 
 
+def test_ws_notify_treats_committed_pending_proof_as_sent_unconfirmed(monkeypatch, tmp_path, capsys):
+    """Run fe943a54: the GATE was committed and reached the front desk, but the receipt proof was still pending.
+    That is sent-unconfirmed, not a refusal: logged, not raised."""
+    conn = _Conn({"assistant.binding": BINDING, "send": {"type": "send.result", "delivery": "committed_pending_proof"}})
+    _patch_connection(monkeypatch, conn)
+    _REAL_WS_NOTIFY("GATE scheduled-test run=r1 x", "r1", "ws://x", tmp_path / "t")
+    out = capsys.readouterr().out
+    assert "sent-unconfirmed" in out and "committed_pending_proof" in out and "refused" not in out
+    assert [m["type"] for m in conn.sent] == ["assistant.binding", "send"]  # one send, no resubmit
+
+
 def test_ws_notify_refuses_non_gate_text(tmp_path):
     with pytest.raises(ValueError):
         _REAL_WS_NOTIFY("REPORT other", "r", "ws://x", tmp_path / "t")

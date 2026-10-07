@@ -140,7 +140,8 @@ def ws_notify(text: str, run_id: str, url: str, token_path: Path, deadline: floa
 
     Only two verbs are used: `assistant.binding` (read) and one `send` whose text starts
     with `GATE scheduled-test`. Every blocking phase (connect, each RPC) is bounded by the time
-    left on the one absolute `deadline`, recomputed before the phase, with no floor. Raises on any
+    left on the one absolute `deadline`, recomputed before the phase, with no floor. `landed` is delivery;
+    `committed_pending_proof` is logged as sent-unconfirmed and does not fail. Raises on any other
     refusal or an exhausted deadline so the caller can log it.
     """
     if not text.startswith("GATE scheduled-test "):
@@ -160,7 +161,11 @@ def ws_notify(text: str, run_id: str, url: str, token_path: Path, deadline: floa
         connection.timeout = _left(deadline)
         sent = connection.rpc({"type": "send", "host": host, "session_name": session, "text": text,
                                "request_id": key, "optimistic_id": key})
-        if sent.get("type") != "send.result" or sent.get("delivery") != "landed":  # only `landed` proves delivery
+        if sent.get("type") == "send.result" and sent.get("delivery") == "committed_pending_proof":
+            # Committed to the assistant stream, receipt proof still pending: sent-unconfirmed, not a refusal.
+            print("gate notify sent-unconfirmed: delivery=committed_pending_proof (not resubmitted)", flush=True)
+            return
+        if sent.get("type") != "send.result" or sent.get("delivery") != "landed":  # any other state is a refusal
             raise RuntimeError(f"send refused: {sent.get('type')} delivery={sent.get('delivery')}")
 
 
