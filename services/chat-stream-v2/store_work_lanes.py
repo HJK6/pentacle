@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -100,6 +101,24 @@ def _canonical(value: Any) -> str:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _readable_title(text: Any, fallback: str) -> str:
+    """Derive an operator-readable lane title within TITLE_MAX.
+
+    Whole text when it fits; otherwise its first sentence when that fits;
+    otherwise a word-boundary cut with an ellipsis. Never a mid-word cut: the
+    preview's title is what the FD adopts, and the full text stays in summary."""
+    whole = " ".join(str(text or "").split()) or fallback
+    if len(whole) <= TITLE_MAX:
+        return whole
+    first = re.split(r"(?<=[.;!?])\s", whole, maxsplit=1)[0].strip()
+    if 0 < len(first) <= TITLE_MAX:
+        return first
+    cut = whole[: TITLE_MAX - 1]
+    if " " in cut:
+        cut = cut[: cut.rfind(" ")]
+    return cut.rstrip(" ,;:-") + "\u2026"
 
 
 def _text(value: Any, limit: int, code: str, *, required: bool = False) -> str | None:
@@ -832,7 +851,7 @@ def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dic
         except ValueError:
             provenance = []
         out.append({
-            "adoption_key": key, "title": (row.get("title") or row.get("objective") or sid)[:TITLE_MAX],
+            "adoption_key": key, "title": _readable_title(row.get("title") or row.get("objective"), sid),
             "lead": {"stream_id": sid, "generation": row.get("session_generation")},
             "visible_chat": {"stream_id": sid, "generation": row.get("session_generation")},
             "owner_kind": None,
@@ -861,8 +880,12 @@ def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dic
         except (ValueError, AttributeError):
             request_message_id = None
         out.append({
-            "adoption_key": f"request:{request_message_id or lane['lane_id']}", "lane_id": lane["lane_id"],
-            "title": (lane.get("summary") or lane["lane_id"])[:TITLE_MAX], "summary": lane.get("summary") or "",
+            # One request may admit several lanes; the lane id keeps each key unique
+            # under the UNIQUE adoption_key index (prefix stays `request:` for the apply validator).
+            "adoption_key": (f"request:{request_message_id}:{lane['lane_id']}" if request_message_id
+                             else f"request:{lane['lane_id']}"),
+            "lane_id": lane["lane_id"],
+            "title": _readable_title(lane.get("summary"), lane["lane_id"]), "summary": lane.get("summary") or "",
             "lead": ({"stream_id": lane["bound_stream_id"], "generation": lane["bound_generation"]}
                      if lane.get("bound_stream_id") and lead_static_eligible(lead_row) else None),
             "visible_chat": {"stream_id": composite_stream_id},
