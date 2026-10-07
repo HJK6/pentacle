@@ -637,6 +637,10 @@ def test_usage_rollup_ac9_private_config_rules(fx: Fx, tmp_path: Path) -> None:
     (fx.data / ur.CONFIG_NAME).unlink()
     cal = fx.run('--calibrate')['calibration']
     assert cal['config_loaded'] is False  # never falls back to the public example
+    blocker = tmp_path / 'a-file'
+    blocker.write_text('')
+    with pytest.raises(ur.RollupError, match='cannot write'):
+        fx.run('--calibrate', '--calibration-out', str(blocker / 'calibration.json'))
 
 
 def test_usage_rollup_ac9_example_config_is_synthetic() -> None:

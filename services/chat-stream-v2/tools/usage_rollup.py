@@ -1149,7 +1149,10 @@ def run(argv: list[str] | None = None) -> tuple[int, dict[str, Any]]:
     if args.calibrate:
         calibration = calibrate(src, config, config_path)
         out_path = Path(args.calibration_out).expanduser() if args.calibration_out else data_dir / CALIBRATION_NAME
-        write_private(out_path, calibration)
+        try:
+            write_private(out_path, calibration)
+        except OSError as exc:
+            raise RollupError(f'cannot write {out_path}: {exc}') from exc
         result['calibration'] = calibration
         result['calibration_written'] = str(out_path)
         cal = Calibration(calibration, out_path)
