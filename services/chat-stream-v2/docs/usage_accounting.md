@@ -45,6 +45,29 @@ the explicitly labelled projection:
 Cached input is not added a second time. Claude's native `uncached_input`,
 `cache_read`, `cache_write` and `output` fields remain native values.
 
+## Codex ledger row versus response rows
+
+The cumulative Codex ledger row is the per-field maximum of the rollout's `token_count.info.total_token_usage`.
+That client counter is not the sum of the session's responses: it never applies a response whose `token_count`
+carries `last_token_usage` of zero (total unchanged), nor a final response written without a following
+`token_count`, and the daemon may stop collecting before the last snapshot. Each `token_usage_record` also
+carries `thread_token_usage`, the thread's own counter after that response, which equals the running sum of the
+rollout's own response `usage` records. On the 2026-10-07 read-only sample reconciliation
+(`tools/usage_codex_sample_reconcile.py`; finding in
+`spec_pentacle__usage_codex_ledger_vs_rows_sample_reconciliation_2026_10` § Readback) 1,289 of the 1,314
+`unverifiable` sessions had a complete, consistent row set whose sum equals the final `thread_token_usage` while
+the ledger row was lower; the other 25 had response rows missing from the head of the session (collection began
+after them), so their rows are incomplete. Nothing here changes classification: `unverifiable` stays the label
+until a separate amendment stores `thread_token_usage` with the rows. Buckets: cached input is inside input
+and reasoning is inside output in every checked session.
+
+The tool is read-only (`mode=ro`, no write path), reads rollouts on the host that holds them, and hashes native
+and account ids in its output:
+
+    python3 tools/usage_codex_sample_reconcile.py transcripts --host <host> --ids-file ids.json --hash
+    python3 tools/usage_codex_sample_reconcile.py sample --ledger <ledger copy> --seed <n>
+    python3 tools/usage_codex_sample_reconcile.py join --ledger <ledger copy> --facts facts.jsonl --out table.csv
+
 ## Replay and satellite acknowledgement
 
 `request_id` is correlation only. The durable source record key is the
