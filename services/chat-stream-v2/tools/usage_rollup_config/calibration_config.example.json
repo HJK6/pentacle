@@ -2,6 +2,7 @@
   "schema_version": 1,
   "_comment": "Synthetic example only. The real file lives at ~/.local/share/pentacle-stream/calibration_config.json on Thoth, mode 0600, and is never committed.",
   "unplaceable_threshold": 0.01,
+  "retired_hosts": [],
   "windows": {
     "anchor": "2026-01-07T16:00:00Z",
     "days": 7,

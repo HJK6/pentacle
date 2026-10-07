@@ -53,6 +53,7 @@ SAMPLE_MIN_COVERAGE = 0.95
 METHOD_B_MIN_SAMPLES = 10
 METHOD_B_MIN_SPAN = 30
 DEFAULT_UNPLACEABLE_THRESHOLD = 0.01
+RETIRED_QUIET_S = 7 * 86400.0
 PROXY_LABEL = 'proxy: union of inter-response gaps <= 10 min from provenance observed_at (Claude records)'
 DOLLARS_LABEL = 'API-equivalent weighted proxy, not billing'
 
@@ -309,6 +310,7 @@ class Sources:
         self.cards: list[tuple[str | None, str | None, float, float]] = []
         self.holds: list[tuple[str, float, float]] = []
         self.history: list[dict[str, Any]] = []
+        self.usage_state: list[tuple[str, str, float | None]] = []  # (collection_host, stream_id, updated_at)
         live = data_dir / 'sessions.db'
         if not live.exists():
             raise RollupError(f'no ledger at {live}')
@@ -338,6 +340,9 @@ class Sources:
                 self.seats[seat.stream_id] = seat  # live wins over archive (loaded second)
         if {'v2_usage_records', 'v2_usage_provenance', 'v2_usage_identity'} <= tables:
             self.records.extend(Rec(row, self.pricing) for row in conn.execute(RECORDS_SQL))
+        if 'v2_usage_state' in tables:
+            for row in conn.execute('SELECT collection_host, stream_id, updated_at FROM v2_usage_state'):
+                self.usage_state.append((row['collection_host'], row['stream_id'], parse_ts(row['updated_at'])))
         if 'v2_reports' in tables:
             for row in conn.execute('SELECT from_stream_id, qa_verdict, ingested_at, created_at FROM v2_reports'):
                 at = parse_ts(row['ingested_at']) or parse_ts(row['created_at'])
@@ -717,6 +722,35 @@ def load_config(path: Path) -> dict[str, Any] | None:
     return data
 
 
+def retired_hosts(src: Sources, config: dict[str, Any]) -> tuple[set[str], list[dict[str, Any]]]:
+    """Honour a configured retired host only if nothing live points at it: no open seat, no recent usage push."""
+    listed = config.get('retired_hosts') or []
+    if not isinstance(listed, list) or not all(isinstance(h, str) and h for h in listed):
+        raise RollupError('calibration config: retired_hosts must be a list of host names')
+    honoured: set[str] = set()
+    report: list[dict[str, Any]] = []
+    for host in sorted(set(listed)):
+        # Composite assistant rows (e.g. bart:assistant) are routing aliases with no usage of their own.
+        open_rows = [s for s in src.seats.values() if s.host == host and s.status == 'open']
+        open_seats = [s for s in open_rows if s.provider != 'composite']
+        composite = len(open_rows) - len(open_seats)
+        # An unparseable updated_at cannot prove the host quiet, so it counts as recent.
+        recent = [u for u in src.usage_state if (u[0] == host or u[1].startswith(host + ':'))
+                  and (u[2] is None or u[2] >= src.now - RETIRED_QUIET_S)]
+        if open_seats:
+            reason = f'open seat in sessions ({len(open_seats)})'
+        elif recent:
+            reason = 'v2_usage_state row updated within 7 days'
+        else:
+            honoured.add(host)
+            report.append({'host': host, 'status': 'honoured',
+                           **({'open_composite_rows_not_counted': composite} if composite else {})})
+            continue
+        print(f'usage rollup: warning: retired_hosts entry {host!r} ignored: {reason}', file=sys.stderr)
+        report.append({'host': host, 'status': 'ignored', 'reason': reason})
+    return honoured, report
+
+
 class Timeline:
     """Timed Claude records ordered by observed_at, for window and interval slices."""
 
@@ -733,23 +767,53 @@ class Timeline:
         return self.recs[bisect.bisect_right(self.times, start):bisect.bisect_right(self.times, end)]
 
 
-def account_partition(acct: Account, recs: Iterable[Rec]) -> dict[str, Any]:
-    """Per-(provider, account, quota) partition; ambiguous mass sits in every candidate account's denominator."""
-    measured = unpriced = unknown = 0
+WINDOW_BUCKETS = ('measured', 'unpriced', 'unknown_account')
+
+
+def _bucket_for(acct: Account | None, rec: Rec) -> str | None:
+    """The window bucket a timed record adds to this account's denominator (None: not this account's)."""
+    if acct is None:  # fleet-wide view: every timed Claude record by its class
+        return rec.cls if rec.cls in WINDOW_BUCKETS else None
+    if rec.cls == 'measured':
+        return 'measured' if rec.account == acct.id else None
+    if rec.cls == 'unpriced':
+        return 'unpriced' if rec.account == acct.id or (rec.account is None and acct.may_own(rec.host)) else None
+    if rec.cls == 'unknown_account':
+        return 'unknown_account' if acct.may_own(rec.host) else None
+    return None
+
+
+def account_partition(acct: Account | None, recs: Iterable[Rec]) -> dict[str, Any]:
+    """Per-(provider, account, quota) partition; ambiguous mass sits in every candidate account's denominator.
+
+    `by_host` splits the same three buckets by record host (conflict is a sub-count of unknown_account),
+    so the host rows always sum to `tokens` exactly.
+    """
+    tokens = dict.fromkeys(WINDOW_BUCKETS, 0)
+    by_host: dict[str, dict[str, int]] = {}
     dollars = 0.0
     for rec in recs:
-        if rec.cls == 'measured':
-            if rec.account == acct.id:
-                measured += rec.total
-                dollars += rec.dollars or 0.0
-        elif rec.cls == 'unpriced':
-            if rec.account == acct.id or (rec.account is None and acct.may_own(rec.host)):
-                unpriced += rec.total
-        elif rec.cls == 'unknown_account' and acct.may_own(rec.host):
-            unknown += rec.total
-    denom = measured + unpriced + unknown
-    return {'tokens': {'measured': measured, 'unpriced': unpriced, 'unknown_account': unknown},
-            'dollars': round(dollars, 6), 'coverage': (measured / denom) if denom else None}
+        bucket = _bucket_for(acct, rec)
+        if bucket is None:
+            continue
+        tokens[bucket] += rec.total
+        host = by_host.setdefault(rec.host, {**dict.fromkeys(WINDOW_BUCKETS, 0), 'conflict': 0})
+        host[bucket] += rec.total
+        if bucket == 'unknown_account' and rec.account_state == 'conflict':
+            host['conflict'] += rec.total
+        if bucket == 'measured':
+            dollars += rec.dollars or 0.0
+    denom = sum(tokens.values())
+    return {'tokens': tokens, 'by_host': by_host,
+            'dollars': round(dollars, 6), 'coverage': (tokens['measured'] / denom) if denom else None}
+
+
+def identity_mass(by_host: dict[str, dict[str, int]], outside: dict[str, dict[str, int]]) -> list[dict[str, Any]]:
+    """Per-host identity mass: window buckets (summing to the parent denominator) plus untimed/retired outside it."""
+    zero = {**dict.fromkeys(WINDOW_BUCKETS, 0), 'conflict': 0}
+    return [{'provider': 'claude', 'host': host, 'window': dict(by_host.get(host) or zero),
+             'outside_window_sum': dict(outside.get(host) or {'untimed': 0, 'retired': 0})}
+            for host in sorted(set(by_host) | set(outside))]
 
 
 def _coverage_fields(part: dict[str, Any], eligible: bool) -> dict[str, Any]:
@@ -761,8 +825,17 @@ def _coverage_fields(part: dict[str, Any], eligible: bool) -> dict[str, Any]:
             'measured_coverage_if_bounded': None if cov is None else round(cov, 6)}
 
 
-def unplaceable_summary(records: list[Rec], threshold: float) -> dict[str, Any]:
-    claude = [r for r in records if r.provider == 'claude']
+def unplaceable_summary(records: list[Rec], threshold: float, retired: set[str] = frozenset()) -> dict[str, Any]:
+    """Untimed share of Claude tokens; honoured retired hosts leave numerator and denominator."""
+    retired_mass: dict[str, int] = {}
+    claude = []
+    for rec in records:
+        if rec.provider != 'claude':
+            continue
+        if rec.host in retired:
+            retired_mass[rec.host] = retired_mass.get(rec.host, 0) + rec.total
+        else:
+            claude.append(rec)
     total = sum(r.total for r in claude)
     mass: dict[tuple[str, str], int] = {}
     for rec in claude:
@@ -773,7 +846,8 @@ def unplaceable_summary(records: list[Rec], threshold: float) -> dict[str, Any]:
     ratio = (unplaceable / total) if total else 0.0
     return {'provider': 'claude', 'unplaceable_tokens': unplaceable, 'provider_total_tokens': total,
             'ratio': round(ratio, 6), 'threshold': threshold, 'passes': ratio <= threshold,
-            'by_host_account': [{'host': h, 'account_id': a, 'tokens': t} for (h, a), t in sorted(mass.items())]}
+            'by_host_account': [{'host': h, 'account_id': a, 'tokens': t} for (h, a), t in sorted(mass.items())],
+            'retired_mass': [{'provider': 'claude', 'host': h, 'tokens': t} for h, t in sorted(retired_mass.items())]}
 
 
 def windows_for(config: dict[str, Any], first: float, now: float) -> list[tuple[float, float]]:
@@ -788,7 +862,7 @@ def windows_for(config: dict[str, Any], first: float, now: float) -> list[tuple[
 
 
 def method_a(acct: Account, timeline: Timeline, config: dict[str, Any], eligible: bool,
-             now: float) -> dict[str, Any]:
+             now: float, outside: dict[str, dict[str, int]]) -> dict[str, Any]:
     if not timeline.times:
         return {'method': 'full_week_100', 'status': 'insufficient', 'coefficient': None,
                 'reason': 'no timed records', 'points': []}
@@ -800,7 +874,8 @@ def method_a(acct: Account, timeline: Timeline, config: dict[str, Any], eligible
                                  'completed': end <= now, 'dollars': round(part['dollars'], 4),
                                  'tokens': part['tokens'], 'bias': 'floor',
                                  'usd_per_pct': round(part['dollars'] / 100.0, 4),
-                                 'eligibility': 'eligible' if eligible else 'unknown'}
+                                 'eligibility': 'eligible' if eligible else 'unknown',
+                                 'identity_mass_by_host': identity_mass(part['by_host'], outside)}
         point.update(_coverage_fields(part, eligible))
         if start in excluded:
             reason = 'excluded_by_config'
@@ -857,26 +932,45 @@ def history_lines(history: list[dict[str, Any]], account: str, window_kind: str)
     return lines, probes
 
 
-def method_b(acct: Account, timeline: Timeline, history: list[dict[str, Any]], eligible: bool) -> dict[str, Any]:
+def method_b(acct: Account, timeline: Timeline, history: list[dict[str, Any]], eligible: bool,
+             outside: dict[str, dict[str, int]]) -> dict[str, Any]:
+    """Pair each positive pct change with the previous pct-change observation.
+
+    Delta = 0 observations extend the open interval instead of closing it, so their tokens stay in the next
+    sample; a pct decrease starts a new base and forms no sample. Exclusions judge the whole interval.
+    """
     lines, probes = history_lines(history, acct.id, QUOTA)
     samples, exclusions = [], list(probes)
-    for first, second in zip(lines, lines[1:]):
-        t1, t2 = parse_ts(first['observed_at']), parse_ts(second['observed_at'])
-        delta = second['pct'] - first['pct']
-        r1, r2 = _minute(first.get('resets_at')), _minute(second.get('resets_at'))
-        sample: dict[str, Any] = {'from': first['observed_at'], 'to': second['observed_at'],
-                                  'delta_pct': delta, 'interval_s': round(t2 - t1, 3)}
-        part = account_partition(acct, timeline.interval(t1, t2))
-        sample['dollars'] = round(part['dollars'], 6)
+    union_recs: list[Rec] = []
+    formed = 0
+    base, run = (lines[0], []) if lines else (None, [])
+    for line in lines[1:]:
+        delta = line['pct'] - base['pct']
+        if delta == 0:
+            run.append(line)
+            continue
+        if delta < 0:
+            exclusions.append({'from': base['observed_at'], 'to': line['observed_at'], 'delta_pct': delta,
+                               'reason': 'pct_decrease_new_base'})
+            base, run = line, []
+            continue
+        t1, t2 = parse_ts(base['observed_at']), parse_ts(line['observed_at'])
+        resets = [_minute(l.get('resets_at')) for l in (base, *run, line)]
+        recs = timeline.interval(t1, t2)
+        union_recs.extend(recs)
+        formed += 1
+        part = account_partition(acct, recs)
+        sample: dict[str, Any] = {'from': base['observed_at'], 'to': line['observed_at'],
+                                  'delta_pct': delta, 'interval_s': round(t2 - t1, 3),
+                                  'observations': len(run) + 2, 'tokens': part['tokens'],
+                                  'dollars': round(part['dollars'], 6)}
         sample.update(_coverage_fields(part, eligible))
-        if r1 is None or r2 is None:
+        if any(r is None for r in resets):
             reason = 'reset_unknown'
-        elif r1 != r2:
+        elif len(set(resets)) > 1:
             reason = 'reset_crossing'
         elif t2 == t1:
             reason = 'stale'
-        elif delta <= 0:
-            reason = 'non_positive_delta'
         elif t2 - t1 > MAX_INTERVAL_S:
             reason = 'interval_over_24h'
         elif not eligible:
@@ -892,10 +986,14 @@ def method_b(acct: Account, timeline: Timeline, history: list[dict[str, Any]], e
             exclusions.append(sample)
         else:
             samples.append(sample)
+        base, run = line, []
+    union = account_partition(acct, union_recs)
     out: dict[str, Any] = {'method': 'history_regression', 'quota': QUOTA, 'valid_samples': len(samples),
                            'span_pct': sum(s['delta_pct'] for s in samples), 'samples': samples,
                            'exclusions': exclusions, 'min_samples': METHOD_B_MIN_SAMPLES,
-                           'min_span_pct': METHOD_B_MIN_SPAN, 'min_coverage': SAMPLE_MIN_COVERAGE}
+                           'min_span_pct': METHOD_B_MIN_SPAN, 'min_coverage': SAMPLE_MIN_COVERAGE,
+                           'interval_union': {'intervals': formed, 'tokens': union['tokens'],
+                                              'identity_mass_by_host': identity_mass(union['by_host'], outside)}}
     sxx = sum(s['delta_pct'] ** 2 for s in samples)
     sxy = sum(s['delta_pct'] * s['dollars'] for s in samples)
     if len(samples) < METHOD_B_MIN_SAMPLES or out['span_pct'] < METHOD_B_MIN_SPAN or sxx == 0 or sxy <= 0:
@@ -917,9 +1015,17 @@ def _window_observed_pct(history: list[dict[str, Any]], account: str, start: flo
 def calibrate(src: Sources, config: dict[str, Any] | None, config_path: Path) -> dict[str, Any]:
     config = config or {}
     threshold = float(config.get('unplaceable_threshold', DEFAULT_UNPLACEABLE_THRESHOLD))
-    unplaceable = unplaceable_summary(src.records, threshold)
+    retired, retired_report = retired_hosts(src, config)
+    unplaceable = unplaceable_summary(src.records, threshold, retired)
     eligible = unplaceable['passes']
-    timeline = Timeline(src.records)
+    # Partition order: retired host -> untimed -> window buckets; retired records never enter a window.
+    timeline = Timeline([r for r in src.records if r.host not in retired])
+    outside: dict[str, dict[str, int]] = {}
+    for rec in src.records:
+        if rec.provider != 'claude' or (rec.host not in retired and rec.cls != 'untimed'):
+            continue
+        host = outside.setdefault(rec.host, {'untimed': 0, 'retired': 0})
+        host['retired' if rec.host in retired else 'untimed'] += rec.total
     accounts = [Account(a) for a in config.get('accounts') or [] if (a.get('provider') or 'claude') == 'claude']
     by_label = {a.label: a for a in accounts}
     seen_ids = sorted({r.account for r in src.records if r.provider == 'claude' and r.account})
@@ -936,7 +1042,8 @@ def calibrate(src: Sources, config: dict[str, Any] | None, config_path: Path) ->
                  'provenance_row_coverage': round(sum(r.has_row for r in own) / len(own), 6) if own else None,
                  'measured_rollup': {'tokens': part['tokens'], 'dollars': round(part['dollars'], 4),
                                      'untimed_tokens': sum(r.total for r in own if r.cls == 'untimed'),
-                                     'dollars_label': DOLLARS_LABEL}}
+                                     'dollars_label': DOLLARS_LABEL},
+                 'identity_mass_by_host': identity_mass(part['by_host'], outside)}
         entry.update(_coverage_fields(part, eligible))
         return entry
 
@@ -944,8 +1051,8 @@ def calibrate(src: Sources, config: dict[str, Any] | None, config_path: Path) ->
         if acct.role != 'fleet_only':
             continue
         entry = base(acct)
-        a = method_a(acct, timeline, config, eligible, src.now)
-        b = method_b(acct, timeline, src.history, eligible)
+        a = method_a(acct, timeline, config, eligible, src.now, outside)
+        b = method_b(acct, timeline, src.history, eligible, outside)
         entry['methods'] = {'full_week_100': a, 'history_regression': b}
         if b['coefficient'] is not None:
             entry.update(status='fitted', coefficient=b['coefficient'], basis='history_regression',
@@ -1029,6 +1136,8 @@ def calibrate(src: Sources, config: dict[str, Any] | None, config_path: Path) ->
                        'max_interval_s': MAX_INTERVAL_S, 'unplaceable_threshold': threshold},
         'provenance_row_coverage': round(sum(r.has_row for r in claude) / total, 6) if total else None,
         'unplaceable': unplaceable,
+        'retired_hosts': retired_report,
+        'identity_mass_by_host': identity_mass(account_partition(None, timeline.recs)['by_host'], outside),
         'entries': entries,
         'reported_only': reported_only,
         'codex': {'status': 'deferred', 'follow_up': 'spec_pentacle__usage_codex_rollup_and_calibration_2026_10'},
@@ -1102,7 +1211,8 @@ def render_text(result: dict[str, Any]) -> str:
     if 'calibration' in result:
         cal = result['calibration']
         u = cal['unplaceable']
-        out.append(f"calibration: unplaceable ratio={u['ratio']} threshold={u['threshold']} passes={u['passes']}")
+        out.append(f"calibration: unplaceable ratio={u['ratio']} threshold={u['threshold']} passes={u['passes']}"
+                   f" retired_mass={sum(r['tokens'] for r in u.get('retired_mass', []))}")
         for e in cal['entries']:
             out.append(f"  {e['account_id']} ({e['role']}): status={e['status']} coefficient={e['coefficient']}"
                        f" measured_cov={e.get('measured_coverage')} reason={e.get('reason', '')}")

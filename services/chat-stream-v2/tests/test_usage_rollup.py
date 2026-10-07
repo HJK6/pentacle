@@ -115,14 +115,20 @@ class Fx:
                              'account_id': account, 'window_kind': kind, 'window_minutes': 10080, 'pct': pct,
                              'resets_at': resets, 'source': source})
 
+    def usage_state(self, stream: str, updated: str, *, host: str | None = None) -> None:
+        self.conn.execute('INSERT INTO v2_usage_state VALUES (?,?,?,?,?,?,?,?)',
+                          (stream, 'g', host or stream.split(':', 1)[0], updated, updated, 1, '{}', '[]'))
+
     def config(self, *, accounts: list | None = None, excluded: tuple = (), threshold: float | None = None,
-               anchor: str = '2026-09-02T16:00:00Z', mode: int = 0o600) -> Path:
+               anchor: str = '2026-09-02T16:00:00Z', mode: int = 0o600, retired: tuple | None = None) -> Path:
         data = {'schema_version': 1, 'windows': {'anchor': anchor, 'days': 7, 'excluded': list(excluded)},
                 'accounts': accounts if accounts is not None else [
                     {'label': 'fleet_only', 'account_id': FLEET, 'provider': 'claude', 'role': 'fleet_only'},
                     {'label': 'shared', 'account_id': SHARED, 'provider': 'claude', 'role': 'shared'}]}
         if threshold is not None:
             data['unplaceable_threshold'] = threshold
+        if retired is not None:
+            data['retired_hosts'] = list(retired)
         path = self.data / ur.CONFIG_NAME
         path.write_text(json.dumps(data))
         os.chmod(path, mode)
@@ -533,8 +539,9 @@ def _method_b(fx: Fx, valid: list[int], *, noise: list[float] | None = None) -> 
 def test_usage_rollup_ac6_method_b_fit_and_exclusions(fx: Fx) -> None:
     b = _method_b(fx, [19, 3] + [1] * 8)  # 10 valid spanning 30
     reasons = sorted(x['reason'] for x in b['exclusions'])
+    # The delta-0 step and the same-time merlin line extend the next interval (amendments § 1): no exclusion.
     assert reasons == sorted(['interval_over_24h', 'coverage_below_0.95', 'coverage_below_0.95',
-                              'non_positive_delta', 'probe_source', 'stale', 'reset_crossing'])
+                              'probe_source', 'reset_crossing'])
     tiny = [x for x in b['exclusions'] if x['reason'] == 'coverage_below_0.95' and x['delta_pct'] == 1]
     assert sorted(x['measured_coverage'] for x in tiny) == pytest.approx([19 / 1019, 0.949], abs=1e-6)
     assert b['valid_samples'] == 10 and b['span_pct'] == 30
@@ -563,6 +570,175 @@ def test_usage_rollup_ac6_regression_preferred_over_method_a(fx: Fx) -> None:
     _method_b(fx, [19, 3] + [1] * 8)
     e = entry(fx.run('--calibrate'), FLEET)
     assert e['basis'] == 'history_regression' and e['coefficient'] == pytest.approx(120.0, abs=0.5)
+
+
+# --- amendments AC1: Method B pairs against the previous pct-change observation ---------------
+# spec_pentacle__usage_calibration_amendments_2026_10
+
+def _pairs(fx: Fx, pcts: list[int], gaps: list[int], *, dt: float = 3600.0,
+           unknown_gaps: dict[int, int] | None = None) -> dict:
+    """History pcts[0..n] one dt apart; gaps[i] measured tokens (unknown_gaps[i] unknown) between obs i and i+1."""
+    fx.ident('n-fleet', FLEET)
+    fx.ident('n-unknown', None)
+    fx.seat('thoth:b', created='2026-09-01T00:00:00Z')
+    t = ur.parse_ts('2026-10-01T00:00:00Z')
+    fx.hist(ur.iso(t), pcts[0], resets=R1)
+    for i, pct in enumerate(pcts[1:]):
+        if gaps[i]:
+            fx.rec('thoth:b', out(gaps[i]), observed=ur.iso(t + dt / 2))
+        if (unknown_gaps or {}).get(i):
+            fx.rec('thoth:b', out(unknown_gaps[i]), observed=ur.iso(t + dt / 2), native='n-unknown')
+        t += dt
+        fx.hist(ur.iso(t), pct, resets=R1b)
+    fx.config()
+    return entry(fx.run('--calibrate'), FLEET)['methods']['history_regression']
+
+
+def _formed(b: dict) -> list[dict]:
+    return sorted([*b['samples'], *[x for x in b['exclusions'] if 'interval_s' in x]], key=lambda x: x['from'])
+
+
+def test_usage_calibration_amend_ac1_zero_run_extends_interval(fx: Fx) -> None:
+    b = _pairs(fx, [10, 10, 10, 12], [100, 200, 300])
+    assert len(b['samples']) == 1 and b['exclusions'] == []
+    s = b['samples'][0]
+    # Consecutive pairing would give one sample of 300 tokens (and drop t1 + t2).
+    assert s['delta_pct'] == 2 and s['tokens']['measured'] == 600 and s['observations'] == 4
+    assert s['interval_s'] == 3 * 3600.0 and s['dollars'] == pytest.approx(600 * 75 / 1e6)
+    assert b['interval_union']['intervals'] == 1 and b['interval_union']['tokens']['measured'] == 600
+
+
+def test_usage_calibration_amend_ac1_two_samples_token_split(fx: Fx) -> None:
+    b = _pairs(fx, [10, 12, 12, 15], [100, 200, 300])
+    assert [(s['delta_pct'], s['tokens']['measured']) for s in b['samples']] == [(2, 100), (3, 500)]
+    assert b['exclusions'] == []
+
+
+def test_usage_calibration_amend_ac1_decrease_starts_new_base(fx: Fx) -> None:
+    b = _pairs(fx, [10, 12, 11, 13], [100, 200, 300])
+    assert [(s['delta_pct'], s['tokens']['measured']) for s in b['samples']] == [(2, 100), (2, 300)]
+    assert [(x['delta_pct'], x['reason']) for x in b['exclusions']] == [(-1, 'pct_decrease_new_base')]
+    assert b['interval_union']['tokens']['measured'] == 400  # the 12 -> 11 gap is in no sample
+
+
+def test_usage_calibration_amend_ac1_zero_run_over_24h_excluded(fx: Fx) -> None:
+    b = _pairs(fx, [10, 10, 10, 11], [100, 100, 100], dt=10 * 3600.0)  # each gap 10 h, merged 30 h
+    assert b['samples'] == []
+    assert [(x['delta_pct'], x['interval_s'], x['reason']) for x in _formed(b)] == [(1, 108000.0, 'interval_over_24h')]
+
+
+def test_usage_calibration_amend_ac1_coverage_judged_on_merged_interval(fx: Fx) -> None:
+    # The delta-0 gap holds 51,000 unknown-account tokens; the closing gap alone would have coverage 1.0.
+    b = _pairs(fx, [10, 10, 11], [0, 949_000], unknown_gaps={0: 51_000})
+    assert b['samples'] == []
+    (x,) = _formed(b)
+    assert x['reason'] == 'coverage_below_0.95' and x['measured_coverage'] == 0.949
+    assert x['tokens'] == {'measured': 949_000, 'unpriced': 0, 'unknown_account': 51_000}
+
+
+# --- amendments AC2: retired hosts ---------------------------------------------------------------
+
+def _retired_ledger(fx: Fx, *, bart_open: bool = False) -> None:
+    fx.ident('n-fleet', FLEET)
+    fx.seat('thoth:w', created='2026-09-01T00:00:00Z', specs=('spec_demo__w',))
+    fx.seat('bart:old', created='2026-08-01T00:00:00Z', specs=('spec_demo__old',),
+            closed=None if bart_open else '2026-08-02T00:00:00Z')
+    fx.rec('thoth:w', out(990_000), observed='2026-09-19T00:00:00Z')
+    fx.rec('bart:old', out(30_000), host='bart', native='n-bart', row=False)  # untimed forever
+
+
+def _spec_totals(result: dict) -> list:
+    return [(s['spec_id'], s['claude']['total_tokens'], s['claude']['dollars'], s['claude']['unpriced_tokens'],
+             [(a['account_id'], a['tokens'], a['dollars']) for a in s['claude']['by_account']])
+            for s in result['specs']]
+
+
+def test_usage_calibration_amend_ac2_retired_host_honoured(fx: Fx) -> None:
+    _retired_ledger(fx)
+    fx.usage_state('bart:old', '2026-10-02T23:59:00Z')  # last push 7 days + 1 min before NOW
+    fx.seat('bart:assistant', created='2026-09-19T00:00:00Z', provider='composite')  # open routing alias
+    fx.config()
+    before = fx.run('--calibrate', '--spec', 'spec_demo__w', 'spec_demo__old')
+    assert before['calibration']['unplaceable']['ratio'] == round(30_000 / 1_020_000, 6)
+    assert before['calibration']['unplaceable']['passes'] is False
+    fx.config(retired=('bart',))
+    after = fx.run('--calibrate', '--spec', 'spec_demo__w', 'spec_demo__old')
+    u = after['calibration']['unplaceable']
+    assert after['calibration']['retired_hosts'] == [{'host': 'bart', 'status': 'honoured',
+                                                      'open_composite_rows_not_counted': 1}]
+    assert u['ratio'] == 0.0 and u['provider_total_tokens'] == 990_000 and u['passes'] is True
+    assert u['retired_mass'] == [{'provider': 'claude', 'host': 'bart', 'tokens': 30_000}]
+    assert u['by_host_account'] == []
+    assert _spec_totals(after) == _spec_totals(before)  # per-spec rollups unchanged
+
+
+def test_usage_calibration_amend_ac2_ignored_with_open_seat(fx: Fx, capsys) -> None:
+    _retired_ledger(fx, bart_open=True)
+    fx.config(retired=('bart',))
+    cal = fx.run('--calibrate')['calibration']
+    assert cal['retired_hosts'] == [{'host': 'bart', 'status': 'ignored', 'reason': 'open seat in sessions (1)'}]
+    assert cal['unplaceable']['ratio'] == round(30_000 / 1_020_000, 6) and cal['unplaceable']['retired_mass'] == []
+    assert "retired_hosts entry 'bart' ignored: open seat" in capsys.readouterr().err
+
+
+def test_usage_calibration_amend_ac2_ignored_with_recent_push(fx: Fx, capsys) -> None:
+    _retired_ledger(fx)
+    fx.usage_state('bart:old', '2026-10-03T00:01:00Z')  # 7 days - 1 min before NOW
+    fx.config(retired=('bart',))
+    cal = fx.run('--calibrate')['calibration']
+    assert cal['retired_hosts'] == [{'host': 'bart', 'status': 'ignored',
+                                     'reason': 'v2_usage_state row updated within 7 days'}]
+    assert cal['unplaceable']['passes'] is False and cal['unplaceable']['retired_mass'] == []
+    assert 'within 7 days' in capsys.readouterr().err
+
+
+# --- amendments AC3: identity mass by host is an exclusive partition -----------------------------
+
+def test_usage_calibration_amend_ac3_identity_mass_partition(fx: Fx) -> None:
+    w = '2026-09-19T00:%02d:00Z'
+    fx.ident('n-fleet', FLEET)
+    fx.ident('n-unknown', None)
+    fx.ident('n-m-fleet', FLEET, host='merlin')
+    fx.ident('n-m-conflict', None, host='merlin', conflict=1)
+    fx.ident('n-bart', FLEET, host='bart')
+    fx.seat('thoth:w', created='2026-09-01T00:00:00Z')
+    fx.rec('thoth:w', out(1000), observed=w % 1)                                   # measured
+    fx.rec('merlin:m', out(200), observed=w % 2, model='claude-mystery-1', host='merlin', native='n-m-fleet')  # unpriced
+    fx.rec('thoth:w', out(300), observed=w % 3, native='n-unknown')                # unknown_account
+    fx.rec('merlin:m', out(400), observed=w % 4, host='merlin', native='n-m-conflict')  # unknown_account.conflict
+    fx.rec('thoth:w', out(50), observed=None)                                      # untimed
+    fx.rec('merlin:m', out(60), host='merlin', native='n-m-fleet', row=False)      # untimed
+    fx.rec('bart:old', out(700), observed=w % 5, host='bart', native='n-bart')     # retired, timed in window
+    fx.rec('bart:old', out(800), host='bart', native='n-bart', row=False)          # retired, untimed
+    fx.config(retired=('bart',))
+    cal = fx.run('--calibrate')['calibration']
+    e = entry({'calibration': cal}, FLEET)
+    w2 = next(p for p in e['methods']['full_week_100']['points'] if p['window_start'] == '2026-09-16T16:00:00Z')
+    assert w2['tokens'] == {'measured': 1000, 'unpriced': 200, 'unknown_account': 700}
+    expected = [
+        {'provider': 'claude', 'host': 'bart',
+         'window': {'measured': 0, 'unpriced': 0, 'unknown_account': 0, 'conflict': 0},
+         'outside_window_sum': {'untimed': 0, 'retired': 1500}},
+        {'provider': 'claude', 'host': 'merlin',
+         'window': {'measured': 0, 'unpriced': 200, 'unknown_account': 400, 'conflict': 400},
+         'outside_window_sum': {'untimed': 60, 'retired': 0}},
+        {'provider': 'claude', 'host': 'thoth',
+         'window': {'measured': 1000, 'unpriced': 0, 'unknown_account': 300, 'conflict': 0},
+         'outside_window_sum': {'untimed': 50, 'retired': 0}},
+    ]
+    assert w2['identity_mass_by_host'] == expected
+    for block, parent in ((w2['identity_mass_by_host'], w2['tokens']),
+                          (e['identity_mass_by_host'], e['measured_rollup']['tokens'])):
+        for bucket in ('measured', 'unpriced', 'unknown_account'):  # window sum == parent denominator, exactly
+            assert sum(h['window'][bucket] for h in block) == parent[bucket]
+        assert all(h['window']['conflict'] <= h['window']['unknown_account'] for h in block)
+    # Every record lands in exactly one bucket: window sum + untimed + retired == all Claude tokens.
+    top = cal['identity_mass_by_host']
+    placed = sum(h['window'][b] for h in top for b in ('measured', 'unpriced', 'unknown_account'))
+    assert placed + sum(sum(h['outside_window_sum'].values()) for h in top) == 3510
+    assert placed == 1900
+    assert all('identity_mass_by_host' in x for x in cal['entries'])
+    assert e['methods']['history_regression']['interval_union']['intervals'] == 0
 
 
 # --- AC7 Codex deferred -------------------------------------------------------------

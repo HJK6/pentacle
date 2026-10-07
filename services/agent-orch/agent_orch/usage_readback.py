@@ -7,7 +7,10 @@ view (weekly %, resets, health) — NOT the per-stream token-accounting usage th
 
 Design (spec: spec_pentacle__per_host_usage_readback_on_demand_2026_10):
   * ``thoth`` / the local host: read the live cadence file written by the
-    ``com.pentacle.usage-state-collector`` launchd job (no re-probe).
+    ``com.pentacle.usage-state-collector`` launchd job (no re-probe). The local
+    host is agent-orch's own host id (``~/.agent-orch/config.json``
+    ``local_host_id``, then the hostname). A satellite reading itself has no
+    cadence file, so it runs the satellite probes below locally, without ssh.
   * a satellite (merlin, amaterasu): read once over the existing authenticated
     ssh/machine-profile route:
       - Claude weekly % from the on-host cache ``~/.claude.json`` →
@@ -141,8 +144,18 @@ def load_machines(env: dict | None = None) -> list[dict]:
 
 
 def configured_local_host(env: dict | None = None) -> str:
+    """PENTACLE_HOST_ID / AGENT_ORCH_HOST_ID, else agent-orch's own host id (config.json, then hostname)."""
     env = os.environ if env is None else env
-    return env.get("PENTACLE_HOST_ID") or env.get("AGENT_ORCH_HOST_ID") or "thoth"
+    return env.get("PENTACLE_HOST_ID") or env.get("AGENT_ORCH_HOST_ID") or _agent_local_host_id()
+
+
+def _agent_local_host_id() -> str:
+    # Imported here: this module is also loaded standalone by the daemon's parity tests.
+    from agent_orch.config import local_host_id
+    try:
+        return local_host_id()
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise UsageReadbackError(f"cannot determine the local host id ({exc}); set AGENT_ORCH_HOST_ID") from exc
 
 
 def resolve_host(name: str, env: dict | None = None) -> dict:
@@ -196,6 +209,25 @@ def run_remote(
     # classifiers never mistake an unreachable host for a provider/no-weekly result.
     if proc.returncode == 255:
         return EXIT_SSH_TRANSPORT, proc.stdout or "", (proc.stderr or "").strip() or "ssh connect failed (255)"
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def run_local(
+    ssh_target: str | None,
+    command: str,
+    *,
+    input_text: str | None = None,
+    connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+    read_timeout: float = DEFAULT_READ_TIMEOUT,
+    run=subprocess.run,
+) -> tuple[int, str, str]:
+    """``run_remote``'s contract for the local host: the same probe command, run by ``sh -c`` without ssh."""
+    try:
+        proc = run(["sh", "-c", command], input=input_text, capture_output=True, text=True, timeout=read_timeout)
+    except subprocess.TimeoutExpired:
+        return EXIT_SSH_TIMEOUT, "", "local probe timed out"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return EXIT_SSH_TRANSPORT, "", f"local probe failure ({type(exc).__name__})"
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
@@ -620,7 +652,7 @@ def read_remote_claude(machine: dict, *, now_ms: int, max_age_s: int,
     env = os.environ if env is None else env
     runner = runner or run_remote
     host = machine.get("name")
-    target = machine["ssh_target"]
+    target = machine.get("ssh_target")
     py = _remote_python_bin(machine)
     # Primary: sanitized cache pluck piped over stdin (token never leaves host).
     code, out, err = runner(target, f"{shlex.quote(py)} -", input_text=CLAUDE_CACHE_PLUCK)
@@ -662,7 +694,7 @@ def read_remote_codex(machine: dict, *, now_ms: int, env: dict | None = None,
     env = os.environ if env is None else env
     runner = runner or run_remote
     host = machine.get("name")
-    target = machine["ssh_target"]
+    target = machine.get("ssh_target")
     py = _remote_python_bin(machine)
     runtime = _runtime_dir(env)
     codex_bin = machine.get("codex_bin") or "codex"
@@ -687,13 +719,16 @@ def read_remote(machine: dict, *, max_age_s: int = DEFAULT_MAX_AGE_SECONDS,
 
 # --- top-level orchestration ------------------------------------------------
 def read_host(name: str, *, max_age_s: int = DEFAULT_MAX_AGE_SECONDS,
-              env: dict | None = None, runner=None,
+              env: dict | None = None, runner=None, local_runner=None,
               now_ms: int | None = None) -> list[dict]:
     env = os.environ if env is None else env
     machine = resolve_host(name, env)
-    if is_local(machine, env):
+    if not is_local(machine, env):
+        return read_remote(machine, max_age_s=max_age_s, env=env, runner=runner, now_ms=now_ms)
+    if local_usage_state_path(env).exists():  # the collector host (Thoth): live cadence file, no re-probe
         return read_local(machine.get("name", name), env)
-    return read_remote(machine, max_age_s=max_age_s, env=env, runner=runner, now_ms=now_ms)
+    # A satellite runs no collector: run the satellite probes here, without ssh.
+    return read_remote(machine, max_age_s=max_age_s, env=env, runner=local_runner or run_local, now_ms=now_ms)
 
 
 # --- rendering --------------------------------------------------------------
