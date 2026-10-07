@@ -9,8 +9,9 @@
 // Installed SYNCHRONOUSLY, before any renderer script runs, because app.js
 // reads window.cc and window.HOST at module scope. Calls made before the socket
 // opens are queued and flushed on connect; when the socket drops, every
-// in-flight request is rejected so no caller waits forever, and the queue is
-// replayed after the reconnect.
+// in-flight or queued request is rejected so no caller waits forever, and a
+// rejected request is never sent later. Send-mode frames and calls made after
+// the drop are flushed on the reconnect.
 //
 // A few methods never reach the host — see WEB_LOCAL in main/cc_handlers.js.
 // The clipboard is the one that matters: routing it over the socket would read
@@ -62,6 +63,11 @@ function createTransport({ url, logger = console } = {}) {
 
   function rejectAllPending(reason) {
     for (const [, entry] of pending) entry.reject(new Error(reason));
+    // A caller told its request failed must never see it sent later: drop its
+    // queued frame too. Send-mode frames carry no id and stay queued.
+    for (let i = queued.length - 1; i >= 0; i -= 1) {
+      if (pending.has(queued[i].id)) queued.splice(i, 1);
+    }
     pending.clear();
   }
 

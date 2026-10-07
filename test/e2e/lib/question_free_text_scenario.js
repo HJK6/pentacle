@@ -58,7 +58,9 @@ async function questionFreeText({ session, report, fixture, runtime, cdp }) {
     await session.eval('window.__questionOldDocument = true');
     await session.send('Page.reload');
     await session.waitFor("!window.__questionOldDocument && document.readyState==='complete' && typeof window.focusStreamId==='function'");
-    await session.eval(`window.focusStreamId(${JSON.stringify(fixture.streamId)})`);
+    // The reloaded page loads its session list asynchronously; focusStreamId
+    // returns false (and does nothing) until the fixture session is known.
+    await session.waitFor(`window.focusStreamId(${JSON.stringify(fixture.streamId)}) === true`);
     await session.waitFor(`!!document.querySelector('#header-0 [data-mode="chat"]')`);
     await session.click('#header-0 [data-mode="chat"]');
     await session.waitFor(`!document.querySelector(${JSON.stringify(card)})`);
