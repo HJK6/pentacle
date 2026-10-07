@@ -82,6 +82,8 @@ _TELEMETRY_LOG_SAFE_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/<>-"
 )
 
+import report_producer
+
 SYSTEM_PRODUCER_STREAM_TOKEN_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN"
 SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE"
 SYSTEM_PRODUCER_STREAM_ID_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_ID"
@@ -89,6 +91,12 @@ FIXED_SYSTEM_PRODUCER_STREAM_ID = "altum-bot-cd"
 WMI_BACKUP_PRODUCER_STREAM_ID = "amaterasu:wmi-pg-dailybackup"
 WMI_BACKUP_STREAM_TOKEN_FILE_ENV = "PENTACLE_WMI_BACKUP_STREAM_TOKEN_FILE"
 WMI_BACKUP_NOTIFICATION_DESTINATION = "pentacle-updates"
+# The one configured report producer (report_producer.py; its name and binding
+# are runtime config) may send hello + one constrained report asset.publish.
+REPORT_PRODUCER_PUBLISH_FIELDS = frozenset({
+    "type", "request_id", "from_stream_id", "stream_id", "stream_token", "producer",
+    "title", "content_type", "body", "tags", "asset_id", "spec_id",
+})
 WMI_BACKUP_DEDUP_RE = re.compile(
     r"^wmi-backup\|[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\|([0-9]{4}-[0-9]{2}-[0-9]{2})$"
 )
@@ -1272,7 +1280,13 @@ class Server:
                 caller = client
                 self._client_identities[websocket] = client
         handler = self.handlers.get(verb)
-        if handler is None:
+        report_actor = self._report_producer_id()
+        # The bound report producer gets its typed verb refusal below, even for
+        # a verb this daemon does not implement.
+        if handler is None and (
+            websocket is None or report_actor is None
+            or self._client_system_producers.get(websocket) != report_actor
+        ):
             return [self._unsupported(verb, request_id, caller=caller)]
         # Never let a wire client provide internal authorization fields. The
         # routing-integrity handler receives a server-derived context carrying
@@ -1294,6 +1308,15 @@ class Server:
                         return [self._auth_error_frame(
                             verb, request_id, "system_producer_auth_required"
                         )]
+                elif report_actor is not None and service_auth["service_actor"] == report_actor:
+                    if verb != "asset.publish":
+                        return [self._auth_error_frame(
+                            verb, request_id, "system_producer_forbidden"
+                        )]
+                    if not self._valid_report_producer_publish(msg):
+                        return [self._auth_error_frame(
+                            verb, request_id, "system_producer_payload_invalid"
+                        )]
                 elif verb != "notification.create":
                     return [self._auth_error_frame(
                         verb, request_id, "system_producer_forbidden"
@@ -1302,6 +1325,8 @@ class Server:
                     return [self._auth_error_frame(
                         verb, request_id, "system_producer_payload_invalid"
                     )]
+            if handler is None:
+                return [self._unsupported(verb, request_id, caller=caller)]
             if not self._is_loopback_client(websocket) and verb not in {
                 "ping", "hello", "enroll", "event.push", "host.stats",
             }:
@@ -1502,7 +1527,7 @@ class Server:
                     msg.get("stream_token"), bound_system_actor
                 ))
             )
-            if bound_system_actor == WMI_BACKUP_PRODUCER_STREAM_ID:
+            if bound_system_actor in self._file_token_sources():
                 # Re-read the credential even on tokenless bound connections.
                 # Removal/rotation must revoke old sockets as well as new ones.
                 expected = self._system_producer_token(bound_system_actor)
@@ -1522,18 +1547,21 @@ class Server:
         claim = str(msg.get("from_stream_id") or "").strip()
         producer = str(msg.get("producer") or "").strip()
         cd_token_matches = self._verify_system_producer_token(msg.get("stream_token"))
-        wmi_token_matches = self._verify_system_producer_token(
-            msg.get("stream_token"), WMI_BACKUP_PRODUCER_STREAM_ID
-        )
+        file_sources = self._file_token_sources()
+        file_token_matches = {
+            actor: self._verify_system_producer_token(msg.get("stream_token"), actor)
+            for actor in file_sources
+        }
+        producer_ids = {FIXED_SYSTEM_PRODUCER_STREAM_ID, *file_sources}
         service_attempted = bool(
-            claim in {FIXED_SYSTEM_PRODUCER_STREAM_ID, WMI_BACKUP_PRODUCER_STREAM_ID}
-            or producer in {FIXED_SYSTEM_PRODUCER_STREAM_ID, WMI_BACKUP_PRODUCER_STREAM_ID}
-            or cd_token_matches or wmi_token_matches
+            claim in producer_ids
+            or producer in producer_ids
+            or cd_token_matches or any(file_token_matches.values())
         )
         if service_attempted:
-            if claim == WMI_BACKUP_PRODUCER_STREAM_ID:
-                configured_id = WMI_BACKUP_PRODUCER_STREAM_ID
-                enabled = wmi_token_matches
+            if claim in file_sources:
+                configured_id = claim
+                enabled = file_token_matches[claim]
             else:
                 configured_id = str(os.environ.get(SYSTEM_PRODUCER_STREAM_ID_ENV) or "").strip()
                 enabled = configured_id == FIXED_SYSTEM_PRODUCER_STREAM_ID and cd_token_matches
@@ -1544,7 +1572,7 @@ class Server:
             )
             if authenticated:
                 self._client_system_producers[websocket] = configured_id
-                if configured_id == WMI_BACKUP_PRODUCER_STREAM_ID:
+                if configured_id in file_sources:
                     self._client_token_hashes[websocket] = hashlib.sha256(
                         msg["stream_token"].encode("utf-8")
                     ).hexdigest()
@@ -1672,32 +1700,52 @@ class Server:
         return context
 
     @staticmethod
+    def _report_producer_id() -> str | None:
+        producer = report_producer.load()
+        return producer.stream_id if producer is not None else None
+
+    @staticmethod
+    def _file_token_sources() -> dict[str, str | None]:
+        """Fixed principals whose credential is a user-owned 0600 token file,
+        re-read on every RPC (removal/rotation revokes bound sockets too)."""
+        sources = {WMI_BACKUP_PRODUCER_STREAM_ID: os.environ.get(WMI_BACKUP_STREAM_TOKEN_FILE_ENV)}
+        producer = report_producer.load()
+        if producer is not None:
+            sources[producer.stream_id] = producer.token_file
+        return sources
+
+    @staticmethod
     def _system_producer_token(actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID) -> str | None:
-        # Exactly two fixed principals; no registry or generic service authority.
-        if actor == WMI_BACKUP_PRODUCER_STREAM_ID:
-            token_file = os.environ.get(WMI_BACKUP_STREAM_TOKEN_FILE_ENV)
-        elif actor == FIXED_SYSTEM_PRODUCER_STREAM_ID:
-            token_file = os.environ.get(SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV)
-        else:
-            return None
+        # Fixed principals only; no registry or generic service authority.
+        sources = Server._file_token_sources()
+        if actor in sources:
+            expected = Server._read_token_path(sources[actor], strict=True)
+            if not expected:
+                return None
+            # A file principal never shares a credential with the CD producer
+            # or with another file principal: a shared value is refused.
+            others = [Server._system_producer_token(FIXED_SYSTEM_PRODUCER_STREAM_ID)]
+            others += [Server._read_token_path(path, strict=False) for other, path in sources.items() if other != actor]
+            for other in others:
+                if other and hmac.compare_digest(expected.encode("utf-8"), other.encode("utf-8")):
+                    return None
+            return expected
+        if actor == FIXED_SYSTEM_PRODUCER_STREAM_ID:
+            return Server._read_token_path(os.environ.get(SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV), strict=False)
+        return None
+
+    @staticmethod
+    def _read_token_path(token_file: str | None, *, strict: bool) -> str | None:
         if not token_file:
             return None
         try:
             path = Path(token_file).expanduser()
-            if actor == WMI_BACKUP_PRODUCER_STREAM_ID:
-                metadata = path.stat()
-                if not path.is_file() or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
-                    return None
+            if strict and not report_producer.private_file(path):
+                return None
             expected = path.read_text(encoding="utf-8").strip()
         except (OSError, ValueError, UnicodeError):
             return None
-        if not expected:
-            return None
-        if actor == WMI_BACKUP_PRODUCER_STREAM_ID:
-            cd_token = Server._system_producer_token(FIXED_SYSTEM_PRODUCER_STREAM_ID)
-            if cd_token and hmac.compare_digest(expected.encode("utf-8"), cd_token.encode("utf-8")):
-                return None
-        return expected
+        return expected or None
 
     @staticmethod
     def _verify_system_producer_token(
@@ -1723,6 +1771,31 @@ class Server:
             and isinstance(subscribe, dict)
             and subscribe.get("snapshot") is False
             and subscribe.get("mode") == "rpc"
+        )
+
+    def _valid_report_producer_publish(self, msg: dict[str, Any]) -> bool:
+        producer = report_producer.load()
+        if producer is None or not set(msg).issubset(REPORT_PRODUCER_PUBLISH_FIELDS):
+            return False
+        actor = producer.stream_id
+        cutoff = producer.cutoff(msg.get("asset_id"))
+        body = msg.get("body")
+        return bool(
+            cutoff is not None
+            and msg.get("from_stream_id") == actor
+            and self._verify_system_producer_token(msg.get("stream_token"), actor)
+            and msg.get("stream_id") == actor
+            and msg.get("producer") == actor
+            and isinstance(msg.get("request_id"), str)
+            and msg["request_id"]
+            and len(msg["request_id"]) <= 120
+            and msg.get("content_type") == "report"
+            and msg.get("spec_id") == producer.spec_id
+            and msg.get("tags") == [producer.tag]
+            and msg.get("title") == producer.title_for(cutoff)
+            and isinstance(body, str)
+            and body
+            and len(body.encode("utf-8")) <= producer.body_max_bytes
         )
 
     def _valid_system_notification_create(
