@@ -324,6 +324,182 @@ def _assistant_authority_request_receipt_conn(conn, stream_id, dispatch_id):
             "recipient_stream_id": row["recipient_stream_id"], "last_error": row["last_error"]}
 
 
+def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication_key, dispatch_id, reply_to_message_id,
+                             reply_to_question_id, publish_kind, attachment_ids, evidence_refs,
+                             canonical_payload, event, actor_stream_id=None, actor_generation=None,
+                             authority_stream_id=None, direct_target_stream_id=None,
+                             direct_target_generation=None, direct_single_final=False,
+                             proactive_binding_name=None, proactive_env_binding=None) -> dict[str, Any]:
+    """Insert one assistant publication and its receipt on ``conn``.
+
+    The caller owns the transaction: it must hold ``BEGIN IMMEDIATE`` and
+    commit or roll back, so another write (a work-lane event) can commit
+    atomically with the publication.
+    """
+    canonical_json = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    event_json = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    host, separator, session_name = stream_id.partition(":")
+    if not separator or not host or not session_name:
+        raise ValueError("assistant_composite_invalid_stream_id")
+    if proactive_binding_name is not None:
+        from store_assistant_binding import _binding_conn
+        binding = _binding_conn(conn, proactive_env_binding or {},
+                                name=proactive_binding_name, include_target=False)
+        if (not actor_stream_id or not actor_generation
+                or binding.get("stream_id") != actor_stream_id
+                or binding.get("generation") != actor_generation):
+            raise ValueError("assistant_publish_provenance_unverified")
+        try:
+            _assistant_actor_conn(conn, actor_stream_id, actor_generation)
+        except ValueError as exc:
+            raise ValueError("assistant_publish_provenance_unverified") from exc
+        if (dispatch_id or publish_kind not in {"prose", "status"}
+                or attachment_ids or reply_to_message_id or reply_to_question_id):
+            raise ValueError("assistant_publish_payload_invalid")
+    elif actor_generation is not None:
+        _assistant_actor_conn(conn, actor_stream_id, actor_generation)
+    if direct_single_final:
+        if (not direct_target_stream_id or not direct_target_generation
+                or actor_stream_id != direct_target_stream_id
+                or actor_generation != direct_target_generation):
+            raise ValueError("assistant_direct_actor_unverified")
+        direct_route = conn.execute(
+            "SELECT route_target,route_target_generation,routing_state,input_identity,"
+            "reply_to_question_id FROM v2_assistant_composite_routes "
+            "WHERE stream_id=? AND dispatch_id=?", (stream_id, dispatch_id),
+        ).fetchone()
+        if (direct_route is None or direct_route["route_target"] != direct_target_stream_id
+                or direct_route["route_target_generation"] != direct_target_generation
+                or direct_route["routing_state"] != "resolved"):
+            raise ValueError("assistant_direct_dispatch_unverified")
+        if (reply_to_message_id != direct_route["input_identity"]
+                or reply_to_question_id != direct_route["reply_to_question_id"]):
+            raise ValueError("assistant_direct_reply_unverified")
+        if publish_kind == "prose" and (
+            publication_key != "publish:" + dispatch_id
+            or canonical_payload.get("response_state") != "final"
+        ):
+            raise ValueError("assistant_direct_publication_identity_invalid")
+    prior = conn.execute(
+        "SELECT * FROM v2_assistant_composite_publications WHERE publication_key=?",
+        (publication_key,),
+    ).fetchone()
+    if prior is not None:
+        saved = dict(prior)
+        if saved["payload_digest"] != digest:
+            raise ValueError("assistant_publish_conflict" if proactive_binding_name is not None
+                             else "assistant_publication_idempotency_conflict")
+        replay_event = json.loads(conn.execute(
+            "SELECT event_json FROM session_event_tail WHERE event_id=?", (saved["event_id"],),
+        ).fetchone()[0])
+        replay_event["daemon_seq"] = int(saved["event_id"])
+        saved.update({"event": replay_event, "duplicate": True})
+        return saved
+    if actor_generation is not None and proactive_binding_name is None:
+        route = (dict(direct_route) if direct_single_final else _assistant_dispatch_conn(
+            conn, stream_id, dispatch_id, actor_stream_id, actor_generation,
+            authority=authority_stream_id if publish_kind != "question" else None,
+        ))
+        if route["routing_state"] != "resolved":
+            raise ValueError("assistant_publish_dispatch_state_invalid")
+        if reply_to_message_id != route["input_identity"]:
+            raise ValueError("assistant_publish_reply_unverified")
+        if publish_kind != "question" and reply_to_question_id != route["reply_to_question_id"]:
+            raise ValueError("assistant_publish_question_unverified")
+        # A direct-primary first-visible acknowledgment has no lane operation to
+        # correlate; its exact immutable key is its one-per-dispatch identity.
+        direct_ack = (direct_single_final and publish_kind == "status"
+                      and canonical_payload.get("response_state") == "acknowledged"
+                      and publication_key == "publish:" + dispatch_id + ":ack")
+        if publish_kind != "prose" and not direct_ack:
+            correlated = False
+            for ref in evidence_refs:
+                receipt = conn.execute(
+                    "SELECT * FROM v2_assistant_composite_operations "
+                    "WHERE operation_id=? AND stream_id=? AND dispatch_id=? AND actor_stream_id=?",
+                    (ref, stream_id, dispatch_id, actor_stream_id),
+                ).fetchone()
+                if receipt is not None:
+                    if publish_kind == "question":
+                        question = conn.execute(
+                            "SELECT question_id FROM v2_assistant_composite_question_bridges "
+                            "WHERE operation_id=? AND state='committed'", (ref,),
+                        ).fetchone()
+                        current_question = conn.execute(
+                            "SELECT pending_question_id FROM v2_assistant_composite_lanes "
+                            "WHERE stream_id=? AND lane_id=? AND phase IN ('discussion','execution','waiting')",
+                            (stream_id, receipt["lane_id"]),
+                        ).fetchone()
+                        correlated = (receipt["operation"] == "question.open" and question is not None
+                                      and question["question_id"] == reply_to_question_id
+                                      and current_question is not None
+                                      and current_question["pending_question_id"] == reply_to_question_id)
+                    elif publish_kind == "result":
+                        correlated = receipt["operation"] == "lane.close"
+                    else:
+                        correlated = receipt["operation"] != "route.resolve"
+                if publish_kind == "result" and not correlated:
+                    correlated = conn.execute(
+                        "SELECT 1 FROM v2_assistant_composite_terminal_reports "
+                        "WHERE report_id=? AND stream_id=? AND dispatch_id=? AND actor_stream_id=?",
+                        (ref, stream_id, dispatch_id, actor_stream_id),
+                    ).fetchone() is not None
+                if correlated:
+                    break
+            if not correlated:
+                raise ValueError("assistant_publish_operation_receipt_required")
+    if direct_single_final and publish_kind == "prose":
+        previous_finals = conn.execute(
+            "SELECT publication_key,canonical_payload_json FROM v2_assistant_composite_publications "
+            "WHERE stream_id=? AND dispatch_id=? AND publish_kind='prose'",
+            (stream_id, dispatch_id),
+        ).fetchall()
+        if any(json.loads(row["canonical_payload_json"]).get("response_state") == "final"
+               for row in previous_finals):
+            raise ValueError("assistant_direct_final_already_published")
+    session = conn.execute(
+        "SELECT created_at,status,provider FROM sessions WHERE host=? AND session_name=?",
+        (host, session_name),
+    ).fetchone()
+    if session is None or session["status"] != "open" or session["provider"] != "composite":
+        raise ValueError("assistant_composite_projection_unavailable")
+    event_key = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
+    identity = "assistant-publish:" + publication_key
+    cur = conn.execute(
+        """INSERT INTO session_event_tail(
+            stream_id,session_created_at,event_key,event_json,event_ts,recorded_at,identity
+        ) VALUES (?,?,?,?,?,?,?)""",
+        (
+            stream_id, str(session["created_at"]), event_key, event_json,
+            event.get("timestamp"), time.time(), identity,
+        ),
+    )
+    event_id = int(cur.lastrowid)
+    stamp = _routing_iso_now()
+    conn.execute(
+        """INSERT INTO v2_assistant_composite_publications(
+            publication_key,stream_id,payload_digest,canonical_payload_json,dispatch_id,
+            reply_to_message_id,reply_to_question_id,publish_kind,attachment_ids_json,
+            evidence_refs_json,event_id,created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            publication_key, stream_id, digest, canonical_json, dispatch_id,
+            reply_to_message_id, reply_to_question_id, publish_kind,
+            json.dumps(attachment_ids, separators=(",", ":")),
+            json.dumps(evidence_refs, separators=(",", ":")), event_id, stamp,
+        ),
+    )
+    for attachment in event.get('attachments') or []:
+        conn.execute("INSERT INTO v2_attachment_refs(owner_kind,owner_id,stream_id,upload_id,blob_sha) VALUES ('publication',?,?,?,?)",
+            (publication_key, stream_id, attachment['upload_id'], attachment['key']))
+    stored = dict(conn.execute(
+        "SELECT * FROM v2_assistant_composite_publications WHERE publication_key=?", (publication_key,),
+    ).fetchone())
+    stored.update({"event": dict(event) | {"daemon_seq": event_id}, "duplicate": False})
+    return stored
+
+
 def _assistant_actor_conn(conn, actor, generation):
     host, _, name = str(actor or "").partition(":")
     row = conn.execute(
@@ -1173,9 +1349,6 @@ class _RoutingStoreMixin:
         """Append one assistant event and its idempotency receipt together."""
         if not publication_key or (not dispatch_id and proactive_binding_name is None):
             raise ValueError("assistant_publication_identity_required")
-        canonical_json = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-        event_json = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         host, separator, session_name = stream_id.partition(":")
         if not separator or not host or not session_name:
             raise ValueError("assistant_composite_invalid_stream_id")
@@ -1183,162 +1356,20 @@ class _RoutingStoreMixin:
         def _locked_op(conn: sqlite3.Connection) -> dict[str, Any]:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                if proactive_binding_name is not None:
-                    from store_assistant_binding import _binding_conn
-                    binding = _binding_conn(conn, proactive_env_binding or {},
-                                            name=proactive_binding_name, include_target=False)
-                    if (not actor_stream_id or not actor_generation
-                            or binding.get("stream_id") != actor_stream_id
-                            or binding.get("generation") != actor_generation):
-                        raise ValueError("assistant_publish_provenance_unverified")
-                    try:
-                        _assistant_actor_conn(conn, actor_stream_id, actor_generation)
-                    except ValueError as exc:
-                        raise ValueError("assistant_publish_provenance_unverified") from exc
-                    if (dispatch_id or publish_kind not in {"prose", "status"}
-                            or attachment_ids or reply_to_message_id or reply_to_question_id):
-                        raise ValueError("assistant_publish_payload_invalid")
-                elif actor_generation is not None:
-                    _assistant_actor_conn(conn, actor_stream_id, actor_generation)
-                if direct_single_final:
-                    if (not direct_target_stream_id or not direct_target_generation
-                            or actor_stream_id != direct_target_stream_id
-                            or actor_generation != direct_target_generation):
-                        raise ValueError("assistant_direct_actor_unverified")
-                    direct_route = conn.execute(
-                        "SELECT route_target,route_target_generation,routing_state,input_identity,"
-                        "reply_to_question_id FROM v2_assistant_composite_routes "
-                        "WHERE stream_id=? AND dispatch_id=?", (stream_id, dispatch_id),
-                    ).fetchone()
-                    if (direct_route is None or direct_route["route_target"] != direct_target_stream_id
-                            or direct_route["route_target_generation"] != direct_target_generation
-                            or direct_route["routing_state"] != "resolved"):
-                        raise ValueError("assistant_direct_dispatch_unverified")
-                    if (reply_to_message_id != direct_route["input_identity"]
-                            or reply_to_question_id != direct_route["reply_to_question_id"]):
-                        raise ValueError("assistant_direct_reply_unverified")
-                    if publish_kind == "prose" and (
-                        publication_key != "publish:" + dispatch_id
-                        or canonical_payload.get("response_state") != "final"
-                    ):
-                        raise ValueError("assistant_direct_publication_identity_invalid")
-                prior = conn.execute(
-                    "SELECT * FROM v2_assistant_composite_publications WHERE publication_key=?",
-                    (publication_key,),
-                ).fetchone()
-                if prior is not None:
-                    saved = dict(prior)
-                    if saved["payload_digest"] != digest:
-                        raise ValueError("assistant_publish_conflict" if proactive_binding_name is not None
-                                         else "assistant_publication_idempotency_conflict")
-                    replay_event = json.loads(conn.execute(
-                        "SELECT event_json FROM session_event_tail WHERE event_id=?", (saved["event_id"],),
-                    ).fetchone()[0])
-                    replay_event["daemon_seq"] = int(saved["event_id"])
-                    saved.update({"event": replay_event, "duplicate": True})
-                    conn.commit()
-                    return saved
-                if actor_generation is not None and proactive_binding_name is None:
-                    route = (dict(direct_route) if direct_single_final else _assistant_dispatch_conn(
-                        conn, stream_id, dispatch_id, actor_stream_id, actor_generation,
-                        authority=authority_stream_id if publish_kind != "question" else None,
-                    ))
-                    if route["routing_state"] != "resolved":
-                        raise ValueError("assistant_publish_dispatch_state_invalid")
-                    if reply_to_message_id != route["input_identity"]:
-                        raise ValueError("assistant_publish_reply_unverified")
-                    if publish_kind != "question" and reply_to_question_id != route["reply_to_question_id"]:
-                        raise ValueError("assistant_publish_question_unverified")
-                    # A direct-primary first-visible acknowledgment has no lane operation to
-                    # correlate; its exact immutable key is its one-per-dispatch identity.
-                    direct_ack = (direct_single_final and publish_kind == "status"
-                                  and canonical_payload.get("response_state") == "acknowledged"
-                                  and publication_key == "publish:" + dispatch_id + ":ack")
-                    if publish_kind != "prose" and not direct_ack:
-                        correlated = False
-                        for ref in evidence_refs:
-                            receipt = conn.execute(
-                                "SELECT * FROM v2_assistant_composite_operations "
-                                "WHERE operation_id=? AND stream_id=? AND dispatch_id=? AND actor_stream_id=?",
-                                (ref, stream_id, dispatch_id, actor_stream_id),
-                            ).fetchone()
-                            if receipt is not None:
-                                if publish_kind == "question":
-                                    question = conn.execute(
-                                        "SELECT question_id FROM v2_assistant_composite_question_bridges "
-                                        "WHERE operation_id=? AND state='committed'", (ref,),
-                                    ).fetchone()
-                                    current_question = conn.execute(
-                                        "SELECT pending_question_id FROM v2_assistant_composite_lanes "
-                                        "WHERE stream_id=? AND lane_id=? AND phase IN ('discussion','execution','waiting')",
-                                        (stream_id, receipt["lane_id"]),
-                                    ).fetchone()
-                                    correlated = (receipt["operation"] == "question.open" and question is not None
-                                                  and question["question_id"] == reply_to_question_id
-                                                  and current_question is not None
-                                                  and current_question["pending_question_id"] == reply_to_question_id)
-                                elif publish_kind == "result":
-                                    correlated = receipt["operation"] == "lane.close"
-                                else:
-                                    correlated = receipt["operation"] != "route.resolve"
-                            if publish_kind == "result" and not correlated:
-                                correlated = conn.execute(
-                                    "SELECT 1 FROM v2_assistant_composite_terminal_reports "
-                                    "WHERE report_id=? AND stream_id=? AND dispatch_id=? AND actor_stream_id=?",
-                                    (ref, stream_id, dispatch_id, actor_stream_id),
-                                ).fetchone() is not None
-                            if correlated:
-                                break
-                        if not correlated:
-                            raise ValueError("assistant_publish_operation_receipt_required")
-                if direct_single_final and publish_kind == "prose":
-                    previous_finals = conn.execute(
-                        "SELECT publication_key,canonical_payload_json FROM v2_assistant_composite_publications "
-                        "WHERE stream_id=? AND dispatch_id=? AND publish_kind='prose'",
-                        (stream_id, dispatch_id),
-                    ).fetchall()
-                    if any(json.loads(row["canonical_payload_json"]).get("response_state") == "final"
-                           for row in previous_finals):
-                        raise ValueError("assistant_direct_final_already_published")
-                session = conn.execute(
-                    "SELECT created_at,status,provider FROM sessions WHERE host=? AND session_name=?",
-                    (host, session_name),
-                ).fetchone()
-                if session is None or session["status"] != "open" or session["provider"] != "composite":
-                    raise ValueError("assistant_composite_projection_unavailable")
-                event_key = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
-                identity = "assistant-publish:" + publication_key
-                cur = conn.execute(
-                    """INSERT INTO session_event_tail(
-                        stream_id,session_created_at,event_key,event_json,event_ts,recorded_at,identity
-                    ) VALUES (?,?,?,?,?,?,?)""",
-                    (
-                        stream_id, str(session["created_at"]), event_key, event_json,
-                        event.get("timestamp"), time.time(), identity,
-                    ),
+                stored = _record_publication_conn(
+                    conn, stream_id=stream_id, publication_key=publication_key,
+                    dispatch_id=dispatch_id, reply_to_message_id=reply_to_message_id,
+                    reply_to_question_id=reply_to_question_id, publish_kind=publish_kind,
+                    attachment_ids=attachment_ids, evidence_refs=evidence_refs,
+                    canonical_payload=canonical_payload, event=event,
+                    actor_stream_id=actor_stream_id, actor_generation=actor_generation,
+                    authority_stream_id=authority_stream_id,
+                    direct_target_stream_id=direct_target_stream_id,
+                    direct_target_generation=direct_target_generation,
+                    direct_single_final=direct_single_final,
+                    proactive_binding_name=proactive_binding_name,
+                    proactive_env_binding=proactive_env_binding,
                 )
-                event_id = int(cur.lastrowid)
-                stamp = _routing_iso_now()
-                conn.execute(
-                    """INSERT INTO v2_assistant_composite_publications(
-                        publication_key,stream_id,payload_digest,canonical_payload_json,dispatch_id,
-                        reply_to_message_id,reply_to_question_id,publish_kind,attachment_ids_json,
-                        evidence_refs_json,event_id,created_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        publication_key, stream_id, digest, canonical_json, dispatch_id,
-                        reply_to_message_id, reply_to_question_id, publish_kind,
-                        json.dumps(attachment_ids, separators=(",", ":")),
-                        json.dumps(evidence_refs, separators=(",", ":")), event_id, stamp,
-                    ),
-                )
-                for attachment in event.get('attachments') or []:
-                    conn.execute("INSERT INTO v2_attachment_refs(owner_kind,owner_id,stream_id,upload_id,blob_sha) VALUES ('publication',?,?,?,?)",
-                        (publication_key, stream_id, attachment['upload_id'], attachment['key']))
-                stored = dict(conn.execute(
-                    "SELECT * FROM v2_assistant_composite_publications WHERE publication_key=?", (publication_key,),
-                ).fetchone())
-                stored.update({"event": dict(event) | {"daemon_seq": event_id}, "duplicate": False})
                 conn.commit()
                 return stored
             except BaseException:
@@ -1377,6 +1408,7 @@ class _RoutingStoreMixin:
         authority_wake_tell_id: str | None = None,
         conversation_stream_id: str | None = None,
         authority_generation: str | None = None,
+        operator_confirmation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist the fixed authority-operation matrix; never interpret prose."""
         allowed = {
@@ -1417,6 +1449,23 @@ class _RoutingStoreMixin:
                         record["authority_request"] = _assistant_authority_request_receipt_conn(conn, stream_id, dispatch_id)
                     conn.commit()
                     return record
+                guarded_action = ("lane.close" if operation == "lane.close" else
+                                  "lane.decision:cancel" if operation == "lane.decision"
+                                  and payload.get("transition") == "cancel" else None)
+                if guarded_action is None and operator_confirmation is not None:
+                    raise ValueError("work_lane_operator_confirmation_mismatch")
+                if guarded_action is not None:
+                    # Owner-kind guard (work lanes D5): operator lanes need a confirmation;
+                    # a supplied one must match this lane and action on any lane.
+                    from store_work_lanes import operator_lane_guard_conn, record_routing_confirmation_conn
+                    consumed = operator_lane_guard_conn(
+                        conn, lane_id=lane_id, action=guarded_action,
+                        actor_stream_id=str(actor_stream_id or ""), confirmation=operator_confirmation)
+                    if consumed is not None:
+                        record_routing_confirmation_conn(
+                            conn, lane_id=str(lane_id), stream_id=stream_id, operation_id=operation_id,
+                            action=guarded_action, question_id=consumed,
+                            actor_stream_id=str(actor_stream_id or ""), actor_generation=actor_generation)
                 if operation == "authority.request":
                     if not actor_generation or actor_stream_id != conversation_stream_id:
                         raise ValueError("assistant_operation_luna_required")

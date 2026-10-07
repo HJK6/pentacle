@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from .config import load_config
-from . import prompt_protocol, triage
+from . import prompt_protocol, triage, work_lane_cli
 from . import role_baseline, schema
 from .stream_id import discover_leader_stream_id_short, env_stream_id
 from .wsclient import (
@@ -5194,7 +5194,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     assistant_operation_parser.add_argument(
         "--operation", required=True,
-        choices=("lane.admit", "lane.bind", "lane.decision", "lane.close", "question.open", "question.cancel", "route.resolve", "authority.request"),
+        choices=("lane.admit", "lane.bind", "lane.decision", "lane.close", "question.open", "question.cancel", "route.resolve", "authority.request",
+                 "work_lane.adopt", "work_lane.set_state", "work_lane.set_lead", "work_lane.set_chat",
+                 "work_lane.set_text", "work_lane.set_owner", "work_lane.update"),
     )
     assistant_operation_parser.add_argument("--request-id", required=True)
     assistant_operation_parser.add_argument("--composite-stream-id", required=True)
@@ -5422,6 +5424,7 @@ def build_parser() -> argparse.ArgumentParser:
     nexus_route.add_argument("--timeout", type=float, default=30.0)
     nexus_route.set_defaults(func=nexus)
 
+    work_lane_cli.add_parser(subparsers)
     prompt_parser = subparsers.add_parser("prompt")
     prompt_sub = prompt_parser.add_subparsers(dest="prompt_command", required=True)
     prompt_ask_parser = prompt_sub.add_parser("ask")
