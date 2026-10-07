@@ -82,7 +82,7 @@ def test_satellite_without_registry_reads_itself(satellite):
 def test_satellite_registry_entry_for_itself_is_local(satellite):
     env = satellite("amaterasu", machines=[
         {"name": "merlin", "ssh_target": "u@merlin"},
-        {"name": "amaterasu", "ssh_target": "vamsh@100.104.128.92"},
+        {"name": "amaterasu", "ssh_target": "u@amaterasu"},
     ])
     calls = Calls()
     rows = ur.read_host("amaterasu", env=env, runner=calls.ssh_runner, local_runner=calls.local_runner,
@@ -92,7 +92,7 @@ def test_satellite_registry_entry_for_itself_is_local(satellite):
 
 def test_satellite_still_reads_other_hosts_over_ssh(satellite):
     env = satellite("amaterasu", machines=[{"name": "merlin", "ssh_target": "u@merlin"},
-                                           {"name": "amaterasu", "ssh_target": "vamsh@100.104.128.92"}])
+                                           {"name": "amaterasu", "ssh_target": "u@amaterasu"}])
     seen = []
 
     def ssh_runner(target, command, *, input_text=None, **kw):
