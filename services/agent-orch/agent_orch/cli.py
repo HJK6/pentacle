@@ -4780,6 +4780,19 @@ def usage(args: argparse.Namespace) -> int:
     """Read one host's current Claude/Codex account-period usage (/usage limits)."""
     from agent_orch import usage_readback
 
+    if getattr(args, "unplaced", False):
+        from agent_orch import usage_unplaced
+
+        try:
+            summary = usage_unplaced.read(args.data_dir)
+        except (OSError, Exception) as exc:  # noqa: BLE001 - one readable error line
+            print(f"agent-orch usage --unplaced: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(summary, separators=(",", ":")) if args.json else usage_unplaced.render(summary))
+        return 0
+    if not args.host:
+        print("agent-orch usage: --host is required (or --unplaced)", file=sys.stderr)
+        return 2
     max_age = args.max_age_seconds
     if max_age is None:
         env_val = os.environ.get("PENTACLE_USAGE_MAX_AGE_SECONDS")
@@ -5868,7 +5881,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="read one host's current Claude/Codex account-period usage (/usage limits) once; "
                     "`agent-orch usage rollup --help` for the per-spec/project rollup and calibration",
     )
-    usage_parser.add_argument("--host", required=True, help="host name from machines.json (e.g. thoth, merlin, amaterasu)")
+    usage_parser.add_argument("--host", help="host name from machines.json (e.g. thoth, merlin, amaterasu)")
+    usage_parser.add_argument(
+        "--unplaced", action="store_true",
+        help="list refused/unplaced satellite usage and held-span losses from the daemon DB "
+             "(run on the daemon host; never counted)",
+    )
+    usage_parser.add_argument("--data-dir", default="~/.local/share/pentacle-stream", help=argparse.SUPPRESS)
     usage_parser.add_argument("--json", action="store_true")
     usage_parser.add_argument(
         "--max-age-seconds", type=int, default=None,

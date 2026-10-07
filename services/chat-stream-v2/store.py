@@ -1506,6 +1506,9 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, QaStor
             conn.execute(DEFERRED_REAP_DDL)
             conn.execute(SESSION_REAP_INDEX_DDL)
             conn.execute(SESSION_GENERATIONS_DDL)
+            # Seats opened under a previous daemon get a (second-precision)
+            # history row so their spans have a candidate generation.
+            store_usage.history_backfill_conn(conn)
             conn.execute(ROUTING_INTEGRITY_DDL)
             conn.execute(ROUTING_INTEGRITY_AUDIT_DDL)
             conn.execute(OUTBOUND_NOTICE_DDL)
@@ -2437,6 +2440,19 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, QaStor
                 "VALUES (?,?,?) ON CONFLICT(host, session_name) DO UPDATE SET generation=excluded.generation",
                 (host, session_name, generation),
             )
+            # Per-generation usage history (AC10): the row survives a
+            # same-name reopen that overwrites `sessions` and the generation key.
+            opened = conn.execute(
+                "SELECT pane_pid, provider FROM sessions WHERE host=? AND session_name=?",
+                (host, session_name),
+            ).fetchone()
+            store_usage.history_open_conn(
+                conn, host, session_name, generation,
+                pane_pid=opened["pane_pid"], provider=opened["provider"],
+            )
+            store_usage.history_fill_conn(
+                conn, host, session_name, pane_pid=opened["pane_pid"], provider=opened["provider"],
+            )
             if generation_changed and cols.get("handoff_from_stream_id"):
                 predecessor = str(cols["handoff_from_stream_id"])
                 source_host, separator, source_name = predecessor.partition(":")
@@ -2526,7 +2542,12 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, QaStor
             if cur.rowcount == 0:
                 conn.commit()
                 return None
+            if "pane_pid" in cols or "provider" in cols:
+                store_usage.history_fill_conn(
+                    conn, host, session_name, pane_pid=cols.get("pane_pid"), provider=cols.get("provider"),
+                )
             if closing:
+                store_usage.history_close_conn(conn, host, session_name)
                 stream_id = f"{host}:{session_name}"
                 conn.execute("DELETE FROM v2_nudge_state WHERE stream_id=?", (stream_id,))
                 stamp = _routing_iso_now()
@@ -2792,6 +2813,7 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, QaStor
                         existing[1],
                     )
                 return None
+            store_usage.history_close_conn(conn, host, session_name)
             stream_id = f"{host}:{session_name}"
             if close_kind == "operator_offline_close":
                 generation_row = conn.execute(
@@ -2866,6 +2888,7 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, QaStor
             if cur.rowcount == 0:
                 conn.commit()
                 return None
+            store_usage.history_close_conn(conn, host, session_name)
             stream_id = f"{host}:{session_name}"
             stamp = _routing_iso_now()
             conn.execute(

@@ -76,7 +76,10 @@ idempotency key, so replaying the same source records with either the same or a
 new request ID produces zero new writes and reports `usage_replayed`. The
 satellite keeps its sanitized usage span pending and advances its source
 high-water offset only after the coordinator returns the usage acknowledgement.
-Rejected usage leaves that stream pending and its offset unmoved.
+Rejected usage leaves that stream pending and its offset unmoved. With a wire-v2
+daemon, an item refused only for a stale fence, and a span with no fence, is
+held and resolved from generation history instead (repository
+`docs/usage_accounting.md` § Unfenced spans).
 
 ## Candidate evidence
 
