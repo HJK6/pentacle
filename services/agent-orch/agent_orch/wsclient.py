@@ -2389,7 +2389,7 @@ async def _await_starting_spawn(
     except asyncio.CancelledError:
         expire()
         raise
-    if done:
+    if done and time.monotonic() < deadline:  # a task done only past the deadline is not proof
         if "result" in proof:
             return proof["result"]  # also when cleanup after the proof failed
         return task.result()

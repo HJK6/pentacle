@@ -415,3 +415,49 @@ def test_helper_cleanup_failure_after_proof_keeps_the_proven_result(monkeypatch,
         assert result["type"] == "spawn.error" and result["error_code"] == "spawn_failed", result
     else:
         assert result["type"] == "spawn.ok" and result["state"] == "ready", result
+
+
+@pytest.mark.parametrize("stall", ["receive-past-deadline-no-proof", "cleanup-past-deadline-after-proof"])
+def test_helper_task_done_only_after_the_deadline_is_not_proof(monkeypatch, tmp_path, stall):
+    """Helper-level (faked websocket, real connect/read/classify/settle/owner
+    code). A synchronous loop stall, released only once the absolute deadline
+    has passed, lets the wait task finish before the owner's timeout runs.
+    Without proof settled in time the owner returns typed indeterminate, not
+    the late task result; proof settled in time survives a stalled cleanup."""
+    deadline: list[float] = []
+
+    def stall_past_deadline():
+        while wsclient.time.monotonic() <= deadline[0] + 0.02:  # barrier: past the deadline
+            wsclient.time.sleep(0.005)
+
+    class Socket:
+        transport = None
+
+        async def send(self, raw):
+            return None
+
+        async def recv(self):
+            if stall == "receive-past-deadline-no-proof":
+                stall_past_deadline()
+            return json.dumps({"type": "snapshot", "sessions": [{"stream_id": "testhost:v2-c2", "state": "ready", "status": "open"}]})
+
+        async def close(self):
+            if stall == "cleanup-past-deadline-after-proof":
+                stall_past_deadline()
+
+    async def connect(*_args, **_kwargs):
+        return Socket()
+
+    monkeypatch.setattr(wsclient.websockets, "connect", connect)
+
+    async def scenario():
+        deadline.append(wsclient.time.monotonic() + 0.1)
+        return await wsclient._await_starting_spawn(config(tmp_path), _accepted(), deadline=deadline[0])
+
+    result = asyncio.run(scenario())
+    assert wsclient.time.monotonic() > deadline[0]
+    assert result["request_id"] == "spawn-c2" and result["stream_id"] == "testhost:v2-c2"
+    if stall == "receive-past-deadline-no-proof":
+        assert result["type"] == "spawn.indeterminate", result
+    else:
+        assert result["type"] == "spawn.ok" and result["state"] == "ready", result
