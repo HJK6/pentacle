@@ -373,7 +373,7 @@ def proof_predicate(cumulative: dict[str, int] | None, responses: list[CodexRow]
     ordered = [per_ordinal[k][0].vector for k in sorted(per_ordinal) if len(per_ordinal[k]) == 1]
     if any(later[f] < earlier[f] for earlier, later in zip(ordered, ordered[1:]) for f in THREAD_FIELDS):
         failed.add('counter_consistency')
-    if any(flag != 'malformed_proof' for flag in flags):
+    if flags:  # any stored flag, whatever its name
         failed.add('flags')
     if any(not p.valid for p in proof):
         failed.add('malformed_proof')
@@ -396,9 +396,8 @@ class CodexSession:
                  flags: dict[str, int] | None = None, identity_conflict: int | None = None):
         self.host, self.native = host, native
         self.proof = proof or []
-        self.flags = dict(flags or {})
-        if any(not p.valid for p in self.proof):
-            self.flags['malformed_proof'] = sum(1 for p in self.proof if not p.valid)
+        self.flags = dict(flags or {})  # stored adverse evidence only; malformed rows are counted on read
+        self.malformed = sum(1 for p in self.proof if not p.valid)
         self.blocked_by: list[str] | None = None
         self.proof_boundary_seq: int | None = None
         self.stream_id = cumulative.stream_id if cumulative is not None else None
@@ -466,6 +465,8 @@ class CodexSession:
             entry['reconciled_by_rows_blocked_by'] = list(self.blocked_by or ())
         if self.flags:
             entry['flags'] = dict(sorted(self.flags.items()))
+        if self.malformed:
+            entry['malformed_proof_rows'] = self.malformed
         return entry
 
     def masses(self) -> dict[str, int]:

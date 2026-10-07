@@ -774,12 +774,27 @@ def test_k_out_of_band_malformed_stored_proof_blocked_without_writes(lab: Lab, c
     lab.conn = sqlite3.connect(lab.db)
     entry = lab.session('n-k')
     assert entry['class'] == 'unverifiable'
-    assert 'malformed_proof' in entry['reconciled_by_rows_blocked_by']
+    assert entry['reconciled_by_rows_blocked_by'] == ['malformed_proof']
+    assert entry['malformed_proof_rows'] == 1 and 'flags' not in entry
     lab.conn.close()
     assert _db_digest(lab.data) == before
     with sqlite3.connect(lab.db) as conn:
         assert list(conn.iterdump()) == dump_before
     lab.conn = sqlite3.connect(lab.db)
+
+
+def test_k_stored_flag_named_like_derived_clause_still_blocks(lab: Lab, capsys) -> None:
+    """QA 3d385876: a stored flag blocks P whatever its name, including one spelled 'malformed_proof'."""
+    r = lab.add(zero_last_rollout('n-k2'))
+    assert lab.backfill(capsys) == 0
+    assert_proven(lab, r)
+    lab.conn.execute('INSERT INTO v2_usage_codex_thread_flags (host,native_session_id,flag,response_id,detail,'
+                     'first_seen_at) VALUES (?,?,?,?,?,?)',
+                     (HOST, r.native, 'malformed_proof', 'unexpected', 'stored row', '2026-10-07T00:00:00Z'))
+    lab.conn.commit()
+    entry = assert_blocked(lab, r, 'flags')
+    assert entry['reconciled_by_rows_blocked_by'] == ['flags']
+    assert entry['flags'] == {'malformed_proof': 1} and 'malformed_proof_rows' not in entry
 
 
 # --- AC2 merge rules: no erasure, adverse evidence retained ----------------------------------------------------------

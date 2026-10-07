@@ -442,7 +442,7 @@ backfill proof row per ordinal `1..n`, mapped one-to-one to existing response
 rows, and no response row without one (a live-only tail is not proven);
 (c) `equality` — the five-field sum of the mapped rows equals the vector at
 `n`; (d) `counter_consistency` — vectors non-decreasing along `1..n`;
-(e) `flags` — no stored flag, and `malformed_proof` — every stored proof row
+(e) `flags` — no stored flag of any name, and `malformed_proof` — every stored proof row
 re-validated on read (types, non-negative, cached ≤ input, reasoning ≤ output,
 `backfill` ⇔ ordinal), since an out-of-band write can pass the column CHECKs;
 (f) `ledger_le_thread` — `C_n` ≤ the vector at `n` in every bucket. A timed row
@@ -451,7 +451,7 @@ its class and the rollup JSON is byte-for-byte as before: the
 `reconciled_by_rows` class key, its block counts and `proof_sessions` appear
 only when the ledger holds at least one proof row. Then `proof_sessions` lists
 each session P was evaluated on (hashed `session`, `host`, `class`,
-`proof_rows`, `flags`): proven ones add `source: rows`, `proof_boundary_seq`,
+`proof_rows`, stored `flags` by name, `malformed_proof_rows` counted on read): proven ones add `source: rows`, `proof_boundary_seq`,
 `thread_vector` and per-bucket `ledger_below_thread_by`; the rest name their
 failing clauses in `reconciled_by_rows_blocked_by` and stay `unverifiable`
 (never `partial` by subtraction). The reconciliation block's
