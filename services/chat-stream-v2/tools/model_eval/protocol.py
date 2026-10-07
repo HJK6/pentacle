@@ -29,10 +29,11 @@ def validate_report_payload(payload, status="done", flags=None):
                 return [f"--{name.replace('_', '-')} conflicts with {name} in --result"]
             merged[name] = flags[name]
     errors = []
-    if any(flags.get(k) is not None for k in ("qa_verdict", "target_sha", "qa_reviewed_scope", "qa_gate_evidence_digest")):
+    # Like the real CLI, QA review evidence is required only once a scope or digest flag is given.
+    if flags.get("qa_reviewed_scope") is not None or flags.get("qa_gate_evidence_digest") is not None:
         for key, flag in (("target_sha", "--target-sha"), ("qa_reviewed_scope", "--qa-reviewed-scope"),
                           ("qa_gate_evidence_digest", "--qa-gate-evidence-digest")):
-            if flags.get(key) is None and not (key == "target_sha" and "target_sha" in merged):
+            if flags.get(key) is None:
                 errors.append(f"QA review evidence requires {flag}")
         digest = flags.get("qa_gate_evidence_digest")
         if digest is not None and not DIGEST.fullmatch(digest):

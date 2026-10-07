@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from model_eval import evaluate, grader, protocol, runner, scoring
+from model_eval import cli, evaluate, grader, protocol, runner, scoring
 
 
 def test_argv_binds_model_effort_and_cwd_explicitly():
@@ -219,3 +219,24 @@ def test_capture_diff_includes_staged_and_committed_changes(fix_repo, tmp_path):
         assert "test_mod.py" not in diff  # installed tests are part of the baseline
     finally:
         runner.remove_worktree(str(repo), wt)
+
+
+def test_grade_makes_one_call_per_task_and_persists_nothing_on_invalid_reply(tmp_path, monkeypatch):
+    bundle = tmp_path / "b"
+    bundle.mkdir()
+    log = tmp_path / "log.jsonl"
+    log.write_text(json.dumps({"cmd": "report", "valid": True, "status": "done", "qa_verdict": "accept", "payload": {}}) + "\n")
+    tasks = tmp_path / "tasks.json"
+    tasks.write_text(json.dumps({"tasks": [{"id": "t1", "class": "qa", "brief": "b", "known": {}}]}))
+    row = {"task_id": "t1", "model": "luna", "status": "finished", "log": str(log)}
+    (bundle / "runs.jsonl").write_text(json.dumps(row) + "\n")
+    replies = []
+
+    def fake_grader(prompt):
+        replies.append(prompt)
+        return "{}", {}
+
+    monkeypatch.setattr(grader, "run_grader", fake_grader)
+    with pytest.raises(ValueError):
+        cli.main(["grade", "--tasks", str(tasks), "--bundle", str(bundle)])
+    assert len(replies) == 1 and not (bundle / "grades.json").exists()

@@ -72,12 +72,15 @@ def test_finding_without_suggested_fix_is_invalid_and_not_counted(tmp_path, monk
     assert codes[1] == 2 and protocol.check_protocol(entries, qa=False) == "no"
 
 
-def test_qa_review_flags_are_required_together_and_checked(tmp_path, monkeypatch):
-    partial = ["report", "--status", "done", "--qa-verdict", "accept", "--result", json.dumps(GOOD)]
+def test_qa_review_flags_follow_the_real_cli(tmp_path, monkeypatch):
+    bare = ["report", "--status", "done", "--qa-verdict", "accept", "--result", json.dumps(GOOD)]
+    scope_only = bare + ["--qa-reviewed-scope", "diff"]
     bad_digest = report_call(GOOD, "reject")[:-1] + ["NOTHEX"]
-    entries, codes = run_calls(tmp_path, monkeypatch, [partial, bad_digest, report_call(GOOD, "reject")])
-    assert codes == [2, 2, 0]
+    entries, codes = run_calls(tmp_path, monkeypatch, [scope_only, bad_digest, bare, report_call(GOOD, "reject")])
+    # evidence flags need the full set; a bare --qa-verdict is accepted like the real CLI does
+    assert codes == [2, 2, 0, 0]
     assert protocol.reported_verdict(entries) == "reject"
+    assert protocol.reported_verdict(entries[2:3]) == "accept"
 
 
 def test_schema_check_cases():
