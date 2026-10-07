@@ -12,13 +12,16 @@ installed and logged in (`codex` and `claude`; the grader uses `claude`). Task
 checkers need whatever their commands call. Every command below runs from
 `services/chat-stream-v2/tools` of a checkout and has the form
 `python3 -m model_eval.cli <command> ...`. `<bundle>` is a directory you create
-for outputs; `<tasks>` is the frozen task file.
+for outputs and **must be an absolute path** (the model runs with its cwd set to a worktree, so a
+relative bundle path would resolve under that worktree); task `repo` paths should be absolute too.
+`<tasks>` is the frozen task file. Example: `python3 -m model_eval.cli run --tasks /abs/tasks.json
+--bundle /abs/bundle`.
 
 | Command | Required flags | Writes |
 |---|---|---|
 | `freeze <tasks>` | the file | prints its SHA-256 |
 | `eligibility` | `--repo --pre-fix --fix --cmd --red-pattern --test-files F...` (optional `--setup-cmd`, `--out DIR`) | `--out DIR/{red,green}.txt` and a JSON receipt on stdout; exit 0 only if eligible |
-| `run` | `--tasks <tasks> --bundle <bundle>` (optional repeatable `--task ID`, `--model luna|haiku`, `--timeout S`) | `<bundle>/runs.jsonl` (one scored row per cell, appended; finished cells are skipped on a re-run) and `<bundle>/runs/<task>/<model>/` (brief log, CLI output, `final.diff`, `record.json`) |
+| `run` | `--tasks <tasks> --bundle <bundle>` (optional repeatable `--task ID`, `--model luna|haiku`, `--timeout S`) | `<bundle>/runs.jsonl` (one scored row per cell, appended; on a re-run every cell that already has a row, failed ones included, is skipped, so only an interrupted cell with no row is retried) and `<bundle>/runs/<task>/<model>/` (the stand-in CLI call log `agent_orch.jsonl`, `stdout.jsonl`, `stderr.txt`, `last_message.txt`, `final.diff`, `record.json`; the brief is not stored, it stays inline in the task file) |
 | `grade` | `--tasks <tasks> --bundle <bundle>` | `<bundle>/grades.json` |
 | `report` | `--bundle <bundle>` | recommendation JSON on stdout |
 
