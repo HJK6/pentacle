@@ -675,6 +675,9 @@ class Server:
         from watch_wake import WatchWake
         self.watch_wake = WatchWake(getattr(self.sessions, "store", None), self.sessions)
         self.handlers.update(self.watch_wake.wire_handlers())
+        # Operator-only adapter to the Cosmo household store (Pentacle Personal).
+        from household import Household
+        self.handlers.update(Household().wire_handlers())
         self.runtime_sha = ""
         self._host_stats: dict[str, dict[str, Any]] = {}
         self._host_stats_order_lock = asyncio.Lock()
