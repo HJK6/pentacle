@@ -1,5 +1,6 @@
 """Saved answers use the existing durable queue, including crash ambiguity."""
 import asyncio
+import time
 from contextlib import asynccontextmanager
 import pytest
 from comms import Comms
@@ -149,7 +150,12 @@ def test_prompt_answer_uses_same_owned_queue_and_pending_ack(tmp_path,mode):
             assert (await state(notify,q))['resolution']['delivery_status']=='delivered'
     asyncio.run(run())
 
-def test_tell_retention_cannot_erase_possible_answer_input(tmp_path,monkeypatch):
+def _expire_abandoned_leases(conn):
+    conn.execute("UPDATE v2_outbound_notices SET lease_until=0 WHERE lease_owner IS NOT NULL AND delivered_at IS NULL AND terminal_at IS NULL")
+    conn.commit()
+
+@pytest.mark.parametrize('clock_step', [0.0, -0.5])
+def test_tell_retention_cannot_erase_possible_answer_input(tmp_path,monkeypatch,clock_step):
     async def run():
         async with fixture(tmp_path) as (notify,queue,comms,provider,sessions,store):
             q=await _seed_live_shaped_question(notify);await answer(notify,q)
@@ -159,7 +165,11 @@ def test_tell_retention_cannot_erase_possible_answer_input(tmp_path,monkeypatch)
             monkeypatch.setattr('store.TELL_RETENTION',1)
             for i in range(3):await store.put_tell_delivery('unrelated-'+str(i),{'reply':{},'delivery':{}})
             assert await store.get_tell_delivery(ANSWER_TELL_ID_PREFIX+q['notification_id']) is not None
-            await asyncio.sleep(.12);await queue.drain_once(force=True)
+            # A wall-clock step (WSL time sync) between claim and re-drain must not matter.
+            real_time=time.time;monkeypatch.setattr(time,'time',lambda:real_time()+clock_step)
+            # Expire the abandoned claim directly instead of sleeping past its .1s lease.
+            await store.submit(_expire_abandoned_leases)
+            await queue.drain_once(force=True)
             assert provider.pastes==[]
             assert (await state(notify,q))['resolution']['delivery_status']=='unconfirmed'
     asyncio.run(run())
