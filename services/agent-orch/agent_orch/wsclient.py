@@ -1816,7 +1816,10 @@ async def assistant_once(config: Config, payload: dict[str, Any], *, timeout: fl
     from_stream_id = _resolved_rpc_from_stream_id()
     verb = str(payload.get("type") or "")
     if verb not in {"assistant.publish", "assistant.operation", "assistant.binding", "assistant.rebind",
-                    "assistant.authority", "assistant.ruling"}:
+                    "assistant.authority", "assistant.ruling",
+                    # Work-lanes v1 read verbs (`agent-orch work-lane list|show|adopt --preview`);
+                    # the mutators stay `assistant.operation` with `operation: work_lane.*`.
+                    "work_lanes.list", "work_lanes.show", "work_lanes.adopt_preview"}:
         raise ValueError("assistant_verb_invalid")
     prefix = verb
     payload.setdefault("request_id", f"assistant-{uuid.uuid4()}")
