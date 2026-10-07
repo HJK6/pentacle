@@ -577,3 +577,60 @@ def test_post_activation_smoke_uses_installed_machine_file(
         assert code == deploy_mod.EXIT_FLEET_SMOKE_FAILED == 6
         assert "do NOT retry the deploy" in error
         assert json.loads(output)["daemon_runtime_readback"]["pid"] == 999
+
+
+class _GracefulLaunchd:
+    """launchd as observed on the daemon host (2026-10-07 21:02Z): `bootout` returns at once, but the
+    job stays loaded while the old daemon finishes its graceful shutdown, and a `bootstrap`
+    in that window fails with rc 5 (Input/output error)."""
+
+    def __init__(self, unload_after_s: float) -> None:
+        self.now = 0.0
+        self.unload_at: float | None = None
+        self.unload_after_s = unload_after_s
+        self.calls: list[tuple[str, float]] = []
+
+    def loaded(self) -> bool:
+        return self.unload_at is None or self.now < self.unload_at
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def runner(self, cmd, _cwd):
+        verb = cmd[1]
+        self.calls.append((verb, self.now))
+        if verb == "bootout":
+            self.unload_at = self.now + self.unload_after_s
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if verb == "print":
+            if self.loaded():
+                return subprocess.CompletedProcess(cmd, 0, "state = running\n\tpid = 7603\n", "")
+            return subprocess.CompletedProcess(cmd, 113, "", "Could not find service")
+        if verb == "bootstrap":
+            if self.loaded():
+                return subprocess.CompletedProcess(cmd, 5, "", "Bootstrap failed: 5: Input/output error")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        raise AssertionError(cmd)
+
+
+def test_reload_waits_for_the_job_to_leave_launchd_before_bootstrapping():
+    """RED for the rc=5 race: the old daemon takes 3 s to shut down after bootout."""
+    launchd = _GracefulLaunchd(unload_after_s=3.0)
+    deploy_mod._reload_launchd(
+        "com.pentacle.chat-streamd-v2", launchd.runner, sleep=launchd.sleep, monotonic=launchd.monotonic,
+    )
+    bootstraps = [at for verb, at in launchd.calls if verb == "bootstrap"]
+    assert bootstraps and all(at >= 3.0 for at in bootstraps), launchd.calls
+    assert len(bootstraps) == 1, launchd.calls
+
+
+def test_reload_wait_is_bounded_and_a_stuck_job_still_reports_the_bootstrap_failure():
+    launchd = _GracefulLaunchd(unload_after_s=1e9)
+    with pytest.raises(deploy_mod.DeployError, match="rc=5"):
+        deploy_mod._reload_launchd(
+            "com.pentacle.chat-streamd-v2", launchd.runner, sleep=launchd.sleep, monotonic=launchd.monotonic,
+        )
+    assert launchd.now <= deploy_mod.RELOAD_UNLOAD_WAIT_S + 1.0, launchd.now

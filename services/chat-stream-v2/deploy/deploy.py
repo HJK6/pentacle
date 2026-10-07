@@ -712,15 +712,32 @@ def _ensure_launchd_environment(
     return changed
 
 
+# launchd sends SIGKILL 20 s after SIGTERM (ExitTimeOut), so a job leaves launchd within
+# that window; 30 s adds teardown margin. Observed on the daemon host: a bootstrap 0 s after bootout
+# failed rc 5 while the old daemon was still shutting down.
+RELOAD_UNLOAD_WAIT_S = 30.0
+RELOAD_UNLOAD_POLL_S = 0.25
+
+
 def _reload_launchd(
     label: str,
     runner: Runner = _run,
     *,
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     target = _launchctl_target(label)
     domain = target.rsplit("/", 1)[0]
     _checked(("launchctl", "bootout", target), Path.cwd(), runner)
+    # bootout returns while the old daemon is still in its graceful shutdown, and launchd
+    # refuses a bootstrap of a job it still holds (rc 5). Wait, bounded, for the job to go;
+    # past the bound the bootstrap below still runs and reports its own failure.
+    unload_deadline = monotonic() + RELOAD_UNLOAD_WAIT_S
+    while monotonic() < unload_deadline:
+        state = _launchd_state(label, runner)
+        if state.answered and not state.loaded:
+            break
+        sleep(RELOAD_UNLOAD_POLL_S)
     command = ("launchctl", "bootstrap", domain, str(_launchd_plist_path(label)))
     result: subprocess.CompletedProcess[str] | None = None
     for attempt in range(3):
