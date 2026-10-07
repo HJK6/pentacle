@@ -82,6 +82,140 @@ Remote inventory rows can be displayed, but a daemon never reads a remote row's
 provider path or mutates its accounting. Each host needs its own activated
 collector; this feature adds no cross-host accounting transport or fleet totals.
 
+## Unfenced spans
+
+A satellite learns a stream's `session_generation` only from the usage fences
+on a `host.stats` ack (every 30 s). Before wire version 2, a seat that answered
+and closed between two stats acks had no fence, and its usage was lost. A
+record read after a same-name reopen was also credited to the new generation.
+Wire v2 resolves the generation on the daemon from durable history and the
+record's own transcript time. It never uses receipt time or a grace window.
+
+**History.** `v2_session_generation_history` has one row per
+(host, session name, generation). The row holds `pane_pid`, `provider`,
+`created_at`, `precision`, `closed_at` and the transcript identity
+(`native_session_id`, `source_file_identity_digest`).
+
+- `open_session` writes the row with a millisecond `created_at` (`precision='ms'`).
+- Opening a new generation over a row that is still open closes the prior row
+  at the new `created_at`, so a name has at most one open row.
+- Every close path writes `closed_at` in milliseconds at the time of the write.
+- Daemon start backfills a row for each open session that has none, keeping the
+  second-resolution `sessions.created_at` and flagging it `precision='s'`.
+- The identity columns are written once: by fenced admission, or by the first
+  credited unfenced record. A reopen never overwrites them.
+- A same-name reopen always mints a new generation, so it gets its own row.
+- The scheduled retention pass deletes a row only when it closed more than 30
+  days ago. Open rows are never pruned. Rows are never archived with
+  `sessions`.
+
+**Classifier.** `usage_admission.classify` is the single ordered refusal-only
+rule. Both v2 paths call it; only the candidate set differs.
+
+- A fenced item's only candidate is its fence generation's history row.
+- A held record's candidates are the rows that match host, session name, pane
+  pid and provider.
+- The order of checks is: `timestamp_missing`, `no_candidate_generation`,
+  `clock_unavailable` (transient), `outside_all_generations`,
+  `generation_overlap`, `boundary_uncertain`, credited.
+
+Clock evidence comes from the stats round trip. The ack carries `server_now`,
+and the satellite keeps `{offset_s, rtt_s, server_now}`. Each record is
+corrected by the hull of its capture-time and send-time samples. Every
+uncertainty term only widens the refusal zone. An open row has no end
+boundary.
+
+**Clock limit.** The hull bounds the offset only at the two sampled instants.
+A clock step or drift between samples that the samples do not show is not
+detected. It could place a record on the wrong side of a boundary.
+
+The measured offsets on 2026-10-07 were Amaterasu +0.109 s and Merlin −0.115 s
+against Thoth.
+
+**Held-span file.** The satellite keeps
+`~/.local/state/pentacle-satellite/unfenced_usage.json`
+(`PENTACLE_SATELLITE_HELD_SPAN_PATH`). It holds a span, with each record's
+`transcript_ts` and capture clock, in these cases:
+
+- the span has no matching fence;
+- the daemon refused the item only because its fence was stale
+  (`session_not_open`, `generation_mismatch`, `pane_pid_mismatch` or
+  `provider_mismatch`);
+- the daemon deferred the item as `clock_unavailable`;
+- the daemon is v2 but the satellite has no clock sample from the last 540 s.
+
+The file is fsynced before that pass's events push. Event offsets advance
+exactly as before.
+
+The bounds are 256 records and 64 KiB per entry, and 64 entries in all. An
+entry expires after 24 h of time with the daemon enabled, or 7 days after it
+was written while the daemon is disabled. Every drop is first recorded as a
+loss in the same atomic write. A loss has a reason (`held_span_expired_ttl`,
+`held_span_capacity_entries`, `held_span_capacity_bytes` or
+`held_span_overflow_records`), an id `instance:seq` that is never reused, and
+counts that merge per (entry key, reason). The list holds at most 64 records:
+60 keyed records and one overflow record per reason.
+
+**Wire and ack.** The satellite sends `usage_unfenced` (entries) and
+`usage_unfenced_losses` only while the most recent `event.push` ack had
+`wire_version >= 2` and a `usage_unfenced` block. Any other ack, or any push
+error, clears that flag. A v1 daemon accepts such a frame and ignores the
+fields, so after a rollback at most one frame carries them, and the held data
+stays on disk.
+
+Fenced items are classified only when the frame carries `clock`. A frame
+without `clock` (every v1 satellite) keeps the legacy admission unchanged.
+
+Inside one store transaction committed before the ack, the daemon does the
+following:
+
+- credits records through `record_historical_usage_conn`. This is the
+  history-row writer and shares the merge core with the live-row writer;
+- persists every terminal refusal in `v2_usage_unplaced`;
+- upserts losses with the revision guard.
+
+The ack carries `usage_unfenced: {recorded: [{key, seq}], rejected: [{key, seq,
+reason, transient}]}`, `losses_recorded` and `losses_conflict`. Record-level
+refusals of a fenced item are added to `usage_rejected` with `index`, so they
+never block the stream's offset.
+
+Codex `cumulative` ownership stays with the first generation that credits it.
+A later generation's record is reported as
+`cumulative_owned_by_prior_generation`.
+
+**Loss conflicts.** A loss payload with a lower or equal `rev` and different
+counts is `loss_conflict`. Its symptom is a hold file restored from an older
+copy, which is unsupported. When it happens:
+
+- the stored `loss:` row is unchanged;
+- the pending payload is kept in a `loss_conflict:` row, which from then on
+  receives every payload for that id;
+- the id is never acked as recorded, and the satellite keeps the record;
+- the satellite mints ids from a fresh instance after the first conflict.
+
+Conflict rows are never counted. If a restored record's first send already
+exceeds the stored `rev`, it silently replaces the stored counts. That case
+stays an undetectable limit.
+
+Loss upserts for one host run under one lock. A loss is applied only when the
+frame's `request_id` is above the highest applied for that satellite process.
+The server serves each request in its own task, so after an ack timeout a later
+frame can arrive first; the earlier frame's losses are then neither stored nor
+acked, and the satellite sends them again.
+
+**Readback.** On the daemon host, `agent-orch usage --unplaced [--json]` lists:
+
+- refused records per stream, with their reasons;
+- loss `records_lost` summed per reason;
+- unresolved conflicts, showing both payloads and no recovered count.
+
+Unplaced usage is never measured, placed or priced. The rollup partition does
+not read it yet; that is a tracked residual.
+
+A resumed transcript's history replay (its records predate the pane) is
+refused. It is listed there, normally as `outside_all_generations` or
+`no_candidate_generation`.
+
 ## Provenance
 
 Provenance joins each ledger record to an account, a model and an observation

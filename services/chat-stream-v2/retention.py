@@ -9,6 +9,9 @@ The passes, in the order a full run applies them:
 
   1. `archive_rows`   — terminal `sessions` rows move to `sessions_archive.db`,
                         except those a live row still descends from (lineage).
+     Then `v2_session_generation_history` rows closed more than 30 days ago
+     are deleted (never archived; open rows are kept), so per-generation usage
+     history outlives the satellite held-span delivery horizon.
   2. `archive_events` — `session_event_tail` rows of terminal / already-archived
                         / orphan sessions move wholesale, and each still-open
                         session keeps only its newest `tail_keep` rows. This is
@@ -563,6 +566,7 @@ class PassResult:
     managed_blobs_deleted: int = 0
     managed_uploads_reconciled: int = 0
     managed_uploads_promoted: int = 0
+    history_pruned: int = 0
 
     @property
     def events_moved(self) -> int:
@@ -653,6 +657,13 @@ class RetentionJob:
         )
         result.sessions_moved = moved
         budget -= moved
+
+        # Usage generation history (AC10) is never archived with its session:
+        # a row is deleted only 30 days after its close, open rows never.
+        from store_usage import prune_generation_history_conn
+        result.history_pruned = await self._submit(
+            lambda conn: prune_generation_history_conn(conn, time.time())
+        )
 
         if wants_events and budget > 0:
             def _events(conn: sqlite3.Connection, limit: int) -> tuple[int, int]:
