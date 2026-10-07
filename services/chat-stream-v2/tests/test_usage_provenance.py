@@ -381,6 +381,9 @@ def test_codex_responses_live_then_backfill_and_conflicts(tmp_path: Path) -> Non
             assert replay["counts"] == {"replayed": 3}
             differing = dict(live_responses[0], data={**live_responses[0]["data"], "output": 31})
             assert (await sink.admit(HOST, {"version": 1, "items": [differing]}))["counts"] == {"response_conflict": 1}
+            # A live span that starts mid-turn (no turn_context yet) defers to backfill.
+            midturn = native_provenance("codex", records[5:6], native_session_id="native-codex", state={})
+            assert midturn == []
             # Resumed/forked rollout repeating a response id yields one row.
             forked = native_provenance("codex", records + records[4:6], complete=True)
             assert sum(item["kind"] == "codex_response" for item in forked) == 3

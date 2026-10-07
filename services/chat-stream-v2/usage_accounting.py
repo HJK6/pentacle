@@ -250,11 +250,15 @@ def _codex_provenance(records: list[dict[str, Any]], *, native_session_id: str |
             if any(type(value) is not int or value < 0 for value in values.values()):
                 continue
             turn = _text(payload.get('turn_id'))
-            model = state['turn_models'].get(turn) if turn is not None else None
+            model = (state['turn_models'].get(turn) if turn is not None else None) or state.get('last_model')
+            if model is None and not complete:
+                # A live span can start mid-turn (history horizon); responses are
+                # immutable, so leave this one to the whole-file backfill.
+                continue
             seen_responses.add(response_id)
             responses.append((response_id, {
                 'response_id': response_id, 'observed_at': iso_utc(record.get('timestamp')),
-                'model': model or state.get('last_model'), **values,
+                'model': model, **values,
             }))
         elif kind == 'event_msg' and payload.get('type') == 'token_count':
             rate_limits = payload.get('rate_limits')
