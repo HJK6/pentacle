@@ -39,7 +39,29 @@ DDL = (
         cache_write_input INTEGER NOT NULL, output INTEGER NOT NULL,
         reasoning_output INTEGER NOT NULL,
         PRIMARY KEY(host,native_session_id,response_id))''',
+    # Thread proof (docs/usage_accounting.md § Thread proof): one row per response, written in the response
+    # row's transaction; read only by the rollup's reconciled_by_rows predicate.
+    '''CREATE TABLE IF NOT EXISTS v2_usage_codex_thread_proof (
+        host TEXT NOT NULL, native_session_id TEXT NOT NULL, response_id TEXT NOT NULL,
+        transcript_seq INTEGER NULL CHECK(transcript_seq IS NULL OR transcript_seq >= 1),
+        thread_input INTEGER NOT NULL CHECK(thread_input >= 0),
+        thread_cached_input INTEGER NOT NULL CHECK(thread_cached_input >= 0),
+        thread_cache_write_input INTEGER NOT NULL CHECK(thread_cache_write_input >= 0),
+        thread_output INTEGER NOT NULL CHECK(thread_output >= 0),
+        thread_reasoning_output INTEGER NOT NULL CHECK(thread_reasoning_output >= 0),
+        source TEXT NOT NULL CHECK(source IN ('backfill','live')), observed_at TEXT,
+        PRIMARY KEY(host,native_session_id,response_id))''',
+    '''CREATE UNIQUE INDEX IF NOT EXISTS v2_usage_codex_thread_proof_seq
+        ON v2_usage_codex_thread_proof(host,native_session_id,transcript_seq) WHERE transcript_seq IS NOT NULL''',
+    # Adverse evidence: insert-or-ignore, never deleted by any merge.
+    '''CREATE TABLE IF NOT EXISTS v2_usage_codex_thread_flags (
+        host TEXT NOT NULL, native_session_id TEXT NOT NULL, flag TEXT NOT NULL, response_id TEXT NOT NULL,
+        detail TEXT, first_seen_at TEXT,
+        PRIMARY KEY(host,native_session_id,flag,response_id))''',
 )
+THREAD_COLUMNS = ('thread_input', 'thread_cached_input', 'thread_cache_write_input', 'thread_output',
+                  'thread_reasoning_output')
+THREAD_FIELDS = ('input', 'cached_input', 'cache_write_input', 'output', 'reasoning_output')
 SOURCE_FIELDS = ('jsonl_path', 'claude_session_id', 'observer_binding', 'pane_pid')
 
 
@@ -90,9 +112,10 @@ def snapshot_conn(conn, row: dict[str, Any]) -> dict[str, Any]:
 
 class UsageStoreMixin:
     async def record_provenance(self, host: str, items: list[dict[str, Any]], *,
-                                dry_run: bool = False) -> dict[str, Any]:
+                                dry_run: bool = False, version: int = 1) -> dict[str, Any]:
         """Persist validated provenance items for ``host`` on the Store worker."""
-        return await self.submit(lambda conn: record_provenance_conn(conn, host, items, dry_run=dry_run))
+        return await self.submit(lambda conn: record_provenance_conn(conn, host, items, dry_run=dry_run,
+                                                                     version=version))
 
     async def usage_provenance_summary(self, stream_id: str, generation: str) -> dict[str, Any]:
         return await self.submit(lambda conn: provenance_summary_conn(conn, stream_id, generation))
@@ -279,16 +302,66 @@ def _merge_identity(conn, host: str, provider: str, native: str,
     return True
 
 
+def _put_flag(conn, host: str, native: str, flag: str, response_id: str, detail: str | None) -> bool:
+    """Insert-or-ignore one adverse-evidence row; True when it is new."""
+    cursor = conn.execute(
+        'INSERT OR IGNORE INTO v2_usage_codex_thread_flags (host,native_session_id,flag,response_id,detail,'
+        'first_seen_at) VALUES (?,?,?,?,?,?)', (host, native, flag, response_id, detail, iso_now()))
+    return cursor.rowcount > 0
+
+
+def _merge_proof(conn, host: str, native: str, data: dict[str, Any], *, dry_run: bool) -> str:
+    """Apply one response's thread proof (no erasure). Returns recorded, replayed, upgraded,
+    proof_conflict or duplicate_ordinal; the last two are kept as flags and never written."""
+    response_id, seq = data['response_id'], data['transcript_seq']
+    vector = tuple(data['thread_token_usage'][field] for field in THREAD_FIELDS)
+    row = conn.execute(
+        f'SELECT transcript_seq, {",".join(THREAD_COLUMNS)} FROM v2_usage_codex_thread_proof '
+        'WHERE host=? AND native_session_id=? AND response_id=?', (host, native, response_id)).fetchone()
+    if row is not None:
+        stored_seq, stored = row[0], tuple(row[1:])
+        if stored != vector or (seq is not None and stored_seq is not None and seq != stored_seq):
+            if not dry_run:
+                _put_flag(conn, host, native, 'proof_conflict', response_id,
+                          f'stored seq={stored_seq} offered seq={seq}' if stored == vector else 'vector differs')
+            return 'proof_conflict'
+        if seq is None or stored_seq is not None:
+            return 'replayed'
+    if seq is not None:
+        holder = conn.execute(
+            'SELECT response_id FROM v2_usage_codex_thread_proof '
+            'WHERE host=? AND native_session_id=? AND transcript_seq=?', (host, native, seq)).fetchone()
+        if holder is not None and holder[0] != response_id:
+            if not dry_run:
+                _put_flag(conn, host, native, 'duplicate_ordinal', response_id,
+                          f'ordinal {seq} held by another response')
+            return 'duplicate_ordinal'
+    if dry_run:
+        return 'recorded' if row is None else 'upgraded'
+    if row is None:
+        conn.execute(
+            f'INSERT INTO v2_usage_codex_thread_proof (host,native_session_id,response_id,transcript_seq,'
+            f'{",".join(THREAD_COLUMNS)},source,observed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+            (host, native, response_id, seq, *vector, 'backfill' if seq is not None else 'live', data['observed_at']))
+        return 'recorded'
+    # A live row gains its ordinal from the whole-file backfill; the vector is identical.
+    conn.execute("UPDATE v2_usage_codex_thread_proof SET transcript_seq=?, source='backfill' "
+                 'WHERE host=? AND native_session_id=? AND response_id=?', (seq, host, native, response_id))
+    return 'upgraded'
+
+
 def record_provenance_conn(conn, host: str, items: list[dict[str, Any]], *,
-                           dry_run: bool = False) -> dict[str, Any]:
-    """Apply validated claude_record/codex_response items in one transaction.
+                           dry_run: bool = False, version: int = 1) -> dict[str, Any]:
+    """Apply validated claude_record/codex_response/codex_thread_flag items in one transaction.
 
     Never reads or writes v2_usage_records/v2_usage_state beyond the existence
     lookup that proves the native session belongs to ``host``. Returns per-item
     outcomes in input order: recorded, replayed, response_conflict,
-    unknown_native_session or unknown_record.
+    unknown_native_session or unknown_record, plus ``proof_counts`` for the
+    version-2 thread proof carried by codex_response items.
     """
     outcomes: list[str] = []
+    proof_counts: dict[str, int] = {}
     identities = 0
     known_sessions: dict[tuple[str, str], bool] = {}
     with conn:
@@ -303,6 +376,10 @@ def record_provenance_conn(conn, host: str, items: list[dict[str, Any]], *,
                 ).fetchone() is not None
             if not known_sessions[session_key]:
                 outcomes.append('unknown_native_session')
+                continue
+            if item['kind'] == 'codex_thread_flag':
+                new = dry_run or _put_flag(conn, host, native, data['flag'], data['response_id'], data['detail'])
+                outcomes.append('recorded' if new else 'replayed')
                 continue
             if item['kind'] == 'claude_record':
                 ledger = conn.execute(
@@ -356,14 +433,20 @@ def record_provenance_conn(conn, host: str, items: list[dict[str, Any]], *,
                         )
                     outcomes.append('recorded')
                 else:
-                    # Responses are immutable: insert-or-ignore, a differing replay is counted.
+                    # Responses are immutable: insert-or-ignore, a differing replay is counted
+                    # (and, from a version-2 producer, kept as adverse evidence).
                     outcomes.append('replayed' if tuple(row) == values else 'response_conflict')
+                    if outcomes[-1] == 'response_conflict' and version >= 2 and not dry_run:
+                        _put_flag(conn, host, native, 'duplicate_response_conflict', data['response_id'], None)
+                if version >= 2 and 'thread_token_usage' in data and outcomes[-1] != 'response_conflict':
+                    proof = _merge_proof(conn, host, native, data, dry_run=dry_run)
+                    proof_counts[proof] = proof_counts.get(proof, 0) + 1
             identity = item['identity']
             if identity is not None and not dry_run:
                 identities += _merge_identity(conn, host, provider, native, identity, data.get('observed_at'))
         if dry_run:
             conn.rollback()
-    return {'outcomes': outcomes, 'identities_changed': identities,
+    return {'outcomes': outcomes, 'identities_changed': identities, 'proof_counts': proof_counts,
             'known_native_sessions': sorted(f'{provider}:{native}' for (provider, native), known in known_sessions.items() if known),
             'unknown_native_sessions': sorted(f'{provider}:{native}' for (provider, native), known in known_sessions.items() if not known)}
 

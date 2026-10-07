@@ -28,7 +28,8 @@ from usage_provenance import (  # noqa: E402
     BackfillCursor, ProvenanceSink, run_backfill,
 )
 
-REQUIRED_TABLES = frozenset({"v2_usage_records", "v2_usage_provenance", "v2_usage_identity", "v2_usage_codex_responses"})
+REQUIRED_TABLES = frozenset({"v2_usage_records", "v2_usage_provenance", "v2_usage_identity", "v2_usage_codex_responses",
+                             "v2_usage_codex_thread_proof", "v2_usage_codex_thread_flags"})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,8 +56,8 @@ def main(argv: list[str] | None = None) -> int:
         print("provenance tables absent: deploy the daemon first", file=sys.stderr)
         return 2
 
-    async def record(host, items, *, dry_run=False):
-        return record_provenance_conn(conn, host, items, dry_run=dry_run)
+    async def record(host, items, *, dry_run=False, version=1):
+        return record_provenance_conn(conn, host, items, dry_run=dry_run, version=version)
 
     sink = ProvenanceSink(record, HistoryLog(db.with_name(HISTORY_FILENAME)))
 

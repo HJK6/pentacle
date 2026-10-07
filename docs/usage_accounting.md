@@ -117,8 +117,11 @@ values differ is counted `response_conflict` and ignored. A live span that
 starts mid-turn (no known model yet) leaves that response to backfill.
 
 **Wire.** `event.push` carries an optional `usage_provenance` block
-`{version: 1, items: [...], dry_run?}` (≤ 2000 items) and requires the source
-host proof. Every item has exactly `kind`, `provider`, `native_session_id`,
+`{version: 1|2, items: [...], dry_run?}` (≤ 2000 items) and requires the source
+host proof. The daemon admits versions 1 and 2 and answers with its own
+version (2) in the ack; any other version is `unsupported_version`. Version 2
+adds the thread proof (§ Thread proof); version-1 items are stored exactly as
+before. Every item has exactly `kind`, `provider`, `native_session_id`,
 `source_file_identity_digest`, `identity`, `data`; `data` keys are fixed per
 kind (`claude_record`, `codex_response`, `rate_limit`). A `claude_record` or
 `codex_response` needs a ledger row for that native session on the
@@ -148,6 +151,44 @@ python3 services/chat-stream-v2/satellite.py --backfill
 python3 services/chat-stream-v2/tools/backfill_usage_provenance.py \
   --db ~/.local/share/pentacle-stream/sessions.db --host thoth [--dry-run]
 ```
+
+### Thread proof
+
+Version 2 lets a `codex_response` carry both `thread_token_usage` (the record's
+own five-field thread counter after that response: `input`, `cached_input`,
+`cache_write_input`, `output`, `reasoning_output`; non-negative, cached ≤ input,
+reasoning ≤ output) and `transcript_seq` (its 1-based ordinal among the
+rollout's accepted own-thread `token_usage_record`s). Only the whole-file
+backfill knows the ordinal; the live tail sends `transcript_seq: null`. A
+record without a valid thread counter carries neither field. A malformed field
+makes the item `bad_provenance`.
+
+| Table | Key | Holds |
+|---|---|---|
+| `v2_usage_codex_thread_proof` | host, native session, `response_id`; partial unique index on (host, native session, `transcript_seq`) where not null | `transcript_seq`, the five `thread_*` counters (`INTEGER NOT NULL CHECK >= 0`), `source` (`backfill` with an ordinal, `live` without), `observed_at` |
+| `v2_usage_codex_thread_flags` | host, native session, `flag`, `response_id` | adverse evidence: `detail`, `first_seen_at`; insert-or-ignore, never deleted |
+
+The proof row is written in the response row's `BEGIN IMMEDIATE` transaction.
+Merge never erases: an identical replay is `replayed`; a `live` row becomes
+`backfill` only by gaining its ordinal with an identical vector; a differing
+vector or a differing ordinal is not written and is flagged `proof_conflict`;
+an ordinal already held by another response of the session is not written and
+is flagged `duplicate_ordinal`. The producer reports `counter_reset` (a thread
+counter field lower than at the previous ordinal, whole-file pass only) and
+`foreign_thread_response` (a copied record whose `thread_id` is another
+thread) as `codex_thread_flag` items `{flag, response_id, detail}`; a
+version-2 `response_conflict` is kept as `duplicate_response_conflict`. The
+ack reports `proof_counts` beside `counts`.
+
+**Negotiation.** A satellite with no version-2 grant in its process sends the
+empty probe `{version: 2, items: []}` before its first data batch; ack
+version 2 → it sends version 2; `unsupported_version` → it strips the proof,
+drops flags, sends version 1 and probes again after an hour. A version-2 data
+batch answered `unsupported_version` (a rolled-back daemon) downgrades the same
+way. The backfill cursor records the version each file was sent under (an
+entry without one is version 1): a pass under version 2 re-sends every
+version-1 file once, so responses replay and proof rows insert. The ledger host's own
+ingest and backfill call the sink in process and always send version 2.
 
 Records whose transcript is gone stay without provenance; nothing is filled
 from the current login. `agent-orch inspect <stream> --json` returns
@@ -390,10 +431,34 @@ one class before any window logic, computed over every response, timed or not:
 |---|---|---|
 | `reconciled` | `Σ R_n == C_n` in every bucket | timed responses are placed at their `observed_at`; null-time responses are `untimed` |
 | `partial` | `Σ R_n ≤ C_n` in every bucket, some bucket below (includes a row with no responses) | as reconciled, plus the residual `C_n − Σ R_n` as `unreconciled` |
-| `unverifiable` | any bucket `Σ R_n > C_n`, or responses with no cumulative row | `max(Σ R_n, C_n)` per bucket (`Σ R_n` without a row), only in `unverifiable_mass`; nothing of it is placed, untimed or unreconciled |
+| `reconciled_by_rows` | would be `unverifiable`, has thread-proof rows, and predicate P holds (below) | the response rows only (the proven prefix): timed rows placed, null-time rows `untimed`; the ledger row is never added and `unreconciled` is zero |
+| `unverifiable` | any bucket `Σ R_n > C_n`, or responses with no cumulative row, and not `reconciled_by_rows` | `max(Σ R_n, C_n)` per bucket (`Σ R_n` without a row), only in `unverifiable_mass`; nothing of it is placed, untimed or unreconciled |
+
+**Predicate P** (thread proof, § Thread proof) is evaluated in the same single
+deferred read-only snapshot as every other table the rollup reads. With `n` the
+largest backfill ordinal: (a) `identity` — a cumulative row exists and the
+session's `v2_usage_identity.conflict` is 0; (b) `completeness` — exactly one
+backfill proof row per ordinal `1..n`, mapped one-to-one to existing response
+rows, and no response row without one (a live-only tail is not proven);
+(c) `equality` — the five-field sum of the mapped rows equals the vector at
+`n`; (d) `counter_consistency` — vectors non-decreasing along `1..n`;
+(e) `flags` — no stored flag of any name, and `malformed_proof` — every stored proof row
+re-validated on read (types, non-negative, cached ≤ input, reasoning ≤ output,
+`backfill` ⇔ ordinal), since an out-of-band write can pass the column CHECKs;
+(f) `ledger_le_thread` — `C_n` ≤ the vector at `n` in every bucket. A timed row
+is placement, not completeness evidence. A session with no proof rows keeps
+its class and the rollup JSON is byte-for-byte as before: the
+`reconciled_by_rows` class key, its block counts and `proof_sessions` appear
+only when the ledger holds at least one proof row. Then `proof_sessions` lists
+each session P was evaluated on (hashed `session`, `host`, `class`,
+`proof_rows`, stored `flags` by name, `malformed_proof_rows` counted on read): proven ones add `source: rows`, `proof_boundary_seq`,
+`thread_vector` and per-bucket `ledger_below_thread_by`; the rest name their
+failing clauses in `reconciled_by_rows_blocked_by` and stay `unverifiable`
+(never `partial` by subtraction). The reconciliation block's
+`reconciled_by_rows` entry adds `blocked_sessions` and `blocked_by` per clause.
 
 For reconciled and partial sessions, placed + untimed + unreconciled equals
-`C_n` per bucket. A session's account is its `v2_usage_identity` creator
+`C_n` per bucket; for `reconciled_by_rows`, placed + untimed equals `Σ R_n`. A session's account is its `v2_usage_identity` creator
 account (or unknown / conflict); creator ids are never pooled. The private
 config's `account_aliases` (`[{provider: codex, account_id, alias_of,
 justification}]`) folds one id into another only with a non-empty
