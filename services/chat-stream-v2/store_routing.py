@@ -1249,7 +1249,12 @@ class _RoutingStoreMixin:
                         raise ValueError("assistant_publish_reply_unverified")
                     if publish_kind != "question" and reply_to_question_id != route["reply_to_question_id"]:
                         raise ValueError("assistant_publish_question_unverified")
-                    if publish_kind != "prose":
+                    # A direct-primary first-visible acknowledgment has no lane operation to
+                    # correlate; its exact immutable key is its one-per-dispatch identity.
+                    direct_ack = (direct_single_final and publish_kind == "status"
+                                  and canonical_payload.get("response_state") == "acknowledged"
+                                  and publication_key == "publish:" + dispatch_id + ":ack")
+                    if publish_kind != "prose" and not direct_ack:
                         correlated = False
                         for ref in evidence_refs:
                             receipt = conn.execute(
