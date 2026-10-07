@@ -384,6 +384,7 @@ def _is_send_frame(raw: Any) -> bool:
         return False
     return isinstance(msg, dict) and str(msg.get("type") or "") in {
         "send", "notification.resolve", "notification.resolve_by_dedup", "prompt.answer",
+        "voice_answer.answer",
     }
 
 
@@ -939,6 +940,7 @@ class Server:
         )
         if isinstance(request, dict) and request.get("type") in {
             "notification.resolve", "notification.resolve_by_dedup", "prompt.answer",
+            "voice_answer.answer",
         }:
             for frame in result:
                 if isinstance(frame, dict):

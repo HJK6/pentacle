@@ -60,6 +60,7 @@ from _shared.notifications_store import (
 from v2_runtime import env_number
 from message_envelopes import build_message_envelope
 from outbound_notices import NOTICE_KIND_NOTIFICATION_ANSWER, NoticeDecision
+import voice_answers as voice_answers_v1
 
 log = logging.getLogger("chat_streamd_v2.notify")
 
@@ -427,7 +428,7 @@ class Notify:
         prompt = {f"prompt.{v}": self.prompt for v in ("ask", "status", "answer", "cancel", "list")}
         notif = {f"notification.{v}": self.notification
                  for v in ("create", "resolve_by_dedup", "await", "list", "resolve")}
-        return {**prompt, **notif}
+        return {**prompt, **notif, "voice_answer.answer": self.voice_answer}
 
     # -- hello snapshot ----------------------------------------------------
 
@@ -953,19 +954,9 @@ class Notify:
 
     async def _prompt_answer(self, msg: dict, request_id: str) -> dict:
         qid = str(msg.get("question_id") or "")
-        # Canonical answer payload (D3): {question_id, selections?: [str], text?: str}.
-        # Legacy aliases are rejected rather than guessed at.
-        for legacy in ("custom_text", "value", "note"):
-            if msg.get(legacy) is not None:
-                return self._prompt_error(request_id, "prompt_invalid", question_id=qid,
-                                          message=f"{legacy} is not a valid answer field; "
-                                                  "send selections and/or text")
-        if msg.get("text") is not None and not isinstance(msg.get("text"), str):
-            return self._prompt_error(request_id, "prompt_invalid", question_id=qid,
-                                      message="text must be a string")
-        if msg.get("selections") is not None and not isinstance(msg.get("selections"), list):
-            return self._prompt_error(request_id, "prompt_invalid", question_id=qid,
-                                      message="selections must be a list")
+        invalid = self._answer_payload_error(msg, request_id, qid, self._prompt_error)
+        if invalid is not None:
+            return invalid
         question = await self._db.call("get_agent_question", qid)
         if question is None:
             return self._prompt_error(request_id, "question_not_found", question_id=qid)
@@ -978,18 +969,53 @@ class Notify:
             )
         if not _question_mutation_authorized(msg, question, allow_verified_agent_relay=True):
             return self._prompt_error(request_id, "question_unauthorized", question_id=qid)
+        failed, question, client, already = await self._apply_answer(
+            question, msg, request_id, _actor_provenance(msg), self._prompt_error)
+        if failed is not None:
+            return failed
+        response = {"type": "prompt.answer.ok", "request_id": request_id, "ok": True, "question": question}
+        if already:
+            response["already_answered"] = True
+        else:
+            response["notification"] = client
+        return response
+
+    @staticmethod
+    def _answer_payload_error(msg: dict, request_id: str, qid: str, error: Callable[..., dict]) -> dict | None:
+        # Canonical answer payload (D3): {question_id, selections?: [str], text?: str}.
+        # Legacy aliases are rejected rather than guessed at.
+        for legacy in ("custom_text", "value", "note"):
+            if msg.get(legacy) is not None:
+                return error(request_id, "prompt_invalid", question_id=qid,
+                             message=f"{legacy} is not a valid answer field; "
+                                     "send selections and/or text")
+        if msg.get("text") is not None and not isinstance(msg.get("text"), str):
+            return error(request_id, "prompt_invalid", question_id=qid,
+                         message="text must be a string")
+        if msg.get("selections") is not None and not isinstance(msg.get("selections"), list):
+            return error(request_id, "prompt_invalid", question_id=qid,
+                         message="selections must be a list")
+        return None
+
+    async def _apply_answer(
+        self, question: dict, msg: dict, request_id: str, provenance: dict, error: Callable[..., dict],
+    ) -> tuple[dict | None, dict | None, dict | None, bool]:
+        """The one answer implementation beneath prompt.answer and voice_answer.answer.
+
+        Returns ``(error_frame, question, client_notification, already_answered)``.
+        """
+        qid = str(question.get("question_id") or "")
         # Recheck producer liveness/generation before answering so recovery cannot
         # expose an actionable stale question and an answer cannot be delivered to
         # a replacement generation that reused the producer stream id.
         if question.get("state") == "open" and not self._producer_is_current(question):
             expired = await self._expire_stale_question(question)
-            return self._prompt_error(request_id, "question_producer_gone", question_id=qid,
-                                      question=expired,
-                                      message="the asking session is gone; the question expired")
+            return error(request_id, "question_producer_gone", question_id=qid,
+                         question=expired,
+                         message="the asking session is gone; the question expired"), None, None, False
         envelope = question.get("envelope") if isinstance(question.get("envelope"), dict) else {}
         text = msg.get("text") if isinstance(msg.get("text"), str) else None
         selections = list(msg["selections"]) if isinstance(msg.get("selections"), list) else None
-        provenance = _actor_provenance(msg)
         if str(envelope.get("response_mode") or "") != "free_text":
             # A choice accepts selected values, nonblank text alone, or both.
             # The free-text portion maps to the store's existing custom_text path.
@@ -999,20 +1025,184 @@ class Notify:
                 custom_text=choice_text, note=None, actor_provenance=provenance, request_id=request_id)
         else:
             if selections:
-                return self._prompt_error(request_id, "prompt_invalid", question_id=qid,
-                                          message="free_text questions take text only, not selections")
+                return error(request_id, "prompt_invalid", question_id=qid,
+                             message="free_text questions take text only, not selections"), None, None, False
             if not isinstance(text, str) or not text.strip():
-                return self._prompt_error(request_id, "prompt_invalid", question_id=qid,
-                                          message="text must be a non-empty string")
+                return error(request_id, "prompt_invalid", question_id=qid,
+                             message="text must be a non-empty string"), None, None, False
             question, client, already = await self._answer_free_text(
                 question, text=text, note=None, actor_provenance=provenance, request_id=request_id
             )
-        response = {"type": "prompt.answer.ok", "request_id": request_id, "ok": True, "question": question}
-        if already:
-            response["already_answered"] = True
-        else:
-            response["notification"] = client
-        return response
+        return None, question, client, already
+
+    # -- voice_answers.v1 (binding validation + binding-scoped answer) ------
+
+    async def validate_voice_answers(
+        self, binding: dict[str, Any], *, stream_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Check a normalized binding against the question store; never closes one.
+
+        Returns ``(voice_answers_status, binding with per-item stale flags)``.
+        """
+        if not self._assistant_stream_id or stream_id != self._assistant_stream_id:
+            return voice_answers_v1.status("dropped", reason="not_assistant_thread"), binding
+        await self._await_ready()
+        items: list[dict[str, Any]] = []
+        stale_keys: list[str] = []
+        for item in binding["items"]:
+            question = await self._db.call("get_agent_question", item["question_id"])
+            reason = None
+            if question is None:
+                reason = "unknown_question"
+            elif str(question.get("notification_id") or "") != item["notification_id"]:
+                reason = "notification_mismatch"
+            elif _nullable_text(question.get("producer_stream_id")) != item["producer_stream_id"]:
+                reason = "producer_mismatch"
+            elif item["producer_stream_id"] not in (
+                await self._question_scope(item["surface_stream_id"]) or [item["surface_stream_id"]]
+            ):
+                reason = "surface_mismatch"
+            if reason is not None:
+                return voice_answers_v1.status("dropped", reason=reason), binding
+            stale = question.get("state") != "open" or not self._producer_is_current(question)
+            if stale:
+                stale_keys.append(item["key"])
+            items.append({**item, "stale": stale})
+        return voice_answers_v1.status("bound", stale_keys=stale_keys), {**binding, "items": items}
+
+    async def voice_answer(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """``voice_answer.answer {recording_id, question_id, selections?, text?}``."""
+        request_id = str(msg.get("request_id") or "")
+        qid = _nullable_text(msg.get("question_id"))
+        try:
+            await self._await_ready()
+            return await self._voice_answer(msg, request_id, qid)
+        except InvalidNotification as exc:
+            return self._voice_error(request_id, "prompt_invalid", question_id=qid, message=str(exc))
+        except NotificationNotFound:
+            return self._voice_error(request_id, "question_not_found", question_id=qid)
+        except Exception as exc:  # noqa: BLE001 - outcome unknown; a retry re-derives it
+            log.exception("voice_answer.answer failed question_id=%s", qid)
+            return self._voice_error(request_id, "voice_answer_failed", question_id=qid,
+                                     outcome="failed", message=str(exc))
+
+    async def _voice_answer(self, msg: dict[str, Any], request_id: str, qid: str) -> dict[str, Any]:
+        recording_id = _nullable_text(msg.get("recording_id"))
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if not await self._is_bound_front_desk(auth):
+            return self._voice_error(request_id, "voice_answer_seat_unauthorized", question_id=qid)
+        if not recording_id or not qid:
+            return self._voice_error(request_id, "prompt_invalid", question_id=qid,
+                                     message="recording_id and question_id are required")
+        invalid = self._answer_payload_error(msg, request_id, qid, self._voice_error)
+        if invalid is not None:
+            return invalid
+        store = self._notice_store
+        if store is None or not hasattr(store, "get_voice_answer_binding"):
+            return self._voice_error(request_id, "voice_answer_unavailable", question_id=qid)
+        binding = await store.get_voice_answer_binding(recording_id)
+        if binding is None or binding["stream_id"] != self._assistant_stream_id:
+            return self._voice_error(request_id, "voice_answer_binding_not_found",
+                                     recording_id=recording_id, question_id=qid)
+        if binding["state"] != "bound":
+            return self._voice_error(request_id, "voice_answer_binding_dropped",
+                                     recording_id=recording_id, question_id=qid,
+                                     reason=binding.get("reason"))
+        if not str(binding.get("actor_stream_id") or "").startswith("operator:"):
+            return self._voice_error(request_id, "voice_answer_binding_unauthenticated",
+                                     recording_id=recording_id, question_id=qid)
+        item = next((i for i in binding["items"] if i.get("question_id") == qid), None)
+        if item is None:
+            return self._voice_error(request_id, "voice_answer_question_not_bound",
+                                     recording_id=recording_id, question_id=qid)
+        if qid in binding["acks"]:
+            return self._voice_ok(request_id, binding["acks"][qid], replayed=True)
+        question = await self._db.call("get_agent_question", qid)
+        if question is None:
+            return self._voice_error(request_id, "question_not_found", question_id=qid)
+        if (str(question.get("notification_id") or "") != item.get("notification_id")
+                or _nullable_text(question.get("producer_stream_id")) != item.get("producer_stream_id")):
+            return self._voice_error(request_id, "voice_answer_origin_mismatch",
+                                     recording_id=recording_id, question_id=qid)
+        by = voice_answers_v1.voice_answer_by(recording_id)
+        if question.get("state") != "open":
+            # Our own earlier answer whose acknowledgement was lost, or another path.
+            return await self._voice_settle(request_id, question, item, recording_id, by, replayed=True)
+        if _is_assistant_composite_question(question):
+            return self._voice_error(request_id, "assistant_question_reply_requires_chat", question_id=qid)
+        provenance = {
+            "actor_class": "front_desk_voice_answer",
+            "actor_stream_id": _nullable_text(auth.get("stream_id")) or None,
+            "actor_client": _nullable_text(auth.get("connection_client")) or None,
+            "actor_verified": True,
+            "by": by,
+        }
+        try:
+            failed, question, _client, already = await self._apply_answer(
+                question, msg, request_id, provenance, self._voice_error)
+        except (NotificationResolutionConflict, NotificationResolutionInProgress):
+            question, already, failed = await self._db.call("get_agent_question", qid), True, None
+        if failed is not None:
+            if failed.get("error_code") == "question_producer_gone":
+                failed["outcome"] = "stale"
+            return failed
+        return await self._voice_settle(request_id, question, item, recording_id, by, replayed=already)
+
+    async def _voice_settle(
+        self, request_id: str, question: dict | None, item: dict, recording_id: str, by: str, *, replayed: bool,
+    ) -> dict[str, Any]:
+        """Acknowledge an answer this take applied; anything else closed it first.
+
+        Ownership is read from the notification resolution, which the store
+        writes in the same transaction as the answer itself.
+        """
+        qid = str(item.get("question_id") or "")
+        record = await self._db.call("get_notification", str(item.get("notification_id") or ""))
+        answer = (record or {}).get("resolution") if isinstance((record or {}).get("resolution"), dict) else {}
+        if answer.get("by") != by:
+            return self._voice_error(request_id, "voice_answer_stale", outcome="stale",
+                                     recording_id=recording_id, question_id=qid,
+                                     state=(question or {}).get("state"))
+        ack = {
+            "recording_id": recording_id,
+            "question_id": qid,
+            "notification_id": item.get("notification_id"),
+            "producer_stream_id": item.get("producer_stream_id"),
+            "outcome": "answered",
+            "answered_at": answer.get("at"),
+            "provenance": {"actor": "front_desk", "on_behalf_of": "operator",
+                           "recording_id": recording_id, "actor_stream_id": answer.get("actor_stream_id")},
+        }
+        stored = await self._notice_store.record_voice_answer_ack(
+            recording_id=recording_id, question_id=qid, ack=ack, created_at=str(answer.get("at") or ""),
+        )
+        return self._voice_ok(request_id, stored, replayed=replayed)
+
+    async def _is_bound_front_desk(self, auth: dict[str, Any]) -> bool:
+        """Only the seat currently bound to the assistant thread, at its generation."""
+        stream_id = _nullable_text(auth.get("stream_id"))
+        if auth.get("token_verified") is not True or not stream_id or self._assistant_binding is None:
+            return False
+        try:
+            binding = await self._assistant_binding()
+        except Exception:  # noqa: BLE001 - no readable binding authorizes nobody
+            return False
+        generation = _nullable_text(binding.get("generation")) if isinstance(binding, dict) else ""
+        return bool(
+            generation and binding.get("stream_id") == stream_id
+            and _nullable_text(auth.get("session_generation")) == generation
+        )
+
+    @staticmethod
+    def _voice_ok(request_id: str, ack: dict[str, Any], *, replayed: bool) -> dict[str, Any]:
+        return {"type": "voice_answer.answer.ok", "request_id": request_id, "ok": True,
+                "recording_id": ack.get("recording_id"), "question_id": ack.get("question_id"),
+                "outcome": "answered", "replayed": replayed, "ack": ack}
+
+    @staticmethod
+    def _voice_error(request_id: str, error_code: str, **extra: Any) -> dict[str, Any]:
+        return {"type": "voice_answer.answer.error", "request_id": request_id, "ok": False,
+                "error_code": error_code, "error": error_code, **extra}
 
     async def _prompt_cancel(self, msg: dict, request_id: str) -> dict:
         qid = str(msg.get("question_id") or "")

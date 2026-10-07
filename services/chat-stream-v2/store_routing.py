@@ -16,6 +16,7 @@ import time
 from typing import Any
 
 from store_specs import _row, _session_row
+from voice_answers import insert_binding_conn, status as voice_answers_status
 
 # v2-only. One current routing episode per stream. The sessions row carries the
 # latest observation (`routing_integrity`, reason, and timestamp); this table is
@@ -678,8 +679,14 @@ class _RoutingStoreMixin:
         direct_primary: bool = False,
         direct_target_stream_id: str | None = None,
         direct_target_generation: str | None = None,
+        voice_answers: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Atomically append the visible USER event and its routing receipt."""
+        """Atomically append the visible USER event and its routing receipt.
+
+        ``voice_answers`` is a binding prepared by the composite (voice_answers.v1);
+        it is stored, and its status written onto the USER event, in this same
+        transaction.  A duplicate admission never stores a second binding.
+        """
         if scoped_credential_id is not None and (not scoped_credential_id or actor_stream_id != f"scoped:{scoped_credential_id}"):
             raise ValueError("assistant_scoped_actor_invalid")
         if not input_identity:
@@ -819,8 +826,26 @@ class _RoutingStoreMixin:
                         "actor_stream_id": actor_stream_id,
                     },
                 }
-                if voice_meta:
-                    event["meta"] = voice_meta
+                event_meta = dict(voice_meta)
+                prepared = voice_answers
+                if prepared is not None:
+                    recording_id = prepared.get("recording_id")
+                    if recording_id and conn.execute(
+                        "SELECT 1 FROM v2_voice_answer_bindings WHERE recording_id=?", (recording_id,),
+                    ).fetchone() is not None:
+                        # The take is bound to another stream's turn; this one posts unbound.
+                        prepared = {**prepared, "recording_id": None,
+                                    "status": voice_answers_status("dropped", reason="recording_conflict")}
+                    if prepared.get("echo") is not None:
+                        event_meta["voice_answers"] = prepared["echo"]
+                    event_meta["voice_answers_status"] = prepared["status"]
+                    if prepared.get("recording_id"):
+                        insert_binding_conn(
+                            conn, stream_id=stream_id, input_identity=input_identity,
+                            actor_stream_id=actor_stream_id, prepared=prepared, created_at=timestamp,
+                        )
+                if event_meta:
+                    event["meta"] = event_meta
                 event_json = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                 event_key = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
                 cur = conn.execute(

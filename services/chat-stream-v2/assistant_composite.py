@@ -23,6 +23,7 @@ import uuid
 from typing import Any, Awaitable, Callable, Protocol
 
 from assistant_router import AssistantRouterProcessError
+import voice_answers as voice_answers_v1
 
 
 COMPOSITE_CAPABILITY = "assistant_composite_v1"
@@ -199,7 +200,7 @@ class AssistantCompositeConfig:
 
 def direct_dispatch_envelope(
     config: AssistantCompositeConfig, route: dict[str, Any], *, dispatch_id: str,
-    target: str, generation: str,
+    target: str, generation: str, voice_answers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Freeze the trusted root instruction with its durable route intent."""
     attachments = json.loads(str(route.get("attachments_json") or "[]"))
@@ -238,6 +239,7 @@ def direct_dispatch_envelope(
         "<assistant-original-input-json>\n"
         f"{original_json}\n"
         "</assistant-original-input-json>"
+        f"{voice_answers_v1.dispatch_block(voice_answers)}"
     )
     return {
         "origin": config.stream_id, "dispatch_id": dispatch_id,
@@ -255,6 +257,7 @@ Dispatch = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 Broadcast = Callable[[dict[str, Any]], Awaitable[None]]
 QuestionOperation = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 QuestionAnswer = Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
+VoiceAnswersValidate = Callable[..., Awaitable[tuple[dict[str, Any], dict[str, Any]]]]
 
 
 class AssistantComposite:
@@ -271,6 +274,7 @@ class AssistantComposite:
         question_operation: QuestionOperation | None = None,
         question_answer: QuestionAnswer | None = None,
         publication_attachments: Callable[..., Awaitable[list[dict[str, Any]]]] | None = None,
+        voice_answers_validate: VoiceAnswersValidate | None = None,
     ) -> None:
         self.store = store
         from front_desk_digest import FrontDeskDigest
@@ -282,6 +286,7 @@ class AssistantComposite:
         self.broadcast = broadcast
         self.question_operation = question_operation
         self.question_answer = question_answer
+        self.voice_answers_validate = voice_answers_validate
         self.publication_attachments = publication_attachments
         self._worker: asyncio.Task[None] | None = None
         self._worker_lock = asyncio.Lock()
@@ -644,6 +649,20 @@ class AssistantComposite:
         input_identity = optimistic_id or explicit_msg_id
         if not input_identity:
             raise ValueError("assistant_input_identity_required")
+        raw_voice_answers = msg.get("meta", {}).get("voice_answers") if isinstance(msg.get("meta"), dict) else None
+        voice_answers = None
+        if raw_voice_answers is not None:
+            # A replayed take (same recording_id) resolves to its first turn:
+            # no second binding and no second USER event.
+            recording_id = voice_answers_v1.recording_id_of(raw_voice_answers)
+            prior = await self.store.get_voice_answer_binding(recording_id) if recording_id else None
+            if prior is not None and prior["stream_id"] == self.config.stream_id:
+                input_identity = str(prior["input_identity"])
+            else:
+                voice_answers = await self._prepare_voice_answers(
+                    raw_voice_answers, msg, operator_principal=operator_principal,
+                    scoped_credential_id=scoped_credential_id,
+                )
         request_id = str(msg.get("request_id") or input_identity).strip() or input_identity
         existing = await self.store.get_assistant_composite_route(
             stream_id=self.config.stream_id, input_identity=input_identity,
@@ -679,6 +698,7 @@ class AssistantComposite:
             direct_primary=self.config.direct_primary,
             direct_target_stream_id=self.config.direct_primary_stream_id if self.config.direct_primary else None,
             direct_target_generation=self.config.direct_primary_generation if self.config.direct_primary else None,
+            voice_answers=voice_answers,
         )
         receipt_id = record.get("receipt_id")
         await self.refresh_activity()
@@ -738,6 +758,7 @@ class AssistantComposite:
                     )
                     direct_envelope = (direct_dispatch_envelope(
                         self.config, record, dispatch_id=dispatch_id, target=target, generation=generation,
+                        voice_answers=await self._voice_answers_for(record),
                     ) if self.config.direct_primary else None)
                     updated = await self._update_route(
                         str(record["route_id"]), routing_state="resolved", delivery_state="intent",
@@ -765,6 +786,39 @@ class AssistantComposite:
             "delivery_state": record.get("delivery_state"),
             "duplicate": bool(record.get("duplicate")),
         }
+
+    async def _voice_answers_for(self, route: dict[str, Any]) -> dict[str, Any] | None:
+        """The take's stored binding, shown to the backend beside the transcript."""
+        return await self.store.get_voice_answer_binding_for_input(
+            stream_id=self.config.stream_id, input_identity=str(route.get("input_identity") or ""),
+        )
+
+    async def _prepare_voice_answers(
+        self, raw: object, msg: dict[str, Any], *, operator_principal: str | None,
+        scoped_credential_id: str | None,
+    ) -> dict[str, Any]:
+        """Validate a voice_answers.v1 binding; a rejected binding still posts the turn."""
+        try:
+            binding = voice_answers_v1.normalize_voice_answers(raw)
+        except voice_answers_v1.VoiceAnswersInvalid as exc:
+            return {"recording_id": voice_answers_v1.recording_id_of(raw), "echo": None, "binding": {},
+                    "status": voice_answers_v1.status("dropped", reason=str(exc))}
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        operator_turn = bool(
+            auth.get("operator_authenticated") is True and scoped_credential_id is None
+            and str(operator_principal or "").startswith("operator:")
+        )
+        if not operator_turn:
+            state, checked = voice_answers_v1.status("dropped", reason="operator_unauthenticated"), binding
+        elif self.voice_answers_validate is None:
+            state, checked = voice_answers_v1.status("dropped", reason="validation_unavailable"), binding
+        else:
+            try:
+                state, checked = await self.voice_answers_validate(binding, stream_id=self.config.stream_id)
+            except Exception:  # noqa: BLE001 - validation failure drops the binding, never the turn
+                log.exception("voice answers validation failed stream=%s", self.config.stream_id)
+                state, checked = voice_answers_v1.status("dropped", reason="validation_error"), binding
+        return {"recording_id": binding["recording_id"], "echo": binding, "binding": checked, "status": state}
 
     async def _explicit_reply_target(self, route: dict[str, Any]) -> tuple[str, str, str | None] | None:
         """Use an explicit current correlation without spending a router turn."""
@@ -947,6 +1001,7 @@ class AssistantComposite:
                     direct_envelope = direct_dispatch_envelope(
                         self.config, route, dispatch_id=dispatch_id,
                         target=self.config.direct_primary_stream_id, generation=generation,
+                        voice_answers=await self._voice_answers_for(route),
                     )
                     updated = await self._update_route(
                         str(route["route_id"]), routing_state="resolved", delivery_state="intent",
