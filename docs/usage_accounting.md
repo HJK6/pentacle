@@ -408,7 +408,7 @@ never read. `--redact` replaces account ids with config labels (or
 `unconfigured_account_<n>`) in printed output. Use it for receipts. The
 private `calibration.json` keeps the real ids for weekly-percent lookups.
 
-Codex acceptance: `services/chat-stream-v2/tests/test_usage_codex_rollup.py`
+Codex acceptance: `services/chat-stream-v2/tests/test_usage_rollup_codex.py`
 (AC1–AC7 of `spec_pentacle__usage_codex_rollup_and_calibration_2026_10`).
 
 Acceptance: `services/chat-stream-v2/tests/test_usage_rollup.py` (AC1–AC9
