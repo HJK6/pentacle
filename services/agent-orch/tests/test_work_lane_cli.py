@@ -79,7 +79,7 @@ def test_adopt_apply_uses_stable_request_ids(monkeypatch, tmp_path, capsys):
 
 
 def test_request_confirmation_carries_typed_context(monkeypatch):
-    monkeypatch.setenv("AGENT_ORCH_STREAM_ID", "thoth:v2-fd")
+    monkeypatch.setenv("AGENT_ORCH_STREAM_ID", "host-b:v2-fd")
     sent = _wire(monkeypatch, {"type": "prompt.ask.ok"})
     assert _run(["work-lane", "request-confirmation", "wl-1", "--action", "set_state:done",
                  "--title", "Close lane?", "--body", "Mark the lane done."]) == 0
