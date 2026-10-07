@@ -80,7 +80,7 @@ class _Rig:
         self.db = tmp_path / "sessions.db"
         self.store = Store(str(self.db))
         self.store.start()
-        self.sessions = Sessions(self.store, local_host="thoth")
+        self.sessions = Sessions(self.store, local_host="coordinator")
 
         async def stats_handler(_host, _stats):
             return None
@@ -167,7 +167,7 @@ def _run(tmp_path: Path, body) -> None:
     asyncio.run(go())
 
 
-# --- (a) close before first fence: the Merlin journey --------------------------------
+# --- (a) close before first fence: the short-seat journey --------------------------------
 
 def test_a_one_reply_seat_closed_before_first_fence_is_accounted(tmp_path):
     async def body(rig: _Rig) -> None:

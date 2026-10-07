@@ -134,8 +134,8 @@ boundary.
 A clock step or drift between samples that the samples do not show is not
 detected. It could place a record on the wrong side of a boundary.
 
-The measured offsets on 2026-10-07 were Amaterasu +0.109 s and Merlin −0.115 s
-against Thoth.
+Offsets measured on 2026-10-07 between two satellite hosts and the daemon host
+were about +0.109 s and −0.115 s.
 
 **Held-span file.** The satellite keeps
 `~/.local/state/pentacle-satellite/unfenced_usage.json`

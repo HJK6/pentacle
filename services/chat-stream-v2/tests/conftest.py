@@ -60,6 +60,31 @@ def pytest_configure(config) -> None:
     del config
 
 
+@pytest.fixture(autouse=True)
+def _isolated_satellite_held_spans(tmp_path_factory, monkeypatch):
+    """Keep satellite held-span state off the real ~/.local/state path.
+
+    A `Satellite` built without `held_span_path` uses the production default;
+    on a satellite host that file is live state a v2 satellite would deliver.
+    """
+    try:
+        import usage_hold
+    except ImportError:  # pragma: no cover - module absent on older trees
+        yield
+        return
+    real_init = usage_hold.HeldSpans.__init__
+    default = Path(os.path.expanduser(usage_hold.DEFAULT_PATH))
+    base = tmp_path_factory.mktemp("held-spans")
+
+    def init(self, path=usage_hold.DEFAULT_PATH, **kwargs):
+        if Path(os.path.expanduser(str(path))) == default:
+            path = base / "unfenced_usage.json"
+        real_init(self, path, **kwargs)
+
+    monkeypatch.setattr(usage_hold.HeldSpans, "__init__", init)
+    yield
+
+
 @pytest.fixture()
 def isolated_tmux_env(tmp_path):
     """Keep bare tmux calls and child daemons on one owned test socket."""

@@ -63,7 +63,7 @@ def _journey(tmp_path: Path, monkeypatch, body) -> None:
         db = tmp_path / "sessions.db"
         store = Store(str(db))
         store.start()
-        sessions = Sessions(store, local_host="thoth")
+        sessions = Sessions(store, local_host="coordinator")
 
         async def stats_handler(_host, _stats):
             return None
@@ -127,13 +127,13 @@ def test_red_a_short_seat_span_reaches_the_ledger(tmp_path, monkeypatch):
     async def body(j):
         await j.stats()
         await j.cycle({})
-        await j.open("v2-merlin", "gen-a")
-        j.write("v2-merlin", [_reply("m1", _now())])
-        await j.close("v2-merlin")
+        await j.open("v2-short-seat", "gen-a")
+        j.write("v2-short-seat", [_reply("m1", _now())])
+        await j.close("v2-short-seat")
         for _ in range(3):
-            await j.cycle(j.panes("v2-merlin"))
-        assert j.state(f"{HOST}:v2-merlin", "gen-a") is not None, "span lost: usage.tokens stays null"
-        assert j.state(f"{HOST}:v2-merlin", "gen-a")["output"] == 20
+            await j.cycle(j.panes("v2-short-seat"))
+        assert j.state(f"{HOST}:v2-short-seat", "gen-a") is not None, "span lost: usage.tokens stays null"
+        assert j.state(f"{HOST}:v2-short-seat", "gen-a")["output"] == 20
     _journey(tmp_path, monkeypatch, body)
 
 
@@ -199,3 +199,16 @@ def test_red_h_v1_daemon_ignores_unfenced_fields(tmp_path, monkeypatch):
         assert ack["type"] == "event.push.ok"
         assert "usage_unfenced" in ack, "v1 daemon: frame accepted, unfenced fields ignored (no ack block)"
     _journey(tmp_path, monkeypatch, body)
+
+
+def test_default_hold_file_is_never_the_real_state_path(tmp_path):
+    """Satellites built without held_span_path stay in the test sandbox."""
+    import os
+    import usage_hold
+    from satellite import Satellite, SatelliteConfig
+    real = Path(os.path.expanduser(usage_hold.DEFAULT_PATH))
+    existed = real.exists()
+    sat = Satellite(SatelliteConfig(host="worker-one", checkout=str(tmp_path)))
+    held = sat._held_spans()
+    assert held.path != real and held.path.exists()
+    assert real.exists() == existed
