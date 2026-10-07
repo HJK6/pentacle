@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Read-only usage rollup and calibration over the Thoth ledger (Claude only).
+"""Read-only usage rollup and calibration over the Thoth ledger (Claude and Codex).
 
 Contract: docs/usage_accounting.md § Rollup and calibration. Reads
 ``sessions.db``, ``sessions_archive.db``, ``notifications.db`` and
 ``usage_history.jsonl`` with ``mode=ro`` and work-item frontmatter from shared
 memory; the only write is ``--calibrate`` output (``calibration.json``, 0600).
-Codex streams are listed as deferred (spec_pentacle__usage_codex_rollup_and_calibration_2026_10).
+Codex sessions are reconciled per native session (cumulative ledger row vs per-response detail) before any
+window logic (spec_pentacle__usage_codex_rollup_and_calibration_2026_10).
 Stdlib only and Python 3.9 compatible (Thoth's system interpreter).
 
     python3 tools/usage_rollup.py --spec <spec_id> --json
@@ -55,6 +56,12 @@ METHOD_B_MIN_SPAN = 30
 DEFAULT_UNPLACEABLE_THRESHOLD = 0.01
 RETIRED_QUIET_S = 7 * 86400.0
 PROXY_LABEL = 'proxy: union of inter-response gaps <= 10 min from provenance observed_at (Claude records)'
+CODEX_PROXY_LABEL = 'proxy: union of inter-response gaps <= 10 min from placed Codex response observed_at'
+CODEX_QUOTA = 'codex'
+CODEX_QUOTA_MINUTES = 10080
+CODEX_SOURCE = 'rollout'
+RECON_CLASSES = ('reconciled', 'partial', 'unverifiable')
+CODEX_OUTSIDE = ('retired', 'unverifiable', 'unreconciled', 'untimed')
 DOLLARS_LABEL = 'API-equivalent weighted proxy, not billing'
 
 
@@ -169,35 +176,52 @@ class Seat:
         self.source = source
 
 
+def _ints(raw: Any) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    return {k: int(v) for k, v in raw.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+
+
+def codex_ledger_buckets(raw: dict[str, int]) -> dict[str, int]:
+    """Codex cumulative ledger counters -> the four buckets (cached input is a subset of input_total)."""
+    inp, cached = raw.get('input_total', 0), raw.get('cached_input', 0)
+    return {'uncached_input': inp - cached, 'cache_read': cached, 'cache_write': raw.get('cache_write', 0),
+            'output': raw.get('output', 0)}
+
+
+def _identity(account_source: Any, conflict: Any, account_id: Any) -> tuple[str | None, str]:
+    if account_source is None:
+        return None, 'unknown'
+    if conflict:
+        return None, 'conflict'
+    if account_id:
+        return account_id, 'known'
+    return None, 'unknown'
+
+
 class Rec:
     __slots__ = ('host', 'provider', 'native', 'key', 'stream_id', 'tokens', 'total', 'has_row',
-                 'observed', 'model', 'account', 'account_state', 'cls', 'dollars')
+                 'observed', 'model', 'account', 'account_state', 'cls', 'dollars', 'reasoning')
 
     def __init__(self, row: sqlite3.Row, pricing: Pricing):
         self.host, self.provider, self.native = row['host'], row['provider'], row['native_session_id']
         self.key, self.stream_id = row['record_key'], row['stream_id']
         try:
-            raw = json.loads(row['tokens'])
+            raw = _ints(json.loads(row['tokens']))
         except (TypeError, ValueError):
             raw = {}
-        self.tokens = {k: int(v) for k, v in raw.items()
-                       if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        self.reasoning = raw.get('reasoning', 0) if self.provider == 'codex' else 0
+        self.tokens = codex_ledger_buckets(raw) if self.provider == 'codex' else raw
         self.total = sum(self.tokens.values())
         self.has_row = bool(row['has_row'])
         self.observed = parse_ts(row['observed_at']) if self.has_row else None
         self.model = row['model'] if self.has_row else None
-        if row['account_source'] is None:
-            self.account, self.account_state = None, 'unknown'
-        elif row['conflict']:
-            self.account, self.account_state = None, 'conflict'
-        elif row['account_id']:
-            self.account, self.account_state = row['account_id'], 'known'
-        else:
-            self.account, self.account_state = None, 'unknown'
+        self.account, self.account_state = _identity(row['account_source'], row['conflict'], row['account_id'])
         self.dollars = pricing.dollars(self.model, self.tokens) if self.provider == 'claude' else None
         # Exclusive partition (spec § Coverage): untimed first, then unpriced, then unknown account.
+        # A Codex cumulative row is classified per session by reconciliation (CodexSession), not here.
         if self.provider != 'claude':
-            self.cls = 'deferred'
+            self.cls = 'codex_session'
         elif self.observed is None:
             self.cls = 'untimed'
         elif self.dollars is None:
@@ -210,6 +234,121 @@ class Rec:
     @property
     def account_label(self) -> str:
         return self.account if self.account else self.account_state
+
+
+def _zero() -> dict[str, int]:
+    return dict.fromkeys(BUCKETS, 0)
+
+
+def _add(into: dict[str, int], tokens: dict[str, int]) -> dict[str, int]:
+    for bucket in BUCKETS:
+        into[bucket] += tokens.get(bucket, 0)
+    return into
+
+
+class CodexRow:
+    """One v2_usage_codex_responses row in the four ledger buckets; reasoning is a labelled subset of output."""
+    __slots__ = ('host', 'provider', 'native', 'stream_id', 'observed', 'model', 'tokens', 'total', 'reasoning',
+                 'account', 'account_state', 'dollars', 'cls')
+
+    def __init__(self, row: sqlite3.Row, pricing: Pricing):
+        self.host, self.provider, self.native = row['host'], 'codex', row['native_session_id']
+        self.stream_id = None
+        self.observed = parse_ts(row['observed_at'])
+        self.model = row['model']
+        self.tokens = {'uncached_input': int(row['input']) - int(row['cached_input']),
+                       'cache_read': int(row['cached_input']), 'cache_write': int(row['cache_write_input']),
+                       'output': int(row['output'])}
+        self.total = sum(self.tokens.values())
+        self.reasoning = int(row['reasoning_output'])
+        self.account, self.account_state = None, 'unknown'
+        self.dollars = pricing.dollars(self.model, self.tokens)
+        self.cls = 'untimed'
+
+    def classify(self) -> None:
+        """Placed rows only (inside a reconciled/partial session): same order as Claude."""
+        if self.observed is None:
+            self.cls = 'untimed'
+        elif self.dollars is None:
+            self.cls = 'unpriced'
+        elif self.account is None:
+            self.cls = 'unknown_account'
+        else:
+            self.cls = 'measured'
+
+    @property
+    def account_label(self) -> str:
+        return self.account if self.account else self.account_state
+
+
+class CodexSession:
+    """Per-native-session reconciliation of the cumulative ledger row C_n with the response rows R_n.
+
+    The class is decided first over every response (timed or not); rows are labelled only inside
+    reconciled/partial sessions. Invariant: placed + untimed + unreconciled == C_n per bucket, or the whole
+    mass is unverifiable and appears nowhere else.
+    """
+
+    def __init__(self, host: str, native: str, cumulative: Rec | None, responses: list[CodexRow],
+                 identity: tuple[str | None, str]):
+        self.host, self.native = host, native
+        self.stream_id = cumulative.stream_id if cumulative is not None else None
+        self.cumulative = dict(cumulative.tokens) if cumulative is not None else None
+        self.responses = responses
+        self.account, self.account_state = identity
+        self.received = _zero()
+        for row in responses:
+            _add(self.received, row.tokens)
+        c = self.cumulative
+        self.placed: list[CodexRow] = []
+        self.untimed = _zero()
+        self.unreconciled = _zero()
+        self.unverifiable = _zero()
+        if c is None or any(self.received[b] > c.get(b, 0) for b in BUCKETS):
+            self.cls = 'unverifiable'
+            self.unverifiable = ({b: max(self.received[b], c.get(b, 0)) for b in BUCKETS} if c is not None
+                                 else dict(self.received))
+        else:
+            self.cls = 'reconciled' if all(self.received[b] == c.get(b, 0) for b in BUCKETS) else 'partial'
+            self.unreconciled = {b: c.get(b, 0) - self.received[b] for b in BUCKETS}
+            for row in responses:
+                if row.observed is None:
+                    _add(self.untimed, row.tokens)
+                else:
+                    self.placed.append(row)
+        self.set_account(self.account, self.account_state)
+
+    def set_account(self, account: str | None, state: str) -> None:
+        self.account, self.account_state = account, state
+        for row in self.responses:
+            row.stream_id = self.stream_id
+            row.account, row.account_state = account, state
+            row.classify()
+
+    @property
+    def account_label(self) -> str:
+        return self.account if self.account else self.account_state
+
+    def masses(self) -> dict[str, int]:
+        placed = sum(r.total for r in self.placed)
+        return {'placed': placed, 'untimed': sum(self.untimed.values()),
+                'unreconciled': sum(self.unreconciled.values()), 'unverifiable': sum(self.unverifiable.values())}
+
+    @property
+    def total(self) -> int:
+        return sum(self.masses().values())
+
+
+def build_codex_sessions(cumulative: dict[tuple[str, str], Rec], responses: dict[tuple[str, str, str], CodexRow],
+                         identity: dict[tuple[str, str], tuple[str | None, str]]) -> list[CodexSession]:
+    grouped: dict[tuple[str, str], list[CodexRow]] = {}
+    for (host, native, _rid), row in sorted(responses.items()):
+        grouped.setdefault((host, native), []).append(row)
+    sessions = []
+    for key in sorted(set(cumulative) | set(grouped)):
+        sessions.append(CodexSession(key[0], key[1], cumulative.get(key), grouped.get(key, []),
+                                     identity.get(key, (None, 'unknown'))))
+    return sessions
 
 
 class WorkItem:
@@ -310,6 +449,10 @@ class Sources:
         self.cards: list[tuple[str | None, str | None, float, float]] = []
         self.holds: list[tuple[str, float, float]] = []
         self.history: list[dict[str, Any]] = []
+        self._codex_cumulative: dict[tuple[str, str], Rec] = {}
+        self._codex_responses: dict[tuple[str, str, str], CodexRow] = {}
+        self._codex_identity: dict[tuple[str, str], tuple[str | None, str]] = {}
+        self.codex_alias_report: list[dict[str, Any]] = []
         self.usage_state: list[tuple[str, str, float | None]] = []  # (collection_host, stream_id, updated_at)
         live = data_dir / 'sessions.db'
         if not live.exists():
@@ -331,6 +474,13 @@ class Sources:
                 if isinstance(entry, dict):
                     self.history.append(entry)
         self.work_items = load_work_items(work_root)
+        self.codex = build_codex_sessions(self._codex_cumulative, self._codex_responses, self._codex_identity)
+
+    def apply_codex_aliases(self, aliases: dict[str, str]) -> None:
+        """Justified private-config aliases fold one creator account into another (basis: aliased)."""
+        for session in self.codex:
+            if session.account in aliases:
+                session.set_account(aliases[session.account], 'known')
 
     def _load_db(self, conn: sqlite3.Connection, source: str) -> None:
         tables = _tables(conn)
@@ -339,7 +489,19 @@ class Sources:
                 seat = Seat(dict(row), source)
                 self.seats[seat.stream_id] = seat  # live wins over archive (loaded second)
         if {'v2_usage_records', 'v2_usage_provenance', 'v2_usage_identity'} <= tables:
-            self.records.extend(Rec(row, self.pricing) for row in conn.execute(RECORDS_SQL))
+            for row in conn.execute(RECORDS_SQL):
+                rec = Rec(row, self.pricing)
+                self.records.append(rec)
+                if rec.provider == 'codex':  # one cumulative row per native session; live wins over archive
+                    self._codex_cumulative[(rec.host, rec.native)] = rec
+            for row in conn.execute("SELECT host, native_session_id, account_id, account_source, conflict "
+                                    "FROM v2_usage_identity WHERE provider='codex'"):
+                self._codex_identity[(row['host'], row['native_session_id'])] = _identity(
+                    row['account_source'], row['conflict'], row['account_id'])
+        if 'v2_usage_codex_responses' in tables:
+            for row in conn.execute('SELECT * FROM v2_usage_codex_responses'):
+                key = (row['host'], row['native_session_id'], row['response_id'])
+                self._codex_responses[key] = CodexRow(row, self.pricing)
         if 'v2_usage_state' in tables:
             for row in conn.execute('SELECT collection_host, stream_id, updated_at FROM v2_usage_state'):
                 self.usage_state.append((row['collection_host'], row['stream_id'], parse_ts(row['updated_at'])))
@@ -419,20 +581,24 @@ def attribute(seats: dict[str, Seat]) -> dict[str, tuple[str | None, bool]]:
 class Calibration:
     def __init__(self, data: dict[str, Any] | None, path: Path | None):
         self.path = path
-        self.coefficients: dict[str, dict[str, Any]] = {}
+        self.coefficients: dict[tuple[str, str], dict[str, Any]] = {}
         for entry in (data or {}).get('entries') or []:
             if entry.get('provider') == 'claude' and entry.get('quota') == QUOTA and entry.get('account_id'):
-                self.coefficients[entry['account_id']] = entry
+                self.coefficients[('claude', entry['account_id'])] = entry
+        for entry in ((data or {}).get('codex') or {}).get('entries') or []:
+            if entry.get('provider') == 'codex' and entry.get('quota') == CODEX_QUOTA and entry.get('account_id'):
+                self.coefficients[('codex', entry['account_id'])] = entry
 
-    def weekly_pct(self, account: str, dollars: float) -> dict[str, Any]:
-        entry = self.coefficients.get(account)
+    def weekly_pct(self, account: str, dollars: float, provider: str = 'claude') -> dict[str, Any]:
+        quota = QUOTA if provider == 'claude' else CODEX_QUOTA
+        entry = self.coefficients.get((provider, account))
         if entry is None:
             reason = 'no calibration' if self.path is None else 'account not in calibration'
-            return {'value': None, 'quota': QUOTA, 'reason': reason}
+            return {'value': None, 'quota': quota, 'reason': reason}
         if entry.get('coefficient') is None:
-            return {'value': None, 'quota': QUOTA,
+            return {'value': None, 'quota': quota,
                     'reason': entry.get('reason') or f"calibration {entry.get('status') or 'unavailable'}"}
-        return {'value': round(dollars / entry['coefficient'], 4), 'quota': QUOTA,
+        return {'value': round(dollars / entry['coefficient'], 4), 'quota': quota,
                 'basis': entry.get('basis'), 'usd_per_pct': entry['coefficient']}
 
 
@@ -448,6 +614,10 @@ class Context:
         self.records_by_stream: dict[str, list[Rec]] = {}
         for rec in sources.records:
             self.records_by_stream.setdefault(rec.stream_id, []).append(rec)
+        self.codex_by_stream: dict[str, list[CodexSession]] = {}
+        for session in sources.codex:
+            if session.stream_id:
+                self.codex_by_stream.setdefault(session.stream_id, []).append(session)
         self.streams_by_spec: dict[str, list[str]] = {}
         for stream_id, (spec, _folded) in self.attribution.items():
             if spec:
@@ -525,15 +695,115 @@ def summarize_claude(recs: list[Rec], ctx: Context) -> dict[str, Any]:
     }
 
 
-def summarize_codex(recs: list[Rec]) -> dict[str, Any]:
-    totals: dict[str, int] = {}
-    for rec in recs:
-        for key, value in rec.tokens.items():
-            totals[key] = totals.get(key, 0) + value
-    return {'provider': 'codex', 'status': 'deferred', 'priced': False, 'windows': None,
-            'streams': sorted({r.stream_id for r in recs}), 'records': len(recs),
-            'ledger_cumulative_tokens': totals,
-            'follow_up': 'spec_pentacle__usage_codex_rollup_and_calibration_2026_10'}
+def _recon_block(sessions: list[CodexSession]) -> dict[str, Any]:
+    """Session counts and token masses per reconciliation class (the per-bucket split is in `tokens`)."""
+    out: dict[str, Any] = {}
+    for cls in RECON_CLASSES:
+        mine = [s for s in sessions if s.cls == cls]
+        block: dict[str, Any] = {'sessions': len(mine), 'tokens': sum(s.total for s in mine)}
+        if cls == 'partial':
+            block['unreconciled_tokens'] = sum(s.masses()['unreconciled'] for s in mine)
+        out[cls] = block
+    return out
+
+
+def _mass_by_host_account(sessions: list[CodexSession], kind: str) -> list[dict[str, Any]]:
+    mass: dict[tuple[str, str], dict[str, int]] = {}
+    for session in sessions:
+        tokens = getattr(session, kind)
+        if sum(tokens.values()):
+            _add(mass.setdefault((session.host, session.account_label), _zero()), tokens)
+    return [{'host': h, 'account_id': a, 'tokens': sum(t.values()), 'by_bucket': t} for (h, a), t in sorted(mass.items())]
+
+
+def summarize_codex(sessions: list[CodexSession], ctx: Context) -> dict[str, Any]:
+    """Codex scope summary: placed response rows are priced and windowed; everything else is reported, never priced."""
+    ranged = ctx.since is not None or ctx.until is not None
+    placed = [r for s in sessions for r in s.placed
+              if not ranged or ((ctx.since is None or r.observed >= ctx.since)
+                                and (ctx.until is None or r.observed < ctx.until))]
+    tokens, untimed, unreconciled, unverifiable = _zero(), _zero(), _zero(), _zero()
+    for row in placed:
+        _add(tokens, row.tokens)
+    for session in sessions:
+        _add(untimed, session.untimed)
+        _add(unreconciled, session.unreconciled)
+        _add(unverifiable, session.unverifiable)
+    partition = dict.fromkeys(('measured', 'unpriced', 'unknown_account'), 0)
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    accounts: dict[str, dict[str, Any]] = {}
+    dollars = 0.0
+    for row in placed:
+        partition[row.cls] += row.total
+        group = groups.setdefault((row.model or 'unknown', row.account_label), {
+            'model': row.model or 'unknown', 'account_id': row.account_label, 'responses': 0,
+            'tokens': _zero(), 'reasoning_output': 0, 'dollars': 0.0, 'priced': row.dollars is not None})
+        group['responses'] += 1
+        _add(group['tokens'], row.tokens)
+        group['reasoning_output'] += row.reasoning
+        acct = accounts.setdefault(row.account_label, {'account_id': row.account_label, 'tokens': 0,
+                                                       'dollars': 0.0, 'unpriced_tokens': 0})
+        acct['tokens'] += row.total
+        if row.dollars is None:
+            acct['unpriced_tokens'] += row.total
+        else:
+            group['dollars'] += row.dollars
+            acct['dollars'] += row.dollars
+            dollars += row.dollars
+    for group in groups.values():
+        group['dollars'] = round(group['dollars'], 4) if group['priced'] else None
+        if not group['priced']:
+            group['bucket'] = 'unpriced'
+    for acct in accounts.values():
+        acct['dollars'] = round(acct['dollars'], 4)
+        if acct['account_id'] in ('unknown', 'conflict'):
+            acct['weekly_pct'] = {'value': None, 'quota': CODEX_QUOTA, 'reason': f"account {acct['account_id']}"}
+        else:
+            acct['weekly_pct'] = ctx.cal.weekly_pct(acct['account_id'], acct['dollars'], 'codex')
+    outside = {'untimed': sum(untimed.values()), 'unreconciled': sum(unreconciled.values()),
+               'unverifiable': sum(unverifiable.values())}
+    placed_total = sum(partition.values())
+    out: dict[str, Any] = {
+        'provider': 'codex',
+        'streams': sorted({s.stream_id for s in sessions if s.stream_id}),
+        'records': sum(1 for s in sessions if s.cumulative is not None),
+        'sessions': len(sessions),
+        'responses': sum(len(s.responses) for s in sessions),
+        'tokens': tokens,
+        'reasoning_output': sum(r.reasoning for r in placed),
+        'placed_tokens': placed_total,
+        'dollars': round(dollars, 4),
+        'dollars_label': DOLLARS_LABEL,
+        'unpriced_tokens': partition['unpriced'],
+        'partition_tokens': {**partition, **outside},
+        'outside_window_tokens': {'untimed': untimed, 'unreconciled': unreconciled, 'unverifiable': unverifiable},
+        'reconciliation': _recon_block(sessions),
+        'unreconciled_mass': _mass_by_host_account(sessions, 'unreconciled'),
+        'unverifiable_mass': _mass_by_host_account(sessions, 'unverifiable'),
+        'by_model_account': sorted(groups.values(), key=lambda g: (g['model'], g['account_id'])),
+        'by_account': sorted(accounts.values(), key=lambda a: a['account_id']),
+    }
+    denom = placed_total + sum(outside.values())
+    if ranged:  # unplaceable mass has no time, so it cannot be assigned to (or kept out of) a range
+        out.update(completeness=None, measured_coverage=None,
+                   completeness_withheld='--since/--until set; untimed, unreconciled and unverifiable mass has no time')
+    else:
+        out['completeness'] = round(placed_total / denom, 6) if denom else None
+        out['measured_coverage'] = round(partition['measured'] / denom, 6) if denom else None
+    return out
+
+
+def codex_by_stream(sessions: list[CodexSession]) -> list[dict[str, Any]]:
+    rows = []
+    for stream in sorted({s.stream_id for s in sessions if s.stream_id}):
+        mine = [s for s in sessions if s.stream_id == stream]
+        placed = sum(s.masses()['placed'] for s in mine)
+        total = sum(s.total for s in mine)
+        rows.append({'stream_id': stream, 'sessions': len(mine), 'placed_tokens': placed, 'total_tokens': total,
+                     'dollars': round(sum(r.dollars or 0.0 for s in mine for r in s.placed), 4),
+                     'completeness': round(placed / total, 6) if total else None,
+                     'reconciliation': {c: sum(1 for s in mine if s.cls == c) for c in RECON_CLASSES}})
+    return rows
 
 
 def time_metrics(ctx: Context, spec_id: str, streams: list[str]) -> dict[str, Any]:
@@ -579,6 +849,18 @@ def time_metrics(ctx: Context, spec_id: str, streams: list[str]) -> dict[str, An
             times = sorted(r.observed for r in ctx.records_by_stream.get(stream, ()) if r.provider == 'claude')
             gaps += [(a, b) for a, b in zip(times, times[1:]) if b - a <= ACTIVITY_GAP_S]
         out['activity_proxy_h'] = {'value': hours(span(gaps)), 'label': PROXY_LABEL}
+    codex = [s for stream in streams for s in ctx.codex_by_stream.get(stream, ())]
+    if not codex:
+        out['codex_activity_proxy_h'] = {'value': None, 'label': CODEX_PROXY_LABEL, 'reason': 'no Codex sessions'}
+    elif any(s.masses()['placed'] != s.total for s in codex):
+        out['codex_activity_proxy_h'] = {'value': None, 'label': CODEX_PROXY_LABEL,
+                                         'reason': 'Codex mass outside placed responses'}
+    else:
+        gaps = []
+        for stream in streams:
+            times = sorted(r.observed for s in ctx.codex_by_stream.get(stream, ()) for r in s.placed)
+            gaps += [(a, b) for a, b in zip(times, times[1:]) if b - a <= ACTIVITY_GAP_S]
+        out['codex_activity_proxy_h'] = {'value': hours(span(gaps)), 'label': CODEX_PROXY_LABEL}
     qa = sorted(at for stream, verdict, at in src.reports if stream in stream_set and verdict and at is not None)
     out['qa_rounds'] = sum(1 for stream, verdict, _ in src.reports if stream in stream_set and verdict)
     out['time_to_first_qa_h'] = hours(qa[0] - first_open) if qa and first_open is not None else None
@@ -589,6 +871,7 @@ def spec_rollup(ctx: Context, spec_id: str) -> dict[str, Any]:
     spec_id = normalize_spec_ids(spec_id)[0]
     streams = sorted(ctx.streams_by_spec.get(spec_id, ()))
     recs = [r for s in streams for r in ctx.records_by_stream.get(s, ())]
+    codex = [c for s in streams for c in ctx.codex_by_stream.get(s, ())]
     item = ctx.src.work_items.get(spec_id)
     return {
         'spec_id': spec_id,
@@ -597,7 +880,7 @@ def spec_rollup(ctx: Context, spec_id: str) -> dict[str, Any]:
         'streams': streams,
         'folded_streams': sorted(s for s in streams if ctx.attribution[s][1]),
         'claude': summarize_claude([r for r in recs if r.provider == 'claude' and ctx.in_range(r)], ctx),
-        'codex': summarize_codex([r for r in recs if r.provider == 'codex']),
+        'codex': {**summarize_codex(codex, ctx), 'by_stream': codex_by_stream(codex)},
         'untimed_outside_range_records': ctx.range_excluded([r for r in recs if r.provider == 'claude']),
         'completeness': round(sum(r.has_row for r in recs if r.provider == 'claude')
                               / max(1, sum(1 for r in recs if r.provider == 'claude')), 6),
@@ -637,13 +920,14 @@ def project_rollup(ctx: Context, project: str) -> dict[str, Any]:
     members = project_members(ctx, project)
     streams = sorted({s for spec in members for s in ctx.streams_by_spec.get(spec, ())})
     recs = [r for s in streams for r in ctx.records_by_stream.get(s, ())]
+    codex = [c for s in streams for c in ctx.codex_by_stream.get(s, ())]
     return {
         'project': project,
         'kind': 'epic' if project.startswith('epic_') else 'repo',
         'member_specs': members,
         'streams': len(streams),
         'claude': summarize_claude([r for r in recs if r.provider == 'claude' and ctx.in_range(r)], ctx),
-        'codex': summarize_codex([r for r in recs if r.provider == 'codex']),
+        'codex': summarize_codex(codex, ctx),
         'specs': [spec_rollup(ctx, spec) for spec in members],
     }
 
@@ -670,10 +954,11 @@ def comparables(ctx: Context, repo: str, kind: str | None, limit: int) -> dict[s
         pcts = {a['account_id']: a['weekly_pct']['value'] for a in roll['claude']['by_account']}
         row = {'spec_id': item.id, 'kind': item.kind, 'completed_at': iso(item.completed_at),
                'elapsed_delivery_h': delivery['value_h'], 'dollars': roll['claude']['dollars'],
-               'weekly_pct': pcts}
+               'weekly_pct': pcts, 'codex_dollars': roll['codex']['dollars'] if roll['codex']['sessions'] else None,
+               'codex_completeness': roll['codex']['completeness']}
         if not roll['claude']['records']:  # no Claude evidence: a zero would bias the quantiles low
             row['dollars'] = None
-            row['dollars_reason'] = 'codex_only_deferred' if roll['codex']['records'] else 'no_usage_records'
+            row['dollars_reason'] = 'codex_only' if roll['codex']['sessions'] else 'no_usage_records'
         rows.append(row)
         if len(rows) >= limit:
             break
@@ -684,6 +969,7 @@ def comparables(ctx: Context, repo: str, kind: str | None, limit: int) -> dict[s
     out['status'] = 'ok'
     out['elapsed_delivery_h'] = _quartiles([r['elapsed_delivery_h'] for r in rows])
     out['dollars'] = _quartiles([r['dollars'] for r in rows if r['dollars'] is not None])
+    out['codex_dollars'] = _quartiles([r['codex_dollars'] for r in rows if r['codex_dollars'] is not None])
     accounts = sorted({a for r in rows for a in r['weekly_pct']})
     out['weekly_pct'] = {a: _quartiles([r['weekly_pct'][a] for r in rows if r['weekly_pct'].get(a) is not None])
                          for a in accounts}
@@ -752,10 +1038,10 @@ def retired_hosts(src: Sources, config: dict[str, Any]) -> tuple[set[str], list[
 
 
 class Timeline:
-    """Timed Claude records ordered by observed_at, for window and interval slices."""
+    """Timed records of one provider ordered by observed_at, for window and interval slices."""
 
-    def __init__(self, records: list[Rec]):
-        timed = sorted((r for r in records if r.provider == 'claude' and r.observed is not None),
+    def __init__(self, records: Iterable[Any], provider: str = 'claude'):
+        timed = sorted((r for r in records if r.provider == provider and r.observed is not None),
                        key=lambda r: r.observed)
         self.recs = timed
         self.times = [r.observed for r in timed]
@@ -808,11 +1094,13 @@ def account_partition(acct: Account | None, recs: Iterable[Rec]) -> dict[str, An
             'dollars': round(dollars, 6), 'coverage': (tokens['measured'] / denom) if denom else None}
 
 
-def identity_mass(by_host: dict[str, dict[str, int]], outside: dict[str, dict[str, int]]) -> list[dict[str, Any]]:
-    """Per-host identity mass: window buckets (summing to the parent denominator) plus untimed/retired outside it."""
+def identity_mass(by_host: dict[str, dict[str, int]], outside: dict[str, dict[str, int]],
+                  provider: str = 'claude') -> list[dict[str, Any]]:
+    """Per-host identity mass: window buckets (summing to the parent denominator) plus the outside-window classes."""
     zero = {**dict.fromkeys(WINDOW_BUCKETS, 0), 'conflict': 0}
-    return [{'provider': 'claude', 'host': host, 'window': dict(by_host.get(host) or zero),
-             'outside_window_sum': dict(outside.get(host) or {'untimed': 0, 'retired': 0})}
+    keys = ('untimed', 'retired') if provider == 'claude' else CODEX_OUTSIDE
+    return [{'provider': provider, 'host': host, 'window': dict(by_host.get(host) or zero),
+             'outside_window_sum': dict(outside.get(host) or dict.fromkeys(keys, 0))}
             for host in sorted(set(by_host) | set(outside))]
 
 
@@ -848,6 +1136,49 @@ def unplaceable_summary(records: list[Rec], threshold: float, retired: set[str] 
             'ratio': round(ratio, 6), 'threshold': threshold, 'passes': ratio <= threshold,
             'by_host_account': [{'host': h, 'account_id': a, 'tokens': t} for (h, a), t in sorted(mass.items())],
             'retired_mass': [{'provider': 'claude', 'host': h, 'tokens': t} for h, t in sorted(retired_mass.items())]}
+
+
+def codex_outside(sessions: list[CodexSession], retired: set[str]) -> dict[str, dict[str, int]]:
+    """Per-host Codex mass outside every window, classified once: retired -> unverifiable -> unreconciled -> untimed."""
+    outside: dict[str, dict[str, int]] = {}
+    for session in sessions:
+        host = outside.setdefault(session.host, dict.fromkeys(CODEX_OUTSIDE, 0))
+        if session.host in retired:
+            host['retired'] += session.total
+            continue
+        masses = session.masses()
+        for cls in ('unverifiable', 'unreconciled', 'untimed'):
+            host[cls] += masses[cls]
+    return {h: v for h, v in outside.items() if any(v.values())}
+
+
+def codex_unplaceable_summary(sessions: list[CodexSession], threshold: float,
+                              retired: set[str] = frozenset()) -> dict[str, Any]:
+    """Unverifiable + unreconciled + untimed share of all Codex ledger mass; honoured retired hosts leave both sides."""
+    retired_mass: dict[str, int] = {}
+    live = []
+    for session in sessions:
+        if session.host in retired:
+            retired_mass[session.host] = retired_mass.get(session.host, 0) + session.total
+        else:
+            live.append(session)
+    total = sum(s.total for s in live)
+    mass: dict[tuple[str, str], dict[str, int]] = {}
+    for session in live:
+        m = session.masses()
+        if m['unverifiable'] or m['unreconciled'] or m['untimed']:
+            row = mass.setdefault((session.host, session.account_label),
+                                  {'unverifiable': 0, 'unreconciled': 0, 'untimed': 0})
+            for cls in row:
+                row[cls] += m[cls]
+    unplaceable = sum(sum(v.values()) for v in mass.values())
+    ratio = (unplaceable / total) if total else 0.0
+    return {'provider': 'codex', 'unplaceable_tokens': unplaceable, 'provider_total_tokens': total,
+            'ratio': round(ratio, 6), 'threshold': threshold, 'passes': ratio <= threshold,
+            'by_class': {c: sum(v[c] for v in mass.values()) for c in ('unverifiable', 'unreconciled', 'untimed')},
+            'by_host_account': [{'host': h, 'account_id': a, 'tokens': sum(v.values()), **v}
+                                for (h, a), v in sorted(mass.items())],
+            'retired_mass': [{'provider': 'codex', 'host': h, 'tokens': t} for h, t in sorted(retired_mass.items())]}
 
 
 def windows_for(config: dict[str, Any], first: float, now: float) -> list[tuple[float, float]]:
@@ -908,16 +1239,25 @@ def _minute(value: Any) -> int | None:
     return None if ts is None else int(round(ts / 60.0))
 
 
-def history_lines(history: list[dict[str, Any]], account: str, window_kind: str) -> tuple[list[dict], list[dict]]:
-    """(deduped non-probe lines sorted by observed_at, probe/invalid exclusions) for one account and quota."""
+def history_lines(history: list[dict[str, Any]], account: str, window_kind: str, provider: str = 'claude',
+                  window_minutes: int | None = None, source: str | None = None) -> tuple[list[dict], list[dict]]:
+    """(deduped non-probe lines sorted by observed_at, probe/invalid exclusions) for one account and quota.
+
+    Codex passes window_minutes and source so only the one weekly rollout quota is ever read.
+    """
     seen, lines, probes = set(), [], []
     for line in history:
-        if line.get('provider') != 'claude' or line.get('window_kind') != window_kind:
+        if line.get('provider') != provider or line.get('window_kind') != window_kind:
+            continue
+        if window_minutes is not None and line.get('window_minutes') != window_minutes:
             continue
         if line.get('account_id') != account:
             continue
         if line.get('source') == 'probe':
             probes.append({'observed_at': line.get('observed_at'), 'reason': 'probe_source'})
+            continue
+        if source is not None and line.get('source') != source:
+            probes.append({'observed_at': line.get('observed_at'), 'reason': 'source_not_' + source})
             continue
         if parse_ts(line.get('observed_at')) is None or not isinstance(line.get('pct'), (int, float)):
             probes.append({'observed_at': line.get('observed_at'), 'reason': 'invalid_line'})
@@ -932,14 +1272,13 @@ def history_lines(history: list[dict[str, Any]], account: str, window_kind: str)
     return lines, probes
 
 
-def method_b(acct: Account, timeline: Timeline, history: list[dict[str, Any]], eligible: bool,
-             outside: dict[str, dict[str, int]]) -> dict[str, Any]:
+def pair_samples(acct: Account, timeline: Timeline, lines: list[dict], probes: list[dict], eligible: bool,
+                 outside: dict[str, dict[str, int]], provider: str = 'claude') -> dict[str, Any]:
     """Pair each positive pct change with the previous pct-change observation.
 
     Delta = 0 observations extend the open interval instead of closing it, so their tokens stay in the next
     sample; a pct decrease starts a new base and forms no sample. Exclusions judge the whole interval.
     """
-    lines, probes = history_lines(history, acct.id, QUOTA)
     samples, exclusions = [], list(probes)
     union_recs: list[Rec] = []
     formed = 0
@@ -960,7 +1299,7 @@ def method_b(acct: Account, timeline: Timeline, history: list[dict[str, Any]], e
         union_recs.extend(recs)
         formed += 1
         part = account_partition(acct, recs)
-        sample: dict[str, Any] = {'from': base['observed_at'], 'to': line['observed_at'],
+        sample = {'from': base['observed_at'], 'to': line['observed_at'],
                                   'delta_pct': delta, 'interval_s': round(t2 - t1, 3),
                                   'observations': len(run) + 2, 'tokens': part['tokens'],
                                   'dollars': round(part['dollars'], 6)}
@@ -988,21 +1327,62 @@ def method_b(acct: Account, timeline: Timeline, history: list[dict[str, Any]], e
             samples.append(sample)
         base, run = line, []
     union = account_partition(acct, union_recs)
-    out: dict[str, Any] = {'method': 'history_regression', 'quota': QUOTA, 'valid_samples': len(samples),
-                           'span_pct': sum(s['delta_pct'] for s in samples), 'samples': samples,
-                           'exclusions': exclusions, 'min_samples': METHOD_B_MIN_SAMPLES,
-                           'min_span_pct': METHOD_B_MIN_SPAN, 'min_coverage': SAMPLE_MIN_COVERAGE,
-                           'interval_union': {'intervals': formed, 'tokens': union['tokens'],
-                                              'identity_mass_by_host': identity_mass(union['by_host'], outside)}}
+    return {'valid_samples': len(samples), 'span_pct': sum(s['delta_pct'] for s in samples), 'samples': samples,
+            'exclusions': exclusions, 'min_samples': METHOD_B_MIN_SAMPLES,
+            'min_span_pct': METHOD_B_MIN_SPAN, 'min_coverage': SAMPLE_MIN_COVERAGE,
+            'interval_union': {'intervals': formed, 'tokens': union['tokens'],
+                               'identity_mass_by_host': identity_mass(union['by_host'], outside, provider)}}
+
+
+def fit_origin(samples: list[dict[str, Any]], value: Any) -> tuple[float, float] | None:
+    """Least squares through the origin of value(sample) on delta_pct -> (k, median abs % error of delta_pct)."""
     sxx = sum(s['delta_pct'] ** 2 for s in samples)
-    sxy = sum(s['delta_pct'] * s['dollars'] for s in samples)
-    if len(samples) < METHOD_B_MIN_SAMPLES or out['span_pct'] < METHOD_B_MIN_SPAN or sxx == 0 or sxy <= 0:
+    sxy = sum(s['delta_pct'] * value(s) for s in samples)
+    if sxx == 0 or sxy <= 0:
+        return None
+    k = sxy / sxx
+    errors = [abs(s['delta_pct'] - value(s) / k) / s['delta_pct'] for s in samples]
+    return k, statistics.median(errors) * 100
+
+
+def method_b(acct: Account, timeline: Timeline, history: list[dict[str, Any]], eligible: bool,
+             outside: dict[str, dict[str, int]]) -> dict[str, Any]:
+    lines, probes = history_lines(history, acct.id, QUOTA)
+    out: dict[str, Any] = {'method': 'history_regression', 'quota': QUOTA,
+                           **pair_samples(acct, timeline, lines, probes, eligible, outside)}
+    samples = out['samples']
+    fit = fit_origin(samples, lambda s: s['dollars'])
+    if len(samples) < METHOD_B_MIN_SAMPLES or out['span_pct'] < METHOD_B_MIN_SPAN or fit is None:
         out.update(status='insufficient', coefficient=None,
                    reason=f"needs >= {METHOD_B_MIN_SAMPLES} valid samples spanning >= {METHOD_B_MIN_SPAN} pts")
         return out
-    k = sxy / sxx
-    errors = [abs(s['delta_pct'] - s['dollars'] / k) / s['delta_pct'] for s in samples]
-    out.update(status='fitted', coefficient=round(k, 4), residual_mape_pct=round(statistics.median(errors) * 100, 4))
+    out.update(status='fitted', coefficient=round(fit[0], 4), residual_mape_pct=round(fit[1], 4))
+    return out
+
+
+def method_c(acct: Account, timeline: Timeline, history: list[dict[str, Any]], eligible: bool,
+             outside: dict[str, dict[str, int]]) -> dict[str, Any]:
+    """Codex: Method B sampling on the one weekly rollout quota only; fits $ and tokens per 1 %."""
+    lines, probes = history_lines(history, acct.id, CODEX_QUOTA, 'codex', CODEX_QUOTA_MINUTES, CODEX_SOURCE)
+    out: dict[str, Any] = {'method': 'history_regression', 'quota': CODEX_QUOTA,
+                           'window_minutes': CODEX_QUOTA_MINUTES, 'source': CODEX_SOURCE,
+                           **pair_samples(acct, timeline, lines, probes, eligible, outside, 'codex')}
+    samples = out['samples']
+    usd = fit_origin(samples, lambda s: s['dollars'])
+    tok = fit_origin(samples, lambda s: s['tokens']['measured'])
+    reasons = []
+    if not eligible:
+        reasons.append('provider unplaceable gate fails (every interval eligibility_unknown)')
+    if len(samples) < METHOD_B_MIN_SAMPLES or out['span_pct'] < METHOD_B_MIN_SPAN:
+        reasons.append(f"{len(samples)} valid samples spanning {out['span_pct']} pts; needs >= "
+                       f"{METHOD_B_MIN_SAMPLES} spanning >= {METHOD_B_MIN_SPAN}")
+    elif usd is None or tok is None:
+        reasons.append('no positive measured mass in the valid samples')
+    if reasons:
+        out.update(status='insufficient', coefficient=None, tokens_per_pct=None, reason='; '.join(reasons))
+        return out
+    out.update(status='fitted', coefficient=round(usd[0], 4), residual_mape_pct=round(usd[1], 4),
+               tokens_per_pct=round(tok[0], 1), tokens_residual_mape_pct=round(tok[1], 4))
     return out
 
 
@@ -1140,7 +1520,144 @@ def calibrate(src: Sources, config: dict[str, Any] | None, config_path: Path) ->
         'identity_mass_by_host': identity_mass(account_partition(None, timeline.recs)['by_host'], outside),
         'entries': entries,
         'reported_only': reported_only,
-        'codex': {'status': 'deferred', 'follow_up': 'spec_pentacle__usage_codex_rollup_and_calibration_2026_10'},
+        'codex': calibrate_codex(src, config, threshold, retired, retired_report),
+    }
+
+
+def codex_aliases(config: dict[str, Any] | None) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    """Private-config `account_aliases`: an alias merges two Codex creator ids only with a written justification."""
+    listed = (config or {}).get('account_aliases') or []
+    if not isinstance(listed, list):
+        raise RollupError('calibration config: account_aliases must be a list')
+    mapping: dict[str, str] = {}
+    report: list[dict[str, Any]] = []
+    for item in listed:
+        if not isinstance(item, dict) or not item.get('account_id') or not item.get('alias_of'):
+            raise RollupError('calibration config: each account_aliases entry needs account_id and alias_of')
+        row = {'provider': item.get('provider') or 'codex', 'account_id': item['account_id'],
+               'alias_of': item['alias_of']}
+        justification = item.get('justification')
+        if row['provider'] != 'codex':
+            reason = 'only codex aliases are supported'
+        elif not (isinstance(justification, str) and justification.strip()):
+            reason = 'alias requires a justification'
+        elif item['account_id'] == item['alias_of'] or item['alias_of'] in mapping or item['account_id'] in mapping:
+            reason = 'alias is self-referential or chained'
+        else:
+            mapping[item['account_id']] = item['alias_of']
+            report.append({**row, 'status': 'applied', 'basis': 'aliased', 'justification': justification})
+            continue
+        print(f'usage rollup: warning: account_aliases entry rejected: {reason}', file=sys.stderr)
+        report.append({**row, 'status': 'rejected', 'reason': reason})
+    return mapping, report
+
+
+def codex_reported_only(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every Codex history line outside the one fitted quota (weekly `codex` rollout with an account)."""
+    groups: dict[tuple, list[dict]] = {}
+    for line in history:
+        if line.get('provider') != 'codex':
+            continue
+        fitted = (line.get('source') == CODEX_SOURCE and line.get('window_kind') == CODEX_QUOTA
+                  and line.get('window_minutes') == CODEX_QUOTA_MINUTES and line.get('account_id'))
+        if fitted:
+            continue
+        key = (str(line.get('window_kind')), line.get('window_minutes') if isinstance(line.get('window_minutes'), int)
+               else -1, str(line.get('source')), line.get('account_id') or 'null')
+        groups.setdefault(key, []).append(line)
+    out = []
+    for (kind, minutes, source, account), lines in sorted(groups.items()):
+        if account == 'null':
+            reason = 'no account to fit'
+        elif source != CODEX_SOURCE:
+            reason = f'source {source} is not {CODEX_SOURCE}'
+        else:
+            reason = 'auxiliary limit window; one quota per calibration (weekly codex)'
+        out.append({'provider': 'codex', 'window_kind': kind, 'window_minutes': None if minutes == -1 else minutes,
+                    'source': source, 'account_id': account, 'observations': len(lines),
+                    'latest_pct': lines[-1].get('pct'), 'reason': reason})
+    return out
+
+
+def calibrate_codex(src: Sources, config: dict[str, Any], threshold: float, retired: set[str],
+                    retired_report: list[dict[str, Any]]) -> dict[str, Any]:
+    """Method C per (creator account, codex, weekly); no Method A, no probe, measurement of retained evidence only."""
+    sessions = src.codex
+    unplaceable = codex_unplaceable_summary(sessions, threshold, retired)
+    eligible = unplaceable['passes']
+    live = [s for s in sessions if s.host not in retired]
+    timeline = Timeline((r for s in live for r in s.placed), 'codex')
+    outside = codex_outside(sessions, retired)
+    configured = {a.get('account_id'): Account(a) for a in config.get('accounts') or []
+                  if a.get('provider') == 'codex' and a.get('account_id')}
+    aliased: dict[str, list[str]] = {}
+    aliases_of: dict[str, str] = {}
+    for row in src.codex_alias_report:
+        if row['status'] == 'applied':
+            aliased.setdefault(row['alias_of'], []).append(row['account_id'])
+            aliases_of[row['account_id']] = row['alias_of']
+    history_ids = {aliases_of.get(l['account_id'], l['account_id']) for l in src.history
+                   if l.get('provider') == 'codex' and l.get('source') == CODEX_SOURCE
+                   and l.get('window_kind') == CODEX_QUOTA and l.get('window_minutes') == CODEX_QUOTA_MINUTES
+                   and isinstance(l.get('account_id'), str) and l.get('account_id')}
+    ids = sorted({s.account for s in sessions if s.account} | set(configured) | history_ids)
+    history = [({**l, 'account_id': aliases_of[l['account_id']]} if l.get('provider') == 'codex'
+                and l.get('account_id') in aliases_of else l) for l in src.history]
+    reported_only = codex_reported_only(src.history)
+    entries = []
+    for account_id in ids:
+        acct = configured.get(account_id) or Account({'account_id': account_id, 'label': None,
+                                                      'provider': 'codex', 'role': None})
+        own = [s for s in sessions if s.account == account_id]
+        own_live = [s for s in own if s.host not in retired]
+        part = account_partition(acct, timeline.recs)
+        masses = {k: sum(s.masses()[k] for s in own_live) for k in ('placed', 'untimed', 'unreconciled', 'unverifiable')}
+        denom = sum(masses.values())
+        entry: dict[str, Any] = {
+            'account_id': account_id, 'label': acct.label, 'role': acct.role, 'provider': 'codex',
+            'quota': CODEX_QUOTA, 'window_minutes': CODEX_QUOTA_MINUTES, 'unit': 'usd_per_pct',
+            'basis': 'aliased' if account_id in aliased else 'creator_account',
+            'unplaceable': {k: unplaceable[k] for k in ('ratio', 'threshold', 'passes')},
+            'reconciliation': _recon_block(own_live),
+            'reconciliation_masses': masses,
+            'completeness': round(masses['placed'] / denom, 6) if denom else None,
+            'measured_rollup': {'tokens': part['tokens'], 'dollars': round(part['dollars'], 4),
+                                'untimed_tokens': masses['untimed'], 'unreconciled_tokens': masses['unreconciled'],
+                                'unverifiable_tokens': masses['unverifiable'],
+                                'retired_tokens': sum(s.total for s in own if s.host in retired),
+                                'dollars_label': DOLLARS_LABEL},
+            'identity_mass_by_host': identity_mass(part['by_host'], outside, 'codex'),
+            'reported_only': [r for r in reported_only if r['account_id'] == account_id],
+        }
+        if account_id in aliased:
+            entry['aliased_from'] = sorted(aliased[account_id])
+        entry.update(_coverage_fields(part, eligible))
+        c = method_c(acct, timeline, history, eligible, outside)
+        entry['methods'] = {'history_regression': c}
+        entry['method'] = 'history_regression'
+        if c['coefficient'] is not None:
+            entry.update(status='fitted', coefficient=c['coefficient'], tokens_per_pct=c['tokens_per_pct'],
+                         residual_mape_pct=c['residual_mape_pct'],
+                         tokens_residual_mape_pct=c['tokens_residual_mape_pct'], points=c['valid_samples'])
+        else:
+            reason = c['reason']
+            if not eligible:
+                reason += f" (unplaceable_mass {unplaceable['ratio']:.4f} > {threshold})"
+            entry.update(status='insufficient', coefficient=None, tokens_per_pct=None, reason=reason)
+        entry['exclusions'] = [{'from': x.get('from') or x.get('observed_at'), 'reason': x['reason']}
+                               for x in c['exclusions']]
+        entries.append(entry)
+    fleet = account_partition(None, timeline.recs)
+    return {
+        'provider': 'codex', 'quota': CODEX_QUOTA, 'window_minutes': CODEX_QUOTA_MINUTES, 'source': CODEX_SOURCE,
+        'methods': ['history_regression'], 'full_week_100': 'not applicable to Codex (no 100 % rule)',
+        'unplaceable': unplaceable,
+        'retired_hosts': retired_report,
+        'reconciliation': _recon_block([s for s in sessions if s.host not in retired]),
+        'identity_mass_by_host': identity_mass(fleet['by_host'], outside, 'codex'),
+        'account_aliases': src.codex_alias_report,
+        'entries': entries,
+        'reported_only': reported_only,
     }
 
 
@@ -1159,7 +1676,10 @@ def redact(obj: Any, mapping: dict[str, str]) -> Any:
 def redaction_map(src: Sources, config: dict[str, Any] | None) -> dict[str, str]:
     mapping = {a['account_id']: a.get('label') or 'configured_account'
                for a in (config or {}).get('accounts') or [] if a.get('account_id')}
-    others = sorted({r.account for r in src.records if r.account and r.account not in mapping})
+    seen = ({r.account for r in src.records if r.account} | {s.account for s in src.codex if s.account}
+            | {a.get(k) for a in (config or {}).get('account_aliases') or [] if isinstance(a, dict)
+               for k in ('account_id', 'alias_of') if isinstance(a.get(k), str) and a.get(k)})
+    others = sorted(a for a in seen if a not in mapping)
     others += sorted({l.get('account_id') for l in src.history
                       if l.get('account_id') and l.get('account_id') not in mapping and l.get('account_id') not in others})
     for index, account in enumerate(others, 1):
@@ -1196,8 +1716,12 @@ def render_text(result: dict[str, Any]) -> str:
         for acct in spec['claude']['by_account']:
             out.append(f"  account {acct['account_id']}: tokens={acct['tokens']:,} dollars~{acct['dollars']:,.2f}"
                        f" weekly_pct={acct['weekly_pct'].get('value')} ({acct['weekly_pct'].get('reason', '')})")
-        if spec['codex']['records']:
-            out.append(f"  codex: deferred ({spec['codex']['records']} cumulative records, unpriced)")
+        cx = spec['codex']
+        if cx['sessions']:
+            rc = cx['reconciliation']
+            out.append(f"  codex: sessions={cx['sessions']} placed={cx['placed_tokens']:,} dollars~{cx['dollars']:,.2f}"
+                       f" completeness={cx['completeness']} reconciled/partial/unverifiable="
+                       f"{rc['reconciled']['sessions']}/{rc['partial']['sessions']}/{rc['unverifiable']['sessions']}")
     if 'project' in result:
         p = result['project']
         out.append(claude_line(f"project {p['project']} ({len(p['member_specs'])} specs, {p['streams']} streams)",
@@ -1215,6 +1739,13 @@ def render_text(result: dict[str, Any]) -> str:
                    f" retired_mass={sum(r['tokens'] for r in u.get('retired_mass', []))}")
         for e in cal['entries']:
             out.append(f"  {e['account_id']} ({e['role']}): status={e['status']} coefficient={e['coefficient']}"
+                       f" measured_cov={e.get('measured_coverage')} reason={e.get('reason', '')}")
+        cx = cal['codex']
+        out.append(f"codex calibration: unplaceable ratio={cx['unplaceable']['ratio']}"
+                   f" passes={cx['unplaceable']['passes']} reported_only={len(cx['reported_only'])}")
+        for e in cx['entries']:
+            out.append(f"  {e['account_id']}: status={e['status']} usd_per_pct={e['coefficient']}"
+                       f" tokens_per_pct={e['tokens_per_pct']} completeness={e['completeness']}"
                        f" measured_cov={e.get('measured_coverage')} reason={e.get('reason', '')}")
     if 'fleet_totals' in result:
         for row in result['fleet_totals']['by_account']:
@@ -1262,6 +1793,8 @@ def run(argv: list[str] | None = None) -> tuple[int, dict[str, Any]]:
     src = Sources(data_dir=data_dir, work_root=work_root, pricing=pricing, now=now)
     config_path = Path(args.config).expanduser() if args.config else data_dir / CONFIG_NAME
     config = load_config(config_path)
+    aliases, src.codex_alias_report = codex_aliases(config)
+    src.apply_codex_aliases(aliases)
     result: dict[str, Any] = {'schema_version': SCHEMA_VERSION, 'generated_at': iso(now),
                               'pricing_version': pricing.version, 'dollars_label': DOLLARS_LABEL,
                               'since': iso(since), 'until': iso(until)}
