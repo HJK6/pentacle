@@ -194,6 +194,9 @@ def test_a_live_never_fenced_reply_is_accounted_with_provenance(tmp_path):
         rig.write("v2-quick", [_claude("m1", _now())])
         ack = await rig.cycle(rig.panes("v2-quick"))
         assert ack["usage_recorded"] == 1
+        # Provenance may follow one frame later (the provenance version probe of
+        # a fresh satellite process); it then matches the ledger row.
+        await rig.cycle({})
         await rig.close("v2-quick")
         row = await rig.store.fetch_session(HOST, "v2-quick")
         assert row["usage"]["tokens"]["output"] == 20
