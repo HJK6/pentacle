@@ -182,3 +182,11 @@ to control severity; an embedding caller's existing handlers remain authoritativ
 No additional sink or message-content fields are introduced. After activation,
 read each process's configured stderr sink and bind a fresh timestamped record
 to its accepted artifact and PID. Historical records retain their original format.
+
+## Usage-state collector (separate from the ingest satellite)
+
+Each host also runs the usage-state collector so `agent-orch usage --host <h>` reads a
+fresh, account-stamped quota. It is not part of the ingest satellite and has its own
+timer/plist (`pentacle-usage-state-collector.{service,timer}`,
+`com.pentacle.usage-state-collector.plist`, 600 s). Install, verify, enable and roll back
+with `../install_usage_collector.py`; see `docs/usage_accounting.md` § Per-host collector.

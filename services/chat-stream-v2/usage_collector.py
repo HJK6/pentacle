@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,10 +14,12 @@ from usage_history import (
     HISTORY_FILENAME, HistoryLog, claude_cache_lines, claude_probe_lines,
     codex_probe_lines,
 )
+from usage_accounting import iso_from_ms
 from usage_state import (
     UsageStateStore,
     _validate_codex_lkg,
     canonical_state,
+    utc_rfc3339,
 )
 
 
@@ -27,7 +30,54 @@ _CODEX_USAGE_FIELDS = frozenset({
     "pct", "resets_text", "resets_at_iso", "upstream_reported_at",
 })
 _BENIGN_STATUSES = frozenset({"no_update", "fallback_required"})
+PROBE_TIMEOUT_SECONDS = 75
+PINNED_EXECUTABLE_MISSING = "pinned_executable_missing"
 log = logging.getLogger("chat_streamd_v2.usage_collector")
+
+
+def probe_environment(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for the probe children: OAuth path explicitly disabled, no token variables.
+
+    The CLI ``/usage`` scrape is the observation; the optional OAuth-token probe stays off
+    whatever the caller's environment says.
+    """
+    env = {
+        key: value for key, value in (os.environ if base is None else base).items()
+        if "TOKEN" not in key.upper() and "SECRET" not in key.upper()
+    }
+    env["PENTACLE_USAGE_CLAUDE_OAUTH"] = "0"
+    return env
+
+
+def bounded_run(command, *, capture_output=True, text=True, timeout=PROBE_TIMEOUT_SECONDS, env=None):
+    """``subprocess.run`` that owns the child's whole process group.
+
+    A timeout kills the group (the probe's tmux server / ``codex app-server`` children
+    included), reaps it, and raises ``TimeoutExpired`` so the next tick starts clean.
+    """
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None, text=text, env=env,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            process.communicate(timeout=5)
+        except Exception:  # noqa: BLE001 - the group is already dead; never hang the next tick
+            pass
+        raise
+    # Sweep stragglers the probe left in its group after a normal exit.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _now() -> str:
@@ -104,6 +154,49 @@ def _codex_row(payload: dict, now: str) -> dict:
     )
 
 
+def _claude_identity(data: object, *, started: str, ended: str) -> tuple[str | None, str | None]:
+    """(account_id, cache_observed_at) from ONE read of ``~/.claude.json``.
+
+    The account is the OAuth organization only when the cache and the OAuth login name the same
+    ``accountUuid`` in this read (C1); otherwise null. The cache stamp is returned only when this
+    run refreshed it (``started <= fetchedAtMs <= ended``); an older stamp is never adopted.
+    Nothing else in the file is read, so no token field can reach the state.
+    """
+    if not isinstance(data, dict):
+        return None, None
+    cache = data.get("cachedUsageUtilization")
+    oauth = data.get("oauthAccount")
+    cache = cache if isinstance(cache, dict) else {}
+    oauth = oauth if isinstance(oauth, dict) else {}
+    cache_account = cache.get("accountUuid")
+    org = oauth.get("organizationUuid")
+    account_id = org if (
+        isinstance(cache_account, str) and cache_account
+        and cache_account == oauth.get("accountUuid")
+        and isinstance(org, str) and org
+    ) else None
+    fetched = iso_from_ms(cache.get("fetchedAtMs"))
+    refreshed = None
+    if fetched is not None and account_id is not None:
+        moment = utc_rfc3339(fetched)
+        if utc_rfc3339(started) <= moment <= utc_rfc3339(ended):
+            refreshed = fetched
+    return account_id, refreshed
+
+
+def _collection(status: str, attempted_at: str, error: str | None = None) -> dict:
+    return {"status": status, "attempted_at": attempted_at, "error": error}
+
+
+def _failure_code(provider: str, error: Exception | None) -> str:
+    text = str(error) if error is not None else ""
+    if PINNED_EXECUTABLE_MISSING in text:
+        return PINNED_EXECUTABLE_MISSING
+    if isinstance(error, subprocess.TimeoutExpired):
+        return f"{provider}_usage_timeout"
+    return f"{provider}_usage_provider_error"
+
+
 def _never() -> dict:
     return {
         "outcome": "never",
@@ -156,7 +249,7 @@ class UsageStateCollector:
         state_path: str | Path,
         claude_command: tuple[str, ...],
         codex_command: tuple[str, ...],
-        run=subprocess.run,
+        run=bounded_run,
         now_fn=_now,
         claude_config_path: str | Path | None = None,
         history_path: str | Path | None = None,
@@ -175,6 +268,16 @@ class UsageStateCollector:
         )
         self._host = host or os.environ.get("PENTACLE_HOST_ID") or os.environ.get("AGENT_ORCH_HOST_ID") or "thoth"
         self._history_lines: list[dict] = []
+
+    def _read_claude_config(self) -> object:
+        if self._claude_config_path is None:
+            return None
+        try:
+            with self._claude_config_path.open(encoding="utf-8") as handle:
+                return json.load(handle)
+        except Exception as exc:  # noqa: BLE001 - identity is best effort; null account is the safe value
+            log.warning("claude cache unreadable for usage identity: %s", type(exc).__name__)
+            return None
 
     def _record_history(self) -> None:
         """Append this run's percent observations; never fails the state write."""
@@ -200,7 +303,9 @@ class UsageStateCollector:
         a provider failure, so it maps to ``None`` (no observation this cycle). A
         nonzero exit or non-object stdout is a real failure and raises.
         """
-        result = self._run(command, capture_output=True, text=True, timeout=75)
+        result = self._run(
+            command, capture_output=True, text=True, timeout=PROBE_TIMEOUT_SECONDS, env=probe_environment(),
+        )
         if result.returncode:
             raise RuntimeError(result.stderr or "usage CLI failed")
         value = json.loads(result.stdout)
@@ -223,6 +328,15 @@ class UsageStateCollector:
         codex_lkg = state.codex_lkg or _row("codex", "Codex")
         claude_health = state.health or _never()
         codex_health = state.codex_health or _never()
+        # The observation tuple keeps its old observed_at/account_id on a failed or no-update
+        # collection: nothing is re-stamped from poll time and no earlier account is freshened.
+        observations = {
+            provider: dict(entry)
+            for provider, entry in (state.observations or {}).items()
+        }
+        for provider in ("claude", "codex"):
+            observations.setdefault(provider, {"observed_at": None, "account_id": None, "collection": None})
+        started = self._now()
         try:
             payload = self._json(self._claude_command)
             if payload is not None:  # None == benign no-update: keep prior
@@ -232,8 +346,17 @@ class UsageStateCollector:
                 canonical_state(rows, health)  # reject malformed rows -> _failed
                 lkg, claude_health = rows, health
                 self._history_lines += claude_probe_lines(payload, host=self._host, probed_at=done)
+                account_id, refreshed = _claude_identity(self._read_claude_config(), started=started, ended=self._now())
+                observations["claude"] = {
+                    "observed_at": refreshed or done, "account_id": account_id,
+                    "collection": _collection("ok", done),
+                }
+            else:
+                observations["claude"]["collection"] = _collection("no_update", self._now())
         except Exception as exc:
             claude_health = _failed(claude_health, self._now(), provider="claude", error=exc)
+            observations["claude"]["collection"] = _collection(
+                "failed", claude_health["attempted_at"], _failure_code("claude", exc))
         try:
             payload = self._json(self._codex_command)
             if payload is not None:
@@ -242,7 +365,17 @@ class UsageStateCollector:
                 _validate_codex_lkg(row)  # reject malformed row -> _failed
                 codex_lkg, codex_health = row, _ok(done)
                 self._history_lines += codex_probe_lines(payload, host=self._host, probed_at=done)
+                observations["codex"] = {
+                    "observed_at": payload.get("upstream_reported_at"), "account_id": None,
+                    "collection": _collection("ok", done),
+                }
+            else:
+                observations["codex"]["collection"] = _collection("no_update", self._now())
         except Exception as exc:
             codex_health = _failed(codex_health, self._now(), provider="codex", error=exc)
-        self._store.save(lkg, claude_health, codex_lkg=codex_lkg, codex_health=codex_health)
+            observations["codex"]["collection"] = _collection(
+                "failed", codex_health["attempted_at"], _failure_code("codex", exc))
+        self._store.save(
+            lkg, claude_health, codex_lkg=codex_lkg, codex_health=codex_health, observations=observations,
+        )
         self._record_history()

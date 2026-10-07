@@ -5869,7 +5869,7 @@ def build_parser() -> argparse.ArgumentParser:
     usage_parser.add_argument("--json", action="store_true")
     usage_parser.add_argument(
         "--max-age-seconds", type=int, default=None,
-        help="cache freshness cutoff; older Claude-cache reads report 'stale' (default env PENTACLE_USAGE_MAX_AGE_SECONDS or 600)",
+        help="cache freshness cutoff; older Claude-cache reads report 'stale' (default env PENTACLE_USAGE_MAX_AGE_SECONDS or 900)",
     )
     usage_parser.set_defaults(func=usage)
 

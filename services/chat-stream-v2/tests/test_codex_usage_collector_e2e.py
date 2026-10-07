@@ -2,7 +2,7 @@
 
 These tests replace reliance on a live Codex account: the probe's real
 subprocess boundary is exercised against a temporary fake ``codex app-server``
-placed on ``PATH`` (the same discovery mechanism production uses). They pin the two runtime outcomes the
+pinned through ``PENTACLE_CODEX_BIN`` (the only discovery the probe has). They pin the two runtime outcomes the
 spec promises — a fresh ``codex_health.outcome=ok`` seven-key row on success, and
 an accurate ``provider_error`` that byte-preserves the prior Codex LKG, retains
 its receipt stamps, advances ``attempted_at``, and leaves Claude/Fable untouched.
@@ -82,10 +82,10 @@ def _write_fake_codex(tmp_path: Path, *, used_percent=41, resets_at=1_789_362_00
 
 
 def _put_fake_on_path(monkeypatch, tmp_path, **kw):
-    """Write a fake ``codex`` and prepend its dir to PATH — the same discovery
-    mechanism production uses (no dedicated env knob)."""
-    _write_fake_codex(tmp_path, **kw)
-    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    """Write a fake ``codex`` and pin it: the probe resolves the binary only from the
+    absolute ``PENTACLE_CODEX_BIN`` (it never searches PATH)."""
+    fake = _write_fake_codex(tmp_path, **kw)
+    monkeypatch.setenv("PENTACLE_CODEX_BIN", fake)
 
 
 def _seed_v2_state(path: Path) -> dict:
@@ -148,8 +148,7 @@ def test_failure_retains_codex_lkg_and_leaves_claude_untouched(tmp_path, monkeyp
 
 
 def test_probe_json_stdout_is_pure_and_stderr_quiet(tmp_path):
-    _write_fake_codex(tmp_path)
-    env = dict(os.environ, PATH=str(tmp_path) + os.pathsep + os.environ["PATH"])
+    env = dict(os.environ, PENTACLE_CODEX_BIN=_write_fake_codex(tmp_path))
     result = subprocess.run(CODEX_JSON, capture_output=True, text=True, env=env, timeout=30)
     assert result.returncode == 0
     assert result.stderr == ""
@@ -214,9 +213,16 @@ def test_default_local_tz_is_dst_aware():
         time.tzset()
 
 
-def test_resolve_codex_bin_uses_path_only(monkeypatch):
-    monkeypatch.setattr(probe.shutil, "which", lambda name: "/resolved/" + name if name == "codex" else None)
-    assert probe._resolve_codex_bin() == "/resolved/codex"
+def test_resolve_codex_bin_uses_the_pin_only(monkeypatch, tmp_path):
+    fake = tmp_path / "codex"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PENTACLE_CODEX_BIN", str(fake))
+    assert probe._resolve_codex_bin() == str(fake)
+    monkeypatch.setenv("PENTACLE_CODEX_BIN", "codex")  # bare name: never resolved via PATH
+    assert probe._resolve_codex_bin() is None
+    monkeypatch.delenv("PENTACLE_CODEX_BIN")
+    assert probe._resolve_codex_bin() is None
 
 
 def test_reset_text_follows_dst_and_iso_stays_utc():

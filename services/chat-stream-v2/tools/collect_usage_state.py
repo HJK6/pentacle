@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import sys
 from pathlib import Path
 
@@ -28,6 +29,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--claude-config", type=Path, default=Path.home() / ".claude.json",
                         help="Claude Code config whose cached utilization feeds usage_history.jsonl")
     args = parser.parse_args(argv)
+    # One invocation at a time: a probe still running from the previous tick makes this
+    # tick skip (exit 0) instead of stacking a second CLI session on the account.
+    args.state.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.state.with_name(args.state.name + ".lock"), "w") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("usage collector tick skipped: previous run still in progress", file=sys.stderr)
+            return 0
+        _collect(args)
+    return 0
+
+
+def _collect(args: argparse.Namespace) -> None:
     UsageStateCollector(
         state_path=args.state,
         claude_command=((sys.executable, "-c", 'print(\'{"status":"no_update"}\')') if args.skip_claude
@@ -36,7 +51,6 @@ def main(argv: list[str] | None = None) -> int:
                        else (sys.executable, str(args.shared_scripts / "check_codex_usage.py"), "--json")),
         claude_config_path=args.claude_config,
     ).run_once()
-    return 0
 
 
 if __name__ == "__main__":

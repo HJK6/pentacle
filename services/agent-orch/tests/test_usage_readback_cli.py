@@ -236,7 +236,8 @@ def test_usage_cli_token_never_emitted(monkeypatch, tmp_path):
     assert set(plucked) == {"oauth_account_uuid", "oauth_organization_uuid", "cache_account_uuid",
                             "fetched_at_ms", "seven_day_pct", "seven_day_resets",
                             "five_hour_pct", "five_hour_resets",
-                            "seven_day_fable_pct", "seven_day_fable_resets"}
+                            "seven_day_fable_pct", "seven_day_fable_resets", "cadence"}
+    assert plucked["cadence"] is None  # no usage_state.json in this fixture home
     assert plucked["seven_day_pct"] == 85
     # And the full readback path never surfaces the token either.
     row = ur.classify_claude_cache("merlin", plucked, now_ms=NOW_MS + 1000)

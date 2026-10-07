@@ -28,6 +28,28 @@ DEFAULT_KEYCHAIN_SERVICE = "Claude Code-credentials"
 OAUTH_ENABLED_ENV = "PENTACLE_USAGE_CLAUDE_OAUTH"
 
 
+#: The Claude CLI is a pinned executable: an absolute path from these variables (the
+#: first is canonical; the second is the name the Thoth plist already sets) or an
+#: explicit absolute ``--claude``. ``PATH`` is never searched for it.
+CLAUDE_PIN_ENV = ("PENTACLE_CLAUDE_BIN", "PENTACLE_USAGE_CLAUDE_BIN")
+PINNED_EXECUTABLE_MISSING = "pinned_executable_missing"
+
+
+def explicit_pin(value: str | None) -> str | None:
+    """``value`` when it is an absolute path to an executable file, else None."""
+    if not isinstance(value, str) or not os.path.isabs(value):
+        return None
+    return value if os.path.isfile(value) and os.access(value, os.X_OK) else None
+
+
+def pinned_executable(env, names) -> str | None:
+    for name in names:
+        value = (env.get(name) or "").strip()
+        if value:
+            return explicit_pin(value)
+    return None
+
+
 def oauth_enabled() -> bool:
     return os.environ.get(OAUTH_ENABLED_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -196,7 +218,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="collector-compatible JSON output")
     parser.add_argument("--local-fallback", action="store_true", help="compatibility flag; this probe is always local")
-    parser.add_argument("--claude", default=os.environ.get("PENTACLE_USAGE_CLAUDE_BIN", "claude"))
+    parser.add_argument("--claude", default=None,
+                        help="absolute path of the Claude CLI (default: $PENTACLE_CLAUDE_BIN; never searched on PATH)")
     parser.add_argument("--tmux", default=os.environ.get("PENTACLE_USAGE_TMUX_BIN", "tmux"))
     parser.add_argument("--cwd", default=default_cwd())
     args = parser.parse_args()
@@ -216,9 +239,12 @@ def main() -> int:
                 # Older account types and restricted networks still use the
                 # authenticated CLI screen below. Never surface private HTTP data.
                 pass
-    claude, tmux = shutil.which(args.claude), shutil.which(args.tmux)
-    if not claude or not tmux:
-        parser.exit(1, "Claude and tmux must be installed and available to this process\n")
+    claude = explicit_pin(args.claude) if args.claude else pinned_executable(os.environ, CLAUDE_PIN_ENV)
+    if not claude:
+        parser.exit(1, f"{PINNED_EXECUTABLE_MISSING}: set PENTACLE_CLAUDE_BIN to the absolute path of the Claude CLI\n")
+    tmux = shutil.which(args.tmux)
+    if not tmux:
+        parser.exit(1, "tmux must be installed and available to this process\n")
     try:
         result = collect(claude=claude, tmux=tmux, cwd=args.cwd)
     except RuntimeError as exc:

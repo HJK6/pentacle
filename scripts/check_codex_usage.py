@@ -14,8 +14,10 @@ Usage:
 The ``--json`` object is exactly ``{pct, resets_at_iso, resets_text,
 upstream_reported_at}`` (the collector's ``_CODEX_USAGE_FIELDS``). ``resets_at_iso``
 is authoritative UTC; ``resets_text`` is display-only, rendered in the host's
-local timezone. The Codex binary is discovered on ``PATH`` (the same mechanism
-the deploy plist relies on) — no hardcoded install path and no dedicated knob.
+local timezone. The Codex binary is a pinned executable: the absolute path in
+``PENTACLE_CODEX_BIN``. ``PATH`` is never searched; an unset or non-executable pin
+fails closed with ``pinned_executable_missing``. The only RPC methods sent are the
+handshake and the quota-only ``account/rateLimits/read`` (no model inference).
 """
 from __future__ import annotations
 
@@ -23,7 +25,6 @@ import argparse
 import json
 import math
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -37,11 +38,17 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+PINNED_EXECUTABLE_MISSING = "pinned_executable_missing"
+
+
 def _resolve_codex_bin() -> str | None:
-    """Locate the Codex CLI on PATH — the same mechanism the deploy plist relies
-    on (its PATH includes the Codex install dir). No dedicated env/knob is added:
-    production discovery and test injection both go through PATH."""
-    return shutil.which("codex")
+    """The pinned Codex CLI: ``PENTACLE_CODEX_BIN`` as an absolute executable file.
+
+    No ``PATH`` discovery: a missing or non-executable pin is a refusal, never a fallback."""
+    value = (os.environ.get("PENTACLE_CODEX_BIN") or "").strip()
+    if os.path.isabs(value) and os.path.isfile(value) and os.access(value, os.X_OK):
+        return value
+    return None
 
 
 def collect_usage(
@@ -281,7 +288,8 @@ def main(argv: list[str] | None = None) -> int:
     codex_bin = _resolve_codex_bin()
     if not codex_bin:
         # Redacted: never echo tokens, pane content, or discovered paths into health UI.
-        print("Codex CLI not found on PATH; install it or add it to PATH", file=sys.stderr)
+        print(f"{PINNED_EXECUTABLE_MISSING}: set PENTACLE_CODEX_BIN to the absolute path of the Codex CLI",
+              file=sys.stderr)
         return 1
     try:
         usage = collect_usage(codex_bin=codex_bin)

@@ -38,8 +38,9 @@ row is optional and the client hides it when no Fable quota is reported.
    `PENTACLE_USAGE_CWD` folder (or repoint the variable at a trusted one) after
    switching Claude accounts.
 
-   Set `PENTACLE_USAGE_CLAUDE_BIN` and `PENTACLE_USAGE_TMUX_BIN` to absolute paths
-   if the service PATH needs them. If OAuth does not expose a supported account
+   Set `PENTACLE_CLAUDE_BIN` and `PENTACLE_CODEX_BIN` (required; the probes never
+   search `PATH` and fail closed as `pinned_executable_missing`) and
+   `PENTACLE_USAGE_TMUX_BIN` to absolute paths. If OAuth does not expose a supported account
    period, the bounded fallback opens its own tmux server, sends only `/usage`
    and closes that server. It never accepts trust/login prompts or sends a model
    prompt. No private browser service is needed. On managed networks, also set

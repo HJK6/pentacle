@@ -276,9 +276,11 @@ app-server` (stdio JSON-RPC `account/rateLimits/read`) for the Codex row. It
 prefers the window whose `windowDurationMins` is at least a week; business
 accounts that expose only `individualLimit` use that account-period quota,
 converting `remainingPercent` to the used percentage shown in Pentacle. The
-Claude probe binary comes from `PENTACLE_USAGE_CLAUDE_BIN` (the deploy sets it to
-the Claude shim); the Codex binary is found on `PATH` (the collector's launchd
-PATH includes the Codex install dir), so Codex adds no dedicated knob. Codex
+Claude probe binary is the absolute path in `PENTACLE_CLAUDE_BIN` (the legacy
+`PENTACLE_USAGE_CLAUDE_BIN` the Thoth deploy sets for its Claude shim is still
+read); the Codex binary is the absolute path in `PENTACLE_CODEX_BIN`. Neither is
+ever searched on `PATH`: an unset or non-executable pin fails the probe closed as
+`pinned_executable_missing`. Codex
 `resets_at_iso` is authoritative UTC while `resets_text` renders in the host's
 local timezone. A probe that cannot reach its CLI exits non-zero, recording
 `provider_error` for that row while the other provider's fresh value and this

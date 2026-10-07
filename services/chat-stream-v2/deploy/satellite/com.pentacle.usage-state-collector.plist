@@ -1,26 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Usage-state collector for a macOS satellite (e.g. merlin), every 600 s. Rendered by
+  ../install_usage_collector.py. No secret belongs here; the OAuth probe path is disabled.
+-->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.pentacle.usage-state-collector</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/.venv/bin/python</string>
+    <string>__PENTACLE_PYTHON__</string>
     <string>__PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/tools/collect_usage_state.py</string>
     <string>--state</string><string>__PENTACLE_USER_HOME__/.local/share/pentacle-stream/usage_state.json</string>
     <string>--shared-scripts</string><string>__PENTACLE_RELEASE_CHECKOUT__/scripts</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>__PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/deploy/usage-probe-bin:/opt/homebrew/bin:/usr/local/bin:__PENTACLE_USER_HOME__/.local/bin:/usr/bin:/bin</string>
-    <key>PENTACLE_USAGE_CLAUDE_BIN</key><string>__PENTACLE_USER_HOME__/.local/bin/claude</string>
-    <key>PENTACLE_CLAUDE_BIN</key><string>__PENTACLE_USER_HOME__/.local/bin/claude</string>
-    <key>PENTACLE_CODEX_BIN</key><string>/opt/homebrew/bin/codex</string>
+    <key>PATH</key><string>__PENTACLE_PATH__</string>
+    <key>PENTACLE_HOST_ID</key><string>__PENTACLE_HOST_ID__</string>
+    <key>PENTACLE_CLAUDE_BIN</key><string>__PENTACLE_CLAUDE_BIN__</string>
+    <key>PENTACLE_CODEX_BIN</key><string>__PENTACLE_CODEX_BIN__</string>
+    <key>PENTACLE_USAGE_TMUX_BIN</key><string>__PENTACLE_TMUX_BIN__</string>
+    <key>PENTACLE_USAGE_CWD</key><string>__PENTACLE_USAGE_CWD__</string>
     <key>PENTACLE_USAGE_CLAUDE_OAUTH</key><string>0</string>
-    <key>PENTACLE_USAGE_CWD</key><string>__PENTACLE_RELEASE_CHECKOUT__</string>
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>StartInterval</key><integer>300</integer>
+  <key>StartInterval</key><integer>600</integer>
   <key>StandardOutPath</key><string>__PENTACLE_USER_HOME__/.pentacle/usage-state-collector.log</string>
   <key>StandardErrorPath</key><string>__PENTACLE_USER_HOME__/.pentacle/usage-state-collector.err</string>
 </dict>

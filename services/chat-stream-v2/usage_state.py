@@ -24,6 +24,13 @@ STATE_SCHEMA_VERSION = 1
 STATE_KEYS = {"schema_version", "claude_fable_lkg", "claude_health"}
 STATE_SCHEMA_VERSION_V2 = 2
 STATE_KEYS_V2 = STATE_KEYS | {"codex_lkg", "codex_health"}
+#: Optional additive v2 key: per-provider observation tuple (observed_at, account_id,
+#: collection). It never enters the LKG rows, so the limits frame stays byte-identical.
+OBSERVATIONS_KEY = "observations"
+OBSERVATION_PROVIDERS = ("claude", "codex")
+OBSERVATION_KEYS = {"observed_at", "account_id", "collection"}
+COLLECTION_KEYS = {"status", "attempted_at", "error"}
+COLLECTION_STATUSES = {"ok", "no_update", "failed"}
 LKG_ROW_KEYS = {
     "id", "label", "pct", "resets_at_iso", "resets_text",
     "upstream_reported_at", "probed_at",
@@ -101,6 +108,7 @@ class LoadedUsageState:
     health: dict | None
     codex_lkg: dict | None = None
     codex_health: dict | None = None
+    observations: dict | None = None
 
 
 def utc_rfc3339(value: object, *, nullable: bool = True) -> datetime | None:
@@ -206,20 +214,55 @@ def validate_health(
     }
 
 
+def validate_observations(observations: object) -> dict:
+    """Validate the per-provider tuple; strict shape, nothing but these fields persists."""
+    if not isinstance(observations, dict) or set(observations) - set(OBSERVATION_PROVIDERS):
+        raise ValueError("invalid observations shape")
+    clean: dict = {}
+    for provider, entry in observations.items():
+        if not isinstance(entry, dict) or set(entry) != OBSERVATION_KEYS:
+            raise ValueError("invalid observation shape")
+        utc_rfc3339(entry["observed_at"])
+        account_id = entry["account_id"]
+        if account_id is not None and (not isinstance(account_id, str) or not account_id):
+            raise ValueError("invalid observation account")
+        collection = entry["collection"]
+        if not isinstance(collection, dict) or set(collection) != COLLECTION_KEYS:
+            raise ValueError("invalid observation collection")
+        if collection["status"] not in COLLECTION_STATUSES:
+            raise ValueError("invalid observation collection status")
+        utc_rfc3339(collection["attempted_at"], nullable=False)
+        error = collection["error"]
+        if error is not None and (not isinstance(error, str) or not error):
+            raise ValueError("invalid observation collection error")
+        if (collection["status"] == "failed") != (error is not None):
+            raise ValueError("observation error must accompany exactly a failed collection")
+        clean[provider] = {
+            "observed_at": entry["observed_at"],
+            "account_id": account_id,
+            "collection": {key: collection[key] for key in ("status", "attempted_at", "error")},
+        }
+    return clean
+
+
 def validate_state(payload: object) -> LoadedUsageState:
     if isinstance(payload, dict) and payload.get("schema_version") == STATE_SCHEMA_VERSION_V2:
-        if set(payload) != STATE_KEYS_V2:
+        if set(payload) - {OBSERVATIONS_KEY} != STATE_KEYS_V2:
             raise UsageStateError("usage state has unexpected v2 keys")
         base_payload = {key: payload[key] for key in STATE_KEYS}
         base_payload["schema_version"] = STATE_SCHEMA_VERSION
         base = validate_state(base_payload)
         codex_lkg = _validate_codex_lkg(payload["codex_lkg"])
         codex_health = validate_health(payload["codex_health"], provider="codex")
+        observations = (
+            validate_observations(payload[OBSERVATIONS_KEY]) if OBSERVATIONS_KEY in payload else None
+        )
         return LoadedUsageState(
             lkg=base.lkg,
             health=base.health,
             codex_lkg=codex_lkg,
             codex_health=codex_health,
+            observations=observations,
         )
     if not isinstance(payload, dict) or set(payload) != STATE_KEYS:
         raise ValueError("invalid usage state shape")
@@ -266,11 +309,14 @@ def canonical_state_v2(
     *,
     codex_lkg: dict,
     codex_health: dict,
+    observations: dict | None = None,
 ) -> dict:
     payload = canonical_state(lkg, health)
     payload["schema_version"] = STATE_SCHEMA_VERSION_V2
     payload["codex_lkg"] = _validate_codex_lkg(codex_lkg)
     payload["codex_health"] = validate_health(codex_health, provider="codex")
+    if observations is not None:
+        payload[OBSERVATIONS_KEY] = validate_observations(observations)
     return payload
 
 
@@ -336,6 +382,7 @@ class UsageStateStore:
         *,
         codex_lkg: dict | None = None,
         codex_health: dict | None = None,
+        observations: dict | None = None,
     ) -> None:
         try:
             payload = (
@@ -346,6 +393,7 @@ class UsageStateStore:
                     health,
                     codex_lkg=codex_lkg or {},
                     codex_health=codex_health or {},
+                    observations=observations,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - classify as pre-replace write failure

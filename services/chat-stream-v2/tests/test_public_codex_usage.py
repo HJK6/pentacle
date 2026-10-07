@@ -245,4 +245,5 @@ def test_source_has_no_private_or_user_residue():
     text = PROBE_PATH.read_text(encoding="utf-8")
     assert "/opt/homebrew" not in text, "no hardcoded Homebrew path/PATH injection"
     assert "America/Chicago" not in text, "no hardcoded user timezone"
-    assert "shutil.which" in text, "binary must be discovered generically"
+    assert "shutil" not in text, "the Codex binary is pinned, never discovered on PATH"
+    assert "PENTACLE_CODEX_BIN" in text

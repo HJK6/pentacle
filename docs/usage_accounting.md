@@ -179,6 +179,60 @@ by the same snapshot; consumers apply the same tuple. The readback writes only
 where `sessions.db` sits beside the file (Thoth). The Codex probe contract is
 unchanged. Volume is about 300 lines a day; no rotation.
 
+## Per-host collector and the observation tuple
+
+Every execution host (Thoth, Amaterasu, Merlin) runs the same usage-state
+collector, so each host's reading is refreshed on its own cadence instead of only
+when someone uses the Claude CLI there. Thoth keeps its launchd job at 300 s;
+Amaterasu (systemd user timer, `OnUnitActiveSec=600`) and Merlin (launchd,
+`StartInterval` 600) are rendered by `services/chat-stream-v2/deploy/install_usage_collector.py`
+from `deploy/satellite/`. The install, the schedule enable and the release are
+separate steps: `--install` writes the units and a rollback preimage and activates
+nothing, `--verify` runs the rendered command once, `--enable` starts the schedule,
+`--rollback` restores the preimage.
+
+The job runs from the pinned release checkout with absolute `PENTACLE_CLAUDE_BIN`,
+`PENTACLE_CODEX_BIN` and `PENTACLE_USAGE_TMUX_BIN`, a trusted `PENTACLE_USAGE_CWD`,
+`PENTACLE_HOST_ID` and `PENTACLE_USAGE_CLAUDE_OAUTH=0`; it carries no secret. Both
+probes resolve their CLI from those variables only: an unset or non-executable pin
+fails closed as `pinned_executable_missing`, never a `PATH` search. One run at a time
+(`usage_state.json.lock`; a tick that finds the previous run still going exits), each
+probe is bounded at 75 s and its whole process group is killed on timeout. The
+Claude CLI `/usage` scrape is the observation; the CLI's cache refresh is a side
+effect that is verified per host, not assumed. The Codex read is quota-only
+(`initialize` and `account/rateLimits/read`); no model inference runs.
+
+`usage_state.json` (schema v2) gains one optional top-level key, `observations`,
+that never enters the limits rows or frame:
+
+```json
+"observations": {
+  "claude": {"observed_at": "<UTC>|null", "account_id": "<org id>|null",
+             "collection": {"status": "ok|no_update|failed", "attempted_at": "<UTC>", "error": "<code>|null"}},
+  "codex":  {"observed_at": "<UTC>|null", "account_id": null, "collection": {...}}
+}
+```
+
+`observed_at` is the provider's last successful observation: Claude's cache
+`fetchedAtMs` when this run refreshed it (never an older stamp), else the scrape's
+completion time; Codex's `upstream_reported_at`. `account_id` is the OAuth
+`organizationUuid` only under the C1 same-read match, else null (Codex carries no
+identity). A `failed` or `no_update` collection keeps the old `observed_at` and
+`account_id`, so the value keeps aging and is never re-stamped or re-attributed to a
+newer account. The history writers and their dedupe are unchanged (one row per
+populated window; `cache` rows dedupe per observation, `probe` rows are one per tick).
+
+`agent-orch usage --host <h>` plucks the host's cadence file and cache in one ssh
+call (allowlisted fields only) and selects per provider: (a) a collector-`ok`,
+account-matched cadence observation within `--max-age-seconds` (default 900) →
+`ok`, `source=cadence-file`; (b) else a newer account-matched cache observation →
+`source=claude-cache` with its own age, still showing the collector status; (c) else
+the newest matched value as `stale`. A stale or failed reading is never `ok`. Columns:
+`STATUS`, `SOURCE`, `OBSERVED (UTC)`, `AGE`, `ACCOUNT`, `COLLECTOR`; `--json` carries
+`observed_at`, `age_seconds`, `account_id`, `status` (same as `outcome`) and `collector`.
+A host reading its own cadence file applies the age and status rules but cannot
+re-check the login account.
+
 ## Rollup and calibration
 
 `agent-orch usage rollup` runs `services/chat-stream-v2/tools/usage_rollup.py`
