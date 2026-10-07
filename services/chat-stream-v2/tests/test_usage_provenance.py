@@ -843,13 +843,14 @@ def test_local_ingest_rebind_resets_provenance_state(tmp_path: Path) -> None:
 
 def test_copied_parent_responses_stay_with_their_session() -> None:
     """F4: a token_usage_record naming another session is not this session's."""
-    records = _codex_rollout(native="child", responses=2)
+    records = _codex_rollout(native="child", responses=3)
     for record in records:
         if record["type"] == "token_usage_record":
-            record["payload"]["session_id"] = "child"
-    records[2]["payload"]["session_id"] = "parent"
+            # Real sub-agent rollouts: session_id is the root, thread_id is this rollout.
+            record["payload"].update(session_id="root-session", thread_id="child")
+    records[2]["payload"]["thread_id"] = "parent"
     responses = [i for i in native_provenance("codex", records, complete=True) if i["kind"] == "codex_response"]
-    assert [i["data"]["response_id"] for i in responses] == ["resp-1"]
+    assert [i["data"]["response_id"] for i in responses] == ["resp-1", "resp-2"]
 
 
 def test_satellite_provenance_respects_byte_budget_and_unaware_daemon(tmp_path: Path) -> None:

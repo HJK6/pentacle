@@ -249,9 +249,12 @@ def _codex_provenance(records: list[dict[str, Any]], *, native_session_id: str |
             usage = payload.get('usage')
             if response_id is None or response_id in seen_responses or not isinstance(usage, dict):
                 continue
-            owner = _text(payload.get('session_id') or payload.get('thread_id'))
+            # ``thread_id`` names the rollout's own thread (= session_meta id);
+            # ``session_id`` is the ROOT session and differs in sub-agent
+            # rollouts, so only a foreign thread marks a copied parent response.
+            owner = _text(payload.get('thread_id'))
             if owner is not None and native is not None and owner != native:
-                continue  # a copied parent response belongs to the parent session
+                continue
             values = {target: usage.get(source) for target, source in _CODEX_RESPONSE_USAGE}
             if any(type(value) is not int or value < 0 for value in values.values()):
                 continue
