@@ -315,3 +315,55 @@ def test_backoff_saturates_at_large_attempt_counts():
         assert wsclient._retry_backoff_s(policy, attempt) == 2.0
     delay, reason = wsclient._transport_retry_next_delay(policy, wsclient.time.monotonic() + 60, 10**6)
     assert (delay, reason) == (2.0, "")
+
+
+@pytest.mark.parametrize("inventory", ["reset", "stalled-read", "starting-then-reset"])
+def test_spawn_deadline_includes_the_inventory_socket_cleanup(monkeypatch, tmp_path, inventory):
+    """Cycle 2 re-read B4-INVENTORY-CLOSE: once the inventory socket is
+    acquired, a transport loss or stalled read followed by a slow close still
+    returns a typed spawn.indeterminate within the spawn deadline."""
+    fast_retry(monkeypatch, deadline="30")
+    events: list[str] = []
+
+    class Transport:
+        def abort(self):
+            events.append("abort")
+
+    class Socket:
+        transport = Transport()
+
+        async def recv(self):  # the real reader bounds this by the deadline
+            await asyncio.Event().wait()
+
+        async def close(self):
+            events.append("inventory-close")
+            await asyncio.sleep(5)
+
+    snapshot = {"sessions": [{"stream_id": "fixture:v2-c2", "state": "starting"}]} if inventory == "starting-then-reset" \
+        else {"sessions": []}
+
+    async def connect_ready(*_args, **_kwargs):
+        return Socket(), snapshot
+
+    async def await_spawn(*_args, **_kwargs):
+        await asyncio.sleep(5)  # a daemon slow to answer the outcome readback
+        return {"type": "await_spawn.ok", "state": "starting"}
+
+    async def read_frame(*_args, **_kwargs):
+        raise ConnectionResetError("fixture reset")
+
+    monkeypatch.setattr(wsclient, "_connect_ready", connect_ready)
+    monkeypatch.setattr(wsclient, "await_spawn_once", await_spawn)
+    if inventory != "stalled-read":
+        monkeypatch.setattr(wsclient, "_read_rpc_frame", read_frame)
+    deadline_s = 0.15
+
+    async def scenario():
+        started = wsclient.time.monotonic()
+        result = await wsclient._await_starting_spawn(config(tmp_path), _accepted(), deadline=started + deadline_s)
+        return result, wsclient.time.monotonic() - started
+
+    result, elapsed = asyncio.run(scenario())
+    assert elapsed <= deadline_s + 0.05, (elapsed, events)
+    assert result["request_id"] == "spawn-c2" and result["type"] in {"spawn.indeterminate", "spawn.ok"}
+    assert "inventory-close" in events or "abort" in events

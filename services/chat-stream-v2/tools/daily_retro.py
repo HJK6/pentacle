@@ -1275,9 +1275,40 @@ TRANSPORT_ERRORS = (ConnectionError, ConnectionClosed)
 # fixed reason code, and the byte length and sha256 of the raw message. The raw
 # text stays only in the local run directory (0600) and is never sent.
 _ERROR_FIELDS = ("class", "reason", "bytes", "sha256")
-_CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,79}")
-_REASON_CODE = re.compile(r"[a-z_]{1,32}(?::E[A-Z0-9]{1,20})?")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+# Both vocabularies are fixed by code, never by the failing value. A class is
+# named only when it is the genuine class of a trusted module (so a dynamically
+# created class cannot smuggle text in its name); anything else is named by
+# its nearest trusted base.
+_TRUSTED_ERROR_MODULES = ("builtins", "asyncio.exceptions", "concurrent.futures._base", "json.decoder",
+                          "sqlite3", "websockets.exceptions")
+_RECORD_CLASSES = ("LegacyText", "WorkerReport")
+_REASONS = frozenset({"transport_loss", "timeout", "error", "interrupted", "legacy_text", "worker_failed",
+                      "os_error", *(f"os_error:{name}" for name in errno.errorcode.values())})
+
+
+def _trusted_class_name(cls):
+    module = sys.modules.get(cls.__module__)
+    if cls.__module__ in _TRUSTED_ERROR_MODULES and module is not None and getattr(module, cls.__name__, None) is cls:
+        return cls.__name__
+    return None
+
+
+def _error_class_names():
+    import concurrent.futures  # noqa: F401 - loads concurrent.futures._base
+    names = set(_RECORD_CLASSES)
+    for name in _TRUSTED_ERROR_MODULES:
+        for value in vars(sys.modules[name]).values():
+            if isinstance(value, type) and issubclass(value, BaseException) and _trusted_class_name(value):
+                names.add(value.__name__)
+    return frozenset(names)
+
+
+_ERROR_CLASSES = _error_class_names()
+
+
+def _error_class(exc):
+    return next(name for name in map(_trusted_class_name, type(exc).__mro__) if name)
 
 
 def _reason_code(exc):
@@ -1292,8 +1323,7 @@ def _reason_code(exc):
 
 def _is_structured(value):
     return (isinstance(value, dict) and set(value) == set(_ERROR_FIELDS)
-            and isinstance(value["class"], str) and _CLASS_NAME.fullmatch(value["class"]) is not None
-            and isinstance(value["reason"], str) and _REASON_CODE.fullmatch(value["reason"]) is not None
+            and value["class"] in _ERROR_CLASSES and value["reason"] in _REASONS
             and type(value["bytes"]) is int and value["bytes"] >= 0
             and isinstance(value["sha256"], str) and _SHA256.fullmatch(value["sha256"]) is not None)
 
@@ -1301,24 +1331,65 @@ def _is_structured(value):
 def structured_error(exc, root=None):
     """Durable failure record: {class, reason, bytes, sha256}, never message text.
 
-    Idempotent: an already-structured record is returned unchanged. Any other
-    non-exception value (a legacy text record) is treated as raw text. With
-    `root`, the raw text is kept at root/errors/<sha256>.txt (0600) for local
-    diagnosis."""
+    Idempotent: a genuine structured record is returned unchanged. Anything
+    else that is not an exception (a legacy text record, or a dict that is not
+    a valid record) is treated as raw text. With `root`, the raw text is kept
+    at root/errors/<sha256>.txt (0600) for local diagnosis."""
     if _is_structured(exc):
         return dict(exc)
     if isinstance(exc, BaseException):
-        name = type(exc).__name__
-        record_class = name if _CLASS_NAME.fullmatch(name) else "Exception"
-        reason, raw = _reason_code(exc), str(exc)
-    else:
-        record_class, reason = "LegacyText", "legacy_text"
-        raw = exc if isinstance(exc, str) else encoded(exc).decode()
+        return _text_record(str(exc), root, _error_class(exc), _reason_code(exc))
+    return _text_record(exc if isinstance(exc, str) else encoded(exc).decode(), root, "LegacyText", "legacy_text")
+
+
+def _text_record(raw, root, record_class, reason):
     data = raw.encode("utf-8", "backslashreplace")
     sha = hashlib.sha256(data).hexdigest()
     if root is not None:
         _keep_raw_error(Path(root), sha, data)
     return {"class": record_class, "reason": reason, "bytes": len(data), "sha256": sha}
+
+
+_FAILURE_ERROR_FIELDS = ("error", "cleanup_error", "notice_error")
+#: Failure-notice attempts written with a structured body (older ones are rebuilt).
+FAILURE_BODY_FORMAT = 2
+
+
+def _structured_failure_entry(entry, root):
+    """A failure.json entry with every error field structured (retained
+    entries from before structured records are converted in place)."""
+    return {**entry, **{k: structured_error(entry[k], root) for k in _FAILURE_ERROR_FIELDS if k in entry}}
+
+
+def _worker_failure_receipt(response, root, report_id):
+    """What a failed or invalid worker report keeps: identity and outcome
+    metadata plus a structured record of the whole response, never its text."""
+    report = response.get("report") if isinstance(response.get("report"), dict) else response
+    status = report.get("status") if isinstance(report, dict) else None
+    row = response.get("ledger_row_id") if "ledger_row_id" in response else (report or {}).get("ledger_row_id")
+    kind = response.get("result_kind")
+    return {"result_kind": kind if kind in {"report", "closed_without_report"} else None,
+            "status": status if status in {"done", "error", "aborted"} else None,
+            "report_id": report_id if (report or {}).get("report_id") == report_id else None,
+            "ledger_row_id": row if type(row) is int else None,
+            "error": _text_record(encoded(response).decode(), root, "WorkerReport", "worker_failed")}
+
+
+def _projected_stage(stage, root):
+    """A failed stage receipt retained from before projection: replace a raw
+    failure response or failed report with its receipt."""
+    if not stage.get("failed"):
+        return stage
+    stage = dict(stage)
+    failure = stage.get("failure")
+    if isinstance(failure, dict) and not (set(failure) >= {"result_kind", "error"} and _is_structured(failure["error"])):
+        stage["failure"] = _worker_failure_receipt(failure, root, stage.get("report_id"))
+    elif isinstance(failure, str) and failure != "invalid terminal packet":
+        stage["failure"] = structured_error(failure, root)
+    report = stage.get("report")
+    if isinstance(report, dict) and not (set(report) >= {"result_kind", "error"} and _is_structured(report["error"])):
+        stage["report"] = _worker_failure_receipt({"report": report}, root, stage.get("report_id"))
+    return stage
 
 
 def render_error(record):
@@ -1349,8 +1420,8 @@ def record_failure(root, run_id, *, stage, error, notice):
     The top-level fields always describe the latest failure; earlier ones move
     to a bounded per-failure `history`, each keeping its own notice state."""
     path = root / "failure.json"
-    state = read(path, {})
-    history = list(state.get("history", []))
+    state = _structured_failure_entry(read(path, {}), root)
+    history = [_structured_failure_entry(h, root) for h in state.get("history", [])]
     if state.get("error"):
         history.append({k: state[k] for k in ("seq", "at", "stage", "error", "notice", "cleanup_error", "notice_error") if k in state})
     seq = int(state.get("seq") or len(history)) + 1
@@ -1394,8 +1465,8 @@ class Pipeline:
             attempt = stage["attempt"] + 1
             if attempt > 2:
                 raise RuntimeError(f"{name} recovery budget exhausted; retained for assistant")
-            history = read(root / f"{name}-attempts.json", [])
-            history.append(stage)
+            history = [_projected_stage(h, root) for h in read(root / f"{name}-attempts.json", [])]
+            history.append(_projected_stage(stage, root))
             atomic(root / f"{name}-attempts.json", history)
             stage = {}
         else:
@@ -1442,7 +1513,7 @@ class Pipeline:
             if response.get("stream_id") != stage["stream_id"] or response.get("msg_id") != 0:
                 checked(response, "await_report.ok")
         if response.get("result_kind") == "closed_without_report" or (response.get("result_kind") == "report" and not response.get("ok")):
-            stage.update(failed=True, failure=response)
+            stage.update(failed=True, failure=_worker_failure_receipt(response, root, stage["report_id"]))
             atomic(receipt_path, stage)
             raise RuntimeError(f"{name} confirmed failed; recover on next run")
         checked(response, "await_report.ok")
@@ -1456,7 +1527,8 @@ class Pipeline:
         try:
             packet = validator(report.get("extras", {}).get("daily_retro", {}), manifest)
         except Exception:
-            stage.update(failed=True, failure="invalid terminal packet", report=report)
+            stage.update(failed=True, failure="invalid terminal packet",
+                         report=_worker_failure_receipt(response, root, stage["report_id"]))
             atomic(receipt_path, stage)
             raise
         packet = {**packet, "collection": worker_collection(manifest, root / "collection.json")}
@@ -1486,9 +1558,63 @@ class Pipeline:
             atomic(path, record)
             annotate_failure(root, manifest["run_id"], seq=pending.get("seq"), notice=f"superseded: {reason}")
 
+    @staticmethod
+    def _failure_body(manifest, stage, failure, root):
+        return (f"REPORT daily-retro failure {manifest['run_id']} stage {stage}: {render_error(failure)}. "
+                f"Retained state: {root}. The next producer pass resumes the retained stage without a new worker; "
+                "no operator notification for routine retries.")
+
+    def normalize_retained_failure_state(self, manifest):
+        """Convert failure state retained from before structured records:
+        error fields, the pending notice, failed stage receipts, and every
+        failure-notice attempt body. An attempt keeps its request id, so a
+        resend stays exactly-once (the daemon dedupes by key) and only ever
+        carries the structured body; a landed attempt is never resent."""
+        root = self.settings.state_root / "runs" / manifest["run_id"]
+        path = root / "failure.json"
+        state = read(path, None)
+        if state:
+            converted = {**_structured_failure_entry(state, root),
+                         **({"history": [_structured_failure_entry(h, root) for h in state["history"]]}
+                            if "history" in state else {})}
+            if converted != state:
+                atomic(path, converted)
+        for name in STAGES:
+            for receipt_path, many in ((root / f"{name}.json", False), (root / f"{name}-attempts.json", True)):
+                value = read(receipt_path, None)
+                if value:
+                    converted = [_projected_stage(v, root) for v in value] if many else _projected_stage(value, root)
+                    if converted != value:
+                        atomic(receipt_path, converted)
+        delivery_path = root / "failure-delivery.json"
+        record = read(delivery_path, None)
+        if not record:
+            return
+        original = json.loads(encoded(record))
+        failures = {e.get("seq"): e for e in [*(state or {}).get("history", []), state or {}] if e.get("seq")}
+        pending = record.get("pending")
+        if pending:
+            pending["failure"] = structured_error(pending.get("failure"), root)
+            failures[pending.get("seq")] = {"stage": pending.get("stage"), "error": pending["failure"]}
+        for attempt in record.get("attempts", []):
+            if attempt.get("body_format") == FAILURE_BODY_FORMAT:
+                continue
+            known = failures.get(attempt.get("seq"), {})
+            text = attempt.get("payload", {}).get("text", "")
+            attempt["payload"]["text"] = self._failure_body(manifest, known.get("stage", "unknown"),
+                                                            known.get("error", text), root)
+            attempt["body_format"] = FAILURE_BODY_FORMAT
+            if "receipt" in attempt:
+                attempt["receipt"] = {k: attempt["receipt"].get(k) for k in ("type", "delivery", "state", "request_id")
+                                      if isinstance(attempt["receipt"], dict)}
+        if record != original:
+            atomic(delivery_path, record)
+
     async def deliver(self, manifest, final=None, failure=None):
         root = self.settings.state_root / "runs" / manifest["run_id"]
         path = root / ("failure-delivery.json" if failure else "delivery.json")
+        if failure:
+            self.normalize_retained_failure_state(manifest)
         record = read(path, {"attempts": []})
         if (root / "review.json").exists():
             return record
@@ -1510,9 +1636,7 @@ class Pipeline:
             key = "daily-retro-" + digest([self.settings.namespace, manifest["run_id"], target, generation, bool(failure),
                                            *([seq] if pending else [])])[:32]
             if failure:
-                body = (f"REPORT daily-retro failure {manifest['run_id']} stage {pending.get('stage')}: {render_error(pending['failure'])}. "
-                        f"Retained state: {root}. The next producer pass resumes the retained stage without a new worker; "
-                        "no operator notification for routine retries.")
+                body = self._failure_body(manifest, pending.get("stage"), pending["failure"], root)
             else:
                 summary = ""
                 if manifest.get("consolidation"):
@@ -1530,7 +1654,8 @@ class Pipeline:
                         "If record-review returns a due weekly_summary, publish its compact accounting once, leading with gap_accounting.headline (new-this-week and actionable current, baseline as one separate labelled line), then denominators and coverage limits; never sum repeated daily source gaps. "
                         "Ask only for an actual missing grant through the existing versioned decision helper; routine authorized work needs no operator permission.")
             host, session = target.split(":", 1)
-            attempt = {"target": target, "generation": generation, "request_id": key, **({"seq": seq} if pending else {}),
+            attempt = {"target": target, "generation": generation, "request_id": key,
+                       **({"seq": seq, "body_format": FAILURE_BODY_FORMAT} if pending else {}),
                        "payload": {"host": host, "session_name": session, "text": body,
                                    "request_id": key, "optimistic_id": key}}
             record["attempts"].append(attempt)
@@ -1590,6 +1715,7 @@ class Pipeline:
 
     async def run_manifest(self, manifest):
         root = self.settings.state_root / "runs" / manifest["run_id"]
+        self.normalize_retained_failure_state(manifest)
         if (root / "review.json").exists():
             self.supersede_pending_notice(manifest, "review recorded")
             await self.cleanup(manifest)

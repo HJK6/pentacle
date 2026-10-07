@@ -29,7 +29,8 @@ The whole graceful stop shares one absolute deadline (`shutdown_budget.py`):
 - **Overruns:** a step that overruns is cancelled and abandoned, never awaited again, so a step that ignores cancellation cannot hold the stop open.
 - **Store reserve:** 1 s is held back for `store.stop()`.
 - **Loop teardown:** after the stop, teardown waits at most 0.5 s for leftover tasks (`run_bounded`).
-- **Total:** stays under launchd's 20 s exit window, so the store stops before SIGKILL.
+- **Total:** the asynchronous shutdown and loop teardown stay under launchd's 20 s exit window, so the store stops before SIGKILL.
+- **Limit:** CPython's exit-time join of the notify and assets executor threads runs after this and is not budgeted. A worker stuck there is ended by launchd's SIGKILL at 20 s. Writes from an abandoned step may be lost by design.
 
 A graceful stop first closes spawn admission (new spawns wait and reconnect after the
 restart). It then cancels in-flight spawn tasks while the store is still running,

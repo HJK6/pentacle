@@ -2340,10 +2340,10 @@ async def _await_starting_spawn(
         request_id = str(accepted.get("request_id") or "").strip()
         payload = {"spawn_request_id": request_id} if request_id else {"stream_id": stream_id}
         try:
-            outcome = await await_spawn_once(
-                config,
-                payload,
-                timeout=min(1.0, max(0.1, deadline - time.monotonic())),
+            outcome = await _within_deadline(
+                await_spawn_once(config, payload, timeout=min(1.0, max(0.1, deadline - time.monotonic())),
+                                 deadline_at=deadline),
+                deadline - time.monotonic(),
             )
         except Exception:  # noqa: BLE001 - an unavailable readback is not proof
             return None
@@ -2430,7 +2430,7 @@ async def _await_starting_spawn(
     except (OSError, websockets.exceptions.ConnectionClosed):
         return await recover_after_transport_loss()
     finally:
-        await ws.close()
+        await _close_within(ws, deadline)
     session = inventory_session(inventory)
     if not isinstance(session, dict):
         return accepted

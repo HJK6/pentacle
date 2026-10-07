@@ -855,6 +855,8 @@ class Server:
         if not done:  # never wait on a listener's cancellation past the budget
             closing.cancel()
             closing.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+            return
+        closing.result()  # a listener error propagates, as wait_for did
 
     # -- connection --------------------------------------------------------
 

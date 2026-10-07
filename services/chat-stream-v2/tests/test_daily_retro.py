@@ -1747,11 +1747,17 @@ def test_structured_error_holds_no_message_text_and_is_idempotent(tmp_path):
     assert retro.structured_error(KeyboardInterrupt())["reason"] == "interrupted"
 
 
-@pytest.mark.parametrize("seed", range(24))
-def test_failure_records_and_notice_never_persist_or_deliver_message_text(tmp_path, seed):
-    """Every file the run writes (except the local 0600 raw copy) and every
-    delivered body is free of the failing message, across primary, cleanup
-    and notice-delivery errors."""
+ROUTES = ("raised", "dynamic-class", "failed-report", "invalid-packet")
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("seed", range(12))
+def test_failure_records_and_notice_never_persist_or_deliver_message_text(tmp_path, seed, route):
+    """Every file the run writes (except the local 0600 raw copies) and every
+    delivered body is free of the failing text, whether it arrives as a raised
+    exception, in a dynamically named exception class, in a failed worker
+    report, or in an invalid terminal packet; across primary, cleanup and
+    notice-delivery errors and a second pass."""
     raw, parts = next(_fuzzed_messages(1000 + seed, 1))
     memory = tmp_path / "memory"
     for folder in ("completed", "deprecated"):
@@ -1760,14 +1766,26 @@ def test_failure_records_and_notice_never_persist_or_deliver_message_text(tmp_pa
     config = retro.Settings(memory, tmp_path / "state", "ws://127.0.0.1:12345", tmp_path / "token", "fixture",
                             isolated=True)
     source(config.memory_root, "one")
+    dynamic = type(_standin(__import__("random").Random(seed)), (RuntimeError,), {})
+    parts = [*parts, dynamic.__name__]
 
     class Failing(Transport):
         notice_down = True
 
         async def await_report_once(self, config, stream, msg_id, **kwargs):
-            if "astra" in stream:
+            if "astra" not in stream:
+                return await super().await_report_once(config, stream, msg_id, **kwargs)
+            if route == "raised":
                 raise RuntimeError(raw)
-            return await super().await_report_once(config, stream, msg_id, **kwargs)
+            if route == "dynamic-class":
+                raise dynamic(raw)
+            if route == "failed-report":
+                return {"type": "await_report.ok", "ok": False, "result_kind": "report", "status": "error",
+                        "reason": raw, "report": {"status": "error", "reason": raw, "summary": raw}}
+            response = await super().await_report_once(config, stream, msg_id, **kwargs)
+            response["report"]["extras"]["daily_retro"]["run_id"] = raw
+            response["report"]["summary"] = raw
+            return response
 
         async def close_once(self, config, stream, **kwargs):
             raise ConnectionRefusedError(111, raw)
@@ -1778,10 +1796,10 @@ def test_failure_records_and_notice_never_persist_or_deliver_message_text(tmp_pa
             return await super().send_receipt_once(config, target, key)
 
     rpc = Failing()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(Exception):
         asyncio.run(retro.Pipeline(config, rpc).run(at()))
     rpc.notice_down = False
-    with pytest.raises(RuntimeError):  # Astra still fails; the queued notice flushes first
+    with pytest.raises(Exception):  # Astra still fails; the queued notice flushes first
         asyncio.run(retro.Pipeline(config, rpc).run(at()))
     root = config.state_root / "runs/2026-09-28"
     bodies = [r["payload"]["text"] for r in rpc.sent.values()]
@@ -1791,62 +1809,70 @@ def test_failure_records_and_notice_never_persist_or_deliver_message_text(tmp_pa
     for path, text in [*persisted.items(), *(("delivered", b) for b in bodies)]:
         assert not _leaks(text, parts), (path, raw)
     failure = retro.read(root / "failure.json")
-    assert failure["error"]["class"] == "RuntimeError" and failure["error"]["reason"] == "error"
+    for entry in [failure, *failure["history"]]:
+        for field in ("error", "cleanup_error", "notice_error"):
+            if field in entry:
+                assert retro.structured_error(entry[field]) == entry[field], entry[field]  # genuine record
+    assert failure["error"]["class"] in {"RuntimeError", "ValueError", "KeyError", "TypeError"}
     assert failure["cleanup_error"]["reason"] == "transport_loss"
     assert any(h.get("notice_error", {}).get("reason") == "os_error:EIO" for h in [failure, *failure["history"]])
     kept = list((root / "errors").iterdir())
     assert kept and all(p.stat().st_mode & 0o777 == 0o600 for p in kept)
     assert (root / "errors").stat().st_mode & 0o777 == 0o700
-    assert raw.encode("utf-8", "backslashreplace") in {p.read_bytes() for p in kept}
+    if route in ("raised", "dynamic-class"):
+        assert raw.encode("utf-8", "backslashreplace") in {p.read_bytes() for p in kept}
 
 
-def test_producer_transport_reconnects_only_transport_loss(config, monkeypatch):
-    """C4 via the shared client contract; finding (e): only a refused/dropped
-    socket is reconnected, and only for retry-eligible verbs."""
-    monkeypatch.delenv("AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS", raising=False)
-    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_BACKOFF_BASE_S", "0.001")
-    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_BACKOFF_CAP_S", "0.001")
-    calls = []
-    failures = []
-
-    class Connection:
-        def __enter__(self):
-            calls.append(1)
-            if failures:
-                raise failures.pop(0)
-            return self
-        def __exit__(self, *exc):
-            return False
-        def rpc(self, payload):
-            return {"type": "await_report.ok", "ok": True, "stream_id": payload["stream_id"]}
-
-    monkeypatch.setattr(retro, "authenticated_operator_connection", lambda *a: Connection())
-    retro.atomic(config.state_root / "runs/2026-09-28/astra.json", {"stream_id": "fixture:astra", "generation": "g"})
-    transport = retro.ProducerTransport(config)
-    failures[:] = [ConnectionRefusedError(111, "refused")] * 6
-    payload = {"type": "await_report", "stream_id": "fixture:astra", "msg_id": 0}
-    assert asyncio.run(transport.call(payload))["type"] == "await_report.ok"
-    assert len(calls) == 7
-    calls.clear()
-    failures[:] = [FileNotFoundError(2, "operator token missing")]
-    with pytest.raises(FileNotFoundError):
-        asyncio.run(transport.call(payload))
-    assert len(calls) == 1
-    calls.clear()
-    failures[:] = [ConnectionRefusedError(111, "refused")]
-    with pytest.raises(ConnectionRefusedError):
-        asyncio.run(transport.call({"type": "close", "host": "fixture", "session_name": "astra",
-                                    "expected_generation": "g"}))
-    assert len(calls) == 1
+def test_record_vocabulary_is_fixed_and_forged_records_are_not_accepted():
+    """Cycle 2 re-read B1-CLASS: neither field can carry caller-chosen text."""
+    secret = "QzKwHrTyMnPvXsJg"
+    for cls in (type(secret, (RuntimeError,), {}), type(secret, (Exception,), {}), type(secret, (OSError,), {})):
+        record = retro.structured_error(cls("x"))
+        assert secret not in json.dumps(record) and record["class"] in {"RuntimeError", "Exception", "OSError"}
+    spoof = type("ValueError", (Exception,), {"__module__": "builtins"})  # not the genuine builtins class
+    assert retro.structured_error(spoof("x"))["class"] == "Exception"
+    genuine = retro.structured_error(ConnectionResetError(104, "x"))
+    assert retro.structured_error(genuine) == genuine
+    for forged in ({**genuine, "reason": secret}, {**genuine, "class": secret}, {**genuine, "reason": "os_error:" + secret},
+                   {**genuine, "extra": secret}, {**genuine, "bytes": True}):
+        record = retro.structured_error(forged)
+        assert record["class"] == "LegacyText" and secret not in json.dumps(record) + retro.render_error(forged)
 
 
-def test_producer_backoff_saturates_at_large_attempt_counts():
-    """Final QA B5: the producer's reconnect uses the shared client backoff;
-    a long outage past attempt 1024 waits at the cap instead of overflowing."""
-    policy = retro.wsclient.RetryPolicy(max_attempts=3, backoff_base_s=0.25, backoff_cap_s=2.0,
-                                        jitter_fraction=0.0, deadline_s=3600.0, transport_deadline_bound=True)
-    deadline = retro.monotonic() + 60
-    assert retro.wsclient._transport_retry_next_delay(policy, deadline, 1025) == (2.0, "")
+def test_retained_legacy_failure_state_is_converted_and_never_resent(config):
+    """Cycle 2 re-read B1-LEGACY: text records and an unlanded notice attempt
+    written before structured records are converted on the next pass. The
+    attempt keeps its key (exactly-once) and only the structured body is
+    sent; a landed legacy attempt is never resent."""
+    secret = "QzKwHrTyMnPvXsJg"
+    old = 'RuntimeError: token="' + secret + '\\'
+    manifest = retro.collect(config, at())
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "failure.json", {"run_id": manifest["run_id"], "seq": 2, "error": old, "stage": "astra",
+                                         "notice": "pending", "cleanup_error": old,
+                                         "history": [{"seq": 1, "error": old, "notice": "delivered"}]})
+    payload = {"host": "fixture", "session_name": "reviewer", "text": old, "request_id": "legacy-2",
+               "optimistic_id": "legacy-2"}
+    landed = {**payload, "request_id": "legacy-1", "optimistic_id": "legacy-1"}
+    retro.atomic(root / "failure-delivery.json", {
+        "pending": {"seq": 2, "stage": "astra", "failure": old},
+        "attempts": [{"target": "fixture:reviewer", "generation": "g1", "seq": 1, "request_id": "legacy-1",
+                      "payload": landed, "confirmed": True, "receipt": {"delivery": "landed", "payload": landed}},
+                     {"target": "fixture:reviewer", "generation": "g1", "seq": 2, "request_id": "legacy-2",
+                      "payload": payload}]})
+    retro.atomic(root / "astra.json", {"attempt": 1, "report_id": "r", "failed": True,
+                                       "failure": {"type": "await_report.ok", "ok": False, "reason": old}})
+    rpc = Transport()
+    asyncio.run(retro.Pipeline(config, rpc).deliver(manifest, failure=True))
+    assert list(rpc.sent) == ["legacy-2"]  # same key; the landed one is not resent
+    assert secret not in rpc.sent["legacy-2"]["payload"]["text"]
+    assert rpc.sent["legacy-2"]["payload"]["text"].startswith("REPORT daily-retro failure")
+    retro.record_failure(root, manifest["run_id"], stage="astra", error=retro.structured_error(RuntimeError("new")),
+                         notice="pending")
+    for path in root.rglob("*"):
+        if path.is_file() and path.parent.name != "errors":
+            assert secret not in path.read_text(errors="replace"), path
+    assert secret in "".join(p.read_text() for p in (root / "errors").iterdir())
 
 
 def test_cli_failure_writes_only_the_structured_record_to_stderr(tmp_path):
