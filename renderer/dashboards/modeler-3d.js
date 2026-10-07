@@ -81,6 +81,8 @@
       frame.title = '3D Modeler viewer';
       frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
       frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.setAttribute('allow', 'xr-spatial-tracking; fullscreen');
+      frame.setAttribute('loading', 'lazy');
       function finish(state, message) {
         if (refs.disposed || refs.generation !== generation || shell.dataset.modelerState !== 'loading') return;
         if (refs.timer !== null) clearTimeout(refs.timer);

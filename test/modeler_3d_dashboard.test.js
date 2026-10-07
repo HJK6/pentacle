@@ -43,6 +43,8 @@ test('configured frame is sandboxed, starts loading and completes on navigation 
   assert.equal(h.state(), 'loading'); assert.equal(h.frame().src, fixtureUrl);
   assert.equal(h.frame().getAttribute('sandbox'), 'allow-scripts allow-same-origin');
   assert.equal(h.frame().getAttribute('referrerpolicy'), 'no-referrer');
+  assert.equal(h.frame().getAttribute('allow'), 'xr-spatial-tracking; fullscreen');
+  assert.equal(h.frame().getAttribute('loading'), 'lazy');
   assert.equal(h.frame().title, '3D Modeler viewer');
   assert.equal(h.timers.size, 1); assert.equal([...h.timers.values()][0].ms, 15000);
   h.frame().dispatchEvent(new h.window.Event('load'));
