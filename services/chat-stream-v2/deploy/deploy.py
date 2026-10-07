@@ -713,7 +713,7 @@ def _ensure_launchd_environment(
 
 
 # launchd sends SIGKILL 20 s after SIGTERM (ExitTimeOut), so a job leaves launchd within
-# that window; 30 s adds teardown margin. Observed on Thoth: a bootstrap 0 s after bootout
+# that window; 30 s adds teardown margin. Observed on the daemon host: a bootstrap 0 s after bootout
 # failed rc 5 while the old daemon was still shutting down.
 RELOAD_UNLOAD_WAIT_S = 30.0
 RELOAD_UNLOAD_POLL_S = 0.25

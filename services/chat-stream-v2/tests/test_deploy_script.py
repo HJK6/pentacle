@@ -580,7 +580,7 @@ def test_post_activation_smoke_uses_installed_machine_file(
 
 
 class _GracefulLaunchd:
-    """launchd as observed on Thoth (2026-10-07 21:02Z): `bootout` returns at once, but the
+    """launchd as observed on the daemon host (2026-10-07 21:02Z): `bootout` returns at once, but the
     job stays loaded while the old daemon finishes its graceful shutdown, and a `bootstrap`
     in that window fails with rc 5 (Input/output error)."""
 
