@@ -162,22 +162,156 @@ Retired provider-specific launchers and live operational evidence are outside th
 
 ### Web voice composer
 
-`node test/e2e/web_gate.js` includes `web-chat-voice`. It uses a synthetic
-browser media stream and stubbed ASR/provider replies, while exercising the
-shipped composer, browser recorder, real blob upload, and optimistic send store.
-It checks recording duration/Cancel, visible `backend_unavailable`, Retry with
-the same transcription identity, one text row with voice metadata, media-track
-release, and no host room-mic click. It never records the host microphone or
-sends to a live provider. Live backend availability and assistant-composite
-receipt/USER-event persistence are separate release checks.
+The [web composer contract](chat_protocol.md#web-composer-recording) is exercised
+by `web-chat-voice` in [the web gate](../test/e2e/web_gate.js), implemented in
+[web_voice_scenario.js](../test/e2e/lib/web_voice_scenario.js). It runs the
+shipped composer, browser recorder, real blob upload and ordinary optimistic
+send store in headless Chrome against disposable loopback services and seeded
+synthetic sessions. Slot PTY creation and ASR/provider replies are stubbed; an
+oscillator supplies a synthetic browser MediaStream. Transcription is held until
+the pending row is observed, and the provider send is captured. No physical
+microphone or live provider is used, and no live transcription backend is
+contacted.
 
-Focused coverage:
+The scenario retains recording duration/accessible Cancel, visible
+`backend_unavailable` with Retry, stable transcription identity, one text row,
+media-track release and the assertion **chat mic leaves room mic untouched**.
+It additionally checks:
+
+- At least one visible metering bar within 1 s of recording, with no more than
+  46 live bars, and a timer that advances from `0:00` in `m:ss` format
+- The mounted composer capsule's computed green tint and border
+- The computed green, circular 40 px **Stop and send** control
+- A visible pending row in the transcript area containing uppercase
+  `TRANSCRIBING` and 30 waveform bars before any text send
+- Exactly one ordinary text dispatch, store row and DOM user row, with positive
+  `meta.voice.duration_s` on the send and `voice.duration_s` on the projected row,
+  plus a visible DOM voice caption in `m:ss` format
+- No partial/interim transcript text or transcription/send call before stop.
+  A MutationObserver plus 25 ms samples examines the recording panel, including
+  text briefly inserted, removed or changed between samples. Recording labels,
+  controls and `m:ss` timer text are allowed; other text fails the oracle
+
+This browser scenario covers the optimistic row; it does not establish live
+receipt persistence or a voice-caption reload against a deployed daemon.
+The caption's optimistic/echo/fresh-history rendering, above-bubble pending
+caption, Retry/Discard and interruption journeys have separate synthetic
+coverage below.
+
+#### Commands and collection
+
+Run from the repository root after [installing the prerequisites](../README.md#local-setup)
+and dependencies with `npm ci`. The complete candidate gates are:
 
 ```sh
-node scripts/run-tests.js test/web_voice.test.js test/web_voice_integration.test.js test/web_voice_store.test.ts test/cc_handlers_parity.test.js test/web_cc.test.js
+npm run prestart
+npm test
+npm run build:web
+node test/e2e/web_gate.js
 ```
 
-These cover
-permission denial, unsupported browsers, MP4/WAV codecs, empty transcription,
-cancellation, stream binding, bridge error propagation and text Retry metadata.
-Use the daemon's provisioned Python environment for the web gate prerequisites.
+`npm test` invokes the existing collector exactly as follows:
+
+```sh
+node scripts/run-tests.js "test/*.test.js" "test/*.test.ts" "test/e2e/terminal_interaction_runtime/*.test.js"
+```
+
+The web gate needs Chrome/Chromium, `tmux`, the daemon's provisioned Python
+packages and permission to create local sockets and attach Chrome over CDP.
+Use the no-profile invocation above for voice acceptance. The external
+`--profile <config.js>` mode skips this hermetic-only voice fixture and the
+history child gates, so it is not an equivalent pass. Never point this
+acceptance run at a production daemon.
+
+For focused repair and collection checks:
+
+```sh
+node scripts/run-tests.js test/web_voice.test.js test/web_voice_fidelity.test.js test/web_voice_journey.test.ts test/web_voice_scenario.test.js test/web_voice_integration.test.js test/web_voice_store.test.ts test/cc_handlers_parity.test.js test/web_cc.test.js
+```
+
+Keep the collector output naming the three added test files and their executed
+cases; a filename listing or a focused pass does not replace the aggregate:
+
+- [web_voice_fidelity.test.js](../test/web_voice_fidelity.test.js): 90 ms sampling,
+  46-bar retention and stable nodes, geometry/opacity/animation rules, capsule
+  tint, hidden controls with preserved draft, Discard, timer, green stop circle,
+  MP4/WAV shared-stream metering and capture resource cleanup
+- [web_voice_journey.test.ts](../test/web_voice_journey.test.ts): the right-aligned
+  30-bin bubble with its caption above it; upload/transcription/empty failures;
+  stable Blob/request identity on Retry; late-completion suppression on Discard;
+  tab-hidden and ended-track interruptions, including pending-start/stop races;
+  and the actual shared renderer for optimistic, acknowledged, exact-echo and
+  fresh-history captions. Equal text with distinct identities and ordinary text
+  Retry are covered without duplicating or transferring captions
+- [web_voice_scenario.test.js](../test/web_voice_scenario.test.js): positive and
+  isolated negative controls for the browser oracle, transient text insertion
+  and replacement through MutationObserver, and collection of all independent
+  failed predicates
+
+Existing voice, bridge and store tests also cover permission denial,
+unsupported contexts, MP4/WAV selection, PCM size bounds, empty transcription,
+cancellation, captured destination, room-mic isolation and Retry metadata.
+
+#### Full aggregate and evidence boundaries
+
+The current [scenario registry](../test/e2e/lib/web_scenarios.js) contains
+**15 named scenarios**:
+
+1. `transport-and-config`
+2. `settings-version-line`
+3. `sidebar-from-inventory`
+4. `coloured-host-glyphs`
+5. `slot-attach-type-resize-kill`
+6. `chat-transcript-paint`
+7. `chat-file-delivery`
+8. `web-chat-voice`
+9. `public-chat-renderer-contracts`
+10. `mic-panel-answer-window`
+11. `slot-survives-cc-reconnect`
+12. `slot-column-split`
+13. `question-free-text`
+14. `closed-chat-slot`
+15. `host-restart-restores-input`
+
+After a successful no-profile main run, the command also runs both
+[history retention](../test/e2e/web_chat_history_retention_gate.cjs) and
+[history paging](../test/e2e/web_chat_history_paging_gate.cjs) child gates, each
+with its own browser/services and evidence directory. Either child failing
+makes the command fail. A printed main `web_gate: PASS` alone is not full
+aggregate success; inspect the child results, final exit status and cleanup.
+Those general history gates do not replace the voice-specific caption tests.
+
+Keep these evidence levels explicit in a candidate report:
+
+- **Local unit/JSDOM and source checks:** deterministic synthetic devices,
+  clocks, daemon frames, DOM rendering and CSS/source assertions. They establish
+  the tested logic and renderer contract, not physical capture, real Chrome
+  layout/animation or deployed backend behavior
+- **Hermetic Chrome, local or hosted:** the built web bundle, real browser
+  recorder and computed UI, real fixture blob upload, 15 scenarios and both
+  history child gates. The existing [Public checks workflow](../.github/workflows/predeploy-tests.yml)
+  runs the unit/build commands above and installs Chrome before the web gate.
+  Bind a hosted result to the
+  exact candidate SHA, harness and complete job output. An installation step
+  still running or a Chrome/CDP/local-socket startup failure is not a product
+  RED or a browser pass; record it as pending or setup-blocked
+- **Physical/live release proof:** microphone hardware and permissions on the
+  supported browser/device, live backend availability/transcription, durable
+  receipt/USER echo/history through the deployed daemon, and the served bundle's
+  record → waveform → stop → TRANSCRIBING → captioned-text journey. These remain
+  separate fleet-owned release checks; synthetic tests do not establish them
+
+For baseline RED evidence, use the unchanged pre-feature product with the new
+oracle and retain each observed predicate. Missing live bars, the mobile stop
+circle and the uppercase/30-bin pending row are the intended new regressions.
+Timer progress, one text send with voice metadata and no interim transcript
+already worked on that baseline; their deliberately broken observations are
+**oracle negative controls**, not baseline regressions. Expected RED is not
+observed RED until browser setup succeeds and the predicates actually run.
+
+Retain command output, candidate/harness identity, verdicts and cleanup results
+without real transcripts, credentials, private endpoints or machine paths.
+The browser scenario can save `voice-recording.png` and `voice-transcribing.png`
+in its run directory. Treat them as evidence only when they were produced by a
+verified synthetic run; this document does not assert that screenshots or any
+particular candidate's browser gates have passed.

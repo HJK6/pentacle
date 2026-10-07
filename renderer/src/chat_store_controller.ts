@@ -369,6 +369,8 @@ export class ChatStoreController {
   ): PentacleSessionDetail | null {
     const detail = selectSessionDetail(this.state, streamId, options);
     if (!detail) return null;
+    // Renderer-local bridge for now: rebuilding this map on each render belongs
+    // in chat-core when its shared event-to-row projection carries meta.voice.
     const voices = new Map<string, VoiceMetadata>();
     for (const event of selectPentacleDerivedEventIndex(this.state).byStream.get(streamId) ?? []) {
       const voice = validVoiceMetadata((event as PentacleEvent & { meta?: { voice?: unknown } }).meta?.voice);

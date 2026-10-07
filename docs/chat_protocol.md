@@ -188,23 +188,88 @@ metadata validation is unchanged. Voice metadata does not alter send identity.
 
 ### Web composer recording
 
-In web mode the chat composer microphone starts a take in the viewer's browser.
-Tap it again to stop; the pending take displays recording duration, Cancel,
-Transcribing, and a visible failure with Retry. Permission denial can be retried
-after the browser permission is changed. The chat button never toggles the host
-room microphone; Electron keeps its existing room-mic binding.
+In web mode, open the experimental Chat view and tap **Record voice message**
+in the chat composer to start a take in the viewer's browser. See the
+[web setup](../README.md#local-setup) for enabling Chat UI. The implementation
+is [the browser recorder and take lifecycle](../renderer/web_voice.js), mounted
+by [the chat composer](../renderer/app.js), with voice styles in
+[chat_v3.css](../renderer/chat_v3.css).
+
+While recording:
+
+- The composer capsule gains a green tint. Attachment, draft and text-send
+  controls are hidden, preserving their current contents for when recording ends
+- A Discard X, blinking dot and tabular `m:ss` timer sit beside the live waveform
+- Web Audio samples the same captured stream every 90 ms. The strip retains the
+  latest 46 bars; the complete level series is retained for the pending waveform
+- Live bars are 2.5 px wide with 2 px gaps in a right-aligned 26 px area. A clamped
+  level `l` gives height `max(1, round(l * 26))` and opacity `0.45 + 0.55 * l`.
+  New bars grow from scaleY 0.2 over 180 ms; existing bars keep their nodes
+- Tap the 40 px green **Stop and send** circle, with an outline mic glyph and
+  two 1.4 s pulse rings offset by 0.7 s, to finish. The dot uses a 1 s stepped
+  blink. As a web-only deviation from mobile, `prefers-reduced-motion`
+  disables rings and bar, dot and spinner animation
+
+The meter normalizes RMS audio levels from −60..0 dBFS to 0..1; it does not
+perform speech recognition. There is no live, partial or streaming
+transcription while recording. A take stops automatically at five minutes.
+Only one capture can be active across the page's chat slots at a time.
+
+Stopping immediately restores the composer controls and shows a right-aligned
+pending row in the transcript area. A muted ring spinner, mono 9 px
+`TRANSCRIBING` label (1 px letter spacing) and Discard X form the caption
+**above** the voice bubble. The bubble contains a decorative play glyph, 30
+peak bins from the full recording's levels, and its `m:ss` duration. The glyph
+is not a playback control. Pending bars are 2.5 px wide with 2 px gaps, height
+`max(2, round(l * 22))` and opacity `0.4 + 0.6 * l`; a take without samples uses
+30 fallback levels of 0.2. The pending spinner respects reduced motion too.
+
+The path remains **upload_blob → transcribe_blob → ordinary send**. The browser
+uses `chat-stream:upload-blob`, then the authenticated
+`chat-stream:transcribe-blob` bridge to the daemon's existing `transcribe_blob`
+verb. It does not introduce a second backend. A nonempty trimmed transcript
+replaces the pending row with ordinary optimistic text carrying
+`meta.voice.duration_s`; no audio attachment is sent to the agent.
+
+The [shared transcript renderer](../renderer/src/shared_transcript_view.ts)
+shows a green mic glyph and green mono 9 px duration beneath the sent text.
+It reads validated `item.voice` metadata for optimistic, echoed and historical
+user rows, so the caption is reconstructed after reload when the daemon returns
+top-level `meta.voice` on history events. Post-reload validation against the
+real daemon remains a fleet-owned check after rollout. Message identity, rather than matching transcript text, governs
+reconciliation; equal text from a different message does not inherit a caption.
+
+Failures and interruptions keep the existing bounded take lifecycle:
+
+- Upload/transcription failure retains the pending bubble and an amber error
+  with **RETRY**. Retry keeps the audio Blob and transcription request identity;
+  an already-uploaded blob is reused. Duplicate Retry clicks cannot dispatch
+  the same take twice. An empty transcript shows “Nothing was recognized.”
+  and sends no message
+- Discard removes the pending take and suppresses late upload/transcription
+  completion. Cancelling while permission or recorder stop is pending also
+  releases the late capture before another slot can acquire it
+- Hiding the tab or ending a media track stops through the same lifecycle and
+  labels the pending row `interrupted at m:ss`. The captured portion can still
+  transcribe and send unless discarded. Cleanup-generated track endings do not
+  trigger another stop/send
+- The destination is captured when recording starts; another chat cannot
+  redirect the take. Closing the originating slot cancels its capture or
+  pending transcription
+- Once text is dispatched, the ordinary optimistic send store owns delivery,
+  reconnect reconciliation and text Retry. Audio is released; text Retry keeps
+  `meta.voice.duration_s` without another upload or transcription
 
 Capture uses `audio/mp4` when MediaRecorder supports it, otherwise mono PCM WAV
-through Web Audio, reduced to at most 16 kHz to fit the daemon 16 MiB audio cap. A take stops automatically at five minutes and releases its
-media tracks. Microphone capture needs a secure context and `getUserMedia`;
-unavailable browsers show a disabled button with an explanation.
+through Web Audio, reduced to at most 16 kHz to fit the daemon's 16 MiB audio
+cap. Both paths use the same Web Audio analyser and release media tracks and
+the audio context on stop, discard or capture failure. Microphone capture needs
+a secure context and `getUserMedia`; unsupported contexts show a disabled button
+with an explanation. Missing audio/metering capability or permission denial
+shows a retryable error; change the browser permission before retrying a denial.
 
-The browser reuses `chat-stream:upload-blob`, then calls the authenticated
-`chat-stream:transcribe-blob` bridge (a passthrough to `transcribe_blob`). A failed
-take retains its audio and stable transcription request identity for Retry.
-An empty transcript shows “Nothing was recognized.” and sends no message.
-Once text is dispatched, the ordinary optimistic send store owns delivery,
-reconnect reconciliation and Retry; audio is released and text retries retain
-`meta.voice.duration_s`. The destination is captured when recording starts,
-so selecting another chat cannot redirect a take. Closing the originating slot
-cancels capture or a pending transcription.
+The chat button never toggles the host room microphone. The
+[separate room-mic path](desktop_config.md#per-chat-voice-messages) and Electron's
+existing room-mic binding are unchanged. See
+[web voice validation](E2E_HARNESS.md#web-voice-composer) for automated coverage
+and the distinction between fixture, browser and live release evidence.
