@@ -29,6 +29,12 @@ def _isolated_usage_history(tmp_path, monkeypatch):
     monkeypatch.setenv("PENTACLE_USAGE_HISTORY_PATH", str(tmp_path / "usage_history.jsonl"))
 
 
+@pytest.fixture(autouse=True)
+def _reader_is_thoth(monkeypatch):
+    """These cases read from Thoth's seat; the running machine's own host id must not leak in."""
+    monkeypatch.setattr(ur, "_agent_local_host_id", lambda: "thoth")
+
+
 def _cache(**over):
     base = {
         "oauth_account_uuid": "acct-A",

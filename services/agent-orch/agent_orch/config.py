@@ -73,6 +73,18 @@ def _hostname_host_id() -> str:
     raise RuntimeError(f"unknown_local_host: {hostname}")
 
 
+def local_host_id(config: dict[str, Any] | None = None) -> str:
+    """This machine's fleet host id: AGENT_ORCH_HOST_ID, then config.json local_host_id, then the hostname."""
+    host_id = os.environ.get("AGENT_ORCH_HOST_ID")
+    if host_id:
+        return host_id
+    config = _read_json_config() if config is None else config
+    configured_host_id = config.get("local_host_id")
+    if isinstance(configured_host_id, str) and configured_host_id:
+        return configured_host_id
+    return _hostname_host_id()
+
+
 def load_config() -> Config:
     config = _read_json_config()
 
@@ -88,13 +100,7 @@ def load_config() -> Config:
     if token is None:
         token = ""
 
-    host_id = os.environ.get("AGENT_ORCH_HOST_ID")
-    if not host_id:
-        configured_host_id = config.get("local_host_id")
-        if isinstance(configured_host_id, str) and configured_host_id:
-            host_id = configured_host_id
-        else:
-            host_id = _hostname_host_id()
+    host_id = local_host_id(config)
 
     runtime_dir = Path(
         os.environ.get("AGENT_ORCH_RUNTIME_DIR") or "~/.agent-orch/"
