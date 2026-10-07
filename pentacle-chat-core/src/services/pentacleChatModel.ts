@@ -15,6 +15,7 @@ import { getHostOrder, getHostTheme } from './hostConfig';
 import { logTelemetry } from '../utils/telemetry';
 import { TELEMETRY_EVENTS } from '../utils/telemetryEvents';
 import { normalizePentacleHost } from './pentacleHosts';
+import { laneUpdateFromEvent, type PentacleLaneUpdate } from './workLanes';
 import {
   coalesceInterpretedEvents,
   collapseCodeBlocks,
@@ -157,6 +158,8 @@ export type PentacleTranscriptItem = {
   replyToQuestionId?: string;
   laneId?: string;
   publishKind?: PentacleAssistantPublishKind;
+  // Typed lane-update card payload when publish_kind === 'lane_update'; `text` stays the summary.
+  laneUpdate?: PentacleLaneUpdate;
   // Present on `agent-question-answer` rows: the durable notification this row echoes, so a
   // client holding the same answer as a resolved-notification projection can render one of them
   // rather than both.
@@ -787,6 +790,9 @@ function sameTranscriptItem(a: PentacleTranscriptItem, b: PentacleTranscriptItem
     a.replyToQuestionId === b.replyToQuestionId &&
     a.laneId === b.laneId &&
     a.publishKind === b.publishKind &&
+    a.laneUpdate?.update_id === b.laneUpdate?.update_id &&
+    a.laneUpdate?.kind === b.laneUpdate?.kind &&
+    a.laneUpdate?.summary === b.laneUpdate?.summary &&
     a.eventCase === b.eventCase &&
     a.displayRule === b.displayRule &&
     a.disclosure?.previewText === b.disclosure?.previewText &&
@@ -1218,6 +1224,11 @@ function unifiedFeedId(event: PentacleEvent) {
     event.timestamp,
     event.kind,
   ].join(':');
+}
+
+function laneUpdateField(event: PentacleEvent): { laneUpdate?: PentacleLaneUpdate } {
+  const laneUpdate = laneUpdateFromEvent(event);
+  return laneUpdate ? { laneUpdate } : {};
 }
 
 function unifiedEventAllowsFeed(event: PentacleEvent, session: PentacleSessionSummary | undefined) {
@@ -1842,6 +1853,7 @@ function buildSessionTranscriptRows(
         : {}),
       ...(event.lane_id ? { laneId: event.lane_id } : {}),
       ...(event.publish_kind ? { publishKind: event.publish_kind } : {}),
+      ...laneUpdateField(event),
       ...(item.notificationId ? { notificationId: item.notificationId } : {}),
     };
     if (event.attachments && event.attachments.length > 0) {

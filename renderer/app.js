@@ -38,6 +38,7 @@ const {
   projectChatStreamSessionsToDesktop,
 } = require('./sidebar_filter');
 const { orderSidebarRows } = require('./sidebar_attention');
+const { workLanesStatsText, renderWorkLanesPanelHtml } = require('./work_lanes_panel');
 const {
   isReportUnread,
   reportUnreadCount,
@@ -505,6 +506,8 @@ const state = {
   // the sidebar until the next daemon inventory frame reconciles them away.
   // Keeps state.chatStream.sessions single-frame-fed (see desktop_single_roster).
   locallyClosedStreamIds: new Set(),
+  // Daemon work-lanes projection (pentacle-chat-core workLanes slice); null until a lane-aware daemon sends one.
+  workLanes: null,
 };
 
 Object.defineProperty(state, 'sessions', {
@@ -1038,8 +1041,13 @@ function onChatHistoryChanged(streamId) {
   }
 }
 
-function ensureChatEventsLoaded(streamId, retry = false) {
-  return _ensureChatEventsLoaded(state.chatStream, streamId, window?.cc, console, { retry, onChange: onChatHistoryChanged });
+// `generation` is passed only for a lane-history slot (its closed chat is read at that generation).
+function slotLaneGeneration(slot) {
+  return state.slots[slot]?.laneHistory?.generation || undefined;
+}
+
+function ensureChatEventsLoaded(streamId, retry = false, generation = undefined) {
+  return _ensureChatEventsLoaded(state.chatStream, streamId, window?.cc, console, { retry, generation, onChange: onChatHistoryChanged });
 }
 
 // Rows the store holds for a slot's stream, before synthesized durable answers.
@@ -1064,10 +1072,13 @@ function syncChatHistoryPins() {
   window.PentacleChatStore?.setFocusedChatStreams?.(streams);
 }
 
-function chatStreamStillNeedsHistory(streamId) {
+// `generation` identifies who the retry belongs to: a lane-history slot at that generation, or
+// (undefined) an ordinary chat slot. A slot of the other kind on the same stream id never keeps it alive.
+function chatStreamStillNeedsHistory(streamId, generation = undefined) {
   for (let slot = 0; slot < state.slots.length; slot++) {
     if (!state.slots[slot] || state.botSlots[slot] || state.slotViewModes[slot] !== 'chat') continue;
     if (state.slotChatBoundStream[slot] !== streamId) continue;
+    if (slotLaneGeneration(slot) !== generation) continue;
     const rel = state.slotReliability[slot];
     return state.chatStream.historyLoads?.[streamId]?.status === 'error'
       || !chatDetailHasRows(selectSlotSessionDetail(streamId, showTurnDurationEnabled(), false, rel ? rel.visibleCount : 120));
@@ -1075,10 +1086,17 @@ function chatStreamStillNeedsHistory(streamId) {
   return false;
 }
 
-function scheduleChatHistoryRetry(streamId, hasRows) {
+// A lane-history retry belongs to the slot instance that scheduled it (slotGen changes on every
+// attach and detach), so a stale timer never acts for a replacement at the same generation.
+function scheduleChatHistoryRetry(streamId, hasRows, generation = undefined, slot = undefined) {
+  const instance = generation !== undefined && slot !== undefined ? state.slotGen[slot] : undefined;
+  const stillOwned = () => instance === undefined
+    || (state.slotGen[slot] === instance && slotLaneGeneration(slot) === generation);
   return _scheduleHistoryRetry(state.chatStream, streamId, window?.cc, console, {
     hasRows,
-    stillNeeded: chatStreamStillNeedsHistory,
+    generation,
+    owner: instance === undefined ? undefined : `${generation}#${instance}`,
+    stillNeeded: (id) => stillOwned() && chatStreamStillNeedsHistory(id, generation),
     onChange: onChatHistoryChanged,
     setTimer: setTimeout,
   });
@@ -1092,7 +1110,10 @@ function refetchEventsForActiveChatSlots() {
     streamState: state.chatStream,
     cc: window?.cc,
     streamHostForHostId,
-    findStreamSession: (streamState, session, host) => session.popoutStreamId
+    generationForSlot: slotLaneGeneration,
+    findStreamSession: (streamState, session, host) => session.laneHistory
+      ? (session.laneHistory.unavailable ? null : { stream_id: session.laneHistory.streamId })
+      : session.popoutStreamId
       ? streamState.sessions.find(item => item.stream_id === session.popoutStreamId && item.host === host) || null
       : chatUi.findStreamSessionForDesktopSession(streamState, session, host),
     onChange: onChatHistoryChanged,
@@ -1813,7 +1834,8 @@ const closedChatSlots = createClosedChatSlots({
   readState: () => ({
     connected: state.chatStream.connected,
     epoch: state.chatStream.stateVersion,
-    slots: state.slots.map((slot, index) => slot && ({
+    // A lane-history slot is bound to a closed chat; it is never retired by inventory membership.
+    slots: state.slots.map((slot, index) => slot && !slot.laneHistory && ({
       host: streamHostForHostId(slot.hostId), name: slot.name,
       generation: state.slotGen[index], bot: state.botSlots[index],
     })),
@@ -1831,6 +1853,18 @@ const closedChatSlots = createClosedChatSlots({
   },
 });
 
+// Work lanes (spec_pentacle__first_class_work_lanes_2026_10): the daemon projection is the only
+// lane source. Accepts the push frame and the work_lanes field of snapshot/hello replies.
+function applyWorkLanesPayload(payload) {
+  const core = window.PentacleChatCore;
+  if (!payload || !core?.applyWorkLanesFrame) return;
+  const base = state.workLanes || core.emptyWorkLanesInventory();
+  const next = core.applyWorkLanesFrame(base, payload);
+  if (next === base) return;
+  state.workLanes = next;
+  scheduleSidebarRerender();
+}
+
 function applyChatStreamState(data) {
   // NOT gated on chatUiEnabled(): the sidebar visibility filter consumes
   // state.chatStream.sessions regardless of whether the in-slot chat UI is
@@ -1844,6 +1878,8 @@ function applyChatStreamState(data) {
   // there's a stale-UI window where the sidebar still shows live state
   // but the daemon is unreachable.
   if (!applyVersionedConnectionState(state.chatStream, data, setDegradedMode)) return;
+  // Lanes ride the same ordering gate as the rest of the snapshot: a stale snapshot never rolls them back.
+  if (data.work_lanes) applyWorkLanesPayload(data);
   if (Array.isArray(data.events)) {
     state.chatStream.events = data.events.slice(-CHAT_STREAM_LIMIT);
   }
@@ -1898,6 +1934,13 @@ function applyChatStreamState(data) {
 function applyChatStreamPayload(payload) {
   // NOT gated on chatUiEnabled(): see applyChatStreamState.
   if (!payload) return;
+  if (payload.type === 'work_lanes.inventory') {
+    // A lane push is ordered by the connection state version like every other daemon frame.
+    if (applyVersionedConnectionState(state.chatStream, { ...payload, connected: state.chatStream.connected }, setDegradedMode)) {
+      applyWorkLanesPayload(payload);
+    }
+    return;
+  }
   if (payload.type === 'chat.event' && payload.event) {
     applyChatStreamPayload(payload.event);
     return;
@@ -1950,6 +1993,7 @@ function applyChatStreamPayload(payload) {
       schedules: payload.schedules || [],
       notifications: payload.notifications || [],
       hosts_stats: payload.hosts_stats || state.chatStream.hostsStats,
+      ...(payload.work_lanes ? { work_lanes: payload.work_lanes } : {}),
     }, 'snapshot');
     if (Object.prototype.hasOwnProperty.call(payload, 'limits')) {
       renderLimits(
@@ -3034,6 +3078,7 @@ async function loadEarlierDaemonHistory(slot, streamId) {
     prevScrollTop: refs.scrollEl ? refs.scrollEl.scrollTop : 0,
   };
   await requestOlderHistory(state.chatStream, streamId, window?.cc, console, {
+    generation: slotLaneGeneration(slot),
     onChange: onChatHistoryChanged,
     expand: id => window.PentacleChatStore?.setHistoryExpanded?.(id),
     hasNewRows: () => remainingNow() > 0,
@@ -3123,7 +3168,7 @@ function applySlotChatListRender(slot, refs, render) {
   if (window.PentacleChatView?.replaceTranscriptHtml) window.PentacleChatView.replaceTranscriptHtml(refs.listEl, render.html);
   else refs.listEl.innerHTML = render.html;
   refs.listEl.querySelector('.slot-chat-history-retry')?.addEventListener('click', () => {
-    ensureChatEventsLoaded(render.paintedStreamId, true);
+    ensureChatEventsLoaded(render.paintedStreamId, true, slotLaneGeneration(slot));
     renderSlotChat(slot);
   });
   refs.listEl.dataset.streamId = render.paintedStreamId || '';
@@ -3325,6 +3370,30 @@ function syncSlotCopyId(slot) {
 document.addEventListener('selectionchange', maybeApplyDeferredSlotChatRenders);
 document.addEventListener('mouseup', maybeApplyDeferredSlotChatRenders);
 
+// Read-only banner (or the explicit "Chat unavailable" card) for a lane's visible chat.
+function syncLaneHistoryNotice(refs, laneHistory) {
+  let notice = refs.chatShell.querySelector('.lane-history-banner');
+  if (!notice) {
+    notice = document.createElement('div');
+    notice.className = 'lane-history-banner';
+    notice.setAttribute('role', 'status');
+    refs.chatShell.insertBefore(notice, refs.chatShell.firstChild);
+  }
+  notice.classList.toggle('is-unavailable', !!laneHistory.unavailable);
+  notice.textContent = laneHistory.unavailable
+    ? 'Chat unavailable \u2014 the chat linked to this lane is no longer retained. The lane stays open; nothing else is opened in its place.'
+    : 'Read-only history \u2014 this lane\'s chat is closed.';
+  refs.listEl.style.display = laneHistory.unavailable ? 'none' : '';
+}
+
+// A lane's closed chat has no store detail until rows arrive; say what the load actually did.
+function laneHistoryEmptyMessage(streamId) {
+  if (!state.chatStream.connected) return 'Reconnecting…';
+  const load = state.chatStream.historyLoads?.[streamId];
+  if (load?.status === 'error') return 'Messages could not be loaded.';
+  return load?.status === 'loaded' ? 'No retained messages.' : 'Loading chat…';
+}
+
 function renderSlotChat(slot) {
   const refs = state.slotChatRefs[slot];
   const session = state.slots[slot];
@@ -3397,6 +3466,11 @@ function renderSlotChat(slot) {
   if (!chatMode) {
     updateSlotStatusGlyph(slot, null);
     return;
+  }
+
+  if (session.laneHistory) {
+    syncLaneHistoryNotice(refs, session.laneHistory);
+    if (session.laneHistory.unavailable) { updateSlotStatusGlyph(slot, null); return; }
   }
 
   // Real chat-render path: select the transcript detail with render telemetry
@@ -3483,8 +3557,8 @@ function renderSlotChat(slot) {
   // re-emit re-enters renderSlotChat and replaces the empty placeholder
   // with the transcript.
   if (detail?.streamId) {
-    ensureChatEventsLoaded(detail.streamId);
-    scheduleChatHistoryRetry(detail.streamId, chatDetailHasRows(detail));
+    ensureChatEventsLoaded(detail.streamId, false, slotLaneGeneration(slot));
+    scheduleChatHistoryRetry(detail.streamId, chatDetailHasRows(detail), slotLaneGeneration(slot), slot);
   }
 
   const shouldStick = !refs.scrollEl || (refs.scrollEl.scrollHeight - refs.scrollEl.scrollTop - refs.scrollEl.clientHeight) < 32;
@@ -3555,7 +3629,7 @@ function renderSlotChat(slot) {
 
   const listHtml = detail
     ? transcriptHtml
-    : `<div class="slot-chat-empty">${state.chatStream.connected ? 'Loading chat…' : 'Reconnecting…'}</div>`;
+    : `<div class="slot-chat-empty">${session.laneHistory ? laneHistoryEmptyMessage(streamId) : state.chatStream.connected ? 'Loading chat…' : 'Reconnecting…'}</div>`;
 
   // Bug1 (chat_ui_hardening_batch3): tag the rendered list with the stream whose
   // transcript was actually painted (empty/leaked => ''), so a DOM check can
@@ -4102,7 +4176,7 @@ function cancelChatComposer(slot) {
 }
 
 async function sendChatComposer(slot) {
-  if (!chatUiEnabled()) return;
+  if (!chatUiEnabled() || state.slots[slot]?.laneHistory) return;
   const refs = state.slotChatRefs[slot];
   const inputEl = refs?.inputEl;
   const literal = inputEl ? inputEl.value : state.slotDrafts[slot];
@@ -4318,7 +4392,7 @@ function renderSlotStatus(slot, remoteSessionState) {
 
 function updateSlotViewMode(slot, mode) {
   if (!chatUiEnabled()) mode = 'terminal';
-  if (isCompositeSlot(slot) && mode !== 'asset') mode = 'chat';
+  if ((isCompositeSlot(slot) || state.slots[slot]?.laneHistory) && mode !== 'asset') mode = 'chat';
   const previousMode = state.slotViewModes[slot];
   state.slotViewModes[slot] = mode;
   window.PentacleHarness?.emit?.('slot:viewmode', { slot, data: { mode } });
@@ -4347,7 +4421,7 @@ function updateSlotViewMode(slot, mode) {
 function ensureSlotModeToggle(slot) {
   const header = document.getElementById(`header-${slot}`);
   if (!header) return;
-  if (!chatUiEnabled() || isCompositeSlot(slot)) {
+  if (!chatUiEnabled() || isCompositeSlot(slot) || state.slots[slot]?.laneHistory) {
     header.querySelector('.cell-view-toggle-group')?.remove();
     return;
   }
@@ -4719,9 +4793,10 @@ function renderSidebar() {
   }));
   const needsAnswerCount = attentionRows.filter((r) => r.attentionTier === 0).length;
   const workingCount = attentionRows.filter((r) => r.attentionTier === 1).length;
-  stats.textContent = search
-    ? `${active.length} of ${sourceFiltered.length} sessions`
-    : `${active.length} sessions | ${needsAnswerCount} need answer | ${workingCount} working`;
+  stats.textContent = workLanesStatsText(state.workLanes, {
+    sessions: active.length, needsAnswer: needsAnswerCount, working: workingCount,
+    search, sourceFiltered: sourceFiltered.length,
+  });
 
   renderSourceFilterBar(all);
   for (let slot = 0; slot < 4; slot++) syncSlotAssistantControls(slot);
@@ -4810,7 +4885,14 @@ function renderSidebar() {
     </div>`;
   }
 
-  let html = '';
+  // "Lanes (N)" section above the session tiers: the daemon's open lanes, in its order.
+  const core = window.PentacleChatCore;
+  let html = core?.workLaneTapTarget ? renderWorkLanesPanelHtml(state.workLanes, {
+    tapTarget: core.workLaneTapTarget,
+    etaLabel: core.workLaneEtaLabel,
+    nowMs: Date.now(),
+    renderLeadCard: (leadSession, options) => chatUi.renderStatusCard(leadSession, options),
+  }) : '';
   // Session rows in attention order, with a tier divider whenever the tier
   // changes. Tier 2 (ordinary) is only labelled when an attention tier
   // precedes it (see SIDEBAR_TIER_LABELS note).
@@ -4863,6 +4945,17 @@ function renderSidebar() {
     });
   });
 
+  list.querySelectorAll('.lane-row').forEach((el) => {
+    el.addEventListener('click', () => openWorkLane(el));
+    el.addEventListener('keydown', (e) => {
+      if (e.target !== el) return;
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        openWorkLane(el);
+      }
+    });
+  });
+
   // Edit button handlers
   list.querySelectorAll('.s-edit-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -4895,6 +4988,73 @@ function renderSidebar() {
       const restored = document.querySelector(`.s-status-toggle[data-status-toggle-stream="${cssAttrEscape(streamId)}"]`);
       if (restored) restored.focus();
     });
+  });
+}
+
+// ── Work lane taps ──────────────────────────────────────────────
+// A lane tap opens the lane's daemon-resolved visible chat: `open_chat` an open
+// session or the composite, `history` a read-only slot for the closed chat at the
+// lane's generation, `unavailable` an explicit card. Never Bart, a hidden worker
+// or a newer generation as a fallback.
+function openWorkLane(el) {
+  const lane = (state.workLanes?.lanes || []).find((item) => item.lane_id === el.dataset.laneId);
+  if (!lane) return;
+  const target = window.PentacleChatCore.workLaneTapTarget(lane);
+  if (target.action === 'open_chat') {
+    const summary = state.sessions.find((s) => sessionSummaryStreamId(s) === target.stream_id
+      && filterSidebarSessions([s]).length === 1);
+    if (!summary) {
+      showToast('This lane\'s chat is not available in this window', { type: 'error' });
+      return;
+    }
+    activateSidebarRow({ dataset: {
+      name: summary.name, display: summary.display_name || summary.name,
+      host: summary.hostId || (IS_CLIENT ? 'remote' : 'local'),
+      streamId: target.stream_id, primaryAction: 'status',
+    } }, IS_CLIENT ? 'remote' : 'local');
+    return;
+  }
+  openLaneHistorySlot(lane, target);
+}
+
+function openLaneHistorySlot(lane, target) {
+  const chat = lane.visible_chat;
+  const unavailable = target.action !== 'history';
+  const colon = chat.stream_id.indexOf(':');
+  const host = colon > 0 ? chat.stream_id.slice(0, colon) : '';
+  const hostId = _streamHostToHostId(host) || host || 'local';
+  // One slot per lane, under a synthetic name so a later open session of the same
+  // name (a new generation) is never mistaken for this slot or focused in its place.
+  let slot = state.slots.findIndex((item) => item?.laneHistory?.laneId === lane.lane_id);
+  if (slot < 0) {
+    slot = state.maximizedSlot !== null ? state.maximizedSlot : state.slots.findIndex((item) => item === null);
+    if (slot < 0) slot = 3;
+  }
+  const laneHistory = { streamId: chat.stream_id, generation: unavailable ? null : target.generation, laneId: lane.lane_id,
+    ...(unavailable ? { unavailable: true } : {}) };
+  const current = state.slots[slot]?.laneHistory;
+  if (!current || current.streamId !== laneHistory.streamId || current.generation !== laneHistory.generation
+    || !!current.unavailable !== unavailable) {
+    attachSession(slot, `lane-history:${lane.lane_id}`, lane.title || chat.stream_id, hostId, {
+      popoutStreamId: unavailable ? null : chat.stream_id,
+      laneHistory,
+    });
+  }
+  if (state.maximizedSlot !== null && state.maximizedSlot !== slot) maximizeSlot(slot);
+  else if (document.body.classList.contains('web-sidebar-narrow')) setNarrowActiveSlot(slot);
+  if (!unavailable) loadLaneHistory(laneHistory);
+}
+
+// A closed chat is unknown to the store until its rows arrive, so the normal render-driven
+// history fetch never starts; request it here (at the lane's generation) and repaint the slot.
+function loadLaneHistory(laneHistory) {
+  _ensureChatEventsLoaded(state.chatStream, laneHistory.streamId, window?.cc, console, {
+    retry: true,
+    generation: laneHistory.generation,
+    onChange: (id) => {
+      onChatHistoryChanged(id);
+      state.slots.forEach((item, index) => { if (item?.laneHistory?.streamId === id) scheduleSlotChatRender(index); });
+    },
   });
 }
 
@@ -5044,6 +5204,7 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   const gen = state.slotGen[slot]; // capture generation to detect stale async resumes
   state.slots[slot] = { name: sessionName, displayName, hostId,
     popoutStreamId: options.popoutStreamId || null,
+    laneHistory: options.laneHistory || null,
     assistantDirect: options.assistantDirect || null,
     session_kind: canonicalChatSessionStateForNameHost(sessionName, hostId)?.session_kind };
   if (document.body.classList.contains('web-sidebar-narrow')) setNarrowActiveSlot(slot);
@@ -5107,9 +5268,17 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   state.slotBuffers[slot] = '';
   state.slotDrafts[slot] = '';
   state.slotDraftTouched[slot] = false;
-  state.slotViewModes[slot] = isCompositeSlot(slot) ? 'chat' : defaultChatViewMode();
+  state.slotViewModes[slot] = isCompositeSlot(slot) || options.laneHistory ? 'chat' : defaultChatViewMode();
+  document.getElementById(`cell-${slot}`).classList.toggle('lane-history', !!options.laneHistory);
   fetchSlotAssetSnapshot(slot, gen);
   ensureSlotAssetTabs(slot);
+
+  // A lane's closed chat is a read-only transcript: no terminal, no composer, no send.
+  if (options.laneHistory) {
+    renderSidebar();
+    renderSlotChat(slot);
+    return;
+  }
 
   if (isCompositeSlot(slot)) {
     if (IS_CHAT_POPOUT) maximizeSlot(slot);
@@ -5312,7 +5481,7 @@ function detachSlot(slot) {
   }
   clearSlotAssetDismissals(slot);
   header.querySelector('.slot-asset-tabs')?.remove();
-  document.getElementById(`cell-${slot}`).classList.remove('occupied');
+  document.getElementById(`cell-${slot}`).classList.remove('occupied', 'lane-history');
 
   // Clear state before async/throwing operations
   const hadSlot = !!state.slots[slot];
@@ -5606,7 +5775,7 @@ function restoreSlotsAfterReconnect() {
   for (let slot = 0; slot < 4; slot += 1) {
     if (!state.slots[slot] || state.botSlots[slot] || state.slotViewModes[slot] !== 'chat') continue;
     const boundStreamId = state.slotChatBoundStream[slot];
-    if (boundStreamId) ensureChatEventsLoaded(boundStreamId, true);
+    if (boundStreamId) ensureChatEventsLoaded(boundStreamId, true, slotLaneGeneration(slot));
     scheduleSlotChatRender(slot);
   }
   // Belt-and-suspenders for any chat slot that resolves via inventory but has
