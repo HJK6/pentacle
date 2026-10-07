@@ -81,6 +81,7 @@ from .wsclient import (
 SERVICES_ROOT = Path(__file__).resolve().parents[2]
 if str(SERVICES_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICES_ROOT))
+import _shared
 from _shared.report_payload_v1 import SchemaError, validate as validate_report_payload
 from _shared.asset_schema import (
     AssetBodyTooLarge,
@@ -4795,11 +4796,14 @@ def usage(args: argparse.Namespace) -> int:
     return 0
 
 
-USAGE_ROLLUP_TOOL = Path(__file__).resolve().parents[2] / "chat-stream-v2" / "tools" / "usage_rollup.py"
+# Resolve from the services root `_shared` was imported from: the checkout's
+# services/ in a source tree, <release>/app/services in a fleet release (put on
+# sys.path by pentacle_release.pth; agent_orch itself sits in site-packages there).
+USAGE_ROLLUP_TOOL = Path(_shared.__file__).resolve().parents[1] / "chat-stream-v2" / "tools" / "usage_rollup.py"
 
 
 def usage_rollup_passthrough(rollup_args: list[str]) -> int:
-    """`agent-orch usage rollup ...`: run the read-only rollup tool from this checkout.
+    """`agent-orch usage rollup ...`: run the read-only rollup tool from this checkout or release.
 
     The tool reads the Thoth ledger (docs/usage_accounting.md § Rollup and
     calibration); every token after `rollup` is passed verbatim, so its own
