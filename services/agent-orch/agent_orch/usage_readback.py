@@ -35,8 +35,6 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config as agent_config
-
 
 # --- outcome taxonomy -------------------------------------------------------
 # Exactly one outcome per provider row. ``pct`` is present only for ok/stale.
@@ -152,8 +150,10 @@ def configured_local_host(env: dict | None = None) -> str:
 
 
 def _agent_local_host_id() -> str:
+    # Imported here: this module is also loaded standalone by the daemon's parity tests.
+    from agent_orch.config import local_host_id
     try:
-        return agent_config.local_host_id()
+        return local_host_id()
     except (OSError, ValueError, RuntimeError) as exc:
         raise UsageReadbackError(f"cannot determine the local host id ({exc}); set AGENT_ORCH_HOST_ID") from exc
 
