@@ -1071,3 +1071,25 @@ def test_qa5_rejected_v2_frame_is_retried_once_without_the_fields(tmp_path):
         rig.sat._apply_ack(ack, hw)
         assert rig.sat._held_spans().pending_count() == 1
     _run(tmp_path, body)
+
+
+@pytest.mark.parametrize("field", ["offset_s", "rtt_s", "transcript_ts"])
+def test_qa6_oversized_json_integers_are_malformed_not_fatal(tmp_path, field):
+    from usage_admission import classify, parse_clock
+    huge = 10 ** 1000
+    if field != "transcript_ts":
+        assert parse_clock({"offset_s": 0.0, "rtt_s": 0.01, "server_now": _now(), field: huge}) is None
+    assert classify(huge, [], None, time.time())[0] == "timestamp_missing"
+
+    async def body(rig: _Rig) -> None:
+        await rig.open("v2-big", "gen-a")
+        good = {"offset_s": 0.0, "rtt_s": 0.01, "server_now": _now()}
+        frame_clock = {**good, field: huge} if field != "transcript_ts" else good
+        record = {**_claude("m1", None), "transcript_ts": huge if field == "transcript_ts" else _now(),
+                  "seq": 1, "clock": good}
+        entry = {"key": "k", "stream_id": f"{HOST}:v2-big", "provider": "claude", "source_pane_pid": PANE,
+                 "native_session_id": SID_A, "source_file_identity_digest": "a" * 64, "records": [record]}
+        out = await rig.store.record_unfenced(HOST, [entry], None, clock=frame_clock, receipt_now=time.time())
+        expected = "timestamp_missing" if field == "transcript_ts" else "clock_unavailable"
+        assert [r["reason"] for r in out["rejected"]] == [expected]
+    _run(tmp_path, body)

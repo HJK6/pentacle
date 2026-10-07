@@ -66,20 +66,30 @@ def iso_ms(seconds: float) -> str:
     return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{millis % 1000:03d}Z"
 
 
+def _finite(value: Any) -> float | None:
+    """A finite float from a JSON number; bool, oversized or non-finite -> None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def parse_clock(value: Any) -> ClockSample | None:
     """Validate a wire clock sample; anything malformed is no sample."""
     if not isinstance(value, dict):
         return None
-    offset, rtt = value.get('offset_s'), value.get('rtt_s')
+    offset, rtt = _finite(value.get('offset_s')), _finite(value.get('rtt_s'))
     server_now = epoch(value.get('server_now'))
     if (
         server_now is None or not math.isfinite(server_now)
-        or isinstance(offset, bool) or not isinstance(offset, (int, float)) or not math.isfinite(offset)
-        or isinstance(rtt, bool) or not isinstance(rtt, (int, float)) or not math.isfinite(rtt)
+        or offset is None or rtt is None
         or rtt < 0 or abs(offset) > 10 ** 7 or rtt > 3600
     ):
         return None
-    return ClockSample(float(offset), float(rtt), server_now)
+    return ClockSample(offset, rtt, server_now)
 
 
 def generation_from_row(row: Any) -> Generation | None:
@@ -128,7 +138,8 @@ def classify(
     capture: ClockSample | None = None,
 ) -> tuple[str, str | None]:
     """First match wins, identical on both v2 paths -> (outcome, generation)."""
-    if ts is None or not math.isfinite(ts):
+    ts = _finite(ts)
+    if ts is None:
         return 'timestamp_missing', None
     if not candidates:
         return 'no_candidate_generation', None
