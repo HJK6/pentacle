@@ -223,14 +223,23 @@ def test_list_without_filters_is_unchanged(tmp_path):
     assert [m["asset_id"] for m in reply["assets"]] == ["example-report-b", "example-report-c"]
 
 
+WINDOW = {"sort": "asset_id_desc", "limit": 12}
+
+
 @pytest.mark.parametrize("bad", [
-    {"asset_id_prefix": "Bad-Prefix"},
-    {"asset_id_prefix": ""},
-    {"producer": ""},
-    {"producer": 7},
-    {"sort": "updated_at_desc"},
+    {**WINDOW, "asset_id_prefix": "Bad-Prefix"},
+    {**WINDOW, "asset_id_prefix": ""},
+    {**WINDOW, "producer": ""},
+    {**WINDOW, "producer": 7},
+    {"asset_id_prefix": "example-report-", "limit": 12},           # sort required
+    {"producer": "hostx:example-producer", "limit": 12},          # sort required
+    {"sort": "updated_at_desc", "limit": 12},
+    {"asset_id_prefix": "example-report-", "sort": "asset_id_desc"},  # limit required
+    {**WINDOW, "limit": 401},
+    {**WINDOW, "limit": 0},
+    {**WINDOW, "stream_id": "fixturehost:seat1"},                  # spec-scoped only
 ])
-def test_list_filter_values_are_validated(tmp_path, bad):
+def test_list_window_arguments_are_validated(tmp_path, bad):
     async def scenario(assets):
         return await assets.asset({"type": "asset.list", "request_id": "l",
                                    "spec_id": SPEC_ID, **bad})
@@ -238,3 +247,54 @@ def test_list_filter_values_are_validated(tmp_path, bad):
     reply = _run(tmp_path, scenario)
     assert reply["type"] == "asset.error"
     assert reply["error_code"] == "asset_invalid"
+
+
+def test_report_window_reads_an_index_range_not_the_namespace(tmp_path):
+    """The window query is served by an index in asset_id order with LIMIT, so
+    SQLite stops after `limit` matching rows (no full scan, no temp sort)."""
+    from _shared.assets_store import AssetStore
+
+    store = AssetStore(str(tmp_path / "assets.db"))
+    try:
+        for producer in ("hostx:example-producer", None):
+            clauses = ["spec_id = ?"] + (["producer = ?"] if producer else []) + ["asset_id >= ? AND asset_id < ?"]
+            params = [SPEC_ID] + ([producer] if producer else []) + ["example-report-", "example-report."]
+            plan = " | ".join(row[-1] for row in store._conn.execute(
+                f"EXPLAIN QUERY PLAN SELECT * FROM assets WHERE {' AND '.join(clauses)} "
+                "ORDER BY asset_id DESC LIMIT 12", params).fetchall())
+            want = "idx_assets_spec_producer_asset" if producer else "idx_assets_spec_asset"
+            assert want in plan, plan
+            assert "TEMP B-TREE" not in plan, plan
+            assert "SCAN assets" not in plan, plan
+        # Behaviour: a large namespace still returns exactly the newest W ids.
+        for day in range(1, 29):
+            for rev in ("", "-r01"):
+                store.publish_asset(host="fixturehost", session_name="seed", stream_id="fixturehost:seed",
+                                    asset_id=f"example-report-202610{day:02d}T1300Z{rev}", title="t",
+                                    content_type="report", body=_report_body("t"),
+                                    producer="hostx:example-producer", spec_id=SPEC_ID)
+        rows = store.list_spec_window(SPEC_ID, limit=3, asset_id_prefix="example-report-",
+                                      producer="hostx:example-producer")
+        assert [r["asset_id"] for r in rows] == [
+            "example-report-20261028T1300Z-r01", "example-report-20261028T1300Z",
+            "example-report-20261027T1300Z-r01"]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("prefix", ["example-report-", "a", "z", "x9", "example.report_"])
+def test_prefix_range_matches_startswith(tmp_path, prefix):
+    from _shared.assets_store import AssetStore
+
+    ids = ["a", "a-", "a0", "b", "example-report-1", "example-report.", "example-report_",
+           "example.report_x", "x9", "x9-r01", "x:", "y", "z", "z~", "za"]
+    store = AssetStore(str(tmp_path / "assets.db"))
+    try:
+        for asset_id in ids:
+            store.publish_asset(host="fixturehost", session_name="seed", stream_id="fixturehost:seed",
+                                asset_id=asset_id, title="t", content_type="report",
+                                body=_report_body("t"), spec_id=SPEC_ID)
+        got = [r["asset_id"] for r in store.list_spec_window(SPEC_ID, limit=100, asset_id_prefix=prefix)]
+        assert got == sorted((i for i in ids if i.startswith(prefix)), reverse=True)
+    finally:
+        store.close()

@@ -195,6 +195,16 @@ class AssetStore:
                 "CREATE INDEX IF NOT EXISTS idx_assets_spec_updated "
                 "ON assets(spec_id, updated_at DESC)"
             )
+            # Bounded dashboard report windows (list_spec_window): an id range
+            # under one spec, optionally for one producer, read in id order.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_assets_spec_asset "
+                "ON assets(spec_id, asset_id)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_assets_spec_producer_asset "
+                "ON assets(spec_id, producer, asset_id)"
+            )
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS asset_comments (
@@ -387,6 +397,45 @@ class AssetStore:
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
+        with self._lock:
+            self._require_open()
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def list_spec_window(
+        self,
+        spec_id: str,
+        *,
+        limit: int,
+        asset_id_prefix: str | None = None,
+        producer: str | None = None,
+    ) -> list[dict]:
+        """At most `limit` rows of one spec, newest asset_id first (byte order),
+        restricted to a literal id prefix and/or an exact producer. Served by
+        idx_assets_spec_asset / idx_assets_spec_producer_asset, so the scan
+        stops after `limit` matching rows instead of reading the namespace."""
+        spec_id = str(spec_id or "").strip()
+        if not spec_id:
+            raise InvalidAsset("spec_id must be non-empty")
+        if int(limit) < 1:
+            raise ValueError(f"limit must be >= 1; got {limit}")
+        cols = ", ".join(ASSET_COLUMNS)
+        clauses = ["spec_id = ?"]
+        params: list[Any] = [spec_id]
+        if producer is not None:
+            clauses.append("producer = ?")
+            params.append(producer)
+        if asset_id_prefix:
+            # Half-open id range [prefix, prefix with its last character
+            # incremented): exactly the ids that start with the prefix.
+            upper = asset_id_prefix[:-1] + chr(ord(asset_id_prefix[-1]) + 1)
+            clauses.append("asset_id >= ? AND asset_id < ?")
+            params.extend([asset_id_prefix, upper])
+        sql = (
+            f"SELECT {cols} FROM assets WHERE {' AND '.join(clauses)} "
+            "ORDER BY asset_id DESC LIMIT ?"
+        )
+        params.append(int(limit))
         with self._lock:
             self._require_open()
             rows = self._conn.execute(sql, tuple(params)).fetchall()

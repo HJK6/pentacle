@@ -105,8 +105,9 @@ owner `stream_id` and the `producer`; a client then calls
 operator-authenticated path). A `report` board reads its namespace with one
 bounded request `{ spec_id, asset_id_prefix, producer, sort: "asset_id_desc",
 limit: W }`: the daemon applies the literal prefix and exact producer filters
-and the byte-wise id sort before the limit. These are reader filters, not
-authorization. The id grammar is `^<prefix><key_format>(-r<rev_width digits>)?$`
+and the byte-wise id sort before the limit, reading an index range so the scan
+stops at `W` rows; a window needs `sort` and `limit` 1–400 and a spec-scoped
+list. These are reader filters, not authorization. The id grammar is `^<prefix><key_format>(-r<rev_width digits>)?$`
 with all-zero revisions excluded (`report_id_grammar`); under it, byte order is
 (key, revision) order. Synthetic retrieval fixtures F-A–F-E (foreign rows,
 revisions, `-r09`/`-r10`, `-r9`/`-r00` errors, full window, empty) are in

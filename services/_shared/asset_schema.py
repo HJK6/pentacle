@@ -7,6 +7,7 @@ import os
 import re
 from collections.abc import Iterable, Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 
 CONTENT_TYPES = frozenset({"report", "dashboard-catalog"})
@@ -415,7 +416,7 @@ def _validate_catalog_board(board: Any, path: str, seen_ids: set[str]) -> None:
         if not isinstance(description, str) or len(description) > 200:
             _raise_path(f"{path}.description", "must be a string of at most 200 characters")
     kind = board.get("kind")
-    if kind not in CATALOG_BOARD_KINDS:
+    if not isinstance(kind, str) or kind not in CATALOG_BOARD_KINDS:
         _raise_path(f"{path}.kind", "must be one of: " + ", ".join(sorted(CATALOG_BOARD_KINDS)))
     common = {"id", "name", "description", "kind"}
     if kind == "report":
@@ -442,11 +443,8 @@ def _validate_catalog_board(board: Any, path: str, seen_ids: set[str]) -> None:
             _raise_path(f"{path}.hosted", "must be an object")
         _reject_unknown_keys(hosted, f"{path}.hosted", {"url"})
         url = _require_string(hosted, "url", f"{path}.hosted.url")
-        if (
-            len(url) > 2048
-            or not re.fullmatch(r"https?://[^\s/?#@]+(?:[/?#][^\s]*)?", url)
-        ):
-            _raise_path(f"{path}.hosted.url", "must be an absolute http(s) URL without userinfo")
+        if not _is_plain_http_url(url):
+            _raise_path(f"{path}.hosted.url", "must be an absolute http(s) URL with a host and no userinfo")
 
 
 def _validate_catalog_web(web: Any, path: str) -> None:
@@ -504,6 +502,24 @@ def _validate_catalog_report(report: Any, path: str) -> None:
         bad = [p for p in CATALOG_TITLE_PLACEHOLDER_RE.findall(template) if p not in {"key", "rev"}]
         if bad or template.count("{") != template.count("}"):
             _raise_path(f"{path}.title_template", "only {key} and {rev} placeholders are allowed")
+
+
+def _is_plain_http_url(url: str) -> bool:
+    if len(url) > 2048 or any(ch.isspace() for ch in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        port = parts.port  # raises ValueError for a malformed port
+    except ValueError:
+        return False
+    del port
+    return (
+        parts.scheme in {"http", "https"}
+        and bool(parts.hostname)
+        and parts.username is None
+        and parts.password is None
+        and "@" not in parts.netloc
+    )
 
 
 def _require_match(value: Mapping, key: str, pattern: re.Pattern, path: str) -> str:
