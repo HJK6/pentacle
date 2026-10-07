@@ -570,3 +570,47 @@ test('the private-terms enforcement is public-only, fail-closed, with a host-loc
   assert.match(src, /PENTACLE_PRIVATE_TERMS_FILE/);
   assert.match(src, /\.config\/pentacle\/private-terms\.json/);
 });
+
+// Fleet terms are assembled, so guard fixtures do not add real-name residue.
+const fleetName = ['tho', 'th'].join('');
+test('fleet guard rejects an added test hit in the outgoing commit', () => {
+  const sb = sandbox();
+  git(sb.work, [...ID, 'checkout', '-b', 'fleet-added']);
+  fs.mkdirSync(path.join(sb.work, 'tests'));
+  commitFile(sb.work, 'tests/fixture.txt', 'owner=' + fleetName + '\n', 'new host fixture');
+  const r = tryGit(sb.work, withHook(['push', 'public', 'fleet-added:refs/heads/fleet-added']), pub(sb.remote));
+  assert.notEqual(r.status, 0, 'new fleet host must refuse even inside tests');
+  assert.match(r.stderr, /fleet.host/i);
+});
+test('fleet guard scans a non-HEAD outgoing tip instead of the checkout', () => {
+  const sb = sandbox();
+  git(sb.work, [...ID, 'checkout', '-b', 'fleet-tip']);
+  commitFile(sb.work, 'runtime.txt', 'owner=' + fleetName + '\n', 'new host');
+  git(sb.work, ['checkout', 'main']);
+  const r = tryGit(sb.work, withHook(['push', 'public', 'fleet-tip:refs/heads/fleet-tip']), pub(sb.remote));
+  assert.notEqual(r.status, 0, 'clean checkout must not hide a dirty outgoing tip');
+  assert.match(r.stderr, /fleet.host/i);
+});
+test('fleet guard preserves unchanged baseline hits across line shifts but refuses duplicate lines', () => {
+  const sb = sandbox();
+  commitFile(sb.work, 'old.txt', 'owner=' + fleetName + '\n', 'existing baseline');
+  git(sb.work, [...ID, 'push', 'public', 'main:refs/heads/main']);
+  git(sb.work, [...ID, 'checkout', '-b', 'shifted']);
+  commitFile(sb.work, 'old.txt', 'heading\nowner=' + fleetName + '\n', 'shift lines');
+  assert.equal(tryGit(sb.work, withHook(['push', 'public', 'shifted:refs/heads/shifted']), pub(sb.remote)).status, 0);
+  commitFile(sb.work, 'old.txt', 'heading\nowner=' + fleetName + '\nowner=' + fleetName + '\n', 'duplicate');
+  const r = tryGit(sb.work, withHook(['push', 'public', 'shifted:refs/heads/shifted']), pub(sb.remote));
+  assert.notEqual(r.status, 0, 'extra identical occurrence must not be baseline debt');
+});
+
+test('fleet guard checks every non-deletion tip in a multi-ref push', () => {
+  const sb = sandbox();
+  git(sb.work, [...ID, 'checkout', '-b', 'clean-tip']);
+  commitFile(sb.work, 'clean.txt', 'clean\n', 'clean');
+  git(sb.work, [...ID, 'checkout', '-b', 'bad-tip']);
+  commitFile(sb.work, 'bad.txt', fleetName + '\n', 'bad');
+  git(sb.work, ['checkout', 'clean-tip']);
+  const r = tryGit(sb.work, withHook(['push', 'public', 'clean-tip:refs/heads/clean-tip', 'bad-tip:refs/heads/bad-tip']), pub(sb.remote));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /fleet.host/);
+});

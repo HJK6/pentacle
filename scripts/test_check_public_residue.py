@@ -193,7 +193,72 @@ def _external_dictionary_and_exceptions():
             assert cpr.check(root, allowlist)["passed"]
 
 
+def _fleet_additions():
+    with isolated_git_environment(), tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(root), *args], stderr=subprocess.PIPE).decode().strip()
+        git("init", "-q")
+        git("config", "user.name", "Test")
+        git("config", "user.email", "test@example.invalid")
+        word = "tho" + "th"
+        source = root / "source.txt"
+        source.write_text("old " + word + "\n")
+        def commit():
+            git("add", "-A")
+            git("commit", "-qm", "fixture")
+            return git("rev-parse", "HEAD")
+        base = commit()
+        def check():
+            return cpr.check_fleet_additions(root, base, commit())
+        source.write_text("new heading\nold " + word + "\n")
+        assert check()["passed"], "line shifts are not new hits"
+        source.write_text("old " + word + "\nold " + word + "\n")
+        assert check()["unexcepted_match_count"] == 1, "duplicate line was grandfathered"
+        source.write_text("changed " + word + "\n")
+        assert not check()["passed"], "changed matching content was grandfathered"
+        source.write_text("clean\n")
+        assert check()["passed"], "removing old debt failed"
+        moved = root / "moved.txt"
+        source.rename(moved)
+        moved.write_text("old " + word + "\n")
+        assert not check()["passed"], "moving content to a new path must be reviewed"
+        moved.unlink()
+        named = root / (word + ".txt")
+        named.write_text("clean\n")
+        result = check()
+        assert result["rule_hits"][0]["rule"] == "fleet_host_path"
+        assert word not in json.dumps(result), "matching path text leaked"
+        named.unlink()
+        source.write_bytes(b"\xff\0" + word.encode() + b"\n")
+        assert not check()["passed"], "non-UTF8 blob bypassed detector"
+        source.unlink()
+        source.symlink_to("/nonexistent/" + word)
+        assert not check()["passed"], "symlink target blob bypassed detector"
+        source.unlink()
+        principal = "ama" + "terasu:wmi-pg-dailybackup"
+        for value, expected in [(principal, True), (principal + "-extra", False),
+                                ("x:" + principal, False), (principal.upper(), False),
+                                (principal + " " + word, False),
+                                ("ama" + "terasu:other", False),
+                                ("id_" + word.upper() + "_one", False),
+                                ("thorough", True)]:
+            source.write_text(value + "\n")
+            assert check()["passed"] == expected, "principal/token rule mismatch"
+        source.write_text("clean end\n")
+        tip = commit()
+        source.write_text(word)  # working tree and index must not decide the result
+        git("add", "source.txt")
+        assert cpr.check_fleet_additions(root, base, tip)["passed"]
+        for argv in [("--fleet-base", base),
+                     ("--fleet-base", "missing-ref", "--fleet-tip", tip)]:
+            result = subprocess.run([sys.executable, str(_mod_path), "--root", str(root), *argv],
+                                    capture_output=True, text=True)
+            assert result.returncode != 0, "missing fleet inputs accepted"
+
+
 def main() -> int:
+    _fleet_additions()
     _portable_and_semantic_rules()
     _external_dictionary_and_exceptions()
     # In-range (second octet 64-127) must be flagged, anywhere on the line.
