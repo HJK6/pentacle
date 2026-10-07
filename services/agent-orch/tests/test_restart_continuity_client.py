@@ -368,3 +368,50 @@ def test_spawn_deadline_includes_the_inventory_socket_cleanup(monkeypatch, tmp_p
     assert result["request_id"] == "spawn-c2" and result["type"] == "spawn.indeterminate", result
     assert result["stream_id"] == "testhost:v2-c2"
     assert "inventory-close" in events or "abort" in events
+
+
+@pytest.mark.parametrize("path", ["snapshot", "recovery-readback"])
+def test_helper_cleanup_failure_after_proof_keeps_the_proven_result(monkeypatch, tmp_path, path):
+    """Helper-level (faked sockets, not the real transport): proof is
+    established, then the socket cleanup raises. The proven result is
+    returned, not the cleanup error. Real-transport stalled-close races are in
+    test_spawn_deadline_real_path.py."""
+    fast_retry(monkeypatch, deadline="30")
+    failed = {"stream_id": "testhost:v2-c2", "state": "failed", "status": "closed",
+              "closed_at": "2026-10-07T00:00:00Z", "error_code": "spawn_failed"}
+
+    class Socket:
+        transport = None
+
+        def __init__(self):
+            self.sent: list[dict] = []
+
+        async def send(self, raw):
+            self.sent.append(json.loads(raw))
+
+        async def recv(self):
+            request = self.sent[-1]
+            return json.dumps({"type": "await_spawn.ok", "ok": True, "request_id": request["request_id"],
+                               "state": "ready", "session": {"stream_id": "testhost:v2-c2", "state": "ready"}})
+
+        async def close(self):
+            raise RuntimeError("cleanup failed")
+
+    async def connect_ready(*_args, **_kwargs):
+        if path == "snapshot":
+            return Socket(), {"sessions": [failed]}
+        raise ConnectionRefusedError(111, "refused")
+
+    async def connect_rpc_ready(*_args, **_kwargs):
+        return Socket()
+
+    monkeypatch.setattr(wsclient, "_connect_ready", connect_ready)
+    monkeypatch.setattr(wsclient, "_connect_rpc_ready", connect_rpc_ready)
+    started = wsclient.time.monotonic()
+    result = asyncio.run(wsclient._await_starting_spawn(config(tmp_path), _accepted(), deadline=started + 0.3))
+    assert wsclient.time.monotonic() - started <= 0.3 + 0.05
+    assert result["request_id"] == "spawn-c2" and result["stream_id"] == "testhost:v2-c2"
+    if path == "snapshot":
+        assert result["type"] == "spawn.error" and result["error_code"] == "spawn_failed", result
+    else:
+        assert result["type"] == "spawn.ok" and result["state"] == "ready", result

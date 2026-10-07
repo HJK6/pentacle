@@ -66,8 +66,15 @@ second pane.
   backoff, and cleanup. Every socket it opens is owned by the wait. At the deadline
   those transports are aborted and the wait is cancelled, so no close handshake,
   retry or send runs past it, including during the CLI's own loop shutdown.
-- Without terminal proof by then, the result is a typed `spawn.indeterminate`, never
-  a success or a failure. The admitted seat is never cancelled or re-spawned.
+- Terminal proof (ready, or a recorded failure for this request and stream) is handed
+  to the owner as soon as it is established, before any socket cleanup. This covers
+  the initial snapshot, a later inventory frame, and the recovery readback, whose
+  response is handed over before its own socket closes. A proven result is returned
+  even if cleanup then stalls past the deadline or fails. Proof that first arrives
+  after the deadline, or names another stream, never counts.
+- Without terminal proof by the deadline, the result is a typed
+  `spawn.indeterminate`, never a success or a failure. The admitted seat is never
+  cancelled or re-spawned.
 - This is a bound on the client's own awaits. It is not a real-time guarantee
   under host starvation, and interpreter exit after the loop is not counted.
 - Single-shot verbs (`close`, `reparent`, `notification.await`, `send.receipt.get`)
