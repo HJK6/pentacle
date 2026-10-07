@@ -375,27 +375,24 @@ def provenance_summary_conn(conn, stream_id: str, generation: str) -> dict[str, 
     Claude record with a v2_usage_provenance row, a Codex cumulative record
     whose native session has at least one v2_usage_codex_responses row.
     """
-    rows = conn.execute(
-        'SELECT host, provider, native_session_id, record_key FROM v2_usage_records '
-        'WHERE stream_id=? AND generation=?', (stream_id, generation),
+    records = conn.execute(
+        'SELECT COUNT(*) FROM v2_usage_records WHERE stream_id=? AND generation=?', (stream_id, generation),
+    ).fetchone()[0]
+    covered = conn.execute(
+        """SELECT COUNT(*) FROM v2_usage_records r WHERE r.stream_id=? AND r.generation=? AND (
+               (r.provider='codex' AND EXISTS (SELECT 1 FROM v2_usage_codex_responses c
+                   WHERE c.host=r.host AND c.native_session_id=r.native_session_id))
+               OR (r.provider<>'codex' AND EXISTS (SELECT 1 FROM v2_usage_provenance p
+                   WHERE p.host=r.host AND p.provider=r.provider
+                   AND p.native_session_id=r.native_session_id AND p.record_key=r.record_key)))""",
+        (stream_id, generation),
+    ).fetchone()[0]
+    sessions = conn.execute(
+        'SELECT DISTINCT host, provider, native_session_id FROM v2_usage_records '
+        'WHERE stream_id=? AND generation=? ORDER BY host, provider, native_session_id', (stream_id, generation),
     ).fetchall()
-    covered = 0
-    sessions: dict[tuple[str, str, str], None] = {}
-    for row in rows:
-        sessions.setdefault((row['host'], row['provider'], row['native_session_id']), None)
-        if row['provider'] == 'codex':
-            hit = conn.execute(
-                'SELECT 1 FROM v2_usage_codex_responses WHERE host=? AND native_session_id=? LIMIT 1',
-                (row['host'], row['native_session_id']),
-            ).fetchone()
-        else:
-            hit = conn.execute(
-                'SELECT 1 FROM v2_usage_provenance WHERE host=? AND provider=? AND native_session_id=? AND record_key=?',
-                tuple(row),
-            ).fetchone()
-        covered += hit is not None
     identities = []
-    for host, provider, native in sessions:
+    for host, provider, native in (tuple(row) for row in sessions):
         identity = conn.execute(
             'SELECT account_id, account_source, conflict, cli_version FROM v2_usage_identity '
             'WHERE host=? AND provider=? AND native_session_id=?', (host, provider, native),
@@ -419,6 +416,6 @@ def provenance_summary_conn(conn, stream_id: str, generation: str) -> dict[str, 
         account_source = 'unknown'
     return {
         'account_id': account_id, 'account_source': account_source, 'conflict': conflict,
-        'provenance_coverage': {'records': len(rows), 'with_provenance': covered},
+        'provenance_coverage': {'records': records, 'with_provenance': covered},
         'native_sessions': identities,
     }
