@@ -53,7 +53,7 @@ def test_actual_fd_shape_a1b(role, tmp_path, evidence):
 
 @pytest.mark.parametrize("variant", ["spawn_explicit", "handoff_inherited"])
 def test_successor_recovery_a4_to_a8(variant, tmp_path, evidence):
-    """The deployed shape: PENTACLE_ASSISTANT_ROLE unset (the Thoth readback), so
+    """The deployed shape: PENTACLE_ASSISTANT_ROLE unset (the daemon host readback), so
     the FD row is unprotected and resume opens a new generation. A protected row
     refuses resume (the A1 control above), so A4-A8 do not apply to it."""
     _assert_pass(fm.run_handoff_recovery(tmp_path / "env", evidence, assistant_role=None, variant=variant))

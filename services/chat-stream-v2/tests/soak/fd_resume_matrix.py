@@ -336,7 +336,7 @@ def run_self_resume(root: Path, evidence: Path, *, assistant_role: str | None) -
             "one_pane": len(panes) == 1,
         }
         if label == "A1":
-            # Protected-row control: the actual FD is unprotected (Thoth plist has
+            # Protected-row control: the actual FD is unprotected (the daemon host plist has
             # no PENTACLE_ASSISTANT_ROLE), so the refusal is recorded, not fixed.
             rec["control"] = "protected_row_resume_refused"
             rec["checks"] = {
