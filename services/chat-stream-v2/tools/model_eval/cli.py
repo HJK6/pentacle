@@ -67,8 +67,14 @@ def cmd_grade(args):
         if outputs:
             prompt = grader.build_prompt(task, order, outputs,
                                          doc.get("grader_prompt", grader.DEFAULT_PROMPT))
-            text, raw = grader.run_grader(prompt)
-            grades = grader.parse_grades(text, order)
+            for attempt in (1, 2):
+                text, raw = grader.run_grader(prompt)
+                try:
+                    grades = grader.parse_grades(text, order, expected=outputs)
+                    break
+                except ValueError:
+                    if attempt == 2:
+                        raise
         else:
             text, raw, grades = "", {}, {}
         graded[task["id"]] = {"order": order, "grades": grades, "reply": text}

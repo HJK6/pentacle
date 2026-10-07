@@ -154,3 +154,68 @@ def test_run_order_alternates_models_per_task():
     tasks = [{"id": "a"}, {"id": "b"}]
     assert [(t["id"], m) for t, m in evaluate.run_order(tasks)] == [
         ("a", "luna"), ("a", "haiku"), ("b", "haiku"), ("b", "luna")]
+
+
+def test_missing_grades_and_scope_flags_are_rejected():
+    order = {"A": "haiku", "B": "luna"}
+    with pytest.raises(ValueError):
+        grader.parse_grades("{}", order)
+    with pytest.raises(ValueError):
+        grader.parse_grades('{"A": {"grade": 2, "followed_scope": true}}', order)
+    with pytest.raises(ValueError):
+        grader.parse_grades('{"A": {"grade": 2}, "B": {"grade": 1, "followed_scope": true}}', order)
+    # a failed run has no output, so its grade may be absent
+    only = grader.parse_grades('{"A": {"grade": 2, "followed_scope": true}}', order, expected=["haiku"])
+    assert list(only) == ["haiku"]
+
+
+def test_known_outcome_is_scrubbed_in_the_grader_prompt():
+    task = {"id": "t", "class": "qa", "brief": "b", "known": {"issue": "gpt-6-luna via Codex missed it"}}
+    prompt = grader.build_prompt(task, {"A": "haiku", "B": "luna"}, {})
+    assert "luna" not in prompt.lower() and "codex" not in prompt.lower()
+
+
+def test_run_session_records_actual_cwd_argv_and_tuple(tmp_path, monkeypatch):
+    work = tmp_path / "wt"
+    work.mkdir()
+    script = ("pwd > seen_cwd.txt; "
+              "agent-orch tell p 'START x'; "
+              "agent-orch report --msg-id 1 --status done --result '{\"summary\":\"s\",\"findings\":[],\"next_action\":\"n\"}'; "
+              "agent-orch tell p 'END x'; "
+              "echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}'")
+    monkeypatch.setattr(runner, "build_argv", lambda key, wt, last, run_dir: ["sh", "-c", script])
+    record = runner.run_session("luna", "brief", str(work), str(tmp_path / "run"), timeout_s=30)
+    assert (work / "seen_cwd.txt").read_text().strip() == os.path.realpath(str(work))
+    assert record["cwd"] == str(work) and record["argv"][:2] == ["sh", "-c"]
+    assert record["requested"] == {"model": "gpt-6-luna", "effort": "max"}
+    assert record["effective"]["model"] == "gpt-6-luna" and record["effective"]["effort"] == scoring.UNAVAILABLE
+    assert (record["tokens_in"], record["tokens_out"], record["failure_reason"]) == (10, 2, None)
+    assert protocol.check_protocol(protocol.read_log(record["log"]), qa=False) == "yes"
+
+
+def test_launch_failure_and_timeout_become_failure_records(tmp_path, monkeypatch):
+    work = tmp_path / "wt"
+    work.mkdir()
+    monkeypatch.setattr(runner, "build_argv", lambda *a: ["/nonexistent/binary"])
+    record = runner.run_session("haiku", "b", str(work), str(tmp_path / "r1"), timeout_s=5)
+    assert record["failure_reason"].startswith("launch error") and record["usd_api_equiv"] == scoring.UNAVAILABLE
+    monkeypatch.setattr(runner, "build_argv", lambda *a: ["sleep", "30"])
+    record = runner.run_session("haiku", "b", str(work), str(tmp_path / "r2"), timeout_s=1)
+    assert record["failure_reason"] == "timeout after 1s"
+
+
+def test_capture_diff_includes_staged_and_committed_changes(fix_repo, tmp_path):
+    repo, pre, fix = fix_repo
+    wt = evaluate.prepare_worktree(fix_task(repo, pre, fix), str(tmp_path))
+    try:
+        base = evaluate.snapshot_tree(wt)
+        open(os.path.join(wt, "mod.py"), "w").write("def f():\n    return 2\n")
+        git(wt, "add", "mod.py")
+        git(wt, "-c", "user.email=t@example.test", "-c", "user.name=t", "commit", "-qm", "model commit")
+        open(os.path.join(wt, "new.py"), "w").write("X = 1\n")
+        path = evaluate.capture_diff(wt, str(tmp_path), base)
+        diff = open(path).read()
+        assert "+    return 2" in diff and "new.py" in diff
+        assert "test_mod.py" not in diff  # installed tests are part of the baseline
+    finally:
+        runner.remove_worktree(str(repo), wt)

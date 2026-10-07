@@ -113,17 +113,19 @@ def run_session(key, brief, worktree, run_dir, timeout_s=DEFAULT_TIMEOUT_S, rate
     out_path, err_path = (os.path.join(run_dir, n) for n in ("stdout.jsonl", "stderr.txt"))
     started, reason, code = time.time(), None, None
     with open(out_path, "w") as out, open(err_path, "w") as err:
-        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out, stderr=err, cwd=worktree,
-                                env=run_env(bin_dir, log_path), start_new_session=True, text=True)
         try:
-            proc.communicate(brief, timeout=timeout_s)
-            code = proc.returncode
-        except subprocess.TimeoutExpired:
-            _kill_group(proc)
-            proc.wait()
-            reason = f"timeout after {timeout_s}s"
-        except OSError as exc:  # pragma: no cover - launch failure
-            reason = f"launch error: {exc}"
+            proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out, stderr=err, cwd=worktree,
+                                    env=run_env(bin_dir, log_path), start_new_session=True, text=True)
+        except OSError as exc:
+            proc, reason = None, f"launch error: {exc}"
+        if proc is not None:
+            try:
+                proc.communicate(brief, timeout=timeout_s)
+                code = proc.returncode
+            except subprocess.TimeoutExpired:
+                _kill_group(proc)
+                proc.wait()
+                reason = f"timeout after {timeout_s}s"
     wall_s = round(time.time() - started, 1)
     with open(out_path, encoding="utf-8", errors="replace") as fh:
         effective, t_in, t_out, usd, raw = parse_usage(key, fh.read())
@@ -135,7 +137,9 @@ def run_session(key, brief, worktree, run_dir, timeout_s=DEFAULT_TIMEOUT_S, rate
     return {
         "model": key,
         "requested": {"model": spec["model"], "effort": spec["effort"]},
-        "effective": {"model": effective or (spec["model"] if key == "luna" and raw else None)},
+        # Neither CLI reports the effective effort; it is recorded as unavailable, not assumed.
+        "effective": {"model": effective or (spec["model"] if key == "luna" and raw else None),
+                      "effort": scoring.UNAVAILABLE},
         "cwd": worktree, "argv": argv, "exit_code": code, "wall_s": wall_s,
         "tokens_in": t_in, "tokens_out": t_out, "usd_api_equiv": usd, "usage": raw,
         "failure_reason": reason, "log": log_path, "stdout": out_path, "stderr": err_path,

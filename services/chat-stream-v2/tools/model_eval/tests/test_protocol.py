@@ -12,10 +12,14 @@ def run_calls(tmp_path, monkeypatch, calls):
     return protocol.read_log(str(log)), codes
 
 
+SHA = "a" * 40
+QA_FLAGS = ["--target-sha", SHA, "--qa-reviewed-scope", "diff", "--qa-gate-evidence-digest", "b" * 64]
+
+
 def report_call(payload, verdict=None, extra=()):
     args = ["report", "--msg-id", "1", "--status", "done", "--result", json.dumps(payload)]
     if verdict:
-        args += ["--qa-verdict", verdict]
+        args += ["--qa-verdict", verdict] + QA_FLAGS
     return args + list(extra)
 
 
@@ -61,6 +65,21 @@ def test_result_file_is_unsupported(tmp_path, monkeypatch):
     assert codes == [2] and not entries[0]["valid"]
 
 
+def test_finding_without_suggested_fix_is_invalid_and_not_counted(tmp_path, monkeypatch):
+    bad = dict(GOOD, findings=[{"severity": "major", "where": "a", "issue": "b"}])
+    entries, codes = run_calls(tmp_path, monkeypatch, [
+        ["tell", "p", "START"], report_call(bad), ["tell", "p", "END"]])
+    assert codes[1] == 2 and protocol.check_protocol(entries, qa=False) == "no"
+
+
+def test_qa_review_flags_are_required_together_and_checked(tmp_path, monkeypatch):
+    partial = ["report", "--status", "done", "--qa-verdict", "accept", "--result", json.dumps(GOOD)]
+    bad_digest = report_call(GOOD, "reject")[:-1] + ["NOTHEX"]
+    entries, codes = run_calls(tmp_path, monkeypatch, [partial, bad_digest, report_call(GOOD, "reject")])
+    assert codes == [2, 2, 0]
+    assert protocol.reported_verdict(entries) == "reject"
+
+
 def test_schema_check_cases():
     assert protocol.validate_report_payload(GOOD) == []
     finding = {"severity": "major", "where": "a.py:1", "issue": "x", "suggested_fix": None}
@@ -70,3 +89,5 @@ def test_schema_check_cases():
     assert protocol.validate_report_payload(dict(GOOD, findings="none"))
     assert protocol.validate_report_payload([])
     assert protocol.validate_report_payload(dict(GOOD, details={"a": 1}, extras={})) == []
+    # the payload itself may carry the governance fields the real schema allows
+    assert protocol.validate_report_payload(dict(GOOD, qa_verdict="accept", target_sha=SHA)) == []

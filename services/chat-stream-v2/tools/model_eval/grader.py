@@ -64,7 +64,7 @@ def output_text(row, run_dir):
 
 def build_prompt(task, order, outputs, base_prompt=DEFAULT_PROMPT):
     """Assemble the grader prompt; `outputs` maps model -> text (failed runs absent)."""
-    known = json.dumps(task.get("known", {}), indent=1)
+    known = scrub(json.dumps(task.get("known", {}), indent=1))
     blocks = [base_prompt, f"TASK BRIEF:\n{scrub(task['brief'])}",
               f"KNOWN OUTCOME:\n{known}", f"RUBRIC ({task['class']}): {RUBRICS[task['class']]}"]
     for label, model in order.items():
@@ -73,19 +73,27 @@ def build_prompt(task, order, outputs, base_prompt=DEFAULT_PROMPT):
     return "\n\n".join(blocks)
 
 
-def parse_grades(text, order):
-    """Map the grader's JSON back to models; unknown/invalid entries raise ValueError."""
+def parse_grades(text, order, expected=None):
+    """Map the grader's JSON back to models; invalid or missing entries raise ValueError.
+
+    `expected` lists the models whose finished output must be graded (default: all).
+    """
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         raise ValueError("no JSON object in grader reply")
     data = json.loads(match.group(0))
     grades = {}
+    expected = set(order.values() if expected is None else expected)
     for label, model in order.items():
         item = data.get(label)
         if item is None:
+            if model in expected:
+                raise ValueError(f"missing grade for {label}")
             continue
-        if item.get("grade") not in (0, 1, 2):
+        if not isinstance(item, dict) or item.get("grade") not in (0, 1, 2):
             raise ValueError(f"invalid grade for {label}")
+        if not isinstance(item.get("followed_scope"), bool):
+            raise ValueError(f"missing followed_scope for {label}")
         grades[model] = {"grade": item["grade"], "followed_scope": bool(item.get("followed_scope")),
                          "note": str(item.get("note", ""))[:300]}
     return grades

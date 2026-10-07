@@ -33,6 +33,10 @@ def handle(argv):
     entry["status"] = _flag(argv, "--status")
     entry["qa_verdict"] = _flag(argv, "--qa-verdict")
     entry["target_sha"] = _flag(argv, "--target-sha")
+    flags = {"qa_verdict": entry["qa_verdict"], "target_sha": entry["target_sha"],
+             "completion_kind": _flag(argv, "--completion-kind"),
+             "qa_reviewed_scope": _flag(argv, "--qa-reviewed-scope"),
+             "qa_gate_evidence_digest": _flag(argv, "--qa-gate-evidence-digest")}
     if "--result-file" in argv:
         entry.update(valid=False, errors=["unsupported_in_v2: use --result"])
     else:
@@ -42,7 +46,8 @@ def handle(argv):
         except ValueError as exc:
             entry.update(valid=False, errors=[f"invalid JSON: {exc}"])
         else:
-            errors = validate_report_payload(payload) if raw is not None else ["--result is required"]
+            errors = (validate_report_payload(payload, entry["status"] or "", flags)
+                      if raw is not None else ["--result is required"])
             entry.update(valid=not errors, errors=errors, payload=payload if not errors else None)
     if entry["valid"]:
         return entry, {"type": "report.ok", "ok": True}, 0

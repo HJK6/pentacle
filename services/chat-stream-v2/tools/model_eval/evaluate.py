@@ -55,9 +55,18 @@ def setup_worktree(path, setup_cmd):
         subprocess.run(setup_cmd, shell=True, cwd=path, check=True, capture_output=True)
 
 
-def capture_diff(worktree, run_dir):
-    subprocess.run(["git", "-C", worktree, "add", "-N", "."], capture_output=True)
-    diff = subprocess.run(["git", "-C", worktree, "diff"], capture_output=True, text=True).stdout
+def snapshot_tree(worktree):
+    """Tree id of the prepared worktree (after setup and installed tests): the diff baseline."""
+    subprocess.run(["git", "-C", worktree, "add", "-A"], check=True, capture_output=True)
+    return subprocess.run(["git", "-C", worktree, "write-tree"], check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+def capture_diff(worktree, run_dir, base_tree):
+    """Everything the model changed since `base_tree`, whether left unstaged, staged or committed."""
+    subprocess.run(["git", "-C", worktree, "add", "-A"], capture_output=True)
+    diff = subprocess.run(["git", "-C", worktree, "diff", "--cached", base_tree],
+                          capture_output=True, text=True).stdout
     path = os.path.join(run_dir, "final.diff")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(diff)
@@ -101,11 +110,13 @@ def run_one(task, model, bundle, tasks_doc, timeout_s=runner.DEFAULT_TIMEOUT_S):
     wt_parent = os.path.join(bundle, "worktrees")
     os.makedirs(wt_parent, exist_ok=True)
     worktree = prepare_worktree(task, wt_parent)
+    base_tree = snapshot_tree(worktree)
     try:
         record = runner.run_session(model, task["brief"], worktree, run_dir, timeout_s,
                                     rates=tasks_doc.get("pricing"))
+        final_diff = capture_diff(worktree, run_dir, base_tree)  # before scoring touches the tree
         row = score_run(task, record, worktree)
-        row["final_diff"] = capture_diff(worktree, run_dir)
+        row["final_diff"] = final_diff
         with open(os.path.join(run_dir, "record.json"), "w", encoding="utf-8") as fh:
             fh.write(scoring.dumps({**record, "row": row}))
     finally:

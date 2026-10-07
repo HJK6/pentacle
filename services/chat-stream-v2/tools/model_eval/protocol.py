@@ -1,35 +1,49 @@
 """Report payload schema check and protocol detection from the call log."""
 import json
+import os
+import re
+import sys
 
-REPORT_KEYS = {"summary", "findings", "next_action", "details", "extras"}
-SEVERITIES = {"blocking", "major", "minor", "info"}
+_SERVICES = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+if _SERVICES not in sys.path:
+    sys.path.insert(0, _SERVICES)
+from _shared import report_payload_v1  # noqa: E402  the authoritative payload schema
+
+DIGEST = re.compile(r"[a-f0-9]{64}")
 
 
-def validate_report_payload(payload):
-    """Return a list of schema errors for a report payload (empty when valid)."""
+def validate_report_payload(payload, status="done", flags=None):
+    """Return a list of schema errors for a report (empty when valid).
+
+    Applies the authoritative ReportPayloadV1 validator after merging the
+    structured flags (`qa_verdict`, `target_sha`, `completion_kind`) the way the
+    real CLI does; a QA review flag set also needs scope and evidence digest.
+    """
+    flags = flags or {}
     if not isinstance(payload, dict):
         return ["payload must be a JSON object"]
-    errors = [f"unknown top-level key: {k}" for k in sorted(set(payload) - REPORT_KEYS)]
-    for key in ("summary", "next_action"):
-        value = payload.get(key)
-        if not isinstance(value, str) or not value.strip():
-            errors.append(f"{key} must be a non-empty string")
-    findings = payload.get("findings")
-    if not isinstance(findings, list):
-        errors.append("findings must be an array")
-        return errors
-    for i, item in enumerate(findings):
-        if not isinstance(item, dict):
-            errors.append(f"findings[{i}] must be an object")
-            continue
-        if item.get("severity") not in SEVERITIES:
-            errors.append(f"findings[{i}].severity must be one of {sorted(SEVERITIES)}")
-        for key in ("where", "issue"):
-            if not isinstance(item.get(key), str):
-                errors.append(f"findings[{i}].{key} must be a string")
-        fix = item.get("suggested_fix")
-        if fix is not None and not isinstance(fix, str):
-            errors.append(f"findings[{i}].suggested_fix must be a string or null")
+    merged = dict(payload)
+    for name in ("qa_verdict", "target_sha", "completion_kind"):
+        if flags.get(name) is not None:
+            if name in merged:
+                return [f"--{name.replace('_', '-')} conflicts with {name} in --result"]
+            merged[name] = flags[name]
+    errors = []
+    if any(flags.get(k) is not None for k in ("qa_verdict", "target_sha", "qa_reviewed_scope", "qa_gate_evidence_digest")):
+        for key, flag in (("target_sha", "--target-sha"), ("qa_reviewed_scope", "--qa-reviewed-scope"),
+                          ("qa_gate_evidence_digest", "--qa-gate-evidence-digest")):
+            if flags.get(key) is None and not (key == "target_sha" and "target_sha" in merged):
+                errors.append(f"QA review evidence requires {flag}")
+        digest = flags.get("qa_gate_evidence_digest")
+        if digest is not None and not DIGEST.fullmatch(digest):
+            errors.append("--qa-gate-evidence-digest must be a lowercase 64-hex SHA-256")
+        if flags.get("qa_reviewed_scope") is not None and not flags["qa_reviewed_scope"].strip():
+            errors.append("--qa-reviewed-scope must be non-empty")
+    try:
+        report_payload_v1.validate(merged, status, enforce_inline_caps=True)
+    except report_payload_v1.SchemaError as exc:
+        errors.append(str(exc))
+        errors.extend(f"{v.get('field')}: {v.get('detail')}" for v in exc.violations)
     return errors
 
 
