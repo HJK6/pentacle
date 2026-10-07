@@ -73,7 +73,9 @@ test('real DOM reader observes visible state, actual frame attributes and contro
   assert.equal(readDashboardObservation(dom.window.document).frameUrl, null);
 });
 test('hermetic profile enables dashboards and adds viewer URL only when explicitly configured', t => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-profile-'));
+  // require() caches by real path; macOS tmpdir is a symlink, so resolve it before
+  // evicting the cache entry or the second read returns the stale profile.
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-profile-')));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   function read(configured) {
     const profile = writeProfile(dir, 19031, fixtureUrl, configured);
