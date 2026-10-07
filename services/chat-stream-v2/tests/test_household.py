@@ -25,6 +25,13 @@ OPERATOR = {"operator_authenticated": True, "operator_principal": "operator:cid"
 NOW = datetime(2026, 10, 7, 3, 0, tzinfo=timezone.utc).timestamp()
 
 
+class _FakeCosmoServer(ThreadingHTTPServer):
+    # household.snapshot opens one connection per list plus two event windows at once; macOS
+    # refuses connects beyond socketserver's default listen backlog of 5 (ECONNRESET/ECONNREFUSED),
+    # which the adapter correctly reports as "household store unavailable".
+    request_queue_size = 64
+
+
 class FakeCosmo:
     """Records every request; replies from a (method, path) table."""
 
@@ -58,7 +65,7 @@ class FakeCosmo:
 
             do_GET = do_POST = do_PATCH = do_DELETE = _serve
 
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd = _FakeCosmoServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
 
@@ -473,6 +480,12 @@ def test_seat_operator_authority_context_shape_matches_server():
 
 
 # ---- neutral, viewer-relative vocabulary ---------------------------------------------------
+
+def test_fake_cosmo_accepts_a_whole_snapshot_burst(cosmo):
+    import household
+    # One snapshot is len(LISTS) + 2 parallel calls; the fake must queue them all on every OS.
+    assert cosmo.httpd.request_queue_size >= len(household.LISTS) + 2
+
 
 def test_snapshot_translates_cosmo_vocabulary(adapter, cosmo):
     cosmo.routes[("GET", "/lists/tasks/items")] = (200, {"items": [
