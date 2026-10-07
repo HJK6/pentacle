@@ -32,6 +32,7 @@ from typing import Any, Iterable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from store_specs import normalize_spec_ids  # noqa: E402
+from usage_codex_sample_reconcile import digest as session_digest  # noqa: E402
 from usage_history import HISTORY_FILENAME, dedupe_key  # noqa: E402
 
 SCHEMA_VERSION = 1
@@ -61,6 +62,13 @@ CODEX_QUOTA = 'codex'
 CODEX_QUOTA_MINUTES = 10080
 CODEX_SOURCE = 'rollout'
 RECON_CLASSES = ('reconciled', 'partial', 'unverifiable')
+#: Emitted only when the ledger holds at least one thread-proof row (no proof: today's output byte for byte).
+PROOF_RECON_CLASSES = ('reconciled', 'reconciled_by_rows', 'partial', 'unverifiable')
+#: Predicate P clauses in report order (spec_pentacle__usage_codex_reconciled_by_rows_2026_10 Target State 2).
+P_CLAUSES = ('identity', 'completeness', 'equality', 'counter_consistency', 'flags', 'malformed_proof',
+             'ledger_le_thread')
+THREAD_FIELDS = ('input', 'cached_input', 'cache_write_input', 'output', 'reasoning_output')
+THREAD_COLUMNS = tuple(f'thread_{f}' for f in THREAD_FIELDS)
 CODEX_OUTSIDE = ('retired', 'unverifiable', 'unreconciled', 'untimed')
 DOLLARS_LABEL = 'API-equivalent weighted proxy, not billing'
 
@@ -248,11 +256,12 @@ def _add(into: dict[str, int], tokens: dict[str, int]) -> dict[str, int]:
 
 class CodexRow:
     """One v2_usage_codex_responses row in the four ledger buckets; reasoning is a labelled subset of output."""
-    __slots__ = ('host', 'provider', 'native', 'stream_id', 'observed', 'model', 'tokens', 'total', 'reasoning',
-                 'account', 'account_state', 'dollars', 'cls')
+    __slots__ = ('host', 'provider', 'native', 'response_id', 'stream_id', 'observed', 'model', 'tokens', 'total',
+                 'reasoning', 'account', 'account_state', 'dollars', 'cls')
 
     def __init__(self, row: sqlite3.Row, pricing: Pricing):
         self.host, self.provider, self.native = row['host'], 'codex', row['native_session_id']
+        self.response_id = row['response_id']
         self.stream_id = None
         self.observed = parse_ts(row['observed_at'])
         self.model = row['model']
@@ -280,6 +289,99 @@ class CodexRow:
     def account_label(self) -> str:
         return self.account if self.account else self.account_state
 
+    def vector(self) -> dict[str, int]:
+        """The stored five-field usage vector (cached inside input, reasoning inside output)."""
+        return {'input': self.tokens['uncached_input'] + self.tokens['cache_read'],
+                'cached_input': self.tokens['cache_read'], 'cache_write_input': self.tokens['cache_write'],
+                'output': self.tokens['output'], 'reasoning_output': self.reasoning}
+
+
+class ProofRow:
+    """One stored v2_usage_codex_thread_proof row, validated here: the rollup never trusts storage."""
+    __slots__ = ('response_id', 'seq', 'source', 'vector', 'valid')
+
+    def __init__(self, row: sqlite3.Row):
+        self.response_id = row['response_id']
+        self.seq = row['transcript_seq']
+        self.source = row['source']
+        values = [row[c] for c in THREAD_COLUMNS]
+        typed = all(type(v) is int for v in values)
+        self.vector = dict(zip(THREAD_FIELDS, values)) if typed else None
+        v = self.vector
+        # Stored-proof validator (Plan 3(k)): the same invariants the wire enforces, re-checked on read,
+        # because an out-of-band write can violate them while every column CHECK still holds.
+        self.valid = bool(
+            v is not None and all(x >= 0 for x in values)
+            and v['cached_input'] <= v['input'] and v['reasoning_output'] <= v['output']
+            and ((self.source == 'backfill' and type(self.seq) is int and self.seq >= 1)
+                 or (self.source == 'live' and self.seq is None)))
+
+    @property
+    def ordinal(self) -> int | None:
+        return self.seq if self.source == 'backfill' and type(self.seq) is int else None
+
+
+def _sum_vectors(vectors: Iterable[dict[str, int]]) -> dict[str, int]:
+    total = dict.fromkeys(THREAD_FIELDS, 0)
+    for vector in vectors:
+        for field in THREAD_FIELDS:
+            total[field] += vector[field]
+    return total
+
+
+def thread_buckets(v: dict[str, int]) -> dict[str, int]:
+    """A thread vector in the four ledger buckets (the same model as codex_ledger_buckets)."""
+    return {'uncached_input': v['input'] - v['cached_input'], 'cache_read': v['cached_input'],
+            'cache_write': v['cache_write_input'], 'output': v['output']}
+
+
+def proof_predicate(cumulative: dict[str, int] | None, responses: list[CodexRow], proof: list[ProofRow],
+                    flags: dict[str, int], identity_conflict: int | None) -> tuple[list[str], int | None]:
+    """Predicate P over one snapshot: the failing clauses (empty when proven) and the boundary ordinal n.
+
+    Clauses: (a) identity, (b) completeness with exactly one backfill row per ordinal 1..n mapped one-to-one
+    to response rows and no response without one, (c) equality of the prefix row sum with the vector at n,
+    (d) counter consistency (non-decreasing along 1..n), (e) no stored flags and no malformed stored row,
+    (f) the cumulative ledger at or below the vector at n in every bucket. A timed row is not evidence.
+    """
+    failed: set[str] = set()
+    if cumulative is None or identity_conflict != 0:
+        failed.add('identity')
+    usable = [p for p in proof if p.vector is not None]
+    backfill = [p for p in usable if p.ordinal is not None]
+    n = max((p.ordinal for p in backfill), default=None)
+    rows = {row.response_id: row for row in responses}
+    per_ordinal: dict[int, list[ProofRow]] = {}
+    for p in backfill:
+        per_ordinal.setdefault(p.ordinal, []).append(p)
+    proven_ids = {p.response_id for p in backfill}
+    complete = (
+        n is not None
+        and all(len(per_ordinal.get(k, ())) == 1 for k in range(1, n + 1))
+        and len(proven_ids) == len(backfill)
+        and all(p.response_id in rows for p in backfill)
+        and all(rid in proven_ids for rid in rows)
+        and len(usable) == len(proof)
+    )
+    if not complete:
+        failed.add('completeness')
+    at_n = per_ordinal.get(n, []) if n is not None else []
+    boundary = at_n[0].vector if len(at_n) == 1 else None
+    prefix = _sum_vectors(rows[p.response_id].vector() for p in backfill if p.response_id in rows)
+    if boundary is None or prefix != boundary:
+        failed.add('equality')
+    ordered = [per_ordinal[k][0].vector for k in sorted(per_ordinal) if len(per_ordinal[k]) == 1]
+    if any(later[f] < earlier[f] for earlier, later in zip(ordered, ordered[1:]) for f in THREAD_FIELDS):
+        failed.add('counter_consistency')
+    if any(flag != 'malformed_proof' for flag in flags):
+        failed.add('flags')
+    if any(not p.valid for p in proof):
+        failed.add('malformed_proof')
+    if cumulative is None or boundary is None or any(
+            cumulative.get(b, 0) > t for b, t in thread_buckets(boundary).items()):
+        failed.add('ledger_le_thread')
+    return [c for c in P_CLAUSES if c in failed], n
+
 
 class CodexSession:
     """Per-native-session reconciliation of the cumulative ledger row C_n with the response rows R_n.
@@ -290,8 +392,15 @@ class CodexSession:
     """
 
     def __init__(self, host: str, native: str, cumulative: Rec | None, responses: list[CodexRow],
-                 identity: tuple[str | None, str]):
+                 identity: tuple[str | None, str], proof: list[ProofRow] | None = None,
+                 flags: dict[str, int] | None = None, identity_conflict: int | None = None):
         self.host, self.native = host, native
+        self.proof = proof or []
+        self.flags = dict(flags or {})
+        if any(not p.valid for p in self.proof):
+            self.flags['malformed_proof'] = sum(1 for p in self.proof if not p.valid)
+        self.blocked_by: list[str] | None = None
+        self.proof_boundary_seq: int | None = None
         self.stream_id = cumulative.stream_id if cumulative is not None else None
         self.cumulative = dict(cumulative.tokens) if cumulative is not None else None
         self.responses = responses
@@ -304,7 +413,21 @@ class CodexSession:
         self.untimed = _zero()
         self.unreconciled = _zero()
         self.unverifiable = _zero()
-        if c is None or any(self.received[b] > c.get(b, 0) for b in BUCKETS):
+        today_unverifiable = c is None or any(self.received[b] > c.get(b, 0) for b in BUCKETS)
+        if today_unverifiable and self.proof:
+            # Only a session that would be unverifiable today, and only with proof rows present (legacy bypass).
+            self.blocked_by, self.proof_boundary_seq = proof_predicate(
+                c, responses, self.proof, self.flags, identity_conflict)
+        if today_unverifiable and self.proof and not self.blocked_by:
+            # One source of mass: the proven prefix's rows (every row, by completeness); the ledger row is
+            # never added and unreconciled is zero by construction.
+            self.cls = 'reconciled_by_rows'
+            for row in responses:
+                if row.observed is None:
+                    _add(self.untimed, row.tokens)
+                else:
+                    self.placed.append(row)
+        elif today_unverifiable:
             self.cls = 'unverifiable'
             self.unverifiable = ({b: max(self.received[b], c.get(b, 0)) for b in BUCKETS} if c is not None
                                  else dict(self.received))
@@ -329,6 +452,22 @@ class CodexSession:
     def account_label(self) -> str:
         return self.account if self.account else self.account_state
 
+    def proof_entry(self) -> dict[str, Any]:
+        """Per-session JSON for a session P was evaluated on (unverifiable today, proof rows present)."""
+        entry: dict[str, Any] = {'session': session_digest(self.native), 'host': self.host, 'class': self.cls,
+                                 'proof_rows': len(self.proof)}
+        if self.cls == 'reconciled_by_rows':
+            n = self.proof_boundary_seq
+            vector = next(p.vector for p in self.proof if p.ordinal == n)
+            thread = thread_buckets(vector)
+            entry.update(source='rows', proof_boundary_seq=n, thread_vector=dict(vector),
+                         ledger_below_thread_by={b: thread[b] - (self.cumulative or {}).get(b, 0) for b in thread})
+        else:
+            entry['reconciled_by_rows_blocked_by'] = list(self.blocked_by or ())
+        if self.flags:
+            entry['flags'] = dict(sorted(self.flags.items()))
+        return entry
+
     def masses(self) -> dict[str, int]:
         placed = sum(r.total for r in self.placed)
         return {'placed': placed, 'untimed': sum(self.untimed.values()),
@@ -340,14 +479,22 @@ class CodexSession:
 
 
 def build_codex_sessions(cumulative: dict[tuple[str, str], Rec], responses: dict[tuple[str, str, str], CodexRow],
-                         identity: dict[tuple[str, str], tuple[str | None, str]]) -> list[CodexSession]:
+                         identity: dict[tuple[str, str], tuple[str | None, str]],
+                         proof: dict[tuple[str, str, str], ProofRow] | None = None,
+                         flags: dict[tuple[str, str], dict[str, int]] | None = None,
+                         conflicts: dict[tuple[str, str], int] | None = None) -> list[CodexSession]:
     grouped: dict[tuple[str, str], list[CodexRow]] = {}
     for (host, native, _rid), row in sorted(responses.items()):
         grouped.setdefault((host, native), []).append(row)
+    proofs: dict[tuple[str, str], list[ProofRow]] = {}
+    for (host, native, _rid), row in sorted((proof or {}).items()):
+        proofs.setdefault((host, native), []).append(row)
+    flags, conflicts = flags or {}, conflicts or {}
     sessions = []
     for key in sorted(set(cumulative) | set(grouped)):
         sessions.append(CodexSession(key[0], key[1], cumulative.get(key), grouped.get(key, []),
-                                     identity.get(key, (None, 'unknown'))))
+                                     identity.get(key, (None, 'unknown')), proofs.get(key), flags.get(key),
+                                     conflicts.get(key)))
     return sessions
 
 
@@ -452,6 +599,9 @@ class Sources:
         self._codex_cumulative: dict[tuple[str, str], Rec] = {}
         self._codex_responses: dict[tuple[str, str, str], CodexRow] = {}
         self._codex_identity: dict[tuple[str, str], tuple[str | None, str]] = {}
+        self._codex_conflict: dict[tuple[str, str], int] = {}
+        self._codex_proof: dict[tuple[str, str, str], ProofRow] = {}
+        self._codex_flags: dict[tuple[str, str], dict[str, int]] = {}
         self.codex_alias_report: list[dict[str, Any]] = []
         self.usage_state: list[tuple[str, str, float | None]] = []  # (collection_host, stream_id, updated_at)
         live = data_dir / 'sessions.db'
@@ -474,7 +624,10 @@ class Sources:
                 if isinstance(entry, dict):
                     self.history.append(entry)
         self.work_items = load_work_items(work_root)
-        self.codex = build_codex_sessions(self._codex_cumulative, self._codex_responses, self._codex_identity)
+        self.codex = build_codex_sessions(self._codex_cumulative, self._codex_responses, self._codex_identity,
+                                          self._codex_proof, self._codex_flags, self._codex_conflict)
+        #: Any thread proof at all: gates every new rollup field, so a proof-free ledger reads as before.
+        self.codex_proof = any(session.proof for session in self.codex)
 
     def apply_codex_aliases(self, aliases: dict[str, str]) -> None:
         """Justified private-config aliases fold one creator account into another (basis: aliased)."""
@@ -483,6 +636,17 @@ class Sources:
                 session.set_account(aliases[session.account], 'known')
 
     def _load_db(self, conn: sqlite3.Connection, source: str) -> None:
+        # One deferred read transaction on a read-only connection: every table below, including the Codex
+        # rows, thread proof and flags that predicate P joins, comes from a single snapshot, so a backfill
+        # batch committing mid-read is seen entirely or not at all (Plan 3(j)).
+        conn.execute('BEGIN DEFERRED')
+        try:
+            self._read_db(conn, source)
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def _read_db(self, conn: sqlite3.Connection, source: str) -> None:
         tables = _tables(conn)
         if 'sessions' in tables:
             for row in conn.execute('SELECT * FROM sessions'):
@@ -498,10 +662,18 @@ class Sources:
                                     "FROM v2_usage_identity WHERE provider='codex'"):
                 self._codex_identity[(row['host'], row['native_session_id'])] = _identity(
                     row['account_source'], row['conflict'], row['account_id'])
+                self._codex_conflict[(row['host'], row['native_session_id'])] = row['conflict']
         if 'v2_usage_codex_responses' in tables:
             for row in conn.execute('SELECT * FROM v2_usage_codex_responses'):
                 key = (row['host'], row['native_session_id'], row['response_id'])
                 self._codex_responses[key] = CodexRow(row, self.pricing)
+        if 'v2_usage_codex_thread_proof' in tables:
+            for row in conn.execute('SELECT * FROM v2_usage_codex_thread_proof'):
+                self._codex_proof[(row['host'], row['native_session_id'], row['response_id'])] = ProofRow(row)
+        if 'v2_usage_codex_thread_flags' in tables:
+            for row in conn.execute('SELECT host, native_session_id, flag FROM v2_usage_codex_thread_flags'):
+                counts = self._codex_flags.setdefault((row['host'], row['native_session_id']), {})
+                counts[row['flag']] = counts.get(row['flag'], 0) + 1
         if 'v2_usage_state' in tables:
             for row in conn.execute('SELECT collection_host, stream_id, updated_at FROM v2_usage_state'):
                 self.usage_state.append((row['collection_host'], row['stream_id'], parse_ts(row['updated_at'])))
@@ -519,7 +691,6 @@ class Sources:
                     expires = parse_ts(row['expires_at'])
                     end = min(expires, self.now) if expires is not None else self.now
                 self.holds.append((row['owner_stream'], start, end))
-        conn.close()
 
     def _load_cards(self, conn: sqlite3.Connection) -> None:
         if 'agent_questions' in _tables(conn):
@@ -695,14 +866,23 @@ def summarize_claude(recs: list[Rec], ctx: Context) -> dict[str, Any]:
     }
 
 
-def _recon_block(sessions: list[CodexSession]) -> dict[str, Any]:
+def recon_classes(proof: bool) -> tuple[str, ...]:
+    return PROOF_RECON_CLASSES if proof else RECON_CLASSES
+
+
+def _recon_block(sessions: list[CodexSession], proof: bool = False) -> dict[str, Any]:
     """Session counts and token masses per reconciliation class (the per-bucket split is in `tokens`)."""
     out: dict[str, Any] = {}
-    for cls in RECON_CLASSES:
+    for cls in recon_classes(proof):
         mine = [s for s in sessions if s.cls == cls]
         block: dict[str, Any] = {'sessions': len(mine), 'tokens': sum(s.total for s in mine)}
         if cls == 'partial':
             block['unreconciled_tokens'] = sum(s.masses()['unreconciled'] for s in mine)
+        if cls == 'reconciled_by_rows':
+            blocked = [s for s in sessions if s.blocked_by]
+            block['blocked_sessions'] = len(blocked)
+            block['blocked_by'] = {c: n for c in P_CLAUSES
+                                   for n in [sum(c in s.blocked_by for s in blocked)] if n}
         out[cls] = block
     return out
 
@@ -777,12 +957,14 @@ def summarize_codex(sessions: list[CodexSession], ctx: Context) -> dict[str, Any
         'unpriced_tokens': partition['unpriced'],
         'partition_tokens': {**partition, **outside},
         'outside_window_tokens': {'untimed': untimed, 'unreconciled': unreconciled, 'unverifiable': unverifiable},
-        'reconciliation': _recon_block(sessions),
+        'reconciliation': _recon_block(sessions, ctx.src.codex_proof),
         'unreconciled_mass': _mass_by_host_account(sessions, 'unreconciled'),
         'unverifiable_mass': _mass_by_host_account(sessions, 'unverifiable'),
         'by_model_account': sorted(groups.values(), key=lambda g: (g['model'], g['account_id'])),
         'by_account': sorted(accounts.values(), key=lambda a: a['account_id']),
     }
+    if ctx.src.codex_proof:
+        out['proof_sessions'] = [s.proof_entry() for s in sessions if s.proof and s.blocked_by is not None]
     denom = placed_total + sum(outside.values())
     if ranged:  # unplaceable mass has no time, so it cannot be assigned to (or kept out of) a range
         out.update(completeness=None, measured_coverage=None,
@@ -793,7 +975,7 @@ def summarize_codex(sessions: list[CodexSession], ctx: Context) -> dict[str, Any
     return out
 
 
-def codex_by_stream(sessions: list[CodexSession]) -> list[dict[str, Any]]:
+def codex_by_stream(sessions: list[CodexSession], proof: bool = False) -> list[dict[str, Any]]:
     rows = []
     for stream in sorted({s.stream_id for s in sessions if s.stream_id}):
         mine = [s for s in sessions if s.stream_id == stream]
@@ -802,7 +984,7 @@ def codex_by_stream(sessions: list[CodexSession]) -> list[dict[str, Any]]:
         rows.append({'stream_id': stream, 'sessions': len(mine), 'placed_tokens': placed, 'total_tokens': total,
                      'dollars': round(sum(r.dollars or 0.0 for s in mine for r in s.placed), 4),
                      'completeness': round(placed / total, 6) if total else None,
-                     'reconciliation': {c: sum(1 for s in mine if s.cls == c) for c in RECON_CLASSES}})
+                     'reconciliation': {c: sum(1 for s in mine if s.cls == c) for c in recon_classes(proof)}})
     return rows
 
 
@@ -880,7 +1062,7 @@ def spec_rollup(ctx: Context, spec_id: str) -> dict[str, Any]:
         'streams': streams,
         'folded_streams': sorted(s for s in streams if ctx.attribution[s][1]),
         'claude': summarize_claude([r for r in recs if r.provider == 'claude' and ctx.in_range(r)], ctx),
-        'codex': {**summarize_codex(codex, ctx), 'by_stream': codex_by_stream(codex)},
+        'codex': {**summarize_codex(codex, ctx), 'by_stream': codex_by_stream(codex, ctx.src.codex_proof)},
         'untimed_outside_range_records': ctx.range_excluded([r for r in recs if r.provider == 'claude']),
         'completeness': round(sum(r.has_row for r in recs if r.provider == 'claude')
                               / max(1, sum(1 for r in recs if r.provider == 'claude')), 6),
@@ -1632,7 +1814,7 @@ def calibrate_codex(src: Sources, config: dict[str, Any], threshold: float, reti
             'quota': CODEX_QUOTA, 'window_minutes': CODEX_QUOTA_MINUTES, 'unit': 'usd_per_pct',
             'basis': 'aliased' if account_id in aliased else 'creator_account',
             'unplaceable': {k: unplaceable[k] for k in ('ratio', 'threshold', 'passes')},
-            'reconciliation': _recon_block(own_live),
+            'reconciliation': _recon_block(own_live, src.codex_proof),
             'reconciliation_masses': masses,
             'completeness': round(masses['placed'] / denom, 6) if denom else None,
             'measured_rollup': {'tokens': part['tokens'], 'dollars': round(part['dollars'], 4),
@@ -1667,7 +1849,7 @@ def calibrate_codex(src: Sources, config: dict[str, Any], threshold: float, reti
         'methods': ['history_regression'], 'full_week_100': 'not applicable to Codex (no 100 % rule)',
         'unplaceable': unplaceable,
         'retired_hosts': retired_report,
-        'reconciliation': _recon_block([s for s in sessions if s.host not in retired]),
+        'reconciliation': _recon_block([s for s in sessions if s.host not in retired], src.codex_proof),
         'identity_mass_by_host': identity_mass(fleet['by_host'], outside, 'codex'),
         'account_aliases': src.codex_alias_report,
         'entries': entries,
@@ -1735,7 +1917,9 @@ def render_text(result: dict[str, Any]) -> str:
             rc = cx['reconciliation']
             out.append(f"  codex: sessions={cx['sessions']} placed={cx['placed_tokens']:,} dollars~{cx['dollars']:,.2f}"
                        f" completeness={cx['completeness']} reconciled/partial/unverifiable="
-                       f"{rc['reconciled']['sessions']}/{rc['partial']['sessions']}/{rc['unverifiable']['sessions']}")
+                       f"{rc['reconciled']['sessions']}/{rc['partial']['sessions']}/{rc['unverifiable']['sessions']}"
+                       + (f" reconciled_by_rows={rc['reconciled_by_rows']['sessions']}"
+                          if 'reconciled_by_rows' in rc else ''))
     if 'project' in result:
         p = result['project']
         out.append(claude_line(f"project {p['project']} ({len(p['member_specs'])} specs, {p['streams']} streams)",

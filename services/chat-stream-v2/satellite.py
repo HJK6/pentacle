@@ -71,11 +71,11 @@ from codex_rollout_norm import codex_session_identity, normalize_codex_rollout_r
 from machine_stats import STATS_INTERVAL_S, WIRE_VERSION as STATS_WIRE_VERSION, sample_machine_stats
 from mirror import _provider_from_session_name
 from logging_config import configure_logging
-from usage_accounting import native_provenance
+from usage_accounting import FLAG_KIND as PROVENANCE_FLAG_KIND, native_provenance
 from usage_provenance import (
     BACKFILL_BATCH, DEFAULT_CODEX_ROOT, MAX_ITEMS as PROVENANCE_MAX_ITEMS,
-    PAYLOAD_VERSION as PROVENANCE_VERSION, BackfillCursor, codex_header_records,
-    run_backfill,
+    REPROBE_S as PROVENANCE_REPROBE_S, BackfillCursor, codex_header_records,
+    for_version as provenance_for_version, negotiated_version, probe_payload, run_backfill,
 )
 
 log = logging.getLogger("chat_streamd_v2.satellite")
@@ -492,6 +492,12 @@ class Satellite:
         self._inflight_provenance: dict[tuple, dict] = {}
         #: None until an ack shows whether the daemon understands provenance.
         self._provenance_supported: bool | None = None
+        #: Payload version granted by the daemon's answer to the empty version-2
+        #: probe (None: not yet probed in this process); a version-1 grant is
+        #: re-probed after PROVENANCE_REPROBE_S.
+        self._provenance_version: int | None = None
+        self._provenance_reprobe_at = 0.0
+        self._provenance_probe_inflight = False
 
     def _read_sha(self) -> str:
         try:
@@ -1002,7 +1008,7 @@ class Satellite:
                 provider, included,
                 native_session_id=(st.provider_session_id or None) if provider == "codex" else None,
                 source_file_identity_digest=self._source_file_identity_digest(st.path),
-                state=st.provenance_state,
+                state=st.provenance_state, proof=True,
             )
         except Exception as exc:  # noqa: BLE001 - provenance never blocks chat/usage
             log.warning("stream %s provenance failed: %s", st.session_name, exc)
@@ -1012,20 +1018,33 @@ class Satellite:
         """Attach pending provenance within a byte budget so it never pushes a
         frame past the WebSocket limit (events always take precedence)."""
         self._inflight_provenance = {}
+        self._provenance_probe_inflight = False
         pending = getattr(self, "_pending_provenance", {})
         if not pending or getattr(self, "_provenance_supported", True) is False:
             return
+        version = getattr(self, "_provenance_version", None)
+        if version == 1 and time.monotonic() >= self._provenance_reprobe_at:
+            version = self._provenance_version = None
+        if version is None:
+            # Capability probe before data: the next push carries the batch.
+            frame["usage_provenance"] = probe_payload()
+            self._provenance_probe_inflight = True
+            return
         budget = int(WS_MAX_SIZE * 0.75) - len(json.dumps(frame)) - 128  # block envelope
         items = []
-        for key, item in pending.items():
-            size = len(json.dumps(item)) + 2
+        for key, item in list(pending.items()):
+            shaped = provenance_for_version([item], version)
+            if not shaped:  # a version-1 daemon cannot store flags; the backfill re-sends them
+                pending.pop(key, None)
+                continue
+            size = len(json.dumps(shaped[0])) + 2
             if len(items) >= PROVENANCE_MAX_ITEMS or size > budget:
                 break
             budget -= size
-            items.append(item)
+            items.append(shaped[0])
             self._inflight_provenance[key] = item
         if items:
-            frame["usage_provenance"] = {"version": PROVENANCE_VERSION, "items": items}
+            frame["usage_provenance"] = {"version": version, "items": items}
 
     @staticmethod
     def _provenance_key(item: dict) -> tuple:
@@ -1033,6 +1052,8 @@ class Satellite:
         if item.get("kind") == "rate_limit":
             return ("rate_limit", data.get("account_id"), data.get("window_kind"),
                     data.get("window_minutes"), str(data.get("resets_at")), data.get("pct"))
+        if item.get("kind") == PROVENANCE_FLAG_KIND:
+            return (PROVENANCE_FLAG_KIND, item.get("native_session_id"), data.get("response_id"), data.get("flag"))
         return (item.get("kind"), item.get("native_session_id"),
                 data.get("record_key") or data.get("response_id"))
 
@@ -1169,6 +1190,19 @@ class Satellite:
             return None
         usage_was_acknowledged = "usage_recorded" in ack or "usage_replayed" in ack or "usage_rejected" in ack
         provenance_ack = ack.get("usage_provenance")
+        if getattr(self, "_provenance_probe_inflight", False):
+            self._provenance_probe_inflight = False
+            if not isinstance(provenance_ack, dict):
+                self._provenance_supported = False  # predates provenance entirely
+            else:
+                granted = negotiated_version(provenance_ack)
+                if granted is not None:
+                    self._provenance_version = granted
+                    self._provenance_reprobe_at = time.monotonic() + PROVENANCE_REPROBE_S
+        elif isinstance(provenance_ack, dict) and provenance_ack.get("error") == "unsupported_version":
+            # A rolled-back daemon: resend the kept batch as version 1, re-probe later.
+            self._provenance_version = 1
+            self._provenance_reprobe_at = time.monotonic() + PROVENANCE_REPROBE_S
         if getattr(self, "_inflight_provenance", None):
             # A daemon that ignores the block (older release) stops further
             # attachment until reconnect; backfill recovers what it missed.
@@ -1343,7 +1377,9 @@ async def _backfill(sat: Satellite, args) -> dict:
         sat.config.bart_ws, max_size=WS_MAX_SIZE,
         ping_interval=20, ping_timeout=20, close_timeout=10,
     ) as ws:
-        async def push(items: list[dict], dry_run: bool) -> dict:
+        granted = {"version": 1}
+
+        async def send(payload: dict) -> dict:
             sat._req += 1
             rid = sat._req
             frame = {
@@ -1351,7 +1387,7 @@ async def _backfill(sat: Satellite, args) -> dict:
                 "push_secret": sat.config.push_secret, "satellite_sha": sat.sha,
                 "satellite_pid": os.getpid(), "wire_version": WIRE_VERSION,
                 "host": sat.config.host, "events": [], "high_water": {},
-                "usage_provenance": {"version": PROVENANCE_VERSION, "items": items, "dry_run": dry_run},
+                "usage_provenance": payload,
             }
             proof = sat._source_host_proof(os.getpid())
             if proof is not None:
@@ -1369,8 +1405,19 @@ async def _backfill(sat: Satellite, args) -> dict:
                     return {"error": str(msg.get("error") or msg.get("type") or "push_failed")}
                 return msg.get("usage_provenance") or {"error": "provenance_unacknowledged"}
 
+        async def probe() -> int | None:
+            # The empty version-2 payload precedes data, so a cold producer's first
+            # batch already carries ordinal 1; unsupported_version downgrades to 1.
+            version = negotiated_version(await send(probe_payload()))
+            if version is not None:
+                granted["version"] = version
+            return version
+
+        async def push(items: list[dict], dry_run: bool) -> dict:
+            return await send({"version": granted["version"], "items": items, "dry_run": dry_run})
+
         summary = await run_backfill(push, roots=roots, cursor=cursor,
-                                     dry_run=args.dry_run, batch=args.batch)
+                                     dry_run=args.dry_run, batch=args.batch, probe=probe)
     summary["host"] = sat.config.host
     summary["satellite_sha"] = sat.sha
     return summary

@@ -72,6 +72,13 @@ PROVENANCE_DATA_FIELDS = {
     }),
 }
 PROVENANCE_KIND_PROVIDER = {'claude_record': 'claude', 'codex_response': 'codex', 'rate_limit': 'codex'}
+# Payload version 2 (docs/usage_accounting.md § Thread proof): a codex_response may also carry both of
+# CODEX_PROOF_FIELDS, and the producer reports adverse evidence as codex_thread_flag items.
+CODEX_PROOF_FIELDS = frozenset({'thread_token_usage', 'transcript_seq'})
+THREAD_VECTOR_FIELDS = ('input', 'cached_input', 'cache_write_input', 'output', 'reasoning_output')
+FLAG_KIND = 'codex_thread_flag'
+FLAG_DATA_FIELDS = frozenset({'flag', 'response_id', 'detail'})
+PRODUCER_FLAGS = frozenset({'counter_reset', 'foreign_thread_response'})
 _CODEX_RESPONSE_USAGE = (
     ('input', 'input_tokens'), ('cached_input', 'cached_input_tokens'),
     ('cache_write_input', 'cache_write_input_tokens'), ('output', 'output_tokens'),
@@ -193,6 +200,24 @@ def _claude_provenance(records: list[dict[str, Any]], *, digest: str | None, com
     return items
 
 
+def _vector(usage: Any) -> dict[str, int] | None:
+    """A complete, internally consistent five-field usage vector, or None."""
+    if not isinstance(usage, dict):
+        return None
+    values = {target: usage.get(source) for target, source in _CODEX_RESPONSE_USAGE}
+    if any(type(value) is not int or value < 0 for value in values.values()):
+        return None
+    if values['cached_input'] > values['input'] or values['reasoning_output'] > values['output']:
+        return None
+    return values
+
+
+def _flag(native: str | None, digest: str | None, flag: str, response_id: str, detail: str | None) -> dict[str, Any]:
+    return {'kind': FLAG_KIND, 'provider': 'codex', 'native_session_id': native,
+            'source_file_identity_digest': digest, 'identity': None,
+            'data': {'flag': flag, 'response_id': response_id, 'detail': detail}}
+
+
 def _pct(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -202,11 +227,14 @@ def _pct(value: Any) -> int | None:
 
 def _codex_provenance(records: list[dict[str, Any]], *, native_session_id: str | None,
                       digest: str | None, complete: bool,
-                      state: dict[str, Any] | None) -> list[dict[str, Any]]:
+                      state: dict[str, Any] | None, proof: bool = False) -> list[dict[str, Any]]:
     """Per-response detail and rate-limit windows from one rollout span.
 
     ``state`` carries a live tail's cross-span context (session identity, turn
-    models); a complete transcript needs none.
+    models); a complete transcript needs none. ``proof`` adds the version-2
+    thread proof: each response's ``thread_token_usage`` and, for a complete
+    transcript only, its 1-based ``transcript_seq`` among accepted own-thread
+    records, plus ``codex_thread_flag`` items for adverse evidence.
     """
     state = state if state is not None else {}
     if native_session_id and state.get('native_session_id') not in (None, native_session_id):
@@ -218,6 +246,8 @@ def _codex_provenance(records: list[dict[str, Any]], *, native_session_id: str |
     native = native_session_id or state.get('native_session_id')
     responses: list[tuple[str, dict[str, Any]]] = []
     seen_responses: set[str] = set()
+    flags: dict[tuple[str, str], dict[str, Any]] = {}
+    previous_thread: dict[str, int] | None = None
     limits: list[dict[str, Any]] = []
     seen_limits: set[tuple] = set()
     for record in records:
@@ -254,6 +284,9 @@ def _codex_provenance(records: list[dict[str, Any]], *, native_session_id: str |
             # rollouts, so only a foreign thread marks a copied parent response.
             owner = _text(payload.get('thread_id'))
             if owner is not None and native is not None and owner != native:
+                if proof:
+                    flags.setdefault(('foreign_thread_response', response_id),
+                                     _flag(native, digest, 'foreign_thread_response', response_id, None))
                 continue
             values = {target: usage.get(source) for target, source in _CODEX_RESPONSE_USAGE}
             if any(type(value) is not int or value < 0 for value in values.values()):
@@ -265,10 +298,21 @@ def _codex_provenance(records: list[dict[str, Any]], *, native_session_id: str |
                 # immutable, so leave this one to the whole-file backfill.
                 continue
             seen_responses.add(response_id)
-            responses.append((response_id, {
+            data = {
                 'response_id': response_id, 'observed_at': iso_utc(record.get('timestamp')),
                 'model': model, **values,
-            }))
+            }
+            thread = _vector(payload.get('thread_token_usage')) if proof else None
+            if thread is not None:
+                seq = len(responses) + 1 if complete else None
+                if complete and previous_thread is not None and any(
+                        thread[field] < previous_thread[field] for field in THREAD_VECTOR_FIELDS):
+                    fields = ','.join(f for f in THREAD_VECTOR_FIELDS if thread[f] < previous_thread[f])
+                    flags.setdefault(('counter_reset', response_id), _flag(
+                        native, digest, 'counter_reset', response_id, f'ordinal {seq}: {fields} decreased'))
+                previous_thread = thread
+                data.update(thread_token_usage=thread, transcript_seq=seq)
+            responses.append((response_id, data))
         elif kind == 'event_msg' and payload.get('type') == 'token_count':
             rate_limits = payload.get('rate_limits')
             observed_at = iso_utc(record.get('timestamp'))
@@ -302,6 +346,7 @@ def _codex_provenance(records: list[dict[str, Any]], *, native_session_id: str |
                 'kind': 'codex_response', 'provider': 'codex', 'native_session_id': native,
                 'source_file_identity_digest': digest, 'identity': identity, 'data': data,
             })
+        items.extend(flags.values())
     for limit in limits:
         data = {'account_id': account_id, **limit}
         key = (data['account_id'], data['window_kind'], data['window_minutes'],
@@ -320,8 +365,9 @@ def native_provenance(provider: str, records: list[dict[str, Any]], *,
                       native_session_id: str | None = None,
                       source_file_identity_digest: str | None = None,
                       complete: bool = False,
-                      state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Typed provenance items for one transcript span (wire schema version 1).
+                      state: dict[str, Any] | None = None,
+                      proof: bool = False) -> list[dict[str, Any]]:
+    """Typed provenance items for one transcript span (wire schema version 1; ``proof`` adds version 2).
 
     ``complete`` means the span is the whole transcript, so a missing identity
     record is a definitive ``unknown`` rather than "not in this span".
@@ -330,5 +376,6 @@ def native_provenance(provider: str, records: list[dict[str, Any]], *,
         return _claude_provenance(records, digest=source_file_identity_digest, complete=complete)
     if provider == 'codex':
         return _codex_provenance(records, native_session_id=native_session_id,
-                                 digest=source_file_identity_digest, complete=complete, state=state)
+                                 digest=source_file_identity_digest, complete=complete, state=state,
+                                 proof=proof)
     return []

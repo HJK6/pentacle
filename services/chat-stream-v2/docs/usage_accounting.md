@@ -57,9 +57,10 @@ rollout's own response `usage` records. On the 2026-10-07 read-only sample recon
 `spec_pentacle__usage_codex_ledger_vs_rows_sample_reconciliation_2026_10` § Readback) 1,289 of the 1,314
 `unverifiable` sessions had a complete, consistent row set whose sum equals the final `thread_token_usage` while
 the ledger row was lower; the other 25 had response rows missing from the head of the session (collection began
-after them), so their rows are incomplete. Nothing here changes classification: `unverifiable` stays the label
-until a separate amendment stores `thread_token_usage` with the rows. Buckets: cached input is inside input
-and reasoning is inside output in every checked session.
+after them), so their rows are incomplete. The rollup's `reconciled_by_rows` class (`docs/usage_accounting.md`
+§ Thread proof, at the repository root) now stores `thread_token_usage` with the rows and labels a session only
+under its full predicate; the ledger row is never changed. Buckets: cached input is inside input in every
+checked session, and reasoning is inside output where reasoning usage is positive.
 
 The tool is read-only (`mode=ro`, no write path), reads rollouts on the host that holds them, and hashes native
 and account ids in its output:

@@ -1,4 +1,4 @@
-"""``usage_provenance`` (payload version 1): validation, admission and export.
+"""``usage_provenance`` (payload versions 1 and 2): validation, admission and export.
 
 Contract: docs/usage_accounting.md § Provenance. The event is metadata only: it
 never reads or writes token totals, and admission ignores stream open/closed
@@ -20,14 +20,19 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator
 
 from usage_accounting import (
-    IDENTITY_FIELDS, PROVENANCE_DATA_FIELDS, PROVENANCE_ITEM_FIELDS,
-    PROVENANCE_KIND_PROVIDER, iso_utc, native_provenance,
+    CODEX_PROOF_FIELDS, FLAG_DATA_FIELDS, FLAG_KIND, IDENTITY_FIELDS, PRODUCER_FLAGS,
+    PROVENANCE_DATA_FIELDS, PROVENANCE_ITEM_FIELDS, PROVENANCE_KIND_PROVIDER,
+    THREAD_VECTOR_FIELDS, iso_utc, native_provenance,
 )
 from usage_history import HistoryLog, rollout_line
 
 log = logging.getLogger('chat_streamd_v2.usage_provenance')
 
-PAYLOAD_VERSION = 1
+PAYLOAD_VERSION = 2
+#: The daemon admits both; version 1 items are stored exactly as before (no proof, no flags).
+ACCEPTED_VERSIONS = frozenset({1, 2})
+#: A downgraded producer probes for version 2 again after this long.
+REPROBE_S = 3600.0
 MAX_ITEMS = 2000
 BACKFILL_BATCH = 500
 _PAYLOAD_FIELDS = frozenset({'version', 'items', 'dry_run'})
@@ -37,7 +42,7 @@ REJECTIONS = frozenset({
     'bad_provenance', 'unsupported_kind', 'unsupported_kind_for_provider',
     'unknown_native_session', 'unknown_record',
 })
-_LEDGER_KINDS = frozenset({'claude_record', 'codex_response'})
+_LEDGER_KINDS = frozenset({'claude_record', 'codex_response', FLAG_KIND})
 
 
 def _now_iso() -> str:
@@ -71,18 +76,50 @@ def _valid_identity(identity: Any) -> bool:
     return (account is None) == (source == 'unknown')
 
 
-def validate_item(item: Any) -> str | None:
-    """Exact per-kind key sets and types; None when admissible."""
+def _valid_thread_vector(value: Any) -> bool:
+    return (
+        isinstance(value, dict) and set(value) == set(THREAD_VECTOR_FIELDS)
+        and all(_count(value[field]) for field in THREAD_VECTOR_FIELDS)
+        and value['cached_input'] <= value['input'] and value['reasoning_output'] <= value['output']
+    )
+
+
+def validate_item(item: Any, version: int = PAYLOAD_VERSION) -> str | None:
+    """Exact per-kind key sets and types for ``version``; None when admissible.
+
+    Version 2 adds ``codex_thread_flag`` items and lets a ``codex_response``
+    carry both ``thread_token_usage`` and ``transcript_seq``; version 1 admits
+    neither.
+    """
     if not isinstance(item, dict) or set(item) != PROVENANCE_ITEM_FIELDS:
         return 'bad_provenance'
     kind, provider, data = item['kind'], item['provider'], item['data']
+    if kind == FLAG_KIND and version >= 2:
+        ok = (
+            provider == 'codex' and _str(item['native_session_id'], 256) and item['identity'] is None
+            and (item['source_file_identity_digest'] is None
+                 or (isinstance(item['source_file_identity_digest'], str)
+                     and _HEX64.fullmatch(item['source_file_identity_digest'])))
+            and isinstance(data, dict) and set(data) == FLAG_DATA_FIELDS
+            and data['flag'] in PRODUCER_FLAGS and _str(data['response_id'], 256)
+            and _opt_str(data['detail'], 1024)
+        )
+        return None if ok else 'bad_provenance'
     if kind not in PROVENANCE_DATA_FIELDS:
         return 'unsupported_kind'
     if provider not in ('claude', 'codex'):
         return 'bad_provenance'
     if PROVENANCE_KIND_PROVIDER[kind] != provider:
         return 'unsupported_kind_for_provider'
-    if not isinstance(data, dict) or set(data) != PROVENANCE_DATA_FIELDS[kind]:
+    if not isinstance(data, dict):
+        return 'bad_provenance'
+    keys = set(data)
+    if kind == 'codex_response' and version >= 2 and keys == PROVENANCE_DATA_FIELDS[kind] | CODEX_PROOF_FIELDS:
+        seq = data['transcript_seq']
+        if not _valid_thread_vector(data['thread_token_usage']) or not (
+                seq is None or (type(seq) is int and seq >= 1)):
+            return 'bad_provenance'
+    elif keys != PROVENANCE_DATA_FIELDS[kind]:
         return 'bad_provenance'
     native, digest, identity = item['native_session_id'], item['source_file_identity_digest'], item['identity']
     if kind == 'rate_limit':
@@ -118,6 +155,37 @@ def validate_item(item: Any) -> str | None:
     return None
 
 
+def for_version(items: list[dict[str, Any]], version: int) -> list[dict[str, Any]]:
+    """Items as a producer sends them under ``version``: version 1 strips the proof and drops flags."""
+    if version >= 2:
+        return items
+    out = []
+    for item in items:
+        if item.get('kind') == FLAG_KIND:
+            continue
+        data = item.get('data') or {}
+        if CODEX_PROOF_FIELDS & set(data):
+            item = {**item, 'data': {k: v for k, v in data.items() if k not in CODEX_PROOF_FIELDS}}
+        out.append(item)
+    return out
+
+
+def probe_payload() -> dict[str, Any]:
+    """The empty capability probe a producer sends before its first data batch."""
+    return {'version': PAYLOAD_VERSION, 'items': []}
+
+
+def negotiated_version(ack: Any) -> int | None:
+    """The version a probe acknowledgement grants: 2, 1 (``unsupported_version``) or None (no verdict)."""
+    if not isinstance(ack, dict):
+        return None
+    if ack.get('error') == 'unsupported_version':
+        return 1
+    if not ack.get('error') and ack.get('version') == PAYLOAD_VERSION:
+        return PAYLOAD_VERSION
+    return None
+
+
 def _normalized(item: dict[str, Any]) -> dict[str, Any]:
     data = dict(item['data'])
     if data.get('observed_at') is not None:
@@ -141,7 +209,8 @@ class ProvenanceSink:
             or ('dry_run' in payload and not isinstance(payload['dry_run'], bool))
         ):
             return {'version': PAYLOAD_VERSION, 'error': 'bad_provenance'}
-        if payload.get('version') != PAYLOAD_VERSION:
+        version = payload.get('version')
+        if type(version) is not int or version not in ACCEPTED_VERSIONS:
             return {'version': PAYLOAD_VERSION, 'error': 'unsupported_version'}
         items = payload['items']
         if len(items) > MAX_ITEMS:
@@ -152,7 +221,7 @@ class ProvenanceSink:
         ledger: list[tuple[int, dict[str, Any]]] = []
         limits: list[tuple[int, dict[str, Any]]] = []
         for index, item in enumerate(items):
-            reason = validate_item(item)
+            reason = validate_item(item, version)
             if reason is not None:
                 outcomes[index] = reason
             elif item['kind'] in _LEDGER_KINDS:
@@ -162,12 +231,14 @@ class ProvenanceSink:
         known: list[str] = []
         unknown: list[str] = []
         identities = 0
+        proof_counts: dict[str, int] = {}
         if ledger:
-            stored = await self._record(host, [item for _, item in ledger], dry_run=dry_run)
+            stored = await self._record(host, [item for _, item in ledger], dry_run=dry_run, version=version)
             for (index, _item), outcome in zip(ledger, stored['outcomes']):
                 outcomes[index] = outcome
             known, unknown = stored['known_native_sessions'], stored['unknown_native_sessions']
             identities = stored['identities_changed']
+            proof_counts = stored.get('proof_counts') or {}
         if limits:
             if self.history is None:
                 for index, _item in limits:
@@ -182,7 +253,7 @@ class ProvenanceSink:
         if counts.get('recorded') and not dry_run:
             log.info('usage provenance host=%s %s', host, dict(sorted(counts.items())),
                      extra={'subsystem': 'usage_provenance', 'bug_ref': 'usage_provenance_export_2026_10'})
-        return {
+        ack = {
             'version': PAYLOAD_VERSION,
             'dry_run': dry_run,
             'items': len(items),
@@ -195,6 +266,9 @@ class ProvenanceSink:
                 for index, outcome in enumerate(outcomes) if outcome in REJECTIONS
             ][:100],
         }
+        if version >= 2:
+            ack['proof_counts'] = dict(sorted(proof_counts.items()))
+        return ack
 
 
 # --- exporter: transcript discovery and whole-file items --------------------
@@ -279,12 +353,18 @@ def file_items(provider: str, path: str) -> list[dict[str, Any]]:
                 continue
             if isinstance(record, dict):
                 records.append(record)
-    return native_provenance(provider, records, complete=True,
+    return native_provenance(provider, records, complete=True, proof=True,
                              source_file_identity_digest=source_file_identity_digest(path))
 
 
 class BackfillCursor:
-    """Resumable per-file cursor: a file whose (size, mtime) is unchanged is skipped."""
+    """Resumable per-file cursor: a file whose (size, mtime) is unchanged is skipped.
+
+    Each entry also records the payload version the file was sent under (an
+    entry without one predates version 2, so it was version 1). A file sent
+    under an older version than the current pass is not done: after the first
+    version-2 acknowledgement every version-1 file is re-sent once.
+    """
 
     def __init__(self, path: str | os.PathLike[str] | None) -> None:
         self.path = Path(path).expanduser() if path else None
@@ -305,29 +385,43 @@ class BackfillCursor:
             return None
         return [stat.st_size, stat.st_mtime]
 
-    def is_done(self, path: str) -> bool:
+    def is_done(self, path: str, version: int = 1) -> bool:
         stamp = self._stamp(path)
-        return stamp is not None and self.done.get(path) == stamp
+        entry = self.done.get(path)
+        if stamp is None or not isinstance(entry, list) or entry[:2] != stamp:
+            return False
+        sent = entry[2] if len(entry) > 2 else 1
+        return sent >= version
 
-    def mark(self, path: str, stamp: list[float] | None) -> None:
+    def mark(self, path: str, stamp: list[float] | None, version: int = 1) -> None:
         if stamp is None or self.path is None:
             return
-        self.done[path] = stamp
+        self.done[path] = [*stamp, version]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix('.tmp')
-        tmp.write_text(json.dumps({'version': 1, 'done': self.done}, sort_keys=True))
+        tmp.write_text(json.dumps({'version': 2, 'done': self.done}, sort_keys=True))
         os.replace(tmp, self.path)
 
 
 async def run_backfill(push: Callable[[list[dict[str, Any]], bool], Awaitable[dict[str, Any]]], *,
                        roots: dict[str, str], cursor: BackfillCursor, dry_run: bool,
-                       batch: int = BACKFILL_BATCH) -> dict[str, Any]:
+                       batch: int = BACKFILL_BATCH, version: int = PAYLOAD_VERSION,
+                       probe: Callable[[], Awaitable[int | None]] | None = None) -> dict[str, Any]:
     """Walk local transcripts and push their provenance in bounded batches.
 
-    ``push(items, dry_run)`` returns a sink acknowledgement. A dry run never
-    advances the cursor. Returns the summary printed by both CLIs.
+    ``push(items, dry_run)`` returns a sink acknowledgement for items already
+    shaped for ``version``. A remote producer passes ``probe``, which sends the
+    empty version-2 payload before any data and returns the granted version.
+    A dry run never advances the cursor. Returns the summary printed by both CLIs.
     """
     summary: dict[str, Any] = {'dry_run': dry_run, 'providers': {}}
+    if probe is not None:
+        granted = await probe()
+        if granted is None:
+            summary['error'] = 'probe_failed'
+            return summary
+        version = granted
+    summary['payload_version'] = version
     for provider, root in roots.items():
         stats: Counter = Counter()
         found: set[str] = set()
@@ -335,12 +429,12 @@ async def run_backfill(push: Callable[[list[dict[str, Any]], bool], Awaitable[di
         unknown: set[str] = set()
         for path in iter_transcripts(provider, root):
             stats['files'] += 1
-            if not dry_run and cursor.is_done(path):
+            if not dry_run and cursor.is_done(path, version):
                 stats['files_skipped_cursor'] += 1
                 continue
             stamp = BackfillCursor._stamp(path)
             try:
-                items = await asyncio.to_thread(file_items, provider, path)
+                items = for_version(await asyncio.to_thread(file_items, provider, path), version)
             except OSError as exc:
                 stats['files_unreadable'] += 1
                 log.warning('backfill skipped unreadable transcript: %s', exc)
@@ -361,7 +455,7 @@ async def run_backfill(push: Callable[[list[dict[str, Any]], bool], Awaitable[di
                 known.update(ack.get('known_native_sessions') or ())
                 unknown.update(ack.get('unknown_native_sessions') or ())
             if complete and not dry_run:
-                cursor.mark(path, stamp)
+                cursor.mark(path, stamp, version)
         stats['native_sessions_found'] = len(found)
         stats['native_sessions_known_in_ledger'] = len(known)
         stats['native_sessions_unknown_to_ledger'] = len(unknown - known)
