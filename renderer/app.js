@@ -2797,7 +2797,7 @@ function ensureSlotChatSurface(slot) {
       voicePanel.hidden = true;
       dockEl.insertBefore(voicePanel, composeEl);
       const voiceController = bindComposerMic({
-        web: window.HOST.isWeb === true, env: window, button: micEl, panel: voicePanel, takeMount: scrollEl,
+        web: window.HOST.isWeb === true, env: window, button: micEl, panel: voicePanel, composer: composeEl, takeMount: scrollEl,
         roomToggle: () => document.getElementById('mic-btn-toggle')?.click(),
         getStreamId: () => {
           const target = chatControlTargetForSlot(slot);

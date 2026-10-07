@@ -21,11 +21,13 @@ import {
   onReconnect,
   selectChatList,
   selectSessionDetail,
+  selectPentacleDerivedEventIndex,
   optimisticMatchesServerUser,
   OPTIMISTIC_RECONCILE_WINDOW_MS,
   logTelemetry,
   TELEMETRY_EVENTS,
 } from 'pentacle-chat-core';
+import { validVoiceMetadata, type VoiceMetadata } from './voice_metadata';
 import {
   eligibleReconnectReplayOptimisticIds,
   markDaemonRestartSurvivorsIndeterminate,
@@ -365,7 +367,25 @@ export class ChatStoreController {
     streamId: string,
     options?: Parameters<typeof selectSessionDetail>[2],
   ): PentacleSessionDetail | null {
-    return selectSessionDetail(this.state, streamId, options);
+    const detail = selectSessionDetail(this.state, streamId, options);
+    if (!detail) return null;
+    // Renderer-local bridge for now: rebuilding this map on each render belongs
+    // in chat-core when its shared event-to-row projection carries meta.voice.
+    const voices = new Map<string, VoiceMetadata>();
+    for (const event of selectPentacleDerivedEventIndex(this.state).byStream.get(streamId) ?? []) {
+      const voice = validVoiceMetadata((event as PentacleEvent & { meta?: { voice?: unknown } }).meta?.voice);
+      if (!voice) continue;
+      // Match the core's stable row identity, including reconciled echoes.
+      // Top-level meta.voice is persisted on both live and history wire events.
+      const seq = event.correlatedDaemonSeq ?? event.daemon_seq;
+      if (Number.isFinite(seq) && seq >= 0) voices.set(`${streamId}:${seq}`, voice);
+      if (event.optimistic_id) voices.set(`${streamId}:optimistic:${event.optimistic_id}`, voice);
+    }
+    if (!voices.size) return detail;
+    return { ...detail, transcriptItems: detail.transcriptItems.map(item => {
+      const voice = voices.get(item.eventKey || '');
+      return voice && (item.isUser || item.displayRule === 'bubble:user') ? { ...item, voice } : item;
+    }) };
   }
 
   // Phase 6b harness helper: count persisted (non-DRAFT) events for a stream.
@@ -593,7 +613,7 @@ export class ChatStoreController {
     const generation = this.socketGeneration;
     const beginTurn = this.getTurnPhase(streamId) === 'idle';
 
-    this.setState(sendOptimisticMessage(this.state, {
+    let optimistic = sendOptimisticMessage(this.state, {
       streamId,
       text: sendText,
       optimisticId,
@@ -605,7 +625,18 @@ export class ChatStoreController {
       replyToMessageId: reply.reply_to_message_id,
       replyToQuestionId: reply.reply_to_question_id,
       ...(sendAttachments.length ? { attachments: sendAttachments } : {}),
-    }));
+    });
+    // The ordinary send reducer owns the row and its lifecycle. Seed only its
+    // additive renderer metadata before listeners see the optimistic row.
+    const voice = validVoiceMetadata(reply.meta?.voice);
+    if (voice) {
+      const event = selectPentacleDerivedEventIndex(optimistic).byStream.get(streamId)?.find(item => item.optimistic_id === optimisticId);
+      if (event) optimistic = mutatePentacleEventBuckets(optimistic, {
+        type: 'optimistic-replace', streamId, optimisticId,
+        event: { ...event, meta: { voice } } as PentacleEvent,
+      });
+    }
+    this.setState(optimistic);
 
     // Optimistic-send lifecycle telemetry (mirrors mobile's beacons). Routed
     // through the shared sink; the dev/CI harness captures it. The default sink

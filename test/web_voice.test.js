@@ -64,7 +64,12 @@ test('recorder selects MP4 and releases tracks', async () => {
     static isTypeSupported(type) { return type === 'audio/mp4'; }
     start() {} stop() { this.ondataavailable({ data: new Blob(['mp4']) }); this.onstop(); }
   }
-  const recorder = createBrowserRecorder({ MediaRecorder: Recorder, navigator: { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [{ stop: () => stopped++ }] }) } } });
+  class AudioContext {
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createAnalyser() { return { getFloatTimeDomainData(samples) { samples.fill(0); }, disconnect() {} }; }
+    async resume() {} async close() {}
+  }
+  const recorder = createBrowserRecorder({ AudioContext, MediaRecorder: Recorder, navigator: { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [{ stop: () => stopped++ }] }) } } });
   await recorder.start(); const take = await recorder.stop(); assert.equal(take.blob.type, 'audio/mp4'); assert.equal(stopped, 1);
 });
 test('unsupported MP4 captures PCM into valid WAV and cleans up on cancel', async () => {
@@ -72,6 +77,7 @@ test('unsupported MP4 captures PCM into valid WAV and cleans up on cancel', asyn
   class AudioContext {
     sampleRate = 8000; destination = {};
     createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createAnalyser() { return { getFloatTimeDomainData(samples) { samples.fill(0); }, disconnect() {} }; }
     createScriptProcessor() { processor = { connect() {}, disconnect() {} }; return processor; }
     async resume() {} async close() { closed++; }
   }
