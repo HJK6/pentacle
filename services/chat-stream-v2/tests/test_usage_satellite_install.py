@@ -97,6 +97,11 @@ def test_thoth_plist_keeps_300s_and_pins_the_clis(tmp_path):
     env = rendered["EnvironmentVariables"]
     assert Path(env["PENTACLE_CLAUDE_BIN"]).is_absolute()
     assert Path(env["PENTACLE_CODEX_BIN"]).is_absolute()
+    # Thoth keeps its CLIs under the user home (there is no /opt/homebrew/bin/codex there): a pin
+    # to a path that does not exist fails the probe closed, so the template must bind to the home.
+    home = str(Path.home())
+    assert env["PENTACLE_CLAUDE_BIN"] == f"{home}/.local/bin/claude"
+    assert env["PENTACLE_CODEX_BIN"] == f"{home}/.local/bin/codex"
     assert env["PENTACLE_USAGE_CLAUDE_OAUTH"] == "0"
     assert not [key for key in env if any(word in key.upper() for word in ("TOKEN", "SECRET"))]
     assert Path(rendered["ProgramArguments"][1]).is_relative_to(repo)

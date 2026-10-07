@@ -15,7 +15,7 @@
     <key>PATH</key><string>__PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/deploy/usage-probe-bin:/opt/homebrew/bin:/usr/local/bin:__PENTACLE_USER_HOME__/.local/bin:/usr/bin:/bin</string>
     <key>PENTACLE_USAGE_CLAUDE_BIN</key><string>__PENTACLE_USER_HOME__/.local/bin/claude</string>
     <key>PENTACLE_CLAUDE_BIN</key><string>__PENTACLE_USER_HOME__/.local/bin/claude</string>
-    <key>PENTACLE_CODEX_BIN</key><string>/opt/homebrew/bin/codex</string>
+    <key>PENTACLE_CODEX_BIN</key><string>__PENTACLE_USER_HOME__/.local/bin/codex</string>
     <key>PENTACLE_USAGE_CLAUDE_OAUTH</key><string>0</string>
     <key>PENTACLE_USAGE_CWD</key><string>__PENTACLE_RELEASE_CHECKOUT__</string>
   </dict>
