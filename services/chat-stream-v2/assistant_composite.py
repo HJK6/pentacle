@@ -24,6 +24,7 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from assistant_router import AssistantRouterProcessError
 import voice_answers as voice_answers_v1
+from store_work_lanes import PRODUCT_OPERATIONS as WORK_LANE_PRODUCT_OPERATIONS
 
 
 COMPOSITE_CAPABILITY = "assistant_composite_v1"
@@ -295,6 +296,8 @@ class AssistantComposite:
         self._worker_rewake = False
         self._binding_lock = asyncio.Lock()
         self.ruling_hook: Callable[..., Awaitable[dict[str, Any] | None]] | None = None
+        self.work_lane_confirmation_reader: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None
+        self.work_lanes_changed: Callable[[], Awaitable[Any]] | None = None
         #: Optional async hook invoked once per committed user-facing reply
         #: (prose/final).  Wired by main for the Cosmo push audience; a no-op for
         #: assistants with no scoped push subscribers.
@@ -1595,9 +1598,18 @@ class AssistantComposite:
         if {str(key) for key in msg if not str(key).startswith("_")} - operation_fields:
             raise ValueError("assistant_operation_payload_invalid")
         operation = str(msg.get("operation") or "")
+        if operation.startswith("work_lane."):
+            return await self._work_lane_operation(msg, actor_stream_id, actor_generation)
         operation_id = _optional_id(msg.get("request_id"))
         lane_id = _optional_id(msg.get("lane_id"))
         payload = msg.get("payload")
+        routing_confirmation = None
+        if (operation in {"lane.close", "lane.decision"} and isinstance(payload, dict)
+                and "operator_confirmation" in payload):
+            # Spec D5: the operator-lane guard's confirmation travels beside the
+            # routing payload, which keeps its fixed key set.
+            payload = dict(payload)
+            routing_confirmation = await self._read_work_lane_confirmation(payload.pop("operator_confirmation"))
         dispatch_id = _optional_id(msg.get("dispatch_id"))
         reply_to_message_id = _optional_id(msg.get("reply_to_message_id"))
         if (
@@ -1747,6 +1759,7 @@ class AssistantComposite:
             lane_id=lane_id, actor_stream_id=actor_stream_id, payload=payload,
             dispatch_id=dispatch_id, reply_to_message_id=reply_to_message_id,
             expected_lane_version=expected_version, evidence_refs=evidence_refs,
+            operator_confirmation=routing_confirmation,
             route_id=str((route or {}).get("route_id") or "") or None,
             route_dispatch_id=resolved_dispatch_id,
             route_target=resolved_target,
@@ -1779,6 +1792,51 @@ class AssistantComposite:
             self._wake_worker()
         await self.refresh_activity()
         return {"type": "assistant.operation.ok", **result}
+
+    async def _read_work_lane_confirmation(self, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict) or set(value) != {"question_id"} or not value.get("question_id"):
+            raise ValueError("work_lane_operator_confirmation_required")
+        if self.work_lane_confirmation_reader is None:
+            raise ValueError("work_lane_operator_confirmation_required")
+        found = await self.work_lane_confirmation_reader(str(value["question_id"]))
+        if found is None:
+            raise ValueError("work_lane_operator_confirmation_mismatch")
+        return found
+
+    async def _work_lane_operation(self, msg: dict[str, Any], actor_stream_id: str | None,
+                                   actor_generation: str) -> dict[str, Any]:
+        """Product lane operations (spec D2): FD-only, no dispatch, CAS + idempotent."""
+        operation = str(msg.get("operation") or "")[len("work_lane."):]
+        request_id = _optional_id(msg.get("request_id"))
+        payload = msg.get("payload")
+        dispatch_id = msg.get("dispatch_id")
+        if (_optional_id(msg.get("composite_stream_id")) != self.config.stream_id or not request_id
+                or not isinstance(payload, dict) or dispatch_id not in (None, "", "none")
+                or msg.get("reply_to_message_id") is not None or msg.get("evidence_refs")):
+            raise ValueError("assistant_operation_required_fields")
+        if operation not in WORK_LANE_PRODUCT_OPERATIONS:
+            raise ValueError("assistant_operation_invalid")
+        expected = msg.get("expected_lane_version")
+        lane_id = _optional_id(msg.get("lane_id"))
+        if operation != "adopt" and (lane_id is None or isinstance(expected, bool) or not isinstance(expected, int)):
+            raise ValueError("work_lane_operation_invalid")
+        confirmation = None
+        if "operator_confirmation" in payload:
+            confirmation = await self._read_work_lane_confirmation(payload["operator_confirmation"])
+        result = await self.store.apply_work_lane_operation(
+            stream_id=self.config.stream_id, request_id=request_id, operation=operation,
+            lane_id=lane_id, expected_lane_version=expected if operation != "adopt" else None,
+            payload=payload, actor_stream_id=str(actor_stream_id or ""), actor_generation=actor_generation,
+            binding_name=self.config.name, env_binding=self._env_binding(), confirmation=confirmation,
+        )
+        published = result.pop("publication", None)
+        if not result.get("duplicate"):
+            if published is not None and self.broadcast is not None:
+                await self.broadcast({"type": "chat.event", "event": published})
+            if self.work_lanes_changed is not None:
+                await self.work_lanes_changed()
+        return {"type": "assistant.operation.ok", "operation": "work_lane." + operation,
+                "request_id": request_id, **result}
 
     async def _is_current_dispatch_actor(
         self, route: dict[str, Any], actor: str, *, allow_authority: bool = False,

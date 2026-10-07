@@ -108,6 +108,7 @@ def asset_metadata(record: dict) -> dict:
         "read": bool(record.get("read_at")),
         "read_at": record.get("read_at"),
         "spec_id": record.get("spec_id"),
+        "producer": record.get("producer"),
         "updated_at": record["updated_at"],
     }
 

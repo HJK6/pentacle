@@ -113,3 +113,24 @@ agent-orch asset list --spec-id <spec_id>
 ```
 
 Session-scoped assets stay tied to the producing stream. Use session scope for ordinary review loops with one live agent; use spec scope for artifacts that another future agent must find after the producer closes.
+
+## Report-Producer Principal
+
+One fixed service principal may publish one kind of report asset without a seat. Its name and binding are runtime configuration, not source: the daemon's `PENTACLE_REPORT_PRODUCER_CONFIG` holds only the path of a user-owned mode-0600 JSON file (never a token). Unset, unreadable, foreign-owned, group/world-accessible or invalid means the principal is disabled; the file is re-read on every RPC, so removing or editing it takes effect on the next call.
+
+```json
+{"stream_id": "examplehost:daily-report",
+ "token_file": "/private/local/daily-report-token",
+ "spec_id": "spec_example__daily_reports",
+ "asset_id_pattern": "^daily-report-([0-9]{8})(?:-r[0-9]+)?$",
+ "cutoff_format": "%Y%m%d",
+ "title_template": "Daily report {cutoff}",
+ "tag": "daily-report",
+ "body_max_bytes": 65536}
+```
+
+- `stream_id` is `host:session`, also the fixed storage anchor (no seat is created), and may not be the CD or WMI backup principal. `token_file` is an absolute path to its own user-owned 0600 token file; a value equal to the CD or WMI backup credential is refused.
+- `asset_id_pattern` has exactly one group, the cutoff. `cutoff_format` (optional) must turn a sample date into text that parses back to the same calendar date (literal suffixes such as `T1300Z` are fine; `%Y` or `%m%d` alone are not). `title_template` contains `{cutoff}` once; `body_max_bytes` is at most 1 MiB.
+- The client connects with an RPC hello (`from_stream_id` = the principal, `stream_token` = the file's token, `subscribe: {snapshot: false, mode: "rpc"}`) and may then send only `asset.publish`; every other verb, including one the daemon does not implement, is `system_producer_forbidden`. The publish must carry `from_stream_id`, `stream_id` and `producer` equal to the principal, type `report`, the configured spec id, exactly the configured tag, an asset id matching the pattern with a valid cutoff, the title for that cutoff and a body within the cap; anything else is `system_producer_payload_invalid` with no write.
+- A published asset id is immutable. Republishing the identical title and body returns `asset.publish.ok` with `unchanged: true` and no write or broadcast; any other content for that id, including a malformed body, is `report_producer_immutable`. A correction is a new id (for example a `-rN` suffix).
+- No other caller may claim the principal's producer id, or publish an id matching its pattern under its spec, first or later (`asset_unauthorized`). The check and the write are one store operation, so concurrent publishes cannot interleave. `asset.list` metadata carries `producer`, so readers can trust only records produced by the configured principal.
