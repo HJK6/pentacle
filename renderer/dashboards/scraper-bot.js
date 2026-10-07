@@ -12,7 +12,7 @@ function mount(container) {
   return { frame };
 }
 window.DASHBOARDS.push({
-  id: 'scraper-bot', name: 'Scraper Bot', description: 'Configured scraper dashboard',
+  id: 'scraper-bot', retired: true, name: 'Scraper Bot', description: 'Configured scraper dashboard',
   color: 'var(--blue)', mount, update() {}, unmount(refs) { refs.frame.remove(); },
   pollFn: async () => null, pollInterval: 60000,
 });

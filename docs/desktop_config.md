@@ -95,6 +95,9 @@ provider models and effort. See [daemon setup](../services/chat-stream-v2/README
 | `features.inputBar` | Boolean; example true | Retained compatibility flag; currently unused. |
 | `features.usage` | Boolean; example false | Sidebar usage setting. Explicit false excludes live limits.update subscription frames; enabling it requires reload. Cached snapshot values may still paint. |
 | `features.dashboards` | Boolean; false | Dashboard/widgets controls; actual backends require external adapters. |
+| `dashboards.hidden` | String array; `[]` | Hide exact dashboard IDs, taking precedence over `showRetired`. |
+| `dashboards.showRetired` | Boolean; `false` | List registered retired boards after active boards. |
+| `dashboards.modeler3d.url` | String; absent | Absolute HTTP(S) viewer URL without embedded credentials. No default host; keep it in private local configuration. See [Dashboards view](dashboards_view.md) for states, sandbox limits and compatibility checks. |
 | `features.mic` | Boolean; false | Microphone panel and voice controls; requires a running mic server. Reload after changing. |
 | `features.sourceTags` | Boolean; false | Host tags on sessions. Reload after changing. |
 | `features.showTurnDuration` | Boolean; false | Timing annotations in Chat; changes live. |

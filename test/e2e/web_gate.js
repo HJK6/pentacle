@@ -25,6 +25,7 @@ const { spawn, execFileSync } = require('child_process');
 
 const cdp = require('./lib/cdp');
 const scenarios = require('./lib/web_scenarios');
+const { startModelerFixture } = require('./lib/modeler_fixture_server');
 const { withRuntimeDirectory, execWithRuntimeDirectory } = require('./lib/runtime_directory');
 const { main: startHost } = require('../../server');
 
@@ -161,10 +162,12 @@ class Report {
   }
 }
 
-function writeProfile(scratch, daemonPort) {
+function writeProfile(scratch, daemonPort, modelerFixtureUrl = null, configured = false) {
   const config = {
     appName: 'Pentacle',
-    features: { mic: false, chatUi: true, inputBar: true },
+    features: { mic: false, chatUi: true, inputBar: true, dashboards: true },
+    ...(modelerFixtureUrl ? { dashboardHub: { url: modelerFixtureUrl, scraperBotUrl: modelerFixtureUrl } } : {}),
+    ...(configured && modelerFixtureUrl ? { dashboards: { modeler3d: { url: modelerFixtureUrl } } } : {}),
     tmux: 'tmux',
     // Contrast scenarios exercise real machine glyphs, which require multiple hosts.
     hosts: { local: { kind: 'local' }, local2: { kind: 'local' } },
@@ -243,6 +246,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-gate-')));
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-gate-chrome-'));
   const runtime = {};
+  const chromeLog = [];
   let daemon = null; let host = null; let chrome = null; let session = null;
   const fixture = args.profile ? null : FIXTURE;
 
@@ -255,6 +259,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     try { if (runtime.tmuxSession) tmux(['kill-session', '-t', `=${runtime.tmuxSession}`], { stdio: 'ignore' }); } catch {}
     try { if (runtime.freezeTmux) tmux(['kill-session', '-t', `=${runtime.freezeTmux}`], { stdio: 'ignore' }); } catch {}
     try { if (host) await host.close(); } catch {}
+    let modelerCleanupError = null;
+    try { if (runtime.modelerFixture) await runtime.modelerFixture.close(); } catch (error) { modelerCleanupError = error; }
     // A restarted host runs as a subprocess (see restartHost); kill it too.
     let hostCleanupError = null;
     try { await stopOwnedProcess(runtime.hostProc); } catch (error) { hostCleanupError = error; }
@@ -279,6 +285,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     runtime.fixtureAuthCleanup = { generated_credential_count: generatedCount, retained_for_debug: args.keep, registry_removed: !fs.existsSync(registryPath), token_removed: !fs.existsSync(tokenPath), remaining_credential_count: fs.existsSync(registryPath) ? Object.keys(JSON.parse(fs.readFileSync(registryPath, 'utf8')).credentials || {}).length : 0 };
     if (daemonCleanupError) throw daemonCleanupError;
     if (hostCleanupError) throw hostCleanupError;
+    if (modelerCleanupError) throw modelerCleanupError;
     if (!args.keep && (!runtime.fixtureAuthCleanup.registry_removed || !runtime.fixtureAuthCleanup.token_removed)) throw new Error('CLEANUP_FAIL: isolated credential artifacts remain');
   };
 
@@ -287,7 +294,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     if (!profile) {
       daemon = await startDaemon(args, scratch, runtime);
       runtime.fixtureDaemonPort = daemon.port;
-      profile = writeProfile(scratch, daemon.port);
+      runtime.modelerFixture = await startModelerFixture();
+      profile = writeProfile(scratch, daemon.port, runtime.modelerFixture.url);
       report.note(`seeded loopback daemon on 127.0.0.1:${daemon.port} (${daemon.seed})`);
     } else {
       report.note(`external daemon via profile ${profile} (observational: sidebar/transcript non-fatal)`);
@@ -332,6 +340,12 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     };
     const startHostSamePort = async () => { await startHostProcess(); return hostPort; };
     const restartHost = async () => { await stopHost(); await startHostSamePort(); return hostPort; };
+    const configureModeler = fixture ? async configured => {
+      // This URL can only be the test-owned loopback server. The external
+      // --profile path has no mutation hook and cannot enter this journey.
+      writeProfile(scratch, daemon.port, runtime.modelerFixture.url, configured);
+      await restartHost();
+    } : null;
 
     // Daemon lifecycle primitives (hermetic runs only), so a scenario can model
     // a chat-stream daemon blip around a host restart — the real trigger for the
@@ -369,7 +383,6 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     } : null;
 
     const chromeBin = resolveChrome();
-    const chromeLog = [];
     const cdpMatch = new RegExp(`127\\.0\\.0\\.1:${host.port}|Terminal Dashboard`);
     // Retry on a lost CDP port race (fresh port each attempt) unless a fixed
     // --cdp-port was requested.
@@ -396,7 +409,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     }
     if (!session) throw cdpErr || new Error('could not attach Chrome over CDP');
 
-    const ctx = { session, report, cdp, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort };
+    const ctx = { session, report, cdp, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
+      configureModeler, modelerFixtureUrl: runtime.modelerFixture?.url };
     let failed = 0;
     for (const [name, fn] of scenarios.SCENARIOS) {
       console.log(`\n▸ ${name}`);
@@ -409,6 +423,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     console.log(`\n◀ web_gate: ${verdict.status}\n  artifacts: ${report.dir}`);
     return verdict.status === 'PASS' && failed === 0 ? 0 : 1;
   } catch (e) {
+    fs.writeFileSync(path.join(report.dir, 'chrome.log'), chromeLog.join(''));
     console.error(`\n◀ web_gate: FAIL — ${e && e.message}`);
     try { report.write({ error: String(e && e.stack ? e.stack : e) }); } catch {}
     console.error(`  artifacts: ${report.dir}`);

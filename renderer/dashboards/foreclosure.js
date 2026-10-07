@@ -90,7 +90,7 @@ const _showForeclosure = _hasDashboardHub
   || (_isClient && _hasRemote);
 if (_showForeclosure) {
   window.DASHBOARDS.push({
-    id: 'foreclosure-pipeline',
+    id: 'foreclosure-pipeline', retired: true,
     name: 'Foreclosure Pipeline',
     description: 'Scraping + skiptrace flow with stage status',
     color: 'var(--green)',

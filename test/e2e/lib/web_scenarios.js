@@ -9,6 +9,7 @@ const { publicChatRendererContracts } = require('./public_chat_renderer_contract
 const { micPanelAnswerWindow } = require('./mic_panel_scenario');
 const { webVoice } = require('./web_voice_scenario');
 const { chatFileDelivery } = require('./chat_file_delivery_scenario');
+const { webDashboardsRevamp } = require('./dashboard_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
 // page (window.cc over the websocket) and a chat-stream-v2 daemon. web_gate.js
@@ -497,6 +498,7 @@ const SCENARIOS = [
   ['slot-survives-cc-reconnect', slotSurvivesCcReconnect],
   ['slot-column-split', runGridSplit],
   ['question-free-text', questionFreeText],
+  ['web-dashboards-revamp', webDashboardsRevamp],
   ['closed-chat-slot', closedChatSlot],
   // Host-restart walk runs LAST: it tears the host process (and briefly the
   // daemon) down, so it must not disturb the deterministic scenarios above.
