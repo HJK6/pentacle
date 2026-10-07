@@ -82,24 +82,6 @@ Remote inventory rows can be displayed, but a daemon never reads a remote row's
 provider path or mutates its accounting. Each host needs its own activated
 collector; this feature adds no cross-host accounting transport or fleet totals.
 
-A satellite offers a stream's usage only under the coordinator-issued fence
-(stream, generation, provider, pane PID) that arrives on `host.stats` acks.
-Usage records consumed before a stream's first fence (a short seat that
-answers within seconds) are held per bind (transcript path, native session,
-provider, pane PID, file digest), and offered in full once a matching fence
-arrives. A missing fence and a fence for another pane or provider are treated
-alike. While a held span has no matching fence, the satellite fetches fences
-every 5 s instead of every 30 s. Events are never re-sent, and the ledger's
-per-record max-merge keeps a re-offer exact. A held span is dropped when its
-tail rebinds (path, native session, provider or pane PID changes). When the
-seat leaves tmux, the span is kept for up to 600 s. For that window after a
-close (`USAGE_CLOSE_GRACE_S`), the coordinator still issues the closed row's
-fence and admits satellite usage under its unchanged generation, provider,
-pane PID and source identity. So a seat that answers and closes before any
-fence is still accounted once. Local ingest and every other admission rule
-are unchanged. More than 5,000 held or unacknowledged records for one stream
-log a warning that its usage is incomplete.
-
 ## Provenance
 
 Provenance joins each ledger record to an account, a model and an observation
