@@ -319,6 +319,39 @@ def test_dot_send_reaches_current_binding_attributed_not_operator():
     asyncio.run(run())
 
 
+def test_dot_send_ack_preserves_provider_queued_and_still_drops_fleet_fields():
+    async def run():
+        daemon, comms = _dot_server_for_send()
+
+        async def queued_send(msg):
+            comms.sent.append(msg)
+            return {"type": "send.result", "delivery": "landed", "provider_queued": True,
+                    "host": "secret-host", "session_name": "secret-session",
+                    "receipt_id": "secret-receipt"}
+
+        comms.send = queued_send
+        auth = {"dot_principal": True, "token_verified": True, "stream_id": DOT_ID}
+        res = await daemon._on_send({
+            "to_stream_id": "bart:assistant", "text": "queued please",
+            "request_id": "req-q", "_auth_context": auth,
+        })
+        assert res["provider_queued"] is True
+        assert res["delivery"] == "landed"
+        assert res["request_id"] == "req-q"
+        assert "secret" not in json.dumps(res)
+        for leaked in ("host", "session_name", "receipt_id"):
+            assert leaked not in res, leaked
+
+        # An ordinary idle ack carries no provider_queued key at all.
+        plain, plain_comms = _dot_server_for_send()
+        idle = await plain._on_send({
+            "to_stream_id": "bart:assistant", "text": "idle", "_auth_context": auth,
+        })
+        assert "provider_queued" not in idle
+
+    asyncio.run(run())
+
+
 def test_dot_send_to_non_bart_target_denied():
     async def run():
         daemon, comms = _dot_server_for_send()

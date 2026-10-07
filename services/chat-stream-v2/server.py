@@ -3132,7 +3132,7 @@ class Server:
         ack: dict[str, Any] = {"type": "send.result", "to_stream_id": composite_stream_id}
         if isinstance(result, dict):
             for key in ("delivery", "state", "submission_confirmed",
-                        "action_committed", "submission_attempts"):
+                        "action_committed", "submission_attempts", "provider_queued"):
                 if key in result:
                     ack[key] = result[key]
         if msg.get("request_id") is not None:
