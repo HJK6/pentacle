@@ -1724,6 +1724,40 @@ class Notify:
             return True
         return _nullable_text(row.get("session_generation")) == stored
 
+    async def work_lane_confirmation(self, question_id: str) -> dict | None:
+        """Facts of an answered work-lane confirmation question (spec D5), or None.
+
+        The work-lane store verifies lane, action, producer, answer and the
+        persisted resolution ``actor_class``, and consumes the id once.
+        """
+        question = await self._db.call("get_agent_question", question_id)
+        if not question:
+            return None
+        context = (question.get("envelope") or {}).get("context")
+        answer = question.get("answer") or {}
+        notification = None
+        if question.get("notification_id"):
+            notification = await self._db.call("get_notification", question["notification_id"])
+        resolution = (notification or {}).get("resolution") or {}
+        if isinstance(resolution, str):
+            try:
+                resolution = json.loads(resolution)
+            except ValueError:
+                resolution = {}
+        chosen = next((str(v) for v in (answer.get("value"), answer.get("choice"), answer.get("label"))
+                       if v not in (None, "")), None)
+        resolution_class = resolution.get("actor_class") if isinstance(resolution, dict) else None
+        return {
+            "question_id": question_id,
+            "producer_stream_id": question.get("producer_stream_id"),
+            "work_lane_confirmation": ({"lane_id": context.get("lane_id"), "action": context.get("action")}
+                                       if isinstance(context, dict)
+                                       and context.get("schema") == "WorkLaneConfirmationV1" else None),
+            "answer": chosen if question.get("state") == "answered" else None,
+            "actor_class": (resolution_class if resolution_class == answer.get("actor_class")
+                            else "mismatch"),
+        }
+
     async def _expire_stale_question(self, question: dict) -> dict | None:
         producer = _nullable_text(question.get("producer_stream_id"))
         if producer:
