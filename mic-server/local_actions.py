@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 
 PROMPT_VERSION = 'voice-actions-v5-option-grounding'
 MODEL = 'qwen3:8b'
-MODELS = {'astra': ('codex', 'gpt-6-astra'), 'sol': ('codex', 'gpt-6-sol'),
+MODELS = {'astra': ('codex', 'gpt-6-astra'), 'sol': ('codex', 'gpt-6.1-sol'),
           'terra': ('codex', 'gpt-5.6-terra'), 'luna': ('codex', 'gpt-6-luna'),
           'opus': ('claude', 'claude-opus-4-8'), 'sonnet': ('claude', 'claude-sonnet-5'),
           'fable': ('claude', 'claude-fable-5-1')}
