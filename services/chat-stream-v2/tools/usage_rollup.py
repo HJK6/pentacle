@@ -730,7 +730,10 @@ def retired_hosts(src: Sources, config: dict[str, Any]) -> tuple[set[str], list[
     honoured: set[str] = set()
     report: list[dict[str, Any]] = []
     for host in sorted(set(listed)):
-        open_seats = [s for s in src.seats.values() if s.host == host and s.status == 'open']
+        # Composite assistant rows (e.g. bart:assistant) are routing aliases with no usage of their own.
+        open_rows = [s for s in src.seats.values() if s.host == host and s.status == 'open']
+        open_seats = [s for s in open_rows if s.provider != 'composite']
+        composite = len(open_rows) - len(open_seats)
         # An unparseable updated_at cannot prove the host quiet, so it counts as recent.
         recent = [u for u in src.usage_state if (u[0] == host or u[1].startswith(host + ':'))
                   and (u[2] is None or u[2] >= src.now - RETIRED_QUIET_S)]
@@ -740,7 +743,8 @@ def retired_hosts(src: Sources, config: dict[str, Any]) -> tuple[set[str], list[
             reason = 'v2_usage_state row updated within 7 days'
         else:
             honoured.add(host)
-            report.append({'host': host, 'status': 'honoured'})
+            report.append({'host': host, 'status': 'honoured',
+                           **({'open_composite_rows_not_counted': composite} if composite else {})})
             continue
         print(f'usage rollup: warning: retired_hosts entry {host!r} ignored: {reason}', file=sys.stderr)
         report.append({'host': host, 'status': 'ignored', 'reason': reason})

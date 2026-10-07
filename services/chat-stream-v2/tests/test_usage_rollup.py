@@ -656,6 +656,7 @@ def _spec_totals(result: dict) -> list:
 def test_usage_calibration_amend_ac2_retired_host_honoured(fx: Fx) -> None:
     _retired_ledger(fx)
     fx.usage_state('bart:old', '2026-10-02T23:59:00Z')  # last push 7 days + 1 min before NOW
+    fx.seat('bart:assistant', created='2026-09-19T00:00:00Z', provider='composite')  # open routing alias
     fx.config()
     before = fx.run('--calibrate', '--spec', 'spec_demo__w', 'spec_demo__old')
     assert before['calibration']['unplaceable']['ratio'] == round(30_000 / 1_020_000, 6)
@@ -663,7 +664,8 @@ def test_usage_calibration_amend_ac2_retired_host_honoured(fx: Fx) -> None:
     fx.config(retired=('bart',))
     after = fx.run('--calibrate', '--spec', 'spec_demo__w', 'spec_demo__old')
     u = after['calibration']['unplaceable']
-    assert after['calibration']['retired_hosts'] == [{'host': 'bart', 'status': 'honoured'}]
+    assert after['calibration']['retired_hosts'] == [{'host': 'bart', 'status': 'honoured',
+                                                      'open_composite_rows_not_counted': 1}]
     assert u['ratio'] == 0.0 and u['provider_total_tokens'] == 990_000 and u['passes'] is True
     assert u['retired_mass'] == [{'provider': 'claude', 'host': 'bart', 'tokens': 30_000}]
     assert u['by_host_account'] == []
