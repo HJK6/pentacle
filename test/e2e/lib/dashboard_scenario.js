@@ -96,6 +96,13 @@ async function webDashboardsRevamp(ctx) {
     await session.waitFor("!!document.querySelector('[id^=header-] [data-mode=chat]')");
     await session.eval("document.querySelectorAll('[id^=header-] [data-mode=chat]').forEach(button => button.click())");
     await session.waitFor(`!!document.querySelector('.slot-chat-list[data-stream-id="${fixture.streamId}"]')?.textContent.includes(${JSON.stringify(fixture.transcript[0].text)})`);
+    // A reload re-fetches resolved questions (cc.promptList) separately from the
+    // transcript, then re-renders the slot. Earlier scenarios answer questions in
+    // this session, so snapshot only once the slot shows every answered question
+    // the daemon reports; otherwise the late re-render reads as a transcript change.
+    const answered = await session.eval(`window.cc.promptList({ producer_stream_id: ${JSON.stringify(fixture.streamId)}, open: false })
+      .then((reply) => (reply?.questions || []).filter((q) => q && q.state !== 'open' && q.answer).length)`);
+    await session.waitFor(`document.querySelectorAll('.slot-chat-list[data-stream-id="${fixture.streamId}"] .slot-chat-v3-answer-entry').length >= ${Number(answered) || 0}`);
     await session.eval(`(() => {
       const list = document.querySelector('.slot-chat-list[data-stream-id="${fixture.streamId}"]');
       const input = list.closest('.slot-chat-shell').querySelector('.slot-chat-compose-input');
