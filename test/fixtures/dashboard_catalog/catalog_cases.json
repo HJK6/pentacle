@@ -1,0 +1,3536 @@
+{
+  "_doc": "Synthetic dashboard-catalog validation cases shared by the daemon (services/_shared/asset_schema.py) and the web/mobile catalog loaders. `error` is a substring of the daemon's message path.",
+  "valid": [
+    {
+      "name": "full",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty boards",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.0.1",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "boards": []
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "schema_version 2",
+      "catalog": {
+        "schema_version": 2,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "schema_version"
+    },
+    {
+      "name": "bad catalog_version",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1 0",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "catalog_version"
+    },
+    {
+      "name": "short commit",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "abc"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "package.commit"
+    },
+    {
+      "name": "host_api 0",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 0
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "host_api"
+    },
+    {
+      "name": "unknown top key",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ],
+        "extra": 1
+      },
+      "error": "unknown keys"
+    },
+    {
+      "name": "duplicate board id",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          },
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          }
+        ]
+      },
+      "error": "duplicate board id"
+    },
+    {
+      "name": "bad board id",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "Example",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "boards[0].id"
+    },
+    {
+      "name": "unknown kind",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "native",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "kind"
+    },
+    {
+      "name": "missing kind block",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report"
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "report"
+    },
+    {
+      "name": "foreign kind block",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            },
+            "web": {
+              "script": "web/a.js",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "unknown keys"
+    },
+    {
+      "name": "unknown report key order",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}",
+              "order": "id_capture_desc"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "unknown keys"
+    },
+    {
+      "name": "runtime samples rejected",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}",
+              "samples": [
+                "example-report-20261007T1300Z"
+              ]
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "unknown keys"
+    },
+    {
+      "name": "key_format unanchored plus",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]+",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "key_format"
+    },
+    {
+      "name": "key_format range",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{4,8}",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "key_format"
+    },
+    {
+      "name": "key_format alternation",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "(A|B)[0-9]{4}",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "key_format"
+    },
+    {
+      "name": "key_format lowercase class",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[a-z]{4}",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "key_format"
+    },
+    {
+      "name": "key_format digit escape",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "\\d{8}",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "key_format"
+    },
+    {
+      "name": "key_format too narrow",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{3}",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "key_format"
+    },
+    {
+      "name": "key_format too wide",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{40}",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "key_format"
+    },
+    {
+      "name": "key_format bare dot",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}.X",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "key_format"
+    },
+    {
+      "name": "rev_width 4",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 4,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "rev_width"
+    },
+    {
+      "name": "select other",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "oldest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "select"
+    },
+    {
+      "name": "history_limit 0",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 0,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "history_limit"
+    },
+    {
+      "name": "title placeholder",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {1}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "title_template"
+    },
+    {
+      "name": "prefix uppercase",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "Example-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "asset_id_prefix"
+    },
+    {
+      "name": "spec id shape",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "not-a-spec",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "spec_id"
+    },
+    {
+      "name": "writer_enforced missing",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "writer_enforced"
+    },
+    {
+      "name": "script traversal",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/../x.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "web.script"
+    },
+    {
+      "name": "script absolute",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "/web/x.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "web.script"
+    },
+    {
+      "name": "script url",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "https://cdn.example.test/x.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "web.script"
+    },
+    {
+      "name": "script wrong ext",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/x.css",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "web.script"
+    },
+    {
+      "name": "lib bad hash",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "XYZ"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "libs[0].sha256"
+    },
+    {
+      "name": "too many libs",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/l0.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          },
+          {
+            "path": "web/l1.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          },
+          {
+            "path": "web/l2.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          },
+          {
+            "path": "web/l3.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          },
+          {
+            "path": "web/l4.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          },
+          {
+            "path": "web/l5.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          },
+          {
+            "path": "web/l6.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          },
+          {
+            "path": "web/l7.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          },
+          {
+            "path": "web/l8.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "libs"
+    },
+    {
+      "name": "unknown action",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "household.create"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "actions"
+    },
+    {
+      "name": "poll too fast",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 500
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "poll_interval_ms"
+    },
+    {
+      "name": "hosted userinfo",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://user:pw@viewer.example.test/"
+            }
+          }
+        ]
+      },
+      "error": "hosted.url"
+    },
+    {
+      "name": "hosted scheme",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "javascript:alert(1)"
+            }
+          }
+        ]
+      },
+      "error": "hosted.url"
+    },
+    {
+      "name": "entry too large",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "boards[0]"
+    },
+    {
+      "name": "too many boards",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "b-0",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-1",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-2",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-3",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-4",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-5",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-6",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-7",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-8",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-9",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-10",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-11",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-12",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-13",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-14",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-15",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-16",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-17",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-18",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-19",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-20",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-21",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-22",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-23",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-24",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-25",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-26",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-27",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-28",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-29",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-30",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-31",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-32",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-33",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-34",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-35",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-36",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-37",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-38",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-39",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-40",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-41",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-42",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-43",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-44",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-45",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-46",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-47",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-48",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-49",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-50",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-51",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-52",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-53",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-54",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-55",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-56",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-57",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-58",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-59",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-60",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-61",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-62",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-63",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          },
+          {
+            "id": "b-64",
+            "name": "B",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://h.example.test/"
+            }
+          }
+        ]
+      },
+      "error": "boards"
+    },
+    {
+      "name": "hosted empty authority",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "http://:"
+            }
+          }
+        ]
+      },
+      "error": "hosted.url"
+    },
+    {
+      "name": "hosted port only",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "http://:80/"
+            }
+          }
+        ]
+      },
+      "error": "hosted.url"
+    },
+    {
+      "name": "hosted bad port",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test:99999/"
+            }
+          }
+        ]
+      },
+      "error": "hosted.url"
+    },
+    {
+      "name": "hosted missing host",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https:///app"
+            }
+          }
+        ]
+      },
+      "error": "hosted.url"
+    },
+    {
+      "name": "kind list",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": [],
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "kind"
+    },
+    {
+      "name": "kind object",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": {
+              "report": 1
+            },
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "https://viewer.example.test/app"
+            }
+          }
+        ]
+      },
+      "error": "kind"
+    }
+  ]
+}

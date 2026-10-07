@@ -30,6 +30,7 @@ import asyncio
 import functools
 import json
 import logging
+import re
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -212,17 +213,31 @@ class Assets:
         explicit_spec_ids = _normalize_spec_ids(msg.get("spec_ids"), msg.get("spec_id"))
         raw_limit = msg.get("limit")
         limit = int(raw_limit) if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
+        # Optional dashboard report window: literal id prefix and/or exact
+        # metadata producer, newest asset_id first, at most `limit` rows, read
+        # from an index (no namespace scan). Reader selection only;
+        # authorization is unchanged. Spec-scoped lists only.
+        window = _list_window(msg, limit)
         session_key: dict | None = None
         if explicit_spec_ids and not (
             _nullable_text(msg.get("stream_id")) or _nullable_text(msg.get("host"))
         ):
             records: list[dict] = []
-            for spec_id in explicit_spec_ids:
-                records.extend(await self._call("list_by_spec_id", spec_id=spec_id))
-            records.sort(key=lambda r: (r.get("updated_at") or "", r.get("asset_id") or ""), reverse=True)
-            if limit is not None:
-                records = records[:limit]
+            if window is not None:
+                for spec_id in explicit_spec_ids:
+                    records.extend(await self._call("list_spec_window", spec_id=spec_id, **window))
+                # Python str order is code-point order, identical to UTF-8 byte order.
+                records.sort(key=lambda r: str(r.get("asset_id") or ""), reverse=True)
+                records = records[:window["limit"]]
+            else:
+                for spec_id in explicit_spec_ids:
+                    records.extend(await self._call("list_by_spec_id", spec_id=spec_id))
+                records.sort(key=lambda r: (r.get("updated_at") or "", r.get("asset_id") or ""), reverse=True)
+                if limit is not None:
+                    records = records[:limit]
         else:
+            if window is not None:
+                raise InvalidAsset("asset_id_prefix/producer/sort require a spec-scoped list (spec_id without stream_id)")
             session_key = self._session_key_from_msg(msg)
             if session_key is None:
                 raise InvalidAsset("stream_id (or host + session_name) is required")
@@ -513,6 +528,31 @@ class Assets:
     def _error(request_id: str, error_code: str, **extra: Any) -> dict:
         return {"type": "asset.error", "request_id": request_id,
                 "error_code": error_code, "error": error_code, **extra}
+
+
+_LIST_ID_PREFIX_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+LIST_WINDOW_MAX = 400
+
+
+def _list_window(msg: dict, limit: int | None) -> dict | None:
+    """The bounded report window requested by asset_id_prefix/producer/sort,
+    or None for the unchanged default list."""
+    id_prefix = msg.get("asset_id_prefix")
+    producer = msg.get("producer")
+    sort = msg.get("sort")
+    if id_prefix is None and producer is None and sort is None:
+        return None
+    if id_prefix is not None and (
+        not isinstance(id_prefix, str) or not _LIST_ID_PREFIX_RE.fullmatch(id_prefix)
+    ):
+        raise InvalidAsset("asset_id_prefix must match [a-z0-9][a-z0-9._-]{0,63}")
+    if producer is not None and (not isinstance(producer, str) or not producer or len(producer) > 256):
+        raise InvalidAsset("producer must be a non-empty string")
+    if sort != "asset_id_desc":
+        raise InvalidAsset("sort must be 'asset_id_desc' (required with asset_id_prefix/producer)")
+    if limit is None or not 1 <= limit <= LIST_WINDOW_MAX:
+        raise InvalidAsset(f"limit 1-{LIST_WINDOW_MAX} is required with asset_id_prefix/producer/sort")
+    return {"limit": limit, "asset_id_prefix": id_prefix, "producer": producer}
 
 
 def _asset_id(msg: dict) -> str:

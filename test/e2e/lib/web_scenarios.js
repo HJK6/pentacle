@@ -10,6 +10,7 @@ const { micPanelAnswerWindow } = require('./mic_panel_scenario');
 const { webVoice } = require('./web_voice_scenario');
 const { chatFileDelivery } = require('./chat_file_delivery_scenario');
 const { webDashboardsRevamp } = require('./dashboard_scenario');
+const { dashboardCatalog } = require('./dashboard_catalog_scenario');
 const { webWorkLanes } = require('./work_lanes_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
@@ -500,6 +501,7 @@ const SCENARIOS = [
   ['slot-column-split', runGridSplit],
   ['question-free-text', questionFreeText],
   ['web-dashboards-revamp', webDashboardsRevamp],
+  ['dashboard_catalog', dashboardCatalog],
   // Reloads the page at both ends and injects only the frozen lane wire fixture; runs before closed-chat-slot.
   ['web-work-lanes', webWorkLanes],
   ['closed-chat-slot', closedChatSlot],

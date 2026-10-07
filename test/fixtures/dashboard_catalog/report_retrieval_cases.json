@@ -1,0 +1,344 @@
+{
+  "_doc": "Synthetic, source-grounded report-retrieval fixtures (spec rev 4 fixtures F-A..F-E with synthetic ids). rows are seeded under spec_id with the given producer; `server_ids` is what the daemon returns for `request`; `outcome` is the client selection result. Window W = min(4*history_limit, 400) = 12.",
+  "descriptor": {
+    "spec_id": "example__dashboard_reports",
+    "asset_id_prefix": "example-report-",
+    "key_format": "[0-9]{8}T[0-9]{4}Z",
+    "rev_width": 2,
+    "producer_stream_id": "hostx:example-producer",
+    "writer_enforced": true,
+    "select": "latest",
+    "list": true,
+    "history_limit": 3,
+    "title_template": "Report {key} r{rev}"
+  },
+  "window": 12,
+  "cases": [
+    {
+      "name": "F-A interleaved foreign rows",
+      "rows": [
+        {
+          "asset_id": "example-report-20261007T1300Z",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261008T1300Z",
+          "producer": "hostx:other-seat",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-digest-20261007T1300Z",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "dashboard-catalog",
+          "producer": "hostx:example-producer",
+          "content_type": "dashboard-catalog"
+        }
+      ],
+      "server_ids": [
+        "example-report-20261007T1300Z"
+      ],
+      "outcome": {
+        "state": "complete",
+        "latest": "example-report-20261007T1300Z",
+        "keys": [
+          [
+            "20261007T1300Z",
+            0
+          ]
+        ],
+        "window_full": false,
+        "truncated": false
+      },
+      "request": {
+        "spec_id": "example__dashboard_reports",
+        "asset_id_prefix": "example-report-",
+        "producer": "hostx:example-producer",
+        "sort": "asset_id_desc",
+        "limit": 12
+      },
+      "_note": "The foreign-producer row uses a newer key under the same prefix and spec, so it would win if not excluded server-side (the store keeps one row per spec+asset_id, so a same-id foreign row cannot exist)."
+    },
+    {
+      "name": "F-B revisions and base ordering",
+      "rows": [
+        {
+          "asset_id": "example-report-20261006T1300Z",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261006T1300Z-r01",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261006T1300Z-r02",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261007T1300Z",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        }
+      ],
+      "server_ids": [
+        "example-report-20261007T1300Z",
+        "example-report-20261006T1300Z-r02",
+        "example-report-20261006T1300Z-r01",
+        "example-report-20261006T1300Z"
+      ],
+      "outcome": {
+        "state": "complete",
+        "latest": "example-report-20261007T1300Z",
+        "keys": [
+          [
+            "20261007T1300Z",
+            0
+          ],
+          [
+            "20261006T1300Z",
+            2
+          ]
+        ],
+        "window_full": false,
+        "truncated": false
+      },
+      "request": {
+        "spec_id": "example__dashboard_reports",
+        "asset_id_prefix": "example-report-",
+        "producer": "hostx:example-producer",
+        "sort": "asset_id_desc",
+        "limit": 12
+      }
+    },
+    {
+      "name": "F-C revision 09 vs 10",
+      "rows": [
+        {
+          "asset_id": "example-report-20261005T1300Z-r09",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261005T1300Z-r10",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        }
+      ],
+      "server_ids": [
+        "example-report-20261005T1300Z-r10",
+        "example-report-20261005T1300Z-r09"
+      ],
+      "outcome": {
+        "state": "complete",
+        "latest": "example-report-20261005T1300Z-r10",
+        "keys": [
+          [
+            "20261005T1300Z",
+            10
+          ]
+        ],
+        "window_full": false,
+        "truncated": false
+      },
+      "request": {
+        "spec_id": "example__dashboard_reports",
+        "asset_id_prefix": "example-report-",
+        "producer": "hostx:example-producer",
+        "sort": "asset_id_desc",
+        "limit": 12
+      }
+    },
+    {
+      "name": "F-C variable-width revision",
+      "rows": [
+        {
+          "asset_id": "example-report-20261005T1300Z-r09",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261005T1300Z-r9",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        }
+      ],
+      "server_ids": [
+        "example-report-20261005T1300Z-r9",
+        "example-report-20261005T1300Z-r09"
+      ],
+      "outcome": {
+        "state": "error",
+        "unexpected_id": "example-report-20261005T1300Z-r9"
+      },
+      "request": {
+        "spec_id": "example__dashboard_reports",
+        "asset_id_prefix": "example-report-",
+        "producer": "hostx:example-producer",
+        "sort": "asset_id_desc",
+        "limit": 12
+      }
+    },
+    {
+      "name": "F-C all-zero revision",
+      "rows": [
+        {
+          "asset_id": "example-report-20261005T1300Z-r09",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261005T1300Z-r00",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        }
+      ],
+      "server_ids": [
+        "example-report-20261005T1300Z-r09",
+        "example-report-20261005T1300Z-r00"
+      ],
+      "outcome": {
+        "state": "error",
+        "unexpected_id": "example-report-20261005T1300Z-r00"
+      },
+      "request": {
+        "spec_id": "example__dashboard_reports",
+        "asset_id_prefix": "example-report-",
+        "producer": "hostx:example-producer",
+        "sort": "asset_id_desc",
+        "limit": 12
+      }
+    },
+    {
+      "name": "F-D full window, too few keys",
+      "rows": [
+        {
+          "asset_id": "example-report-20261004T1300Z",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261004T1300Z-r01",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261004T1300Z-r02",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261004T1300Z-r03",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261004T1300Z-r04",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261004T1300Z-r05",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261004T1300Z-r06",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261004T1300Z-r07",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261004T1300Z-r08",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261004T1300Z-r09",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261004T1300Z-r10",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261004T1300Z-r11",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        },
+        {
+          "asset_id": "example-report-20261003T1300Z",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        }
+      ],
+      "server_ids": [
+        "example-report-20261004T1300Z-r11",
+        "example-report-20261004T1300Z-r10",
+        "example-report-20261004T1300Z-r09",
+        "example-report-20261004T1300Z-r08",
+        "example-report-20261004T1300Z-r07",
+        "example-report-20261004T1300Z-r06",
+        "example-report-20261004T1300Z-r05",
+        "example-report-20261004T1300Z-r04",
+        "example-report-20261004T1300Z-r03",
+        "example-report-20261004T1300Z-r02",
+        "example-report-20261004T1300Z-r01",
+        "example-report-20261004T1300Z"
+      ],
+      "outcome": {
+        "state": "partial",
+        "latest": "example-report-20261004T1300Z-r11",
+        "keys": [
+          [
+            "20261004T1300Z",
+            11
+          ]
+        ],
+        "window_full": true,
+        "truncated": true,
+        "global_latest_when_writer_enforced": true,
+        "notice": "history truncated: 1 of up to 3 loaded"
+      },
+      "request": {
+        "spec_id": "example__dashboard_reports",
+        "asset_id_prefix": "example-report-",
+        "producer": "hostx:example-producer",
+        "sort": "asset_id_desc",
+        "limit": 12
+      }
+    },
+    {
+      "name": "F-E empty namespace",
+      "rows": [
+        {
+          "asset_id": "example-digest-20261007T1300Z",
+          "producer": "hostx:example-producer",
+          "content_type": "report"
+        }
+      ],
+      "server_ids": [],
+      "outcome": {
+        "state": "empty"
+      },
+      "request": {
+        "spec_id": "example__dashboard_reports",
+        "asset_id_prefix": "example-report-",
+        "producer": "hostx:example-producer",
+        "sort": "asset_id_desc",
+        "limit": 12
+      }
+    }
+  ]
+}

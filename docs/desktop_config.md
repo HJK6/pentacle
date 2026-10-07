@@ -95,6 +95,9 @@ provider models and effort. See [daemon setup](../services/chat-stream-v2/README
 | `features.inputBar` | Boolean; example true | Retained compatibility flag; currently unused. |
 | `features.usage` | Boolean; example false | Sidebar usage setting. Explicit false excludes live limits.update subscription frames; enabling it requires reload. Cached snapshot values may still paint. |
 | `features.dashboards` | Boolean; false | Dashboard/widgets controls; actual backends require external adapters. |
+| `dashboards` | Object; absent | Dashboard view settings below. A host's `publicConfig` never sends `catalogRoot` to the renderer. |
+| `dashboards.catalogSpecId` | String; absent | Spec id under which the operator published the `dashboard-catalog` asset (`asset_id` `dashboard-catalog`). Unset = no catalog: the dashboards view shows only built-ins and makes no catalog call. Not secret; keep your own value in local configuration. See [Dashboards view](dashboards_view.md#runtime-catalog). |
+| `dashboards.catalogRoot` | String; absent | Web host only: directory of immutable catalog version directories (`<catalogRoot>/<catalog_version>/catalog.json` + `web/` files) served under auth at `/dashboards/private/<catalog_version>/<path>`. Host filesystem path; stripped from `publicConfig`. Read at host start. |
 | `dashboards.hidden` | String array; `[]` | Hide exact dashboard IDs, taking precedence over `showRetired`. |
 | `dashboards.showRetired` | Boolean; `false` | List registered retired boards after active boards. |
 | `dashboards.modeler3d.url` | String; absent | Absolute HTTP(S) viewer URL without embedded credentials. No default host; keep it in private local configuration. See [Dashboards view](dashboards_view.md) for states, sandbox limits and compatibility checks. |

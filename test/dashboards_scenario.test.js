@@ -17,11 +17,13 @@ function observation() {
 function loaded() { return { ...observation(), state: 'loaded', text: 'Loaded', frameUrl: fixtureUrl, sandbox: 'allow-scripts allow-same-origin', allow: 'xr-spatial-tracking; fullscreen', loading: 'lazy', referrerPolicy: 'no-referrer' }; }
 function chat() { return { sameNodes: true, sameStream: true, sameTranscript: true, sameDraft: true, chatsVisible: true, dashboardsHidden: true, frames: 0 }; }
 
-test('web gate collects the dashboard scenario before destructive journeys', () => {
-  assert.equal(SCENARIOS.length, 17);
+test('web gate collects the dashboard scenarios before destructive journeys', () => {
+  assert.equal(SCENARIOS.length, 18);
   const names = SCENARIOS.map(([name]) => name);
   const index = names.indexOf('web-dashboards-revamp');
   assert.ok(index >= 0 && index < names.indexOf('closed-chat-slot'));
+  const catalog = names.indexOf('dashboard_catalog');
+  assert.ok(catalog > index && catalog < names.indexOf('closed-chat-slot'));
   assert.equal(names[names.length - 1], 'host-restart-restores-input');
 });
 test('dashboard gate accepts complete synthetic observations for both states and the chat round trip', () => {
