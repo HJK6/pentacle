@@ -471,6 +471,29 @@ export function replaceTranscriptHtml(container: HTMLElement, html: string): voi
   }
 }
 
+const LANE_UPDATE_KIND_LABEL: Record<string, string> = {
+  lane_started: 'Lane started',
+  lane_completed: 'Completed',
+  lane_blocked: 'Blocked',
+  lane_unblocked: 'Unblocked',
+  major_decision: 'Decision',
+  milestone: 'Milestone',
+};
+
+// Typed lane-update card (spec_pentacle__first_class_work_lanes_2026_10 D6/D8). The daemon
+// publishes it into Bart's timeline; `summary` is also the event text, so clients that
+// do not branch on publish_kind 'lane_update' still show the prose.
+function renderLaneUpdateCard(update: NonNullable<PentacleTranscriptItem['laneUpdate']>): string {
+  const label = LANE_UPDATE_KIND_LABEL[update.kind] || update.kind;
+  const title = update.title ? `<span class="lane-update-title">${escapeHtml(update.title)}</span>` : '';
+  return `<article class="slot-chat-row slot-chat-lane-update is-${escapeHtml(update.kind)}" aria-label="${escapeHtml(`Lane update: ${label}`)}" data-copy-kind="message" data-lane-id="${escapeHtml(update.lane_id)}" data-update-id="${escapeHtml(update.update_id)}" data-update-kind="${escapeHtml(update.kind)}">
+    <div class="lane-update-card">
+      <div class="lane-update-head"><span class="lane-update-kind">${escapeHtml(label)}</span>${title}</div>
+      <p class="lane-update-summary">${escapeHtml(update.summary)}</p>
+    </div>
+  </article>`;
+}
+
 // Render ONE transcript item to an HTML string, mapping displayRule -> desktop
 // DOM. Returns '' for items that must not produce a row (hidden:*, draft:*).
 function renderTranscriptItemBodyHtml(
@@ -517,6 +540,7 @@ function renderTranscriptItemBodyHtml(
   if (rule === 'system:compacted') {
     return `<article class="slot-chat-compacted" aria-label="Compacted transcript"><span>↘</span>${escapeHtml(item.text)}</article>`;
   }
+  if (item.laneUpdate) return renderLaneUpdateCard(item.laneUpdate);
   if (rule === 'bubble:agent' || item.tone === 'agent') {
     return `<article class="slot-chat-row is-agent" aria-label="${escapeHtml(`Subagent${item.label ? ` · ${item.label}` : ''}`)}">${renderDisclosure(item, options, `Subagent${item.label ? ` · ${item.label}` : ''}`, `Show full ${item.label || 'subagent'} output`)}</article>`;
   }

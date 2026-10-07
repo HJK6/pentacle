@@ -17,8 +17,8 @@ function observation() {
 function loaded() { return { ...observation(), state: 'loaded', text: 'Loaded', frameUrl: fixtureUrl, sandbox: 'allow-scripts allow-same-origin', allow: 'xr-spatial-tracking; fullscreen', loading: 'lazy', referrerPolicy: 'no-referrer' }; }
 function chat() { return { sameNodes: true, sameStream: true, sameTranscript: true, sameDraft: true, chatsVisible: true, dashboardsHidden: true, frames: 0 }; }
 
-test('web gate collects the 16th dashboard scenario before destructive journeys', () => {
-  assert.equal(SCENARIOS.length, 16);
+test('web gate collects the dashboard scenario before destructive journeys', () => {
+  assert.equal(SCENARIOS.length, 17);
   const names = SCENARIOS.map(([name]) => name);
   const index = names.indexOf('web-dashboards-revamp');
   assert.ok(index >= 0 && index < names.indexOf('closed-chat-slot'));
