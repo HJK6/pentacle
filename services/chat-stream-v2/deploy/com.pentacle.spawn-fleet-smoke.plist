@@ -8,7 +8,7 @@
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>cd __PENTACLE_RELEASE_CHECKOUT__ &amp;&amp; __PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/.venv/bin/python __PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/tools/spawn_fleet_smoke.py</string>
+    <string>cd __PENTACLE_RELEASE_CHECKOUT__ &amp;&amp; __PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/.venv/bin/python __PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/tools/gate_at_fire.py run --job spawn-fleet-smoke --duration "up to 60 min (one spawn cell per provider, prompt mode and host, each bounded by its 180 s terminal-idle wait; the first gated run records the measured time)" --targets @machines --candidate-repo __PENTACLE_RELEASE_CHECKOUT__ -- __PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/.venv/bin/python __PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2/tools/spawn_fleet_smoke.py</string>
   </array>
   <key>StartInterval</key>
   <integer>43200</integer>
