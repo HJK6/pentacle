@@ -28,6 +28,7 @@ const { createMicRequest } = require('../main/mic_request');
 const { createCcHandlers, createCollector } = require(path.join(ROOT, 'main', 'cc_handlers'));
 const { createWsBridge } = require('./ws_bridge');
 const { freezeWebDist } = require('./web_build_id');
+const { createPrivateDashboardRoute } = require('./private_dashboards');
 const chatStreamClient = require(path.join(ROOT, 'main', 'chat_stream_client'));
 
 const DEFAULT_PORT = 7795;
@@ -386,6 +387,11 @@ async function main(argv = process.argv.slice(2)) {
   }
 
   const configJson = ccHandlers.publicConfig();
+  // Authenticated private dashboard files (see server/private_dashboards.js).
+  const privateDashboards = createPrivateDashboardRoute({
+    catalogRoot: CONFIG.dashboards?.catalogRoot || null,
+    log: (line) => console.warn(line),
+  });
   const server = http.createServer((req, res) => {
     const urlPath = new URL(req.url, 'http://localhost').pathname;
     // When auth is on, /login is the only unauthenticated surface; a GET
@@ -419,6 +425,7 @@ async function main(argv = process.argv.slice(2)) {
         .end(JSON.stringify({ ok: true, connections: bridge.connections.size }));
       return;
     }
+    if (privateDashboards.handle(req, res, urlPath)) return;
     serveStatic(res, urlPath, configJson, frozen);
   });
 

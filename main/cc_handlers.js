@@ -142,7 +142,10 @@ function createCcHandlers({
   function publicConfig() {
     const { token, tokenPath, ...chatStream } = CONFIG.chatStream || {};
     const { startCommand, ...mic } = CONFIG.mic || {};
-    return { ...CONFIG, mic, chatStream, hostIds: CONFIG.chatStream?.hosts || ['local'], platform: process.platform,
+    // The private catalog root is a host filesystem path; the browser only
+    // needs the catalog spec id.
+    const { catalogRoot, ...dashboards } = CONFIG.dashboards || {};
+    return { ...CONFIG, mic, chatStream, ...(CONFIG.dashboards ? { dashboards } : {}), hostIds: CONFIG.chatStream?.hosts || ['local'], platform: process.platform,
       hostname: os.hostname(), isClient: Boolean(CONFIG.remote), configError: configError?.message || null, configWarnings,
       buildId };
   }
