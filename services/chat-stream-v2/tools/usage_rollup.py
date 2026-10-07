@@ -663,9 +663,13 @@ def comparables(ctx: Context, repo: str, kind: str | None, limit: int) -> dict[s
             excluded.append({'spec_id': item.id, 'reason': delivery['reason']})
             continue
         pcts = {a['account_id']: a['weekly_pct']['value'] for a in roll['claude']['by_account']}
-        rows.append({'spec_id': item.id, 'kind': item.kind, 'completed_at': iso(item.completed_at),
-                     'elapsed_delivery_h': delivery['value_h'], 'dollars': roll['claude']['dollars'],
-                     'weekly_pct': pcts})
+        row = {'spec_id': item.id, 'kind': item.kind, 'completed_at': iso(item.completed_at),
+               'elapsed_delivery_h': delivery['value_h'], 'dollars': roll['claude']['dollars'],
+               'weekly_pct': pcts}
+        if not roll['claude']['records']:  # no Claude evidence: a zero would bias the quantiles low
+            row['dollars'] = None
+            row['dollars_reason'] = 'codex_only_deferred' if roll['codex']['records'] else 'no_usage_records'
+        rows.append(row)
         if len(rows) >= limit:
             break
     out: dict[str, Any] = {'repo': repo, 'kind': kind, 'count': len(rows), 'rows': rows, 'excluded': excluded}
@@ -674,7 +678,7 @@ def comparables(ctx: Context, repo: str, kind: str | None, limit: int) -> dict[s
         return out
     out['status'] = 'ok'
     out['elapsed_delivery_h'] = _quartiles([r['elapsed_delivery_h'] for r in rows])
-    out['dollars'] = _quartiles([r['dollars'] for r in rows])
+    out['dollars'] = _quartiles([r['dollars'] for r in rows if r['dollars'] is not None])
     accounts = sorted({a for r in rows for a in r['weekly_pct']})
     out['weekly_pct'] = {a: _quartiles([r['weekly_pct'][a] for r in rows if r['weekly_pct'].get(a) is not None])
                          for a in accounts}

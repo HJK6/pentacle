@@ -238,7 +238,9 @@ provenance. `qa_rounds` counts reports that carry a `qa_verdict`.
 by a kind tag from `{feature, defect, infra, convention, analysis}`; the legacy
 tag `bug` reads as `defect`. Results run newest first, capped at `--n`, and give
 `p25`/`median`/`p75` (inclusive linear quantiles) of `elapsed_delivery_h`,
-dollars and weekly percent per account. With fewer than 3 matches the result is
+Claude dollars and weekly percent per account. A row with no Claude records has
+`dollars: null` (`codex_only_deferred` or `no_usage_records`) and is left out of
+the dollar quantiles. With fewer than 3 matches the result is
 `status: insufficient_comparables`, and `rows` lists the matches found.
 
 **Calibration (`--calibrate`).** This fits one quota: Claude `seven_day`

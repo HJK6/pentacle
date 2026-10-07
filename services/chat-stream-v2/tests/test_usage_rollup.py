@@ -330,6 +330,20 @@ def test_usage_rollup_ac4_comparables_quantiles_kind_and_censoring(fx: Fx) -> No
     assert legacy['kind'] == 'defect' and legacy['count'] == 1
 
 
+def test_usage_rollup_ac4_codex_only_rows_have_no_claude_dollars(fx: Fx) -> None:
+    for name, h, mtok in (('a', 1, 1), ('b', 2, 2), ('c', 3, 3)):
+        _completed_spec(fx, f'spec_demo__{name}', h, mtok)
+    fx.seat('thoth:cx', created='2026-09-01T00:00:00Z', closed='2026-09-01T04:00:00Z', specs=('spec_demo__cx',),
+            provider='codex')
+    fx.rec('thoth:cx', {'input_total': 5, 'cached_input': 0, 'output': 1, 'reasoning': 0}, native='cx',
+           provider='codex', row=False)
+    fx.item('spec_demo__cx', tags=('feature',))
+    comp = fx.run('--comparables', '--repo', 'demo')['comparables']
+    cx = next(r for r in comp['rows'] if r['spec_id'] == 'spec_demo__cx')
+    assert cx['dollars'] is None and cx['dollars_reason'] == 'codex_only_deferred'
+    assert comp['count'] == 4 and comp['dollars'] == {'p25': 2.25, 'median': 3.0, 'p75': 3.75}
+
+
 def test_usage_rollup_ac4_checked_in_synthetic_feature_item(fx: Fx) -> None:
     spec = 'spec_synthetic__feature_completed'
     fx.seat('thoth:syn', created='2026-09-18T00:00:00Z', closed='2026-09-18T06:00:00Z', specs=(spec,))
