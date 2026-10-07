@@ -219,8 +219,9 @@ class SatelliteConfig:
 
 EARLY_FENCE_MIN_S = 5.0
 MAX_HELD_USAGE_RECORDS = 5000
-#: Matches the coordinator's USAGE_CLOSE_GRACE_S: a closed seat's fence is issued that long.
-HELD_USAGE_TTL_S = 600.0
+#: A held span with no matching fence this long after it was first held is dropped. An open seat
+#: gets its fence within one early refresh; the bound keeps a reopened row from inheriting it later.
+HELD_USAGE_TTL_S = 60.0
 
 
 def _fence_matches(fence: object, provider: str, source_pid: str) -> bool:
@@ -800,7 +801,7 @@ class Satellite:
         }
         held = self._unfenced_usage.get(stream_id)
         if held is None or held.get("bind") != bind:
-            held = self._unfenced_usage[stream_id] = {"bind": bind, "records": [], "closed_at": None}
+            held = self._unfenced_usage[stream_id] = {"bind": bind, "records": [], "held_at": time.monotonic()}
         merged = _merge_usage_records(held["records"], wire_records)
         if len(merged) > MAX_HELD_USAGE_RECORDS:
             log.warning("stream %s: %d held pre-fence usage records exceed %d; the oldest are dropped "
@@ -809,17 +810,13 @@ class Satellite:
             merged = merged[-MAX_HELD_USAGE_RECORDS:]
         held["records"] = merged
 
-    def _release_unfenced_usage(self, stream_id: str, st: _StreamTail | None) -> None:
-        """Offer held records once this stream's fence matches the bind they were read from.
-
-        `st` is None once the seat has left tmux: the held span then waits (up to
-        HELD_USAGE_TTL_S) for the coordinator's grace fence of the just-closed row.
-        """
+    def _release_unfenced_usage(self, stream_id: str, st: _StreamTail) -> None:
+        """Offer held records once this stream's fence matches the bind they were read from."""
         held = getattr(self, "_unfenced_usage", {}).get(stream_id)
         if held is None:
             return
         bind = held["bind"]
-        if st is not None and (
+        if (
             st.path != bind["path"]
             or st.provider_session_id != bind["native_session_id"]
             or (st.provider or bind["provider"]) != bind["provider"]
@@ -827,15 +824,12 @@ class Satellite:
         ):
             self._unfenced_usage.pop(stream_id, None)  # rebound: the held span belongs to another bind
             return
-        if st is None and held.get("closed_at") is not None and (
-            time.monotonic() - float(held["closed_at"]) > HELD_USAGE_TTL_S
-        ):
-            log.warning("stream %s: held pre-fence usage dropped; no matching fence within %ss of close",
-                        stream_id, int(HELD_USAGE_TTL_S))
-            self._unfenced_usage.pop(stream_id, None)
-            return
         fences = getattr(self, "_usage_fences", {}).get(stream_id)
         if not _fence_matches(fences, bind["provider"], bind["source_pane_pid"]):
+            if time.monotonic() - float(held["held_at"]) > HELD_USAGE_TTL_S:
+                log.warning("stream %s: held pre-fence usage dropped; no matching fence within %ss",
+                            stream_id, int(HELD_USAGE_TTL_S))
+                self._unfenced_usage.pop(stream_id, None)
             return
         candidate = {
             "stream_id": stream_id,
@@ -902,9 +896,11 @@ class Satellite:
         for name in list(self._tails):
             if name not in discovered:
                 self._tails.pop(name, None)
-                held = getattr(self, "_unfenced_usage", {}).get(f"{cfg.host}:{name}")
-                if held is not None and held.get("closed_at") is None:
-                    held["closed_at"] = time.monotonic()  # kept for the coordinator's close-grace fence
+                # The coordinator admits usage only for open rows, so a seat gone before its fence is not
+                # captured (follow-up: timestamped capture with a coordinator cutoff at close).
+                if getattr(self, "_unfenced_usage", {}).pop(f"{cfg.host}:{name}", None) is not None:
+                    log.warning("stream %s: seat closed before its first usage fence; held usage dropped",
+                                f"{cfg.host}:{name}")
 
         budget = cfg.max_events_per_pass
         events: list[dict] = []
@@ -969,9 +965,6 @@ class Satellite:
                     self._queue_usage(f"{self.config.host}:{name}", usage)
                 self._queue_provenance(self._pass_provenance.get(f"{self.config.host}:{name}") or ())
             self._release_unfenced_usage(f"{self.config.host}:{name}", st)
-        for stream_id in list(getattr(self, "_unfenced_usage", {})):
-            if stream_id.removeprefix(f"{cfg.host}:") not in self._tails:
-                self._release_unfenced_usage(stream_id, None)
         return events, high_water, capped
 
     def _collect_stream(self, st: _StreamTail, budget: int, out: list[dict]) -> tuple[int, bool]:

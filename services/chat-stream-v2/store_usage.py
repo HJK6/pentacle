@@ -3,45 +3,12 @@ from __future__ import annotations
 
 import json
 import logging
-import time
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from usage_accounting import FIELDS, native_usage
 from v2_runtime import iso_now
 
 log = logging.getLogger('chat_streamd_v2.store_usage')
-
-#: Remote usage for a seat that closed before its satellite held a fence (a short seat's
-#: whole transcript) is still admitted for this long after the close, under the row's
-#: unchanged generation, provider, pane PID and source identity.
-USAGE_CLOSE_GRACE_S = 600.0
-
-
-def _epoch(value: Any) -> float | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        moment = datetime.fromisoformat(value.replace('Z', '+00:00'))
-    except ValueError:
-        return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment.timestamp()
-
-
-def usage_row_admissible(row: dict[str, Any] | None, *, close_grace_s: float = 0.0,
-                         now: float | None = None) -> bool:
-    """An open row, or (remote path only) a row closed within the grace window."""
-    if row is None:
-        return False
-    if row.get('status') == 'open':
-        return True
-    if close_grace_s <= 0 or row.get('status') != 'closed':
-        return False
-    closed = _epoch(row.get('closed_at'))
-    current = time.time() if now is None else now
-    return closed is not None and 0 <= current - closed <= close_grace_s
 
 DDL = (
     '''CREATE TABLE IF NOT EXISTS v2_usage_state (
@@ -142,43 +109,13 @@ class UsageStoreMixin:
         )
         return outcome['snapshot'] if outcome['accepted'] else None
 
-    async def list_usage_grace_rows(self, host: str, *, close_grace_s: float = USAGE_CLOSE_GRACE_S
-                                    ) -> list[dict[str, Any]]:
-        """Rows of `host` closed within the grace window (their fences stay issuable)."""
-        cutoff = datetime.fromtimestamp(time.time() - close_grace_s, tz=timezone.utc)
-        # closed_at is fixed-width UTC (iso_now); the string prefilter keeps a margin, the exact check is below.
-        floor = (cutoff - timedelta(seconds=60)).strftime('%Y-%m-%dT%H:%M:%SZ')
-
-        from store_specs import _session_row
-
-        def _op(conn) -> list[dict[str, Any]]:
-            rows = conn.execute(
-                "SELECT * FROM sessions WHERE host=? AND status='closed' AND closed_at >= ?", (host, floor)).fetchall()
-            out = []
-            for row in rows:
-                item = _session_row(conn, row)
-                if item is None:
-                    continue
-                item['stream_id'] = f"{item['host']}:{item['session_name']}"
-                closed = _epoch(item.get('closed_at'))
-                if closed is not None and closed >= cutoff.timestamp() and usage_row_admissible(
-                        item, close_grace_s=close_grace_s):
-                    out.append(item)
-            return out
-
-        return await self.submit(_op)
-
     async def record_usage_checked(
         self, expected: dict[str, Any], records: list[dict[str, Any]], *,
         native_session_id: str, collection_host: str,
         malformed: bool = False,
         source_file_identity_digest: str | None = None,
-        close_grace_s: float = 0.0,
     ) -> dict[str, Any]:
-        """One native span: fence, identities, deltas and diagnostics commit together.
-
-        ``close_grace_s`` > 0 (the satellite path only) also admits a row closed within that window.
-        """
+        """One native span: fence, identities, deltas and diagnostics commit together."""
         from store_specs import _session_row
 
         provider = expected.get('provider')
@@ -201,7 +138,7 @@ class UsageStoreMixin:
                 conn.execute('BEGIN IMMEDIATE')
                 current = _session_row(conn, conn.execute('SELECT * FROM sessions WHERE host=? AND session_name=?',
                                                         (expected.get('host'), expected.get('session_name'))).fetchone())
-                if not usage_row_admissible(current, close_grace_s=close_grace_s):
+                if current is None or current.get('status') != 'open':
                     return {'accepted': False, 'snapshot': None, 'reason': 'session_not_open',
                             'recorded': False, 'replayed': False}
                 if not expected.get('session_generation') or current.get('session_generation') != expected['session_generation']:
