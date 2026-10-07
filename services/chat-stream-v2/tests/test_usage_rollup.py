@@ -220,7 +220,7 @@ def test_usage_rollup_ac1_folding_walks_unattributed_chain(fx: Fx) -> None:
 
 # --- AC2 pricing ------------------------------------------------------------------
 
-def test_usage_rollup_ac2_pricing_token_weighted_unpriced_and_codex_deferred(fx: Fx) -> None:
+def test_usage_rollup_ac2_pricing_token_weighted_unpriced_and_codex_reconciled(fx: Fx) -> None:
     S = 'spec_demo__priced'
     fx.ident('n-fleet', FLEET)
     fx.seat('thoth:a', created='2026-09-01T00:00:00Z', specs=(S,))
@@ -242,8 +242,12 @@ def test_usage_rollup_ac2_pricing_token_weighted_unpriced_and_codex_deferred(fx:
     assert claude['partition_tokens']['unpriced'] == 500
     assert by_account(claude, FLEET)['unpriced_tokens'] == 500
     codex = fx.run('--spec', S)['specs'][0]['codex']
-    assert codex['status'] == 'deferred' and codex['priced'] is False and codex['windows'] is None
-    assert codex['streams'] == ['thoth:cx'] and codex['ledger_cumulative_tokens']['input_total'] == 900
+    # Codex follow-up shipped: a cumulative row with no responses is partial and wholly unreconciled, never priced.
+    assert 'status' not in codex and codex['streams'] == ['thoth:cx'] and codex['dollars'] == 0
+    assert codex['outside_window_tokens']['unreconciled'] == {'uncached_input': 100, 'cache_read': 800,
+                                                              'cache_write': 0, 'output': 50}
+    assert codex['reconciliation']['partial'] == {'sessions': 1, 'tokens': 950, 'unreconciled_tokens': 950}
+    assert codex['completeness'] == 0.0
 
 
 # --- AC3 time metrics --------------------------------------------------------------
@@ -346,7 +350,7 @@ def test_usage_rollup_ac4_codex_only_rows_have_no_claude_dollars(fx: Fx) -> None
     fx.item('spec_demo__cx', tags=('feature',))
     comp = fx.run('--comparables', '--repo', 'demo')['comparables']
     cx = next(r for r in comp['rows'] if r['spec_id'] == 'spec_demo__cx')
-    assert cx['dollars'] is None and cx['dollars_reason'] == 'codex_only_deferred'
+    assert cx['dollars'] is None and cx['dollars_reason'] == 'codex_only' and cx['codex_dollars'] == 0
     assert comp['count'] == 4 and comp['dollars'] == {'p25': 2.25, 'median': 3.0, 'p75': 3.75}
 
 
@@ -741,9 +745,9 @@ def test_usage_calibration_amend_ac3_identity_mass_partition(fx: Fx) -> None:
     assert e['methods']['history_regression']['interval_union']['intervals'] == 0
 
 
-# --- AC7 Codex deferred -------------------------------------------------------------
+# --- AC7 Codex mass stays out of the Claude calibration ----------------------------------
 
-def test_usage_rollup_ac7_codex_never_windowed_or_fitted(fx: Fx) -> None:
+def test_usage_rollup_ac7_codex_never_enters_claude_windows(fx: Fx) -> None:
     _method_a_ledger(fx)
     fx.seat('thoth:cx', created='2026-09-01T00:00:00Z', specs=('spec_demo__cx',), provider='codex')
     fx.rec('thoth:cx', {'input_total': 10**9, 'cached_input': 0, 'output': 0, 'reasoning': 0},
@@ -754,10 +758,12 @@ def test_usage_rollup_ac7_codex_never_windowed_or_fitted(fx: Fx) -> None:
     fx.config()
     result = fx.run('--calibrate', '--spec', 'spec_demo__cx')
     cal = result['calibration']
-    assert {e['provider'] for e in cal['entries']} == {'claude'} and cal['codex']['status'] == 'deferred'
+    assert {e['provider'] for e in cal['entries']} == {'claude'}
+    assert [(e['provider'], e['account_id'], e['status']) for e in cal['codex']['entries']] == [
+        ('codex', 'codex-acct', 'insufficient')]
     assert cal['unplaceable']['provider_total_tokens'] == 2_500_000  # Codex mass never enters Claude windows
     spec = result['specs'][0]
-    assert spec['codex']['status'] == 'deferred' and spec['claude']['total_tokens'] == 0
+    assert spec['claude']['total_tokens'] == 0 and spec['codex']['records'] == 1
     stored = json.loads((fx.data / 'calibration.json').read_text())
     assert all(e['provider'] == 'claude' for e in stored['entries'])
     assert oct(os.stat(fx.data / 'calibration.json').st_mode & 0o777) == '0o600'

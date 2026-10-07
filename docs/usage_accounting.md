@@ -189,9 +189,8 @@ overrides the path. It reads `sessions.db`, `sessions_archive.db`,
 `notifications.db` and `usage_history.jsonl` with `mode=ro`, plus work-item
 frontmatter under `~/agent-workspace/triforce-memory/work`. Its only write is
 `--calibrate` output. It never changes admission, attribution storage or the
-daemon. Scope is **Claude only**. Codex streams are listed as
-`{provider: codex, status: deferred}` with their unpriced cumulative ledger
-totals until `spec_pentacle__usage_codex_rollup_and_calibration_2026_10` ships.
+daemon. It covers Claude and Codex; Codex is reconciled per native session
+first (see **Codex** below).
 
 ```
 agent-orch usage rollup --spec <spec_id>... [--since ISO] [--until ISO] --json
@@ -242,8 +241,9 @@ by a kind tag from `{feature, defect, infra, convention, analysis}`; the legacy
 tag `bug` reads as `defect`. Results run newest first, capped at `--n`, and give
 `p25`/`median`/`p75` (inclusive linear quantiles) of `elapsed_delivery_h`,
 Claude dollars and weekly percent per account. A row with no Claude records has
-`dollars: null` (`codex_only_deferred` or `no_usage_records`) and is left out of
-the dollar quantiles. With fewer than 3 matches the result is
+`dollars: null` (`codex_only` or `no_usage_records`) and is left out of
+the dollar quantiles. Each row also carries `codex_dollars` (placed Codex
+responses only) and `codex_completeness`; `codex_dollars` has its own quantiles. With fewer than 3 matches the result is
 `status: insufficient_comparables`, and `rows` lists the matches found.
 
 **Calibration (`--calibrate`).** This fits one quota: Claude `seven_day`
@@ -324,6 +324,69 @@ whose `hosts` could own it, which is every host unless the config narrows it.
   `external_residual` = observed pct − predicted pct, labelled as an estimate
   of non-fleet use.
 
+**Codex.** The ledger keeps one cumulative row `C_n` per native session
+(`uncached_input = input_total − cached_input`, `cache_read = cached_input`,
+`cache_write = 0`, `output`); `v2_usage_codex_responses` holds the
+per-response rows `R_n` in the same four buckets (`cache_write =
+cache_write_input`). `reasoning_output` is a labelled subset of `output`,
+reported but never a fifth bucket and never priced. Each session gets exactly
+one class before any window logic, computed over every response, timed or not:
+
+| class | rule | mass |
+|---|---|---|
+| `reconciled` | `Σ R_n == C_n` in every bucket | timed responses are placed at their `observed_at`; null-time responses are `untimed` |
+| `partial` | `Σ R_n ≤ C_n` in every bucket, some bucket below (includes a row with no responses) | as reconciled, plus the residual `C_n − Σ R_n` as `unreconciled` |
+| `unverifiable` | any bucket `Σ R_n > C_n`, or responses with no cumulative row | `max(Σ R_n, C_n)` per bucket (`Σ R_n` without a row), only in `unverifiable_mass`; nothing of it is placed, untimed or unreconciled |
+
+For reconciled and partial sessions, placed + untimed + unreconciled equals
+`C_n` per bucket. A session's account is its `v2_usage_identity` creator
+account (or unknown / conflict); creator ids are never pooled. The private
+config's `account_aliases` (`[{provider: codex, account_id, alias_of,
+justification}]`) folds one id into another only with a non-empty
+`justification`; otherwise the entry is rejected with a printed warning. An id
+may be an alias source once and never both a source and a target (chains are
+rejected whatever the entry order).
+Applied aliases make the entry `basis: aliased` (else `creator_account`).
+
+Pricing: Codex models in `pricing.json` are priced by named API-equivalent
+assumption classes (`codex_frontier`, `codex_standard`, `codex_small`); an
+unlisted model is `unpriced`. Only placed responses are priced; untimed,
+unreconciled and unverifiable mass never is. Per spec and project, `codex`
+reports placed `tokens` by bucket, `dollars`, `partition_tokens`
+(`measured`/`unpriced`/`unknown_account` for placed rows plus `untimed`,
+`unreconciled`, `unverifiable`), `outside_window_tokens` by bucket,
+`reconciliation` (sessions and tokens per class), `unreconciled_mass` and
+`unverifiable_mass` per (host, account), `by_model_account`, `by_account`
+(with `weekly_pct` from the Codex calibration) and `by_stream` (spec only).
+`completeness` = placed ÷ (placed + untimed + unreconciled + unverifiable),
+token-weighted; with `--since`/`--until` it is withheld because the
+unplaceable classes have no time. A session with no cumulative row has no
+stream and appears only in calibration. `time.codex_activity_proxy_h` is the
+union of placed-response gaps of 10 minutes or less, null when any Codex mass
+of the scope is not placed.
+
+Codex calibration (`calibration.codex`) fits exactly one quota: history lines
+with `source = rollout`, `window_kind = codex`, `window_minutes = 10080` and
+an account. Every other line (`codex_bengalfox`, `base_model_inference`, any
+300-minute window, probe lines, null-account lines) is listed in
+`reported_only` with its count and never enters a sample. The partition is
+the Claude one per (codex, account, quota) with the order `retired` →
+`unverifiable` → `unreconciled` → `untimed` → window buckets;
+`identity_mass_by_host` puts those four under `outside_window_sum`; in an
+account entry they count only that account's sessions plus unknown/conflict
+sessions on hosts it may own (the top level is fleet-wide). The Codex
+unplaceable gate is (unverifiable + unreconciled + untimed) ÷ all Codex
+session mass, honoured retired hosts removed from both sides, threshold 1 %.
+Method C uses the Method B pairing and exclusions on that quota and, with
+≥ 10 valid samples spanning ≥ 30 points, fits both `coefficient`
+(`usd_per_pct`) and `tokens_per_pct` through the origin, with residuals.
+Otherwise the entry is `status: insufficient, coefficient: null` with a
+reason. There is no Method A for Codex, and no probe or Codex workload is run
+to make samples. One entry per creator account (from sessions, the quota's
+history lines, or a `provider: codex` config account) carries
+`reconciliation`, `reconciliation_masses`, `completeness`, `measured_coverage`
+and its own `reported_only` lines.
+
 **Private config.** Real account ids live only on Thoth in
 `~/.local/share/pentacle-stream/calibration_config.json`, which must be mode
 0600 and outside the repository; anything else is refused. Labels must be
@@ -336,6 +399,9 @@ missing config leaves every account `not_configured`. The public example is
 never read. `--redact` replaces account ids with config labels (or
 `unconfigured_account_<n>`) in printed output. Use it for receipts. The
 private `calibration.json` keeps the real ids for weekly-percent lookups.
+
+Codex acceptance: `services/chat-stream-v2/tests/test_usage_rollup_codex.py`
+(AC1–AC7 of `spec_pentacle__usage_codex_rollup_and_calibration_2026_10`).
 
 Acceptance: `services/chat-stream-v2/tests/test_usage_rollup.py` (AC1–AC9
 fixtures on the real Store schema, plus the `test_usage_calibration_amend_*`

@@ -1,11 +1,17 @@
 {
-  "version": "2026-10-07.1",
+  "version": "2026-10-07.2",
   "unit": "usd_per_mtok",
-  "basis": "API-equivalent weights named in spec_pentacle__usage_rollup_and_calibration_2026_10; a weighted proxy for limit consumption, not billing.",
+  "basis": "API-equivalent weights named in spec_pentacle__usage_rollup_and_calibration_2026_10 (Claude) and spec_pentacle__usage_codex_rollup_and_calibration_2026_10 (Codex); a weighted proxy for limit consumption, not billing.",
   "classes": {
     "opus": {"uncached_input": 15.0, "cache_write": 18.75, "cache_read": 1.5, "output": 75.0},
     "sonnet": {"uncached_input": 3.0, "cache_write": 3.75, "cache_read": 0.3, "output": 15.0},
-    "zero": {"uncached_input": 0.0, "cache_write": 0.0, "cache_read": 0.0, "output": 0.0}
+    "zero": {"uncached_input": 0.0, "cache_write": 0.0, "cache_read": 0.0, "output": 0.0},
+    "codex_frontier": {"uncached_input": 5.0, "cache_write": 5.0, "cache_read": 0.5, "output": 40.0,
+                       "assumption": "named API-equivalent assumption: frontier Codex tier; cached input at 10 % of input; cache writes at the input rate; reasoning is part of output and never priced separately"},
+    "codex_standard": {"uncached_input": 1.25, "cache_write": 1.25, "cache_read": 0.125, "output": 10.0,
+                       "assumption": "named API-equivalent assumption: standard Codex tier at 1/4 of frontier"},
+    "codex_small": {"uncached_input": 0.25, "cache_write": 0.25, "cache_read": 0.025, "output": 2.0,
+                    "assumption": "named API-equivalent assumption: small Codex tier at 1/20 of frontier"}
   },
   "models": {
     "claude-opus-4-8": {"class": "opus"},
@@ -14,6 +20,14 @@
     "claude-fable-5-1": {"class": "opus", "assumption": "Fable priced as Opus-class (named assumption)"},
     "claude-sonnet-5": {"class": "sonnet"},
     "claude-sonnet-5-5": {"class": "sonnet"},
-    "<synthetic>": {"class": "zero", "assumption": "Claude Code synthetic messages carry no model usage"}
+    "<synthetic>": {"class": "zero", "assumption": "Claude Code synthetic messages carry no model usage"},
+    "gpt-6-sol": {"class": "codex_frontier", "assumption": "Sol priced as the frontier tier"},
+    "gpt-6.1-sol": {"class": "codex_frontier", "assumption": "Sol 6.1 priced as the frontier tier"},
+    "gpt-6-astra": {"class": "codex_frontier", "assumption": "Astra priced as the frontier tier"},
+    "gpt-reserve": {"class": "codex_frontier", "assumption": "reserve model priced as the frontier tier"},
+    "gpt-6-luna": {"class": "codex_standard", "assumption": "Luna priced as the standard tier"},
+    "gpt-5.6-luna": {"class": "codex_standard", "assumption": "Luna 5.6 priced as the standard tier"},
+    "codex-auto-review": {"class": "codex_standard", "assumption": "auto-review priced as the standard tier"},
+    "gpt-5.6-terra": {"class": "codex_small", "assumption": "Terra priced as the small tier"}
   }
 }
