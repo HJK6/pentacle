@@ -82,6 +82,149 @@ Remote inventory rows can be displayed, but a daemon never reads a remote row's
 provider path or mutates its accounting. Each host needs its own activated
 collector; this feature adds no cross-host accounting transport or fleet totals.
 
+## Unfenced spans
+
+A satellite learns a stream's `session_generation` only from the usage fences
+on a `host.stats` ack (every 30 s). Before wire version 2, a seat that answered
+and closed between two stats acks had no fence, and its usage was lost. A
+record read after a same-name reopen was also credited to the new generation.
+Wire v2 resolves the generation on the daemon from durable history and the
+record's own transcript time. It never uses receipt time or a grace window.
+
+**History.** `v2_session_generation_history` has one row per
+(host, session name, generation). The row holds `pane_pid`, `provider`,
+`created_at`, `precision`, `closed_at` and the transcript identity
+(`native_session_id`, `source_file_identity_digest`).
+
+- `open_session` writes the row with a millisecond `created_at` (`precision='ms'`).
+- Opening a new generation over a row that is still open closes the prior row
+  at the new `created_at`, so a name has at most one open row.
+- Every close path writes `closed_at` in milliseconds at the time of the write.
+- Daemon start first reconciles open rows that a daemon without history (for
+  example one rolled back to) left stale: a row whose session closed is closed
+  at `sessions.closed_at`; a row whose name was reopened as another generation,
+  or whose session was archived, has an unknown close and is closed with zero
+  width, so its records are refused. It then backfills a row for each open
+  session that has none for its current generation, keeping the
+  second-resolution `sessions.created_at` and flagging it `precision='s'`.
+- The identity columns are written once: by fenced admission, or by the first
+  credited unfenced record. A reopen never overwrites them.
+- A same-name reopen always mints a new generation, so it gets its own row.
+- The scheduled retention pass deletes a row only when it closed more than 30
+  days ago. Open rows are never pruned. Rows are never archived with
+  `sessions`.
+
+**Classifier.** `usage_admission.classify` is the single ordered refusal-only
+rule. Both v2 paths call it; only the candidate set differs.
+
+- A fenced item's only candidate is its fence generation's history row.
+- A held record's candidates are the rows that match host, session name, pane
+  pid and provider.
+- The order of checks is: `timestamp_missing`, `no_candidate_generation`,
+  `clock_unavailable` (transient), `outside_all_generations`,
+  `generation_overlap`, `boundary_uncertain`, credited.
+
+Clock evidence comes from the stats round trip. The ack carries `server_now`,
+and the satellite keeps `{offset_s, rtt_s, server_now}`. Each record is
+corrected by the hull of its capture-time and send-time samples. Every
+uncertainty term only widens the refusal zone. An open row has no end
+boundary.
+
+**Clock limit.** The hull bounds the offset only at the two sampled instants.
+A clock step or drift between samples that the samples do not show is not
+detected. It could place a record on the wrong side of a boundary.
+
+Offsets measured on 2026-10-07 between two satellite hosts and the daemon host
+were about +0.109 s and −0.115 s.
+
+**Held-span file.** The satellite keeps
+`~/.local/state/pentacle-satellite/unfenced_usage.json`
+(`PENTACLE_SATELLITE_HELD_SPAN_PATH`). It holds a span, with each record's
+`transcript_ts` and capture clock, in these cases:
+
+- the span has no matching fence;
+- the daemon refused the item only because its fence was stale
+  (`session_not_open`, `generation_mismatch`, `pane_pid_mismatch` or
+  `provider_mismatch`);
+- the daemon deferred the item as `clock_unavailable`;
+- the daemon is v2 but the satellite has no clock sample from the last 540 s.
+
+The file is fsynced before that pass's events push. Event offsets advance
+exactly as before.
+
+The bounds are 256 records and 64 KiB per entry, and 64 entries in all. An
+entry expires after 24 h of time with the daemon enabled, or 7 days after it
+was written while the daemon is disabled. Every drop is first recorded as a
+loss in the same atomic write. A loss has a reason (`held_span_expired_ttl`,
+`held_span_capacity_entries`, `held_span_capacity_bytes` or
+`held_span_overflow_records`), an id `instance:seq` that is never reused, and
+counts that merge per (entry key, reason). The list holds at most 64 records:
+60 keyed records and one overflow record per reason.
+
+**Wire and ack.** The satellite sends `usage_unfenced` (entries) and
+`usage_unfenced_losses` only while the most recent `event.push` ack had
+`wire_version >= 2` and a `usage_unfenced` block. Any other ack, or any push
+error, clears that flag. A v1 daemon accepts such a frame and ignores the
+fields, so after a rollback at most one frame carries them, and the held data
+stays on disk. If a daemon rejects a frame carrying them, the satellite retries
+that same pass once without them.
+
+Fenced items are classified only when the frame carries `clock`. A frame
+without `clock` (every v1 satellite) keeps the legacy admission unchanged.
+
+Inside one store transaction committed before the ack, the daemon does the
+following:
+
+- credits records through `record_historical_usage_conn`. This is the
+  history-row writer and shares the merge core with the live-row writer;
+- persists every terminal refusal in `v2_usage_unplaced`;
+- upserts losses with the revision guard.
+
+The ack carries `usage_unfenced: {recorded: [{key, seq}], rejected: [{key, seq,
+reason, transient}]}`, `losses_recorded` and `losses_conflict`. Record-level
+refusals of a fenced item are added to `usage_rejected` with `index`, so they
+never block the stream's offset.
+
+Codex `cumulative` ownership stays with the first generation that credits it.
+A later generation's record is reported as
+`cumulative_owned_by_prior_generation`.
+
+**Loss conflicts.** A loss payload with a lower or equal `rev` and different
+counts is `loss_conflict`. Its symptom is a hold file restored from an older
+copy, which is unsupported. When it happens:
+
+- the stored `loss:` row is unchanged;
+- the pending payload is kept in a `loss_conflict:` row; from then on every
+  payload for that id is routed to that row (a latch) and replaces its pending
+  payload when the incoming `rev` is at least the retained pending `rev`;
+- the id is never acked as recorded, and the satellite keeps the record;
+- the satellite mints ids from a fresh instance after the first conflict.
+
+Conflict rows are never counted. If a restored record's first send already
+exceeds the stored `rev`, it silently replaces the stored counts. That case
+stays an undetectable limit.
+
+Loss upserts for one host run under one lock. A loss is applied only when the
+frame's `request_id` is above the highest applied for that satellite process
+incarnation (`satellite_pid` plus a per-process `satellite_incarnation` token,
+because an auto-update exec restart keeps the PID and restarts request ids).
+The server serves each request in its own task, so after an ack timeout a later
+frame can arrive first; the earlier frame's losses are then neither stored nor
+acked, and the satellite sends them again.
+
+**Readback.** On the daemon host, `agent-orch usage --unplaced [--json]` lists:
+
+- refused records per stream, with their reasons;
+- loss `records_lost` summed per reason;
+- unresolved conflicts, showing both payloads and no recovered count.
+
+Unplaced usage is never measured, placed or priced. The rollup partition does
+not read it yet; that is a tracked residual.
+
+A resumed transcript's history replay (its records predate the pane) is
+refused. It is listed there, normally as `outside_all_generations` or
+`no_candidate_generation`.
+
 ## Provenance
 
 Provenance joins each ledger record to an account, a model and an observation
@@ -117,8 +260,11 @@ values differ is counted `response_conflict` and ignored. A live span that
 starts mid-turn (no known model yet) leaves that response to backfill.
 
 **Wire.** `event.push` carries an optional `usage_provenance` block
-`{version: 1, items: [...], dry_run?}` (≤ 2000 items) and requires the source
-host proof. Every item has exactly `kind`, `provider`, `native_session_id`,
+`{version: 1|2, items: [...], dry_run?}` (≤ 2000 items) and requires the source
+host proof. The daemon admits versions 1 and 2 and answers with its own
+version (2) in the ack; any other version is `unsupported_version`. Version 2
+adds the thread proof (§ Thread proof); version-1 items are stored exactly as
+before. Every item has exactly `kind`, `provider`, `native_session_id`,
 `source_file_identity_digest`, `identity`, `data`; `data` keys are fixed per
 kind (`claude_record`, `codex_response`, `rate_limit`). A `claude_record` or
 `codex_response` needs a ledger row for that native session on the
@@ -148,6 +294,44 @@ python3 services/chat-stream-v2/satellite.py --backfill
 python3 services/chat-stream-v2/tools/backfill_usage_provenance.py \
   --db ~/.local/share/pentacle-stream/sessions.db --host thoth [--dry-run]
 ```
+
+### Thread proof
+
+Version 2 lets a `codex_response` carry both `thread_token_usage` (the record's
+own five-field thread counter after that response: `input`, `cached_input`,
+`cache_write_input`, `output`, `reasoning_output`; non-negative, cached ≤ input,
+reasoning ≤ output) and `transcript_seq` (its 1-based ordinal among the
+rollout's accepted own-thread `token_usage_record`s). Only the whole-file
+backfill knows the ordinal; the live tail sends `transcript_seq: null`. A
+record without a valid thread counter carries neither field. A malformed field
+makes the item `bad_provenance`.
+
+| Table | Key | Holds |
+|---|---|---|
+| `v2_usage_codex_thread_proof` | host, native session, `response_id`; partial unique index on (host, native session, `transcript_seq`) where not null | `transcript_seq`, the five `thread_*` counters (`INTEGER NOT NULL CHECK >= 0`), `source` (`backfill` with an ordinal, `live` without), `observed_at` |
+| `v2_usage_codex_thread_flags` | host, native session, `flag`, `response_id` | adverse evidence: `detail`, `first_seen_at`; insert-or-ignore, never deleted |
+
+The proof row is written in the response row's `BEGIN IMMEDIATE` transaction.
+Merge never erases: an identical replay is `replayed`; a `live` row becomes
+`backfill` only by gaining its ordinal with an identical vector; a differing
+vector or a differing ordinal is not written and is flagged `proof_conflict`;
+an ordinal already held by another response of the session is not written and
+is flagged `duplicate_ordinal`. The producer reports `counter_reset` (a thread
+counter field lower than at the previous ordinal, whole-file pass only) and
+`foreign_thread_response` (a copied record whose `thread_id` is another
+thread) as `codex_thread_flag` items `{flag, response_id, detail}`; a
+version-2 `response_conflict` is kept as `duplicate_response_conflict`. The
+ack reports `proof_counts` beside `counts`.
+
+**Negotiation.** A satellite with no version-2 grant in its process sends the
+empty probe `{version: 2, items: []}` before its first data batch; ack
+version 2 → it sends version 2; `unsupported_version` → it strips the proof,
+drops flags, sends version 1 and probes again after an hour. A version-2 data
+batch answered `unsupported_version` (a rolled-back daemon) downgrades the same
+way. The backfill cursor records the version each file was sent under (an
+entry without one is version 1): a pass under version 2 re-sends every
+version-1 file once, so responses replay and proof rows insert. The ledger host's own
+ingest and backfill call the sink in process and always send version 2.
 
 Records whose transcript is gone stay without provenance; nothing is filled
 from the current login. `agent-orch inspect <stream> --json` returns
@@ -390,10 +574,34 @@ one class before any window logic, computed over every response, timed or not:
 |---|---|---|
 | `reconciled` | `Σ R_n == C_n` in every bucket | timed responses are placed at their `observed_at`; null-time responses are `untimed` |
 | `partial` | `Σ R_n ≤ C_n` in every bucket, some bucket below (includes a row with no responses) | as reconciled, plus the residual `C_n − Σ R_n` as `unreconciled` |
-| `unverifiable` | any bucket `Σ R_n > C_n`, or responses with no cumulative row | `max(Σ R_n, C_n)` per bucket (`Σ R_n` without a row), only in `unverifiable_mass`; nothing of it is placed, untimed or unreconciled |
+| `reconciled_by_rows` | would be `unverifiable`, has thread-proof rows, and predicate P holds (below) | the response rows only (the proven prefix): timed rows placed, null-time rows `untimed`; the ledger row is never added and `unreconciled` is zero |
+| `unverifiable` | any bucket `Σ R_n > C_n`, or responses with no cumulative row, and not `reconciled_by_rows` | `max(Σ R_n, C_n)` per bucket (`Σ R_n` without a row), only in `unverifiable_mass`; nothing of it is placed, untimed or unreconciled |
+
+**Predicate P** (thread proof, § Thread proof) is evaluated in the same single
+deferred read-only snapshot as every other table the rollup reads. With `n` the
+largest backfill ordinal: (a) `identity` — a cumulative row exists and the
+session's `v2_usage_identity.conflict` is 0; (b) `completeness` — exactly one
+backfill proof row per ordinal `1..n`, mapped one-to-one to existing response
+rows, and no response row without one (a live-only tail is not proven);
+(c) `equality` — the five-field sum of the mapped rows equals the vector at
+`n`; (d) `counter_consistency` — vectors non-decreasing along `1..n`;
+(e) `flags` — no stored flag of any name, and `malformed_proof` — every stored proof row
+re-validated on read (types, non-negative, cached ≤ input, reasoning ≤ output,
+`backfill` ⇔ ordinal), since an out-of-band write can pass the column CHECKs;
+(f) `ledger_le_thread` — `C_n` ≤ the vector at `n` in every bucket. A timed row
+is placement, not completeness evidence. A session with no proof rows keeps
+its class and the rollup JSON is byte-for-byte as before: the
+`reconciled_by_rows` class key, its block counts and `proof_sessions` appear
+only when the ledger holds at least one proof row. Then `proof_sessions` lists
+each session P was evaluated on (hashed `session`, `host`, `class`,
+`proof_rows`, stored `flags` by name, `malformed_proof_rows` counted on read): proven ones add `source: rows`, `proof_boundary_seq`,
+`thread_vector` and per-bucket `ledger_below_thread_by`; the rest name their
+failing clauses in `reconciled_by_rows_blocked_by` and stay `unverifiable`
+(never `partial` by subtraction). The reconciliation block's
+`reconciled_by_rows` entry adds `blocked_sessions` and `blocked_by` per clause.
 
 For reconciled and partial sessions, placed + untimed + unreconciled equals
-`C_n` per bucket. A session's account is its `v2_usage_identity` creator
+`C_n` per bucket; for `reconciled_by_rows`, placed + untimed equals `Σ R_n`. A session's account is its `v2_usage_identity` creator
 account (or unknown / conflict); creator ids are never pooled. The private
 config's `account_aliases` (`[{provider: codex, account_id, alias_of,
 justification}]`) folds one id into another only with a non-empty

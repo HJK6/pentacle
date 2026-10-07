@@ -296,7 +296,7 @@ class Ingest:
                 st.provenance_state["_bound"] = bound
             items = native_provenance(
                 provider, records, native_session_id=st.session_id or None,
-                state=st.provenance_state,
+                state=st.provenance_state, proof=True,
             )
             for start in range(0, len(items), PROVENANCE_MAX_ITEMS):
                 await self.provenance.admit(self.local_host, {

@@ -252,8 +252,8 @@ def test_provenance_requires_source_host_proof_and_ignores_generation(tmp_path: 
                 assert conn.execute("SELECT COUNT(*) FROM v2_usage_provenance").fetchone()[0] == 0
                 assert conn.execute("SELECT COUNT(*) FROM v2_usage_identity").fetchone()[0] == 0
             bad_version = _frame([])
-            bad_version["usage_provenance"]["version"] = 2
-            assert (await ep.handle_push(bad_version))["usage_provenance"] == {"version": 1, "error": "unsupported_version"}
+            bad_version["usage_provenance"]["version"] = 3  # versions 1 and 2 are admitted
+            assert (await ep.handle_push(bad_version))["usage_provenance"] == {"version": 2, "error": "unsupported_version"}
         finally:
             store.stop()
 
@@ -638,9 +638,12 @@ def test_satellite_live_tail_exports_provenance_and_clears_on_ack(tmp_path: Path
             })
             kinds = sorted(item["kind"] for item in sat._pending_provenance.values())
             assert kinds == ["claude_record", "codex_response", "rate_limit", "rate_limit"]
+            probe = await sat._push(ws, [], {})  # the empty version-2 probe precedes the first data batch
+            sat._apply_ack(probe, {})
+            assert ws.frames[0]["usage_provenance"] == {"version": 2, "items": []}
             ack = await sat._push(ws, events, high_water)
             sat._apply_ack(ack, high_water)
-            assert ws.frames[0]["usage_provenance"]["version"] == 1
+            assert ws.frames[1]["usage_provenance"]["version"] == 2
             assert ack["usage_provenance"]["counts"] == {"recorded": 4}
             assert sat._pending_provenance == {}
             limits = [json.loads(line) for line in (tmp_path / "usage_history.jsonl").read_text().splitlines()]
@@ -860,6 +863,7 @@ def test_satellite_provenance_respects_byte_budget_and_unaware_daemon(tmp_path: 
     from satellite import Satellite, SatelliteConfig
 
     sat = Satellite(SatelliteConfig(host=HOST, checkout=str(tmp_path)))
+    sat._provenance_version = 2  # past the capability probe
     items = native_provenance("claude", [_claude_assistant(f"m{i}") for i in range(50)], complete=True)
     sat._queue_provenance(items)
     big = {"events": ["x" * (int(satellite.WS_MAX_SIZE * 0.75) - 2000)]}

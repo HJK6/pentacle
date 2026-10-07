@@ -48,6 +48,9 @@ import re
 import time
 from typing import Any, Awaitable, Callable, Mapping
 
+from usage_admission import iso_ms
+from store_usage import is_store_contention
+
 from ingest import _identity_key, broadcast_assistant_mirror, codex_source_pane_pid, validate_event_payload
 from machine_stats import WIRE_VERSION as STATS_WIRE_VERSION, validate_machine_stats
 from message_envelopes import annotate_message_envelope
@@ -58,7 +61,10 @@ log = logging.getLogger("chat_streamd_v2.event_push")
 #: Wire schema version of the normalized payloads the satellite sends. Bumped
 #: only when the on-the-wire event shape changes incompatibly; the ack echoes
 #: the server's supported version so a too-old/too-new satellite is visible.
-WIRE_VERSION = 1
+#: 2 adds held unfenced usage spans, loss records and clock samples
+#: (docs/usage_accounting.md § Unfenced spans); a v1 frame is admitted exactly
+#: as before.
+WIRE_VERSION = 2
 
 #: Hard cap on events accepted in a single push, so one oversized batch cannot
 #: monopolize the store thread (loop rule 2, sink side). The satellite's per-pass
@@ -71,7 +77,9 @@ STALE_ALERT_MIN_INTERVAL_S = 300.0
 
 _FULL_GIT_SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
-_HOST_PROOF_FIELDS = frozenset({"type", "request_id", "push_secret", "satellite_sha", "satellite_pid", "wire_version", "host", "events", "usage", "usage_provenance", "high_water", "inventory", "frozen_streams", "source_host_proof"})
+_HOST_PROOF_FIELDS = frozenset({"type", "request_id", "push_secret", "satellite_sha", "satellite_pid", "wire_version", "host", "events", "usage", "usage_provenance", "high_water", "inventory", "frozen_streams", "source_host_proof",
+                                "usage_unfenced", "usage_unfenced_losses", "satellite_now", "clock",
+                                "satellite_incarnation"})
 _USAGE_REQUIRED_FIELDS = frozenset({
     "stream_id", "provider", "session_generation", "source_pane_pid",
     "native_session_id", "source_file_identity_digest", "records",
@@ -131,6 +139,15 @@ class EventPush:
         # also the log-dedup state, so recovery deliberately re-arms a later
         # independent drop instead of suppressing it for the daemon lifetime.
         self._dropped_admissions: dict[tuple[str, str], tuple[str, str]] = {}
+        #: Loss-record ordering (AC10 Target State 2a precondition). The server
+        #: serves each WS request in its own task, so after a satellite ack
+        #: timeout a later frame can reach the store before an earlier one.
+        #: Loss upserts run under one per-host lock and only for a request id
+        #: above the highest already applied for that satellite process; a
+        #: stale frame's losses are neither stored nor acked (the satellite
+        #: keeps and re-sends them).
+        self._loss_locks: dict[str, asyncio.Lock] = {}
+        self._loss_high_water: dict[tuple[str, int, str], int] = {}
 
     def wire_handlers(self) -> dict[str, Callable[[dict], Awaitable[dict]]]:
         return {"event.push": self.handle_push, "host.stats": self.handle_host_stats}
@@ -171,13 +188,17 @@ class EventPush:
             "request_id": rid,
             "version": version,
             "wire_version": STATS_WIRE_VERSION,
+            # Additive clock evidence for the wire-v2 timestamp classifier.
+            "server_now": iso_ms(time.time()),
         }
         try:
             fences = await self._usage_fences(host)
         except Exception as exc:  # noqa: BLE001 - stats remains available if usage projection fails
             log.warning("usage fence projection failed host=%s: %s", host, exc)
-            fences = []
-        if fences:
+            fences = None
+        if fences is not None:
+            # Always sent, including `[]`, so a satellite drops the fence of a
+            # row that closed (an omitted list leaves its last fences in place).
             reply["usage_fences"] = fences
         return reply
 
@@ -280,10 +301,117 @@ class EventPush:
             })
         return [fence for fence in fences if all(fence.values())]
 
+    @staticmethod
+    def _is_v2_frame(msg: dict) -> bool:
+        version = msg.get("wire_version")
+        return type(version) is int and version >= 2
+
+    def _v2_timing(self, msg: dict) -> dict[str, Any] | None:
+        """Fenced items of a v2 frame carrying ``clock`` use the v2 classifier.
+
+        A frame without ``clock`` (every v1 satellite) keeps legacy admission
+        exactly; a v2 satellite omits it only while it has not seen a v2
+        daemon, i.e. while it is behaving as a v1 satellite.
+        """
+        if not self._is_v2_frame(msg) or "clock" not in msg:
+            return None
+        return {"clock": msg.get("clock"), "receipt_now": time.time()}
+
+    async def _project_usage(self, accepted_usage: list[dict[str, Any]]) -> bool:
+        """Apply durable usage snapshots to the live in-memory rows."""
+        usage_projected = False
+        if self.sessions is None:
+            return False
+        for accepted in accepted_usage:
+            snapshot = accepted.get("snapshot")
+            stream_id = accepted.get("stream_id")
+            if (
+                not isinstance(snapshot, dict)
+                or not isinstance(stream_id, str)
+                or snapshot.get("stream_id") != stream_id
+                or not isinstance(snapshot.get("session_generation"), str)
+            ):
+                continue
+            if self.sessions.apply_durable(
+                stream_id,
+                expected_generation=snapshot["session_generation"],
+                usage=snapshot,
+            ) is not None:
+                usage_projected = True
+        return usage_projected
+
+    def _losses_in_order(self, msg: dict, host: str) -> bool:
+        """True when this frame is newer than any applied for its process."""
+        pid, rid = msg.get("satellite_pid"), msg.get("request_id")
+        incarnation = msg.get("satellite_incarnation")
+        if type(pid) is not int or type(rid) is not int:
+            return True
+        # An exec restart (auto-update) keeps the PID but restarts request ids;
+        # the incarnation token makes it a new ordering domain.
+        key = (host, pid, incarnation if isinstance(incarnation, str) else "")
+        if rid <= self._loss_high_water.get(key, -1):
+            return False
+        self._loss_high_water.pop(key, None)
+        self._loss_high_water[key] = rid
+        while len(self._loss_high_water) > 4096:  # bounded: oldest domains first
+            self._loss_high_water.pop(next(iter(self._loss_high_water)))
+        return True
+
+    async def _record_unfenced(self, msg: dict, *, authenticated_host: str) -> dict[str, Any]:
+        """Held spans and loss records of one v2 frame, committed before the ack."""
+        empty = {"recorded": [], "rejected": [], "losses_recorded": [], "losses_conflict": [],
+                 "counts": {"recorded": 0, "replayed": 0}}
+        entries = msg.get("usage_unfenced")
+        losses = msg.get("usage_unfenced_losses")
+        if entries is None and losses is None:
+            return empty
+        lock = self._loss_locks.setdefault(authenticated_host, asyncio.Lock())
+        async with lock:
+            apply_losses = self._losses_in_order(msg, authenticated_host)
+            try:
+                outcome = await self.store.record_unfenced(
+                    authenticated_host, entries if isinstance(entries, list) else [],
+                    losses if apply_losses else None,
+                    clock=msg.get("clock"), receipt_now=time.time(),
+                )
+            except Exception as exc:  # noqa: BLE001 - nothing committed; every record is retried
+                if not is_store_contention(exc):
+                    log.warning("event.push unfenced usage failed host=%s: %s", authenticated_host, exc)
+                    raise
+                # Nothing committed and no loss is acked; the satellite re-sends
+                # all of it in a later (higher request id) frame.
+                retry = [
+                    {"key": entry["key"], "seq": record.get("seq"), "reason": "retry", "transient": True}
+                    for entry in (entries if isinstance(entries, list) else [])
+                    if isinstance(entry, dict) and isinstance(entry.get("key"), str)
+                    for record in (entry.get("records") or []) if isinstance(record, dict)
+                ]
+                return {**empty, "rejected": retry}
+        projected = False
+        if self.sessions is not None:
+            for stream_id, generation in outcome.get("touched") or ():
+                host, _, name = stream_id.partition(":")
+                row = await self.store.fetch_session(host, name)
+                if (
+                    isinstance(row, dict) and row.get("status") == "open"
+                    and str(row.get("session_generation") or "") == generation
+                    and isinstance(row.get("usage"), dict)
+                ):
+                    projected = await self._project_usage([
+                        {"stream_id": stream_id, "snapshot": row["usage"]},
+                    ]) or projected
+        return {**outcome, "_projected": projected}
+
     async def _record_remote_usage(
-        self, usage: Any, *, authenticated_host: str,
-    ) -> tuple[int, int, list[dict[str, str]], list[dict[str, Any]]]:
-        """Admit usage items independently, keeping request ids correlation-only."""
+        self, usage: Any, *, authenticated_host: str, timing: dict[str, Any] | None = None,
+    ) -> tuple[int, int, list[dict[str, Any]], list[dict[str, Any]]]:
+        """Admit usage items independently, keeping request ids correlation-only.
+
+        With ``timing`` (a wire-v2 frame) each credited item may also carry
+        record-level refusals; they are appended to the rejected list with the
+        record ``index`` and ``terminal``/``transient`` so a v2 satellite never
+        mistakes them for an item-level rejection that blocks its offset.
+        """
         if not isinstance(usage, list) or len(usage) > MAX_BATCH:
             return 0, 0, [], []
         recorded = replayed = 0
@@ -317,10 +445,16 @@ class EventPush:
                 native_session_id=item["native_session_id"],
                 collection_host=authenticated_host,
                 source_file_identity_digest=item["source_file_identity_digest"],
+                **({"timing": timing} if timing is not None else {}),
             )
             if not outcome.get("accepted"):
                 rejected.append({"stream_id": stream_id, "reason": str(outcome.get("reason") or "usage_rejected")})
                 continue
+            for refusal in outcome.get("refused") or ():
+                rejected.append({
+                    "stream_id": stream_id, "reason": refusal["reason"], "index": refusal["index"],
+                    "record_key": refusal["record_key"], "transient": refusal["transient"],
+                })
             if outcome.get("recorded"):
                 recorded += 1
             elif outcome.get("replayed"):
@@ -382,6 +516,7 @@ class EventPush:
         # a supplied proof is never optional or ignored.
         source_proof_required = (
             "usage" in msg or "usage_provenance" in msg
+            or "usage_unfenced" in msg or "usage_unfenced_losses" in msg
             or msg.get("source_host_proof") is not None
         )
         if source_proof_required:
@@ -608,25 +743,9 @@ class EventPush:
         if "usage" in msg:
             usage_recorded, usage_replayed, usage_rejected, accepted_usage = await self._record_remote_usage(
                 msg.get("usage"), authenticated_host=authenticated_source_host,
+                timing=self._v2_timing(msg),
             )
-            usage_projected = False
-            if self.sessions is not None:
-                for accepted in accepted_usage:
-                    snapshot = accepted.get("snapshot")
-                    stream_id = accepted.get("stream_id")
-                    if (
-                        not isinstance(snapshot, dict)
-                        or not isinstance(stream_id, str)
-                        or snapshot.get("stream_id") != stream_id
-                        or not isinstance(snapshot.get("session_generation"), str)
-                    ):
-                        continue
-                    if self.sessions.apply_durable(
-                        stream_id,
-                        expected_generation=snapshot["session_generation"],
-                        usage=snapshot,
-                    ) is not None:
-                        usage_projected = True
+            usage_projected = await self._project_usage(accepted_usage)
             if usage_projected and self.inventory_emitter is not None:
                 try:
                     await self.inventory_emitter.emit_if_changed()
@@ -634,6 +753,15 @@ class EventPush:
                     log.warning("event.push usage inventory broadcast failed host=%s: %s", host, exc)
                     return err("ingest_failed")
 
+        unfenced_ack: dict[str, Any] | None = None
+        if self._is_v2_frame(msg):
+            unfenced_ack = await self._record_unfenced(msg, authenticated_host=authenticated_source_host)
+            if unfenced_ack.pop("_projected", False) and self.inventory_emitter is not None:
+                try:
+                    await self.inventory_emitter.emit_if_changed()
+                except Exception as exc:  # noqa: BLE001 - never acknowledge a failed fanout
+                    log.warning("event.push unfenced inventory broadcast failed host=%s: %s", host, exc)
+                    return err("ingest_failed")
         # Provenance runs after usage so this push's ledger rows can match.
         # It never touches token totals, and its failure is reported in its own
         # ack block rather than failing the already-durable events and usage.
@@ -673,6 +801,16 @@ class EventPush:
         }
         if provenance_ack is not None:
             reply["usage_provenance"] = provenance_ack
+        if unfenced_ack is not None:
+            # Present on every v2 ack, so a v2 satellite knows this daemon
+            # admits held spans; its absence (a v1 daemon) clears that flag.
+            reply["usage_unfenced"] = {
+                "recorded": unfenced_ack["recorded"], "rejected": unfenced_ack["rejected"],
+            }
+            reply["losses_recorded"] = unfenced_ack["losses_recorded"]
+            reply["losses_conflict"] = unfenced_ack["losses_conflict"]
+            reply["usage_recorded"] += unfenced_ack["counts"]["recorded"]
+            reply["usage_replayed"] += unfenced_ack["counts"]["replayed"]
         return reply
 
     async def _stream_lifecycle_state(self, stream_id: str) -> tuple[str, str]:

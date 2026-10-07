@@ -4410,6 +4410,65 @@ body.web-sidebar-narrow .grid.maximized .grid-cell.narrow-active {
 .sidebar-group-label.needs-answer { color: var(--yellow); }
 .sidebar-group-label.idle { color: var(--fg-dim); }
 
+/* ── Work lanes (daemon projection): sidebar section, lane-update cards, read-only history slot ── */
+.lanes-label { color: var(--blue); }
+.lane-row {
+  padding: 7px 14px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  position: relative;
+}
+.lane-row:hover, .lane-row:focus-visible { background: var(--bg3); outline: none; }
+.lane-row[data-lane-state="blocked"] { border-left-color: var(--red); }
+.lane-row[data-lane-state="active"] { border-left-color: var(--green); }
+.lane-row[data-lane-state="paused"] { border-left-color: var(--yellow); }
+.lane-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.lane-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.lane-presence { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--fg-dim); }
+.lane-presence.is-working { background: var(--green); }
+.lane-presence.is-idle { background: transparent; border: 1.5px solid var(--green); }
+.lane-presence.is-offline { background: transparent; border: 1.5px solid var(--fg-dim); }
+.lane-presence.is-lost { background: transparent; border: 1.5px dashed var(--yellow); }
+.lane-owner { flex: none; font-size: 10px; color: var(--fg-dim); }
+.lane-owner.is-operator { color: var(--blue); }
+.lane-state {
+  flex: none; font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
+  border: 1px solid currentColor; border-radius: 999px; padding: 1px 6px;
+}
+.lane-state.is-blocked { color: var(--red); }
+.lane-state.is-active { color: var(--green); }
+.lane-state.is-paused { color: var(--yellow); }
+.lane-summary, .lane-blocker, .lane-step, .lane-meta { margin-top: 2px; font-size: 11px; color: var(--fg-dim); overflow-wrap: anywhere; }
+.lane-blocker { color: var(--red); }
+.lane-meta:empty { display: none; }
+.lane-meta > * + * { margin-left: 8px; }
+.lane-eta.is-stale { color: var(--yellow); font-style: italic; }
+.lane-chat-note.is-unavailable { color: var(--yellow); }
+.lanes-truncated { padding: 2px 14px 6px; font-size: 10px; color: var(--fg-dim); }
+
+.slot-chat-lane-update { align-self: stretch; }
+.lane-update-card {
+  border: 1px solid var(--border); border-left-width: 3px; border-radius: 8px;
+  background: var(--bg3); padding: 8px 12px; max-width: 92%;
+}
+.slot-chat-lane-update.is-lane_blocked .lane-update-card { border-left-color: var(--red); }
+.slot-chat-lane-update.is-lane_completed .lane-update-card,
+.slot-chat-lane-update.is-lane_started .lane-update-card,
+.slot-chat-lane-update.is-lane_unblocked .lane-update-card { border-left-color: var(--green); }
+.slot-chat-lane-update.is-major_decision .lane-update-card,
+.slot-chat-lane-update.is-milestone .lane-update-card { border-left-color: var(--blue); }
+.lane-update-head { display: flex; align-items: baseline; gap: 8px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+.lane-update-kind { font-weight: 700; color: var(--fg-dim); }
+.lane-update-title { font-weight: 600; color: var(--fg); text-transform: none; letter-spacing: 0; font-size: 12px; }
+.lane-update-summary { margin: 4px 0 0; font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+
+.lane-history-banner {
+  padding: 6px 14px; font-size: 11px; color: var(--fg-dim);
+  border-bottom: 1px solid var(--border); background: var(--bg3);
+}
+.lane-history-banner.is-unavailable { color: var(--yellow); padding: 18px 14px; font-size: 13px; }
+.grid-cell.lane-history .slot-chat-dock, .grid-cell.lane-history .slot-chat-compose { display: none; }
+
 /* ── Sidebar attention badges (open questions / unread reports) ── */
 .s-attention-badge {
   display: inline-flex;

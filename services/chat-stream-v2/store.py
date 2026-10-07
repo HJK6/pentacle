@@ -56,6 +56,7 @@ import store_consent as consent
 from store_qa import QaStoreMixin
 from store_exchange import ExchangeStoreMixin
 
+from store_work_lanes import _WorkLanesStoreMixin, ensure_work_lane_schema
 from store_routing import (
     ASSISTANT_COMPOSITE_LANES_DDL,
     ASSISTANT_COMPOSITE_OPERATIONS_DDL,
@@ -1371,7 +1372,7 @@ def _iso_epoch(value: object) -> float | None:
         return None
 
 
-class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
+class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000) -> None:
@@ -1428,7 +1429,9 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
         if self._start_error is not None:
             raise self._start_error
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 5.0) -> None:
+        """Stop the worker, waiting at most `timeout` s for it to drain (the
+        thread is a daemon thread, so an overrun cannot hold process exit)."""
         with self._lock:
             if self._thread is None:
                 return
@@ -1436,7 +1439,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             self._closing = True
             thread = self._thread
         self._queue.put(None)
-        thread.join(timeout=5)
+        thread.join(timeout=timeout)
         with self._lock:
             self._thread = None
             self._closing = False
@@ -1505,6 +1508,9 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             conn.execute(DEFERRED_REAP_DDL)
             conn.execute(SESSION_REAP_INDEX_DDL)
             conn.execute(SESSION_GENERATIONS_DDL)
+            # Seats opened under a previous daemon get a (second-precision)
+            # history row so their spans have a candidate generation.
+            store_usage.history_backfill_conn(conn)
             conn.execute(ROUTING_INTEGRITY_DDL)
             conn.execute(ROUTING_INTEGRITY_AUDIT_DDL)
             conn.execute(OUTBOUND_NOTICE_DDL)
@@ -1612,6 +1618,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
                     conn.execute("ROLLBACK TO assistant_operation_constraint")
                     conn.execute("RELEASE assistant_operation_constraint")
                     raise
+            ensure_work_lane_schema(conn)
             conn.execute(REPORTS_DDL)
             conn.execute(REPORTS_INDEX_DDL)
             conn.execute(AWAITERS_DDL)
@@ -2435,6 +2442,19 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
                 "VALUES (?,?,?) ON CONFLICT(host, session_name) DO UPDATE SET generation=excluded.generation",
                 (host, session_name, generation),
             )
+            # Per-generation usage history (AC10): the row survives a
+            # same-name reopen that overwrites `sessions` and the generation key.
+            opened = conn.execute(
+                "SELECT pane_pid, provider FROM sessions WHERE host=? AND session_name=?",
+                (host, session_name),
+            ).fetchone()
+            store_usage.history_open_conn(
+                conn, host, session_name, generation,
+                pane_pid=opened["pane_pid"], provider=opened["provider"],
+            )
+            store_usage.history_fill_conn(
+                conn, host, session_name, pane_pid=opened["pane_pid"], provider=opened["provider"],
+            )
             if generation_changed and cols.get("handoff_from_stream_id"):
                 predecessor = str(cols["handoff_from_stream_id"])
                 source_host, separator, source_name = predecessor.partition(":")
@@ -2524,7 +2544,12 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             if cur.rowcount == 0:
                 conn.commit()
                 return None
+            if "pane_pid" in cols or "provider" in cols:
+                store_usage.history_fill_conn(
+                    conn, host, session_name, pane_pid=cols.get("pane_pid"), provider=cols.get("provider"),
+                )
             if closing:
+                store_usage.history_close_conn(conn, host, session_name)
                 stream_id = f"{host}:{session_name}"
                 conn.execute("DELETE FROM v2_nudge_state WHERE stream_id=?", (stream_id,))
                 stamp = _routing_iso_now()
@@ -2790,6 +2815,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
                         existing[1],
                     )
                 return None
+            store_usage.history_close_conn(conn, host, session_name)
             stream_id = f"{host}:{session_name}"
             if close_kind == "operator_offline_close":
                 generation_row = conn.execute(
@@ -2864,6 +2890,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             if cur.rowcount == 0:
                 conn.commit()
                 return None
+            store_usage.history_close_conn(conn, host, session_name)
             stream_id = f"{host}:{session_name}"
             stamp = _routing_iso_now()
             conn.execute(

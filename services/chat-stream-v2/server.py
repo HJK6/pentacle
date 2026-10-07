@@ -459,6 +459,7 @@ class Server:
         #: When present, the hello snapshot carries the open Updates cards and
         #: its verb handlers are merged into the dispatch table.
         self.notify: Any = None
+        self.work_lanes: Any = None
         #: Assigned by `main.py` after construction. The blob store owns partial
         #: upload state; the server tears down a closed connection's uploads
         #: through it (spec: the connection is an upload's one owning path).
@@ -500,6 +501,7 @@ class Server:
         self._client_exclude_event_types: dict[Any, frozenset[str]] = {}
         self._client_events_mode: dict[Any, str] = {}
         self._client_assistant_composite_v1: dict[Any, bool] = {}
+        self._client_work_lanes_v1: dict[Any, bool] = {}
         #: Per-client last-sent digest, keyed by coalescing key, of the most
         #: recent COALESCIBLE broadcast frame handed to that client. A frame
         #: byte-identical to the last one is suppressed (zero new visible state):
@@ -664,6 +666,9 @@ class Server:
             "transcribe_blob": self._on_transcribe_blob,
             "assistant.publish": self._on_assistant_publish,
             "assistant.operation": self._on_assistant_operation,
+            "work_lanes.list": self._on_work_lanes_list,
+            "work_lanes.show": self._on_work_lanes_show,
+            "work_lanes.adopt_preview": self._on_work_lanes_adopt_preview,
             "assistant.binding": self._on_assistant_binding,
             "assistant.rebind": self._on_assistant_rebind,
             "assistant.authority": self._on_assistant_authority,
@@ -808,39 +813,55 @@ class Server:
         assert self._ws_server is not None, "bind() must be called before serve_forever()"
         await self._ws_server.serve_forever()
 
-    async def close(self) -> None:
+    async def close(self, *, deadline: float | None = None) -> None:
+        """Stop serving. `deadline` (monotonic) is the daemon's shutdown
+        budget: every wait below takes min(its own cap, what remains), and a
+        task that ignores cancellation is left behind, not awaited."""
+        def within(cap: float) -> float:
+            return cap if deadline is None else max(0.0, min(cap, deadline - time.monotonic()))
+
+        async def settle(tasks: Any, cap: float = 3.0) -> None:
+            if deadline is None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            elif tasks:
+                await asyncio.wait(tasks, timeout=within(cap))
+
         if self._consent_expiry_task is not None:
             self._consent_expiry_task.cancel()
-            await asyncio.gather(self._consent_expiry_task, return_exceptions=True)
+            await settle((self._consent_expiry_task,), cap=1.0)
             self._consent_expiry_task = None
         # spec_example_2026_01:
         # let accepted sends finish injecting before teardown, then cancel any
         # stragglers so shutdown stays bounded.
         if self._detached_send_tasks:
             pending = tuple(self._detached_send_tasks)
-            _, still_running = await asyncio.wait(pending, timeout=5.0)
+            _, still_running = await asyncio.wait(pending, timeout=within(5.0))
             for task in still_running:
                 task.cancel()
             if still_running:
-                await asyncio.gather(*still_running, return_exceptions=True)
+                await settle(still_running)
         for task in tuple(self._client_writer_tasks.values()):
             task.cancel()
         self._client_writer_tasks.clear()
         if self._tls_ws_server is not None:
             self._tls_ws_server.close()
-            try:
-                await asyncio.wait_for(self._tls_ws_server.wait_closed(), timeout=3)
-            except (asyncio.TimeoutError, asyncio.CancelledError):  # pragma: no cover
-                pass
+            await self._wait_listener_closed(self._tls_ws_server, within(3.0))
             self._tls_ws_server = None
         if self._ws_server is None:
             return
         self._ws_server.close()
-        try:
-            await asyncio.wait_for(self._ws_server.wait_closed(), timeout=3)
-        except (asyncio.TimeoutError, asyncio.CancelledError):  # pragma: no cover
-            pass
+        await self._wait_listener_closed(self._ws_server, within(3.0))
         self._ws_server = None
+
+    @staticmethod
+    async def _wait_listener_closed(listener: Any, timeout: float) -> None:
+        closing = asyncio.ensure_future(listener.wait_closed())
+        done, _ = await asyncio.wait({closing}, timeout=timeout)
+        if not done:  # never wait on a listener's cancellation past the budget
+            closing.cancel()
+            closing.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+            return
+        closing.result()  # a listener error propagates, as wait_for did
 
     # -- connection --------------------------------------------------------
 
@@ -973,7 +994,7 @@ class Server:
         # projected frame. Render it once per subscription group instead of
         # rebuilding and JSON-encoding a fleet inventory for every socket.
         groups: dict[
-            tuple[bool, frozenset[str] | None, frozenset[str], bool, str, bool], list[Any],
+            tuple[bool, frozenset[str] | None, frozenset[str], bool, str, bool, bool], list[Any],
         ] = {}
         for websocket in tuple(recipients):
             if websocket in self._client_system_producers:
@@ -994,6 +1015,7 @@ class Server:
                 # Composite inventory and events differ by negotiated capability.
                 # Never reuse an unsupported client's projection for a capable one.
                 bool(self._client_assistant_composite_v1.get(websocket, False)),
+                bool(self._client_work_lanes_v1.get(websocket, False)),
             )
             groups.setdefault(key, []).append(websocket)
         for clients in groups.values():
@@ -1053,6 +1075,7 @@ class Server:
         self._client_exclude_event_types.pop(websocket, None)
         self._client_events_mode.pop(websocket, None)
         self._client_assistant_composite_v1.pop(websocket, None)
+        self._client_work_lanes_v1.pop(websocket, None)
         self._client_last_sent_digest.pop(websocket, None)
         self._client_inflight_coalescible.pop(websocket, None)
         self._host_stats_clients.discard(websocket)
@@ -2084,6 +2107,26 @@ class Server:
         subscribed = subscribe.get("capabilities") if isinstance(subscribe.get("capabilities"), dict) else {}
         return bool(capabilities.get("assistant_composite_v1") or subscribed.get("assistant_composite_v1"))
 
+    @staticmethod
+    def _client_wants_work_lanes(msg: dict[str, Any]) -> bool:
+        capabilities = msg.get("capabilities") if isinstance(msg.get("capabilities"), dict) else {}
+        subscribe = msg.get("subscribe") if isinstance(msg.get("subscribe"), dict) else {}
+        subscribed = subscribe.get("capabilities") if isinstance(subscribe.get("capabilities"), dict) else {}
+        return bool(capabilities.get("work_lanes_v1") or subscribed.get("work_lanes_v1"))
+
+    def _work_lanes_capable_for_message(self, msg: dict[str, Any]) -> bool:
+        """Lane data only for non-scoped, non-Dot clients that negotiated work_lanes_v1."""
+        if self.work_lanes is None:
+            return False
+        websocket = msg.get("_client_websocket")
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if auth.get("dot_principal") or auth.get("scoped_principal") or self._scoped_stream_for(websocket) is not None:
+            return False
+        if websocket is not None and websocket in self._client_dot_connections:
+            return False
+        return bool((websocket is not None and self._client_work_lanes_v1.get(websocket, False))
+                    or self._client_wants_work_lanes(msg))
+
     def _assistant_composite_capable_for_message(self, msg: dict[str, Any]) -> bool:
         websocket = msg.get("_client_websocket")
         return bool(websocket is not None and self._client_assistant_composite_v1.get(websocket, False))
@@ -2230,6 +2273,8 @@ class Server:
                 bool(self._client_assistant_composite_v1.get(websocket, False)),
             ):
                 return None
+        if frame_type == "work_lanes.inventory" and not self._client_work_lanes_v1.get(websocket, False):
+            return None
         return dict(payload)
 
     def _scoped_credential_revoked(self, credential_id: str, client_kind: str) -> bool:
@@ -2416,6 +2461,7 @@ class Server:
             self._client_exclude_event_types[websocket] = exclude_event_types
             self._client_events_mode[websocket] = events_mode
             self._client_assistant_composite_v1[websocket] = self._client_wants_assistant_composite(msg)
+            self._client_work_lanes_v1[websocket] = self._client_wants_work_lanes(msg)
             # v1 (parent ruling f4e6c3cf): a Dot connection's hello discloses no
             # fleet data, whatever it subscribed to. Return exactly
             # [hello, <empty snapshot>] — no fleet sessions/notifications/
@@ -2507,6 +2553,7 @@ class Server:
                     and websocket not in self._client_authenticated_streams
                 ) else {}),
                 **({"assistant_composite_v1": True} if self._any_composite_enabled() else {}),
+                **({"work_lanes_v1": True} if self.work_lanes is not None else {}),
             },
             "sessions": snapshot_sessions,
             "notifications": (await self.notify.snapshot_notifications(
@@ -2549,6 +2596,9 @@ class Server:
         hello: dict[str, Any] = {"type": "hello"}
         if self._any_composite_enabled():
             hello["capabilities"] = {"assistant_composite_v1": True}
+        if self._work_lanes_capable_for_message(msg):
+            # The hello bootstrap carries the same projection as the push frame.
+            snapshot["work_lanes"] = await self.work_lanes.current()
         frames: list[dict[str, Any]] = [hello, snapshot]
         if "hosts.stats" not in exclude_event_types:
             frames.append(self.hosts_stats_frame())
@@ -2607,7 +2657,10 @@ class Server:
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if auth.get("dot_principal"):
             active = [self._dot_project_session(row) for row in active]
-        return {"type": "list_sessions.ok", "active": active}
+        reply: dict[str, Any] = {"type": "list_sessions.ok", "active": active}
+        if self._work_lanes_capable_for_message(msg):
+            reply["work_lanes"] = await self.work_lanes.current()
+        return reply
 
     @staticmethod
     def _dot_project_session(session: dict[str, Any]) -> dict[str, Any]:
@@ -2980,11 +3033,14 @@ class Server:
             # chatter persisted without a paste).
             "_assistant_composite_backend_dispatch": True,
         })
-        return {
+        delivered = {
             "type": "tell.ok", "to_stream_id": composite_stream_id, "tell_id": tell_id,
             "delivery_status": reply.get("delivery_status"),
             "submission_confirmed": reply.get("submission_confirmed"),
         }
+        if reply.get("front_desk_hold_id"):
+            delivered["front_desk_hold_id"] = reply["front_desk_hold_id"]
+        return delivered
 
     async def _flush_composite_tells(self, composite: Any) -> int:
         """Deliver this composite's queued tells, in order, to the new binding.
@@ -3003,7 +3059,8 @@ class Server:
                 break
             if result is None:
                 break
-            if not self._composite_tell_committed(result):
+            if not (self._composite_tell_committed(result)
+                    or await self._composite_tell_durably_held(result)):
                 # Delivery is not yet committed (e.g. pasted_unsubmitted: the
                 # paste sits in an active draft and the target has not received
                 # it as input).  Keep the row queued and stop in order — a later
@@ -3013,6 +3070,21 @@ class Server:
             await self.store.delete_composite_tell(seq=row["seq"])
             delivered += 1
         return delivered
+
+    async def _composite_tell_durably_held(self, reply: dict[str, Any]) -> bool:
+        """Whether the front-desk digest durably holds this tell for the bound seat.
+
+        A peer tell to the front desk is delivered into the digest hold (no paste),
+        the same as while bound. Only a hold whose notice row survives a restart
+        counts; a drop or any reply without that row stays queued. A replay of the
+        same tell_id recovers the same hold, so this never double-delivers.
+        """
+        hold_id = str(reply.get("front_desk_hold_id") or "")
+        if reply.get("delivery_status") != "persisted" or not hold_id:
+            return False
+        row = await self.store.submit(lambda conn: conn.execute(
+            "SELECT 1 FROM v2_outbound_notices WHERE notice_id=?", (hold_id,)).fetchone())
+        return row is not None
 
     @staticmethod
     def _composite_tell_committed(reply: dict[str, Any]) -> bool:
@@ -3419,6 +3491,51 @@ class Server:
         except ValueError as exc:
             raise VerbError(str(exc), str(exc)) from exc
 
+    def _work_lanes_reader(self, msg: dict[str, Any]) -> None:
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        websocket = msg.get("_client_websocket")
+        if self.work_lanes is None or self.store is None:
+            raise VerbError("work_lanes_unavailable", "work lanes are not enabled on this daemon")
+        if (auth.get("dot_principal") or auth.get("scoped_principal")
+                or self._scoped_stream_for(websocket) is not None
+                or not (auth.get("operator_authenticated") or auth.get("token_verified")
+                        or (websocket is not None and self._is_loopback_client(websocket)))):
+            raise VerbError("work_lanes_unauthorized", "work lanes require an operator or verified seat")
+
+    async def _on_work_lanes_list(self, msg: dict[str, Any]) -> dict[str, Any]:
+        self._work_lanes_reader(msg)
+        limit = msg.get("limit", 200)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise VerbError("work_lanes_list_invalid", "limit must be 1..200")
+        before = msg.get("before_updated_at")
+        if before is not None and not isinstance(before, str):
+            raise VerbError("work_lanes_list_invalid", "before_updated_at must be a string")
+        before_lane_id = msg.get("before_lane_id")
+        if before_lane_id is not None and not isinstance(before_lane_id, str):
+            raise VerbError("work_lanes_list_invalid", "before_lane_id must be a string")
+        return await self.work_lanes.list(include_done=bool(msg.get("include_done")), limit=limit,
+                                          before_updated_at=before, before_lane_id=before_lane_id)
+
+    async def _on_work_lanes_show(self, msg: dict[str, Any]) -> dict[str, Any]:
+        self._work_lanes_reader(msg)
+        lane_id = str(msg.get("lane_id") or "")
+        shown = await self.store.get_work_lane(lane_id) if lane_id else None
+        if shown is None:
+            raise VerbError("work_lane_not_found", "no first-class lane with that id")
+        listed = await self.work_lanes.list(include_done=True)
+        projected = next((lane for lane in listed["lanes"] if lane["lane_id"] == lane_id), None)
+        return {"type": "work_lanes.show.ok", "lane": shown["lane"], "projection": projected,
+                "events": shown["events"], "updates": shown["updates"]}
+
+    async def _on_work_lanes_adopt_preview(self, msg: dict[str, Any]) -> dict[str, Any]:
+        self._work_lanes_reader(msg)
+        composite = self._composite_for_message(msg)
+        if composite is None:
+            raise VerbError("assistant_composite_unavailable", "no assistant composite")
+        candidates = await self.store.work_lane_adopt_preview(
+            composite_stream_id=composite.config.stream_id, env_binding=composite._env_binding())
+        return {"type": "work_lanes.adopt_preview.ok", "candidates": candidates}
+
     async def _on_assistant_binding(self, msg: dict[str, Any]) -> dict[str, Any]:
         composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
@@ -3596,7 +3713,7 @@ class Server:
         if not self._stream_is_visible_to_client(
             stream_id, include_subagents, opened_by_host_ids,
             self._assistant_composite_capable_for_message(msg),
-        ):
+        ) and not await self._work_lane_history_readable(msg, stream_id, auth):
             raise VerbError("unknown_session", "Unknown or inactive session")
         raw_limit = msg.get("limit")
         try:
@@ -3630,6 +3747,23 @@ class Server:
             before_daemon_seq=before_daemon_seq,
             page_size=page_size,
         )
+
+    async def _work_lane_history_readable(self, msg: dict[str, Any], stream_id: str,
+                                          auth: dict[str, Any]) -> bool:
+        """Work lanes D4: a closed visible chat of a first-class lane, for operator clients only.
+
+        The pointer validator is re-applied now, so a pointer that became a
+        hidden, protected or backend seat is refused rather than served.
+        """
+        generation = msg.get("generation")
+        if (self.store is None or self.work_lanes is None or not isinstance(generation, str) or not generation
+                or not auth.get("operator_authenticated") or auth.get("scoped_principal")
+                or auth.get("dot_principal")
+                or self._scoped_stream_for(msg.get("_client_websocket")) is not None):
+            return False
+        composite = self.assistant_composite
+        env_binding = composite._env_binding() if composite is not None else None
+        return await self.store.work_lane_history_readable(stream_id, generation, env_binding)
 
     async def _stream_request_stream_events(
         self,

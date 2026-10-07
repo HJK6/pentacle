@@ -1,0 +1,192 @@
+{
+  "dollars_label": "API-equivalent weighted proxy, not billing",
+  "fleet_totals": {
+    "by_account": [],
+    "provider": "claude"
+  },
+  "generated_at": "2026-10-10T00:00:00Z",
+  "pricing_version": "2026-10-07.2",
+  "schema_version": 1,
+  "since": null,
+  "specs": [
+    {
+      "claude": {
+        "by_account": [],
+        "by_model_account": [],
+        "dollars": 0.0,
+        "dollars_label": "API-equivalent weighted proxy, not billing",
+        "measured_coverage": null,
+        "partition_tokens": {
+          "measured": 0,
+          "unknown_account": 0,
+          "unpriced": 0,
+          "untimed": 0
+        },
+        "provenance_row_coverage": null,
+        "provider": "claude",
+        "records": 0,
+        "tokens": {
+          "cache_read": 0,
+          "cache_write": 0,
+          "output": 0,
+          "uncached_input": 0
+        },
+        "total_tokens": 0,
+        "unpriced_tokens": 0
+      },
+      "codex": {
+        "by_account": [
+          {
+            "account_id": "00000000-0000-4000-8000-0000000000c1",
+            "dollars": 0.0005,
+            "tokens": 105,
+            "unpriced_tokens": 0,
+            "weekly_pct": {
+              "quota": "codex",
+              "reason": "no calibration",
+              "value": null
+            }
+          }
+        ],
+        "by_model_account": [
+          {
+            "account_id": "00000000-0000-4000-8000-0000000000c1",
+            "dollars": 0.0005,
+            "model": "gpt-6-sol",
+            "priced": true,
+            "reasoning_output": 0,
+            "responses": 1,
+            "tokens": {
+              "cache_read": 50,
+              "cache_write": 0,
+              "output": 5,
+              "uncached_input": 50
+            }
+          }
+        ],
+        "by_stream": [
+          {
+            "completeness": 0.009774,
+            "dollars": 0.0005,
+            "placed_tokens": 105,
+            "reconciliation": {
+              "partial": 0,
+              "reconciled": 1,
+              "unverifiable": 2
+            },
+            "sessions": 3,
+            "stream_id": "ledger-host:cx",
+            "total_tokens": 10743
+          }
+        ],
+        "completeness": 0.009774,
+        "dollars": 0.0005,
+        "dollars_label": "API-equivalent weighted proxy, not billing",
+        "measured_coverage": 0.009774,
+        "outside_window_tokens": {
+          "unreconciled": {
+            "cache_read": 0,
+            "cache_write": 0,
+            "output": 0,
+            "uncached_input": 0
+          },
+          "untimed": {
+            "cache_read": 0,
+            "cache_write": 0,
+            "output": 0,
+            "uncached_input": 0
+          },
+          "unverifiable": {
+            "cache_read": 4050,
+            "cache_write": 0,
+            "output": 508,
+            "uncached_input": 6080
+          }
+        },
+        "partition_tokens": {
+          "measured": 105,
+          "unknown_account": 0,
+          "unpriced": 0,
+          "unreconciled": 0,
+          "untimed": 0,
+          "unverifiable": 10638
+        },
+        "placed_tokens": 105,
+        "provider": "codex",
+        "reasoning_output": 0,
+        "reconciliation": {
+          "partial": {
+            "sessions": 0,
+            "tokens": 0,
+            "unreconciled_tokens": 0
+          },
+          "reconciled": {
+            "sessions": 1,
+            "tokens": 105
+          },
+          "unverifiable": {
+            "sessions": 2,
+            "tokens": 10638
+          }
+        },
+        "records": 3,
+        "responses": 7,
+        "sessions": 3,
+        "streams": [
+          "ledger-host:cx"
+        ],
+        "tokens": {
+          "cache_read": 50,
+          "cache_write": 0,
+          "output": 5,
+          "uncached_input": 50
+        },
+        "unpriced_tokens": 0,
+        "unreconciled_mass": [],
+        "unverifiable_mass": [
+          {
+            "account_id": "00000000-0000-4000-8000-0000000000c1",
+            "by_bucket": {
+              "cache_read": 4050,
+              "cache_write": 0,
+              "output": 508,
+              "uncached_input": 6080
+            },
+            "host": "ledger-host",
+            "tokens": 10638
+          }
+        ]
+      },
+      "completeness": 0.0,
+      "folded_streams": [],
+      "spec_id": "spec_demo__cx",
+      "streams": [
+        "ledger-host:cx"
+      ],
+      "time": {
+        "activity_proxy_h": {
+          "label": "proxy: union of inter-response gaps <= 10 min from provenance observed_at (Claude records)",
+          "reason": "no Claude records",
+          "value": null
+        },
+        "codex_activity_proxy_h": {
+          "label": "proxy: union of inter-response gaps <= 10 min from placed Codex response observed_at",
+          "reason": "Codex mass outside placed responses",
+          "value": null
+        },
+        "elapsed_delivery_h": {
+          "censored": true,
+          "elapsed_so_far_h": 216.0,
+          "reason": "not_completed"
+        },
+        "known_wait_h": 0.0,
+        "qa_rounds": 0,
+        "seats": 1,
+        "time_to_first_qa_h": null
+      },
+      "untimed_outside_range_records": 0,
+      "work_item": null
+    }
+  ],
+  "until": null
+}

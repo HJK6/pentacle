@@ -282,13 +282,13 @@ def test_unresolved_candidate_or_targets_fail_closed_without_a_gate(tmp_path, re
 
 def test_gate_names_every_required_field_with_the_full_candidate(tmp_path, repo, capsys, monkeypatch):
     machines = tmp_path / "machines.json"
-    machines.write_text(json.dumps({"machines": [{"name": "thoth"}, {"name": "merlin"}, {"name": "amaterasu"}]}))
+    machines.write_text(json.dumps({"machines": [{"name": "host-b"}, {"name": "host-c"}, {"name": "host-a"}]}))
     monkeypatch.setenv("PENTACLE_MACHINES_FILE", str(machines))
     _run(tmp_path, repo, tmp_path / "ran", "--targets", "@machines", wait="0.1")
     out = capsys.readouterr().out
     sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     for field in ("run=nightly-soak-", f"candidate={sha}", "candidate_clean=true", "runtime=", "proposed_host=",
-                  "target_hosts=thoth,merlin,amaterasu", "machines_sha256=", "expected_duration=~30 min", "load/cpu=",
+                  "target_hosts=host-b,host-c,host-a", "machines_sha256=", "expected_duration=~30 min", "load/cpu=",
                   "known_reservations=NOT KNOWN TO THE JOB", "approve with:", "SKIPPED_UNAPPROVED"):
         assert field in out
 
@@ -323,7 +323,7 @@ def _patch_connection(monkeypatch, conn):
     monkeypatch.setattr(lw, "authenticated_operator_connection", connection)
 
 
-BINDING = {"type": "assistant.binding.ok", "stream_id": "thoth:v2-fd"}
+BINDING = {"type": "assistant.binding.ok", "stream_id": "host-b:v2-fd"}
 
 
 def test_ws_notify_sends_the_gate_to_the_current_assistant_binding_only(monkeypatch, tmp_path):
@@ -332,7 +332,7 @@ def test_ws_notify_sends_the_gate_to_the_current_assistant_binding_only(monkeypa
     _REAL_WS_NOTIFY("GATE scheduled-test run=r1 x", "r1", "ws://x", tmp_path / "t")
     assert [m["type"] for m in conn.sent] == ["assistant.binding", "send"]
     sent = conn.sent[1]
-    assert (sent["host"], sent["session_name"]) == ("thoth", "v2-fd") and sent["text"].startswith("GATE scheduled-test ")
+    assert (sent["host"], sent["session_name"]) == ("host-b", "v2-fd") and sent["text"].startswith("GATE scheduled-test ")
 
 
 @pytest.mark.parametrize("reply", [{"type": "send.error"}, {"type": "send.result", "delivery": "failed"},
@@ -366,3 +366,17 @@ def test_fleet_smoke_launchd_template_is_gated_with_targets_and_a_stated_duratio
     assert "tools/gate_at_fire.py run --job spawn-fleet-smoke" in text
     assert "--targets @machines" in text and "--duration unmeasured" not in text and "--candidate-repo" in text
     assert text.index("gate_at_fire.py") < text.index("spawn_fleet_smoke.py")
+
+
+def test_the_real_live_window_import_resolves_from_a_bare_interpreter(tmp_path):
+    """Found in the live rehearsal on host-b: with only the helper's own paths, tools.live_window needs services/ too.
+
+    Every other test fakes the connection module, so run the real import in a clean interpreter."""
+    code = ("import sys; sys.path.insert(0, %r); import gate_at_fire; gate_at_fire._ensure_import_paths(); "
+            "import tools.live_window; print('ok')") % str(Path(gate_at_fire_path()).parent)
+    out = subprocess.run([sys.executable, "-I", "-c", code], cwd=tmp_path, capture_output=True, text=True)
+    assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr[-400:]
+
+
+def gate_at_fire_path():
+    return gaf.__file__

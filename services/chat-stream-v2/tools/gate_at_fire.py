@@ -120,6 +120,13 @@ def gate_text(run_id: str, a: argparse.Namespace, host: str, sha: str, cmd: list
             f"late approval cannot revive it")
 
 
+def _ensure_import_paths() -> None:
+    """`tools.live_window` needs this service dir and services/ (for `_shared`) on sys.path, as spawn_fleet_smoke sets."""
+    for path in (SERVICE_DIR, SERVICE_DIR.parent):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+
+
 def _left(deadline: float) -> float:
     """Seconds left on the occurrence's one monotonic deadline; raises when none remain."""
     left = deadline - time.monotonic()
@@ -140,8 +147,7 @@ def ws_notify(text: str, run_id: str, url: str, token_path: Path, deadline: floa
         raise ValueError("only GATE scheduled-test messages may be sent")
     if deadline is None:  # direct callers outside run() get a 20 s absolute budget
         deadline = time.monotonic() + 20.0
-    if str(SERVICE_DIR) not in sys.path:
-        sys.path.insert(0, str(SERVICE_DIR))
+    _ensure_import_paths()
     from tools.live_window import authenticated_operator_connection
 
     with authenticated_operator_connection(url, token_path, min(20.0, _left(deadline))) as connection:

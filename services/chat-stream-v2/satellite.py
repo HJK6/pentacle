@@ -71,11 +71,13 @@ from codex_rollout_norm import codex_session_identity, normalize_codex_rollout_r
 from machine_stats import STATS_INTERVAL_S, WIRE_VERSION as STATS_WIRE_VERSION, sample_machine_stats
 from mirror import _provider_from_session_name
 from logging_config import configure_logging
-from usage_accounting import native_provenance
+from usage_accounting import FLAG_KIND as PROVENANCE_FLAG_KIND, native_provenance
+from usage_admission import iso_ms
+from usage_hold import DEFAULT_PATH as DEFAULT_HELD_SPAN_PATH, HeldSpans
 from usage_provenance import (
     BACKFILL_BATCH, DEFAULT_CODEX_ROOT, MAX_ITEMS as PROVENANCE_MAX_ITEMS,
-    PAYLOAD_VERSION as PROVENANCE_VERSION, BackfillCursor, codex_header_records,
-    run_backfill,
+    REPROBE_S as PROVENANCE_REPROBE_S, BackfillCursor, codex_header_records,
+    for_version as provenance_for_version, negotiated_version, probe_payload, run_backfill,
 )
 
 log = logging.getLogger("chat_streamd_v2.satellite")
@@ -111,8 +113,20 @@ def _tmux_reports_authoritative_empty(returncode: int, stderr: str, stdout: str)
 
 #: Wire schema version of the payloads this agent sends. MUST equal
 #: `event_push.WIRE_VERSION` on coordinator (a unit test pins the two together); bumped
-#: only on an incompatible change to the normalized event shape.
-WIRE_VERSION = 1
+#: only on an incompatible change to the normalized event shape. 2 adds held
+#: unfenced usage spans, loss records and clock samples (sent only while the
+#: most recent ack came from a v2 daemon).
+WIRE_VERSION = 2
+#: A fenced item is sent for v2 classification only with a clock sample this
+#: fresh (satellite monotonic); otherwise its records are held. The daemon
+#: refuses a sample older than 600 s by its own clock.
+FENCED_CLOCK_MAX_AGE_S = 540.0
+HELD_CLOCK_MAX_AGE_S = 600.0
+#: Item-level refusals that mean only "this fence is stale"; with a v2 daemon
+#: the records are held and resolved from generation history instead.
+STALE_FENCE_REASONS = frozenset({
+    "session_not_open", "generation_mismatch", "pane_pid_mismatch", "provider_mismatch",
+})
 
 #: Root of the per-project `<uuid>.jsonl` transcript tree; overridable for
 #: tests / a non-default HOME. Working-state observations do not require a
@@ -179,6 +193,7 @@ class SatelliteConfig:
     no_autoupdate: bool = False         # never git-checkout/exec-restart
     update_min_interval_s: float = DEFAULT_UPDATE_MIN_INTERVAL_S
     ack_timeout_s: float = 30.0
+    held_span_path: str = DEFAULT_HELD_SPAN_PATH
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "SatelliteConfig":
@@ -214,6 +229,7 @@ class SatelliteConfig:
             disabled=flag("DISABLE"),
             no_autoupdate=flag("NO_AUTOUPDATE"),
             update_min_interval_s=num("UPDATE_MIN_INTERVAL_S", DEFAULT_UPDATE_MIN_INTERVAL_S, float),
+            held_span_path=e.get(ENV_PREFIX + "HELD_SPAN_PATH") or DEFAULT_HELD_SPAN_PATH,
         )
 
 
@@ -492,6 +508,28 @@ class Satellite:
         self._inflight_provenance: dict[tuple, dict] = {}
         #: None until an ack shows whether the daemon understands provenance.
         self._provenance_supported: bool | None = None
+        #: Payload version granted by the daemon's answer to the empty version-2
+        #: probe (None: not yet probed in this process); a version-1 grant is
+        #: re-probed after PROVENANCE_REPROBE_S.
+        self._provenance_version: int | None = None
+        self._provenance_reprobe_at = 0.0
+        self._provenance_probe_inflight = False
+        #: Held unfenced spans (usage_hold.py), loaded at the start of a session.
+        self._held: HeldSpans | None = None
+        self._pass_hold: dict[str, tuple[dict, list[dict]]] = {}
+        #: Set only by an ack from a v2 daemon (wire_version >= 2 and a
+        #: `usage_unfenced` block); cleared by any other ack or push error.
+        self._unfenced_enabled = False
+        #: Latest host.stats clock sample and its monotonic receipt time.
+        self._clock: dict | None = None
+        self._clock_mono = 0.0
+        self._inflight_usage: dict[str, dict] = {}
+        self._inflight_clock: dict | None = None
+        self._held_tick_mono: float | None = None
+        #: Distinguishes this process from an exec-restarted one with the same
+        #: PID (auto-update), whose request ids restart at 1; the daemon orders
+        #: loss frames per (host, pid, incarnation).
+        self._incarnation = os.urandom(8).hex()
 
     def _read_sha(self) -> str:
         try:
@@ -664,11 +702,16 @@ class Satellite:
 
     @staticmethod
     def _sanitize_usage_records(provider: str, records: list[dict]) -> list[dict]:
-        """Keep only provider-native identity and token-count fields."""
+        """Keep only provider-native identity and token-count fields, plus the
+        record's own top-level transcript time as `transcript_ts` (wire v2;
+        ignored by legacy admission)."""
         sanitized: list[dict] = []
         for record in records:
             if not isinstance(record, dict):
                 continue
+            stamp = record.get("timestamp")
+            transcript_ts = stamp if isinstance(stamp, str) and stamp else None
+            start = len(sanitized)
             if provider == "codex":
                 if record.get("type") == "session_meta":
                     payload = record.get("payload")
@@ -711,24 +754,24 @@ class Satellite:
                             "type": "assistant", "sessionId": session_id,
                             "message": {"id": message_id, "usage": allowed},
                         })
+            for item in sanitized[start:]:
+                item["transcript_ts"] = transcript_ts
         return sanitized
 
     def _usage_candidate(
         self, st: _StreamTail, provider: str, records: list[dict],
         record_end_offsets: list[int], consumed_to: int,
     ) -> dict[str, object] | None:
+        """The fenced usage item for this span, or None.
+
+        A span with usage but no matching fence (none issued yet, or the fence
+        row closed) is staged in `_pass_hold` instead of being discarded; the
+        caller writes it to the held-span file before this pass's push.
+        """
         stream_id = f"{self.config.host}:{st.session_name}"
         fences = getattr(self, "_usage_fences", {}).get(stream_id)
-        if not isinstance(fences, dict):
-            return None
         source_pid = str(st.source_pane_pid or "").removeprefix("!")
-        if (
-            fences.get("provider") != provider
-            or fences.get("source_pane_pid") != source_pid
-            or not fences.get("session_generation")
-            or not st.provider_session_id
-            or not source_pid
-        ):
+        if not st.provider_session_id or not source_pid:
             return None
         included = [
             record for record, end_offset in zip(records, record_end_offsets)
@@ -737,15 +780,80 @@ class Satellite:
         wire_records = self._sanitize_usage_records(provider, included)
         if not wire_records:
             return None
+        identity = {
+            "stream_id": stream_id,
+            "provider": provider,
+            "source_pane_pid": source_pid,
+            "native_session_id": st.provider_session_id,
+            "source_file_identity_digest": self._source_file_identity_digest(st.path),
+        }
+        if (
+            not isinstance(fences, dict)
+            or fences.get("provider") != provider
+            or fences.get("source_pane_pid") != source_pid
+            or not fences.get("session_generation")
+        ):
+            held = [record for record in wire_records if record.get("type") != "session_meta"]
+            if held:
+                if not hasattr(self, "_pass_hold"):
+                    self._pass_hold = {}
+                self._pass_hold[stream_id] = (identity, held)
+            return None
         return {
             "stream_id": stream_id,
             "provider": provider,
             "session_generation": str(fences["session_generation"]),
             "source_pane_pid": source_pid,
             "native_session_id": st.provider_session_id,
-            "source_file_identity_digest": self._source_file_identity_digest(st.path),
+            "source_file_identity_digest": identity["source_file_identity_digest"],
             "records": wire_records,
         }
+
+    # -- held unfenced spans (wire v2) -------------------------------------------
+
+    def _held_spans(self) -> HeldSpans:
+        if getattr(self, "_held", None) is None:
+            self._held = HeldSpans(getattr(self.config, "held_span_path", DEFAULT_HELD_SPAN_PATH))
+        return self._held
+
+    def _clock_age(self) -> float | None:
+        if getattr(self, "_clock", None) is None:
+            return None
+        return time.monotonic() - self._clock_mono
+
+    def _clock_within(self, max_age_s: float) -> dict | None:
+        age = self._clock_age()
+        return self._clock if age is not None and age <= max_age_s else None
+
+    def _note_clock(self, ack: dict, t_send_wall: float, t_send_mono: float) -> None:
+        """Keep the latest {offset_s, rtt_s, server_now} from a v2 stats ack."""
+        from usage_admission import epoch
+
+        server_now = epoch(ack.get("server_now"))
+        if server_now is None:
+            return
+        rtt = max(0.0, time.monotonic() - t_send_mono)
+        self._clock = {
+            "offset_s": round(server_now - (t_send_wall + rtt / 2), 6),
+            "rtt_s": round(rtt, 6),
+            "server_now": ack["server_now"],
+        }
+        self._clock_mono = time.monotonic()
+        held = getattr(self, "_held", None)
+        if held is not None:
+            held.bind_clock(self._clock)
+
+    def _hold_pass(self, stream_id: str) -> None:
+        staged = getattr(self, "_pass_hold", {}).get(stream_id)
+        if staged is None:
+            return
+        identity, records = staged
+        try:
+            self._held_spans().hold(identity, records, self._clock_within(HELD_CLOCK_MAX_AGE_S))
+        except OSError as exc:
+            # A broken disk must not stop chat ingest; this span's usage is
+            # then lost exactly as before the held-span path existed.
+            log.error("held-span write failed stream=%s records=%d: %s", stream_id, len(records), exc)
 
     def _collect(
         self,
@@ -763,6 +871,7 @@ class Satellite:
         if not hasattr(self, "_usage_fences"):
             self._usage_fences = {}
         self._pass_usage = {}
+        self._pass_hold = {}
         self._usage_path_streams = {}
         self._pass_provenance = {}
         if discovered is None:
@@ -846,6 +955,9 @@ class Satellite:
                     self._usage_path_streams.setdefault(path, set()).add(f"{self.config.host}:{name}")
                     self._pending_usage.setdefault(f"{self.config.host}:{name}", usage)
                     self._pending_usage[f"{self.config.host}:{name}"] = usage
+                # Durable (fsynced) before this pass's events push, so the
+                # offset may advance exactly as before without losing usage.
+                self._hold_pass(f"{self.config.host}:{name}")
                 self._queue_provenance(self._pass_provenance.get(f"{self.config.host}:{name}") or ())
         return events, high_water, capped
 
@@ -1002,30 +1114,144 @@ class Satellite:
                 provider, included,
                 native_session_id=(st.provider_session_id or None) if provider == "codex" else None,
                 source_file_identity_digest=self._source_file_identity_digest(st.path),
-                state=st.provenance_state,
+                state=st.provenance_state, proof=True,
             )
         except Exception as exc:  # noqa: BLE001 - provenance never blocks chat/usage
             log.warning("stream %s provenance failed: %s", st.session_name, exc)
             return []
 
+    def _attach_usage_v2(self, frame: dict) -> None:
+        """Choose v2 or legacy admission for this frame's fenced items.
+
+        The frame carries `clock` only when every fenced item in it can be
+        classified: a sample <= 540 s old, or (v2 daemon) any sample, in which
+        case items without a fresh sample are held instead of sent. Without
+        a v2 daemon and a fresh sample the items keep legacy admission.
+        """
+        enabled = getattr(self, "_unfenced_enabled", False)
+        fresh = self._clock_within(FENCED_CLOCK_MAX_AGE_S)
+        pending = getattr(self, "_pending_usage", {})
+        if enabled and pending and fresh is None:
+            for stream_id in list(pending):
+                item = pending[stream_id]
+                try:
+                    self._held_spans().move_fenced(
+                        item, list(range(len(item["records"]))), self._clock_within(HELD_CLOCK_MAX_AGE_S),
+                    )
+                except OSError as exc:
+                    log.error("held-span write failed stream=%s: %s; sending legacy", stream_id, exc)
+                    continue
+                pending.pop(stream_id)
+        sample = (getattr(self, "_clock", None) if enabled else None) or fresh
+        if sample is not None and (enabled or fresh is not None):
+            frame["clock"] = sample
+            frame["satellite_now"] = iso_ms(time.time())
+        self._inflight_clock = frame.get("clock")
+
+    def _attach_unfenced(self, frame: dict) -> None:
+        """Held entries and loss records, only while the daemon is v2."""
+        self._frame_had_unfenced = False
+        if not getattr(self, "_unfenced_enabled", False):
+            return
+        held = self._held_spans()
+        budget = int(WS_MAX_SIZE * 0.5) - len(json.dumps(frame))
+        entries = held.frame_entries(budget) if frame.get("clock") is not None else []
+        losses = held.frame_losses()
+        if entries:
+            frame["usage_unfenced"] = entries
+        if losses:
+            frame["usage_unfenced_losses"] = losses
+        self._frame_had_unfenced = bool(entries or losses)
+
+    async def _push_pass(self, ws, events: list[dict], high_water: dict[str, int],
+                         inventory: list[str] | None = None) -> dict | None:
+        """Push one pass; if a frame carrying the v2 usage fields is rejected
+        (e.g. by a rolled-back v1 daemon), retry the same pass once without
+        them. Offsets and held data are untouched by the rejected attempt."""
+        ack = await self._push(ws, events, high_water, inventory=inventory)
+        if (
+            isinstance(ack, dict) and ack.get("type") == "event.push.error"
+            and getattr(self, "_frame_had_unfenced", False)
+        ):
+            log.warning("push with held usage rejected (%s); retrying this pass without it", ack.get("error"))
+            self._apply_unfenced_ack(ack)  # clears the enable flag
+            ack = await self._push(ws, events, high_water, inventory=inventory)
+        return ack
+
+    def _apply_unfenced_ack(self, ack: dict) -> None:
+        """Enable flag, held-entry/loss removal, and deferred fenced records."""
+        self._rehoused_streams = set()
+        if ack.get("type") != "event.push.ok":
+            self._unfenced_enabled = False
+            self._inflight_usage = {}
+            return
+        block = ack.get("usage_unfenced")
+        version = ack.get("wire_version")
+        self._unfenced_enabled = isinstance(block, dict) and type(version) is int and version >= 2
+        try:
+            if self._unfenced_enabled:
+                self._held_spans().apply_ack(block, ack.get("losses_recorded"), ack.get("losses_conflict"))
+                # An item refused only because its fence went stale (the row
+                # closed or reopened) is held for history resolution instead
+                # of being re-sent under that fence forever.
+                pending = getattr(self, "_pending_usage", {})
+                for item in ack.get("usage_rejected") or ():
+                    if not isinstance(item, dict) or "index" in item or item.get("reason") not in STALE_FENCE_REASONS:
+                        continue
+                    stream_id = str(item.get("stream_id") or "")
+                    sent = getattr(self, "_inflight_usage", {}).get(stream_id)
+                    if sent is None:
+                        continue
+                    self._held_spans().move_fenced(
+                        sent, list(range(len(sent["records"]))),
+                        getattr(self, "_inflight_clock", None) or self._clock_within(HELD_CLOCK_MAX_AGE_S),
+                    )
+                    if pending.get(stream_id) is sent:
+                        pending.pop(stream_id)
+                    self._rehoused_streams.add(stream_id)
+            deferred: dict[str, list[int]] = {}
+            for item in ack.get("usage_rejected") or ():
+                if isinstance(item, dict) and item.get("transient") and type(item.get("index")) is int:
+                    deferred.setdefault(str(item.get("stream_id") or ""), []).append(item["index"])
+            for stream_id, indices in deferred.items():
+                sent = getattr(self, "_inflight_usage", {}).get(stream_id)
+                if sent is not None:
+                    self._held_spans().move_fenced(sent, indices, getattr(self, "_inflight_clock", None))
+        except OSError as exc:
+            log.error("held-span ack write failed: %s", exc)
+        self._inflight_usage = {}
+
     def _attach_provenance(self, frame: dict) -> None:
         """Attach pending provenance within a byte budget so it never pushes a
         frame past the WebSocket limit (events always take precedence)."""
         self._inflight_provenance = {}
+        self._provenance_probe_inflight = False
         pending = getattr(self, "_pending_provenance", {})
         if not pending or getattr(self, "_provenance_supported", True) is False:
             return
+        version = getattr(self, "_provenance_version", None)
+        if version == 1 and time.monotonic() >= self._provenance_reprobe_at:
+            version = self._provenance_version = None
+        if version is None:
+            # Capability probe before data: the next push carries the batch.
+            frame["usage_provenance"] = probe_payload()
+            self._provenance_probe_inflight = True
+            return
         budget = int(WS_MAX_SIZE * 0.75) - len(json.dumps(frame)) - 128  # block envelope
         items = []
-        for key, item in pending.items():
-            size = len(json.dumps(item)) + 2
+        for key, item in list(pending.items()):
+            shaped = provenance_for_version([item], version)
+            if not shaped:  # a version-1 daemon cannot store flags; the backfill re-sends them
+                pending.pop(key, None)
+                continue
+            size = len(json.dumps(shaped[0])) + 2
             if len(items) >= PROVENANCE_MAX_ITEMS or size > budget:
                 break
             budget -= size
-            items.append(item)
+            items.append(shaped[0])
             self._inflight_provenance[key] = item
         if items:
-            frame["usage_provenance"] = {"version": PROVENANCE_VERSION, "items": items}
+            frame["usage_provenance"] = {"version": version, "items": items}
 
     @staticmethod
     def _provenance_key(item: dict) -> tuple:
@@ -1033,6 +1259,8 @@ class Satellite:
         if item.get("kind") == "rate_limit":
             return ("rate_limit", data.get("account_id"), data.get("window_kind"),
                     data.get("window_minutes"), str(data.get("resets_at")), data.get("pct"))
+        if item.get("kind") == PROVENANCE_FLAG_KIND:
+            return (PROVENANCE_FLAG_KIND, item.get("native_session_id"), data.get("response_id"), data.get("flag"))
         return (item.get("kind"), item.get("native_session_id"),
                 data.get("record_key") or data.get("response_id"))
 
@@ -1076,6 +1304,7 @@ class Satellite:
             "host": self.config.host,
             "stats": stats,
         }
+        t_send_wall, t_send_mono = time.time(), time.monotonic()
         await ws.send(json.dumps(frame))
         deadline = asyncio.get_running_loop().time() + self.config.ack_timeout_s
         while True:
@@ -1089,6 +1318,8 @@ class Satellite:
             except (ValueError, TypeError):
                 continue
             if isinstance(msg, dict) and msg.get("request_id") == rid:
+                if msg.get("type") == "host.stats.ok":
+                    self._note_clock(msg, t_send_wall, t_send_mono)
                 fences = msg.get("usage_fences")
                 if isinstance(fences, list):
                     self._usage_fences = {
@@ -1117,6 +1348,7 @@ class Satellite:
             "host": self.config.host,
             "events": events,
             "high_water": high_water,
+            "satellite_incarnation": getattr(self, "_incarnation", ""),
         }
         if inventory is not None:
             frame["inventory"] = inventory
@@ -1130,12 +1362,15 @@ class Satellite:
         # Always send the field, including the empty acknowledgement, so the
         # daemon can distinguish an updated satellite from a legacy caller.
         frame["frozen_streams"] = frozen_streams
+        self._attach_usage_v2(frame)
         pending_usage = getattr(self, "_pending_usage", {})
         if pending_usage:
             frame["usage"] = [pending_usage[sid] for sid in sorted(pending_usage)]
+        self._inflight_usage = dict(pending_usage)
         proof = self._source_host_proof(os.getpid())
         if proof is not None:
             frame["source_host_proof"] = proof
+        self._attach_unfenced(frame)
         self._attach_provenance(frame)
         await ws.send(json.dumps(frame))
         # Read frames until our reply arrives; the daemon fans broadcasts (incl.
@@ -1159,6 +1394,7 @@ class Satellite:
         """Advance acked offsets and read the version verdict. Returns a target
         SHA to update to, or None."""
         kind = str(ack.get("type") or "")
+        self._apply_unfenced_ack(ack)
         if kind == "event.push.error":
             log.warning("push rejected: %s", ack.get("error"))
             version = ack.get("version") if isinstance(ack.get("version"), dict) else {}
@@ -1169,6 +1405,19 @@ class Satellite:
             return None
         usage_was_acknowledged = "usage_recorded" in ack or "usage_replayed" in ack or "usage_rejected" in ack
         provenance_ack = ack.get("usage_provenance")
+        if getattr(self, "_provenance_probe_inflight", False):
+            self._provenance_probe_inflight = False
+            if not isinstance(provenance_ack, dict):
+                self._provenance_supported = False  # predates provenance entirely
+            else:
+                granted = negotiated_version(provenance_ack)
+                if granted is not None:
+                    self._provenance_version = granted
+                    self._provenance_reprobe_at = time.monotonic() + PROVENANCE_REPROBE_S
+        elif isinstance(provenance_ack, dict) and provenance_ack.get("error") == "unsupported_version":
+            # A rolled-back daemon: resend the kept batch as version 1, re-probe later.
+            self._provenance_version = 1
+            self._provenance_reprobe_at = time.monotonic() + PROVENANCE_REPROBE_S
         if getattr(self, "_inflight_provenance", None):
             # A daemon that ignores the block (older release) stops further
             # attachment until reconnect; backfill recovers what it missed.
@@ -1181,11 +1430,13 @@ class Satellite:
                 if pending_provenance.get(key) is sent:  # never drop a newer replacement
                     pending_provenance.pop(key, None)
         self._inflight_provenance = {}
+        # Record-level v2 refusals (`index`) are final or already held; only
+        # an item-level rejection keeps the stream's offset and pending item.
         usage_rejected_streams = {
             str(item.get("stream_id") or "")
             for item in (ack.get("usage_rejected") or ())
-            if isinstance(item, dict) and item.get("stream_id")
-        }
+            if isinstance(item, dict) and item.get("stream_id") and "index" not in item
+        } - getattr(self, "_rehoused_streams", set())
         if usage_was_acknowledged:
             pending_usage = getattr(self, "_pending_usage", {})
             for stream_id in list(pending_usage):
@@ -1280,6 +1531,12 @@ class Satellite:
         cfg = self.config
         delay = cfg.interval_s if cfg.first_delay_s is None else cfg.first_delay_s
         self._provenance_supported = None  # re-probe the (possibly redeployed) daemon
+        self._unfenced_enabled = False  # re-learned from this connection's first ack
+        try:
+            self._held_spans()
+        except OSError as exc:
+            log.error("held-span file unavailable: %s", exc)
+        self._held_tick_mono = time.monotonic()
         if not cfg.disabled:
             ack = await self._send_host_stats(ws)
             version = ack.get("version") if isinstance(ack, dict) else None
@@ -1299,15 +1556,28 @@ class Satellite:
                 if target:
                     await asyncio.to_thread(self._maybe_update, str(target))
                 self._last_stats_at = time.monotonic()
+            self._tick_held()
             events, high_water, _capped = await asyncio.to_thread(self._collect)
             inventory = self._last_discovery_inventory
-            ack = await self._push(ws, events, high_water, inventory=inventory)
+            ack = await self._push_pass(ws, events, high_water, inventory=inventory)
             if ack is None:
                 continue           # no ack: offsets unmoved, re-read next pass
             target = self._apply_ack(ack, high_water)
             if target:
                 # Blocking git work (and a possible exec-restart) off the loop.
                 await asyncio.to_thread(self._maybe_update, target)
+
+    def _tick_held(self) -> None:
+        now = time.monotonic()
+        last = getattr(self, "_held_tick_mono", None)
+        self._held_tick_mono = now
+        held = getattr(self, "_held", None)
+        if held is None or last is None:
+            return
+        try:
+            held.tick(enabled=self._unfenced_enabled, elapsed_s=now - last)
+        except OSError as exc:
+            log.error("held-span tick failed: %s", exc)
 
     async def run_forever(self) -> None:
         cfg = self.config
@@ -1343,7 +1613,9 @@ async def _backfill(sat: Satellite, args) -> dict:
         sat.config.bart_ws, max_size=WS_MAX_SIZE,
         ping_interval=20, ping_timeout=20, close_timeout=10,
     ) as ws:
-        async def push(items: list[dict], dry_run: bool) -> dict:
+        granted = {"version": 1}
+
+        async def send(payload: dict) -> dict:
             sat._req += 1
             rid = sat._req
             frame = {
@@ -1351,7 +1623,7 @@ async def _backfill(sat: Satellite, args) -> dict:
                 "push_secret": sat.config.push_secret, "satellite_sha": sat.sha,
                 "satellite_pid": os.getpid(), "wire_version": WIRE_VERSION,
                 "host": sat.config.host, "events": [], "high_water": {},
-                "usage_provenance": {"version": PROVENANCE_VERSION, "items": items, "dry_run": dry_run},
+                "usage_provenance": payload,
             }
             proof = sat._source_host_proof(os.getpid())
             if proof is not None:
@@ -1369,8 +1641,19 @@ async def _backfill(sat: Satellite, args) -> dict:
                     return {"error": str(msg.get("error") or msg.get("type") or "push_failed")}
                 return msg.get("usage_provenance") or {"error": "provenance_unacknowledged"}
 
+        async def probe() -> int | None:
+            # The empty version-2 payload precedes data, so a cold producer's first
+            # batch already carries ordinal 1; unsupported_version downgrades to 1.
+            version = negotiated_version(await send(probe_payload()))
+            if version is not None:
+                granted["version"] = version
+            return version
+
+        async def push(items: list[dict], dry_run: bool) -> dict:
+            return await send({"version": granted["version"], "items": items, "dry_run": dry_run})
+
         summary = await run_backfill(push, roots=roots, cursor=cursor,
-                                     dry_run=args.dry_run, batch=args.batch)
+                                     dry_run=args.dry_run, batch=args.batch, probe=probe)
     summary["host"] = sat.config.host
     summary["satellite_sha"] = sat.sha
     return summary

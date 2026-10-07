@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from .config import load_config
-from . import prompt_protocol, triage
+from . import prompt_protocol, triage, work_lane_cli
 from . import role_baseline, schema
 from .stream_id import discover_leader_stream_id_short, env_stream_id
 from .wsclient import (
@@ -4780,6 +4780,19 @@ def usage(args: argparse.Namespace) -> int:
     """Read one host's current Claude/Codex account-period usage (/usage limits)."""
     from agent_orch import usage_readback
 
+    if getattr(args, "unplaced", False):
+        from agent_orch import usage_unplaced
+
+        try:
+            summary = usage_unplaced.read(args.data_dir)
+        except (OSError, Exception) as exc:  # noqa: BLE001 - one readable error line
+            print(f"agent-orch usage --unplaced: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(summary, separators=(",", ":")) if args.json else usage_unplaced.render(summary))
+        return 0
+    if not args.host:
+        print("agent-orch usage: --host is required (or --unplaced)", file=sys.stderr)
+        return 2
     max_age = args.max_age_seconds
     if max_age is None:
         env_val = os.environ.get("PENTACLE_USAGE_MAX_AGE_SECONDS")
@@ -5194,7 +5207,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     assistant_operation_parser.add_argument(
         "--operation", required=True,
-        choices=("lane.admit", "lane.bind", "lane.decision", "lane.close", "question.open", "question.cancel", "route.resolve", "authority.request"),
+        choices=("lane.admit", "lane.bind", "lane.decision", "lane.close", "question.open", "question.cancel", "route.resolve", "authority.request",
+                 "work_lane.adopt", "work_lane.set_state", "work_lane.set_lead", "work_lane.set_chat",
+                 "work_lane.set_text", "work_lane.set_owner", "work_lane.update"),
     )
     assistant_operation_parser.add_argument("--request-id", required=True)
     assistant_operation_parser.add_argument("--composite-stream-id", required=True)
@@ -5422,6 +5437,7 @@ def build_parser() -> argparse.ArgumentParser:
     nexus_route.add_argument("--timeout", type=float, default=30.0)
     nexus_route.set_defaults(func=nexus)
 
+    work_lane_cli.add_parser(subparsers)
     prompt_parser = subparsers.add_parser("prompt")
     prompt_sub = prompt_parser.add_subparsers(dest="prompt_command", required=True)
     prompt_ask_parser = prompt_sub.add_parser("ask")
@@ -5865,7 +5881,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="read one host's current Claude/Codex account-period usage (/usage limits) once; "
                     "`agent-orch usage rollup --help` for the per-spec/project rollup and calibration",
     )
-    usage_parser.add_argument("--host", required=True, help="host name from machines.json (e.g. thoth, merlin, amaterasu)")
+    usage_parser.add_argument("--host", help="host name from machines.json (e.g. thoth, merlin, amaterasu)")
+    usage_parser.add_argument(
+        "--unplaced", action="store_true",
+        help="list refused/unplaced satellite usage and held-span losses from the daemon DB "
+             "(run on the daemon host; never counted)",
+    )
+    usage_parser.add_argument("--data-dir", default="~/.local/share/pentacle-stream", help=argparse.SUPPRESS)
     usage_parser.add_argument("--json", action="store_true")
     usage_parser.add_argument(
         "--max-age-seconds", type=int, default=None,

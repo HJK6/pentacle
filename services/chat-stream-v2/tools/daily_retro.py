@@ -7,6 +7,7 @@ import asyncio
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta, timezone
+import errno
 import fcntl
 import hashlib
 import json
@@ -16,6 +17,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import traceback
 from time import monotonic
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -28,6 +30,7 @@ from agent_orch.config import Config  # noqa: E402
 from agent_orch.triage import parse_frontmatter  # noqa: E402
 from agent_orch import prompt_protocol, wsclient  # noqa: E402
 from tools.live_window import authenticated_operator_connection  # noqa: E402
+from websockets.exceptions import ConnectionClosed  # noqa: E402
 from message_envelopes import match_message_envelope  # noqa: E402
 
 ZONE = ZoneInfo("America/Chicago")
@@ -1264,6 +1267,197 @@ def retain_weekly_summary(settings, run_id):
                 "due": True, "summary": summary}
 
 
+# A daemon restart surfaces as a refused/reset socket or a closed websocket.
+# Nothing else (a missing token file, a disk error) is a transport loss.
+TRANSPORT_ERRORS = (ConnectionError, ConnectionClosed)
+# Failure records never carry exception text: free text can hold a credential
+# in forms no pattern list anticipates. A record names the exception class, a
+# fixed reason code, and the byte length and sha256 of the raw message. The raw
+# text stays only in the local run directory (0600) and is never sent.
+_ERROR_FIELDS = ("class", "reason", "bytes", "sha256")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+# Both vocabularies are fixed by code, never by the failing value. A class is
+# named only when it is the genuine class of a trusted module (so a dynamically
+# created class cannot smuggle text in its name); anything else is named by
+# its nearest trusted base.
+_TRUSTED_ERROR_MODULES = ("builtins", "asyncio.exceptions", "concurrent.futures._base", "json.decoder",
+                          "sqlite3", "websockets.exceptions")
+_RECORD_CLASSES = ("LegacyText", "WorkerReport")
+_REASONS = frozenset({"transport_loss", "timeout", "error", "interrupted", "legacy_text", "worker_failed",
+                      "os_error", *(f"os_error:{name}" for name in errno.errorcode.values())})
+
+
+def _trusted_class_name(cls):
+    module = sys.modules.get(cls.__module__)
+    if cls.__module__ in _TRUSTED_ERROR_MODULES and module is not None and getattr(module, cls.__name__, None) is cls:
+        return cls.__name__
+    return None
+
+
+def _error_class_names():
+    import concurrent.futures  # noqa: F401 - loads concurrent.futures._base
+    names = set(_RECORD_CLASSES)
+    for name in _TRUSTED_ERROR_MODULES:
+        for value in vars(sys.modules[name]).values():
+            if isinstance(value, type) and issubclass(value, BaseException) and _trusted_class_name(value):
+                names.add(value.__name__)
+    return frozenset(names)
+
+
+_ERROR_CLASSES = _error_class_names()
+
+
+def _error_class(exc):
+    return next(name for name in map(_trusted_class_name, type(exc).__mro__) if name)
+
+
+def _reason_code(exc):
+    if isinstance(exc, TRANSPORT_ERRORS):
+        return "transport_loss"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, OSError):
+        return "os_error" + (f":{errno.errorcode[exc.errno]}" if exc.errno in errno.errorcode else "")
+    return "error" if isinstance(exc, Exception) else "interrupted"
+
+
+def _is_structured(value):
+    return (isinstance(value, dict) and set(value) == set(_ERROR_FIELDS)
+            and isinstance(value["class"], str) and value["class"] in _ERROR_CLASSES
+            and isinstance(value["reason"], str) and value["reason"] in _REASONS
+            and type(value["bytes"]) is int and value["bytes"] >= 0
+            and isinstance(value["sha256"], str) and _SHA256.fullmatch(value["sha256"]) is not None)
+
+
+def structured_error(exc, root=None):
+    """Durable failure record: {class, reason, bytes, sha256}, never message text.
+
+    Idempotent: a genuine structured record is returned unchanged. Anything
+    else that is not an exception (a legacy text record, or a dict that is not
+    a valid record) is treated as raw text. With `root`, the raw text is kept
+    at root/errors/<sha256>.txt (0600) for local diagnosis."""
+    if _is_structured(exc):
+        return dict(exc)
+    if isinstance(exc, BaseException):
+        return _text_record(str(exc), root, _error_class(exc), _reason_code(exc))
+    return _text_record(exc if isinstance(exc, str) else encoded(exc).decode(), root, "LegacyText", "legacy_text")
+
+
+def _text_record(raw, root, record_class, reason):
+    data = raw.encode("utf-8", "backslashreplace")
+    sha = hashlib.sha256(data).hexdigest()
+    if root is not None:
+        _keep_raw_error(Path(root), sha, data)
+    return {"class": record_class, "reason": reason, "bytes": len(data), "sha256": sha}
+
+
+_FAILURE_ERROR_FIELDS = ("error", "cleanup_error", "notice_error")
+#: Failure-notice attempts written with a structured body (older ones are rebuilt).
+FAILURE_BODY_FORMAT = 2
+
+
+def _structured_failure_entry(entry, root):
+    """A failure.json entry with every error field structured (retained
+    entries from before structured records are converted in place)."""
+    return {**entry, **{k: structured_error(entry[k], root) for k in _FAILURE_ERROR_FIELDS if k in entry}}
+
+
+_WORKER_RECEIPT_FIELDS = frozenset({"result_kind", "status", "report_id", "ledger_row_id", "error"})
+
+
+def _worker_failure_receipt(response, root, report_id):
+    """What a failed or invalid worker report keeps: identity and outcome
+    metadata plus a structured record of the whole response, never its text."""
+    report = response.get("report") if isinstance(response.get("report"), dict) else response
+    status = report.get("status") if isinstance(report, dict) else None
+    row = response.get("ledger_row_id") if "ledger_row_id" in response else (report or {}).get("ledger_row_id")
+    kind = response.get("result_kind")
+    return {"result_kind": kind if isinstance(kind, str) and kind in {"report", "closed_without_report"} else None,
+            "status": status if isinstance(status, str) and status in {"done", "error", "aborted"} else None,
+            "report_id": report_id if (report or {}).get("report_id") == report_id else None,
+            "ledger_row_id": row if type(row) is int else None,
+            "error": _text_record(encoded(response).decode(), root, "WorkerReport", "worker_failed")}
+
+
+def _projected_stage(stage, root):
+    """A failed stage receipt retained from before projection: replace a raw
+    failure response or failed report with its receipt."""
+    if not stage.get("failed"):
+        return stage
+    stage = dict(stage)
+    failure = stage.get("failure")
+    if isinstance(failure, dict) and not _is_worker_receipt(failure, stage.get("report_id")):
+        stage["failure"] = _worker_failure_receipt(failure, root, stage.get("report_id"))
+    elif isinstance(failure, str) and failure != "invalid terminal packet":
+        stage["failure"] = structured_error(failure, root)
+    report = stage.get("report")
+    if isinstance(report, dict) and not _is_worker_receipt(report, stage.get("report_id")):
+        stage["report"] = _worker_failure_receipt({"report": report}, root, stage.get("report_id"))
+    return stage
+
+
+def _is_worker_receipt(value, report_id):
+    """Exactly the projected receipt schema: any extra or non-conforming field
+    means the value is raw and is projected again."""
+    return (isinstance(value, dict) and set(value) == _WORKER_RECEIPT_FIELDS
+            and (value["result_kind"] is None or (isinstance(value["result_kind"], str)
+                                                  and value["result_kind"] in {"report", "closed_without_report"}))
+            and (value["status"] is None or (isinstance(value["status"], str)
+                                             and value["status"] in {"done", "error", "aborted"}))
+            and (value["report_id"] is None or value["report_id"] == report_id)
+            and (value["ledger_row_id"] is None or type(value["ledger_row_id"]) is int)
+            and _is_structured(value["error"]))
+
+
+def render_error(record):
+    record = structured_error(record)
+    return f"{record['class']} reason={record['reason']} bytes={record['bytes']} sha256={record['sha256'][:16]}"
+
+
+def _keep_raw_error(root, name, data):
+    """Keep raw text at root/errors/<name>.txt. Best effort: losing the local
+    copy must never fail failure recording."""
+    try:
+        folder = root / "errors"
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(folder, 0o700)
+        fd = os.open(folder / f"{name}.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def record_failure(root, run_id, *, stage, error, notice):
+    """Append one failure to the run's durable failure state and return its seq.
+
+    The top-level fields always describe the latest failure; earlier ones move
+    to a bounded per-failure `history`, each keeping its own notice state."""
+    path = root / "failure.json"
+    state = _structured_failure_entry(read(path, {}), root)
+    history = [_structured_failure_entry(h, root) for h in state.get("history", [])]
+    if state.get("error"):
+        history.append({k: state[k] for k in ("seq", "at", "stage", "error", "notice", "cleanup_error", "notice_error") if k in state})
+    seq = int(state.get("seq") or len(history)) + 1
+    atomic(path, {"run_id": run_id, "seq": seq, "at": now_iso(), "stage": stage, "error": error,
+                  "notice": notice, "latest": True, "history": history[-8:]})
+    return seq
+
+
+def annotate_failure(root, run_id, seq=None, **fields):
+    """Merge fields into the latest failure (or the history entry for `seq`)."""
+    path = root / "failure.json"
+    state = read(path, {})
+    if seq is not None and state.get("seq") != seq:
+        state["history"] = [{**h, **fields} if h.get("seq") == seq else h for h in state.get("history", [])]
+        atomic(path, state)
+        return
+    atomic(path, {**state, "run_id": run_id, **fields})
+
+
 class Pipeline:
     def __init__(self, settings, rpc=wsclient):
         self.settings, self.rpc, self.config = settings, rpc, settings.rpc()
@@ -1288,8 +1482,8 @@ class Pipeline:
             attempt = stage["attempt"] + 1
             if attempt > 2:
                 raise RuntimeError(f"{name} recovery budget exhausted; retained for assistant")
-            history = read(root / f"{name}-attempts.json", [])
-            history.append(stage)
+            history = [_projected_stage(h, root) for h in read(root / f"{name}-attempts.json", [])]
+            history.append(_projected_stage(stage, root))
             atomic(root / f"{name}-attempts.json", history)
             stage = {}
         else:
@@ -1336,7 +1530,7 @@ class Pipeline:
             if response.get("stream_id") != stage["stream_id"] or response.get("msg_id") != 0:
                 checked(response, "await_report.ok")
         if response.get("result_kind") == "closed_without_report" or (response.get("result_kind") == "report" and not response.get("ok")):
-            stage.update(failed=True, failure=response)
+            stage.update(failed=True, failure=_worker_failure_receipt(response, root, stage["report_id"]))
             atomic(receipt_path, stage)
             raise RuntimeError(f"{name} confirmed failed; recover on next run")
         checked(response, "await_report.ok")
@@ -1350,7 +1544,8 @@ class Pipeline:
         try:
             packet = validator(report.get("extras", {}).get("daily_retro", {}), manifest)
         except Exception:
-            stage.update(failed=True, failure="invalid terminal packet", report=report)
+            stage.update(failed=True, failure="invalid terminal packet",
+                         report=_worker_failure_receipt(response, root, stage["report_id"]))
             atomic(receipt_path, stage)
             raise
         packet = {**packet, "collection": worker_collection(manifest, root / "collection.json")}
@@ -1358,21 +1553,107 @@ class Pipeline:
         atomic(receipt_path, stage)
         return stage
 
+    def queue_failure_notice(self, manifest, *, seq, stage, failure):
+        """Persist the failure notice before any RPC: the daemon may be down.
+        A newer failure supersedes an older notice that never landed."""
+        root = self.settings.state_root / "runs" / manifest["run_id"]
+        path = root / "failure-delivery.json"
+        record = read(path, {"attempts": []})
+        prior = record.get("pending")
+        if prior and prior.get("seq") != seq:
+            annotate_failure(root, manifest["run_id"], seq=prior.get("seq"), notice=f"superseded by failure {seq}")
+        record["pending"] = {"seq": seq, "stage": stage, "failure": failure, "at": now_iso()}
+        atomic(path, record)
+
+    def supersede_pending_notice(self, manifest, reason):
+        root = self.settings.state_root / "runs" / manifest["run_id"]
+        path = root / "failure-delivery.json"
+        record = read(path, {"attempts": []})
+        pending = record.get("pending")
+        if pending:
+            record["pending"] = None
+            atomic(path, record)
+            annotate_failure(root, manifest["run_id"], seq=pending.get("seq"), notice=f"superseded: {reason}")
+
+    @staticmethod
+    def _failure_body(manifest, stage, failure, root):
+        return (f"REPORT daily-retro failure {manifest['run_id']} stage {stage}: {render_error(failure)}. "
+                f"Retained state: {root}. The next producer pass resumes the retained stage without a new worker; "
+                "no operator notification for routine retries.")
+
+    def normalize_retained_failure_state(self, manifest):
+        """Convert failure state retained from before structured records:
+        error fields, the pending notice, failed stage receipts, and every
+        failure-notice attempt body. An attempt keeps its request id, so a
+        resend stays exactly-once (the daemon dedupes by key) and only ever
+        carries the structured body; a landed attempt is never resent."""
+        root = self.settings.state_root / "runs" / manifest["run_id"]
+        path = root / "failure.json"
+        state = read(path, None)
+        if state:
+            converted = {**_structured_failure_entry(state, root),
+                         **({"history": [_structured_failure_entry(h, root) for h in state["history"]]}
+                            if "history" in state else {})}
+            if converted != state:
+                atomic(path, converted)
+        for name in STAGES:
+            for receipt_path, many in ((root / f"{name}.json", False), (root / f"{name}-attempts.json", True)):
+                value = read(receipt_path, None)
+                if value:
+                    converted = [_projected_stage(v, root) for v in value] if many else _projected_stage(value, root)
+                    if converted != value:
+                        atomic(receipt_path, converted)
+        delivery_path = root / "failure-delivery.json"
+        record = read(delivery_path, None)
+        if not record:
+            return
+        original = json.loads(encoded(record))
+        failures = {e.get("seq"): e for e in [*(state or {}).get("history", []), state or {}] if e.get("seq")}
+        pending = record.get("pending")
+        if pending:
+            pending["failure"] = structured_error(pending.get("failure"), root)
+            failures[pending.get("seq")] = {"stage": pending.get("stage"), "error": pending["failure"]}
+        for attempt in record.get("attempts", []):
+            if attempt.get("body_format") == FAILURE_BODY_FORMAT:
+                continue
+            known = failures.get(attempt.get("seq"), {})
+            text = attempt.get("payload", {}).get("text", "")
+            attempt["payload"]["text"] = self._failure_body(manifest, known.get("stage", "unknown"),
+                                                            known.get("error", text), root)
+            attempt["body_format"] = FAILURE_BODY_FORMAT
+            if "receipt" in attempt:
+                attempt["receipt"] = {k: attempt["receipt"].get(k) for k in ("type", "delivery", "state", "request_id")
+                                      if isinstance(attempt["receipt"], dict)}
+        if record != original:
+            atomic(delivery_path, record)
+
     async def deliver(self, manifest, final=None, failure=None):
         root = self.settings.state_root / "runs" / manifest["run_id"]
         path = root / ("failure-delivery.json" if failure else "delivery.json")
+        if failure:
+            self.normalize_retained_failure_state(manifest)
         record = read(path, {"attempts": []})
         if (root / "review.json").exists():
             return record
+        pending = record.get("pending") if failure else None
+        if failure and not pending:
+            return record
         binding = await self.binding()
         target, generation = binding["stream_id"], binding["session_generation"]
-        attempt = next((a for a in record["attempts"] if a["target"] == target and a["generation"] == generation), None)
+        seq = pending.get("seq") if pending else None
+        attempt = next((a for a in record["attempts"] if a["target"] == target and a["generation"] == generation
+                        and a.get("seq") == seq), None)
         if attempt and attempt.get("confirmed"):
+            if pending:
+                self._notice_landed(manifest, record, path, seq)
             return record
         if not attempt:
-            key = "daily-retro-" + digest([self.settings.namespace, manifest["run_id"], target, generation, bool(failure)])[:32]
+            # One notice per failure: the key carries the failure seq (absent for
+            # the ready REPORT, which keeps its historical key).
+            key = "daily-retro-" + digest([self.settings.namespace, manifest["run_id"], target, generation, bool(failure),
+                                           *([seq] if pending else [])])[:32]
             if failure:
-                body = f"REPORT daily-retro failure {manifest['run_id']}: {failure}. Retained state: {root}. Retry with existing producer; no operator notification for routine retries."
+                body = self._failure_body(manifest, pending.get("stage"), pending["failure"], root)
             else:
                 summary = ""
                 if manifest.get("consolidation"):
@@ -1391,6 +1672,7 @@ class Pipeline:
                         "Ask only for an actual missing grant through the existing versioned decision helper; routine authorized work needs no operator permission.")
             host, session = target.split(":", 1)
             attempt = {"target": target, "generation": generation, "request_id": key,
+                       **({"seq": seq, "body_format": FAILURE_BODY_FORMAT} if pending else {}),
                        "payload": {"host": host, "session_name": session, "text": body,
                                    "request_id": key, "optimistic_id": key}}
             record["attempts"].append(attempt)
@@ -1405,9 +1687,17 @@ class Pipeline:
         attempt["at"] = now_iso()
         attempt["collection_to_delivery_seconds"] = (datetime.fromisoformat(attempt["at"]) - datetime.fromisoformat(manifest["collected_at"])).total_seconds()
         atomic(path, record)
+        if pending and attempt["confirmed"]:
+            self._notice_landed(manifest, record, path, seq)
         if not attempt["confirmed"]:
             raise RuntimeError("delivery pending; exact target/body/key retained")
         return record
+
+    def _notice_landed(self, manifest, record, path, seq):
+        record["pending"] = None
+        atomic(path, record)
+        annotate_failure(self.settings.state_root / "runs" / manifest["run_id"], manifest["run_id"],
+                         seq=seq, notice="delivered")
 
     async def cleanup(self, manifest, force=False):
         root = self.settings.state_root / "runs" / manifest["run_id"]
@@ -1442,23 +1732,42 @@ class Pipeline:
 
     async def run_manifest(self, manifest):
         root = self.settings.state_root / "runs" / manifest["run_id"]
+        self.normalize_retained_failure_state(manifest)
         if (root / "review.json").exists():
+            self.supersede_pending_notice(manifest, "review recorded")
             await self.cleanup(manifest)
             return False
+        if read(root / "failure-delivery.json", {}).get("pending"):
+            try:  # A notice that could not reach the daemon stays durable until it lands.
+                await self.deliver(manifest, failure=True)
+            except Exception as notice_error:
+                annotate_failure(root, manifest["run_id"], notice_error=structured_error(notice_error, root))
+        primary = None
         try:
             sol = await self.worker(manifest, "sol")
             astra = await self.worker(manifest, "astra", sol["packet"])
             await self.deliver(manifest, astra)
             return True
-        except Exception as exc:
-            atomic(root / "failure.json", {"at": now_iso(), "error": str(exc)})
-            try:
-                await self.deliver(manifest, failure=str(exc))
-            except Exception as delivery_error:
-                atomic(root / "failure-notice-error.json", {"error": str(delivery_error)})
+        except BaseException as exc:
+            primary = exc
+            stage = next((n for n in ("sol", "astra") if not read(root / f"{n}.json", {}).get("packet")), "delivery")
+            error = structured_error(exc, root)
+            seq = record_failure(root, manifest["run_id"], stage=stage, error=error, notice="pending")
+            self.queue_failure_notice(manifest, seq=seq, stage=stage, failure=error)
+            if isinstance(exc, Exception):
+                try:
+                    await self.deliver(manifest, failure=True)
+                except Exception as delivery_error:
+                    annotate_failure(root, manifest["run_id"], notice_error=structured_error(delivery_error, root))
             raise
         finally:
-            await self.cleanup(manifest)
+            try:
+                await self.cleanup(manifest)
+            except Exception as cleanup_error:
+                # Cleanup is retried by the next pass; it never replaces the primary error.
+                if primary is None:
+                    raise
+                annotate_failure(root, manifest["run_id"], cleanup_error=structured_error(cleanup_error, root))
 
     async def history_run(self, baseline_path, batch, no_deliver=False):
         history_baseline(self.settings, baseline_path)
@@ -1500,7 +1809,9 @@ class Pipeline:
                     sol = await self.worker(manifest, "sol")
                     await self.worker(manifest, "astra", sol["packet"])
                 except Exception as exc:
-                    atomic(root / "failure.json", {"at": now_iso(), "error": str(exc)})
+                    stage = next((n for n in ("sol", "astra") if not read(root / f"{n}.json", {}).get("packet")), "astra")
+                    record_failure(root, manifest["run_id"], stage=stage, error=structured_error(exc, root),
+                                   notice="not required: no-deliver history batch")
                     raise
                 finally:
                     await self.cleanup(manifest, force=True)
@@ -1888,7 +2199,23 @@ class ProducerTransport:
         def invoke():
             with authenticated_operator_connection(self.settings.ws_url, self.settings.token_path, timeout + 2) as connection:
                 return connection.rpc(payload)
-        return await asyncio.to_thread(invoke)
+        if not wsclient._is_rpc_retry_eligible(payload):
+            return await asyncio.to_thread(invoke)
+        # Same reconnect contract as the agent-orch client: a daemon restart is
+        # survived inside the verb's own retry deadline (await/spawn re-sends are
+        # ledger-resolved or idempotency-keyed), then the transport error stands.
+        policy = wsclient._rpc_retry_policy_from_env(timeout)
+        deadline = wsclient._retry_deadline(monotonic(), policy)
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return await asyncio.to_thread(invoke)
+            except TRANSPORT_ERRORS:
+                delay, _reason = wsclient._transport_retry_next_delay(policy, deadline, attempt)
+                if delay is None:
+                    raise
+                await asyncio.sleep(delay)
 
     async def spawn_once(self, config, payload):
         if not any(stage.get("payload") == payload for stage in self.stages()):
@@ -2030,7 +2357,26 @@ def main():
             cmd.add_argument("--workers-config", required=True)
             cmd.add_argument("--evidence-dir", required=True)
     args = parser.parse_args()
+    settings_holder = []
+    try:
+        result = _run_command(args, settings_holder)
+    except Exception as exc:
+        # The scheduled job's stderr is a log file: never let a traceback carry
+        # the exception text there. The raw traceback is kept with the run's
+        # other raw errors (0600); stderr gets the structured record only.
+        root = settings_holder[0].state_root if settings_holder else None
+        record = structured_error(exc, root)
+        if root is not None:
+            _keep_raw_error(Path(root), record["sha256"] + ".traceback",
+                            traceback.format_exc().encode("utf-8", "backslashreplace"))
+        print(json.dumps({"error": record}), file=sys.stderr)
+        raise SystemExit(1) from None
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def _run_command(args, settings_holder):
     settings = Settings.load(args.config)
+    settings_holder.append(settings)
     if args.command == "collect":
         result = collect(settings, datetime.fromisoformat(args.now))
     elif args.command == "summary":
@@ -2052,7 +2398,7 @@ def main():
             result = asyncio.run(pipeline.record_review(args.run_id, read(Path(args.result))))
         else:
             result = asyncio.run(pipeline.decision(args.work_id, read(Path(args.proposal)), retry_blocked=args.retry_blocked))
-    print(json.dumps(result, ensure_ascii=False))
+    return result
 
 
 if __name__ == "__main__":
