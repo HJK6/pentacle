@@ -371,8 +371,13 @@ def test_fleet_smoke_launchd_template_is_gated_with_targets_and_a_stated_duratio
 def test_the_real_live_window_import_resolves_from_a_bare_interpreter(tmp_path):
     """Found in the live rehearsal on host-b: with only the helper's own paths, tools.live_window needs services/ too.
 
-    Every other test fakes the connection module, so run the real import in a clean interpreter."""
-    code = ("import sys; sys.path.insert(0, %r); import gate_at_fire; gate_at_fire._ensure_import_paths(); "
+    Every other test fakes the connection module, so run the real import in a clean interpreter. The probe checks
+    only our own path resolution, so the third-party websockets modules are stubbed: `-I` drops the user site, and a
+    system interpreter without websockets>=13 (no `websockets.sync`) must not fail a path test."""
+    stub = ("import sys, types; ms = {n: types.ModuleType(n) for n in ('websockets', 'websockets.sync', "
+            "'websockets.sync.client', 'websockets.exceptions')}; ms['websockets.sync.client'].connect = None; "
+            "ms['websockets.exceptions'].ConnectionClosed = Exception; sys.modules.update(ms); ")
+    code = (stub + "sys.path.insert(0, %r); import gate_at_fire; gate_at_fire._ensure_import_paths(); "
             "import tools.live_window; print('ok')") % str(Path(gate_at_fire_path()).parent)
     out = subprocess.run([sys.executable, "-I", "-c", code], cwd=tmp_path, capture_output=True, text=True)
     assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr[-400:]
