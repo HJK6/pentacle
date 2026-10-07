@@ -182,7 +182,10 @@ unchanged. Volume is about 300 lines a day; no rotation.
 ## Rollup and calibration
 
 `agent-orch usage rollup` runs `services/chat-stream-v2/tools/usage_rollup.py`
-on Thoth (stdlib, Python 3.9+). It reads `sessions.db`, `sessions_archive.db`,
+on Thoth (stdlib, Python 3.9+). The CLI finds the tool under the services root
+that `_shared` was imported from: the checkout's `services/`, or
+`<release>/app/services` in a fleet release. `PENTACLE_USAGE_ROLLUP_TOOL`
+overrides the path. It reads `sessions.db`, `sessions_archive.db`,
 `notifications.db` and `usage_history.jsonl` with `mode=ro`, plus work-item
 frontmatter under `~/agent-workspace/triforce-memory/work`. Its only write is
 `--calibrate` output. It never changes admission, attribution storage or the
