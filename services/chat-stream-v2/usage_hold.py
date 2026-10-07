@@ -203,23 +203,28 @@ class HeldSpans:
 
     def tick(self, *, enabled: bool, elapsed_s: float) -> None:
         """Advance enabled time and drop expired entries (24 h enabled, or
-        7 days from write while the daemon cannot take them)."""
-        if not self.state["entries"]:
+        7 days from write while the daemon cannot take them).
+
+        Enabled time accrues in memory and is persisted with the next write
+        (at least every ENABLED_FLUSH_S); a restart can only lose accrual,
+        which keeps an entry longer, never shorter.
+        """
+        entries = self.state["entries"]
+        if not entries:
             return
-        state = copy.deepcopy(self.state)
         now = self._wall()
         if enabled and elapsed_s > 0:
-            for entry in state["entries"].values():
+            for entry in entries.values():
                 entry["enabled_s"] = float(entry.get("enabled_s", 0.0)) + elapsed_s
             self._unflushed_s += elapsed_s
-        expired = [key for key, entry in state["entries"].items()
+        expired = [key for key, entry in entries.items()
                    if entry["enabled_s"] > ENABLED_TTL_S or now - entry["written_at"] > DISABLED_RETAIN_S]
+        if not expired and self._unflushed_s < ENABLED_FLUSH_S:
+            return
+        state = copy.deepcopy(self.state)
         for key in expired:
             self._drop_entry(state, key, "held_span_expired_ttl", now)
-        if expired or self._unflushed_s >= ENABLED_FLUSH_S:
-            self._write(state)
-        else:
-            self.state = state
+        self._write(state)
 
     def bind_clock(self, clock: dict) -> None:
         """Bind the first sample obtained after capture to clockless records."""
@@ -255,6 +260,8 @@ class HeldSpans:
 
     def apply_ack(self, block: dict[str, Any], losses_recorded: Any, losses_conflict: Any) -> None:
         """Delete recorded/terminal records and acked losses; keep the rest."""
+        if not (block.get("recorded") or block.get("rejected") or losses_recorded or losses_conflict):
+            return
         state = copy.deepcopy(self.state)
         done: dict[str, set[int]] = {}
         for item in block.get("recorded") or ():

@@ -895,3 +895,37 @@ def test_identity_mismatch_against_history_is_refused(tmp_path):
         assert [r["reason"] for r in second["rejected"]] == [
             "source_identity_mismatch", "native_session_identity_mismatch"]
     _run(tmp_path, body)
+
+
+def test_handoff_successor_gets_its_own_disjoint_history_row(tmp_path):
+    async def body(rig: _Rig) -> None:
+        await rig.open("v2-pred", "gen-p")
+        await rig.sessions.open(HOST, "v2-succ", provider="claude", pane_pid="5151", session_generation="gen-s",
+                                handoff_from_stream_id=f"{HOST}:v2-pred",
+                                observer_binding={"executable": "/usr/bin/claude", "pane_pid": "5151",
+                                                  "pane_started_at": "y"})
+        rows = rig.q("SELECT session_name, generation, closed_at FROM v2_session_generation_history "
+                     "ORDER BY session_name")
+        assert rows == [("v2-pred", "gen-p", None), ("v2-succ", "gen-s", None)]
+    _run(tmp_path, body)
+
+
+def test_fenced_clock_unavailable_moves_records_to_the_held_span(tmp_path):
+    async def body(rig: _Rig) -> None:
+        await rig.steady()
+        await rig.open("v2-ck", "gen-a")
+        await rig.stats()
+        # The satellite's sample is fresh by its monotonic clock, but the
+        # daemon judges server_now 700 s old by its own clock (guard path).
+        rig.sat._clock = {**rig.sat._clock, "server_now": _now(-700)}
+        rig.write("v2-ck", [_claude("m1", _now())])
+        ack = await rig.cycle(rig.panes("v2-ck"))
+        assert {"stream_id": f"{HOST}:v2-ck", "reason": "clock_unavailable", "index": 0, "record_key": "m1",
+                "transient": True} in ack["usage_rejected"]
+        assert rig.sat._held_spans().pending_count() == 1
+        assert rig.tokens(f"{HOST}:v2-ck", "gen-a") is None or not rig.tokens(f"{HOST}:v2-ck", "gen-a")["output"]
+        await rig.stats()                      # a fresh sample; the held record is delivered
+        await rig.cycle(rig.panes("v2-ck"))
+        assert rig.tokens(f"{HOST}:v2-ck", "gen-a")["output"] == 20
+        assert rig.sat._held_spans().pending_count() == 0
+    _run(tmp_path, body)
