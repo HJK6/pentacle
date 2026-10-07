@@ -503,19 +503,35 @@ def _operator_connection(
             # turn-duration line) just after the final reply. Re-read the
             # authoritative set until two reads agree, so a snapshot taken
             # between the two is never mistaken for the complete turn.
+            # Every read after the first must finish inside the settle bound;
+            # a set still changing at the bound fails rather than being used.
             settle_deadline = time.monotonic() + EVENT_SETTLE_LIMIT_S
             previous_seqs = None
             while True:
-                replay = rpc({
-                    "type": "request_stream_events", "stream_id": stream_id, "limit": 500,
-                }, "request_stream_events", deadline=time.monotonic() + HISTORY_HEARTBEAT_DEADLINE_MS / 1000)
+                deadline = time.monotonic() + HISTORY_HEARTBEAT_DEADLINE_MS / 1000
+                if previous_seqs is not None:
+                    deadline = min(deadline, settle_deadline)
+                try:
+                    replay = rpc({
+                        "type": "request_stream_events", "stream_id": stream_id, "limit": 500,
+                    }, "request_stream_events", deadline=deadline)
+                except RuntimeError as exc:
+                    if previous_seqs is not None and "timed out" in str(exc):
+                        raise RuntimeError(
+                            f"event: authoritative event set did not settle within {EVENT_SETTLE_LIMIT_S}s"
+                        ) from exc
+                    raise
                 expected = replay.get("events")
                 if not isinstance(expected, list):
                     raise RuntimeError(f"event: authoritative replay is malformed: {replay}")
                 seqs = sorted(int(event.get("daemon_seq", -1)) for event in expected
                               if isinstance(event, dict) and event.get("stream_id") == stream_id)
-                if seqs == previous_seqs or time.monotonic() >= settle_deadline:
+                if seqs == previous_seqs:
                     break
+                if time.monotonic() + EVENT_SETTLE_INTERVAL_S >= settle_deadline:
+                    raise RuntimeError(
+                        f"event: authoritative event set did not settle within {EVENT_SETTLE_LIMIT_S}s"
+                    )
                 previous_seqs = seqs
                 time.sleep(EVENT_SETTLE_INTERVAL_S)
             expected = sorted(

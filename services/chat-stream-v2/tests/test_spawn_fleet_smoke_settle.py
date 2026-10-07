@@ -24,9 +24,10 @@ SYSTEM = {"stream_id": STREAM, "daemon_seq": 103, "kind": "SYSTEM", "text": "Wor
 class FakeSocket:
     """Answers the validate_session RPCs; SYSTEM commits after the first snapshot."""
 
-    def __init__(self):
+    def __init__(self, churn=False):
         self.queue = [{"type": "chat.event", "event": USER}, {"type": "chat.event", "event": FINAL}]
         self.snapshots = 0
+        self.churn = churn
 
     def send(self, text):
         request = json.loads(text)
@@ -34,6 +35,9 @@ class FakeSocket:
         if kind == "request_stream_events":
             self.snapshots += 1
             events = [USER, FINAL] if self.snapshots == 1 else [USER, FINAL, SYSTEM]
+            if self.churn:
+                # A stream that never stops growing never settles.
+                events = [USER, FINAL] + [dict(SYSTEM, daemon_seq=200 + i) for i in range(self.snapshots)]
             self.queue.append({"type": "request_stream_events.ok", "request_id": rid, "events": events})
             if self.snapshots == 1:
                 # The trailing record commits right after the first read.
@@ -53,8 +57,8 @@ class FakeSocket:
 
 
 @pytest.fixture
-def validate(monkeypatch):
-    socket = FakeSocket()
+def validate(monkeypatch, request):
+    socket = FakeSocket(churn=getattr(request, "param", False))
 
     @contextmanager
     def connection(_url, _token_path, _timeout):
@@ -81,3 +85,24 @@ def test_trailing_system_record_after_final_does_not_fail_event_gate(validate):
     assert metrics["event"]["final_seq"] == SYSTEM["daemon_seq"]
     assert metrics["event"]["initial"]["passed"] is True
     assert socket.snapshots >= 2
+
+
+@pytest.mark.parametrize("validate", [True], indirect=True)
+def test_snapshot_that_never_settles_fails_inside_the_bound(validate, monkeypatch):
+    monkeypatch.setattr(spawn_fleet_smoke, "EVENT_SETTLE_LIMIT_S", 0.6)
+    socket, run = validate
+    started = spawn_fleet_smoke.time.monotonic()
+    with pytest.raises(RuntimeError, match="did not settle within 0.6s"):
+        run()
+    assert spawn_fleet_smoke.time.monotonic() - started < 0.6 + 0.3
+    assert socket.snapshots >= 2
+
+
+def test_row_after_the_bound_is_never_accepted(validate, monkeypatch):
+    """QA da793a8d reproduction: with a bound shorter than one interval, the
+    second (post-bound) snapshot must not be used."""
+    monkeypatch.setattr(spawn_fleet_smoke, "EVENT_SETTLE_LIMIT_S", 0.01)
+    socket, run = validate
+    with pytest.raises(RuntimeError, match="did not settle"):
+        run()
+    assert socket.snapshots == 1
