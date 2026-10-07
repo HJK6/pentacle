@@ -113,7 +113,7 @@ def test_lane_count_is_not_session_count_v11():
         await env.seat("unrelated-1")
         await env.seat("unrelated-2")
         await env.adopt(key="stream:count", lead=lead)
-        sessions = Sessions(env.store, tmux=None, local_host="amaterasu")
+        sessions = Sessions(env.store, tmux=None, local_host="host-a")
         await sessions.refresh()
         frames = []
 
@@ -122,7 +122,7 @@ def test_lane_count_is_not_session_count_v11():
         inv = WorkLanesInventory(env.store, sessions, broadcast)
         frame = await inv.current()
         assert frame["counts"] == {"open": 1, "active": 1, "paused": 0, "blocked": 0}
-        assert len([s for s in sessions.list_open() if s["stream_id"].startswith("amaterasu:")]) == 6
+        assert len([s for s in sessions.list_open() if s["stream_id"].startswith("host-a:")]) == 6
         assert await inv.emit_if_changed() is True
         assert await inv.emit_if_changed() is False  # signature dedupe
         assert frames[0]["type"] == "work_lanes.inventory"
@@ -139,11 +139,11 @@ def test_presented_paused_before_reconcile_and_server_reads_v4_v8():
                                              "text": "history line", "raw": {}},
              "identity": "h1",
              "lifecycle": await env.store.fetch_open_session_lifecycle(lead[0], pane_pid="5151")}], limit=100)
-        await env.store.mark_closed("amaterasu", "hist-lead", closed_at="2026-10-07T20:00:00Z",
+        await env.store.mark_closed("host-a", "hist-lead", closed_at="2026-10-07T20:00:00Z",
                                     pane_status="pane_dead", close_kind="operator_close")
-        sessions = Sessions(env.store, tmux=None, local_host="amaterasu")
+        sessions = Sessions(env.store, tmux=None, local_host="host-a")
         await sessions.refresh()
-        server = Server(store=env.store, sessions=sessions, comms=None, local_host="amaterasu")
+        server = Server(store=env.store, sessions=sessions, comms=None, local_host="host-a")
         server.assistant_composite = env.composite
         server.work_lanes = WorkLanesInventory(env.store, sessions, server.broadcast)
         frame = await server.work_lanes.current()
@@ -159,7 +159,7 @@ def test_presented_paused_before_reconcile_and_server_reads_v4_v8():
         with pytest.raises(VerbError):
             await server._on_request_stream_events({"stream_id": lead[0], "generation": lead[1],
                                                     "_auth_context": {"scoped_principal": True,
-                                                                      "scope_stream": "amaterasu:other"}})
+                                                                      "scope_stream": "host-a:other"}})
         # The lane exception itself admits only the exact operator pointer.
         assert await server._work_lane_history_readable(msg, lead[0], operator) is True
         for auth, generation in (({"token_verified": True, "stream_id": FD}, lead[1]),
@@ -185,11 +185,11 @@ def test_unavailable_when_tail_missing_or_generation_changed_v8():
         chat = await env.seat("empty-chat")
         lid = (await env.adopt(key="stream:empty", state="paused", lead=False, owner="operator",
                                chat={"stream_id": chat[0], "generation": chat[1]}))["lane"]["lane_id"]
-        await env.store.mark_closed("amaterasu", "empty-chat", closed_at="2026-10-07T20:00:00Z",
+        await env.store.mark_closed("host-a", "empty-chat", closed_at="2026-10-07T20:00:00Z",
                                     pane_status="pane_dead")
         rows = await env.store.work_lane_rows()
         assert rows[0]["_chat_available"] == "unavailable"
-        await env.store.open_session("amaterasu", "empty-chat", provider="claude")  # new generation
+        await env.store.open_session("host-a", "empty-chat", provider="claude")  # new generation
         rows = await env.store.work_lane_rows()
         assert rows[0]["lane_id"] == lid and rows[0]["_chat_available"] == "unavailable"
     run(body)

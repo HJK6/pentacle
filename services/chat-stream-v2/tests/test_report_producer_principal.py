@@ -161,11 +161,11 @@ def test_other_callers_cannot_rewrite_a_brief_row(credentials, tmp_path):
                 'service_authenticated': True, 'service_actor': BRIEF})))['type'] == 'asset.publish.ok'
             before = await h.rows()
             h.broadcasts.clear()
-            seat = frame(from_stream_id='amaterasu:v2-seat', stream_id='amaterasu:v2-seat',
-                         producer='amaterasu:v2-seat', body=report_body('Spoofed.'))
+            seat = frame(from_stream_id='host-a:v2-seat', stream_id='host-a:v2-seat',
+                         producer='host-a:v2-seat', body=report_body('Spoofed.'))
             seat.pop('stream_token')
             reply = await h.assets.asset({**seat, '_auth_context': {'token_verified': True,
-                                                                     'stream_id': 'amaterasu:v2-seat'}})
+                                                                     'stream_id': 'host-a:v2-seat'}})
             assert reply['error_code'] == 'asset_unauthorized'
             assert await h.rows() == before and h.broadcasts == []
     asyncio.run(run())
@@ -176,7 +176,7 @@ def test_other_callers_cannot_rewrite_a_brief_row(credentials, tmp_path):
     {'asset_id': 'daily-report-2026100'}, {'asset_id': 'daily-report-20261302'},
     {'asset_id': 'other-asset'}, {'asset_id': 'daily-report-20261007-rx'}, {'asset_id': None},
     {'producer': 'altum-bot-cd'}, {'producer': 'amaterasu:wmi-pg-dailybackup'},
-    {'stream_id': 'amaterasu:v2-other'}, {'host': 'thoth'}, {'session_name': 'other'},
+    {'stream_id': 'host-a:v2-other'}, {'host': 'host-b'}, {'session_name': 'other'},
     {'tags': ['daily-report', 'extra']}, {'tags': []}, {'title': 'Anything else'},
     {'title': 'Daily report 20261008'}, {'body': ''}, {'body': None}, {'stream_id': None},
     {'body': 'x' * (64 * 1024 + 1)}, {'request_id': 'x' * 121}, {'review_status': 'approved'},
@@ -346,9 +346,9 @@ def test_concurrent_principal_and_other_caller_cannot_both_write(credentials, tm
         for attempt in range(10):
             async with Harness(str(tmp_path / f'assets-{attempt}.db')) as h:
                 principal = frame(_auth_context={'service_authenticated': True, 'service_actor': BRIEF})
-                seat = frame(from_stream_id='amaterasu:v2-seat', stream_id='amaterasu:v2-seat',
-                             producer='amaterasu:v2-seat', body=report_body('Forged.'),
-                             _auth_context={'token_verified': True, 'stream_id': 'amaterasu:v2-seat'})
+                seat = frame(from_stream_id='host-a:v2-seat', stream_id='host-a:v2-seat',
+                             producer='host-a:v2-seat', body=report_body('Forged.'),
+                             _auth_context={'token_verified': True, 'stream_id': 'host-a:v2-seat'})
                 seat.pop('stream_token')
                 order = (principal, seat) if attempt % 2 else (seat, principal)
                 replies = await asyncio.gather(*(h.assets.asset(m) for m in order))
@@ -358,7 +358,7 @@ def test_concurrent_principal_and_other_caller_cannot_both_write(credentials, tm
                 if row['producer'] == BRIEF:
                     assert 'Forged.' not in row['body']
                 else:
-                    assert row['producer'] == 'amaterasu:v2-seat'
+                    assert row['producer'] == 'host-a:v2-seat'
     asyncio.run(run())
 
 
@@ -366,9 +366,9 @@ def test_concurrent_principal_and_other_caller_cannot_both_write(credentials, tm
 def test_no_other_caller_may_be_first_to_write_a_brief(credentials, tmp_path, claim):
     async def run():
         async with Harness(str(tmp_path / 'assets.db')) as h:
-            seat = frame(from_stream_id='amaterasu:v2-seat', stream_id='amaterasu:v2-seat',
-                         producer=BRIEF if claim == 'producer' else 'amaterasu:v2-seat', body=report_body('Forged.'),
-                         _auth_context={'token_verified': True, 'stream_id': 'amaterasu:v2-seat'})
+            seat = frame(from_stream_id='host-a:v2-seat', stream_id='host-a:v2-seat',
+                         producer=BRIEF if claim == 'producer' else 'host-a:v2-seat', body=report_body('Forged.'),
+                         _auth_context={'token_verified': True, 'stream_id': 'host-a:v2-seat'})
             seat.pop('stream_token')
             if claim == 'producer':
                 seat.update(asset_id='other-id', spec_id='spec_other', title='Anything', tags=['x'])
@@ -384,9 +384,9 @@ def test_no_other_caller_may_be_first_to_write_a_brief(credentials, tmp_path, cl
 def test_other_assets_under_the_spec_are_unaffected(credentials, tmp_path):
     async def run():
         async with Harness(str(tmp_path / 'assets.db')) as h:
-            seat = {'type': 'asset.publish', 'request_id': 'r', 'stream_id': 'amaterasu:v2-seat', 'title': 'QA notes',
+            seat = {'type': 'asset.publish', 'request_id': 'r', 'stream_id': 'host-a:v2-seat', 'title': 'QA notes',
                     'content_type': 'report', 'body': report_body('notes'), 'spec_id': SPEC, 'asset_id': 'qa-notes',
-                    '_auth_context': {'token_verified': True, 'stream_id': 'amaterasu:v2-seat'}}
+                    '_auth_context': {'token_verified': True, 'stream_id': 'host-a:v2-seat'}}
             assert (await h.assets.asset(seat))['type'] == 'asset.publish.ok'
     asyncio.run(run())
 

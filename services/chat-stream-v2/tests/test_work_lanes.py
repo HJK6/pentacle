@@ -50,8 +50,8 @@ class Env:
 
     async def seat(self, name, **fields):
         fields.setdefault("provider", "claude")
-        row = await self.store.open_session("amaterasu", name, **fields)
-        return f"amaterasu:{name}", row["session_generation"]
+        row = await self.store.open_session("host-a", name, **fields)
+        return f"host-a:{name}", row["session_generation"]
 
     async def adopt(self, key="stream:x", state="active", owner="fd", lead=None, chat=None, **extra):
         if lead is None and state == "active":
@@ -200,7 +200,7 @@ def test_visible_chat_pointer_validation_v8():
         for target in ({"stream_id": hidden[0], "generation": hidden[1]},
                        {"stream_id": other_composite[0], "generation": other_composite[1]},
                        {"stream_id": FD, "generation": env.gen},
-                       {"stream_id": "amaterasu:missing", "generation": "g"}):
+                       {"stream_id": "host-a:missing", "generation": "g"}):
             with pytest.raises(ValueError) as e:
                 await env.op("set_chat", {"visible_chat": target}, lane=lid, version=1)
             assert code(e) == "work_lane_visible_chat_invalid"
@@ -220,7 +220,7 @@ def test_lead_loss_reconcile_and_restart_v1_v4():
         lead_b = await env.seat("lead-b", role="lead", parent_stream_id=FD)
         await env.op("set_lead", {"lead": {"stream_id": lead_b[0], "generation": lead_b[1]}},
                      lane=lid, version=1)
-        await env.store.mark_closed("amaterasu", "lead-b", closed_at="2026-10-07T20:00:00Z",
+        await env.store.mark_closed("host-a", "lead-b", closed_at="2026-10-07T20:00:00Z",
                                     pane_status="pane_dead", close_kind="manager_close")
         rows = await env.store.work_lane_rows()
         assert rows[0]["work_state"] == "active" and rows[0]["_qualifies"] is False
@@ -233,7 +233,7 @@ def test_lead_loss_reconcile_and_restart_v1_v4():
         assert shown["lane"]["work_state"] == "paused"
         assert shown["lane"]["work_state_reason"] == "lead_lost"
         assert [e["operation"] for e in shown["events"]] == ["adopt", "set_lead", "lead_lost"]
-        assert shown["events"][1]["payload"]["prior_lead"]["stream_id"] == "amaterasu:lead-a"
+        assert shown["events"][1]["payload"]["prior_lead"]["stream_id"] == "host-a:lead-a"
 
     with tempfile.TemporaryDirectory() as tmp:
         path = str(Path(tmp) / "v1.db")
@@ -245,7 +245,7 @@ def test_blocked_survives_lead_loss_v4():
     async def body(env):
         lead = await env.seat("lead-blk", role="lead", parent_stream_id=FD)
         lid = (await env.adopt(key="stream:blk", state="blocked", lead=lead, blocker="keys"))["lane"]["lane_id"]
-        await env.store.mark_closed("amaterasu", "lead-blk", closed_at="2026-10-07T20:00:00Z",
+        await env.store.mark_closed("host-a", "lead-blk", closed_at="2026-10-07T20:00:00Z",
                                     pane_status="pane_dead")
         assert await env.store.reconcile_work_lanes() == []
         lane = (await env.store.get_work_lane(lid))["lane"]
@@ -345,7 +345,7 @@ def test_emit_started_once_and_owner_kind_v13():
             env.confirm("q-other-action", lid, "set_owner:fd"),
             env.confirm("q-not-yet", lid, "set_state:done", answer="Not yet"),
             env.confirm("q-relay", lid, "set_state:done", actor_class="verified_agent_relay"),
-            env.confirm("q-producer", lid, "set_state:done", producer="amaterasu:someone"),
+            env.confirm("q-producer", lid, "set_state:done", producer="host-a:someone"),
         ]
         for c in bad:
             with pytest.raises(ValueError) as e:
@@ -415,18 +415,18 @@ def test_each_lead_loss_path_reconciles_once_v4(path):
         blk = (await env.adopt(key="stream:loss-blk", state="blocked", lead=blk_lead, blocker="b"))["lane"]
         for name in ("loss-lead", "loss-blk"):
             if path == "visibility_hidden":
-                await env.store.update_session("amaterasu", name, visibility="hidden")
+                await env.store.update_session("host-a", name, visibility="hidden")
             elif path == "role_qa":
-                await env.store.update_session("amaterasu", name, role="qa")
+                await env.store.update_session("host-a", name, role="qa")
             elif path == "new_generation":
-                await env.store.mark_closed("amaterasu", name, closed_at="2026-10-07T20:00:00Z",
+                await env.store.mark_closed("host-a", name, closed_at="2026-10-07T20:00:00Z",
                                             pane_status="pane_dead")
-                await env.store.open_session("amaterasu", name, provider="claude", role="lead",
+                await env.store.open_session("host-a", name, provider="claude", role="lead",
                                              parent_stream_id=FD)
             else:
-                row = await env.store.fetch_session("amaterasu", name)
+                row = await env.store.fetch_session("host-a", name)
                 gen = lead[1] if name == "loss-lead" else blk_lead[1]
-                await env.store.mark_reconciled_dead("amaterasu", name, expected_generation=gen,
+                await env.store.mark_reconciled_dead("host-a", name, expected_generation=gen,
                                                      presumed_dead_at="2026-10-07T20:00:00Z",
                                                      closed_at="2026-10-07T20:00:00Z")
                 assert row is not None
@@ -457,7 +457,7 @@ def test_handoff_follows_successor_d2():
         moved = await env.store.work_lane_handoff(lead[0], succ[0])
         assert [m["lane_id"] for m in moved] == [lid]
         assert await env.store.work_lane_handoff(lead[0], succ[0]) == []
-        await env.store.mark_closed("amaterasu", "ho-pred", closed_at="2026-10-07T20:00:00Z",
+        await env.store.mark_closed("host-a", "ho-pred", closed_at="2026-10-07T20:00:00Z",
                                     pane_status="pane_dead", close_kind="handed_off")
         assert await env.store.reconcile_work_lanes() == []
         shown = await env.store.get_work_lane(lid)
@@ -593,7 +593,7 @@ def test_projection_rechecks_visible_chat_eligibility_qa_f3():
         await env.adopt(key="stream:f3", state="paused", lead=False, owner="operator",
                         chat={"stream_id": chat[0], "generation": chat[1]})
         assert (await env.store.work_lane_rows())[0]["_chat_available"] == "open"
-        await env.store.update_session("amaterasu", "f3-chat", visibility="hidden")
+        await env.store.update_session("host-a", "f3-chat", visibility="hidden")
         assert (await env.store.work_lane_rows())[0]["_chat_available"] == "unavailable"
     run(body)
 
