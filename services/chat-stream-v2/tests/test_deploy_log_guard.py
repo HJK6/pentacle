@@ -99,7 +99,11 @@ def isolated_release(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "verify_deploy_guard", lambda *_a, **_k: {"sole_deployer": True})
     monkeypatch.setattr(module, "_ensure_v2_usage_probe_launchd", lambda *_a: False)
     monkeypatch.setattr(module, "_v2_usage_probe_rollback", lambda *_a: lambda: None)
-    monkeypatch.setattr(module, "_launchd_state", lambda *_a: module.LaunchdState(True, 111))
+    calls = []
+    # The job is loaded (pid 111) until a bootout, and gone after it, as launchd reports it.
+    monkeypatch.setattr(module, "_launchd_state", lambda *_a: (
+        module.LaunchdState(False, None, True) if any(call[1:2] == ("bootout",) for call in calls)
+        else module.LaunchdState(True, 111)))
     # Exercise the real post-activation/stamp boundary, replacing only the live boot probe.
     monkeypatch.setattr(module, "_apply_post_activation", partial(
         module._apply_post_activation,
@@ -115,7 +119,6 @@ def isolated_release(tmp_path, monkeypatch):
         "tiers": [{"tier": tier, "passed": True} for tier in ("unit", "smoke")],
         "passed": True,
     }))
-    calls = []
 
     def activate(*, reload=False, rollback=False, same_ref=False, fail=False, override=None):
         selected = prior if same_ref else target
