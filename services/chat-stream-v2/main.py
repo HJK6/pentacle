@@ -25,6 +25,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 
 import socket
 from pathlib import Path
@@ -67,8 +68,9 @@ from usage_provenance import ProvenanceSink
 from retention import RetentionConfig, RetentionJob
 from routing_integrity import RoutingIntegrity
 from server import RECENT_LIMIT, Server
+from shutdown_budget import ShutdownBudget, configured_budget_s
 from sessions import Sessions
-from spawnctl import SpawnCtl
+from spawnctl import SHUTDOWN_SPAWN_DRAIN_S, SpawnCtl
 from tmux_transport import Tmux
 from store import Store
 from submission_events import DurableUserEventProof
@@ -958,30 +960,80 @@ async def run(args: argparse.Namespace) -> int:
 
     await stop
     log.info("shutdown requested")
+    await shutdown(
+        ShutdownBudget(configured_budget_s()),
+        server=server, spawnctl=spawnctl, tasks=tasks, composites=list(assistant_composites.values()),
+        lane_rulings=server.lane_rulings, notify=notify, assets=assets, lifecycle=lifecycle, store=store,
+    )
+    return 0
 
-    # Bounded, cancellation-aware shutdown (B14). Never touches panes (B10).
+
+#: How much earlier than its shutdown step Server.close's own waits must end.
+SERVER_CLOSE_MARGIN_S = 0.1
+
+
+async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composites, lane_rulings,
+                   notify, assets, lifecycle, store) -> None:
+    """Bounded, cancellation-aware shutdown (B14) under one absolute deadline:
+    every step gets min(its cap, what remains), and an overrunning step is
+    abandoned, so the store stops before launchd's SIGKILL. Never touches
+    panes (B10)."""
+    # Restart continuity: no new spawn admission once stopping, then hand every
+    # in-flight admitted spawn to durable state while the store still runs.
+    server.spawn_ready.clear()
+    await budget.step("spawn-drain", spawnctl.drain_background_spawns(
+        timeout_s=budget.remaining(SHUTDOWN_SPAWN_DRAIN_S)), cap=SHUTDOWN_SPAWN_DRAIN_S)
     # Background tasks stop before the store does, so none is mid-submit when
     # the worker thread goes away.
     for task in tasks:
         task.cancel()
     if tasks:
-        await asyncio.wait(tasks, timeout=5)
-    for _composite in assistant_composites.values():
-        await _composite.stop()
-    if server.lane_rulings is not None:
-        await server.lane_rulings.stop()
-    await server.close()
-    await notify.stop()
-    await assets.stop()
-    await lifecycle.stop(reason="signal")
-    store.stop()
-    return 0
+        await budget.step("background-tasks", asyncio.wait(tasks), cap=5.0)
+    for composite in composites:
+        await budget.step("composite", composite.stop(), cap=2.0)
+    if lane_rulings is not None:
+        await budget.step("lane-rulings", lane_rulings.stop(), cap=2.0)
+    # Server.close's own waits end a little before its step does, so a stalled
+    # wait still leaves time to close both listeners rather than be abandoned.
+    server_s = budget.remaining(8.0)
+    await budget.step("server", server.close(deadline=time.monotonic() + max(0.0, server_s - SERVER_CLOSE_MARGIN_S)),
+                      cap=8.0)
+    await budget.step("notify", notify.stop(), cap=2.0)
+    await budget.step("assets", assets.stop(), cap=2.0)
+    await budget.step("lifecycle", lifecycle.stop(reason="signal"), cap=2.0)
+    store.stop(timeout=budget.remaining(5.0, reserved=False))
+    if budget.abandoned:
+        log.warning("shutdown abandoned steps after the budget: %s", ", ".join(budget.abandoned))
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     configure_logging(getattr(logging, str(args.log_level).upper(), logging.INFO))
-    return asyncio.run(run(args))
+    return run_bounded(run(args))
+
+
+#: Loop teardown after shutdown returns. asyncio.run() would wait without bound
+#: for leftover tasks, so a task that ignores cancellation could hold the
+#: process open past launchd's 20 s window.
+LOOP_TEARDOWN_GRACE_S = 0.5
+
+
+def run_bounded(coro) -> int:
+    """asyncio.run(), except loop teardown waits at most LOOP_TEARDOWN_GRACE_S
+    for leftover tasks; the shutdown budget has already been spent."""
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(coro)
+        leftovers = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in leftovers:
+            task.cancel()
+        if leftovers:
+            loop.run_until_complete(asyncio.wait(leftovers, timeout=LOOP_TEARDOWN_GRACE_S))
+        return result
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 if __name__ == "__main__":

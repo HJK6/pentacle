@@ -1563,3 +1563,381 @@ def test_compiled_packet_and_hash_cannot_replace_frozen_inputs(config):
     with pytest.raises(ValueError,match='immutable inputs'):
         asyncio.run(pipeline.history_consolidate(baseline,[1]))
     assert len(rpc.sent)==1
+
+
+# --- daemon restart continuity (spec_pentacle__daemon_restart_continuity_2026_10) ---
+# Matrix cells C4/C4b run the real `run --on-demand` path against a disposable
+# daemon (tests/soak/test_restart_continuity.py); these pin the driver contract.
+
+
+class DaemonDown(Transport):
+    """The daemon restarted under the Astra await and stays down."""
+    def __init__(self):
+        super().__init__()
+        self.down = False
+
+    def _gate(self):
+        if self.down:
+            raise ConnectionRefusedError(111, "Connect call failed ('127.0.0.1', 7791)")
+
+    async def await_report_once(self, config, stream, msg_id, **kwargs):
+        if "astra" in stream:
+            self.down = True
+        self._gate()
+        return await super().await_report_once(config, stream, msg_id, **kwargs)
+
+    async def assistant_once(self, config, payload):
+        self._gate()
+        return await super().assistant_once(config, payload)
+
+    async def close_once(self, config, stream, **kwargs):
+        self._gate()
+        return await super().close_once(config, stream, **kwargs)
+
+    async def send_receipt_once(self, config, target, key):
+        self._gate()
+        return await super().send_receipt_once(config, target, key)
+
+
+def test_unrecoverable_outage_persists_failure_then_flushes_notice_once(config):
+    """C4b: primary error survives cleanup, notice queued before any RPC, flushed once."""
+    source(config.memory_root, "one", body="No lessons.")
+    rpc = DaemonDown()
+    pipeline = retro.Pipeline(config, rpc)
+    with pytest.raises(ConnectionRefusedError):
+        asyncio.run(pipeline.run(at()))
+    root = config.state_root / "runs/2026-09-28"
+    failure = retro.read(root / "failure.json")
+    assert failure["run_id"] == "2026-09-28" and failure["stage"] == "astra" and failure["seq"] == 1
+    assert failure["error"]["class"] == "ConnectionRefusedError" and failure["error"]["reason"] == "transport_loss"
+    assert failure["notice"] == "pending"
+    assert "cleanup_error" in failure and "notice_error" in failure
+    assert retro.read(root / "failure-delivery.json")["pending"]["seq"] == 1
+    rpc.down = False
+    rpc.await_report_once = Transport.await_report_once.__get__(rpc)
+    assert asyncio.run(pipeline.run(at()))["delivered"] == ["2026-09-28"]
+    bodies = [r["payload"]["text"] for r in rpc.sent.values()]
+    assert sum(b.startswith("REPORT daily-retro failure") for b in bodies) == 1
+    assert sum(b.startswith("REPORT daily-retro ready") for b in bodies) == 1
+    assert len(rpc.spawns) == 2  # no respawn: Sol and Astra once each
+    assert retro.read(root / "failure.json")["notice"] == "delivered"
+    asyncio.run(pipeline.run(at()))
+    assert len(rpc.sent) == 2  # the delivered notice is never resent
+
+
+def test_cleanup_error_never_replaces_primary_error(config):
+    source(config.memory_root, "one")
+    class CleanupDown(Transport):
+        async def await_report_once(self, config, stream, msg_id, **kwargs):
+            if "astra" in stream:
+                raise RuntimeError("primary astra failure")
+            return await super().await_report_once(config, stream, msg_id, **kwargs)
+        async def close_once(self, config, stream, **kwargs):
+            raise ConnectionRefusedError(111, "refused")
+    with pytest.raises(RuntimeError, match="primary astra failure"):
+        asyncio.run(retro.Pipeline(config, CleanupDown()).run(at()))
+    failure = retro.read(config.state_root / "runs/2026-09-28/failure.json")
+    assert failure["error"] == retro.structured_error(RuntimeError("primary astra failure"))
+    assert failure["cleanup_error"]["class"] == "ConnectionRefusedError"
+
+
+def test_interrupt_queues_notice_truthfully_without_rpc(config):
+    """Finding (c): a BaseException exit queues the notice; no delivery RPC is made."""
+    source(config.memory_root, "one")
+    class Interrupted(Transport):
+        async def await_report_once(self, config, stream, msg_id, **kwargs):
+            if "astra" in stream:
+                raise KeyboardInterrupt
+            return await super().await_report_once(config, stream, msg_id, **kwargs)
+        async def assistant_once(self, config, payload):
+            raise AssertionError("no delivery RPC on an interrupt")
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(retro.Pipeline(config, Interrupted()).run(at()))
+    root = config.state_root / "runs/2026-09-28"
+    assert retro.read(root / "failure.json")["notice"] == "pending"
+    assert retro.read(root / "failure-delivery.json")["pending"]["stage"] == "astra"
+
+
+def test_newer_failure_supersedes_unlanded_notice_and_keeps_history(config):
+    """Finding (a): one notice per failure; the latest is marked, earlier kept."""
+    source(config.memory_root, "one")
+    rpc = DaemonDown()
+    pipeline = retro.Pipeline(config, rpc)
+    for down_from_start in (False, True):  # the second pass cannot flush notice 1
+        rpc.down = down_from_start
+        with pytest.raises(ConnectionRefusedError):
+            asyncio.run(pipeline.run(at()))
+    failure = retro.read(config.state_root / "runs/2026-09-28/failure.json")
+    assert failure["seq"] == 2 and failure["latest"] is True and failure["notice"] == "pending"
+    assert [h["seq"] for h in failure["history"]] == [1]
+    assert failure["history"][0]["notice"] == "superseded by failure 2"
+    pending = retro.read(config.state_root / "runs/2026-09-28/failure-delivery.json")["pending"]
+    assert pending["seq"] == 2
+
+
+def test_recorded_review_supersedes_pending_notice(config, monkeypatch):
+    """Finding (d): a later-reviewed run never leaves a stale pending notice."""
+    source(config.memory_root, "one")
+    rpc = DaemonDown()
+    pipeline = retro.Pipeline(config, rpc)
+    with pytest.raises(ConnectionRefusedError):
+        asyncio.run(pipeline.run(at()))
+    root = config.state_root / "runs/2026-09-28"
+    retro.atomic(root / "review.json", {"recorded": True})
+    rpc.down = False
+    asyncio.run(pipeline.run(at()))
+    assert retro.read(root / "failure-delivery.json")["pending"] is None
+    assert retro.read(root / "failure.json")["notice"] == "superseded: review recorded"
+    assert not rpc.sent
+
+
+# --------------------------------------------------------------------------- #
+# Error records never carry message text (cycle 2, B1 pivot). Property tests:
+# fuzzed messages with secret stand-ins in quoted/escaped/newline/backslash and
+# cut forms; no persisted or delivered field holds any part of them.
+# --------------------------------------------------------------------------- #
+
+# Stand-in alphabet without hex digits, so a 6-character window can never be
+# a coincidental match inside a sha256 or a timestamp.
+_STANDIN = "GHJKLMNPQRSTUVWXYZghjkmnpqrstuvwxyz"
+_FORMS = (
+    'password="{a} {b}" tail', "password='{a} {b}", "password='{a} {b}\\", 'api_key="{a} {b}\\',
+    'password="{a}\\\n{b}"', "token=\"{a} \\\" {b}\" tail", "secret={a}}}{b} rest", 'secret={a}"{b} rest',
+    "secret={a};{b}", "GET /x?access_token={a}&y={b}", "Authorization: Bearer {a}", "Authorization: 'Bearer {a} {b}'",
+    '{{"stream_token": "{a}", "next": "{b}"}}', "api_key='{a}\\'{b}'", "Bearer\t{a}\n{b}", "{a}{b}",
+    "token=\x00{a}\x7f{b}", "pässwörd={a} {b}", "access_token=[redacted] {a}", "credential:{a}\r\n{b}",
+)
+
+
+def _standin(rng):
+    return "".join(rng.choice(_STANDIN) for _ in range(rng.randint(10, 24)))
+
+
+def _fuzzed_messages(seed, count):
+    import random
+    rng = random.Random(seed)
+    for _ in range(count):
+        a, b = _standin(rng), _standin(rng)
+        raw = rng.choice(_FORMS).format(a=a, b=b)
+        if rng.random() < 0.3:  # a cut string
+            raw = raw[: rng.randint(len(raw) // 2, len(raw))]
+        if rng.random() < 0.3:
+            raw = rng.choice(("prefix: ", "x" * rng.randint(0, 400) + " ", "\\")) + raw
+        parts = [p for p in (a, b) if len(p) >= 6 and any(p[i:i + 6] in raw for i in range(len(p) - 5))]
+        yield raw, parts
+
+
+def _leaks(text, parts):
+    return [p[i:i + 6] for p in parts for i in range(len(p) - 5) if p[i:i + 6] in text]
+
+
+def test_structured_error_holds_no_message_text_and_is_idempotent(tmp_path):
+    for n, (raw, parts) in enumerate(_fuzzed_messages(1, 2000)):
+        for exc in (RuntimeError(raw), ConnectionRefusedError(111, raw), TimeoutError(raw), raw):
+            record = retro.structured_error(exc, tmp_path if n % 50 == 0 else None)
+            assert set(record) == {"class", "reason", "bytes", "sha256"}
+            text = json.dumps(record) + retro.render_error(record)
+            assert not _leaks(text, parts), (raw, record)
+            assert retro.structured_error(record) == record  # idempotent re-sanitize
+            assert retro.structured_error(retro.structured_error(exc)) == retro.structured_error(exc)
+    exc = ConnectionRefusedError(111, "refused")
+    assert retro.structured_error(exc)["reason"] == "transport_loss"
+    assert retro.structured_error(TimeoutError())["reason"] == "timeout"
+    assert retro.structured_error(FileNotFoundError(2, "x"))["reason"] == "os_error:ENOENT"
+    assert retro.structured_error(KeyboardInterrupt())["reason"] == "interrupted"
+
+
+ROUTES = ("raised", "dynamic-class", "failed-report", "invalid-packet")
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("seed", range(12))
+def test_failure_records_and_notice_never_persist_or_deliver_message_text(tmp_path, seed, route):
+    """Every file the run writes (except the local 0600 raw copies) and every
+    delivered body is free of the failing text, whether it arrives as a raised
+    exception, in a dynamically named exception class, in a failed worker
+    report, or in an invalid terminal packet; across primary, cleanup and
+    notice-delivery errors and a second pass."""
+    raw, parts = next(_fuzzed_messages(1000 + seed, 1))
+    memory = tmp_path / "memory"
+    for folder in ("completed", "deprecated"):
+        (memory / "work" / folder).mkdir(parents=True)
+    (tmp_path / "token").write_text("fixture")
+    config = retro.Settings(memory, tmp_path / "state", "ws://127.0.0.1:12345", tmp_path / "token", "fixture",
+                            isolated=True)
+    source(config.memory_root, "one")
+    dynamic = type(_standin(__import__("random").Random(seed)), (RuntimeError,), {})
+    parts = [*parts, dynamic.__name__]
+
+    class Failing(Transport):
+        notice_down = True
+
+        async def await_report_once(self, config, stream, msg_id, **kwargs):
+            if "astra" not in stream:
+                return await super().await_report_once(config, stream, msg_id, **kwargs)
+            if route == "raised":
+                raise RuntimeError(raw)
+            if route == "dynamic-class":
+                raise dynamic(raw)
+            if route == "failed-report":
+                return {"type": "await_report.ok", "ok": False, "result_kind": "report", "status": "error",
+                        "reason": raw, "report": {"status": "error", "reason": raw, "summary": raw}}
+            response = await super().await_report_once(config, stream, msg_id, **kwargs)
+            response["report"]["extras"]["daily_retro"]["run_id"] = raw
+            response["report"]["summary"] = raw
+            return response
+
+        async def close_once(self, config, stream, **kwargs):
+            raise ConnectionRefusedError(111, raw)
+
+        async def send_receipt_once(self, config, target, key):
+            if self.notice_down:
+                raise OSError(5, raw)
+            return await super().send_receipt_once(config, target, key)
+
+    rpc = Failing()
+    with pytest.raises(Exception):
+        asyncio.run(retro.Pipeline(config, rpc).run(at()))
+    rpc.notice_down = False
+    with pytest.raises(Exception):  # Astra still fails; the queued notice flushes first
+        asyncio.run(retro.Pipeline(config, rpc).run(at()))
+    root = config.state_root / "runs/2026-09-28"
+    bodies = [r["payload"]["text"] for r in rpc.sent.values()]
+    assert bodies and all(b.startswith("REPORT daily-retro failure") for b in bodies)
+    persisted = {p: p.read_text(errors="replace") for p in config.state_root.rglob("*")
+                 if p.is_file() and p.parent.name != "errors"}
+    for path, text in [*persisted.items(), *(("delivered", b) for b in bodies)]:
+        assert not _leaks(text, parts), (path, raw)
+    failure = retro.read(root / "failure.json")
+    for entry in [failure, *failure["history"]]:
+        for field in ("error", "cleanup_error", "notice_error"):
+            if field in entry:
+                assert retro.structured_error(entry[field]) == entry[field], entry[field]  # genuine record
+    assert failure["error"]["class"] in {"RuntimeError", "ValueError", "KeyError", "TypeError"}
+    assert failure["cleanup_error"]["reason"] == "transport_loss"
+    assert any(h.get("notice_error", {}).get("reason") == "os_error:EIO" for h in [failure, *failure["history"]])
+    kept = list((root / "errors").iterdir())
+    assert kept and all(p.stat().st_mode & 0o777 == 0o600 for p in kept)
+    assert (root / "errors").stat().st_mode & 0o777 == 0o700
+    if route in ("raised", "dynamic-class"):
+        assert raw.encode("utf-8", "backslashreplace") in {p.read_bytes() for p in kept}
+
+
+def test_record_vocabulary_is_fixed_and_forged_records_are_not_accepted():
+    """Cycle 2 re-read B1-CLASS: neither field can carry caller-chosen text."""
+    secret = "QzKwHrTyMnPvXsJg"
+    for cls in (type(secret, (RuntimeError,), {}), type(secret, (Exception,), {}), type(secret, (OSError,), {})):
+        record = retro.structured_error(cls("x"))
+        assert secret not in json.dumps(record) and record["class"] in {"RuntimeError", "Exception", "OSError"}
+    spoof = type("ValueError", (Exception,), {"__module__": "builtins"})  # not the genuine builtins class
+    assert retro.structured_error(spoof("x"))["class"] == "Exception"
+    genuine = retro.structured_error(ConnectionResetError(104, "x"))
+    assert retro.structured_error(genuine) == genuine
+    for forged in ({**genuine, "reason": secret}, {**genuine, "class": secret}, {**genuine, "reason": "os_error:" + secret},
+                   {**genuine, "extra": secret}, {**genuine, "bytes": True}):
+        record = retro.structured_error(forged)
+        assert record["class"] == "LegacyText" and secret not in json.dumps(record) + retro.render_error(forged)
+
+
+def test_json_shaped_forged_records_become_text_records_without_error():
+    """Cycle 3 B1 check: non-string class or reason (e.g. a list from JSON) is
+    a forged record, converted like any raw text, never a TypeError."""
+    secret = "QzKwHrTyMnPvXsJg"
+    genuine = retro.structured_error(TimeoutError("x"))
+    for forged in ({**genuine, "class": [secret]}, {**genuine, "reason": [secret]},
+                   {**genuine, "class": {"k": secret}}, {**genuine, "reason": None}):
+        record = retro.structured_error(forged)
+        assert record["class"] == "LegacyText" and secret not in json.dumps(record) + retro.render_error(forged)
+
+
+def test_crafted_worker_receipt_with_raw_siblings_is_projected_again(config):
+    """Cycle 3 B1 check: a receipt is recognised only by its exact projected
+    schema; a valid structured `error` does not bless raw sibling fields."""
+    secret = "QzKwHrTyMnPvXsJg"
+    manifest = retro.collect(config, at())
+    root = config.state_root / "runs" / manifest["run_id"]
+    error = retro.structured_error(RuntimeError("x"))
+    crafted = {"result_kind": "report", "status": "error", "report_id": "r", "ledger_row_id": 1, "error": error,
+               "reason": secret, "report": {"summary": secret}}
+    wrong_types = {"result_kind": ["report"], "status": "error", "report_id": "r", "ledger_row_id": 1, "error": error}
+    retro.atomic(root / "astra.json", {"attempt": 1, "report_id": "r", "failed": True, "failure": crafted,
+                                       "report": {**crafted, "result_kind": secret}})
+    retro.atomic(root / "sol-attempts.json", [{"attempt": 1, "report_id": "r", "failed": True,
+                                               "failure": wrong_types}])
+    retro.Pipeline(config, Transport()).normalize_retained_failure_state(manifest)
+    astra = retro.read(root / "astra.json")
+    assert set(astra["failure"]) == {"result_kind", "status", "report_id", "ledger_row_id", "error"}
+    assert astra["failure"]["error"]["class"] == "WorkerReport"
+    assert set(retro.read(root / "sol-attempts.json")[0]["failure"]) == set(astra["failure"])
+    for path in root.rglob("*"):
+        if path.is_file() and path.parent.name != "errors":
+            assert secret not in path.read_text(errors="replace"), path
+    projected = retro._worker_failure_receipt({"report": {"status": "done"}}, root, "r")
+    assert retro._projected_stage({"failed": True, "report_id": "r", "failure": projected}, root)["failure"] == projected
+
+
+def test_retained_legacy_failure_state_is_converted_and_never_resent(config):
+    """Cycle 2 re-read B1-LEGACY: text records and an unlanded notice attempt
+    written before structured records are converted on the next pass. The
+    attempt keeps its key (exactly-once) and only the structured body is
+    sent; a landed legacy attempt is never resent."""
+    secret = "QzKwHrTyMnPvXsJg"
+    old = 'RuntimeError: token="' + secret + '\\'
+    manifest = retro.collect(config, at())
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "failure.json", {"run_id": manifest["run_id"], "seq": 2, "error": old, "stage": "astra",
+                                         "notice": "pending", "cleanup_error": old,
+                                         "history": [{"seq": 1, "error": old, "notice": "delivered"}]})
+    payload = {"host": "fixture", "session_name": "reviewer", "text": old, "request_id": "legacy-2",
+               "optimistic_id": "legacy-2"}
+    landed = {**payload, "request_id": "legacy-1", "optimistic_id": "legacy-1"}
+    retro.atomic(root / "failure-delivery.json", {
+        "pending": {"seq": 2, "stage": "astra", "failure": old},
+        "attempts": [{"target": "fixture:reviewer", "generation": "g1", "seq": 1, "request_id": "legacy-1",
+                      "payload": landed, "confirmed": True, "receipt": {"delivery": "landed", "payload": landed}},
+                     {"target": "fixture:reviewer", "generation": "g1", "seq": 2, "request_id": "legacy-2",
+                      "payload": payload}]})
+    retro.atomic(root / "astra.json", {"attempt": 1, "report_id": "r", "failed": True,
+                                       "failure": {"type": "await_report.ok", "ok": False, "reason": old}})
+    rpc = Transport()
+    asyncio.run(retro.Pipeline(config, rpc).deliver(manifest, failure=True))
+    assert list(rpc.sent) == ["legacy-2"]  # same key; the landed one is not resent
+    assert secret not in rpc.sent["legacy-2"]["payload"]["text"]
+    assert rpc.sent["legacy-2"]["payload"]["text"].startswith("REPORT daily-retro failure")
+    retro.record_failure(root, manifest["run_id"], stage="astra", error=retro.structured_error(RuntimeError("new")),
+                         notice="pending")
+    for path in root.rglob("*"):
+        if path.is_file() and path.parent.name != "errors":
+            assert secret not in path.read_text(errors="replace"), path
+    assert secret in "".join(p.read_text() for p in (root / "errors").iterdir())
+
+
+def test_cli_failure_writes_only_the_structured_record_to_stderr(tmp_path):
+    """Cycle 2 B1: the scheduled job's stderr is a log file. An uncaught error
+    leaves a structured record there; its text and traceback stay in the
+    0600 errors folder."""
+    import os
+    import subprocess
+    import sys
+    secret = "QzKwHrTyMnPvXsJg"
+    memory, state = tmp_path / "memory", tmp_path / "state"
+    for folder in ("completed", "deprecated"):
+        (memory / "work" / folder).mkdir(parents=True)
+    (tmp_path / "token").write_text("fixture")
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"timezone": "America/Chicago", "memory_root": str(memory), "state_root": str(state),
+                               "token_path": str(tmp_path / "token"), "ws_url": "ws://127.0.0.1:12345",
+                               "host": "fixture", "isolated": True}))
+    service = Path(retro.__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(service.parent / "agent-orch"), str(service.parent), str(service)])}
+    out = subprocess.run([sys.executable, str(service / "tools/daily_retro.py"), "summary", "--config", str(cfg),
+                          "--end-day", f"password='{secret}\\"], cwd=str(service), env=env,
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 1, out.stderr
+    assert secret[:6] not in out.stderr and secret[:6] not in out.stdout and "Traceback" not in out.stderr
+    record = json.loads(out.stderr.strip().splitlines()[-1])["error"]
+    assert record["class"] == "ValueError" and set(record) == {"class", "reason", "bytes", "sha256"}
+    kept = {p.name: p for p in (state / "errors").iterdir()}
+    assert f"{record['sha256']}.txt" in kept and f"{record['sha256']}.traceback.txt" in kept
+    assert all(p.stat().st_mode & 0o777 == 0o600 for p in kept.values())
+    assert secret in kept[f"{record['sha256']}.traceback.txt"].read_text()

@@ -813,39 +813,55 @@ class Server:
         assert self._ws_server is not None, "bind() must be called before serve_forever()"
         await self._ws_server.serve_forever()
 
-    async def close(self) -> None:
+    async def close(self, *, deadline: float | None = None) -> None:
+        """Stop serving. `deadline` (monotonic) is the daemon's shutdown
+        budget: every wait below takes min(its own cap, what remains), and a
+        task that ignores cancellation is left behind, not awaited."""
+        def within(cap: float) -> float:
+            return cap if deadline is None else max(0.0, min(cap, deadline - time.monotonic()))
+
+        async def settle(tasks: Any, cap: float = 3.0) -> None:
+            if deadline is None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            elif tasks:
+                await asyncio.wait(tasks, timeout=within(cap))
+
         if self._consent_expiry_task is not None:
             self._consent_expiry_task.cancel()
-            await asyncio.gather(self._consent_expiry_task, return_exceptions=True)
+            await settle((self._consent_expiry_task,), cap=1.0)
             self._consent_expiry_task = None
         # spec_example_2026_01:
         # let accepted sends finish injecting before teardown, then cancel any
         # stragglers so shutdown stays bounded.
         if self._detached_send_tasks:
             pending = tuple(self._detached_send_tasks)
-            _, still_running = await asyncio.wait(pending, timeout=5.0)
+            _, still_running = await asyncio.wait(pending, timeout=within(5.0))
             for task in still_running:
                 task.cancel()
             if still_running:
-                await asyncio.gather(*still_running, return_exceptions=True)
+                await settle(still_running)
         for task in tuple(self._client_writer_tasks.values()):
             task.cancel()
         self._client_writer_tasks.clear()
         if self._tls_ws_server is not None:
             self._tls_ws_server.close()
-            try:
-                await asyncio.wait_for(self._tls_ws_server.wait_closed(), timeout=3)
-            except (asyncio.TimeoutError, asyncio.CancelledError):  # pragma: no cover
-                pass
+            await self._wait_listener_closed(self._tls_ws_server, within(3.0))
             self._tls_ws_server = None
         if self._ws_server is None:
             return
         self._ws_server.close()
-        try:
-            await asyncio.wait_for(self._ws_server.wait_closed(), timeout=3)
-        except (asyncio.TimeoutError, asyncio.CancelledError):  # pragma: no cover
-            pass
+        await self._wait_listener_closed(self._ws_server, within(3.0))
         self._ws_server = None
+
+    @staticmethod
+    async def _wait_listener_closed(listener: Any, timeout: float) -> None:
+        closing = asyncio.ensure_future(listener.wait_closed())
+        done, _ = await asyncio.wait({closing}, timeout=timeout)
+        if not done:  # never wait on a listener's cancellation past the budget
+            closing.cancel()
+            closing.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+            return
+        closing.result()  # a listener error propagates, as wait_for did
 
     # -- connection --------------------------------------------------------
 
@@ -3017,11 +3033,14 @@ class Server:
             # chatter persisted without a paste).
             "_assistant_composite_backend_dispatch": True,
         })
-        return {
+        delivered = {
             "type": "tell.ok", "to_stream_id": composite_stream_id, "tell_id": tell_id,
             "delivery_status": reply.get("delivery_status"),
             "submission_confirmed": reply.get("submission_confirmed"),
         }
+        if reply.get("front_desk_hold_id"):
+            delivered["front_desk_hold_id"] = reply["front_desk_hold_id"]
+        return delivered
 
     async def _flush_composite_tells(self, composite: Any) -> int:
         """Deliver this composite's queued tells, in order, to the new binding.
@@ -3040,7 +3059,8 @@ class Server:
                 break
             if result is None:
                 break
-            if not self._composite_tell_committed(result):
+            if not (self._composite_tell_committed(result)
+                    or await self._composite_tell_durably_held(result)):
                 # Delivery is not yet committed (e.g. pasted_unsubmitted: the
                 # paste sits in an active draft and the target has not received
                 # it as input).  Keep the row queued and stop in order — a later
@@ -3050,6 +3070,21 @@ class Server:
             await self.store.delete_composite_tell(seq=row["seq"])
             delivered += 1
         return delivered
+
+    async def _composite_tell_durably_held(self, reply: dict[str, Any]) -> bool:
+        """Whether the front-desk digest durably holds this tell for the bound seat.
+
+        A peer tell to the front desk is delivered into the digest hold (no paste),
+        the same as while bound. Only a hold whose notice row survives a restart
+        counts; a drop or any reply without that row stays queued. A replay of the
+        same tell_id recovers the same hold, so this never double-delivers.
+        """
+        hold_id = str(reply.get("front_desk_hold_id") or "")
+        if reply.get("delivery_status") != "persisted" or not hold_id:
+            return False
+        row = await self.store.submit(lambda conn: conn.execute(
+            "SELECT 1 FROM v2_outbound_notices WHERE notice_id=?", (hold_id,)).fetchone())
+        return row is not None
 
     @staticmethod
     def _composite_tell_committed(reply: dict[str, Any]) -> bool:
