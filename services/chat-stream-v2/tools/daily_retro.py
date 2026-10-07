@@ -1270,8 +1270,12 @@ def retain_weekly_summary(settings, run_id):
 TRANSPORT_ERRORS = (ConnectionError, ConnectionClosed)
 _SECRET_FIELD = r"[A-Za-z0-9_-]*(?:token|secret|password|passwd|api[_-]?key|authorization|credential)[A-Za-z0-9_-]*"
 _SECRET_PATTERNS = (
-    # key: value / key=value / "key": "value" (quotes optional, Bearer prefix optional)
-    re.compile(rf"""(?i)(["']?\b{_SECRET_FIELD}["']?\s*[:=]\s*)(["']?)(?:bearer\s+)?[^\s"',;&}}]+\2"""),
+    # key: "value" / key='value': the whole quoted value, including spaces,
+    # delimiters and escaped quotes; an unterminated quote runs to the end.
+    re.compile(rf"""(?i)(["']?\b{_SECRET_FIELD}["']?\s*[:=]\s*)(["'])(?:\\.|(?!\2)[^\\])*(?:\2|$)"""),
+    # key: value / key=value unquoted (Bearer prefix optional): everything up to
+    # whitespace, a quote or a closing brace, so `;`/`&`/`,` cannot split it.
+    re.compile(rf"""(?i)(["']?\b{_SECRET_FIELD}["']?\s*[:=]\s*)(?![\s"']|\[redacted\])(?:bearer\s+)?[^\s"'}}]+"""),
     re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]+"),
 )
 

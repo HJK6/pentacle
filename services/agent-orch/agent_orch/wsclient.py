@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 import websockets
+import websockets.exceptions
 
 from . import agent_orch_version
 from .config import Config
@@ -299,8 +300,14 @@ def _is_rpc_retry_eligible(payload: dict[str, Any]) -> bool:
     return verb in RPC_RETRY_ELIGIBLE_TYPES
 
 
+# 2**30 saturates any realistic cap; a deadline-bound retry can reach attempt
+# counts where an unbounded power overflows float conversion.
+_RETRY_BACKOFF_MAX_EXPONENT = 30
+
+
 def _retry_backoff_s(policy: RetryPolicy, attempt: int) -> float:
-    base = min(policy.backoff_cap_s, policy.backoff_base_s * (2 ** max(0, attempt - 1)))
+    exponent = min(max(0, attempt - 1), _RETRY_BACKOFF_MAX_EXPONENT)
+    base = min(policy.backoff_cap_s, policy.backoff_base_s * (2 ** exponent))
     if policy.jitter_fraction <= 0:
         return base
     return base * (1.0 + random.random() * policy.jitter_fraction)
@@ -324,6 +331,13 @@ def _retry_next_delay(policy: RetryPolicy, deadline: float, attempt: int) -> tup
     if remaining <= 0 or delay >= remaining:
         return None, "retry_deadline_exceeded"
     return delay, ""
+
+
+# A refused, reset or dropped socket (a daemon restart). Only these get the
+# deadline-bound reconnect; any other exception keeps the attempt bound.
+_TRANSPORT_LOSS_ERRORS: tuple[type[BaseException], ...] = (
+    OSError, EOFError, asyncio.IncompleteReadError, websockets.exceptions.ConnectionClosed,
+)
 
 
 def _transport_retry_next_delay(policy: RetryPolicy, deadline: float, attempt: int) -> tuple[float | None, str]:
@@ -1620,15 +1634,23 @@ async def _one_shot_rpc(
     from_stream_id: str | None = None,
     infer_from_env: bool = True,
     response_timeout_extra: float = 0.0,
+    deadline_at: float | None = None,
 ) -> dict[str, Any]:
+    """`deadline_at` (monotonic) caps the retry deadline and every wait, for a
+    caller that owns an outer absolute deadline."""
     request_id = payload["request_id"]
     retry_policy = _rpc_retry_policy_from_env(timeout)
     retry_eligible = _is_rpc_retry_eligible(payload)
     retry_deadline = _retry_deadline(time.monotonic(), retry_policy)
+    if deadline_at is not None:
+        retry_deadline = min(retry_deadline, deadline_at)
+        timeout = max(0.01, min(timeout, deadline_at - time.monotonic()))
+        response_timeout_extra = 0.0
     verb = _rpc_verb(payload)
     attempts = 0
     sent_any = False
     last_message: str | None = None
+    transport_loss = False
     while True:
         attempts += 1
         if attempts > 1 and verb == "send":
@@ -1656,13 +1678,14 @@ async def _one_shot_rpc(
         except Exception as exc:
             retry_reason = "websocket_send_failed"
             last_message = str(exc)
+            transport_loss = isinstance(exc, _TRANSPORT_LOSS_ERRORS)
             if not retry_eligible:
                 raise
         finally:
             if ws is not None:
                 await ws.close()
         attempt_bound: int | str = retry_policy.max_attempts
-        if retry_reason == "websocket_send_failed":
+        if retry_reason == "websocket_send_failed" and transport_loss:
             delay, giveup_reason = _transport_retry_next_delay(retry_policy, retry_deadline, attempts)
             if retry_policy.transport_deadline_bound:
                 attempt_bound = "deadline"
@@ -2309,7 +2332,16 @@ async def _await_starting_spawn(
         payload = {"spawn_request_id": request_id} if request_id else {"stream_id": stream_id}
         last: dict[str, Any] = {}
         while (remaining := deadline - time.monotonic()) > 0:
-            last = await await_spawn_once(config, dict(payload), timeout=min(30.0, max(0.1, remaining)))
+            # The spawn's own deadline bounds the nested retry, its waits and
+            # connect/close work: the CLI never outlives its promised deadline.
+            try:
+                last = await asyncio.wait_for(
+                    await_spawn_once(config, dict(payload), timeout=min(30.0, max(0.1, remaining)),
+                                     deadline_at=deadline),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                break
             session = last.get("session") if isinstance(last.get("session"), dict) else None
             if last.get("type") == "await_spawn.ok" and last.get("state") == "ready":
                 return {**accepted, "stream_id": stream_id, "state": "ready",
@@ -2377,10 +2409,13 @@ async def schedule_once(config: Config, payload: dict[str, Any], *, timeout: flo
     return await _one_shot_rpc(config, payload, prefix="schedule", timeout=timeout, from_stream_id=from_stream_id)
 
 
-async def await_spawn_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+async def await_spawn_once(
+    config: Config, payload: dict[str, Any], *, timeout: float = 30.0, deadline_at: float | None = None,
+) -> dict[str, Any]:
     payload["type"] = "await_spawn"
     payload.setdefault("request_id", f"await-spawn-{uuid.uuid4()}")
-    return await _one_shot_rpc(config, payload, prefix="await_spawn", timeout=timeout, response_timeout_extra=1.0)
+    return await _one_shot_rpc(config, payload, prefix="await_spawn", timeout=timeout, response_timeout_extra=1.0,
+                               deadline_at=deadline_at)
 
 
 async def send_cancel_once(config: Config, msg_id: int, *, timeout: float = 30.0) -> dict[str, Any]:

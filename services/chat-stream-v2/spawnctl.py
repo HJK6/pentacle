@@ -95,7 +95,11 @@ log = logging.getLogger("chat_streamd_v2.spawnctl")
 RESERVATION_TTL_S = 180.0
 #: Shutdown bound for in-flight admitted spawns to write their interruption
 #: outcome and release intent ownership while the store is still running.
-SHUTDOWN_SPAWN_DRAIN_S = 10.0
+# One absolute budget for the graceful-shutdown spawn drain. With the shutdown's
+# other bounded waits (background tasks 5 s, accepted sends 5 s, TLS close 3 s)
+# the total stays inside launchd's 20 s ExitTimeOut, so the store stops before
+# SIGKILL.
+SHUTDOWN_SPAWN_DRAIN_S = 5.0
 RESERVED_LIFECYCLE_ACTORS = frozenset({"daemon:scheduler"})
 BOOT_READY_HARD_DEADLINE_S = 180.0
 CREATION_PROBE_TIMEOUT_S = BOOT_READY_HARD_DEADLINE_S
@@ -1254,8 +1258,11 @@ class SpawnCtl:
         instead of losing those writes to "store is not running" at loop
         teardown. Never touches panes."""
         pending = [task for task in self._background_spawns if not task.done()]
-        # Let a spawn finish an in-progress watermark-to-paste step (bounded):
-        # cancelling between them strands a live pane that adoption must not paste.
+        deadline = time.monotonic() + timeout_s
+        # Let a spawn finish an in-progress watermark-to-paste step, using at most
+        # half the budget: cancelling between them strands a live pane that
+        # adoption must not paste. The cancellation wait gets what remains of
+        # the same deadline.
         settle_deadline = time.monotonic() + timeout_s / 2
         while (
             any(task in self._delivery_critical and not task.done() for task in pending)
@@ -1266,7 +1273,8 @@ class SpawnCtl:
             task.cancel()
         unfinished: set[asyncio.Task[Any]] = set()
         if pending:
-            _done, unfinished = await asyncio.wait(pending, timeout=timeout_s)
+            remaining = max(0.0, deadline - time.monotonic())
+            _done, unfinished = await asyncio.wait(pending, timeout=remaining)
         if pending:
             log.info("drained in-flight spawns at shutdown: cancelled=%d unfinished=%d",
                      len(pending), len(unfinished))

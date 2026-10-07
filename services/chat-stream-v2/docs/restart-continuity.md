@@ -24,7 +24,7 @@ paste, and finally the `v2_spawn_outcomes` row.
 
 A graceful stop first closes spawn admission (new spawns wait and reconnect after the
 restart). It then cancels in-flight spawn tasks while the store is still running,
-bounded at 10 s (`SHUTDOWN_SPAWN_DRAIN_S`). Each spawn records its interruption
+within one absolute 5 s deadline (`SHUTDOWN_SPAWN_DRAIN_S`). With the shutdown's other bounded waits (background tasks 5 s, accepted sends 5 s, TLS close 3 s), the total stays inside launchd's 20 s exit window. Each spawn records its interruption
 handoff (retained intent, an `indeterminate` outcome for an admitted row, intent
 owner released) before the store stops. One step is never cut: a spawn that has
 persisted its pre-paste watermark gets up to half the drain window to land its

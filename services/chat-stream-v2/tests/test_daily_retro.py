@@ -1706,6 +1706,23 @@ def test_sanitize_error_redacts_credential_forms(raw):
     assert "[redacted]" in text and "\n" not in text and text.startswith("RuntimeError: ")
 
 
+@pytest.mark.parametrize("raw", [
+    "password='PLACEHOLDER FIRST SECOND' at login",
+    '{"api_key": "PLACEHOLDER FIRST SECOND", "next": 1}',
+    "secret=PLACEHOLDER;SECOND rest",
+    'token="PLACEHOLDER \\" FIRST SECOND" tail',
+    "password='PLACEHOLDER FIRST SECOND",
+    "Authorization: 'Bearer PLACEHOLDER FIRST SECOND'",
+])
+def test_sanitize_error_redacts_whole_quoted_and_delimited_values(raw):
+    """Final QA B1: a quoted value is redacted whole (spaces, delimiters,
+    escaped quotes, an unterminated quote); an unquoted one up to whitespace."""
+    text = retro.sanitize_error(RuntimeError(raw))
+    for part in ("PLACEHOLDER", "FIRST", "SECOND"):
+        assert part not in text, text
+    assert "[redacted]" in text
+
+
 def test_producer_transport_reconnects_only_transport_loss(config, monkeypatch):
     """C4 via the shared client contract; finding (e): only a refused/dropped
     socket is reconnected, and only for retry-eligible verbs."""
@@ -1744,3 +1761,12 @@ def test_producer_transport_reconnects_only_transport_loss(config, monkeypatch):
         asyncio.run(transport.call({"type": "close", "host": "fixture", "session_name": "astra",
                                     "expected_generation": "g"}))
     assert len(calls) == 1
+
+
+def test_producer_backoff_saturates_at_large_attempt_counts():
+    """Final QA B5: the producer's reconnect uses the shared client backoff;
+    a long outage past attempt 1024 waits at the cap instead of overflowing."""
+    policy = retro.wsclient.RetryPolicy(max_attempts=3, backoff_base_s=0.25, backoff_cap_s=2.0,
+                                        jitter_fraction=0.0, deadline_s=3600.0, transport_deadline_bound=True)
+    deadline = retro.monotonic() + 60
+    assert retro.wsclient._transport_retry_next_delay(policy, deadline, 1025) == (2.0, "")

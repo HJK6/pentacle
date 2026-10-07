@@ -631,8 +631,11 @@ def run_handoff_recovery(root: Path, evidence: Path, *, assistant_role: str | No
             "WHERE input_identity=?", (pre_reconcile.get("optimistic_id") or "",))), {})
         a7["pre_reconcile_input"] = {"text": observed.get("input_text"), "route": pre_route,
                                      "delivered": fd.delivered(succ, observed.get("input_text") or "\0")}
+        hold_times = [holds[t][0]["created_at"] for t in tells if len(holds.get(t) or []) == 1]
         a7["checks"] = {
             "accepted_tells_held_once_for_successor": all(len(h) == 1 for h in holds.values()),
+            # Final QA N2: the dead-window tells reach the successor in send order.
+            "tell_holds_in_send_order": len(hold_times) == len(tells) and hold_times == sorted(hold_times),
             "reconciled_window_input_accepted": bool(inputs),
             "accepted_inputs_delivered_once": all(fd.delivered(succ, t) == 1 for t in inputs),
             "pre_reconcile_input_never_silent": not pre_reconcile or a7["pre_reconcile_input"]["delivered"] == 1

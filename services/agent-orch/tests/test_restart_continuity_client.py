@@ -134,7 +134,7 @@ def test_admitted_spawn_recovers_terminal_state_after_socket_loss(monkeypatch, t
 
     calls: list[dict] = []
 
-    async def await_spawn_once(_config, payload, *, timeout):
+    async def await_spawn_once(_config, payload, *, timeout, **_kwargs):
         calls.append(payload)
         if len(calls) == 1:
             return {"type": "await_spawn.ok", "ok": True, "state": "starting", "stream_id": "testhost:v2-c2",
@@ -157,7 +157,7 @@ def test_admitted_spawn_socket_loss_reports_recorded_failure(monkeypatch, tmp_pa
     async def connect_ready(*_args, **_kwargs):
         raise _closed_1001()
 
-    async def await_spawn_once(_config, payload, *, timeout):
+    async def await_spawn_once(_config, payload, *, timeout, **_kwargs):
         return {"type": "await_spawn.error", "ok": False, "error_code": "spawn_failed",
                 "error": "boot_not_ready: claude TUI not ready", "stream_id": "testhost:v2-c2"}
 
@@ -176,7 +176,7 @@ def test_admitted_spawn_socket_loss_until_deadline_is_typed_indeterminate(monkey
     async def connect_ready(*_args, **_kwargs):
         raise _closed_1001()
 
-    async def await_spawn_once(_config, payload, *, timeout):
+    async def await_spawn_once(_config, payload, *, timeout, **_kwargs):
         return {"type": "await_spawn.indeterminate", "request_id": "x", "reason": "retry_deadline_exceeded",
                 "attempts": 9}
 
@@ -189,3 +189,60 @@ def test_admitted_spawn_socket_loss_until_deadline_is_typed_indeterminate(monkey
     assert result["type"] == "spawn.indeterminate"
     assert result["request_id"] == "spawn-c2" and result["stream_id"] == "testhost:v2-c2"
     assert result["initial_prompt_delivery"]["state"] == "indeterminate"
+
+
+class MalformedSocket(ReplyingSocket):
+    async def recv(self) -> str:
+        return "{not json"
+
+
+def test_non_transport_failure_keeps_the_attempt_bound(monkeypatch, tmp_path):
+    """Final QA B3: only a refused/reset/dropped socket gets the deadline-bound
+    reconnect; a malformed frame on a healthy socket keeps the prior attempt
+    limit and its error."""
+    fast_retry(monkeypatch, deadline="0.3")
+    connects = [0]
+
+    async def connect(config, **_kwargs):
+        connects[0] += 1
+        return MalformedSocket("await_report.ok")
+
+    monkeypatch.setattr(wsclient, "_connect_rpc_ready", connect)
+    payload = {"type": "await_report", "request_id": "await-bad", "stream_id": "testhost:child", "msg_id": 0}
+
+    response = asyncio.run(wsclient._one_shot_rpc(config(tmp_path), payload, prefix="await_report", timeout=5))
+
+    assert connects[0] == wsclient._rpc_retry_policy_from_env(5).max_attempts
+    assert response["reason"] == "retry_exhausted" and response["attempts"] == connects[0]
+
+
+def test_admitted_spawn_recovery_never_outlives_the_spawn_deadline(monkeypatch, tmp_path):
+    """Final QA B4: the real nested await_spawn retry (a larger configured retry
+    window, daemon still down) is capped by the spawn's own outer deadline."""
+    fast_retry(monkeypatch, deadline="30")
+
+    async def connect_ready(*_args, **_kwargs):
+        raise _closed_1001()
+
+    async def refused(config, **_kwargs):
+        raise ConnectionRefusedError(111, "Connect call failed")
+
+    monkeypatch.setattr(wsclient, "_connect_ready", connect_ready)
+    monkeypatch.setattr(wsclient, "_connect_rpc_ready", refused)
+    started = wsclient.time.monotonic()
+
+    result = asyncio.run(wsclient._await_starting_spawn(config(tmp_path), _accepted(), deadline=started + 0.3))
+
+    assert wsclient.time.monotonic() - started < 0.3 + 0.15
+    assert result["type"] == "spawn.indeterminate" and result["request_id"] == "spawn-c2"
+
+
+def test_backoff_saturates_at_large_attempt_counts():
+    """Final QA B5: a deadline-bound retry can pass attempt 1024; the backoff
+    saturates at its cap instead of overflowing float conversion."""
+    policy = wsclient.RetryPolicy(max_attempts=3, backoff_base_s=0.25, backoff_cap_s=2.0, jitter_fraction=0.0,
+                                  deadline_s=3600.0, transport_deadline_bound=True)
+    for attempt in (1025, 10**6):
+        assert wsclient._retry_backoff_s(policy, attempt) == 2.0
+    delay, reason = wsclient._transport_retry_next_delay(policy, wsclient.time.monotonic() + 60, 10**6)
+    assert (delay, reason) == (2.0, "")

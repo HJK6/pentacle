@@ -919,7 +919,12 @@ RETRO_TOOL = SERVICE_DIR / "tools" / "daily_retro.py"
 
 def _seed_codex_rows(cell: Cell, names: tuple[str, ...]) -> dict[str, dict[str, str]]:
     """Daemon stopped: open hidden Codex worker rows (the retro's Sol/Astra seats)
-    with a granted token and a live pane in the run-owned tmux namespace."""
+    with a granted token and a live pane in the run-owned tmux namespace.
+
+    Retained-state fixture, and the matrix's only direct store write: it stands
+    in for the retro's already-running worker seats (the disposable daemon has
+    no Codex launcher). The measured C4/C4b journey (await, report, restart,
+    REPORT delivery) then runs entirely through the daemon."""
     import asyncio
     sys.path.insert(0, str(REPO_SERVICES))
     from store import Store, STREAM_TOKEN_HASH_VERSION  # noqa: E402

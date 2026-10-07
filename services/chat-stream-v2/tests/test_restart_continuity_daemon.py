@@ -138,6 +138,51 @@ def test_shutdown_drain_lets_an_in_progress_paste_land_before_cancelling():
     asyncio.run(run())
 
 
+def test_shutdown_drain_holds_one_absolute_deadline():
+    """Final QA B2: a critical section that never finishes plus a cancellation
+    that never completes must not stretch the drain past its single deadline."""
+    async def run():
+        db = Store(":memory:")
+        db.start()
+        try:
+            ctl = _ctl(db, Tmux())
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def stuck_spawn():
+                task = asyncio.current_task()
+                ctl._delivery_critical.add(task)
+                entered.set()
+                while not release.is_set():  # paste never returns; cancellation swallowed
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        continue
+
+            task = asyncio.create_task(stuck_spawn())
+            ctl._background_spawns.add(task)
+            try:
+                await entered.wait()
+                started = time.monotonic()
+                result = await ctl.drain_background_spawns(timeout_s=0.3)
+                elapsed = time.monotonic() - started
+            finally:
+                release.set()
+                await task
+            assert result == {"cancelled": 1, "unfinished": 1}
+            assert elapsed < 0.3 + 0.1, elapsed
+        finally:
+            db.stop()
+    asyncio.run(run())
+
+
+def test_shutdown_budget_fits_launchd_exit_window():
+    """The drain plus the shutdown's existing bounded waits (background tasks
+    5 s, accepted sends 5 s, TLS close 3 s) stay inside launchd's 20 s
+    ExitTimeOut, so the store is stopped before SIGKILL."""
+    assert spawnctl_mod.SHUTDOWN_SPAWN_DRAIN_S + 5 + 5 + 3 < 20
+
+
 def test_main_shutdown_drains_spawns_before_server_and_store_stop():
     from pathlib import Path
     source = (Path(spawnctl_mod.__file__).parent / "main.py").read_text()
