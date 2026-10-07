@@ -343,6 +343,17 @@ def test_ws_notify_accepts_only_a_delivered_send_result(monkeypatch, tmp_path, r
         _REAL_WS_NOTIFY("GATE scheduled-test r", "r", "ws://x", tmp_path / "t")
 
 
+def test_ws_notify_treats_committed_pending_proof_as_sent_unconfirmed(monkeypatch, tmp_path, capsys):
+    """Run fe943a54: the GATE was committed and reached the front desk, but the receipt proof was still pending.
+    That is sent-unconfirmed, not a refusal: logged, not raised."""
+    conn = _Conn({"assistant.binding": BINDING, "send": {"type": "send.result", "delivery": "committed_pending_proof"}})
+    _patch_connection(monkeypatch, conn)
+    _REAL_WS_NOTIFY("GATE scheduled-test run=r1 x", "r1", "ws://x", tmp_path / "t")
+    out = capsys.readouterr().out
+    assert "sent-unconfirmed" in out and "committed_pending_proof" in out and "refused" not in out
+    assert [m["type"] for m in conn.sent] == ["assistant.binding", "send"]  # one send, no resubmit
+
+
 def test_ws_notify_refuses_non_gate_text(tmp_path):
     with pytest.raises(ValueError):
         _REAL_WS_NOTIFY("REPORT other", "r", "ws://x", tmp_path / "t")
@@ -371,8 +382,13 @@ def test_fleet_smoke_launchd_template_is_gated_with_targets_and_a_stated_duratio
 def test_the_real_live_window_import_resolves_from_a_bare_interpreter(tmp_path):
     """Found in the live rehearsal on host-b: with only the helper's own paths, tools.live_window needs services/ too.
 
-    Every other test fakes the connection module, so run the real import in a clean interpreter."""
-    code = ("import sys; sys.path.insert(0, %r); import gate_at_fire; gate_at_fire._ensure_import_paths(); "
+    Every other test fakes the connection module, so run the real import in a clean interpreter. The probe checks
+    only our own path resolution, so the third-party websockets modules are stubbed: `-I` drops the user site, and a
+    system interpreter without websockets>=13 (no `websockets.sync`) must not fail a path test."""
+    stub = ("import sys, types; ms = {n: types.ModuleType(n) for n in ('websockets', 'websockets.sync', "
+            "'websockets.sync.client', 'websockets.exceptions')}; ms['websockets.sync.client'].connect = None; "
+            "ms['websockets.exceptions'].ConnectionClosed = Exception; sys.modules.update(ms); ")
+    code = (stub + "sys.path.insert(0, %r); import gate_at_fire; gate_at_fire._ensure_import_paths(); "
             "import tools.live_window; print('ok')") % str(Path(gate_at_fire_path()).parent)
     out = subprocess.run([sys.executable, "-I", "-c", code], cwd=tmp_path, capture_output=True, text=True)
     assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr[-400:]

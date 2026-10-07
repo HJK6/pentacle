@@ -992,6 +992,11 @@ try {
   assetList(args) {
     const a = args && typeof args === 'object' ? args : {};
     const payload = assetMessage('asset.list', a);
+    // Bounded reader-selection keys for dashboard report boards (the daemon
+    // applies prefix/producer filters and the id sort before the limit).
+    for (const key of ['limit', 'asset_id_prefix', 'producer', 'sort']) {
+      if (a[key] !== undefined) payload[key] = a[key];
+    }
     return this.sendCommand(payload, 'asset');
   }
 

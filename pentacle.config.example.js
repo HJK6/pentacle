@@ -24,6 +24,8 @@
 // remote: { host: 'host.example', user: 'operator', port: 22, tmux: 'tmux' },
 //   // default absent; legacy single remote transport and client-mode marker
 // dashboardHub: { url: 'http://127.0.0.1:7777' }, // default absent; optional external adapter
+// dashboards: { catalogSpecId: 'example__dashboard_catalog', catalogRoot: '/path/to/dashboard-catalogs' },
+//   // default absent; runtime dashboard catalog (spec id of your catalog asset; web host file root)
 // Legacy hosts.js helper inputs (public main uses hosts/tmux instead):
 // localTmux: 'tmux', // helper default /opt/homebrew/bin/tmux on macOS, tmux elsewhere
 // localSsh: { host: '127.0.0.1', port: 2222, user: 'operator', tmux: 'tmux' }, // default absent

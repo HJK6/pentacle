@@ -5568,8 +5568,8 @@ def build_parser() -> argparse.ArgumentParser:
     asset_parser.add_argument(
         "--type",
         dest="content_type",
-        metavar="report",
-        help="structured report JSON (the only supported publish type)",
+        metavar="{report,dashboard-catalog}",
+        help="report (structured report JSON) or dashboard-catalog (dashboard catalog JSON)",
     )
     asset_parser.add_argument("--content-file")
     asset_parser.add_argument("--tag", action="append", dest="tags", default=[])

@@ -3095,6 +3095,46 @@ def test_await_starting_spawn_open_row_is_indeterminate(
         assert "await_spawn" in handler.kinds()
 
 
+@pytest.mark.parametrize("verb", ["work_lanes.list", "work_lanes.show", "work_lanes.adopt_preview"])
+def test_assistant_rpc_admits_work_lanes_read_verbs(monkeypatch, tmp_path, verb):
+    """`agent-orch work-lane list|show|adopt --preview` route through assistant_once.
+
+    Regression: the daemon served these verbs (work-lanes v1) while the client
+    allowlist refused them with `assistant_verb_invalid` before any RPC."""
+    monkeypatch.setenv("AGENT_ORCH_STREAM_ID", "hosta:planner")
+    monkeypatch.setenv("AGENT_ORCH_STREAM_TOKEN", "seat-test-secret")
+    monkeypatch.delenv("AGENT_ORCH_STREAM_TOKEN_FILE", raising=False)
+    captured: Queue[dict] = Queue()
+    payload = {"type": verb, "request_id": "stable-work-lanes-request",
+               **({"lane_id": "wl-1"} if verb == "work_lanes.show" else {"include_done": False, "limit": 200})}
+    expected = dict(payload)
+
+    async def handler(ws):
+        captured.put(json.loads(await ws.recv()))
+        command = json.loads(await ws.recv())
+        captured.put(command)
+        await ws.send(json.dumps({"type": verb + ".ok", "request_id": command["request_id"], "lanes": []}))
+
+    with StubServer(handler) as server:
+        response = asyncio.run(wsclient.assistant_once(
+            Config(server.url, "operator-test-token", "hosta", tmp_path), payload, timeout=2,
+        ))
+    hello = captured.get(timeout=2)
+    command = captured.get(timeout=2)
+    assert response["type"] == verb + ".ok"
+    assert hello["from_stream_id"] == "hosta:planner"
+    assert hello["stream_token"] == "seat-test-secret"
+    assert command == expected
+
+
+def test_assistant_rpc_still_refuses_unknown_verbs(tmp_path):
+    with pytest.raises(ValueError, match="assistant_verb_invalid"):
+        asyncio.run(wsclient.assistant_once(
+            Config("ws://127.0.0.1:1", "operator-test-token", "hosta", tmp_path),
+            {"type": "work_lanes.set_state", "request_id": "r"}, timeout=1,
+        ))
+
+
 @pytest.mark.parametrize("verb", ["assistant.publish", "assistant.operation"])
 def test_assistant_rpc_authenticates_hello_without_expanding_closed_command(monkeypatch, tmp_path, verb):
     monkeypatch.setenv("AGENT_ORCH_STREAM_ID", "hosta:assistant-backend")
