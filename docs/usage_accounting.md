@@ -82,6 +82,18 @@ Remote inventory rows can be displayed, but a daemon never reads a remote row's
 provider path or mutates its accounting. Each host needs its own activated
 collector; this feature adds no cross-host accounting transport or fleet totals.
 
+A satellite offers a stream's usage only under the coordinator-issued fence
+(stream, generation, provider, pane PID) that arrives on `host.stats` acks.
+Usage records consumed before a stream's first fence (a short seat that
+answers within seconds) are held per bind (transcript path, native session,
+provider, pane PID, file digest), and offered in full once a matching fence
+arrives. While such a stream has no fence, the satellite fetches fences every
+5 s instead of every 30 s. Events are never re-sent, and the ledger's
+per-record max-merge keeps a re-offer exact. A held span is dropped when its
+tail rebinds or its seat disappears. The coordinator issues fences only for
+open rows and admits usage only for them, so a seat that closes before any
+fence still contributes no usage.
+
 ## Provenance
 
 Provenance joins each ledger record to an account, a model and an observation
