@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1531,6 +1532,7 @@ async def _connect_ready(config: Config, timeout: float, from_stream_id: str | N
         ping_timeout=keepalive.ping_timeout,
         close_timeout=keepalive.close_timeout,
     )
+    _own_socket(ws)
     try:
         await ws.send(json.dumps(_hello(config, from_stream_id=from_stream_id), separators=(",", ":")))
         deadline = time.monotonic() + snapshot_timeout
@@ -1546,7 +1548,7 @@ async def _connect_ready(config: Config, timeout: float, from_stream_id: str | N
                 raise PermissionError(str(message.get("error_code") or message.get("error") or message["type"]))
         raise SnapshotTimeout("snapshot_timeout")
     except BaseException:
-        await ws.close()
+        await _close_within(ws, _OWNER_DEADLINE.get())
         raise
 
 
@@ -1566,6 +1568,7 @@ async def _connect_rpc_ready(
         ping_timeout=keepalive.ping_timeout,
         close_timeout=keepalive.close_timeout,
     )
+    _own_socket(ws)
     await ws.send(json.dumps(_rpc_hello(
         config,
         from_stream_id=from_stream_id,
@@ -1623,6 +1626,30 @@ async def _read_rpc_response(
         ),
         timeout_message=timeout_message or f"{prefix.replace('.', '_')}_timeout",
     )
+
+
+# A post-admission spawn wait owns every socket it opens (directly or through a
+# nested RPC), so that at its single deadline it can abort them all and no
+# cleanup or retry runs on past it. Outside such a wait both are unset.
+_OWNED_SOCKETS: contextvars.ContextVar[set[Any] | None] = contextvars.ContextVar("agent_orch_owned_sockets",
+                                                                                   default=None)
+_OWNER_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("agent_orch_owner_deadline",
+                                                                                default=None)
+#: After the owner deadline, how long the cancelled wait may take to unwind its
+#: abort-only cleanup before the owner returns (test slack, not a budget).
+_EXPIRY_UNWIND_S = 0.02
+
+
+def _own_socket(ws: Any) -> None:
+    owned = _OWNED_SOCKETS.get()
+    if owned is not None:
+        owned.add(ws)
+
+
+def _abort_socket(ws: Any) -> None:
+    transport = getattr(ws, "transport", None)
+    if transport is not None:
+        transport.abort()
 
 
 def _abandon(task: asyncio.Future[Any]) -> None:
@@ -1689,6 +1716,8 @@ async def _one_shot_rpc(
     """`deadline_at` (monotonic) caps the retry deadline and every wait, for a
     caller that owns an outer absolute deadline."""
     request_id = payload["request_id"]
+    if deadline_at is None:
+        deadline_at = _OWNER_DEADLINE.get()
     retry_policy = _rpc_retry_policy_from_env(timeout)
     retry_eligible = _is_rpc_retry_eligible(payload)
     retry_deadline = _retry_deadline(time.monotonic(), retry_policy)
@@ -2249,7 +2278,114 @@ async def spawn_once(
     return response
 
 
+def _spawn_indeterminate(
+    accepted: dict[str, Any], session: dict[str, Any] | None, receipt: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Typed spawn.indeterminate for an admitted spawn whose terminal state
+    is unproven; `None` session/receipt fall back to the admission's own."""
+    stream_id = str(accepted.get("stream_id") or (accepted.get("session") or {}).get("stream_id") or "")
+    if session is None and isinstance(accepted.get("session"), dict):
+        session = accepted["session"]
+    if receipt is None:
+        receipt = accepted.get("initial_prompt_delivery") if isinstance(accepted.get("initial_prompt_delivery"), dict) else {}
+    raw_receipt = receipt if isinstance(receipt, dict) else {}
+    proof_watermark = raw_receipt.get("proof_watermark")
+    proof_watermark_state = raw_receipt.get("proof_watermark_state")
+    proof_watermark_reason = raw_receipt.get("proof_watermark_reason")
+    delivery_failed_at = raw_receipt.get("delivery_failed_at")
+    try:
+        if not isinstance(delivery_failed_at, str) or not delivery_failed_at:
+            raise ValueError
+        datetime.fromisoformat(delivery_failed_at.replace("Z", "+00:00"))
+    except ValueError:
+        delivery_failed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    normalized_receipt = {
+        **raw_receipt,
+        "state": "indeterminate",
+        "delivery_status": "indeterminate",
+        "bootstrap_state": "starting",
+        "proof_state": (
+            raw_receipt.get("proof_state")
+            if raw_receipt.get("proof_state") in {"pending", "unreachable"}
+            else "pending"
+        ),
+        "proof_watermark": proof_watermark if type(proof_watermark) is int else None,
+        "proof_watermark_state": (
+            proof_watermark_state
+            if proof_watermark_state in {"reachable", "unreachable"}
+            else None
+        ),
+        "proof_watermark_reason": (
+            proof_watermark_reason if isinstance(proof_watermark_reason, str) else None
+        ),
+        "failure_code": (
+            raw_receipt.get("failure_code")
+            if isinstance(raw_receipt.get("failure_code"), str) and raw_receipt["failure_code"]
+            else "initial_prompt_delivery_unproven"
+        ),
+        "failure_reason": (
+            raw_receipt.get("failure_reason")
+            if isinstance(raw_receipt.get("failure_reason"), str) and raw_receipt["failure_reason"]
+            else "initial prompt delivery remains unproven"
+        ),
+        "delivery_failed_at": delivery_failed_at,
+    }
+    return {
+        "type": "spawn.indeterminate",
+        "ok": True,
+        "request_id": accepted.get("request_id"),
+        "stream_id": stream_id,
+        "state": "starting",
+        "session": {
+            **(session if isinstance(session, dict) else {}),
+            "stream_id": stream_id,
+            "state": "starting",
+            "bootstrap_state": "starting",
+        },
+        "initial_prompt_delivery": normalized_receipt,
+    }
+
+
 async def _await_starting_spawn(
+    config: Config, accepted: dict[str, Any], *, deadline: float,
+) -> dict[str, Any]:
+    """Wait once for an admitted spawn's terminal state, under ONE absolute
+    deadline that covers the whole wait: connect, hello and snapshot,
+    inventory reads, outcome readback, reconnect and backoff, and cleanup.
+
+    The wait runs as one task that owns every socket it opens. At the deadline
+    those transports are aborted and the task is cancelled; its cleanup is
+    abort-only past the deadline, so nothing it started outlives the caller
+    (including asyncio.run's drain at CLI exit). Without terminal proof by
+    then, the result is a typed spawn.indeterminate with the admitted request
+    and stream identity: never a success, never a failure, and the admitted
+    seat is left alone."""
+    owned: set[Any] = set()
+    context = contextvars.copy_context()
+    context.run(_OWNED_SOCKETS.set, owned)
+    context.run(_OWNER_DEADLINE.set, deadline)
+    task = asyncio.get_running_loop().create_task(
+        _await_starting_spawn_within(config, accepted, deadline=deadline), context=context,
+    )
+
+    def expire() -> None:
+        for ws in tuple(owned):
+            _abort_socket(ws)
+        _abandon(task)
+
+    try:
+        done, _ = await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))
+    except asyncio.CancelledError:
+        expire()
+        raise
+    if done:
+        return task.result()
+    expire()
+    await asyncio.wait({task}, timeout=_EXPIRY_UNWIND_S)
+    return _spawn_indeterminate(accepted, None, None)
+
+
+async def _await_starting_spawn_within(
     config: Config, accepted: dict[str, Any], *, deadline: float,
 ) -> dict[str, Any]:
     """Wait once on the subscribed inventory stream after V2 admission."""
@@ -2258,62 +2394,7 @@ async def _await_starting_spawn(
         return accepted
 
     def indeterminate(session: dict[str, Any] | None, receipt: dict[str, Any]) -> dict[str, Any]:
-        raw_receipt = receipt if isinstance(receipt, dict) else {}
-        proof_watermark = raw_receipt.get("proof_watermark")
-        proof_watermark_state = raw_receipt.get("proof_watermark_state")
-        proof_watermark_reason = raw_receipt.get("proof_watermark_reason")
-        delivery_failed_at = raw_receipt.get("delivery_failed_at")
-        try:
-            if not isinstance(delivery_failed_at, str) or not delivery_failed_at:
-                raise ValueError
-            datetime.fromisoformat(delivery_failed_at.replace("Z", "+00:00"))
-        except ValueError:
-            delivery_failed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        normalized_receipt = {
-            **raw_receipt,
-            "state": "indeterminate",
-            "delivery_status": "indeterminate",
-            "bootstrap_state": "starting",
-            "proof_state": (
-                raw_receipt.get("proof_state")
-                if raw_receipt.get("proof_state") in {"pending", "unreachable"}
-                else "pending"
-            ),
-            "proof_watermark": proof_watermark if type(proof_watermark) is int else None,
-            "proof_watermark_state": (
-                proof_watermark_state
-                if proof_watermark_state in {"reachable", "unreachable"}
-                else None
-            ),
-            "proof_watermark_reason": (
-                proof_watermark_reason if isinstance(proof_watermark_reason, str) else None
-            ),
-            "failure_code": (
-                raw_receipt.get("failure_code")
-                if isinstance(raw_receipt.get("failure_code"), str) and raw_receipt["failure_code"]
-                else "initial_prompt_delivery_unproven"
-            ),
-            "failure_reason": (
-                raw_receipt.get("failure_reason")
-                if isinstance(raw_receipt.get("failure_reason"), str) and raw_receipt["failure_reason"]
-                else "initial prompt delivery remains unproven"
-            ),
-            "delivery_failed_at": delivery_failed_at,
-        }
-        return {
-            "type": "spawn.indeterminate",
-            "ok": True,
-            "request_id": accepted.get("request_id"),
-            "stream_id": stream_id,
-            "state": "starting",
-            "session": {
-                **(session if isinstance(session, dict) else {}),
-                "stream_id": stream_id,
-                "state": "starting",
-                "bootstrap_state": "starting",
-            },
-            "initial_prompt_delivery": normalized_receipt,
-        }
+        return _spawn_indeterminate(accepted, session, receipt if isinstance(receipt, dict) else {})
 
     def open_row(session: dict[str, Any] | None) -> bool:
         return bool(
@@ -2412,7 +2493,9 @@ async def _await_starting_spawn(
 
     try:
         ws, snapshot = await _connect_ready(config, max(0.1, deadline - time.monotonic()))
-    except (OSError, websockets.exceptions.ConnectionClosed):
+    except (OSError, EOFError, websockets.exceptions.ConnectionClosed, websockets.exceptions.InvalidHandshake):
+        # A refused, reset or half-open daemon (restart) is a transport loss;
+        # the admitted spawn's state is then read back by request id.
         return await recover_after_transport_loss()
     try:
         if terminal_inventory(snapshot):
@@ -2426,14 +2509,15 @@ async def _await_starting_spawn(
                 timeout_message="spawn_state_timeout",
             )
     except TimeoutError:
-        return await durable_indeterminate(inventory_session(snapshot)) or accepted
+        return await durable_indeterminate(inventory_session(snapshot)) or indeterminate(
+            inventory_session(snapshot), receipt if isinstance(receipt, dict) else {})
     except (OSError, websockets.exceptions.ConnectionClosed):
         return await recover_after_transport_loss()
     finally:
         await _close_within(ws, deadline)
     session = inventory_session(inventory)
     if not isinstance(session, dict):
-        return accepted
+        return indeterminate(None, receipt if isinstance(receipt, dict) else {})
     state = str(session.get("state") or "")
     if state == "ready":
         return {**accepted, "stream_id": stream_id, "state": state, "session": session}

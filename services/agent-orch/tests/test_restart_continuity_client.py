@@ -365,5 +365,6 @@ def test_spawn_deadline_includes_the_inventory_socket_cleanup(monkeypatch, tmp_p
 
     result, elapsed = asyncio.run(scenario())
     assert elapsed <= deadline_s + 0.05, (elapsed, events)
-    assert result["request_id"] == "spawn-c2" and result["type"] in {"spawn.indeterminate", "spawn.ok"}
+    assert result["request_id"] == "spawn-c2" and result["type"] == "spawn.indeterminate", result
+    assert result["stream_id"] == "testhost:v2-c2"
     assert "inventory-close" in events or "abort" in events

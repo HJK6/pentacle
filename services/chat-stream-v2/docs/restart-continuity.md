@@ -61,6 +61,15 @@ second pane.
   socket resolves through `await_spawn` by request id. The result is `ready`, the
   recorded failure, or a typed `spawn.indeterminate` naming the request and stream
   id. The CLI prints `spawn key: <key>` before the RPC.
+- The whole post-admission wait runs under ONE absolute deadline set at admission:
+  connect, hello and snapshot, inventory reads, the outcome readback, reconnect and
+  backoff, and cleanup. Every socket it opens is owned by the wait. At the deadline
+  those transports are aborted and the wait is cancelled, so no close handshake,
+  retry or send runs past it, including during the CLI's own loop shutdown.
+- Without terminal proof by then, the result is a typed `spawn.indeterminate`, never
+  a success or a failure. The admitted seat is never cancelled or re-spawned.
+- This is a bound on the client's own awaits. It is not a real-time guarantee
+  under host starvation, and interpreter exit after the loop is not counted.
 - Single-shot verbs (`close`, `reparent`, `notification.await`, `send.receipt.get`)
   still fail fast with a typed transport error.
 

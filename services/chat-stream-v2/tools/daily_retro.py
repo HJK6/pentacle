@@ -1323,7 +1323,8 @@ def _reason_code(exc):
 
 def _is_structured(value):
     return (isinstance(value, dict) and set(value) == set(_ERROR_FIELDS)
-            and value["class"] in _ERROR_CLASSES and value["reason"] in _REASONS
+            and isinstance(value["class"], str) and value["class"] in _ERROR_CLASSES
+            and isinstance(value["reason"], str) and value["reason"] in _REASONS
             and type(value["bytes"]) is int and value["bytes"] >= 0
             and isinstance(value["sha256"], str) and _SHA256.fullmatch(value["sha256"]) is not None)
 
@@ -1361,6 +1362,9 @@ def _structured_failure_entry(entry, root):
     return {**entry, **{k: structured_error(entry[k], root) for k in _FAILURE_ERROR_FIELDS if k in entry}}
 
 
+_WORKER_RECEIPT_FIELDS = frozenset({"result_kind", "status", "report_id", "ledger_row_id", "error"})
+
+
 def _worker_failure_receipt(response, root, report_id):
     """What a failed or invalid worker report keeps: identity and outcome
     metadata plus a structured record of the whole response, never its text."""
@@ -1368,8 +1372,8 @@ def _worker_failure_receipt(response, root, report_id):
     status = report.get("status") if isinstance(report, dict) else None
     row = response.get("ledger_row_id") if "ledger_row_id" in response else (report or {}).get("ledger_row_id")
     kind = response.get("result_kind")
-    return {"result_kind": kind if kind in {"report", "closed_without_report"} else None,
-            "status": status if status in {"done", "error", "aborted"} else None,
+    return {"result_kind": kind if isinstance(kind, str) and kind in {"report", "closed_without_report"} else None,
+            "status": status if isinstance(status, str) and status in {"done", "error", "aborted"} else None,
             "report_id": report_id if (report or {}).get("report_id") == report_id else None,
             "ledger_row_id": row if type(row) is int else None,
             "error": _text_record(encoded(response).decode(), root, "WorkerReport", "worker_failed")}
@@ -1382,14 +1386,27 @@ def _projected_stage(stage, root):
         return stage
     stage = dict(stage)
     failure = stage.get("failure")
-    if isinstance(failure, dict) and not (set(failure) >= {"result_kind", "error"} and _is_structured(failure["error"])):
+    if isinstance(failure, dict) and not _is_worker_receipt(failure, stage.get("report_id")):
         stage["failure"] = _worker_failure_receipt(failure, root, stage.get("report_id"))
     elif isinstance(failure, str) and failure != "invalid terminal packet":
         stage["failure"] = structured_error(failure, root)
     report = stage.get("report")
-    if isinstance(report, dict) and not (set(report) >= {"result_kind", "error"} and _is_structured(report["error"])):
+    if isinstance(report, dict) and not _is_worker_receipt(report, stage.get("report_id")):
         stage["report"] = _worker_failure_receipt({"report": report}, root, stage.get("report_id"))
     return stage
+
+
+def _is_worker_receipt(value, report_id):
+    """Exactly the projected receipt schema: any extra or non-conforming field
+    means the value is raw and is projected again."""
+    return (isinstance(value, dict) and set(value) == _WORKER_RECEIPT_FIELDS
+            and (value["result_kind"] is None or (isinstance(value["result_kind"], str)
+                                                  and value["result_kind"] in {"report", "closed_without_report"}))
+            and (value["status"] is None or (isinstance(value["status"], str)
+                                             and value["status"] in {"done", "error", "aborted"}))
+            and (value["report_id"] is None or value["report_id"] == report_id)
+            and (value["ledger_row_id"] is None or type(value["ledger_row_id"]) is int)
+            and _is_structured(value["error"]))
 
 
 def render_error(record):

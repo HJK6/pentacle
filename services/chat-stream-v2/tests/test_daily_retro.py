@@ -1839,6 +1839,43 @@ def test_record_vocabulary_is_fixed_and_forged_records_are_not_accepted():
         assert record["class"] == "LegacyText" and secret not in json.dumps(record) + retro.render_error(forged)
 
 
+def test_json_shaped_forged_records_become_text_records_without_error():
+    """Cycle 3 B1 check: non-string class or reason (e.g. a list from JSON) is
+    a forged record, converted like any raw text, never a TypeError."""
+    secret = "QzKwHrTyMnPvXsJg"
+    genuine = retro.structured_error(TimeoutError("x"))
+    for forged in ({**genuine, "class": [secret]}, {**genuine, "reason": [secret]},
+                   {**genuine, "class": {"k": secret}}, {**genuine, "reason": None}):
+        record = retro.structured_error(forged)
+        assert record["class"] == "LegacyText" and secret not in json.dumps(record) + retro.render_error(forged)
+
+
+def test_crafted_worker_receipt_with_raw_siblings_is_projected_again(config):
+    """Cycle 3 B1 check: a receipt is recognised only by its exact projected
+    schema; a valid structured `error` does not bless raw sibling fields."""
+    secret = "QzKwHrTyMnPvXsJg"
+    manifest = retro.collect(config, at())
+    root = config.state_root / "runs" / manifest["run_id"]
+    error = retro.structured_error(RuntimeError("x"))
+    crafted = {"result_kind": "report", "status": "error", "report_id": "r", "ledger_row_id": 1, "error": error,
+               "reason": secret, "report": {"summary": secret}}
+    wrong_types = {"result_kind": ["report"], "status": "error", "report_id": "r", "ledger_row_id": 1, "error": error}
+    retro.atomic(root / "astra.json", {"attempt": 1, "report_id": "r", "failed": True, "failure": crafted,
+                                       "report": {**crafted, "result_kind": secret}})
+    retro.atomic(root / "sol-attempts.json", [{"attempt": 1, "report_id": "r", "failed": True,
+                                               "failure": wrong_types}])
+    retro.Pipeline(config, Transport()).normalize_retained_failure_state(manifest)
+    astra = retro.read(root / "astra.json")
+    assert set(astra["failure"]) == {"result_kind", "status", "report_id", "ledger_row_id", "error"}
+    assert astra["failure"]["error"]["class"] == "WorkerReport"
+    assert set(retro.read(root / "sol-attempts.json")[0]["failure"]) == set(astra["failure"])
+    for path in root.rglob("*"):
+        if path.is_file() and path.parent.name != "errors":
+            assert secret not in path.read_text(errors="replace"), path
+    projected = retro._worker_failure_receipt({"report": {"status": "done"}}, root, "r")
+    assert retro._projected_stage({"failed": True, "report_id": "r", "failure": projected}, root)["failure"] == projected
+
+
 def test_retained_legacy_failure_state_is_converted_and_never_resent(config):
     """Cycle 2 re-read B1-LEGACY: text records and an unlanded notice attempt
     written before structured records are converted on the next pass. The
