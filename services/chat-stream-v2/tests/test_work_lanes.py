@@ -512,3 +512,39 @@ def test_routing_close_and_cancel_guarded_on_operator_lane_v13():
                 actor_stream_id=FD, payload=close, dispatch_id="d", expected_lane_version=1)
         assert not code(e).startswith("work_lane_operator")
     run(body)
+
+
+def test_real_notify_confirmation_round_trip_d5(tmp_path):
+    from notify import Notify
+    from test_question_contract_d3 import _FakeSessions, _ask
+
+    async def go():
+        producer = "hosta:v2-fd"
+        sessions = _FakeSessions({producer: {"visibility": "visible", "status": "open", "session_generation": "g1"}})
+        notify = Notify(str(tmp_path / "notifications.db"), sessions=sessions)
+        await notify.start()
+        try:
+            results = {}
+            for qid, auth in (("q-op", {"operator_authenticated": True}),
+                              ("q-relay", {"token_verified": True, "stream_id": "hosta:v2-other"})):
+                ask = _ask(qid, producer=producer, options=[{"label": "Confirm", "value": "Confirm"},
+                                                             {"label": "Not yet", "value": "Not yet"}])
+                ask["envelope"]["context"] = {"schema": "WorkLaneConfirmationV1", "lane_id": "wl-1",
+                                              "action": "set_state:done"}
+                assert (await notify.prompt(ask))["type"] == "prompt.ask.ok"
+                reply = await notify.prompt({"type": "prompt.answer", "request_id": "a-" + qid,
+                                             "question_id": qid, "selections": ["Confirm"],
+                                             "_auth_context": auth})
+                results[qid] = (reply, await notify.work_lane_confirmation(qid))
+            reply, facts = results["q-op"]
+            assert reply["type"] == "prompt.answer.ok", reply
+            assert facts["work_lane_confirmation"] == {"lane_id": "wl-1", "action": "set_state:done"}
+            assert facts["answer"] == "Confirm" and facts["actor_class"] == "direct_operator"
+            assert facts["producer_stream_id"] == producer
+            reply, facts = results["q-relay"]
+            if reply["type"] == "prompt.answer.ok":
+                assert facts["actor_class"] != "direct_operator"
+            assert await notify.work_lane_confirmation("missing") is None
+        finally:
+            await notify.stop()
+    asyncio.run(go())

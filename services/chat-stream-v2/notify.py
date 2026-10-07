@@ -1744,8 +1744,15 @@ class Notify:
                 resolution = json.loads(resolution)
             except ValueError:
                 resolution = {}
-        chosen = next((str(v) for v in (answer.get("value"), answer.get("choice"), answer.get("label"))
-                       if v not in (None, "")), None)
+        value = answer.get("value")
+        selections = answer.get("selections")
+        if isinstance(value, dict):
+            chosen = value.get("answer")
+        elif isinstance(selections, list) and len(selections) == 1:
+            chosen = selections[0]
+        else:
+            chosen = value
+        chosen = str(chosen) if chosen not in (None, "") and not answer.get("custom_text") else None
         resolution_class = resolution.get("actor_class") if isinstance(resolution, dict) else None
         return {
             "question_id": question_id,
@@ -2028,9 +2035,26 @@ class Notify:
             # allow_custom is canonical true on EVERY question (free text is
             # always admissible), and context is never a second prose channel.
             "allow_custom": True,
-            "context": None,
+            "context": _typed_work_lane_confirmation(raw_context),
         })
         return normalized_envelope, normalized_actions
+
+
+def _typed_work_lane_confirmation(context: Any) -> dict | None:
+    """The one structured context kept on a question: the work-lane confirmation key.
+
+    It carries no prose (body stays the only readable channel); it binds an
+    operator answer to exactly one lane and one guarded action (work lanes D5).
+    """
+    if not isinstance(context, dict) or context.get("schema") != "WorkLaneConfirmationV1":
+        return None
+    lane_id, action = context.get("lane_id"), context.get("action")
+    if (set(context) != {"schema", "lane_id", "action"} or not isinstance(lane_id, str)
+            or not 0 < len(lane_id) <= 128
+            or action not in ("set_state:done", "set_owner:fd", "lane.close", "lane.decision:cancel")):
+        raise QuestionFormatError(field="context", rule="context_cap_bypass",
+                                  message="work-lane confirmation context must be {schema, lane_id, action}")
+    return {"schema": "WorkLaneConfirmationV1", "lane_id": lane_id, "action": action}
 
 
 def _answer_back_text(answer: dict) -> str:
