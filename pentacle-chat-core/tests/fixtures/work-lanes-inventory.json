@@ -1,0 +1,961 @@
+{
+  "schema": "work_lanes_inventory_v1",
+  "description": "Frozen wire contract for first-class work lanes (spec_pentacle__first_class_work_lanes_2026_10 D6/D7). Consumed by the daemon Python projection test and both chat-core TypeScript suites. Clients must not reorder lanes[] and must not compute counts from sessions.",
+  "capability": "work_lanes_v1",
+  "inventory_frame": {
+    "type": "work_lanes.inventory",
+    "lanes": [
+      {
+        "lane_id": "wl-blocked-0001",
+        "title": "Thoth daemon deploy",
+        "summary": "Ship chat-stream-v2 candidate to Thoth",
+        "state": "blocked",
+        "state_reason": "fd",
+        "blocker": "Waiting for operator deploy window",
+        "owner_kind": "fd",
+        "version": 4,
+        "updated_at": "2026-10-07T19:00:00.000Z",
+        "first_admitted_at": "2026-10-07T17:00:00.000Z",
+        "done_at": null,
+        "lead": {
+          "stream_id": "amaterasu:v2-lead0001",
+          "generation": "gen-lead-0001",
+          "qualifies": true,
+          "status": "open",
+          "visibility": "default",
+          "presence": {
+            "online": true,
+            "working": false,
+            "capture_liveness": "idle",
+            "last_activity": "2026-10-07T18:55:00Z"
+          },
+          "status_card": {
+            "goal": "Deploy daemon",
+            "active_step": "Await window",
+            "update": null,
+            "eta_at": "2026-10-07T21:00:00Z",
+            "eta_set_at": "2026-10-07T18:00:00Z",
+            "updated_at": "2026-10-07T18:50:00Z"
+          },
+          "eta_stale": false
+        },
+        "visible_chat": {
+          "stream_id": "amaterasu:v2-lead0001",
+          "generation": "gen-lead-0001",
+          "kind": "session",
+          "available": "open"
+        },
+        "last_update": {
+          "update_id": "lane-update:wl-blocked-0001:req-block-1",
+          "kind": "lane_blocked",
+          "event_id": 1043,
+          "ts": "2026-10-07T19:00:00.000Z"
+        }
+      },
+      {
+        "lane_id": "wl-active-0002",
+        "title": "Work lanes mobile slice",
+        "summary": "Header count, lanes list, lane_update card",
+        "state": "active",
+        "state_reason": "fd",
+        "blocker": null,
+        "owner_kind": "fd",
+        "version": 3,
+        "updated_at": "2026-10-07T18:58:00.000Z",
+        "first_admitted_at": "2026-10-07T18:00:00.000Z",
+        "done_at": null,
+        "lead": {
+          "stream_id": "amaterasu:v2-lead0002",
+          "generation": "gen-lead-0002",
+          "qualifies": true,
+          "status": "open",
+          "visibility": "default",
+          "presence": {
+            "online": true,
+            "working": true,
+            "capture_liveness": "idle",
+            "last_activity": "2026-10-07T18:55:00Z"
+          },
+          "status_card": {
+            "goal": "Mobile lanes UI",
+            "active_step": "LanesSurface",
+            "update": null,
+            "eta_at": "2026-10-08T04:00:00Z",
+            "eta_set_at": "2026-10-07T18:30:00Z",
+            "updated_at": "2026-10-07T18:50:00Z"
+          },
+          "eta_stale": false
+        },
+        "visible_chat": {
+          "stream_id": "bart:assistant",
+          "generation": null,
+          "kind": "composite",
+          "available": "open"
+        },
+        "last_update": {
+          "update_id": "lane-update:wl-active-0002:adopt:stream:amaterasu:v2-lead0002",
+          "kind": "lane_started",
+          "event_id": 1001,
+          "ts": "2026-10-07T18:00:00.000Z"
+        }
+      },
+      {
+        "lane_id": "wl-paused-0004",
+        "title": "Voice answers web",
+        "summary": "Paused after lead seat closed",
+        "state": "paused",
+        "state_reason": "lead_lost_unreconciled",
+        "blocker": null,
+        "owner_kind": "operator",
+        "version": 2,
+        "updated_at": "2026-10-07T18:40:00.000Z",
+        "first_admitted_at": "2026-10-07T16:00:00.000Z",
+        "done_at": null,
+        "lead": {
+          "stream_id": "amaterasu:v2-lead0004",
+          "generation": "gen-lead-0004-old",
+          "qualifies": false,
+          "status": "open",
+          "visibility": "default",
+          "presence": {
+            "online": true,
+            "working": false,
+            "capture_liveness": "idle",
+            "last_activity": "2026-10-07T18:55:00Z"
+          },
+          "status_card": {
+            "goal": "Voice answers",
+            "active_step": null,
+            "update": null,
+            "eta_at": "2026-10-07T20:00:00Z",
+            "eta_set_at": "2026-10-07T16:30:00Z",
+            "updated_at": "2026-10-07T18:50:00Z"
+          },
+          "eta_stale": true
+        },
+        "visible_chat": {
+          "stream_id": "amaterasu:v2-chat0004",
+          "generation": "gen-chat-0004-old",
+          "kind": "session",
+          "available": "unavailable"
+        },
+        "last_update": null
+      },
+      {
+        "lane_id": "wl-paused-0003",
+        "title": "Household boards",
+        "summary": "Deliberately paused by FD",
+        "state": "paused",
+        "state_reason": "lead_lost",
+        "blocker": null,
+        "owner_kind": "operator",
+        "version": 5,
+        "updated_at": "2026-10-07T18:30:00.000Z",
+        "first_admitted_at": "2026-10-07T12:00:00.000Z",
+        "done_at": null,
+        "lead": {
+          "stream_id": "amaterasu:v2-lead0003",
+          "generation": "gen-lead-0003",
+          "qualifies": false,
+          "status": "closed",
+          "visibility": "default",
+          "presence": {
+            "online": false,
+            "working": false,
+            "capture_liveness": "transport_unknown",
+            "last_activity": null
+          },
+          "status_card": {
+            "goal": "Boards",
+            "active_step": null,
+            "update": null,
+            "eta_at": "2026-10-07T15:00:00Z",
+            "eta_set_at": "2026-10-07T12:30:00Z",
+            "updated_at": "2026-10-07T18:50:00Z"
+          },
+          "eta_stale": true
+        },
+        "visible_chat": {
+          "stream_id": "amaterasu:v2-lead0003",
+          "generation": "gen-lead-0003",
+          "kind": "session",
+          "available": "history"
+        },
+        "last_update": {
+          "update_id": "lane-update:wl-paused-0003:req-unblock-3",
+          "kind": "lane_unblocked",
+          "event_id": 977,
+          "ts": "2026-10-07T14:00:00.000Z"
+        }
+      }
+    ],
+    "counts": {
+      "open": 4,
+      "active": 1,
+      "paused": 2,
+      "blocked": 1
+    },
+    "truncated": false,
+    "generated_at": "2026-10-07T19:01:00.000Z"
+  },
+  "hello_field": {
+    "work_lanes": {
+      "type": "work_lanes.inventory",
+      "lanes": [
+        {
+          "lane_id": "wl-blocked-0001",
+          "title": "Thoth daemon deploy",
+          "summary": "Ship chat-stream-v2 candidate to Thoth",
+          "state": "blocked",
+          "state_reason": "fd",
+          "blocker": "Waiting for operator deploy window",
+          "owner_kind": "fd",
+          "version": 4,
+          "updated_at": "2026-10-07T19:00:00.000Z",
+          "first_admitted_at": "2026-10-07T17:00:00.000Z",
+          "done_at": null,
+          "lead": {
+            "stream_id": "amaterasu:v2-lead0001",
+            "generation": "gen-lead-0001",
+            "qualifies": true,
+            "status": "open",
+            "visibility": "default",
+            "presence": {
+              "online": true,
+              "working": false,
+              "capture_liveness": "idle",
+              "last_activity": "2026-10-07T18:55:00Z"
+            },
+            "status_card": {
+              "goal": "Deploy daemon",
+              "active_step": "Await window",
+              "update": null,
+              "eta_at": "2026-10-07T21:00:00Z",
+              "eta_set_at": "2026-10-07T18:00:00Z",
+              "updated_at": "2026-10-07T18:50:00Z"
+            },
+            "eta_stale": false
+          },
+          "visible_chat": {
+            "stream_id": "amaterasu:v2-lead0001",
+            "generation": "gen-lead-0001",
+            "kind": "session",
+            "available": "open"
+          },
+          "last_update": {
+            "update_id": "lane-update:wl-blocked-0001:req-block-1",
+            "kind": "lane_blocked",
+            "event_id": 1043,
+            "ts": "2026-10-07T19:00:00.000Z"
+          }
+        },
+        {
+          "lane_id": "wl-active-0002",
+          "title": "Work lanes mobile slice",
+          "summary": "Header count, lanes list, lane_update card",
+          "state": "active",
+          "state_reason": "fd",
+          "blocker": null,
+          "owner_kind": "fd",
+          "version": 3,
+          "updated_at": "2026-10-07T18:58:00.000Z",
+          "first_admitted_at": "2026-10-07T18:00:00.000Z",
+          "done_at": null,
+          "lead": {
+            "stream_id": "amaterasu:v2-lead0002",
+            "generation": "gen-lead-0002",
+            "qualifies": true,
+            "status": "open",
+            "visibility": "default",
+            "presence": {
+              "online": true,
+              "working": true,
+              "capture_liveness": "idle",
+              "last_activity": "2026-10-07T18:55:00Z"
+            },
+            "status_card": {
+              "goal": "Mobile lanes UI",
+              "active_step": "LanesSurface",
+              "update": null,
+              "eta_at": "2026-10-08T04:00:00Z",
+              "eta_set_at": "2026-10-07T18:30:00Z",
+              "updated_at": "2026-10-07T18:50:00Z"
+            },
+            "eta_stale": false
+          },
+          "visible_chat": {
+            "stream_id": "bart:assistant",
+            "generation": null,
+            "kind": "composite",
+            "available": "open"
+          },
+          "last_update": {
+            "update_id": "lane-update:wl-active-0002:adopt:stream:amaterasu:v2-lead0002",
+            "kind": "lane_started",
+            "event_id": 1001,
+            "ts": "2026-10-07T18:00:00.000Z"
+          }
+        },
+        {
+          "lane_id": "wl-paused-0004",
+          "title": "Voice answers web",
+          "summary": "Paused after lead seat closed",
+          "state": "paused",
+          "state_reason": "lead_lost_unreconciled",
+          "blocker": null,
+          "owner_kind": "operator",
+          "version": 2,
+          "updated_at": "2026-10-07T18:40:00.000Z",
+          "first_admitted_at": "2026-10-07T16:00:00.000Z",
+          "done_at": null,
+          "lead": {
+            "stream_id": "amaterasu:v2-lead0004",
+            "generation": "gen-lead-0004-old",
+            "qualifies": false,
+            "status": "open",
+            "visibility": "default",
+            "presence": {
+              "online": true,
+              "working": false,
+              "capture_liveness": "idle",
+              "last_activity": "2026-10-07T18:55:00Z"
+            },
+            "status_card": {
+              "goal": "Voice answers",
+              "active_step": null,
+              "update": null,
+              "eta_at": "2026-10-07T20:00:00Z",
+              "eta_set_at": "2026-10-07T16:30:00Z",
+              "updated_at": "2026-10-07T18:50:00Z"
+            },
+            "eta_stale": true
+          },
+          "visible_chat": {
+            "stream_id": "amaterasu:v2-chat0004",
+            "generation": "gen-chat-0004-old",
+            "kind": "session",
+            "available": "unavailable"
+          },
+          "last_update": null
+        },
+        {
+          "lane_id": "wl-paused-0003",
+          "title": "Household boards",
+          "summary": "Deliberately paused by FD",
+          "state": "paused",
+          "state_reason": "lead_lost",
+          "blocker": null,
+          "owner_kind": "operator",
+          "version": 5,
+          "updated_at": "2026-10-07T18:30:00.000Z",
+          "first_admitted_at": "2026-10-07T12:00:00.000Z",
+          "done_at": null,
+          "lead": {
+            "stream_id": "amaterasu:v2-lead0003",
+            "generation": "gen-lead-0003",
+            "qualifies": false,
+            "status": "closed",
+            "visibility": "default",
+            "presence": {
+              "online": false,
+              "working": false,
+              "capture_liveness": "transport_unknown",
+              "last_activity": null
+            },
+            "status_card": {
+              "goal": "Boards",
+              "active_step": null,
+              "update": null,
+              "eta_at": "2026-10-07T15:00:00Z",
+              "eta_set_at": "2026-10-07T12:30:00Z",
+              "updated_at": "2026-10-07T18:50:00Z"
+            },
+            "eta_stale": true
+          },
+          "visible_chat": {
+            "stream_id": "amaterasu:v2-lead0003",
+            "generation": "gen-lead-0003",
+            "kind": "session",
+            "available": "history"
+          },
+          "last_update": {
+            "update_id": "lane-update:wl-paused-0003:req-unblock-3",
+            "kind": "lane_unblocked",
+            "event_id": 977,
+            "ts": "2026-10-07T14:00:00.000Z"
+          }
+        }
+      ],
+      "counts": {
+        "open": 4,
+        "active": 1,
+        "paused": 2,
+        "blocked": 1
+      },
+      "truncated": false,
+      "generated_at": "2026-10-07T19:01:00.000Z"
+    }
+  },
+  "list_reply": {
+    "type": "work_lanes.list.ok",
+    "include_done": true,
+    "lanes": [
+      {
+        "lane_id": "wl-blocked-0001",
+        "title": "Thoth daemon deploy",
+        "summary": "Ship chat-stream-v2 candidate to Thoth",
+        "state": "blocked",
+        "state_reason": "fd",
+        "blocker": "Waiting for operator deploy window",
+        "owner_kind": "fd",
+        "version": 4,
+        "updated_at": "2026-10-07T19:00:00.000Z",
+        "first_admitted_at": "2026-10-07T17:00:00.000Z",
+        "done_at": null,
+        "lead": {
+          "stream_id": "amaterasu:v2-lead0001",
+          "generation": "gen-lead-0001",
+          "qualifies": true,
+          "status": "open",
+          "visibility": "default",
+          "presence": {
+            "online": true,
+            "working": false,
+            "capture_liveness": "idle",
+            "last_activity": "2026-10-07T18:55:00Z"
+          },
+          "status_card": {
+            "goal": "Deploy daemon",
+            "active_step": "Await window",
+            "update": null,
+            "eta_at": "2026-10-07T21:00:00Z",
+            "eta_set_at": "2026-10-07T18:00:00Z",
+            "updated_at": "2026-10-07T18:50:00Z"
+          },
+          "eta_stale": false
+        },
+        "visible_chat": {
+          "stream_id": "amaterasu:v2-lead0001",
+          "generation": "gen-lead-0001",
+          "kind": "session",
+          "available": "open"
+        },
+        "last_update": {
+          "update_id": "lane-update:wl-blocked-0001:req-block-1",
+          "kind": "lane_blocked",
+          "event_id": 1043,
+          "ts": "2026-10-07T19:00:00.000Z"
+        }
+      },
+      {
+        "lane_id": "wl-active-0002",
+        "title": "Work lanes mobile slice",
+        "summary": "Header count, lanes list, lane_update card",
+        "state": "active",
+        "state_reason": "fd",
+        "blocker": null,
+        "owner_kind": "fd",
+        "version": 3,
+        "updated_at": "2026-10-07T18:58:00.000Z",
+        "first_admitted_at": "2026-10-07T18:00:00.000Z",
+        "done_at": null,
+        "lead": {
+          "stream_id": "amaterasu:v2-lead0002",
+          "generation": "gen-lead-0002",
+          "qualifies": true,
+          "status": "open",
+          "visibility": "default",
+          "presence": {
+            "online": true,
+            "working": true,
+            "capture_liveness": "idle",
+            "last_activity": "2026-10-07T18:55:00Z"
+          },
+          "status_card": {
+            "goal": "Mobile lanes UI",
+            "active_step": "LanesSurface",
+            "update": null,
+            "eta_at": "2026-10-08T04:00:00Z",
+            "eta_set_at": "2026-10-07T18:30:00Z",
+            "updated_at": "2026-10-07T18:50:00Z"
+          },
+          "eta_stale": false
+        },
+        "visible_chat": {
+          "stream_id": "bart:assistant",
+          "generation": null,
+          "kind": "composite",
+          "available": "open"
+        },
+        "last_update": {
+          "update_id": "lane-update:wl-active-0002:adopt:stream:amaterasu:v2-lead0002",
+          "kind": "lane_started",
+          "event_id": 1001,
+          "ts": "2026-10-07T18:00:00.000Z"
+        }
+      },
+      {
+        "lane_id": "wl-paused-0004",
+        "title": "Voice answers web",
+        "summary": "Paused after lead seat closed",
+        "state": "paused",
+        "state_reason": "lead_lost_unreconciled",
+        "blocker": null,
+        "owner_kind": "operator",
+        "version": 2,
+        "updated_at": "2026-10-07T18:40:00.000Z",
+        "first_admitted_at": "2026-10-07T16:00:00.000Z",
+        "done_at": null,
+        "lead": {
+          "stream_id": "amaterasu:v2-lead0004",
+          "generation": "gen-lead-0004-old",
+          "qualifies": false,
+          "status": "open",
+          "visibility": "default",
+          "presence": {
+            "online": true,
+            "working": false,
+            "capture_liveness": "idle",
+            "last_activity": "2026-10-07T18:55:00Z"
+          },
+          "status_card": {
+            "goal": "Voice answers",
+            "active_step": null,
+            "update": null,
+            "eta_at": "2026-10-07T20:00:00Z",
+            "eta_set_at": "2026-10-07T16:30:00Z",
+            "updated_at": "2026-10-07T18:50:00Z"
+          },
+          "eta_stale": true
+        },
+        "visible_chat": {
+          "stream_id": "amaterasu:v2-chat0004",
+          "generation": "gen-chat-0004-old",
+          "kind": "session",
+          "available": "unavailable"
+        },
+        "last_update": null
+      },
+      {
+        "lane_id": "wl-paused-0003",
+        "title": "Household boards",
+        "summary": "Deliberately paused by FD",
+        "state": "paused",
+        "state_reason": "lead_lost",
+        "blocker": null,
+        "owner_kind": "operator",
+        "version": 5,
+        "updated_at": "2026-10-07T18:30:00.000Z",
+        "first_admitted_at": "2026-10-07T12:00:00.000Z",
+        "done_at": null,
+        "lead": {
+          "stream_id": "amaterasu:v2-lead0003",
+          "generation": "gen-lead-0003",
+          "qualifies": false,
+          "status": "closed",
+          "visibility": "default",
+          "presence": {
+            "online": false,
+            "working": false,
+            "capture_liveness": "transport_unknown",
+            "last_activity": null
+          },
+          "status_card": {
+            "goal": "Boards",
+            "active_step": null,
+            "update": null,
+            "eta_at": "2026-10-07T15:00:00Z",
+            "eta_set_at": "2026-10-07T12:30:00Z",
+            "updated_at": "2026-10-07T18:50:00Z"
+          },
+          "eta_stale": true
+        },
+        "visible_chat": {
+          "stream_id": "amaterasu:v2-lead0003",
+          "generation": "gen-lead-0003",
+          "kind": "session",
+          "available": "history"
+        },
+        "last_update": {
+          "update_id": "lane-update:wl-paused-0003:req-unblock-3",
+          "kind": "lane_unblocked",
+          "event_id": 977,
+          "ts": "2026-10-07T14:00:00.000Z"
+        }
+      },
+      {
+        "lane_id": "wl-done-0005",
+        "title": "Usage rollup",
+        "summary": "Codex per-session reconciliation",
+        "state": "done",
+        "state_reason": "fd",
+        "blocker": null,
+        "owner_kind": "fd",
+        "version": 6,
+        "updated_at": "2026-10-07T17:30:00.000Z",
+        "first_admitted_at": "2026-10-06T10:00:00.000Z",
+        "done_at": "2026-10-07T17:30:00.000Z",
+        "lead": null,
+        "visible_chat": {
+          "stream_id": "bart:assistant",
+          "generation": null,
+          "kind": "composite",
+          "available": "open"
+        },
+        "last_update": {
+          "update_id": "lane-update:wl-done-0005:req-done-5",
+          "kind": "lane_completed",
+          "event_id": 1010,
+          "ts": "2026-10-07T17:30:00.000Z"
+        }
+      }
+    ],
+    "next_before_updated_at": null
+  },
+  "lane_update_events": [
+    {
+      "type": "chat.event",
+      "event": {
+        "stream_id": "bart:assistant",
+        "provider": "composite",
+        "kind": "ASSIST_TEXT",
+        "text": "Work lanes mobile slice \u2014 Header count, lanes list, lane_update card",
+        "message_id": "publication:lane-update:wl-active-0002:adopt:stream:amaterasu:v2-lead0002",
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "publish_kind": "lane_update",
+        "attachments": [],
+        "timestamp": "2026-10-07T18:00:00.000Z",
+        "raw": {
+          "assistant_composite": {
+            "published_by": {
+              "stream_id": "thoth:v2-fdseat",
+              "generation": "gen-fd"
+            }
+          },
+          "publish_kind": "lane_update",
+          "dispatch_id": "",
+          "actor_stream_id": "thoth:v2-fdseat",
+          "lane_update": {
+            "update_id": "lane-update:wl-active-0002:adopt:stream:amaterasu:v2-lead0002",
+            "lane_id": "wl-active-0002",
+            "kind": "lane_started",
+            "summary": "Work lanes mobile slice \u2014 Header count, lanes list, lane_update card",
+            "source": {
+              "type": "adoption",
+              "id": "adopt:stream:amaterasu:v2-lead0002"
+            },
+            "state": "active",
+            "prior_state": null,
+            "owner_kind": "fd",
+            "title": "Work lanes mobile slice",
+            "ts": "2026-10-07T18:00:00.000Z"
+          }
+        },
+        "daemon_seq": 1001
+      }
+    },
+    {
+      "type": "chat.event",
+      "event": {
+        "stream_id": "bart:assistant",
+        "provider": "composite",
+        "kind": "ASSIST_TEXT",
+        "text": "Waiting for operator deploy window",
+        "message_id": "publication:lane-update:wl-blocked-0001:req-block-1",
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "publish_kind": "lane_update",
+        "attachments": [],
+        "timestamp": "2026-10-07T19:00:00.000Z",
+        "raw": {
+          "assistant_composite": {
+            "published_by": {
+              "stream_id": "thoth:v2-fdseat",
+              "generation": "gen-fd"
+            }
+          },
+          "publish_kind": "lane_update",
+          "dispatch_id": "",
+          "actor_stream_id": "thoth:v2-fdseat",
+          "lane_update": {
+            "update_id": "lane-update:wl-blocked-0001:req-block-1",
+            "lane_id": "wl-blocked-0001",
+            "kind": "lane_blocked",
+            "summary": "Waiting for operator deploy window",
+            "source": {
+              "type": "transition",
+              "id": "req-block-1"
+            },
+            "state": "blocked",
+            "prior_state": "active",
+            "owner_kind": "fd",
+            "title": "Thoth daemon deploy",
+            "ts": "2026-10-07T19:00:00.000Z"
+          }
+        },
+        "daemon_seq": 1043
+      }
+    },
+    {
+      "type": "chat.event",
+      "event": {
+        "stream_id": "bart:assistant",
+        "provider": "composite",
+        "kind": "ASSIST_TEXT",
+        "text": "Blocker cleared: design review",
+        "message_id": "publication:lane-update:wl-paused-0003:req-unblock-3",
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "publish_kind": "lane_update",
+        "attachments": [],
+        "timestamp": "2026-10-07T14:00:00.000Z",
+        "raw": {
+          "assistant_composite": {
+            "published_by": {
+              "stream_id": "thoth:v2-fdseat",
+              "generation": "gen-fd"
+            }
+          },
+          "publish_kind": "lane_update",
+          "dispatch_id": "",
+          "actor_stream_id": "thoth:v2-fdseat",
+          "lane_update": {
+            "update_id": "lane-update:wl-paused-0003:req-unblock-3",
+            "lane_id": "wl-paused-0003",
+            "kind": "lane_unblocked",
+            "summary": "Blocker cleared: design review",
+            "source": {
+              "type": "transition",
+              "id": "req-unblock-3"
+            },
+            "state": "paused",
+            "prior_state": "blocked",
+            "owner_kind": "operator",
+            "title": "Household boards",
+            "ts": "2026-10-07T14:00:00.000Z"
+          }
+        },
+        "daemon_seq": 977
+      }
+    },
+    {
+      "type": "chat.event",
+      "event": {
+        "stream_id": "bart:assistant",
+        "provider": "composite",
+        "kind": "ASSIST_TEXT",
+        "text": "Rollup shipped on main 355f12ab",
+        "message_id": "publication:lane-update:wl-done-0005:req-done-5",
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "publish_kind": "lane_update",
+        "attachments": [],
+        "timestamp": "2026-10-07T17:30:00.000Z",
+        "raw": {
+          "assistant_composite": {
+            "published_by": {
+              "stream_id": "thoth:v2-fdseat",
+              "generation": "gen-fd"
+            }
+          },
+          "publish_kind": "lane_update",
+          "dispatch_id": "",
+          "actor_stream_id": "thoth:v2-fdseat",
+          "lane_update": {
+            "update_id": "lane-update:wl-done-0005:req-done-5",
+            "lane_id": "wl-done-0005",
+            "kind": "lane_completed",
+            "summary": "Rollup shipped on main 355f12ab",
+            "source": {
+              "type": "transition",
+              "id": "req-done-5"
+            },
+            "state": "done",
+            "prior_state": "active",
+            "owner_kind": "fd",
+            "title": "Usage rollup",
+            "ts": "2026-10-07T17:30:00.000Z"
+          }
+        },
+        "daemon_seq": 1010
+      }
+    },
+    {
+      "type": "chat.event",
+      "event": {
+        "stream_id": "bart:assistant",
+        "provider": "composite",
+        "kind": "ASSIST_TEXT",
+        "text": "Deploy daemon before web activation",
+        "message_id": "publication:lane-update:wl-blocked-0001:decision-deploy-order",
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "publish_kind": "lane_update",
+        "attachments": [],
+        "timestamp": "2026-10-07T18:20:00.000Z",
+        "raw": {
+          "assistant_composite": {
+            "published_by": {
+              "stream_id": "thoth:v2-fdseat",
+              "generation": "gen-fd"
+            }
+          },
+          "publish_kind": "lane_update",
+          "dispatch_id": "",
+          "actor_stream_id": "thoth:v2-fdseat",
+          "lane_update": {
+            "update_id": "lane-update:wl-blocked-0001:decision-deploy-order",
+            "lane_id": "wl-blocked-0001",
+            "kind": "major_decision",
+            "summary": "Deploy daemon before web activation",
+            "source": {
+              "type": "decision",
+              "id": "decision-deploy-order"
+            },
+            "state": "active",
+            "prior_state": "active",
+            "owner_kind": "fd",
+            "title": "Thoth daemon deploy",
+            "ts": "2026-10-07T18:20:00.000Z"
+          }
+        },
+        "daemon_seq": 1020
+      }
+    },
+    {
+      "type": "chat.event",
+      "event": {
+        "stream_id": "bart:assistant",
+        "provider": "composite",
+        "kind": "ASSIST_TEXT",
+        "text": "Store and operations merged",
+        "message_id": "publication:lane-update:wl-active-0002:m1-store",
+        "reply_to_message_id": null,
+        "reply_to_question_id": null,
+        "publish_kind": "lane_update",
+        "attachments": [],
+        "timestamp": "2026-10-07T18:45:00.000Z",
+        "raw": {
+          "assistant_composite": {
+            "published_by": {
+              "stream_id": "thoth:v2-fdseat",
+              "generation": "gen-fd"
+            }
+          },
+          "publish_kind": "lane_update",
+          "dispatch_id": "",
+          "actor_stream_id": "thoth:v2-fdseat",
+          "lane_update": {
+            "update_id": "lane-update:wl-active-0002:m1-store",
+            "lane_id": "wl-active-0002",
+            "kind": "milestone",
+            "summary": "Store and operations merged",
+            "source": {
+              "type": "milestone",
+              "id": "m1-store",
+              "grouped_ids": [
+                "m1-store-a",
+                "m1-store-b"
+              ]
+            },
+            "state": "active",
+            "prior_state": "active",
+            "owner_kind": "fd",
+            "title": "Work lanes mobile slice",
+            "ts": "2026-10-07T18:45:00.000Z"
+          }
+        },
+        "daemon_seq": 1030
+      }
+    }
+  ],
+  "legacy_render": "A client that does not branch on publish_kind 'lane_update' renders event.text as assistant prose.",
+  "expected": {
+    "order": [
+      "wl-blocked-0001",
+      "wl-active-0002",
+      "wl-paused-0004",
+      "wl-paused-0003"
+    ],
+    "header_count": 4,
+    "header_states": [
+      "active",
+      "paused",
+      "blocked"
+    ],
+    "done_in_lanes": false,
+    "tap": {
+      "wl-blocked-0001": {
+        "action": "open_chat",
+        "stream_id": "amaterasu:v2-lead0001"
+      },
+      "wl-active-0002": {
+        "action": "open_chat",
+        "stream_id": "bart:assistant"
+      },
+      "wl-paused-0004": {
+        "action": "unavailable"
+      },
+      "wl-paused-0003": {
+        "action": "history",
+        "stream_id": "amaterasu:v2-lead0003",
+        "generation": "gen-lead-0003"
+      }
+    },
+    "eta_stale": {
+      "wl-blocked-0001": false,
+      "wl-active-0002": false,
+      "wl-paused-0004": true,
+      "wl-paused-0003": true
+    },
+    "session_inventory_note": "wl-active-0002's lead has 3 hidden workers and 2 unrelated visible sessions exist; counts.open stays 4 (V11)."
+  },
+  "enums": {
+    "state": [
+      "active",
+      "paused",
+      "blocked",
+      "done"
+    ],
+    "state_reason": [
+      "fd",
+      "lead_lost",
+      "lead_lost_unreconciled",
+      "operator_confirmed",
+      "reopened"
+    ],
+    "owner_kind": [
+      "operator",
+      "fd"
+    ],
+    "visible_chat.kind": [
+      "composite",
+      "session"
+    ],
+    "visible_chat.available": [
+      "open",
+      "history",
+      "unavailable"
+    ],
+    "update_kind": [
+      "major_decision",
+      "lane_started",
+      "lane_completed",
+      "lane_blocked",
+      "lane_unblocked",
+      "milestone"
+    ],
+    "source.type": [
+      "transition",
+      "decision",
+      "milestone",
+      "adoption"
+    ],
+    "presence.capture_liveness": [
+      "idle",
+      "wedged_unknown",
+      "transport_unknown"
+    ]
+  }
+}
