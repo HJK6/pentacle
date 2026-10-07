@@ -9,6 +9,13 @@
 // merges the ring into its own buffer and re-emits a snapshot payload that
 // re-enters applyChatStreamPayload, repopulating `state.chatStream.events`.
 
+// A lane's closed chat is read at its exact generation (stream_id alone is refused by the
+// daemon). Only the lane-history slot passes `options.generation`; every other read of the
+// same stream id omits it.
+function generationOf(options) {
+  return options && options.generation ? { generation: String(options.generation) } : {};
+}
+
 function ensureChatEventsLoaded(streamState, streamId, cc, logger = console, options = {}) {
   const id = String(streamId || '');
   if (!id || !streamState?.eventsLoadedFor || !streamState.connected) return false;
@@ -36,7 +43,7 @@ function ensureChatEventsLoaded(streamState, streamId, cc, logger = console, opt
     options.onChange?.(id);
   };
   try {
-    Promise.resolve(cc.requestStreamEvents({ streamId: id }))
+    Promise.resolve(cc.requestStreamEvents({ streamId: id, ...generationOf(options) }))
       .then(complete, error => complete({ ok: false, error: error?.message || error }));
   } catch (error) {
     complete({ ok: false, error: error?.message || error });
@@ -82,7 +89,7 @@ async function requestOlderHistory(streamState, streamId, cc, logger = console, 
   try {
     while (!paging.exhausted) {
       const reply = await cc.requestStreamEvents({
-        streamId: id, beforeDaemonSeq: paging.cursor, limit: HISTORY_PAGE_EVENTS,
+        streamId: id, beforeDaemonSeq: paging.cursor, limit: HISTORY_PAGE_EVENTS, ...generationOf(options),
       });
       if (!reply || reply.ok === false) {
         logger.warn?.('[ChatStream] older history failed:', id, reply?.error);
@@ -110,26 +117,38 @@ function historyLoadIncomplete(load, hasRows) {
   return !!load && (load.status === 'error' || (load.status === 'loaded' && !hasRows));
 }
 
+// Retries of one failed load form a lineage (the first failed load and the loads its retries
+// create). A pending retry is owned by its slot kind, lane generation and slot instance, so an ordinary slot's
+// retry never suppresses a lane-history slot's retry of the same stream id, and either kind's
+// retry may replace the shared load without cancelling its sibling's.
 function scheduleHistoryRetry(streamState, streamId, cc, logger = console, options = {}) {
   const id = String(streamId || '');
   const load = streamState?.historyLoads?.[id];
-  if (!id || !streamState.connected || load?.retryPending || !historyLoadIncomplete(load, options.hasRows)) return false;
+  const lineage = load ? (load.lineage || load) : null;
+  // `options.owner` names the scheduling slot instance; default: the lane generation, else the ordinary owner.
+  const owner = options.owner !== undefined ? String(options.owner) : options.generation ? String(options.generation) : '';
+  if (!id || !streamState.connected || lineage?.retryOwners?.has(owner) || !historyLoadIncomplete(load, options.hasRows)) return false;
   const attempt = load.attempt || 0;
   if (attempt >= HISTORY_RETRY_DELAYS_MS.length) {
     if (!load.exhausted) logger.info?.('[chat.history]', { subsystem: 'chat_history', bug_ref: 'spec_pentacle__web_chat_transcript_collapse_2026_09', streamId: id, event: 'retry_exhausted', attempt });
     load.exhausted = true;
     return false;
   }
-  load.retryPending = true;
+  const owners = lineage.retryOwners || (lineage.retryOwners = new Set());
+  owners.add(owner);
   logger.info?.('[chat.history]', { subsystem: 'chat_history', bug_ref: 'spec_pentacle__web_chat_transcript_collapse_2026_09', streamId: id, event: 'retry_scheduled', attempt: attempt + 1, delayMs: HISTORY_RETRY_DELAYS_MS[attempt] });
   const setTimer = options.setTimer || setTimeout;
   setTimer(() => {
-    load.retryPending = false;
+    owners.delete(owner);
     // The slot may have moved on, rows may have arrived, or a reconnect may
-    // have replaced this load; each makes the retry moot.
-    if (streamState.historyLoads?.[id] !== load || !streamState.connected) return;
+    // have replaced this load; each makes the retry moot. A sibling owner's retry of the
+    // same lineage replacing the load does not.
+    const current = streamState.historyLoads?.[id];
+    if (!current || !streamState.connected || (current !== load && (current.lineage || current) !== lineage)) return;
     if (typeof options.stillNeeded === 'function' && !options.stillNeeded(id)) return;
-    ensureChatEventsLoaded(streamState, id, cc, logger, { retry: true, attempt: attempt + 1, onChange: options.onChange });
+    ensureChatEventsLoaded(streamState, id, cc, logger, { retry: true, attempt: attempt + 1, onChange: options.onChange, generation: options.generation });
+    const next = streamState.historyLoads?.[id];
+    if (next && next !== load && !next.lineage) next.lineage = lineage;
   }, HISTORY_RETRY_DELAYS_MS[attempt]);
   return true;
 }
@@ -161,6 +180,7 @@ function refetchEventsForActiveChatSlots(args) {
     cc,
     streamHostForHostId,
     findStreamSession,
+    generationForSlot,
     logger = console,
     onChange,
   } = args || {};
@@ -175,7 +195,8 @@ function refetchEventsForActiveChatSlots(args) {
       ? findStreamSession(streamState, session, host)
       : null;
     const streamId = streamSession?.stream_id;
-    if (streamId && ensureChatEventsLoaded(streamState, streamId, cc, logger, { onChange })) {
+    const generation = typeof generationForSlot === 'function' ? generationForSlot(slot) : undefined;
+    if (streamId && ensureChatEventsLoaded(streamState, streamId, cc, logger, { onChange, generation })) {
       triggered += 1;
     }
   }

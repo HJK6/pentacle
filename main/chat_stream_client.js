@@ -154,6 +154,8 @@ class ChatStreamClient {
     this._limits = nullLimits();
     this._limitsHealth = null;
     this._hostsStats = {};
+    // Latest work_lanes.inventory frame; null until a lane-aware daemon sends one.
+    this._workLanes = null;
     this._recentLimit = 500;
     // Bound the report/asset read RPCs so an unresponsive daemon yields a
     // visible error instead of an infinite loading spinner (75 KB replies land
@@ -217,6 +219,7 @@ class ChatStreamClient {
       limits: validatedLimits(this._limits),
       limits_health: this._limitsHealth,
       hosts_stats: { ...this._hostsStats },
+      ...(this._workLanes ? { work_lanes: this._workLanes } : {}),
       // Version info for the Settings footer (issue #13): this host's own build
       // SHA and the connected daemon's checkout SHA. Both ride the snapshot so
       // the renderer reads them from one place in Electron and web mode.
@@ -439,7 +442,7 @@ try {
     const payload = {
       type: 'hello',
       client: 'pentacle',
-      capabilities: { assistant_composite_v1: this._cfg?.features?.chatUi === true },
+      capabilities: { assistant_composite_v1: this._cfg?.features?.chatUi === true, work_lanes_v1: true },
       build_sha: this._buildSha,
       subscribe: this._helloSubscribePayload(),
     };
@@ -832,12 +835,14 @@ try {
     });
   }
 
-  async requestStreamEvents({ streamId, limit, beforeDaemonSeq, chunkLimit } = {}) {
+  async requestStreamEvents({ streamId, generation, limit, beforeDaemonSeq, chunkLimit } = {}) {
     const stream_id = String(streamId || '');
     if (!stream_id) {
       return { ok: false, error: 'streamId is required' };
     }
     const payload = { type: 'request_stream_events', stream_id };
+    // A closed lane chat is served only for the exact visible-chat generation.
+    if (generation) payload.generation = String(generation);
     if (Number.isFinite(limit)) payload.limit = Number(limit);
     if (Number.isFinite(beforeDaemonSeq)) payload.before_daemon_seq = Number(beforeDaemonSeq);
     if (Number.isFinite(chunkLimit)) payload.chunk_limit = Number(chunkLimit);
@@ -1397,6 +1402,7 @@ try {
         this._drafts = msg.drafts || {};
         this._sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
         this._capabilities = msg.capabilities && typeof msg.capabilities === 'object' ? { ...msg.capabilities } : {};
+        this._workLanes = msg.work_lanes && typeof msg.work_lanes === 'object' ? msg.work_lanes : null;
         this._replaceSchedules(msg.schedules);
         if (Object.prototype.hasOwnProperty.call(msg, 'limits')) {
           const limits = validatedLimits(msg.limits);
@@ -1426,6 +1432,9 @@ try {
       } else if (msg.type === 'session.inventory' && Array.isArray(msg.sessions)) {
         this._forwardFrame(msg);
         this._sessions = msg.sessions;
+      } else if (msg.type === 'work_lanes.inventory' && Array.isArray(msg.lanes)) {
+        this._workLanes = msg;
+        this._forwardFrame(msg);
       } else if (msg.type === 'schedule.inventory' && Array.isArray(msg.schedules)) {
         this._replaceSchedules(msg.schedules);
         this._forwardFrame({ type: 'schedule.inventory', schedules: this._schedules.slice() });
