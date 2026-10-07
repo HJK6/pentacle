@@ -7,6 +7,7 @@ import asyncio
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta, timezone
+import errno
 import fcntl
 import hashlib
 import json
@@ -16,6 +17,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import traceback
 from time import monotonic
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -1268,24 +1270,77 @@ def retain_weekly_summary(settings, run_id):
 # A daemon restart surfaces as a refused/reset socket or a closed websocket.
 # Nothing else (a missing token file, a disk error) is a transport loss.
 TRANSPORT_ERRORS = (ConnectionError, ConnectionClosed)
-_SECRET_FIELD = r"[A-Za-z0-9_-]*(?:token|secret|password|passwd|api[_-]?key|authorization|credential)[A-Za-z0-9_-]*"
-_SECRET_PATTERNS = (
-    # key: "value" / key='value': the whole quoted value, including spaces,
-    # delimiters and escaped quotes; an unterminated quote runs to the end.
-    re.compile(rf"""(?i)(["']?\b{_SECRET_FIELD}["']?\s*[:=]\s*)(["'])(?:\\.|(?!\2)[^\\])*(?:\2|$)"""),
-    # key: value / key=value unquoted (Bearer prefix optional): everything up to
-    # whitespace, a quote or a closing brace, so `;`/`&`/`,` cannot split it.
-    re.compile(rf"""(?i)(["']?\b{_SECRET_FIELD}["']?\s*[:=]\s*)(?![\s"']|\[redacted\])(?:bearer\s+)?[^\s"'}}]+"""),
-    re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]+"),
-)
+# Failure records never carry exception text: free text can hold a credential
+# in forms no pattern list anticipates. A record names the exception class, a
+# fixed reason code, and the byte length and sha256 of the raw message. The raw
+# text stays only in the local run directory (0600) and is never sent.
+_ERROR_FIELDS = ("class", "reason", "bytes", "sha256")
+_CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,79}")
+_REASON_CODE = re.compile(r"[a-z_]{1,32}(?::E[A-Z0-9]{1,20})?")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
-def sanitize_error(exc):
-    """Durable one-line failure text: type and message, credentials and control bytes removed."""
-    text = exc if isinstance(exc, str) else f"{type(exc).__name__}: {exc}"
-    for pattern in _SECRET_PATTERNS:
-        text = pattern.sub(lambda m: f"{m.group(1)}[redacted]", text)
-    return re.sub(r"[\x00-\x1f\x7f]", " ", text)[:300]
+def _reason_code(exc):
+    if isinstance(exc, TRANSPORT_ERRORS):
+        return "transport_loss"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, OSError):
+        return "os_error" + (f":{errno.errorcode[exc.errno]}" if exc.errno in errno.errorcode else "")
+    return "error" if isinstance(exc, Exception) else "interrupted"
+
+
+def _is_structured(value):
+    return (isinstance(value, dict) and set(value) == set(_ERROR_FIELDS)
+            and isinstance(value["class"], str) and _CLASS_NAME.fullmatch(value["class"]) is not None
+            and isinstance(value["reason"], str) and _REASON_CODE.fullmatch(value["reason"]) is not None
+            and type(value["bytes"]) is int and value["bytes"] >= 0
+            and isinstance(value["sha256"], str) and _SHA256.fullmatch(value["sha256"]) is not None)
+
+
+def structured_error(exc, root=None):
+    """Durable failure record: {class, reason, bytes, sha256}, never message text.
+
+    Idempotent: an already-structured record is returned unchanged. Any other
+    non-exception value (a legacy text record) is treated as raw text. With
+    `root`, the raw text is kept at root/errors/<sha256>.txt (0600) for local
+    diagnosis."""
+    if _is_structured(exc):
+        return dict(exc)
+    if isinstance(exc, BaseException):
+        name = type(exc).__name__
+        record_class = name if _CLASS_NAME.fullmatch(name) else "Exception"
+        reason, raw = _reason_code(exc), str(exc)
+    else:
+        record_class, reason = "LegacyText", "legacy_text"
+        raw = exc if isinstance(exc, str) else encoded(exc).decode()
+    data = raw.encode("utf-8", "backslashreplace")
+    sha = hashlib.sha256(data).hexdigest()
+    if root is not None:
+        _keep_raw_error(Path(root), sha, data)
+    return {"class": record_class, "reason": reason, "bytes": len(data), "sha256": sha}
+
+
+def render_error(record):
+    record = structured_error(record)
+    return f"{record['class']} reason={record['reason']} bytes={record['bytes']} sha256={record['sha256'][:16]}"
+
+
+def _keep_raw_error(root, name, data):
+    """Keep raw text at root/errors/<name>.txt. Best effort: losing the local
+    copy must never fail failure recording."""
+    try:
+        folder = root / "errors"
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(folder, 0o700)
+        fd = os.open(folder / f"{name}.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def record_failure(root, run_id, *, stage, error, notice):
@@ -1455,7 +1510,7 @@ class Pipeline:
             key = "daily-retro-" + digest([self.settings.namespace, manifest["run_id"], target, generation, bool(failure),
                                            *([seq] if pending else [])])[:32]
             if failure:
-                body = (f"REPORT daily-retro failure {manifest['run_id']} stage {pending.get('stage')}: {pending['failure']}. "
+                body = (f"REPORT daily-retro failure {manifest['run_id']} stage {pending.get('stage')}: {render_error(pending['failure'])}. "
                         f"Retained state: {root}. The next producer pass resumes the retained stage without a new worker; "
                         "no operator notification for routine retries.")
             else:
@@ -1543,7 +1598,7 @@ class Pipeline:
             try:  # A notice that could not reach the daemon stays durable until it lands.
                 await self.deliver(manifest, failure=True)
             except Exception as notice_error:
-                annotate_failure(root, manifest["run_id"], notice_error=sanitize_error(notice_error))
+                annotate_failure(root, manifest["run_id"], notice_error=structured_error(notice_error, root))
         primary = None
         try:
             sol = await self.worker(manifest, "sol")
@@ -1553,14 +1608,14 @@ class Pipeline:
         except BaseException as exc:
             primary = exc
             stage = next((n for n in ("sol", "astra") if not read(root / f"{n}.json", {}).get("packet")), "delivery")
-            error = sanitize_error(exc)
+            error = structured_error(exc, root)
             seq = record_failure(root, manifest["run_id"], stage=stage, error=error, notice="pending")
             self.queue_failure_notice(manifest, seq=seq, stage=stage, failure=error)
             if isinstance(exc, Exception):
                 try:
                     await self.deliver(manifest, failure=True)
                 except Exception as delivery_error:
-                    annotate_failure(root, manifest["run_id"], notice_error=sanitize_error(delivery_error))
+                    annotate_failure(root, manifest["run_id"], notice_error=structured_error(delivery_error, root))
             raise
         finally:
             try:
@@ -1569,7 +1624,7 @@ class Pipeline:
                 # Cleanup is retried by the next pass; it never replaces the primary error.
                 if primary is None:
                     raise
-                annotate_failure(root, manifest["run_id"], cleanup_error=sanitize_error(cleanup_error))
+                annotate_failure(root, manifest["run_id"], cleanup_error=structured_error(cleanup_error, root))
 
     async def history_run(self, baseline_path, batch, no_deliver=False):
         history_baseline(self.settings, baseline_path)
@@ -1612,7 +1667,7 @@ class Pipeline:
                     await self.worker(manifest, "astra", sol["packet"])
                 except Exception as exc:
                     stage = next((n for n in ("sol", "astra") if not read(root / f"{n}.json", {}).get("packet")), "astra")
-                    record_failure(root, manifest["run_id"], stage=stage, error=sanitize_error(exc),
+                    record_failure(root, manifest["run_id"], stage=stage, error=structured_error(exc, root),
                                    notice="not required: no-deliver history batch")
                     raise
                 finally:
@@ -2159,7 +2214,26 @@ def main():
             cmd.add_argument("--workers-config", required=True)
             cmd.add_argument("--evidence-dir", required=True)
     args = parser.parse_args()
+    settings_holder = []
+    try:
+        result = _run_command(args, settings_holder)
+    except Exception as exc:
+        # The scheduled job's stderr is a log file: never let a traceback carry
+        # the exception text there. The raw traceback is kept with the run's
+        # other raw errors (0600); stderr gets the structured record only.
+        root = settings_holder[0].state_root if settings_holder else None
+        record = structured_error(exc, root)
+        if root is not None:
+            _keep_raw_error(Path(root), record["sha256"] + ".traceback",
+                            traceback.format_exc().encode("utf-8", "backslashreplace"))
+        print(json.dumps({"error": record}), file=sys.stderr)
+        raise SystemExit(1) from None
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def _run_command(args, settings_holder):
     settings = Settings.load(args.config)
+    settings_holder.append(settings)
     if args.command == "collect":
         result = collect(settings, datetime.fromisoformat(args.now))
     elif args.command == "summary":
@@ -2181,7 +2255,7 @@ def main():
             result = asyncio.run(pipeline.record_review(args.run_id, read(Path(args.result))))
         else:
             result = asyncio.run(pipeline.decision(args.work_id, read(Path(args.proposal)), retry_blocked=args.retry_blocked))
-    print(json.dumps(result, ensure_ascii=False))
+    return result
 
 
 if __name__ == "__main__":

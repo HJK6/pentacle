@@ -1625,6 +1625,56 @@ async def _read_rpc_response(
     )
 
 
+def _abandon(task: asyncio.Future[Any]) -> None:
+    task.cancel()
+    task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+
+
+async def _close_within(ws: Any, deadline_at: float | None) -> None:
+    """Close `ws`; with an owner deadline, never wait past it. Past the
+    deadline the transport is aborted instead of finishing the close handshake.
+    Runs in `finally`, so it also bounds the close during a cancellation."""
+    if deadline_at is None:
+        await ws.close()
+        return
+
+    def abort() -> None:
+        transport = getattr(ws, "transport", None)
+        if transport is not None:
+            transport.abort()
+
+    remaining = deadline_at - time.monotonic()
+    if remaining <= 0:
+        abort()
+        return
+    closing = asyncio.ensure_future(ws.close())
+    try:
+        done, _ = await asyncio.wait({closing}, timeout=remaining)
+    except asyncio.CancelledError:
+        abort()
+        _abandon(closing)
+        raise
+    if not done:
+        abort()
+        _abandon(closing)
+
+
+async def _within_deadline(awaitable: Any, timeout: float) -> Any:
+    """Like asyncio.wait_for, but on timeout the awaitable is cancelled and
+    abandoned rather than awaited: its cleanup can never stretch the
+    caller's deadline. Raises TimeoutError."""
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
+    except asyncio.CancelledError:
+        _abandon(task)
+        raise
+    if not done:
+        _abandon(task)
+        raise TimeoutError
+    return task.result()
+
+
 async def _one_shot_rpc(
     config: Config,
     payload: dict[str, Any],
@@ -1683,7 +1733,7 @@ async def _one_shot_rpc(
                 raise
         finally:
             if ws is not None:
-                await ws.close()
+                await _close_within(ws, deadline_at)
         attempt_bound: int | str = retry_policy.max_attempts
         if retry_reason == "websocket_send_failed" and transport_loss:
             delay, giveup_reason = _transport_retry_next_delay(retry_policy, retry_deadline, attempts)
@@ -2333,12 +2383,13 @@ async def _await_starting_spawn(
         last: dict[str, Any] = {}
         while (remaining := deadline - time.monotonic()) > 0:
             # The spawn's own deadline bounds the nested retry, its waits and
-            # connect/close work: the CLI never outlives its promised deadline.
+            # connect/close work, including cleanup after a cancellation: the
+            # CLI never outlives its promised deadline.
             try:
-                last = await asyncio.wait_for(
+                last = await _within_deadline(
                     await_spawn_once(config, dict(payload), timeout=min(30.0, max(0.1, remaining)),
                                      deadline_at=deadline),
-                    timeout=remaining,
+                    remaining,
                 )
             except TimeoutError:
                 break

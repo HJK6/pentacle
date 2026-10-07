@@ -95,10 +95,7 @@ log = logging.getLogger("chat_streamd_v2.spawnctl")
 RESERVATION_TTL_S = 180.0
 #: Shutdown bound for in-flight admitted spawns to write their interruption
 #: outcome and release intent ownership while the store is still running.
-# One absolute budget for the graceful-shutdown spawn drain. With the shutdown's
-# other bounded waits (background tasks 5 s, accepted sends 5 s, TLS close 3 s)
-# the total stays inside launchd's 20 s ExitTimeOut, so the store stops before
-# SIGKILL.
+# The drain's cap inside the daemon's one shutdown budget (shutdown_budget.py).
 SHUTDOWN_SPAWN_DRAIN_S = 5.0
 RESERVED_LIFECYCLE_ACTORS = frozenset({"daemon:scheduler"})
 BOOT_READY_HARD_DEADLINE_S = 180.0

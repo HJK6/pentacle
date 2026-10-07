@@ -22,9 +22,18 @@ paste, and finally the `v2_spawn_outcomes` row.
 | pane and row, before the paste | The pane is adopted by nonce. The intent has no pre-paste watermark, which proves no paste happened, so adoption waits for provider readiness and pastes the brief once. It then proves that paste like any post-paste adoption. A provider that is still booting leaves the outcome `indeterminate` and the reservation retained; a later reconcile pass delivers it. |
 | paste, before the outcome | Adoption proves delivery from the post-watermark USER event or the provider transcript. It never pastes again. |
 
+The whole graceful stop shares one absolute deadline (`shutdown_budget.py`):
+
+- **Budget:** 15 s by default. `PENTACLE_V2_SHUTDOWN_BUDGET_S` may lower it but never raise it.
+- **Every step:** gets min(its own cap, what remains). The steps are the spawn drain, background tasks, composites, lane rulings, `Server.close` (accepted sends, consent expiry, and the TLS and plain listeners), notify, assets and lifecycle.
+- **Overruns:** a step that overruns is cancelled and abandoned, never awaited again, so a step that ignores cancellation cannot hold the stop open.
+- **Store reserve:** 1 s is held back for `store.stop()`.
+- **Loop teardown:** after the stop, teardown waits at most 0.5 s for leftover tasks (`run_bounded`).
+- **Total:** stays under launchd's 20 s exit window, so the store stops before SIGKILL.
+
 A graceful stop first closes spawn admission (new spawns wait and reconnect after the
 restart). It then cancels in-flight spawn tasks while the store is still running,
-within one absolute 5 s deadline (`SHUTDOWN_SPAWN_DRAIN_S`). With the shutdown's other bounded waits (background tasks 5 s, accepted sends 5 s, TLS close 3 s), the total stays inside launchd's 20 s exit window. Each spawn records its interruption
+within at most 5 s (`SHUTDOWN_SPAWN_DRAIN_S`). Each spawn records its interruption
 handoff (retained intent, an `indeterminate` outcome for an admitted row, intent
 owner released) before the store stops. One step is never cut: a spawn that has
 persisted its pre-paste watermark gets up to half the drain window to land its

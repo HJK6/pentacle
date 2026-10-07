@@ -135,12 +135,26 @@ ledger. It never spawns another worker and never reruns a completed stage. Only
 connection loss counts: an `OSError` such as a missing token file fails at once.
 
 A pass that still fails appends to `runs/<date>/failure.json`. The top level holds
-the latest failure (`seq`, `stage`, sanitized `error`, `notice`, `latest: true`),
-and earlier failures move to a bounded `history`, each with its own notice state.
-Sanitizing removes control bytes and credential values (`Authorization: Bearer`,
-`*token*`, `api_key`, `password`, `secret`, quoted or `key=value`). Cleanup errors
-are recorded as `cleanup_error` and never replace the primary error; cleanup is
-retried on the next pass.
+the latest failure (`seq`, `stage`, `error`, `notice`, `latest: true`), and
+earlier failures move to a bounded `history`, each with its own notice state.
+
+Error records (`error`, `cleanup_error` and `notice_error`) never contain
+exception text, because free text can carry a credential in a form that no
+pattern anticipates. Each record is `{class, reason, bytes, sha256}`:
+- `class`: the exception class name.
+- `reason`: a fixed code (`transport_loss`, `timeout`, `os_error[:ERRNO]`,
+  `error` or `interrupted`).
+- `bytes` and `sha256`: the raw message's byte length and SHA-256.
+
+The raw message is kept only at `runs/<date>/errors/<sha256>.txt` (mode 0600) for
+local diagnosis. It is never persisted elsewhere or delivered. The failure notice
+quotes the structured record. When the CLI exits on an uncaught error, it
+prints only `{"error": <record>}` to stderr (the scheduled job's log file) and
+exits 1. The traceback is kept beside the raw message as
+`errors/<sha256>.traceback.txt` (0600).
+
+Cleanup errors are recorded as `cleanup_error` and never replace the primary
+error; cleanup is retried on the next pass.
 
 The failure notice is queued in `failure-delivery.json` (`pending`) before any
 RPC, including on an interrupt, because the daemon may be unreachable. Its

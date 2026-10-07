@@ -176,20 +176,131 @@ def test_shutdown_drain_holds_one_absolute_deadline():
     asyncio.run(run())
 
 
-def test_shutdown_budget_fits_launchd_exit_window():
-    """The drain plus the shutdown's existing bounded waits (background tasks
-    5 s, accepted sends 5 s, TLS close 3 s) stay inside launchd's 20 s
-    ExitTimeOut, so the store is stopped before SIGKILL."""
-    assert spawnctl_mod.SHUTDOWN_SPAWN_DRAIN_S + 5 + 5 + 3 < 20
+def _stalled_shutdown(calls, budget_s, *, only_server=False):
+    """Every shutdown step stalls and swallows cancellation (or, with
+    `only_server`, only the real Server.close's accepted send, consent expiry
+    and BOTH listeners stall)."""
+    import main as daemon_main
+    from server import Server
+    from shutdown_budget import ShutdownBudget
+
+    async def stall(name):
+        calls.append(name)
+        while True:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                continue
+
+    class Listener:
+        def __init__(self, name):
+            self.name = name
+
+        def close(self):
+            calls.append(self.name)
+
+        async def wait_closed(self):
+            await stall(self.name + "-wait")
+
+    async def quick(name):
+        calls.append(name)
+
+    step = quick if only_server else stall
+
+    class Part:
+        def __init__(self, name):
+            self.name = name
+
+        def stop(self, **_kwargs):
+            return step(self.name)
+
+    class Drain:
+        def drain_background_spawns(self, *, timeout_s):
+            calls.append(("drain-timeout", timeout_s))
+            return step("spawn-drain")
+
+    class StoreStub:
+        def stop(self, timeout):
+            calls.append(("store-timeout", timeout))
+            time.sleep(timeout)  # a worker that never drains: join runs to its timeout
+
+    async def scenario():
+        server = Server.__new__(Server)
+        server.spawn_ready = asyncio.Event()
+        server._consent_expiry_task = asyncio.ensure_future(stall("consent-expiry"))
+        server._detached_send_tasks = {asyncio.ensure_future(stall("accepted-send"))}
+        server._client_writer_tasks = {}
+        server._tls_ws_server, server._ws_server = Listener("tls"), Listener("plain")
+        await asyncio.sleep(0)
+        budget = ShutdownBudget(budget_s)
+        await daemon_main.shutdown(
+            budget, server=server, spawnctl=Drain(), tasks=[asyncio.ensure_future(step("background-task"))],
+            composites=[Part("composite")], lane_rulings=Part("lane-rulings"), notify=Part("notify"),
+            assets=Part("assets"), lifecycle=Part("lifecycle"), store=StoreStub())
+        return budget
+
+    return daemon_main, scenario
+
+
+STEPS = ("spawn-drain", "background-tasks", "composite", "lane-rulings", "server", "notify", "assets", "lifecycle")
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+@pytest.mark.parametrize("only_server", [False, True], ids=["every-step-stalled", "server-close-stalled"])
+def test_stalled_shutdown_completes_within_the_budget(only_server):
+    """Cycle 2 B2: one absolute deadline covers the spawn drain, background
+    tasks, composites, lane rulings, Server.close (accepted sends, consent
+    expiry, BOTH listeners), notify, assets, lifecycle and store.stop; loop
+    teardown never waits on a task that ignores cancellation."""
+    calls: list = []
+    budget_s = 0.6
+    daemon_main, scenario = _stalled_shutdown(calls, budget_s, only_server=only_server)
+    started = time.monotonic()
+    budget = daemon_main.run_bounded(scenario())
+    elapsed = time.monotonic() - started
+    assert elapsed <= budget_s + daemon_main.LOOP_TEARDOWN_GRACE_S + 0.25, elapsed
+    names = [c for c in calls if isinstance(c, str)]
+    drain_timeout = next(c[1] for c in calls if isinstance(c, tuple) and c[0] == "drain-timeout")
+    store_timeout = next(c[1] for c in calls if isinstance(c, tuple) and c[0] == "store-timeout")
+    assert drain_timeout <= budget_s - budget.reserve_s
+    assert calls[-1][0] == "store-timeout"
+    if only_server:
+        # Server.close reached both listeners inside its share; nothing after it was starved.
+        assert {"accepted-send", "consent-expiry", "tls", "plain"} <= set(names), calls
+        assert budget.abandoned in ([], ["server"])
+        assert {"notify", "assets", "lifecycle"} <= set(names)
+        assert store_timeout > 0
+    else:
+        assert budget.abandoned == list(STEPS), budget.abandoned
+        assert 0 < store_timeout <= budget.reserve_s + 0.05  # the reserve is all that is left
+
+
+def test_shutdown_budget_is_at_most_15s_and_env_may_only_lower_it():
+    from shutdown_budget import SHUTDOWN_BUDGET_ENV as KEY, SHUTDOWN_BUDGET_MAX_S, configured_budget_s
+    from main import LOOP_TEARDOWN_GRACE_S
+    assert SHUTDOWN_BUDGET_MAX_S + LOOP_TEARDOWN_GRACE_S + 1 < 20  # launchd ExitTimeOut
+    assert configured_budget_s({}) == 15.0
+    assert configured_budget_s({KEY: "6.5"}) == 6.5
+    for raw in ("30", "x", "0", "-1", "nan", "inf"):
+        assert configured_budget_s({KEY: raw}) == 15.0, raw
+
+
+def test_store_stop_honours_its_timeout():
+    db = Store(":memory:")
+    db.start()
+    started = time.monotonic()
+    db.stop(timeout=0.5)
+    assert time.monotonic() - started < 0.5
+    db.stop(timeout=0.5)  # idempotent
 
 
 def test_main_shutdown_drains_spawns_before_server_and_store_stop():
     from pathlib import Path
     source = (Path(spawnctl_mod.__file__).parent / "main.py").read_text()
-    tail = source[source.index('log.info("shutdown requested")'):]
-    drain = tail.index("spawnctl.drain_background_spawns()")
+    tail = source[source.index("async def shutdown("):]
+    drain = tail.index("spawnctl.drain_background_spawns(")
     assert tail.index("server.spawn_ready.clear()") < drain
-    assert drain < tail.index("await server.close()") < tail.index("store.stop()")
+    assert drain < tail.index("server.close(") < tail.index("store.stop(")
 
 
 # --------------------------------------------------------------------------- #

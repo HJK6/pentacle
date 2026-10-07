@@ -237,6 +237,75 @@ def test_admitted_spawn_recovery_never_outlives_the_spawn_deadline(monkeypatch, 
     assert result["type"] == "spawn.indeterminate" and result["request_id"] == "spawn-c2"
 
 
+@pytest.mark.parametrize("stall", ["recv-then-slow-close", "send-then-slow-close", "slow-connect"])
+@pytest.mark.parametrize("max_attempts", ["1", "3"])
+def test_spawn_deadline_includes_socket_cleanup(monkeypatch, tmp_path, stall, max_attempts):
+    """Cycle 2 B4: a connected socket that stalls (reply, send or connect) and
+    then closes slowly never stretches the spawn deadline. The cancelled
+    RPC's close is bounded by the remaining budget (the transport is
+    aborted), and the outer wait never awaits that cleanup."""
+    fast_retry(monkeypatch, deadline="30")
+    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS", max_attempts)
+    events: list[str] = []
+
+    async def connect_ready(*_args, **_kwargs):
+        raise _closed_1001()
+
+    class Transport:
+        def abort(self):
+            events.append("abort")
+
+    class Socket:
+        transport = Transport()
+
+        async def send(self, _raw):
+            events.append("sent")
+            if stall == "send-then-slow-close":
+                await asyncio.Event().wait()
+
+        async def recv(self):
+            await asyncio.Event().wait()
+
+        async def close(self):
+            events.append("close")
+            await asyncio.sleep(5)
+
+    async def connected(config, **_kwargs):
+        if stall == "slow-connect":
+            await asyncio.sleep(5)
+        await asyncio.sleep(0.02)
+        return Socket()
+
+    monkeypatch.setattr(wsclient, "_connect_ready", connect_ready)
+    monkeypatch.setattr(wsclient, "_connect_rpc_ready", connected)
+    deadline_s = 0.15
+
+    async def scenario():
+        started = wsclient.time.monotonic()
+        result = await wsclient._await_starting_spawn(config(tmp_path), _accepted(), deadline=started + deadline_s)
+        return result, wsclient.time.monotonic() - started
+
+    run_started = wsclient.time.monotonic()
+    result, elapsed = asyncio.run(scenario())
+    assert elapsed <= deadline_s + 0.05, (elapsed, events)
+    assert wsclient.time.monotonic() - run_started <= deadline_s + 0.15  # loop teardown is quick too
+    assert result["type"] == "spawn.indeterminate" and result["request_id"] == "spawn-c2"
+    if stall != "slow-connect":
+        assert "abort" in events, events  # cleanup past the deadline aborts, never waits
+
+
+def test_close_within_without_a_deadline_keeps_the_plain_close():
+    calls = []
+
+    class Socket:
+        async def close(self):
+            await asyncio.sleep(0.05)
+            calls.append("closed")
+
+    asyncio.run(wsclient._close_within(Socket(), None))
+    assert calls == ["closed"]
+
+
 def test_backoff_saturates_at_large_attempt_counts():
     """Final QA B5: a deadline-bound retry can pass attempt 1024; the backoff
     saturates at its cap instead of overflowing float conversion."""

@@ -808,39 +808,53 @@ class Server:
         assert self._ws_server is not None, "bind() must be called before serve_forever()"
         await self._ws_server.serve_forever()
 
-    async def close(self) -> None:
+    async def close(self, *, deadline: float | None = None) -> None:
+        """Stop serving. `deadline` (monotonic) is the daemon's shutdown
+        budget: every wait below takes min(its own cap, what remains), and a
+        task that ignores cancellation is left behind, not awaited."""
+        def within(cap: float) -> float:
+            return cap if deadline is None else max(0.0, min(cap, deadline - time.monotonic()))
+
+        async def settle(tasks: Any, cap: float = 3.0) -> None:
+            if deadline is None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            elif tasks:
+                await asyncio.wait(tasks, timeout=within(cap))
+
         if self._consent_expiry_task is not None:
             self._consent_expiry_task.cancel()
-            await asyncio.gather(self._consent_expiry_task, return_exceptions=True)
+            await settle((self._consent_expiry_task,), cap=1.0)
             self._consent_expiry_task = None
         # spec_example_2026_01:
         # let accepted sends finish injecting before teardown, then cancel any
         # stragglers so shutdown stays bounded.
         if self._detached_send_tasks:
             pending = tuple(self._detached_send_tasks)
-            _, still_running = await asyncio.wait(pending, timeout=5.0)
+            _, still_running = await asyncio.wait(pending, timeout=within(5.0))
             for task in still_running:
                 task.cancel()
             if still_running:
-                await asyncio.gather(*still_running, return_exceptions=True)
+                await settle(still_running)
         for task in tuple(self._client_writer_tasks.values()):
             task.cancel()
         self._client_writer_tasks.clear()
         if self._tls_ws_server is not None:
             self._tls_ws_server.close()
-            try:
-                await asyncio.wait_for(self._tls_ws_server.wait_closed(), timeout=3)
-            except (asyncio.TimeoutError, asyncio.CancelledError):  # pragma: no cover
-                pass
+            await self._wait_listener_closed(self._tls_ws_server, within(3.0))
             self._tls_ws_server = None
         if self._ws_server is None:
             return
         self._ws_server.close()
-        try:
-            await asyncio.wait_for(self._ws_server.wait_closed(), timeout=3)
-        except (asyncio.TimeoutError, asyncio.CancelledError):  # pragma: no cover
-            pass
+        await self._wait_listener_closed(self._ws_server, within(3.0))
         self._ws_server = None
+
+    @staticmethod
+    async def _wait_listener_closed(listener: Any, timeout: float) -> None:
+        closing = asyncio.ensure_future(listener.wait_closed())
+        done, _ = await asyncio.wait({closing}, timeout=timeout)
+        if not done:  # never wait on a listener's cancellation past the budget
+            closing.cancel()
+            closing.add_done_callback(lambda task: None if task.cancelled() else task.exception())
 
     # -- connection --------------------------------------------------------
 

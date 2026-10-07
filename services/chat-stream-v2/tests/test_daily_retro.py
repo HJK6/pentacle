@@ -1609,7 +1609,8 @@ def test_unrecoverable_outage_persists_failure_then_flushes_notice_once(config):
     root = config.state_root / "runs/2026-09-28"
     failure = retro.read(root / "failure.json")
     assert failure["run_id"] == "2026-09-28" and failure["stage"] == "astra" and failure["seq"] == 1
-    assert failure["error"].startswith("ConnectionRefusedError: ") and failure["notice"] == "pending"
+    assert failure["error"]["class"] == "ConnectionRefusedError" and failure["error"]["reason"] == "transport_loss"
+    assert failure["notice"] == "pending"
     assert "cleanup_error" in failure and "notice_error" in failure
     assert retro.read(root / "failure-delivery.json")["pending"]["seq"] == 1
     rpc.down = False
@@ -1636,8 +1637,8 @@ def test_cleanup_error_never_replaces_primary_error(config):
     with pytest.raises(RuntimeError, match="primary astra failure"):
         asyncio.run(retro.Pipeline(config, CleanupDown()).run(at()))
     failure = retro.read(config.state_root / "runs/2026-09-28/failure.json")
-    assert failure["error"] == "RuntimeError: primary astra failure"
-    assert failure["cleanup_error"].startswith("ConnectionRefusedError")
+    assert failure["error"] == retro.structured_error(RuntimeError("primary astra failure"))
+    assert failure["cleanup_error"]["class"] == "ConnectionRefusedError"
 
 
 def test_interrupt_queues_notice_truthfully_without_rpc(config):
@@ -1690,37 +1691,113 @@ def test_recorded_review_supersedes_pending_notice(config, monkeypatch):
     assert not rpc.sent
 
 
-@pytest.mark.parametrize("raw", [
-    "Authorization: Bearer abc.DEF-123",
-    "GET /x?access_token=abc123&y=1",
-    "api_key='k-123'",
-    '{"stream_token": "s3cr3t"}',
-    "password=hunter2",
-    "header Bearer abc.def",
-])
-def test_sanitize_error_redacts_credential_forms(raw):
-    """Finding (b)."""
-    text = retro.sanitize_error(RuntimeError(raw + "\nnext line"))
-    for secret in ("abc.DEF-123", "abc123", "k-123", "s3cr3t", "hunter2", "abc.def"):
-        assert secret not in text
-    assert "[redacted]" in text and "\n" not in text and text.startswith("RuntimeError: ")
+# --------------------------------------------------------------------------- #
+# Error records never carry message text (cycle 2, B1 pivot). Property tests:
+# fuzzed messages with secret stand-ins in quoted/escaped/newline/backslash and
+# cut forms; no persisted or delivered field holds any part of them.
+# --------------------------------------------------------------------------- #
+
+# Stand-in alphabet without hex digits, so a 6-character window can never be
+# a coincidental match inside a sha256 or a timestamp.
+_STANDIN = "GHJKLMNPQRSTUVWXYZghjkmnpqrstuvwxyz"
+_FORMS = (
+    'password="{a} {b}" tail', "password='{a} {b}", "password='{a} {b}\\", 'api_key="{a} {b}\\',
+    'password="{a}\\\n{b}"', "token=\"{a} \\\" {b}\" tail", "secret={a}}}{b} rest", 'secret={a}"{b} rest',
+    "secret={a};{b}", "GET /x?access_token={a}&y={b}", "Authorization: Bearer {a}", "Authorization: 'Bearer {a} {b}'",
+    '{{"stream_token": "{a}", "next": "{b}"}}', "api_key='{a}\\'{b}'", "Bearer\t{a}\n{b}", "{a}{b}",
+    "token=\x00{a}\x7f{b}", "pässwörd={a} {b}", "access_token=[redacted] {a}", "credential:{a}\r\n{b}",
+)
 
 
-@pytest.mark.parametrize("raw", [
-    "password='PLACEHOLDER FIRST SECOND' at login",
-    '{"api_key": "PLACEHOLDER FIRST SECOND", "next": 1}',
-    "secret=PLACEHOLDER;SECOND rest",
-    'token="PLACEHOLDER \\" FIRST SECOND" tail',
-    "password='PLACEHOLDER FIRST SECOND",
-    "Authorization: 'Bearer PLACEHOLDER FIRST SECOND'",
-])
-def test_sanitize_error_redacts_whole_quoted_and_delimited_values(raw):
-    """Final QA B1: a quoted value is redacted whole (spaces, delimiters,
-    escaped quotes, an unterminated quote); an unquoted one up to whitespace."""
-    text = retro.sanitize_error(RuntimeError(raw))
-    for part in ("PLACEHOLDER", "FIRST", "SECOND"):
-        assert part not in text, text
-    assert "[redacted]" in text
+def _standin(rng):
+    return "".join(rng.choice(_STANDIN) for _ in range(rng.randint(10, 24)))
+
+
+def _fuzzed_messages(seed, count):
+    import random
+    rng = random.Random(seed)
+    for _ in range(count):
+        a, b = _standin(rng), _standin(rng)
+        raw = rng.choice(_FORMS).format(a=a, b=b)
+        if rng.random() < 0.3:  # a cut string
+            raw = raw[: rng.randint(len(raw) // 2, len(raw))]
+        if rng.random() < 0.3:
+            raw = rng.choice(("prefix: ", "x" * rng.randint(0, 400) + " ", "\\")) + raw
+        parts = [p for p in (a, b) if len(p) >= 6 and any(p[i:i + 6] in raw for i in range(len(p) - 5))]
+        yield raw, parts
+
+
+def _leaks(text, parts):
+    return [p[i:i + 6] for p in parts for i in range(len(p) - 5) if p[i:i + 6] in text]
+
+
+def test_structured_error_holds_no_message_text_and_is_idempotent(tmp_path):
+    for n, (raw, parts) in enumerate(_fuzzed_messages(1, 2000)):
+        for exc in (RuntimeError(raw), ConnectionRefusedError(111, raw), TimeoutError(raw), raw):
+            record = retro.structured_error(exc, tmp_path if n % 50 == 0 else None)
+            assert set(record) == {"class", "reason", "bytes", "sha256"}
+            text = json.dumps(record) + retro.render_error(record)
+            assert not _leaks(text, parts), (raw, record)
+            assert retro.structured_error(record) == record  # idempotent re-sanitize
+            assert retro.structured_error(retro.structured_error(exc)) == retro.structured_error(exc)
+    exc = ConnectionRefusedError(111, "refused")
+    assert retro.structured_error(exc)["reason"] == "transport_loss"
+    assert retro.structured_error(TimeoutError())["reason"] == "timeout"
+    assert retro.structured_error(FileNotFoundError(2, "x"))["reason"] == "os_error:ENOENT"
+    assert retro.structured_error(KeyboardInterrupt())["reason"] == "interrupted"
+
+
+@pytest.mark.parametrize("seed", range(24))
+def test_failure_records_and_notice_never_persist_or_deliver_message_text(tmp_path, seed):
+    """Every file the run writes (except the local 0600 raw copy) and every
+    delivered body is free of the failing message, across primary, cleanup
+    and notice-delivery errors."""
+    raw, parts = next(_fuzzed_messages(1000 + seed, 1))
+    memory = tmp_path / "memory"
+    for folder in ("completed", "deprecated"):
+        (memory / "work" / folder).mkdir(parents=True)
+    (tmp_path / "token").write_text("fixture")
+    config = retro.Settings(memory, tmp_path / "state", "ws://127.0.0.1:12345", tmp_path / "token", "fixture",
+                            isolated=True)
+    source(config.memory_root, "one")
+
+    class Failing(Transport):
+        notice_down = True
+
+        async def await_report_once(self, config, stream, msg_id, **kwargs):
+            if "astra" in stream:
+                raise RuntimeError(raw)
+            return await super().await_report_once(config, stream, msg_id, **kwargs)
+
+        async def close_once(self, config, stream, **kwargs):
+            raise ConnectionRefusedError(111, raw)
+
+        async def send_receipt_once(self, config, target, key):
+            if self.notice_down:
+                raise OSError(5, raw)
+            return await super().send_receipt_once(config, target, key)
+
+    rpc = Failing()
+    with pytest.raises(RuntimeError):
+        asyncio.run(retro.Pipeline(config, rpc).run(at()))
+    rpc.notice_down = False
+    with pytest.raises(RuntimeError):  # Astra still fails; the queued notice flushes first
+        asyncio.run(retro.Pipeline(config, rpc).run(at()))
+    root = config.state_root / "runs/2026-09-28"
+    bodies = [r["payload"]["text"] for r in rpc.sent.values()]
+    assert bodies and all(b.startswith("REPORT daily-retro failure") for b in bodies)
+    persisted = {p: p.read_text(errors="replace") for p in config.state_root.rglob("*")
+                 if p.is_file() and p.parent.name != "errors"}
+    for path, text in [*persisted.items(), *(("delivered", b) for b in bodies)]:
+        assert not _leaks(text, parts), (path, raw)
+    failure = retro.read(root / "failure.json")
+    assert failure["error"]["class"] == "RuntimeError" and failure["error"]["reason"] == "error"
+    assert failure["cleanup_error"]["reason"] == "transport_loss"
+    assert any(h.get("notice_error", {}).get("reason") == "os_error:EIO" for h in [failure, *failure["history"]])
+    kept = list((root / "errors").iterdir())
+    assert kept and all(p.stat().st_mode & 0o777 == 0o600 for p in kept)
+    assert (root / "errors").stat().st_mode & 0o777 == 0o700
+    assert raw.encode("utf-8", "backslashreplace") in {p.read_bytes() for p in kept}
 
 
 def test_producer_transport_reconnects_only_transport_loss(config, monkeypatch):
@@ -1770,3 +1847,34 @@ def test_producer_backoff_saturates_at_large_attempt_counts():
                                         jitter_fraction=0.0, deadline_s=3600.0, transport_deadline_bound=True)
     deadline = retro.monotonic() + 60
     assert retro.wsclient._transport_retry_next_delay(policy, deadline, 1025) == (2.0, "")
+
+
+def test_cli_failure_writes_only_the_structured_record_to_stderr(tmp_path):
+    """Cycle 2 B1: the scheduled job's stderr is a log file. An uncaught error
+    leaves a structured record there; its text and traceback stay in the
+    0600 errors folder."""
+    import os
+    import subprocess
+    import sys
+    secret = "QzKwHrTyMnPvXsJg"
+    memory, state = tmp_path / "memory", tmp_path / "state"
+    for folder in ("completed", "deprecated"):
+        (memory / "work" / folder).mkdir(parents=True)
+    (tmp_path / "token").write_text("fixture")
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"timezone": "America/Chicago", "memory_root": str(memory), "state_root": str(state),
+                               "token_path": str(tmp_path / "token"), "ws_url": "ws://127.0.0.1:12345",
+                               "host": "fixture", "isolated": True}))
+    service = Path(retro.__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(service.parent / "agent-orch"), str(service.parent), str(service)])}
+    out = subprocess.run([sys.executable, str(service / "tools/daily_retro.py"), "summary", "--config", str(cfg),
+                          "--end-day", f"password='{secret}\\"], cwd=str(service), env=env,
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 1, out.stderr
+    assert secret[:6] not in out.stderr and secret[:6] not in out.stdout and "Traceback" not in out.stderr
+    record = json.loads(out.stderr.strip().splitlines()[-1])["error"]
+    assert record["class"] == "ValueError" and set(record) == {"class", "reason", "bytes", "sha256"}
+    kept = {p.name: p for p in (state / "errors").iterdir()}
+    assert f"{record['sha256']}.txt" in kept and f"{record['sha256']}.traceback.txt" in kept
+    assert all(p.stat().st_mode & 0o777 == 0o600 for p in kept.values())
+    assert secret in kept[f"{record['sha256']}.traceback.txt"].read_text()

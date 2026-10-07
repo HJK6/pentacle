@@ -1428,7 +1428,9 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
         if self._start_error is not None:
             raise self._start_error
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 5.0) -> None:
+        """Stop the worker, waiting at most `timeout` s for it to drain (the
+        thread is a daemon thread, so an overrun cannot hold process exit)."""
         with self._lock:
             if self._thread is None:
                 return
@@ -1436,7 +1438,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             self._closing = True
             thread = self._thread
         self._queue.put(None)
-        thread.join(timeout=5)
+        thread.join(timeout=timeout)
         with self._lock:
             self._thread = None
             self._closing = False
