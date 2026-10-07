@@ -3132,6 +3132,11 @@ class SpawnCtl:
                         if notify is not None:
                             result["prompts_moved"] = None
                             result["prompts_moved"] = await notify.transfer_questions_for_handoff(source, successor)
+                        # Work lanes D-2: lanes led by the predecessor follow the
+                        # successor before the close can reconcile them as lead loss.
+                        stage = "work_lanes"
+                        result["work_lanes_moved"] = len(
+                            await self.store.work_lane_handoff(handoff_from, successor_stream_id))
                         stage = "source_close"
                         self.sessions.assistant.guard_close(source, "handed_off")
                         closed = await self.sessions._close_locked(src_host, src_name, reason="handed_off",

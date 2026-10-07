@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from typing import Any, Awaitable, Callable
 
 LANE_FRAME_CAP = 64
+log = logging.getLogger(__name__)
 _STATE_ORDER = {"blocked": 0, "active": 1, "paused": 2, "done": 3}
 
 
@@ -133,6 +135,41 @@ class WorkLanesInventory:
         self.broadcast = broadcast
         self._last_signature: str | None = None
         self._lock = asyncio.Lock()
+        self._dirty = False
+        self._task: asyncio.Task[None] | None = None
+        self._periodic: asyncio.Task[None] | None = None
+
+    def refresh(self) -> None:
+        """Coalesced, non-blocking: reconcile lead loss then emit if changed.
+
+        Called on every session-inventory recompute and lane write; one task
+        drains repeated calls so the session hot path never waits on it.
+        """
+        self._dirty = True
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._drain())
+
+    async def _drain(self) -> None:
+        while self._dirty:
+            self._dirty = False
+            try:
+                await self.store.reconcile_work_lanes()
+                await self.emit_if_changed()
+            except Exception:  # noqa: BLE001 - a lane refresh must not break session paths
+                log.exception("work lanes refresh failed")
+
+    def start(self, interval_s: float = 60.0) -> None:
+        async def loop() -> None:
+            while True:
+                await asyncio.sleep(interval_s)
+                self.refresh()
+        if self._periodic is None:
+            self._periodic = asyncio.create_task(loop())
+
+    async def stop(self) -> None:
+        for task in (self._periodic, self._task):
+            if task is not None and not task.done():
+                task.cancel()
 
     async def current(self) -> dict[str, Any]:
         rows = await self.store.work_lane_rows()

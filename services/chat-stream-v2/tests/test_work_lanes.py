@@ -404,3 +404,111 @@ def test_fd_lane_unaffected_and_adoption_owner_rules_v15():
                                 chat={"stream_id": child[0], "generation": child[1]})
         assert again["duplicate"] is True
     run(body)
+
+
+@pytest.mark.parametrize("path", ["visibility_hidden", "role_qa", "new_generation", "reconciled_dead"])
+def test_each_lead_loss_path_reconciles_once_v4(path):
+    async def body(env):
+        lead = await env.seat("loss-lead", role="lead", parent_stream_id=FD)
+        lid = (await env.adopt(key="stream:loss", lead=lead))["lane"]["lane_id"]
+        blk_lead = await env.seat("loss-blk", role="lead", parent_stream_id=FD)
+        blk = (await env.adopt(key="stream:loss-blk", state="blocked", lead=blk_lead, blocker="b"))["lane"]
+        for name in ("loss-lead", "loss-blk"):
+            if path == "visibility_hidden":
+                await env.store.update_session("amaterasu", name, visibility="hidden")
+            elif path == "role_qa":
+                await env.store.update_session("amaterasu", name, role="qa")
+            elif path == "new_generation":
+                await env.store.mark_closed("amaterasu", name, closed_at="2026-10-07T20:00:00Z",
+                                            pane_status="pane_dead")
+                await env.store.open_session("amaterasu", name, provider="claude", role="lead",
+                                             parent_stream_id=FD)
+            else:
+                row = await env.store.fetch_session("amaterasu", name)
+                gen = lead[1] if name == "loss-lead" else blk_lead[1]
+                await env.store.mark_reconciled_dead("amaterasu", name, expected_generation=gen,
+                                                     presumed_dead_at="2026-10-07T20:00:00Z",
+                                                     closed_at="2026-10-07T20:00:00Z")
+                assert row is not None
+        rows = {r["lane_id"]: r for r in await env.store.work_lane_rows()}
+        assert rows[lid]["_qualifies"] is False and rows[lid]["work_state"] == "active"
+        assert [c["lane_id"] for c in await env.store.reconcile_work_lanes()] == [lid]
+        assert await env.store.reconcile_work_lanes() == []
+        shown = await env.store.get_work_lane(lid)
+        assert (shown["lane"]["work_state"], shown["lane"]["work_state_reason"]) == ("paused", "lead_lost")
+        assert [e["operation"] for e in shown["events"]].count("lead_lost") == 1
+        assert not [e for e in shown["events"] if e.get("update_kind")]  # lead loss posts no update
+        blocked = (await env.store.get_work_lane(blk["lane_id"]))["lane"]
+        assert (blocked["work_state"], blocked["blocker"]) == ("blocked", "b")
+        # a later qualifying set_lead does not resume
+        fresh = await env.seat("fresh-lead", role="lead", parent_stream_id=FD)
+        r = await env.op("set_lead", {"lead": {"stream_id": fresh[0], "generation": fresh[1]}},
+                         lane=lid, version=shown["lane"]["version"])
+        assert r["lane"]["work_state"] == "paused"
+    run(body)
+
+
+def test_handoff_follows_successor_d2():
+    async def body(env):
+        lead = await env.seat("ho-pred", role="lead", parent_stream_id=FD)
+        lid = (await env.adopt(key="stream:ho", lead=lead,
+                               chat={"stream_id": lead[0], "generation": lead[1]}))["lane"]["lane_id"]
+        succ = await env.seat("ho-succ", role="lead", parent_stream_id=FD, handoff_from_stream_id=lead[0])
+        moved = await env.store.work_lane_handoff(lead[0], succ[0])
+        assert [m["lane_id"] for m in moved] == [lid]
+        assert await env.store.work_lane_handoff(lead[0], succ[0]) == []
+        await env.store.mark_closed("amaterasu", "ho-pred", closed_at="2026-10-07T20:00:00Z",
+                                    pane_status="pane_dead", close_kind="handed_off")
+        assert await env.store.reconcile_work_lanes() == []
+        shown = await env.store.get_work_lane(lid)
+        lane = shown["lane"]
+        assert (lane["bound_stream_id"], lane["work_state"]) == (succ[0], "active")
+        assert lane["visible_chat_stream_id"] == succ[0]
+        handoff = [e for e in shown["events"] if e["operation"] == "lead_handoff"]
+        assert len(handoff) == 1 and handoff[0]["payload"]["from"]["stream_id"] == lead[0]
+    run(body)
+
+
+def test_routing_close_and_cancel_guarded_on_operator_lane_v13():
+    async def body(env):
+        lead = await env.seat("rt-lead", role="lead")
+        lid = (await env.adopt(key="stream:rt", owner="operator", lead=lead))["lane"]["lane_id"]
+
+        async def routing(operation, payload, confirmation=None, op_id="rt-1"):
+            return await env.store.apply_assistant_composite_operation(
+                stream_id=ASSISTANT, operation_id=op_id, operation=operation, lane_id=lid,
+                actor_stream_id=FD, payload=payload, dispatch_id="d", expected_lane_version=1,
+                operator_confirmation=confirmation)
+
+        close = {"completion_message_id": "m", "completion_disposition": "accepted"}
+        cancel = {"decision_id": "x", "transition": "cancel", "from_phase": "discussion",
+                  "to_phase": "cancelled", "operator_basis_message_ids": ["m"]}
+        for operation, payload, action in (("lane.close", close, "lane.close"),
+                                           ("lane.decision", cancel, "lane.decision:cancel")):
+            with pytest.raises(ValueError) as e:
+                await routing(operation, payload)
+            assert code(e) == "work_lane_operator_confirmation_required"
+            wrong = env.confirm("q-wrong-" + action, lid, "set_state:done")
+            with pytest.raises(ValueError) as e:
+                await routing(operation, payload, env.confirmations[wrong["question_id"]])
+            assert code(e) == "work_lane_operator_confirmation_mismatch"
+            ok = env.confirm("q-ok-" + action, lid, action)
+            try:  # guard passes; the routing rule then decides
+                result = await routing(operation, payload, env.confirmations[ok["question_id"]],
+                                       op_id="rt-ok-" + action)
+            except ValueError as exc:
+                assert not str(exc).startswith("work_lane_operator")
+            else:
+                assert operation == "lane.decision" and result["lane"]["phase"] == "cancelled"
+                consumed = [e for e in (await env.store.get_work_lane(lid))["events"]
+                            if e.get("consumed_question_id") == ok["question_id"]]
+                assert len(consumed) == 1
+        # fd lane: routing guard never fires
+        fd_lead = await env.seat("rt-fd", role="lead", parent_stream_id=FD)
+        fd_lane = (await env.adopt(key="stream:rt-fd", lead=fd_lead))["lane"]["lane_id"]
+        with pytest.raises(ValueError) as e:
+            await env.store.apply_assistant_composite_operation(
+                stream_id=ASSISTANT, operation_id="rt-fd", operation="lane.close", lane_id=fd_lane,
+                actor_stream_id=FD, payload=close, dispatch_id="d", expected_lane_version=1)
+        assert not code(e).startswith("work_lane_operator")
+    run(body)

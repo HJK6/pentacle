@@ -49,6 +49,7 @@ from ledger import (
 from logging_config import configure_logging
 from machine_stats import STATS_INTERVAL_S, sample_machine_stats
 from inventory import InventoryEmitter
+from work_lanes_projection import WorkLanesInventory
 from mirror import Mirror, MirrorConfig
 from ingest import Ingest, IngestConfig
 from notify import DEFAULT_NOTIFICATIONS_DB, Notify, NotificationExpiry
@@ -522,6 +523,16 @@ async def run(args: argparse.Namespace) -> int:
         sessions, server.broadcast, min_interval_s=mcfg.inventory_min_interval_s,
     )
     sessions.set_inventory_emitter(inventory_emitter)
+    work_lanes = WorkLanesInventory(store, sessions, server.broadcast)
+    server.work_lanes = work_lanes
+    _session_emit = inventory_emitter.emit_if_changed
+
+    async def _emit_sessions_and_lanes(*, immediate: bool = False) -> bool:
+        changed = await _session_emit(immediate=immediate)
+        work_lanes.refresh()
+        return changed
+    inventory_emitter.emit_if_changed = _emit_sessions_and_lanes
+    work_lanes.start()
     server.lifecycle = lifecycle
     # The ledger announces `child_report_ready` on the server's broadcast, so it
     # is built after the server and attached back (design L13, both paths).
@@ -550,6 +561,12 @@ async def run(args: argparse.Namespace) -> int:
         assistant_stream_id=assistant_composite.config.stream_id if assistant_composite.enabled else "",
     )
     server.notify = notify
+
+    async def _work_lanes_changed() -> None:
+        work_lanes.refresh()
+    for _composite in assistant_composites.values():
+        _composite.work_lane_confirmation_reader = notify.work_lane_confirmation
+        _composite.work_lanes_changed = _work_lanes_changed
     notify.consent_snapshot = server._consent_notifications_for_msg
     spawnctl.consent_notify = notify
     server.handlers.update(notify.wire_handlers())
