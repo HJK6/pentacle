@@ -9,6 +9,11 @@ reads the same SQLite file. Never point it at a real daemon's database.
   seed_dashboard_assets.py --assets-db DB catalog --spec-id S --stream H:N --file catalog.json
   seed_dashboard_assets.py --assets-db DB reports --spec-id S --stream H:N --rows rows.json
   seed_dashboard_assets.py --assets-db DB delete --spec-id S --asset-id ID
+  seed_dashboard_assets.py --assets-db DB raw-catalog-body --spec-id S --file body.txt
+
+`raw-catalog-body` overwrites the stored body of an existing catalog row
+WITHOUT validation, so the gate can show clients a malformed catalog that the
+daemon would refuse on publish.
 """
 
 from __future__ import annotations
@@ -45,6 +50,9 @@ def main(argv: list[str]) -> int:
     reports.add_argument("--spec-id", required=True)
     reports.add_argument("--stream", required=True)
     reports.add_argument("--rows", required=True, help="JSON list of {asset_id, producer[, title]}")
+    raw = sub.add_parser("raw-catalog-body")
+    raw.add_argument("--spec-id", required=True)
+    raw.add_argument("--file", required=True)
     delete = sub.add_parser("delete")
     delete.add_argument("--spec-id", required=True)
     delete.add_argument("--asset-id", required=True)
@@ -69,6 +77,16 @@ def main(argv: list[str]) -> int:
                     asset_id=row["asset_id"], title=title, content_type="report",
                     body=_report_body(title), producer=row["producer"], spec_id=args.spec_id)
             print(json.dumps({"seeded": True}))
+        elif args.command == "raw-catalog-body":
+            import sqlite3
+            with sqlite3.connect(args.assets_db) as conn:
+                changed = conn.execute(
+                    "UPDATE assets SET body = ? WHERE spec_id = ? AND asset_id = 'dashboard-catalog'",
+                    (Path(args.file).read_text(encoding="utf-8"), args.spec_id)).rowcount
+            if changed != 1:
+                raise SystemExit(f"expected one catalog row, updated {changed}")
+            print(json.dumps({"raw_catalog_body": True}))
+            return 0
         else:
             for record in store.find_assets_by_id(args.asset_id):
                 if record.get("spec_id") == args.spec_id:

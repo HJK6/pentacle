@@ -152,9 +152,24 @@ function seedReports(fixture, { python, assetsDb, scratch }) {
   });
 }
 
+// Publish an arbitrary (daemon-valid) catalog body, e.g. requires.host_api 2.
+function publishBody(fixture, { python, assetsDb, scratch }, body) {
+  const file = path.join(scratch, 'catalog-asset-custom.json');
+  fs.writeFileSync(file, body);
+  return JSON.parse(seed(python, assetsDb, ['catalog', '--spec-id', fixture.specId, '--stream', CATALOG_STREAM, '--file', file]));
+}
+
+// Overwrite the published catalog row's body without validation (a malformed
+// catalog the daemon itself would refuse), for client error-state checks.
+function corruptCatalog(fixture, { python, assetsDb, scratch }, body) {
+  const file = path.join(scratch, 'catalog-asset-raw.txt');
+  fs.writeFileSync(file, body);
+  return JSON.parse(seed(python, assetsDb, ['raw-catalog-body', '--spec-id', fixture.specId, '--file', file]));
+}
+
 function deleteCatalog(fixture, { python, assetsDb }) {
   return seed(python, assetsDb, ['delete', '--spec-id', fixture.specId, '--asset-id', 'dashboard-catalog']);
 }
 
-module.exports = { buildCatalogFixture, installVersion, publishCatalog, seedReports, deleteCatalog,
+module.exports = { buildCatalogFixture, installVersion, publishCatalog, publishBody, corruptCatalog, seedReports, deleteCatalog,
   CATALOG_SPEC_ID, CATALOG_STREAM, VERSIONS, adapterSource };

@@ -86,6 +86,21 @@ async function dashboardCatalog(ctx) {
         [`republished asset reads back ${second.version}`, n1.version === second.version && hostUp === true, n1],
       ]);
 
+      // Error-state hooks for the client checks: a daemon-valid catalog that
+      // needs a newer host, then a malformed body written past validation.
+      const newer = JSON.parse(first.assetBody);
+      newer.requires.host_api = 2;
+      catalog.publishBody(`${JSON.stringify(newer, null, 2)}\n`);
+      const unsupported = await session.eval(`window.cc.assetGet({ stream_id: ${JSON.stringify(n1.meta.stream_id)}, asset_id: 'dashboard-catalog', spec_id: ${JSON.stringify(fixture.specId)} })
+        .then((r) => JSON.parse((r.asset || r.result?.asset).body).requires.host_api)`);
+      catalog.corrupt('{"schema_version": 1, "boards": [');
+      const malformed = await session.eval(`window.cc.assetGet({ stream_id: ${JSON.stringify(n1.meta.stream_id)}, asset_id: 'dashboard-catalog', spec_id: ${JSON.stringify(fixture.specId)} })
+        .then((r) => (r.asset || r.result?.asset)?.body ?? null)`);
+      reportChecks(report, [
+        ['host_api 2 catalog hook reaches the client', unsupported === 2, { unsupported }],
+        ['malformed catalog hook reaches the client unvalidated', malformed === '{"schema_version": 1, "boards": [', { malformed }],
+      ]);
+
       // Rollback rehearsal: republish N; its directory is still installed.
       catalog.publish(0);
       const back = await readCatalogAsset(session, fixture.specId);

@@ -134,7 +134,7 @@ into the fixture daemon and checks, through the page's real bridge: empty
 default; `catalogSpecId` without `catalogRoot` in the renderer config; list →
 get with the listed `stream_id`; every listed file served and unlisted paths
 refused; the filtered, id-sorted report window; N+1 installed and published
-while the host runs, N still served; rollback by republishing N.
+while the host runs, N still served; a `requires.host_api: 2` catalog and a malformed catalog body (written past daemon validation) reach the client for its error cards; rollback by republishing N.
 Test override for a private dashboard package's e2e (gate process only; it
 changes the gate's scratch profile, never a host default):
 `PENTACLE_TEST_CATALOG_ROOT=<dir of version dirs>` publishes each

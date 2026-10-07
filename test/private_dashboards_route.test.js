@@ -45,7 +45,7 @@ function versionFiles(tag) {
 }
 
 function setup() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-private-dash-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-dashroute-'));
   const home = path.join(dir, 'home');
   const root = path.join(dir, 'catalogs');
   fs.mkdirSync(home);

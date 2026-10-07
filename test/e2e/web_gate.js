@@ -366,6 +366,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       },
       install: (index) => catalogFixtures.installVersion(catalogFixture, index),
       publish: (index) => catalogFixtures.publishCatalog(catalogFixture, catalogEnv, index),
+      publishBody: (body) => catalogFixtures.publishBody(catalogFixture, catalogEnv, body),
+      corrupt: (body) => catalogFixtures.corruptCatalog(catalogFixture, catalogEnv, body),
       seedReports: () => catalogFixtures.seedReports(catalogFixture, catalogEnv),
       remove: () => catalogFixtures.deleteCatalog(catalogFixture, catalogEnv),
     } : null;
