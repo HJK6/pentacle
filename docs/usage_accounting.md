@@ -188,8 +188,9 @@ counts is `loss_conflict`. Its symptom is a hold file restored from an older
 copy, which is unsupported. When it happens:
 
 - the stored `loss:` row is unchanged;
-- the pending payload is kept in a `loss_conflict:` row, which from then on
-  receives every payload for that id;
+- the pending payload is kept in a `loss_conflict:` row; from then on every
+  payload for that id is routed to that row (a latch) and replaces its pending
+  payload when the incoming `rev` is at least the retained pending `rev`;
 - the id is never acked as recorded, and the satellite keeps the record;
 - the satellite mints ids from a fresh instance after the first conflict.
 
