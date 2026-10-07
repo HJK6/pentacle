@@ -497,3 +497,50 @@ def test_asset_cli_resolves_comment(monkeypatch, tmp_path, capsys):
     ]
     assert json.loads(capsys.readouterr().out)["type"] == "asset.comment.resolve.ok"
 
+
+
+def _catalog_fixture(valid: bool = True) -> dict:
+    from pathlib import Path
+
+    cases = json.loads(
+        (Path(__file__).resolve().parents[3] / "test" / "fixtures" / "dashboard_catalog" / "catalog_cases.json")
+        .read_text(encoding="utf-8")
+    )
+    return cases["valid"][0]["catalog"] if valid else cases["invalid"][0]["catalog"]
+
+
+def test_asset_cli_publishes_dashboard_catalog(monkeypatch, tmp_path):
+    calls = []
+    content_file = tmp_path / "catalog.json"
+    content_file.write_text(json.dumps(_catalog_fixture()), encoding="utf-8")
+
+    async def fake_publish(config, payload, timeout):
+        calls.append(payload)
+        return {"type": "asset.publish.ok", "asset": {"asset_id": "dashboard-catalog"}}
+
+    monkeypatch.setattr(cli, "load_config", lambda: Config("ws://test", "tok", "hostb", tmp_path))
+    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _config: "hostb:codex-caller")
+    monkeypatch.setattr(cli, "asset_publish_once", fake_publish)
+
+    assert cli.asset(
+        _args(
+            tmp_path,
+            content_type="dashboard-catalog",
+            content_file=str(content_file),
+            asset_id="dashboard-catalog",
+            spec_id="example__dashboard_catalog",
+        )
+    ) == 0
+    assert calls[0]["content_type"] == "dashboard-catalog"
+    assert calls[0]["asset_id"] == "dashboard-catalog"
+    assert calls[0]["body"] == shared_validate_asset_payload("dashboard-catalog", json.dumps(_catalog_fixture()))
+
+
+def test_asset_cli_refuses_invalid_dashboard_catalog_before_publish(tmp_path):
+    content_file = tmp_path / "catalog.json"
+    content_file.write_text(json.dumps(_catalog_fixture(valid=False)), encoding="utf-8")
+    with pytest.raises(ValueError, match="schema_version"):
+        cli._asset_publish_payload_from_args(
+            _args(tmp_path, content_type="dashboard-catalog", content_file=str(content_file)),
+            caller_stream_id="hostb:codex-a",
+        )

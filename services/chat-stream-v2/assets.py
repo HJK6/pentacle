@@ -30,6 +30,7 @@ import asyncio
 import functools
 import json
 import logging
+import re
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -212,6 +213,12 @@ class Assets:
         explicit_spec_ids = _normalize_spec_ids(msg.get("spec_ids"), msg.get("spec_id"))
         raw_limit = msg.get("limit")
         limit = int(raw_limit) if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
+        # Optional reader filters (dashboard report boards): a literal id prefix
+        # and an exact metadata `producer`, applied with a byte-wise id sort
+        # BEFORE the limit. Reader selection only; authorization is unchanged.
+        id_prefix, producer_filter, sort = _list_filters(msg)
+        filtered = id_prefix is not None or producer_filter is not None or sort is not None
+        store_limit = None if filtered else limit
         session_key: dict | None = None
         if explicit_spec_ids and not (
             _nullable_text(msg.get("stream_id")) or _nullable_text(msg.get("host"))
@@ -220,8 +227,8 @@ class Assets:
             for spec_id in explicit_spec_ids:
                 records.extend(await self._call("list_by_spec_id", spec_id=spec_id))
             records.sort(key=lambda r: (r.get("updated_at") or "", r.get("asset_id") or ""), reverse=True)
-            if limit is not None:
-                records = records[:limit]
+            if store_limit is not None:
+                records = records[:store_limit]
         else:
             session_key = self._session_key_from_msg(msg)
             if session_key is None:
@@ -229,7 +236,17 @@ class Assets:
             records = await self._call(
                 "list_for_session_and_specs",
                 host=session_key["host"], session_name=session_key["session_name"],
-                spec_ids=self._spec_ids_from_msg(msg, session_key), limit=limit)
+                spec_ids=self._spec_ids_from_msg(msg, session_key), limit=store_limit)
+        if filtered:
+            if id_prefix is not None:
+                records = [r for r in records if str(r.get("asset_id") or "").startswith(id_prefix)]
+            if producer_filter is not None:
+                records = [r for r in records if r.get("producer") == producer_filter]
+            if sort == "asset_id_desc":
+                # Python str order is code-point order, identical to UTF-8 byte order.
+                records.sort(key=lambda r: str(r.get("asset_id") or ""), reverse=True)
+            if limit is not None:
+                records = records[:limit]
         return {"type": "asset.list.ok", "request_id": request_id,
                 "session_key": session_key,
                 "assets": [asset_metadata(r) for r in records]}
@@ -513,6 +530,24 @@ class Assets:
     def _error(request_id: str, error_code: str, **extra: Any) -> dict:
         return {"type": "asset.error", "request_id": request_id,
                 "error_code": error_code, "error": error_code, **extra}
+
+
+_LIST_ID_PREFIX_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+
+
+def _list_filters(msg: dict) -> tuple[str | None, str | None, str | None]:
+    id_prefix = msg.get("asset_id_prefix")
+    if id_prefix is not None and (
+        not isinstance(id_prefix, str) or not _LIST_ID_PREFIX_RE.fullmatch(id_prefix)
+    ):
+        raise InvalidAsset("asset_id_prefix must match [a-z0-9][a-z0-9._-]{0,63}")
+    producer = msg.get("producer")
+    if producer is not None and (not isinstance(producer, str) or not producer or len(producer) > 256):
+        raise InvalidAsset("producer must be a non-empty string")
+    sort = msg.get("sort")
+    if sort is not None and sort != "asset_id_desc":
+        raise InvalidAsset("sort must be 'asset_id_desc'")
+    return id_prefix, producer, sort
 
 
 def _asset_id(msg: dict) -> str:

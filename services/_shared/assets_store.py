@@ -109,6 +109,8 @@ def asset_metadata(record: dict) -> dict:
         "read_at": record.get("read_at"),
         "spec_id": record.get("spec_id"),
         "producer": record.get("producer"),
+        # Owner session of the row: the target an operator `asset.get` names.
+        "stream_id": record.get("stream_id"),
         "updated_at": record["updated_at"],
     }
 
