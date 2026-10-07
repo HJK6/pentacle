@@ -54,6 +54,10 @@ ASSISTANT_KINDS = frozenset({"ASSIST", "ASSIST_TEXT"})
 DEFAULT_URL = "ws://127.0.0.1:7791"
 DEFAULT_TOKEN_PATH = Path.home() / ".config/pentacle-stream/token"
 DEFAULT_TIMEOUT = 180.0
+# The authoritative event snapshot is re-read until it is stable for one
+# interval (bounded), covering records a provider commits right after its final.
+EVENT_SETTLE_INTERVAL_S = 0.25
+EVENT_SETTLE_LIMIT_S = 2.0
 # Teardown is the one stage with a known-fast happy path (a clean remote
 # close lands in ~5s), so it gets its own bounded budget instead of the
 # full stage timeout: a leaked pane must be escalated quickly, and a
@@ -495,12 +499,41 @@ def _operator_connection(
             raise RuntimeError("timed out waiting for assistant event")
 
         def validate_session(stream_id: str, _marker: str) -> dict:
-            replay = rpc({
-                "type": "request_stream_events", "stream_id": stream_id, "limit": 500,
-            }, "request_stream_events", deadline=time.monotonic() + HISTORY_HEARTBEAT_DEADLINE_MS / 1000)
-            expected = replay.get("events")
-            if not isinstance(expected, list):
-                raise RuntimeError(f"event: authoritative replay is malformed: {replay}")
+            # A provider can commit trailing turn records (Claude's SYSTEM
+            # turn-duration line) just after the final reply. Re-read the
+            # authoritative set until two reads agree, so a snapshot taken
+            # between the two is never mistaken for the complete turn.
+            # Every read after the first must finish inside the settle bound;
+            # a set still changing at the bound fails rather than being used.
+            settle_deadline = time.monotonic() + EVENT_SETTLE_LIMIT_S
+            previous_seqs = None
+            while True:
+                deadline = time.monotonic() + HISTORY_HEARTBEAT_DEADLINE_MS / 1000
+                if previous_seqs is not None:
+                    deadline = min(deadline, settle_deadline)
+                try:
+                    replay = rpc({
+                        "type": "request_stream_events", "stream_id": stream_id, "limit": 500,
+                    }, "request_stream_events", deadline=deadline)
+                except RuntimeError as exc:
+                    if previous_seqs is not None and "timed out" in str(exc):
+                        raise RuntimeError(
+                            f"event: authoritative event set did not settle within {EVENT_SETTLE_LIMIT_S}s"
+                        ) from exc
+                    raise
+                expected = replay.get("events")
+                if not isinstance(expected, list):
+                    raise RuntimeError(f"event: authoritative replay is malformed: {replay}")
+                seqs = sorted(int(event.get("daemon_seq", -1)) for event in expected
+                              if isinstance(event, dict) and event.get("stream_id") == stream_id)
+                if seqs == previous_seqs:
+                    break
+                if time.monotonic() + EVENT_SETTLE_INTERVAL_S >= settle_deadline:
+                    raise RuntimeError(
+                        f"event: authoritative event set did not settle within {EVENT_SETTLE_LIMIT_S}s"
+                    )
+                previous_seqs = seqs
+                time.sleep(EVENT_SETTLE_INTERVAL_S)
             expected = sorted(
                 (event for event in expected if event.get("stream_id") == stream_id),
                 key=lambda event: int(event.get("daemon_seq", -1)),

@@ -213,6 +213,8 @@ A direct-primary dispatch publishes its final answer through `assistant publish`
 with the dispatch's fixed request key and `response_state=final`. Publish the
 exact answer, preserving Markdown and whitespace. The canonical prose event is
 the authoritative reply; the shared transcript renderer handles its Markdown.
+If the seat ends that dispatch's turn with prose and no publication, the daemon
+shows that prose as an acknowledgment (see the turn-final exception below).
 
 ## Direct-primary questions
 
@@ -271,7 +273,28 @@ routes retain prepublication suppression through ambiguous delivery; a proven
 failed delivery releases it. Unclassified events retain the existing short-lived
 exact-text fallback. Existing historical duplicate events are not rewritten.
 
-Focused coverage is in `tests/test_assistant_mirror_trigger_scope.py`,
+One narrow exception covers a seat that ends a dispatch turn with prose but
+never publishes. For a Claude `end_turn` or Codex `final_answer`, the store takes
+the newest primary USER or normalized TELL after the previous final in the same
+transcript. It projects the final only when that row is a USER whose
+`optimistic_id` names a route on this composite that is resolved, direct-primary,
+targeted at the bound seat and generation, `landed`, and has no publication of
+any kind. The projection is publication `turnfinal:<dispatch_id>` with
+`publish_kind=status`, `response_state=acknowledged`, the route's
+`input_identity` as `reply_to_message_id`, and `mirrored_from` origin. It is an
+acknowledgment, never a final, so activity reports `acknowledged` and a later
+explicit final publish still lands. Keying by dispatch makes a restart re-read
+of the same turn a no-op. `intent`, `committed_pending` and `uncertain` routes,
+tell/notice-triggered turns, an ordinary USER after the dispatch, and any turn
+whose dispatch already has a publication keep today's suppression. Each
+projection logs `assistant_mirror_turnfinal_projected` with the final's and the
+trigger USER's event ids. The rule assumes file-order ingest: a USER row that
+never reached the tail can let a final attach to an older dispatch in the same
+window. The log makes that case auditable; it does not prevent it. This safety
+net does not replace the seat's acknowledgment and final publishes.
+
+Focused coverage is in `tests/test_assistant_dispatch_turn_final.py`,
+`tests/test_assistant_mirror_trigger_scope.py`,
 `tests/test_assistant_prose_mirror.py` and
 `tests/test_codex_rollout_norm.py` under `services/chat-stream-v2`, including an
 isolated authenticated WebSocket journey. Renderer coverage is in

@@ -1869,6 +1869,98 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             return "excluded"
         return "unknown"
 
+    def _project_dispatch_turn_final_conn(
+        self, conn: sqlite3.Connection, composite_stream_id: str, *, composite_created_at: str,
+        source_stream_id: str, source_generation: str, session_created_at: str, transcript: str,
+        window_start: int, source_event: dict[str, Any], source_event_id: int, body: str,
+        recorded_at: float,
+    ) -> bool:
+        """Project a landed, unpublished dispatch's own turn final as an acknowledgment.
+
+        The candidate is the newest primary input (USER, or a normalized TELL) in
+        this turn window, chosen before any dispatch test; it is a trigger only when
+        its optimistic_id names a dispatch.  A USER row that never reached the tail
+        could let a final attach to an older dispatch in the same window; the log
+        line carries both event ids so that residual stays auditable.
+        """
+        candidate = conn.execute(
+            "SELECT event_id,json_extract(event_json,'$.kind') AS kind,"
+            "json_extract(event_json,'$.optimistic_id') AS optimistic_id "
+            "FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+            "AND event_id>? AND event_id<? "
+            "AND json_extract(event_json,'$.raw.source_session_identity')=? "
+            "AND json_extract(event_json,'$.kind') IN ('USER','TELL') "
+            "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
+            "ORDER BY event_id DESC LIMIT 1",
+            (source_stream_id, session_created_at, window_start, source_event_id, transcript),
+        ).fetchone()
+        if (candidate is None or candidate["kind"] != "USER"
+                or not isinstance(candidate["optimistic_id"], str) or not candidate["optimistic_id"]):
+            return False
+        route = conn.execute(
+            "SELECT dispatch_id,input_identity,reply_to_question_id FROM v2_assistant_composite_routes "
+            "WHERE stream_id=? AND dispatch_id=? AND routing_state='resolved' "
+            "AND route_target=? AND route_target_generation=? AND delivery_state='landed' "
+            "AND json_extract(route_json,'$.admission_mode')='direct_primary'",
+            (composite_stream_id, candidate["optimistic_id"], source_stream_id, source_generation),
+        ).fetchone()
+        if route is None:
+            return False
+        dispatch_id = str(route["dispatch_id"])
+        if conn.execute(
+            "SELECT 1 FROM v2_assistant_composite_publications WHERE stream_id=? AND dispatch_id=? LIMIT 1",
+            (composite_stream_id, dispatch_id),
+        ).fetchone() is not None:
+            return False
+        reply_to_message_id = route["input_identity"]
+        reply_to_question_id = route["reply_to_question_id"]
+        origin = {"stream_id": source_stream_id, "generation": source_generation,
+                  "event_id": source_event_id, "event_ts": source_event.get("timestamp")}
+        publication_key = f"turnfinal:{dispatch_id}"
+        canonical_payload = {
+            "composite_stream_id": composite_stream_id, "dispatch_id": dispatch_id,
+            "reply_to_message_id": reply_to_message_id, "reply_to_question_id": reply_to_question_id,
+            "publish_kind": "status", "response_state": "acknowledged", "message": body,
+            "attachment_ids": [], "evidence_refs": [], "mirrored_from": origin,
+        }
+        canonical_json = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        event = {
+            "stream_id": composite_stream_id, "provider": "composite", "kind": "ASSIST_TEXT",
+            "text": body, "message_id": "publication:" + publication_key,
+            "reply_to_message_id": reply_to_message_id, "reply_to_question_id": reply_to_question_id,
+            "publish_kind": "status", "attachments": [],
+            "timestamp": source_event.get("timestamp"),
+            "raw": {"assistant_composite": True, "publish_kind": "status",
+                    "response_state": "acknowledged", "dispatch_id": dispatch_id,
+                    "reply_to_message_id": reply_to_message_id,
+                    "reply_to_question_id": reply_to_question_id, "mirrored_from": origin,
+                    "attachment_ids": [], "evidence_refs": []},
+        }
+        event_json = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        cur = conn.execute(
+            "INSERT INTO session_event_tail(stream_id,session_created_at,event_key,event_json,"
+            "event_ts,recorded_at,identity) VALUES (?,?,?,?,?,?,?)",
+            (composite_stream_id, composite_created_at, hashlib.sha256(event_json.encode()).hexdigest(),
+             event_json, source_event.get("timestamp"), recorded_at,
+             "assistant-mirror:" + publication_key),
+        )
+        conn.execute(
+            "INSERT INTO v2_assistant_composite_publications(publication_key,stream_id,payload_digest,"
+            "canonical_payload_json,dispatch_id,reply_to_message_id,reply_to_question_id,publish_kind,"
+            "attachment_ids_json,evidence_refs_json,event_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (publication_key, composite_stream_id, hashlib.sha256(canonical_json.encode()).hexdigest(),
+             canonical_json, dispatch_id, reply_to_message_id, reply_to_question_id, "status", "[]", "[]",
+             int(cur.lastrowid), _routing_iso_now()),
+        )
+        log.info(
+            "assistant_mirror_turnfinal_projected source_event_id=%s trigger_event_id=%s "
+            "dispatch_id=%s composite_event_id=%s",
+            source_event_id, int(candidate["event_id"]), dispatch_id, int(cur.lastrowid),
+            extra={"subsystem": "assistant_mirror",
+                   "bug_ref": "pentacle__dispatch_turn_final_projection_2026_10"},
+        )
+        return True
+
     def _mirror_source_event_for_binding(
         self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str], *,
         source_stream_id: str, source_event: dict[str, Any], source_event_id: int,
@@ -1921,26 +2013,6 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
         ).fetchone()
         if composite is None:
             raise ValueError("assistant_mirror_projection_unavailable")
-        # A direct intent is durable before any provider input. Suppress through
-        # all ambiguous delivery states, including a held receipt, until the
-        # matching final publication or a proven no-submit failure.
-        open_route = conn.execute(
-            "SELECT 1 FROM v2_assistant_composite_routes r "
-            "WHERE r.stream_id=? AND r.routing_state='resolved' "
-            "AND r.route_target=? AND r.route_target_generation=? "
-            "AND r.dispatch_id IS NOT NULL "
-            "AND r.delivery_state IN ('intent','committed_pending','uncertain','landed') "
-            "AND json_extract(r.route_json,'$.admission_mode')='direct_primary' "
-            "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p "
-            "WHERE p.stream_id=r.stream_id AND p.dispatch_id=r.dispatch_id "
-            "AND p.publish_kind='prose' "
-            "AND json_extract(p.canonical_payload_json,'$.response_state')='final') "
-            "LIMIT 1", (binding[0], source_stream_id, source_generation),
-        ).fetchone()
-        if open_route is not None:
-            return
-        raw = source_event.get("raw")
-        raw = raw if isinstance(raw, dict) else {}
         transcript = raw.get("source_session_identity")
         record = raw.get("jsonl_record_uuid")
         structured_final = bool(isinstance(transcript, str) and transcript
@@ -1949,6 +2021,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             raw.get("transport") == "claude-jsonl" and raw.get("stop_reason") == "end_turn"
             or raw.get("transport") == "codex-rollout" and raw.get("phase") == "final_answer"
         ))
+        boundary = None
         if structured_final:
             # Ingest order belongs to the source transcript; canonical publication
             # can precede even its USER row. A sibling block in this same provider
@@ -1968,6 +2041,35 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
                 "ORDER BY event_id DESC LIMIT 1",
                 (source_stream_id, source["created_at"], source_event_id, transcript, record),
             ).fetchone()
+            if self._project_dispatch_turn_final_conn(
+                conn, binding[0], composite_created_at=composite["created_at"],
+                source_stream_id=source_stream_id, source_generation=source_generation,
+                session_created_at=source["created_at"], transcript=transcript,
+                window_start=boundary["event_id"] if boundary else 0,
+                source_event=source_event, source_event_id=source_event_id,
+                body=body, recorded_at=recorded_at,
+            ):
+                return
+        # A direct intent is durable before any provider input. Suppress through
+        # all ambiguous delivery states, including a held receipt, until the
+        # matching final publication or a proven no-submit failure. A landed,
+        # unpublished dispatch's own turn final was projected above.
+        open_route = conn.execute(
+            "SELECT 1 FROM v2_assistant_composite_routes r "
+            "WHERE r.stream_id=? AND r.routing_state='resolved' "
+            "AND r.route_target=? AND r.route_target_generation=? "
+            "AND r.dispatch_id IS NOT NULL "
+            "AND r.delivery_state IN ('intent','committed_pending','uncertain','landed') "
+            "AND json_extract(r.route_json,'$.admission_mode')='direct_primary' "
+            "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p "
+            "WHERE p.stream_id=r.stream_id AND p.dispatch_id=r.dispatch_id "
+            "AND p.publish_kind='prose' "
+            "AND json_extract(p.canonical_payload_json,'$.response_state')='final') "
+            "LIMIT 1", (binding[0], source_stream_id, source_generation),
+        ).fetchone()
+        if open_route is not None:
+            return
+        if structured_final:
             published_turn = conn.execute(
                 "SELECT r.dispatch_id FROM v2_assistant_composite_routes r "
                 "JOIN v2_assistant_composite_publications p "
@@ -2098,6 +2200,15 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
                 "WHERE p.publication_key=? AND p.publish_kind='status' AND p.dispatch_id=''",
                 (f"mirror:{source_event_id}",),
             ).fetchone()
+            if row is None:
+                # A dispatch turn final is keyed by its dispatch, so resolve it by origin.
+                row = conn.execute(
+                    "SELECT t.event_id,t.event_json FROM v2_assistant_composite_publications p "
+                    "JOIN session_event_tail t ON t.event_id=p.event_id "
+                    "WHERE p.publication_key LIKE 'turnfinal:%' AND p.publish_kind='status' "
+                    "AND json_extract(p.canonical_payload_json,'$.mirrored_from.event_id')=?",
+                    (source_event_id,),
+                ).fetchone()
             if row is None:
                 return None
             return dict(json.loads(row["event_json"])) | {"daemon_seq": int(row["event_id"])}
