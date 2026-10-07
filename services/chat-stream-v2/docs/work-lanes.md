@@ -40,3 +40,19 @@ Each update is a composite `chat.event` with `publish_kind:"lane_update"` and `m
 - `source.type` is one of `transition`, `decision`, `milestone`, `adoption`.
 
 Updates arrive both live (as a `chat.event` broadcast) and through history (`request_stream_events` on the composite). Deduplicate by `message_id`.
+
+## Daemon model (for operators of the store)
+
+- Lanes are rows of `v2_assistant_composite_lanes` with `work_state` set. All product columns are nullable, so routing-only lanes are unchanged. Product and routing operations share `version`.
+- `v2_work_lane_events` is the audit and update linkage. `event_id` is the request id and `UNIQUE(lane_id, source_id)` deduplicates updates. The partial UNIQUE index on `consumed_question_id` makes each operator confirmation single-use.
+- Each `assistant.operation` with `operation: work_lane.<adopt|set_state|set_lead|set_chat|set_text|set_owner|update>` and `dispatch_id: "none"` writes the lane row, the event row and the `lane_update` publication in one `BEGIN IMMEDIATE` transaction. Only the current direct-primary binding (stream + generation) may submit one; other actors get `work_lane_actor_unverified`.
+- Lead loss: a coalesced refresh runs on every session-inventory recompute and every 60 s. It stores `active → paused (lead_lost)` once, and lead loss never posts an update. A handoff moves the lead (and a visible chat that pointed at the predecessor) to the successor before the predecessor closes, with one `lead_handoff` event and no state change.
+- Operator lanes (`owner_kind=operator`) need a confirmation for `set_state → done`, `set_owner → fd`, routing `lane.close` and routing `lane.decision` with `transition=cancel`. The confirmation is the id of a question that:
+  - was asked with `agent-orch work-lane request-confirmation <lane> --action <set_state:done|set_owner:fd|lane.close|lane.decision:cancel>`, which stores `context = {schema: WorkLaneConfirmationV1, lane_id, action}`;
+  - was produced by the FD seat;
+  - was answered `Confirm` by a direct operator (an agent-relayed answer does not count);
+  - has not been consumed before.
+
+## CLI
+
+`agent-orch work-lane list [--include-done] [--json]`, `show <lane_id> [--json]`, `adopt --preview | --apply <json-file>`, and the FD-only commands `set-state | set-lead | set-chat | set-text | set-owner | update <lane_id> --expected-version N --request-id <stable id>`, plus `request-confirmation`. Retry with the same `--request-id`: a replay returns `duplicate:true` and has no second effect. `adopt --apply` uses `request_id = "adopt:" + adoption_key`, and each entry must carry an explicit `owner_kind`. `owner_kind: fd` needs FD lineage evidence; when lineage is unclear, adopt the lane as `operator`.

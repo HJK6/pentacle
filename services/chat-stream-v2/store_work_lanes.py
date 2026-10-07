@@ -839,11 +839,16 @@ def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dic
             (composite_stream_id,)):
         lane = dict(raw)
         lead_row = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
-        has_admit = conn.execute(
-            "SELECT 1 FROM v2_assistant_composite_operations WHERE lane_id=? AND operation='lane.admit'",
-            (lane["lane_id"],)).fetchone() is not None
+        admit = conn.execute(
+            "SELECT payload_json FROM v2_assistant_composite_operations WHERE lane_id=? AND operation='lane.admit' "
+            "ORDER BY created_at LIMIT 1", (lane["lane_id"],)).fetchone()
+        has_admit = admit is not None
+        try:
+            request_message_id = json.loads(admit[0]).get("request_message_id") if admit else None
+        except (ValueError, AttributeError):
+            request_message_id = None
         out.append({
-            "adoption_key": f"request:{lane['lane_id']}", "lane_id": lane["lane_id"],
+            "adoption_key": f"request:{request_message_id or lane['lane_id']}", "lane_id": lane["lane_id"],
             "title": (lane.get("summary") or lane["lane_id"])[:TITLE_MAX], "summary": lane.get("summary") or "",
             "lead": ({"stream_id": lane["bound_stream_id"], "generation": lane["bound_generation"]}
                      if lane.get("bound_stream_id") and lead_static_eligible(lead_row) else None),
