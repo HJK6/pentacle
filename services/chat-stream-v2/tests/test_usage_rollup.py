@@ -621,6 +621,25 @@ def test_usage_rollup_ac8_transfer_requires_justification(fx: Fx) -> None:
     assert w2['label'] == 'estimate of non-fleet use'
 
 
+def test_usage_rollup_ac8_missing_role_is_never_fitted(fx: Fx) -> None:
+    _method_a_ledger(fx)
+    fx.config(accounts=[{'label': 'fleet_only', 'account_id': FLEET, 'role': 'fleet_only'},
+                        {'label': 'shared', 'account_id': SHARED}], excluded=('2026-09-02T16:00:00Z',))
+    result = fx.run('--calibrate')
+    assert entry(result, FLEET)['coefficient'] == 0.675
+    shared = entry(result, SHARED)
+    assert shared['status'] == 'not_fitted' and shared['coefficient'] is None and 'role' in shared['reason']
+
+
+def test_usage_rollup_ac6_invalid_history_lines_are_listed(fx: Fx) -> None:
+    _method_a_ledger(fx)
+    fx.hist('not-a-time', 10)
+    fx.hist('2026-09-19T00:00:00Z', None)
+    fx.config()
+    b = entry(fx.run('--calibrate'), FLEET)['methods']['history_regression']
+    assert [x['reason'] for x in b['exclusions']] == ['invalid_line', 'invalid_line']
+
+
 # --- AC9 private config, redaction, weekly percent ---------------------------------
 
 def test_usage_rollup_ac9_private_config_rules(fx: Fx, tmp_path: Path) -> None:

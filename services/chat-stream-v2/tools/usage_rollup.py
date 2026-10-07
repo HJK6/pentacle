@@ -692,7 +692,7 @@ class Account:
         self.id = entry.get('account_id')
         self.label = entry.get('label')
         self.provider = entry.get('provider') or 'claude'
-        self.role = entry.get('role') or 'fleet_only'
+        self.role = entry.get('role')  # explicit only: a missing role is never fitted
         hosts = entry.get('hosts')
         self.hosts = set(hosts) if isinstance(hosts, list) else None
         self.transfer_from = entry.get('transfer_from')
@@ -834,7 +834,7 @@ def _minute(value: Any) -> int | None:
 
 
 def history_lines(history: list[dict[str, Any]], account: str, window_kind: str) -> tuple[list[dict], list[dict]]:
-    """(deduped non-probe lines sorted by observed_at, probe exclusions) for one account and quota."""
+    """(deduped non-probe lines sorted by observed_at, probe/invalid exclusions) for one account and quota."""
     seen, lines, probes = set(), [], []
     for line in history:
         if line.get('provider') != 'claude' or line.get('window_kind') != window_kind:
@@ -845,6 +845,7 @@ def history_lines(history: list[dict[str, Any]], account: str, window_kind: str)
             probes.append({'observed_at': line.get('observed_at'), 'reason': 'probe_source'})
             continue
         if parse_ts(line.get('observed_at')) is None or not isinstance(line.get('pct'), (int, float)):
+            probes.append({'observed_at': line.get('observed_at'), 'reason': 'invalid_line'})
             continue
         key = dedupe_key(line)
         if key is not None:
@@ -940,7 +941,7 @@ def calibrate(src: Sources, config: dict[str, Any] | None, config_path: Path) ->
         return entry
 
     for acct in accounts:
-        if acct.role == 'shared':
+        if acct.role != 'fleet_only':
             continue
         entry = base(acct)
         a = method_a(acct, timeline, config, eligible, src.now)
@@ -962,6 +963,14 @@ def calibrate(src: Sources, config: dict[str, Any] | None, config_path: Path) ->
                                   for s in b['exclusions']])
         entries.append(entry)
         fitted[acct.label] = entry
+
+    for acct in accounts:
+        if acct.role in ('fleet_only', 'shared'):
+            continue
+        entry = base(acct)
+        entry.update(status='not_fitted', coefficient=None, conversion=None,
+                     reason=f'config role {acct.role!r} is not fleet_only or shared; not fitted')
+        entries.append(entry)
 
     for acct in accounts:
         if acct.role != 'shared':

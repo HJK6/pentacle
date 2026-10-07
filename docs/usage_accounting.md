@@ -280,17 +280,22 @@ whose `hosts` could own it, which is every host unless the config narrows it.
   compared to the minute), `stale` (same `observed_at`), `non_positive_delta`,
   `interval_over_24h`, `eligibility_unknown`, or coverage below 0.95. The fit
   is least squares through the origin, and `residual_mape_pct` is the median
-  absolute percent error of Δpct. The method activates only with ≥ 10 valid
-  samples spanning ≥ 30 points. An active Method B supersedes Method A.
+  absolute percent error of Δpct. Malformed history lines are listed as
+  `invalid_line`. The method activates only with ≥ 10 valid samples spanning
+  ≥ 30 points. An active Method B supersedes Method A.
 - **Shared account.** It gets `conversion: null, reason: "shared account; not
   fitted"` unless its config entry sets `transfer_from` together with a
   `justification`. In that case `basis: transferred`, and each window carries
   `external_residual` = observed pct − predicted pct, labelled as an estimate
   of non-fleet use.
 
-**Private config.** Real account ids and labels live only on Thoth in
+**Private config.** Real account ids live only on Thoth in
 `~/.local/share/pentacle-stream/calibration_config.json`, which must be mode
-0600 and outside the repository; anything else is refused. The schema is
+0600 and outside the repository; anything else is refused. Labels must be
+non-identifying role names (for example `fleet_only`, `shared`), because
+`--redact` prints them. Each account needs an explicit `role`: `fleet_only` is
+fitted, `shared` follows the transfer rule, and any other or missing role is
+`not_fitted`. The schema is
 `tools/usage_rollup_config/calibration_config.example.json` (synthetic ids). A
 missing config leaves every account `not_configured`. The public example is
 never read. `--redact` replaces account ids with config labels (or
