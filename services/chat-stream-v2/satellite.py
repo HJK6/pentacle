@@ -526,6 +526,10 @@ class Satellite:
         self._inflight_usage: dict[str, dict] = {}
         self._inflight_clock: dict | None = None
         self._held_tick_mono: float | None = None
+        #: Distinguishes this process from an exec-restarted one with the same
+        #: PID (auto-update), whose request ids restart at 1; the daemon orders
+        #: loss frames per (host, pid, incarnation).
+        self._incarnation = os.urandom(8).hex()
 
     def _read_sha(self) -> str:
         try:
@@ -1146,6 +1150,7 @@ class Satellite:
 
     def _attach_unfenced(self, frame: dict) -> None:
         """Held entries and loss records, only while the daemon is v2."""
+        self._frame_had_unfenced = False
         if not getattr(self, "_unfenced_enabled", False):
             return
         held = self._held_spans()
@@ -1156,6 +1161,22 @@ class Satellite:
             frame["usage_unfenced"] = entries
         if losses:
             frame["usage_unfenced_losses"] = losses
+        self._frame_had_unfenced = bool(entries or losses)
+
+    async def _push_pass(self, ws, events: list[dict], high_water: dict[str, int],
+                         inventory: list[str] | None = None) -> dict | None:
+        """Push one pass; if a frame carrying the v2 usage fields is rejected
+        (e.g. by a rolled-back v1 daemon), retry the same pass once without
+        them. Offsets and held data are untouched by the rejected attempt."""
+        ack = await self._push(ws, events, high_water, inventory=inventory)
+        if (
+            isinstance(ack, dict) and ack.get("type") == "event.push.error"
+            and getattr(self, "_frame_had_unfenced", False)
+        ):
+            log.warning("push with held usage rejected (%s); retrying this pass without it", ack.get("error"))
+            self._apply_unfenced_ack(ack)  # clears the enable flag
+            ack = await self._push(ws, events, high_water, inventory=inventory)
+        return ack
 
     def _apply_unfenced_ack(self, ack: dict) -> None:
         """Enable flag, held-entry/loss removal, and deferred fenced records."""
@@ -1327,6 +1348,7 @@ class Satellite:
             "host": self.config.host,
             "events": events,
             "high_water": high_water,
+            "satellite_incarnation": getattr(self, "_incarnation", ""),
         }
         if inventory is not None:
             frame["inventory"] = inventory
@@ -1537,7 +1559,7 @@ class Satellite:
             self._tick_held()
             events, high_water, _capped = await asyncio.to_thread(self._collect)
             inventory = self._last_discovery_inventory
-            ack = await self._push(ws, events, high_water, inventory=inventory)
+            ack = await self._push_pass(ws, events, high_water, inventory=inventory)
             if ack is None:
                 continue           # no ack: offsets unmoved, re-read next pass
             target = self._apply_ack(ack, high_water)

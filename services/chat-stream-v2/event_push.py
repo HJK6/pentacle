@@ -78,7 +78,8 @@ STALE_ALERT_MIN_INTERVAL_S = 300.0
 _FULL_GIT_SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _HOST_PROOF_FIELDS = frozenset({"type", "request_id", "push_secret", "satellite_sha", "satellite_pid", "wire_version", "host", "events", "usage", "usage_provenance", "high_water", "inventory", "frozen_streams", "source_host_proof",
-                                "usage_unfenced", "usage_unfenced_losses", "satellite_now", "clock"})
+                                "usage_unfenced", "usage_unfenced_losses", "satellite_now", "clock",
+                                "satellite_incarnation"})
 _USAGE_REQUIRED_FIELDS = frozenset({
     "stream_id", "provider", "session_generation", "source_pane_pid",
     "native_session_id", "source_file_identity_digest", "records",
@@ -146,7 +147,7 @@ class EventPush:
         #: stale frame's losses are neither stored nor acked (the satellite
         #: keeps and re-sends them).
         self._loss_locks: dict[str, asyncio.Lock] = {}
-        self._loss_high_water: dict[tuple[str, int], int] = {}
+        self._loss_high_water: dict[tuple[str, int, str], int] = {}
 
     def wire_handlers(self) -> dict[str, Callable[[dict], Awaitable[dict]]]:
         return {"event.push": self.handle_push, "host.stats": self.handle_host_stats}
@@ -342,12 +343,18 @@ class EventPush:
     def _losses_in_order(self, msg: dict, host: str) -> bool:
         """True when this frame is newer than any applied for its process."""
         pid, rid = msg.get("satellite_pid"), msg.get("request_id")
+        incarnation = msg.get("satellite_incarnation")
         if type(pid) is not int or type(rid) is not int:
             return True
-        key = (host, pid)
+        # An exec restart (auto-update) keeps the PID but restarts request ids;
+        # the incarnation token makes it a new ordering domain.
+        key = (host, pid, incarnation if isinstance(incarnation, str) else "")
         if rid <= self._loss_high_water.get(key, -1):
             return False
+        self._loss_high_water.pop(key, None)
         self._loss_high_water[key] = rid
+        while len(self._loss_high_water) > 4096:  # bounded: oldest domains first
+            self._loss_high_water.pop(next(iter(self._loss_high_water)))
         return True
 
     async def _record_unfenced(self, msg: dict, *, authenticated_host: str) -> dict[str, Any]:

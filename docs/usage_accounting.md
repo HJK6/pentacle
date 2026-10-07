@@ -100,7 +100,12 @@ record's own transcript time. It never uses receipt time or a grace window.
 - Opening a new generation over a row that is still open closes the prior row
   at the new `created_at`, so a name has at most one open row.
 - Every close path writes `closed_at` in milliseconds at the time of the write.
-- Daemon start backfills a row for each open session that has none, keeping the
+- Daemon start first reconciles open rows that a daemon without history (for
+  example one rolled back to) left stale: a row whose session closed is closed
+  at `sessions.closed_at`; a row whose name was reopened as another generation,
+  or whose session was archived, has an unknown close and is closed with zero
+  width, so its records are refused. It then backfills a row for each open
+  session that has none for its current generation, keeping the
   second-resolution `sessions.created_at` and flagging it `precision='s'`.
 - The identity columns are written once: by fenced admission, or by the first
   credited unfenced record. A reopen never overwrites them.
@@ -161,7 +166,8 @@ counts that merge per (entry key, reason). The list holds at most 64 records:
 `wire_version >= 2` and a `usage_unfenced` block. Any other ack, or any push
 error, clears that flag. A v1 daemon accepts such a frame and ignores the
 fields, so after a rollback at most one frame carries them, and the held data
-stays on disk.
+stays on disk. If a daemon rejects a frame carrying them, the satellite retries
+that same pass once without them.
 
 Fenced items are classified only when the frame carries `clock`. A frame
 without `clock` (every v1 satellite) keeps the legacy admission unchanged.
@@ -199,7 +205,9 @@ exceeds the stored `rev`, it silently replaces the stored counts. That case
 stays an undetectable limit.
 
 Loss upserts for one host run under one lock. A loss is applied only when the
-frame's `request_id` is above the highest applied for that satellite process.
+frame's `request_id` is above the highest applied for that satellite process
+incarnation (`satellite_pid` plus a per-process `satellite_incarnation` token,
+because an auto-update exec restart keeps the PID and restarts request ids).
 The server serves each request in its own task, so after an ack timeout a later
 frame can arrive first; the earlier frame's losses are then neither stored nor
 acked, and the satellite sends them again.

@@ -683,11 +683,46 @@ def history_bind_identity_conn(conn, host: Any, session_name: Any, generation: A
 
 
 def history_backfill_conn(conn) -> int:
-    """Daemon start: one row per open session opened under a previous daemon.
+    """Daemon start: reconcile history with `sessions`, then backfill.
 
-    ``created_at`` is the row's second-resolution stamp, flagged ``'s'`` and
-    never given fabricated milliseconds. Closed rows are not backfilled.
+    A daemon without history (e.g. one rolled back to) can close or reopen a
+    name without writing history, leaving a stale open row. Each open row is
+    reconciled first:
+
+    * its generation is still the open session's -> kept open;
+    * its generation's session row is closed -> closed at ``sessions.closed_at``
+      (whole-second, floored: treating it as the end only refuses more);
+    * otherwise (reopened as another generation, or the row was archived) the
+      real close time is unknown -> closed with zero width at its own
+      ``created_at``, so its records are refused, never credited by analogy.
+
+    Then one row per open session that has none for its current generation,
+    keeping the second-resolution ``sessions.created_at`` flagged ``'s'`` (no
+    fabricated milliseconds). Closed rows without a generation are not
+    backfilled. Returns the number of rows inserted.
     """
+    stale = conn.execute(
+        """SELECT h.host, h.session_name, h.generation, h.created_at,
+                  s.status AS status, s.closed_at AS session_closed_at, g.generation AS current
+           FROM v2_session_generation_history h
+           LEFT JOIN sessions s ON s.host=h.host AND s.session_name=h.session_name
+           LEFT JOIN v2_session_generations g ON g.host=h.host AND g.session_name=h.session_name
+           WHERE h.closed_at IS NULL"""
+    ).fetchall()
+    for row in stale:
+        if row['current'] == row['generation'] and row['status'] == 'open':
+            continue
+        closed = epoch(row['session_closed_at']) if (
+            row['current'] == row['generation'] and row['status'] is not None) else None
+        if closed is None:
+            closed = epoch(row['created_at'])
+        if closed is None:
+            continue
+        conn.execute(
+            'UPDATE v2_session_generation_history SET closed_at=? '
+            'WHERE host=? AND session_name=? AND generation=? AND closed_at IS NULL',
+            (iso_ms(closed), row['host'], row['session_name'], row['generation']),
+        )
     cur = conn.execute(
         """INSERT OR IGNORE INTO v2_session_generation_history
                (host,session_name,generation,pane_pid,provider,created_at,precision)
@@ -695,9 +730,7 @@ def history_backfill_conn(conn) -> int:
                   s.created_at, 's'
            FROM sessions s JOIN v2_session_generations g
              ON g.host=s.host AND g.session_name=s.session_name
-           WHERE s.status='open' AND COALESCE(g.generation,'')<>'' AND COALESCE(s.created_at,'')<>''
-             AND NOT EXISTS (SELECT 1 FROM v2_session_generation_history h
-                             WHERE h.host=s.host AND h.session_name=s.session_name AND h.closed_at IS NULL)"""
+           WHERE s.status='open' AND COALESCE(g.generation,'')<>'' AND COALESCE(s.created_at,'')<>''"""
     )
     return cur.rowcount or 0
 

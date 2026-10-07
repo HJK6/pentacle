@@ -8,6 +8,7 @@ constant that admits.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -72,9 +73,9 @@ def parse_clock(value: Any) -> ClockSample | None:
     offset, rtt = value.get('offset_s'), value.get('rtt_s')
     server_now = epoch(value.get('server_now'))
     if (
-        server_now is None
-        or isinstance(offset, bool) or not isinstance(offset, (int, float))
-        or isinstance(rtt, bool) or not isinstance(rtt, (int, float))
+        server_now is None or not math.isfinite(server_now)
+        or isinstance(offset, bool) or not isinstance(offset, (int, float)) or not math.isfinite(offset)
+        or isinstance(rtt, bool) or not isinstance(rtt, (int, float)) or not math.isfinite(rtt)
         or rtt < 0 or abs(offset) > 10 ** 7 or rtt > 3600
     ):
         return None
@@ -127,7 +128,7 @@ def classify(
     capture: ClockSample | None = None,
 ) -> tuple[str, str | None]:
     """First match wins, identical on both v2 paths -> (outcome, generation)."""
-    if ts is None:
+    if ts is None or not math.isfinite(ts):
         return 'timestamp_missing', None
     if not candidates:
         return 'no_candidate_generation', None

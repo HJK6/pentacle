@@ -104,9 +104,21 @@ class HeldSpans:
         data = json.dumps(state, sort_keys=True, separators=(",", ":")).encode()
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            os.write(fd, data)
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("held-span write made no progress")
+                view = view[written:]
             os.fsync(fd)
-        finally:
+        except BaseException:
+            os.close(fd)
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+            raise
+        else:
             os.close(fd)
         os.replace(temp, self.path)
         try:

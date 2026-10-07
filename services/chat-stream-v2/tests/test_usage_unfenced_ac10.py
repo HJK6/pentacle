@@ -932,3 +932,142 @@ def test_fenced_clock_unavailable_moves_records_to_the_held_span(tmp_path):
         assert rig.tokens(f"{HOST}:v2-ck", "gen-a")["output"] == 20
         assert rig.sat._held_spans().pending_count() == 0
     _run(tmp_path, body)
+
+
+# --- final-QA af22e24e repairs ---------------------------------------------------------
+
+def test_qa1_exec_restart_same_pid_is_a_new_loss_ordering_domain(tmp_path):
+    async def body(rig: _Rig) -> None:
+        def frame(rid, incarnation, loss):
+            msg = f"event.push.v1\0{HOST}\0{SAT_SHA}\0{777}"
+            return {"type": "event.push", "request_id": rid, "push_secret": "secret", "satellite_sha": SAT_SHA,
+                    "satellite_pid": 777, "satellite_incarnation": incarnation, "wire_version": 2, "host": HOST,
+                    "events": [], "high_water": {},
+                    "source_host_proof": hmac.new(HOST_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest(),
+                    "usage_unfenced_losses": [loss]}
+
+        def loss(lid, n):
+            return {"loss_id": lid, "key": "k", "provider": "claude", "native_session_id": "n", "reason": T,
+                    "coalesced": False, "records_lost": n, "bytes_lost": n, "occurrences": 1,
+                    "first_at": 1.0, "last_at": 1.0, "rev": 1}
+        first = await rig.ep.handle_push(frame(500, "aaaa", loss("aa" * 8 + ":1", 3)))
+        # Same PID after os.execv: request ids restart at 1, new incarnation.
+        after = await rig.ep.handle_push(frame(1, "bbbb", loss("bb" * 8 + ":1", 2)))
+        assert first["losses_recorded"] and after["losses_recorded"] == [{"loss_id": "bb" * 8 + ":1", "rev": 1}]
+        stale = await rig.ep.handle_push(frame(400, "aaaa", loss("aa" * 8 + ":2", 9)))
+        assert stale["losses_recorded"] == []          # same incarnation, older frame: not applied
+    _run(tmp_path, body)
+
+
+def test_qa1_satellite_frames_carry_a_per_process_incarnation(tmp_path):
+    async def body(rig: _Rig) -> None:
+        await rig.cycle({})
+        first = rig.ws.frames[-1]["satellite_incarnation"]
+        rig.sat = rig.new_satellite()
+        await rig.cycle({})
+        assert first and rig.ws.frames[-1]["satellite_incarnation"] not in ("", first)
+    _run(tmp_path, body)
+
+
+def test_qa2_start_reconciles_history_left_stale_by_a_daemon_without_history(tmp_path):
+    async def body(rig: _Rig) -> None:
+        await rig.open("v2-rb", "gen-a")
+        await rig.open("v2-cl", "gen-c")
+        rig.stop()
+        with sqlite3.connect(rig.db) as conn:
+            # A rolled-back daemon reopened v2-rb as gen-b and closed v2-cl, writing no history.
+            conn.execute("UPDATE v2_session_generations SET generation='gen-b' WHERE session_name='v2-rb'")
+            conn.execute("UPDATE sessions SET created_at='2030-01-01T00:00:00Z' WHERE session_name='v2-rb'")
+            conn.execute("UPDATE sessions SET status='closed', closed_at='2030-01-01T00:00:05Z' "
+                         "WHERE session_name='v2-cl'")
+        rig.store = Store(str(rig.db))
+        rig.store.start()
+        rows = {r[0]: r[1:] for r in rig.q(
+            "SELECT generation, precision, created_at, closed_at FROM v2_session_generation_history")}
+        a_created = rows["gen-a"][1]
+        assert rows["gen-a"][2] == a_created                          # zero width: records refused
+        assert rows["gen-b"] == ("s", "2030-01-01T00:00:00Z", None)   # current generation backfilled
+        assert rows["gen-c"][2] == "2030-01-01T00:00:05.000Z"          # closed at the session close
+        clock = {"offset_s": 0.0, "rtt_s": 0.01, "server_now": _now()}
+        entry = {"key": "k", "stream_id": f"{HOST}:v2-rb", "provider": "claude", "source_pane_pid": PANE,
+                 "native_session_id": SID_A, "source_file_identity_digest": "a" * 64,
+                 "records": [{**_claude("m1", None), "transcript_ts": _now(), "seq": 1, "clock": clock}]}
+        out = await rig.store.record_unfenced(HOST, [entry], None, clock=clock, receipt_now=time.time())
+        assert out["rejected"][0]["reason"] == "outside_all_generations"   # never credited to gen-a
+    _run(tmp_path, body)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_qa3_non_finite_clocks_are_no_evidence(tmp_path, bad):
+    from usage_admission import parse_clock
+    assert parse_clock({"offset_s": bad, "rtt_s": 0.01, "server_now": _now()}) is None
+    assert parse_clock({"offset_s": 0.0, "rtt_s": bad, "server_now": _now()}) is None
+
+    async def body(rig: _Rig) -> None:
+        await rig.open("v2-nan", "gen-a")
+        good = {"offset_s": 0.0, "rtt_s": 0.01, "server_now": _now()}
+        bad_clock = {"offset_s": bad, "rtt_s": 0.01, "server_now": _now()}
+        entry = {"key": "k", "stream_id": f"{HOST}:v2-nan", "provider": "claude", "source_pane_pid": PANE,
+                 "native_session_id": SID_A, "source_file_identity_digest": "a" * 64,
+                 "records": [{**_claude("m1", None), "transcript_ts": _now(), "seq": 1, "clock": good}]}
+        out = await rig.store.record_unfenced(HOST, [entry], None, clock=bad_clock, receipt_now=time.time())
+        assert out["rejected"] == [{"key": "k", "seq": 1, "reason": "clock_unavailable", "transient": True}]
+        assert rig.tokens(f"{HOST}:v2-nan", "gen-a") is None
+    _run(tmp_path, body)
+
+
+def test_qa4_short_writes_are_completed_and_failures_keep_the_old_file(tmp_path, monkeypatch):
+    import usage_hold
+    from usage_hold import HeldSpans
+    real_write = usage_hold.os.write
+    monkeypatch.setattr(usage_hold.os, "write", lambda fd, data: real_write(fd, bytes(data[:7])))
+    held = HeldSpans(tmp_path / "h.json")
+    ident = {"stream_id": f"{HOST}:v2-w", "provider": "claude", "source_pane_pid": PANE,
+             "native_session_id": "n", "source_file_identity_digest": "a" * 64}
+    rec = {"type": "assistant", "sessionId": "n", "message": {"id": "m1", "usage": {"output_tokens": 1}},
+           "transcript_ts": "2026-10-07T10:00:00.000Z"}
+    held.hold(ident, [rec], None)
+    assert HeldSpans(tmp_path / "h.json").pending_count() == 1     # complete, parseable file
+    good = (tmp_path / "h.json").read_bytes()
+
+    def failing(fd, data):
+        real_write(fd, bytes(data[:5]))
+        raise OSError("disk full")
+    monkeypatch.setattr(usage_hold.os, "write", failing)
+    with pytest.raises(OSError):
+        held.hold(ident, [{**rec, "message": {"id": "m2", "usage": {"output_tokens": 1}}}], None)
+    assert (tmp_path / "h.json").read_bytes() == good
+    assert not list(tmp_path.glob(".h.json.*.tmp"))
+
+
+def test_qa5_rejected_v2_frame_is_retried_once_without_the_fields(tmp_path):
+    async def body(rig: _Rig) -> None:
+        await rig.steady()
+        await rig.open("v2-v1", "gen-a")
+        rig.write("v2-v1", [_claude("m1", _now())])
+
+        class StrictV1:
+            def __init__(self):
+                self.frames = []
+
+            async def send(self, raw):
+                self.frames.append(json.loads(raw))
+
+            async def recv(self):
+                frame = self.frames[-1]
+                if "usage_unfenced" in frame or "usage_unfenced_losses" in frame:
+                    return json.dumps({"type": "event.push.error", "request_id": frame["request_id"],
+                                       "error": "bad_batch"})
+                return json.dumps({"type": "event.push.ok", "request_id": frame["request_id"], "accepted": 0,
+                                   "dropped": [], "reopened": [], "inserted": 0, "high_water": frame["high_water"],
+                                   "version": {"status": "ok"}, "wire_version": 1, "stale": False,
+                                   "usage_recorded": 0, "usage_replayed": 0, "usage_rejected": []})
+        peer = StrictV1()
+        events, hw, _ = rig.sat._collect(rig.panes("v2-v1"))
+        ack = await rig.sat._push_pass(peer, events, hw)
+        assert len(peer.frames) == 2 and "usage_unfenced" in peer.frames[0]
+        assert "usage_unfenced" not in peer.frames[1] and peer.frames[1]["high_water"] == peer.frames[0]["high_water"]
+        assert ack["type"] == "event.push.ok" and not rig.sat._unfenced_enabled
+        rig.sat._apply_ack(ack, hw)
+        assert rig.sat._held_spans().pending_count() == 1
+    _run(tmp_path, body)
