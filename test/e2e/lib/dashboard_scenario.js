@@ -53,17 +53,28 @@ function chatChecks(observation) {
   ];
 }
 // Navigation can invalidate a CDP execution context between otherwise healthy
-// evaluations. Retry only that lifecycle boundary, never arbitrary CDP failures.
+// evaluations, including a navigation from the previous scenario that is still
+// settling when this one arms its marker. Retry only that lifecycle boundary,
+// never arbitrary CDP failures.
+const TRANSIENT_NAVIGATION_ERROR = /Execution context was destroyed|Cannot find context with specified id|Inspected target navigated or closed/;
 async function reloadDashboardPage({ session, cdp, timeoutMs = 30000 }) {
-  await session.eval('window.__dashboardReloadMarker = true');
-  await session.send('Page.reload', {});
   const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await session.eval('window.__dashboardReloadMarker = true');
+      break;
+    } catch (error) {
+      if (!TRANSIENT_NAVIGATION_ERROR.test(String(error?.message || error)) || Date.now() >= deadline) throw error;
+      await cdp.sleep(100);
+    }
+  }
+  await session.send('Page.reload', {});
   do {
     try {
       const ready = await session.eval("window.__dashboardReloadMarker !== true && document.readyState === 'complete' && typeof window.focusStreamId === 'function'");
       if (ready === true) return;
     } catch (error) {
-      if (!/Execution context was destroyed|Cannot find context with specified id/.test(String(error?.message || error))) throw error;
+      if (!TRANSIENT_NAVIGATION_ERROR.test(String(error?.message || error))) throw error;
     }
     if (Date.now() >= deadline) break;
     await cdp.sleep(100);

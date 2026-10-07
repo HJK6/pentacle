@@ -99,7 +99,8 @@ test('dashboard oracle rejects a profile URL that never reached the renderer bri
   assert.equal(configChecks(fixtureUrl, fixtureUrl)[0][1], true);
 });
 
-for (const message of ['Execution context was destroyed. (-32000)', 'Cannot find context with specified id (-32000)']) {
+const TRANSIENT_RELOAD_ERRORS = ['Execution context was destroyed. (-32000)', 'Cannot find context with specified id (-32000)', 'Inspected target navigated or closed (-32000)'];
+for (const message of TRANSIENT_RELOAD_ERRORS) {
   test(`dashboard reload retries a transient context rollover: ${message}`, async () => {
     const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
     let evaluations = 0; let reloads = 0;
@@ -110,6 +111,18 @@ for (const message of ['Execution context was destroyed. (-32000)', 'Cannot find
     } };
     await reloadDashboardPage({ session, cdp: { sleep: async () => {} }, timeoutMs: 1000 });
     assert.equal(reloads, 1); assert.equal(evaluations, 2);
+  });
+}
+for (const message of TRANSIENT_RELOAD_ERRORS) {
+  test(`dashboard reload re-arms after a previous navigation is still settling: ${message}`, async () => {
+    const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
+    let arms = 0; let reloads = 0;
+    const session = { send: async () => { reloads++; }, eval: async expression => {
+      if (expression === 'window.__dashboardReloadMarker = true' && ++arms === 1) throw new Error(message);
+      return true;
+    } };
+    await reloadDashboardPage({ session, cdp: { sleep: async () => {} }, timeoutMs: 1000 });
+    assert.equal(arms, 2); assert.equal(reloads, 1);
   });
 }
 test('dashboard reload waits for the old document marker to disappear', async () => {
