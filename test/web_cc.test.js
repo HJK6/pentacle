@@ -310,6 +310,42 @@ test('a dropped socket rejects every in-flight request instead of hanging', asyn
   await assert.rejects(pending, /connection lost/);
 });
 
+test('a queued call rejected by a drop is never sent after the reconnect', async (t) => {
+  const fake = installFakeWebSocket();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const transport = createTransport({ url: 'ws://host/cc', logger: { warn() {} } });
+  t.after(() => { transport.close(); fake.restore(); });
+
+  // Called while the socket is still connecting, so the frame is queued.
+  const pending = transport.call('chat-stream:send', 'local', 'a', 'hello');
+  transport.fire('pty:write', 0, 'queued');
+  fake.instances[0].close();
+  await assert.rejects(pending, /connection lost/);
+
+  t.mock.timers.tick(5000);
+  const next = fake.instances[1];
+  next.open();
+  assert.deepEqual(next.sent.map((f) => f.method), ['pty:write'],
+    'the rejected call is dropped; send-mode frames keep their queued delivery');
+});
+
+test('a call queued after a drop is still delivered on the reconnect', async (t) => {
+  const fake = installFakeWebSocket();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const transport = createTransport({ url: 'ws://host/cc', logger: { warn() {} } });
+  t.after(() => { transport.close(); fake.restore(); });
+
+  fake.instances[0].open();
+  fake.instances[0].close();
+  const pending = transport.call('get-config');
+  t.mock.timers.tick(5000);
+  const next = fake.instances[1];
+  next.open();
+  assert.deepEqual(next.sent.map((f) => f.method), ['get-config']);
+  next.deliver({ id: next.sent[0].id, ok: true, result: { appName: 'P' } });
+  assert.deepEqual(await pending, { appName: 'P' });
+});
+
 test('an error response rejects with the code the host sent', async (t) => {
   const fake = installFakeWebSocket();
   const transport = createTransport({ url: 'ws://host/cc', logger: { warn() {} } });
