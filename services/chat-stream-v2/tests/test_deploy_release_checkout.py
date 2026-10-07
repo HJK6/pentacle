@@ -121,3 +121,40 @@ def test_fleet_smoke_template_renders_the_activated_v2_checkout(tmp_path: Path) 
     assert rendered["EnvironmentVariables"]["PENTACLE_MACHINES_FILE"] == str(
         Path.home() / ".config/pentacle-public/machines.json"
     )
+
+
+def test_fleet_smoke_helper_runs_from_the_gate_tools_worktree_not_the_runtime_checkout(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    repo = tmp_path / "release"
+    template = repo / deploy_mod.SPAWN_FLEET_SMOKE_TEMPLATE
+    template.parent.mkdir(parents=True)
+    source = Path(__file__).parents[2] / deploy_mod.SPAWN_FLEET_SMOKE_TEMPLATE.relative_to("services")
+    template.write_bytes(source.read_bytes())
+
+    command = plistlib.loads(deploy_mod._render_v2_spawn_fleet_smoke_plist(repo))["ProgramArguments"][2]
+    helper = home / "repos/pentacle-gate-tools/services/chat-stream-v2/tools/gate_at_fire.py"
+    py = repo / "services/chat-stream-v2/.venv/bin/python"
+    # The gate helper lives in its own worktree; the candidate and the wrapped command are the runtime checkout.
+    assert f"{py} {helper} run --job spawn-fleet-smoke" in command
+    assert f"--candidate-repo {repo} -- {py} {repo}/services/chat-stream-v2/tools/spawn_fleet_smoke.py" in command
+    assert str(repo / "services/chat-stream-v2/tools/gate_at_fire.py") not in command
+
+
+def test_a_render_for_a_runtime_checkout_reproduces_the_hand_installed_live_command(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "synthetic-home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    repo = home / "repos/pentacle-public-runtime"
+    source = (Path(__file__).parents[2] / deploy_mod.SPAWN_FLEET_SMOKE_TEMPLATE.relative_to("services")).read_bytes()
+    root = tmp_path / "r"  # render against a throwaway root, then swap in the runtime path
+    (root / deploy_mod.SPAWN_FLEET_SMOKE_TEMPLATE).parent.mkdir(parents=True)
+    (root / deploy_mod.SPAWN_FLEET_SMOKE_TEMPLATE).write_bytes(source)
+    rendered = deploy_mod._render_v2_spawn_fleet_smoke_plist(root).replace(str(root).encode(), str(repo).encode())
+    command = plistlib.loads(rendered)["ProgramArguments"][2]
+    rt = str(repo)
+    assert command.startswith(
+        f"cd {rt} && {rt}/services/chat-stream-v2/.venv/bin/python "
+        f"{home}/repos/pentacle-gate-tools/services/chat-stream-v2/tools/gate_at_fire.py run --job spawn-fleet-smoke "
+    )
+    assert command.endswith(f"--candidate-repo {rt} -- {rt}/services/chat-stream-v2/.venv/bin/python "
+                            f"{rt}/services/chat-stream-v2/tools/spawn_fleet_smoke.py")
