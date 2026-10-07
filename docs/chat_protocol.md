@@ -97,15 +97,15 @@ household store. The daemon keeps no household state, cache or broadcast.
 | Verb | Fields | Result |
 |---|---|---|
 | `household.snapshot` | `month?` (`YYYY-MM`, 2000-01…2100-12, default today's America/Chicago month) | `{today, month, people:{partner}, lists:{tasks,grocery,meals,chores,study}, events, server_now}`; open items only; events from that month plus today…today+7, de-duplicated |
-| `household.item.add` | `list`, `label` (1–1000 chars) | `{item}` |
-| `household.item.done` | `item_id` | `{item}` (Cosmo keeps it 5 s, then removes it) |
+| `household.item.add` | `list`, `label` (1–1000 chars) | `{item, server_now}` |
+| `household.item.done` | `item_id` | `{item, server_now}` (Cosmo keeps it 5 s, then removes it) |
 | `household.item.remove` | `item_id` | `{item_id}` (Cosmo's 204 carries no `server_now`) |
-| `household.event.add` | `date` (`YYYY-MM-DD`), `time` (`HH:MM` or null), `title` (1–500), `who` (`self`, `partner`, `both`; display only) | `{event}` |
+| `household.event.add` | `date` (`YYYY-MM-DD`), `time` (`HH:MM` or null), `title` (1–500), `who` (`self`, `partner`, `both`; display only) | `{event, server_now}` |
 | `household.event.remove` | `event_id` | `{event_id}` (no `server_now`, as above) |
 
 - **Errors** (`error_code`): `unauthorized` (or the dispatcher codes above); `invalid_request`; `invalid_range` (bad `month`);
   `not_found` (Cosmo 404/410, including rows outside the operator's audience); `forbidden` (403);
-  `unavailable` (token file missing, URL or `PENTACLE_COSMO_SELF` unset, URL not HTTPS, connection refused, Cosmo 401, any snapshot sub-call failing,
+  `unavailable` (token file missing, unreadable or empty, URL or `PENTACLE_COSMO_SELF` unset, URL not HTTPS, a connect-time failure before the request was sent such as connection refused or name resolution, Cosmo 401, any snapshot sub-call failing,
   timing out or exceeding 1 MiB); `unknown_outcome` (a change was sent but not confirmed: timeout or
   connection lost while waiting, or an unexpected status). Calls are never retried; after
   `unknown_outcome` the client reads back with `household.snapshot` instead of resending.
