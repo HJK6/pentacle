@@ -100,6 +100,8 @@ RPC_RETRY_ELIGIBLE_TYPES = frozenset(
         "inbound_audit",
         "prompt.ask",
         "prompt.answer",
+        # Daemon-deduped on (recording_id, question_id): a repeat returns the stored ack.
+        "voice_answer.answer",
         "prompt.cancel",
         "prompt.list",
         "prompt.status",
@@ -2013,6 +2015,17 @@ async def prompt_answer_once(
     payload.setdefault("request_id", f"prompt-answer-{uuid.uuid4()}")
     return await _one_shot_rpc(
         config, payload, prefix="prompt", timeout=timeout, from_stream_id=from_stream_id
+    )
+
+
+async def voice_answer_once(
+    config: Config, payload: dict[str, Any], *, timeout: float = 30.0
+) -> dict[str, Any]:
+    """Answer one bound question for a voice take (voice_answers.v1) as the calling seat."""
+    from_stream_id = _attach_agent_identity(payload)
+    payload.setdefault("request_id", f"voice-answer-{uuid.uuid4()}")
+    return await _one_shot_rpc(
+        config, payload, prefix="voice_answer", timeout=timeout, from_stream_id=from_stream_id
     )
 
 

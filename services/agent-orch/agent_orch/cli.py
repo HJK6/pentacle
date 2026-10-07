@@ -45,6 +45,7 @@ from .wsclient import (
     notification_resolve_by_dedup_once,
     park_once,
     prompt_answer_once,
+    voice_answer_once,
     prompt_ask_once,
     prompt_cancel_once,
     prompt_list_once,
@@ -2427,6 +2428,45 @@ def prompt_answer(args: argparse.Namespace) -> int:
         response["question_id"] = args.question_id
         print(json.dumps(response, separators=(",", ":")))
         print(f"agent-orch prompt answer: {message}", file=sys.stderr)
+        return exit_code
+
+
+def voice_answer_answer(args: argparse.Namespace) -> int:
+    # Binding-scoped answer for a voice take (voice_answers.v1): the daemon accepts it only from
+    # the seat bound to the assistant thread, for a question in that recording's binding.
+    selections = list(getattr(args, "selection", None) or [])
+    text = getattr(args, "text", None)
+    if not selections and (text is None or not str(text).strip()):
+        print(
+            "agent-orch voice-answer answer: provide --select and/or --text",
+            file=sys.stderr,
+        )
+        return 2
+    payload: dict[str, object] = {
+        "type": "voice_answer.answer",
+        "recording_id": args.recording_id,
+        "question_id": args.question_id,
+    }
+    if selections:
+        payload["selections"] = selections
+    if text is not None:
+        payload["text"] = text
+    try:
+        response = asyncio.run(
+            voice_answer_once(
+                load_config(),
+                payload,
+                timeout=float(getattr(args, "timeout", 30.0) or 30.0),
+            )
+        )
+        print(json.dumps(response, separators=(",", ":")))
+        return 0 if response.get("type") == "voice_answer.answer.ok" else 1
+    except Exception as exc:
+        response, exit_code, message = _direct_rpc_transport_error("voice_answer", None, exc)
+        response["recording_id"] = args.recording_id
+        response["question_id"] = args.question_id
+        print(json.dumps(response, separators=(",", ":")))
+        print(f"agent-orch voice-answer answer: {message}", file=sys.stderr)
         return exit_code
 
 
@@ -5419,6 +5459,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prompt_answer_parser.add_argument("--timeout", type=float, default=30.0)
     prompt_answer_parser.set_defaults(func=prompt_answer)
+
+    voice_answer_parser = subparsers.add_parser("voice-answer")
+    voice_answer_sub = voice_answer_parser.add_subparsers(dest="voice_answer_command", required=True)
+    voice_answer_answer_parser = voice_answer_sub.add_parser("answer")
+    voice_answer_answer_parser.add_argument("question_id")
+    voice_answer_answer_parser.add_argument(
+        "--recording-id", required=True, help="The voice take's recording id from its bound turn.")
+    voice_answer_answer_parser.add_argument(
+        "--text", help="Free-text answer (free_text questions, or custom text on a choice).")
+    voice_answer_answer_parser.add_argument(
+        "--selection", "--select", action="append",
+        help="Selected option value (repeat for multi_choice). Combine with --text if desired.")
+    voice_answer_answer_parser.add_argument("--timeout", type=float, default=30.0)
+    voice_answer_answer_parser.set_defaults(func=voice_answer_answer)
 
     prompt_cancel_parser = prompt_sub.add_parser("cancel")
     prompt_cancel_parser.add_argument("question_id")
