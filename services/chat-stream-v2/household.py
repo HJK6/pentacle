@@ -6,13 +6,18 @@ uses Cosmo's optional ``pentacle`` credential, which acts for Vamshi: Cosmo's ow
 audience projection decides visibility (``vamshi`` + ``shared``), and because no
 ``scope`` is ever sent, rows created here are Vamshi-private.
 
-Authorization is the server-injected ``_auth_context["operator_authenticated"]``
-flag only (``server.py`` strips client-supplied ``_`` fields before dispatch).
-Seats, Nexus seats, service producers, scoped credentials and unauthenticated
-callers are refused before any Cosmo call. Each verb accepts a fixed field list.
+Authorization is the server-injected ``_auth_context`` only (``server.py`` strips
+client-supplied ``_`` fields before dispatch) and requires the human operator: an
+operator-trusted connection (``operator_principal`` ``operator:<credential>``). A seat
+token elevated by the opt-in ``PENTACLE_SEAT_OPERATOR_AUTHORITY`` mode
+(``operator_authority_source == "stream_token"``) is still a seat and is refused, as are
+Nexus seats, service producers, scoped credentials and unauthenticated callers, before
+any Cosmo call. Each verb accepts a fixed field list.
 
 The bearer token is read from a 0600 file at call time and appears only in the
-outgoing ``Authorization`` header: never in a frame, error text or log line.
+outgoing ``Authorization`` header: never in a frame, error text or log line. The
+Cosmo URL must be ``https://``; plain HTTP is refused before any request unless a
+caller (tests) passes ``allow_insecure=True`` explicitly.
 Calls are never retried; a mutation whose outcome cannot be known (timeout or a
 connection lost after sending) is reported as ``unknown_outcome`` so the client
 reads back instead of resubmitting.
@@ -65,8 +70,9 @@ class _CosmoFailure(Exception):
 
 class Household:
     def __init__(self, *, url: str | None = None, token_file: str | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, allow_insecure: bool = False) -> None:
         self.url = (url or os.environ.get(COSMO_URL_ENV) or COSMO_URL_DEFAULT).rstrip("/")
+        self.allow_insecure = allow_insecure
         self.token_file = token_file or os.environ.get(TOKEN_FILE_ENV) or TOKEN_FILE_DEFAULT
         self.clock = clock
         self._ssl = ssl.create_default_context()
@@ -157,6 +163,9 @@ class Household:
     # ---- transport ---------------------------------------------------------------------
 
     def _token(self) -> str:
+        if not (self.url.startswith("https://") or self.allow_insecure):
+            # Never send the bearer token over plain HTTP.
+            raise VerbError("unavailable", "household store not configured")
         try:
             token = Path(self.token_file).expanduser().read_text().strip()
         except OSError:
@@ -216,7 +225,13 @@ class Household:
 
 def _fields(msg: dict[str, Any], *, required: tuple[str, ...], optional: tuple[str, ...] = ()) -> dict[str, Any]:
     auth = msg.get("_auth_context")
-    if not isinstance(auth, dict) or auth.get("operator_authenticated") is not True:
+    human_operator = (
+        isinstance(auth, dict)
+        and auth.get("operator_authenticated") is True
+        and str(auth.get("operator_principal") or "").startswith("operator:")
+        and auth.get("operator_authority_source") is None
+    )
+    if not human_operator:
         raise VerbError("unauthorized", "operator authentication required")
     given = {k: v for k, v in msg.items() if not str(k).startswith("_") and k not in _ENVELOPE}
     if set(given) - set(required) - set(optional) or set(required) - set(given):

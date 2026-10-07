@@ -98,7 +98,7 @@ def token_file(tmp_path):
 
 @pytest.fixture
 def adapter(cosmo, token_file):
-    return Household(url=cosmo.url, token_file=str(token_file), clock=lambda: NOW)
+    return Household(url=cosmo.url, token_file=str(token_file), clock=lambda: NOW, allow_insecure=True)
 
 
 def call(adapter, verb, **fields):
@@ -133,7 +133,14 @@ NOT_OPERATOR = {
     "service": {"service_authenticated": True, "service_actor": "system:wmi", "operator_authenticated": False},
     "scoped": {"scoped_principal": True, "scope": {"stream": "daff:assistant"}, "operator_authenticated": False},
     "unauthenticated": {"operator_authenticated": False},
-    "truthy-not-true": {"operator_authenticated": "yes"},
+    "truthy-not-true": {"operator_authenticated": "yes", "operator_principal": "operator:cid"},
+    # PENTACLE_SEAT_OPERATOR_AUTHORITY elevates a verified seat token exactly like this.
+    "seat-operator-authority": {"token_verified": True, "stream_id": "amaterasu:v2-seat",
+                                "operator_authenticated": True, "operator_principal": "agent:amaterasu:v2-seat",
+                                "operator_authority_source": "stream_token"},
+    "seat-authority-on-operator-principal": {"operator_authenticated": True, "operator_principal": "operator:cid",
+                                             "operator_authority_source": "stream_token"},
+    "operator-flag-without-principal": {"operator_authenticated": True},
     "missing": None,
 }
 
@@ -321,7 +328,7 @@ def test_refused_connection_is_unavailable(token_file):
     from sessions import VerbError
     import socket
     probe = socket.socket(); probe.bind(("127.0.0.1", 0)); port = probe.getsockname()[1]; probe.close()
-    adapter = Household(url=f"http://127.0.0.1:{port}", token_file=str(token_file), clock=lambda: NOW)
+    adapter = Household(url=f"http://127.0.0.1:{port}", token_file=str(token_file), clock=lambda: NOW, allow_insecure=True)
     for verb in ("household.snapshot", "household.item.remove"):
         with pytest.raises(VerbError) as exc:
             call(adapter, verb, **VERBS[verb])
@@ -330,7 +337,7 @@ def test_refused_connection_is_unavailable(token_file):
 
 def test_missing_token_file_is_unavailable_and_names_no_path(cosmo, tmp_path):
     from sessions import VerbError
-    adapter = Household(url=cosmo.url, token_file=str(tmp_path / "absent.token"), clock=lambda: NOW)
+    adapter = Household(url=cosmo.url, token_file=str(tmp_path / "absent.token"), clock=lambda: NOW, allow_insecure=True)
     with pytest.raises(VerbError) as exc:
         call(adapter, "household.snapshot")
     assert code_of(exc) == "unavailable"
@@ -383,3 +390,63 @@ def test_token_reaches_only_the_authorization_header(adapter, cosmo, token_file,
     assert all(c["auth"] == f"Bearer {TOKEN}" for c in cosmo.calls)
     assert TOKEN not in json.dumps(frames) and TOKEN not in caplog.text
     assert oct(token_file.stat().st_mode & 0o777) == "0o600"
+
+
+# ---- transport security and wire-level denials --------------------------------------------
+
+@pytest.mark.parametrize("verb", sorted(VERBS))
+def test_plain_http_url_is_refused_before_any_request(cosmo, token_file, verb, monkeypatch):
+    from sessions import VerbError
+    import household
+    for adapter in (Household(url=cosmo.url, token_file=str(token_file), clock=lambda: NOW),):
+        with pytest.raises(VerbError) as exc:
+            call(adapter, verb, **VERBS[verb])
+        assert code_of(exc) == "unavailable"
+    monkeypatch.setenv(household.COSMO_URL_ENV, cosmo.url)
+    with pytest.raises(VerbError) as exc:
+        call(Household(token_file=str(token_file), clock=lambda: NOW), verb, **VERBS[verb])
+    assert code_of(exc) == "unavailable"
+    assert cosmo.calls == []
+
+
+def test_default_url_is_https():
+    import household
+    assert Household().url.startswith("https://") and household.COSMO_URL_DEFAULT.startswith("https://")
+
+
+def test_wire_remote_unauthenticated_is_denied_by_dispatcher(adapter, cosmo):
+    server = _server_with(adapter)
+    frames = asyncio.run(server._dispatch(json.dumps({"type": "household.item.remove", "request_id": "u1",
+                                                      "item_id": 7}), websocket=Peer("100.64.0.10")))
+    assert frames[0]["type"] == "household.item.remove.error"
+    assert frames[0]["error_code"] == "authentication_required"
+    assert cosmo.calls == []
+
+
+def test_wire_seat_operator_authority_mode_still_denied(adapter, cosmo, monkeypatch):
+    from server import Server
+    server = Server(seat_operator_authority=True)
+    server.handlers.update(adapter.wire_handlers())
+    peer = Peer("100.64.0.11")
+
+    async def seat_context(websocket, msg):
+        # The exact shape `_auth_context` mints for a verified seat token in this mode.
+        return {"stream_id": "amaterasu:v2-seat", "token_verified": True, "operator_authenticated": True,
+                "operator_principal": "agent:amaterasu:v2-seat", "operator_authority_source": "stream_token",
+                "service_authenticated": False, "service_attempted": False, "dot_principal": False,
+                "transport_tls": False, "peer_loopback": False, "local_admin_verified": False}
+
+    monkeypatch.setattr(server, "_auth_context", seat_context)
+    frames = asyncio.run(server._dispatch(json.dumps({"type": "household.snapshot", "request_id": "s1"}),
+                                          websocket=peer))
+    assert frames[0]["error_code"] == "unauthorized"
+    assert cosmo.calls == []
+
+
+def test_seat_operator_authority_context_shape_matches_server():
+    """Guard the predicate above against drift in server.py's elevation code."""
+    import inspect
+    from server import Server
+    source = inspect.getsource(Server._auth_context)
+    assert 'context["operator_authority_source"] = "stream_token"' in source
+    assert 'f"agent:{owner}"' in source

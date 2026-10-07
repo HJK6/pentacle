@@ -72,13 +72,19 @@ Image attachments (both operator→agent and agent→operator) reuse one content
 Personal tab) read and change the operator's lists and calendar in Cosmo, the one authoritative
 household store. The daemon keeps no household state, cache or broadcast.
 
-- **Who may call.** Only connections whose server-injected `_auth_context.operator_authenticated`
-  is true. Seats, Nexus seats, service producers, scoped (Dot/Cosmo) credentials and
-  unauthenticated callers get `<verb>.error` `unauthorized` and no Cosmo call is made.
+- **Who may call.** Only the human operator: a connection whose server-injected `_auth_context`
+  is operator-authenticated with an `operator:<credential>` principal from operator-trusted
+  transport. A seat token elevated by the opt-in `PENTACLE_SEAT_OPERATOR_AUTHORITY` mode
+  (`operator_authority_source: stream_token`) is still a seat and is refused. No Cosmo call is made
+  for a refused caller. Denial codes: the dispatcher answers remote unauthenticated callers
+  `authentication_required`, Dot principals `dot_scope_denied` and scoped (Cosmo/Daff) credentials
+  `scope_denied` before the handler runs; every other non-operator caller (loopback without operator
+  trust, seats, Nexus seats, service producers, seat-authority-elevated seats) gets `unauthorized`.
 - **Credential.** Cosmo's optional `pentacle` role (acts for Vamshi; `created_by=app`; cannot set
   priority or due dates). The bearer token is read at call time from `COSMO_PENTACLE_TOKEN_FILE`
   (default `~/.cosmo/pentacle.token`, mode 0600) and used only in the `Authorization` header.
-  Cosmo URL: `PENTACLE_COSMO_URL` (default the Thoth tailnet address on port 8443). Cosmo enforces
+  Cosmo URL: `PENTACLE_COSMO_URL` (default the Thoth tailnet address on port 8443); it must be
+  `https://`, otherwise every verb answers `unavailable` without sending anything. Cosmo enforces
   visibility (`vamshi` + `shared`); the adapter never sends `scope`, so new rows are Vamshi-private.
 - **Verbs** (each accepts exactly the listed fields; anything else is `invalid_request`):
 
@@ -87,13 +93,13 @@ household store. The daemon keeps no household state, cache or broadcast.
 | `household.snapshot` | `month?` (`YYYY-MM`, 2000-01…2100-12, default today's America/Chicago month) | `{today, month, lists:{tasks,grocery,meals,chores,study}, events, server_now}`; open items only; events from that month plus today…today+7, de-duplicated |
 | `household.item.add` | `list`, `label` (1–1000 chars) | `{item}` |
 | `household.item.done` | `item_id` | `{item}` (Cosmo keeps it 5 s, then removes it) |
-| `household.item.remove` | `item_id` | `{item_id}` |
+| `household.item.remove` | `item_id` | `{item_id}` (Cosmo's 204 carries no `server_now`) |
 | `household.event.add` | `date` (`YYYY-MM-DD`), `time` (`HH:MM` or null), `title` (1–500), `who` (`me`=Aliyah, `vamshi`, `both`; display only) | `{event}` |
-| `household.event.remove` | `event_id` | `{event_id}` |
+| `household.event.remove` | `event_id` | `{event_id}` (no `server_now`, as above) |
 
-- **Errors** (`error_code`): `unauthorized`; `invalid_request`; `invalid_range` (bad `month`);
+- **Errors** (`error_code`): `unauthorized` (or the dispatcher codes above); `invalid_request`; `invalid_range` (bad `month`);
   `not_found` (Cosmo 404/410, including rows outside the operator's audience); `forbidden` (403);
-  `unavailable` (token file missing, connection refused, Cosmo 401, any snapshot sub-call failing,
+  `unavailable` (token file missing, non-HTTPS URL, connection refused, Cosmo 401, any snapshot sub-call failing,
   timing out or exceeding 1 MiB); `unknown_outcome` (a change was sent but not confirmed: timeout or
   connection lost while waiting, or an unexpected status). Calls are never retried; after
   `unknown_outcome` the client reads back with `household.snapshot` instead of resending.
