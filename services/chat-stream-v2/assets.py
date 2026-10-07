@@ -40,8 +40,12 @@ SERVICES_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVICES_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICES_ROOT))
 
-from _shared.asset_schema import AssetBodyTooLarge, AssetValidationError, normalize_tags
+from _shared.asset_schema import (
+    AssetBodyTooLarge, AssetValidationError, normalize_tags, validate_asset_payload,
+)
 from _shared.assets_store import AssetNotFound, AssetStore, AssetStoreError, InvalidAsset, asset_metadata
+
+import report_producer
 
 log = logging.getLogger("chat_streamd_v2.assets")
 
@@ -122,7 +126,8 @@ class Assets:
             # v1 passes a whitelist of value-error codes through verbatim.
             code = str(exc)
             if code in {"asset_unauthorized", "asset_spec_unattached", "asset_spec_ambiguous",
-                        "asset_spec_anchor_mismatch", "asset.session_closed"}:
+                        "asset_spec_anchor_mismatch", "asset.session_closed",
+                        "report_producer_immutable"}:
                 return self._error(request_id, code)
             return self._error(request_id, "asset_invalid", message=code)
         except AssetStoreError as exc:
@@ -132,10 +137,19 @@ class Assets:
             return self._error(request_id, "asset_store_error")
 
     async def _asset_publish(self, msg: dict, request_id: str) -> dict:
-        host, name = self._resolve(msg)
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        service_actor = auth.get("service_actor") if auth.get("service_authenticated") is True else ""
+        # The configured report producer (report_producer.py) publishes under its
+        # fixed synthetic anchor: the host and session of its stream id.
+        producer = report_producer.load()
+        principal = producer is not None and service_actor == producer.stream_id
+        if principal:
+            host, name = producer.anchor
+        else:
+            host, name = self._resolve(msg)
         stream_id = f"{host}:{name}"
-        record = await self._call(
-            "publish_asset", host=host, session_name=name, stream_id=stream_id,
+        fields = dict(
+            host=host, session_name=name, stream_id=stream_id,
             asset_id=_asset_id(msg) or None,
             title=str(msg.get("title") or ""),
             content_type=str(msg.get("content_type") or msg.get("type_hint") or ""),
@@ -144,8 +158,48 @@ class Assets:
             producer=_nullable_text(msg.get("producer")) or stream_id,
             spec_id=_nullable_text(msg.get("spec_id")),
         )
+        # Check and write in ONE call on the store's single worker thread, so no
+        # other publish can interleave between the ownership check and the write.
+        record, unchanged = await self._run(self._publish_checked, producer, principal, fields)
+        if unchanged:
+            return {"type": "asset.publish.ok", "request_id": request_id,
+                    "asset": record, "unchanged": True}
         await self._broadcast_update(record)
         return {"type": "asset.publish.ok", "request_id": request_id, "asset": record}
+
+    def _publish_checked(self, producer: Any, principal: bool, fields: dict) -> tuple[dict, bool]:
+        """Runs on the store worker thread. A report producer's asset id is
+        immutable: an identical stored form is a no-op, anything else is refused,
+        and no other caller may claim its producer id or write one of its ids
+        under its spec, first or later (the store re-anchors a same spec+id
+        publish onto the existing row and keeps its producer)."""
+        if self._store is None:
+            raise AssetStoreError("asset store not started")
+        same_spec = [
+            record for record in self._store.find_assets_by_id(fields["asset_id"])
+            if fields["spec_id"] and record.get("spec_id") == fields["spec_id"]
+        ] if fields["asset_id"] else []
+        if principal and same_spec:
+            existing = same_spec[0]
+            try:
+                stored_form = validate_asset_payload(fields["content_type"], fields["body"])
+            except (AssetValidationError, AssetBodyTooLarge):
+                stored_form = None
+            if (stored_form is not None
+                    and existing.get("producer") == producer.stream_id
+                    and existing.get("body") == stored_form
+                    and existing.get("title") == fields["title"]
+                    and existing.get("content_type") == fields["content_type"]):
+                return existing, True
+            raise ValueError("report_producer_immutable")
+        if producer is not None and not principal and (
+            # Readers trust that producer, so only the principal may claim it.
+            fields["producer"] == producer.stream_id
+            or (fields["spec_id"] == producer.spec_id and producer.owns_asset_id(fields["asset_id"]))
+            or any(record.get("producer") == producer.stream_id for record in same_spec)
+        ):
+            raise ValueError("asset_unauthorized")
+        return self._store.publish_asset(**fields), False
 
     async def _asset_health(self, msg: dict, request_id: str) -> dict:
         return {"type": "asset.health.ok", "request_id": request_id,
