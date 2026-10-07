@@ -412,6 +412,36 @@ while read -r lref lsha rref rsha extra; do
     warn "         this is foreign history — an unrelated repository's line, or a merge that pulls one in."
     fail=1
   fi
+  # Compare each exact outgoing tip with the freshly resolved destination main.
+  # The checkout/HEAD may differ from lsha; fixture allowlists do not apply.
+  if [ "$is_public" -eq 1 ]; then
+    fleet_checker="${0%/*}/../check_public_residue.py"
+    if [ -z "$TMPD" ] || [ ! -f "$fleet_checker" ] || ! command -v python3 >/dev/null 2>&1; then
+      warn "REFUSED: fleet-host additions checker unavailable (fail closed)."
+      fail=1
+    elif ! python3 "$fleet_checker" --root "$(git rev-parse --show-toplevel)" \
+        --fleet-base "$remote_main" --fleet-tip "$lsha" > "$TMPD/fleet-result.json" 2>/dev/null; then
+      warn "REFUSED: fleet-host additions check failed for ${lref}; compare the outgoing tip with live public main."
+      fail=1
+    elif ! python3 - "$TMPD/fleet-result.json" "$remote_main" "$lsha" 2>/dev/null <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        receipt = json.load(source)
+    valid = (isinstance(receipt, dict) and receipt.get("passed") is True
+             and type(receipt.get("unexcepted_match_count")) is int
+             and receipt["unexcepted_match_count"] == 0 and receipt.get("rule_hits") == []
+             and receipt.get("base") == sys.argv[2] and receipt.get("tip") == sys.argv[3])
+except (OSError, ValueError, TypeError):
+    valid = False
+sys.exit(0 if valid else 1)
+PY
+    then
+      warn "REFUSED: fleet-host receipt missing, invalid or not bound to this push (fail closed)."
+      fail=1
+    fi
+  fi
   : "$rsha"
 done <<EOF
 $PREPUSH_STDIN

@@ -3,11 +3,17 @@
 
 This finite guard supplements review; it is not an exhaustive secret scanner.
 Private dictionary values and matched source text are never emitted.
+
+Fleet-only mode compares exact Git commits (independent of checkout and fixture
+allowlists): --fleet-base <fresh-public-main-sha> --fleet-tip <outgoing-sha>.
+The public pre-push hook supplies these pins for every non-deletion update.
+Existing path/content occurrences remain baseline debt; new occurrences fail.
 """
 from __future__ import annotations
 
 import argparse
 import ast
+from collections import Counter
 import hashlib
 import json
 from pathlib import Path
@@ -15,6 +21,74 @@ import re
 import subprocess
 
 PATTERN = re.compile("|".join(["host" + suffix for suffix in "abc"] + ["ab" + "ra"]))
+
+# As with the portable detector, assemble samples rather than embedding the
+# identifiers this guard is intended to prevent in public source.
+FLEET_NAMES = ["ama" + "terasu", "mer" + "lin", "tho" + "th",
+               "bar" + "t", "barti" + "maeus", "daff" + "odil"]
+FLEET_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(FLEET_NAMES)
+                           + r")(?![A-Za-z0-9])", re.IGNORECASE)
+# One existing wire identity is an explicitly retained compatibility contract.
+# Ignore that occurrence only, never another name on the same line.
+SERVICE_PRINCIPAL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_.:-])" + re.escape(FLEET_NAMES[0] + ":wmi-pg-dailybackup")
+    + r"(?![A-Za-z0-9_.:-])"
+)
+
+
+def _fleet_hit(value: str) -> bool:
+    allowed = [match.span() for match in SERVICE_PRINCIPAL_PATTERN.finditer(value)]
+    return any(not any(start <= match.start() and match.end() <= end for start, end in allowed)
+               for match in FLEET_PATTERN.finditer(value))
+
+
+def check_fleet_additions(root: Path, base: str, tip: str) -> dict:
+    """Compare immutable trees; existing path/content occurrences are debt.
+
+    Counts, not line numbers, preserve shifted lines without allowing duplicate
+    additions. Read blob bytes (including symlinks), never the live checkout.
+    Submodule contents are not recursively scanned; their path names are.
+    """
+    def git(*args: str) -> bytes:
+        return subprocess.check_output(["git", *args], cwd=root, stderr=subprocess.PIPE)
+
+    def resolve(ref: str) -> str:
+        return git("rev-parse", "--verify", "--end-of-options", ref + "^{commit}").decode().strip()
+
+    def tree(oid: str) -> dict:
+        entries = {}
+        for record in git("ls-tree", "-rz", "--full-tree", oid).split(b"\0"):
+            if record:
+                meta, name = record.split(b"\t", 1)
+                mode, kind, blob = meta.decode("ascii").split()
+                entries[name.decode("utf-8", errors="surrogateescape")] = (kind, blob)
+        return entries
+
+    def lines(entry) -> list[str]:
+        if entry is None or entry[0] != "blob":
+            return []
+        return git("cat-file", "blob", entry[1]).decode("utf-8", errors="replace").splitlines()
+
+    base_sha, tip_sha = resolve(base), resolve(tip)
+    before, after = tree(base_sha), tree(tip_sha)
+    hits = []
+    for name, entry in sorted(after.items()):
+        display = ("<fleet-path:" + hashlib.sha256(name.encode("utf-8", errors="surrogateescape")).hexdigest() + ">"
+                   if FLEET_PATTERN.search(name) else name)
+        if name not in before and _fleet_hit(name):
+            hits.append({"path": display, "line": None, "rule": "fleet_host_path"})
+        if entry == before.get(name):
+            continue
+        baseline = Counter(line for line in lines(before.get(name)) if _fleet_hit(line))
+        for number, line in enumerate(lines(entry), 1):
+            if not _fleet_hit(line):
+                continue
+            if baseline[line]:
+                baseline[line] -= 1
+            else:
+                hits.append({"path": display, "line": number, "rule": "fleet_host"})
+    return {"passed": not hits, "base": base_sha, "tip": tip_sha,
+            "rule_hits": hits, "unexcepted_match_count": len(hits)}
 
 # CGNAT / Tailscale range 100.64/10 (second octet 64-127): a concrete
 # tailnet address must never ship in the public tree. The residue check missed a
@@ -268,10 +342,17 @@ def main() -> int:
     parser.add_argument("--allowlist", type=Path)
     parser.add_argument("--private-terms-file", type=Path,
                         help="private JSON string array outside the checkout; values are never printed")
+    parser.add_argument("--fleet-base", help="fleet-only mode: explicit public-main commit")
+    parser.add_argument("--fleet-tip", help="fleet-only mode: exact outgoing commit")
     args = parser.parse_args()
     root = args.root.resolve()
     try:
-        result = check(root, args.allowlist or root / "configs/public_fixture_allowlist.json", args.private_terms_file)
+        if args.fleet_base is not None or args.fleet_tip is not None:
+            if not args.fleet_base or not args.fleet_tip or args.allowlist or args.private_terms_file:
+                parser.error("fleet-only mode requires both --fleet-base and --fleet-tip, without dictionary/allowlist flags")
+            result = check_fleet_additions(root, args.fleet_base, args.fleet_tip)
+        else:
+            result = check(root, args.allowlist or root / "configs/public_fixture_allowlist.json", args.private_terms_file)
     except ValueError as exc:
         parser.error(str(exc))
     except (OSError, subprocess.CalledProcessError):
