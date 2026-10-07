@@ -366,3 +366,17 @@ def test_fleet_smoke_launchd_template_is_gated_with_targets_and_a_stated_duratio
     assert "tools/gate_at_fire.py run --job spawn-fleet-smoke" in text
     assert "--targets @machines" in text and "--duration unmeasured" not in text and "--candidate-repo" in text
     assert text.index("gate_at_fire.py") < text.index("spawn_fleet_smoke.py")
+
+
+def test_the_real_live_window_import_resolves_from_a_bare_interpreter(tmp_path):
+    """Found in the live rehearsal on Thoth: with only the helper's own paths, tools.live_window needs services/ too.
+
+    Every other test fakes the connection module, so run the real import in a clean interpreter."""
+    code = ("import sys; sys.path.insert(0, %r); import gate_at_fire; gate_at_fire._ensure_import_paths(); "
+            "import tools.live_window; print('ok')") % str(Path(gate_at_fire_path()).parent)
+    out = subprocess.run([sys.executable, "-I", "-c", code], cwd=tmp_path, capture_output=True, text=True)
+    assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr[-400:]
+
+
+def gate_at_fire_path():
+    return gaf.__file__
