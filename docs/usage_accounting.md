@@ -113,7 +113,8 @@ record carries `identity: null` rather than `unknown`.
 `message.id`, keeping the copy with the largest `output_tokens`; upsert fills
 nulls only. Codex: one `codex_response` per `token_usage_record.response_id`,
 model from the enclosing `turn_context`; insert-or-ignore, and a replay whose
-values differ is counted `response_conflict` and ignored.
+values differ is counted `response_conflict` and ignored. A live span that
+starts mid-turn (no known model yet) leaves that response to backfill.
 
 **Wire.** `event.push` carries an optional `usage_provenance` block
 `{version: 1, items: [...], dry_run?}` (≤ 2000 items) and requires the source
