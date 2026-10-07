@@ -7,8 +7,8 @@
     "lanes": [
       {
         "lane_id": "wl-blocked-0001",
-        "title": "Thoth daemon deploy",
-        "summary": "Ship chat-stream-v2 candidate to Thoth",
+        "title": "Sample daemon deploy",
+        "summary": "Ship the sample candidate to the sample host",
         "state": "blocked",
         "state_reason": "fd",
         "blocker": "Waiting for operator deploy window",
@@ -18,7 +18,7 @@
         "first_admitted_at": "2026-10-07T17:00:00.000Z",
         "done_at": null,
         "lead": {
-          "stream_id": "amaterasu:v2-lead0001",
+          "stream_id": "fixture-host:v2-lead0001",
           "generation": "gen-lead-0001",
           "qualifies": true,
           "status": "open",
@@ -40,7 +40,7 @@
           "eta_stale": false
         },
         "visible_chat": {
-          "stream_id": "amaterasu:v2-lead0001",
+          "stream_id": "fixture-host:v2-lead0001",
           "generation": "gen-lead-0001",
           "kind": "session",
           "available": "open"
@@ -65,7 +65,7 @@
         "first_admitted_at": "2026-10-07T18:00:00.000Z",
         "done_at": null,
         "lead": {
-          "stream_id": "amaterasu:v2-lead0002",
+          "stream_id": "fixture-host:v2-lead0002",
           "generation": "gen-lead-0002",
           "qualifies": true,
           "status": "open",
@@ -93,7 +93,7 @@
           "available": "open"
         },
         "last_update": {
-          "update_id": "lane-update:wl-active-0002:adopt:stream:amaterasu:v2-lead0002",
+          "update_id": "lane-update:wl-active-0002:adopt:stream:fixture-host:v2-lead0002",
           "kind": "lane_started",
           "event_id": 1001,
           "ts": "2026-10-07T18:00:00.000Z"
@@ -112,7 +112,7 @@
         "first_admitted_at": "2026-10-07T16:00:00.000Z",
         "done_at": null,
         "lead": {
-          "stream_id": "amaterasu:v2-lead0004",
+          "stream_id": "fixture-host:v2-lead0004",
           "generation": "gen-lead-0004-old",
           "qualifies": false,
           "status": "open",
@@ -134,7 +134,7 @@
           "eta_stale": true
         },
         "visible_chat": {
-          "stream_id": "amaterasu:v2-chat0004",
+          "stream_id": "fixture-host:v2-chat0004",
           "generation": "gen-chat-0004-old",
           "kind": "session",
           "available": "unavailable"
@@ -154,7 +154,7 @@
         "first_admitted_at": "2026-10-07T12:00:00.000Z",
         "done_at": null,
         "lead": {
-          "stream_id": "amaterasu:v2-lead0003",
+          "stream_id": "fixture-host:v2-lead0003",
           "generation": "gen-lead-0003",
           "qualifies": false,
           "status": "closed",
@@ -176,7 +176,7 @@
           "eta_stale": true
         },
         "visible_chat": {
-          "stream_id": "amaterasu:v2-lead0003",
+          "stream_id": "fixture-host:v2-lead0003",
           "generation": "gen-lead-0003",
           "kind": "session",
           "available": "history"
@@ -204,8 +204,8 @@
       "lanes": [
         {
           "lane_id": "wl-blocked-0001",
-          "title": "Thoth daemon deploy",
-          "summary": "Ship chat-stream-v2 candidate to Thoth",
+          "title": "Sample daemon deploy",
+          "summary": "Ship the sample candidate to the sample host",
           "state": "blocked",
           "state_reason": "fd",
           "blocker": "Waiting for operator deploy window",
@@ -215,7 +215,7 @@
           "first_admitted_at": "2026-10-07T17:00:00.000Z",
           "done_at": null,
           "lead": {
-            "stream_id": "amaterasu:v2-lead0001",
+            "stream_id": "fixture-host:v2-lead0001",
             "generation": "gen-lead-0001",
             "qualifies": true,
             "status": "open",
@@ -237,7 +237,7 @@
             "eta_stale": false
           },
           "visible_chat": {
-            "stream_id": "amaterasu:v2-lead0001",
+            "stream_id": "fixture-host:v2-lead0001",
             "generation": "gen-lead-0001",
             "kind": "session",
             "available": "open"
@@ -262,7 +262,7 @@
           "first_admitted_at": "2026-10-07T18:00:00.000Z",
           "done_at": null,
           "lead": {
-            "stream_id": "amaterasu:v2-lead0002",
+            "stream_id": "fixture-host:v2-lead0002",
             "generation": "gen-lead-0002",
             "qualifies": true,
             "status": "open",
@@ -290,7 +290,7 @@
             "available": "open"
           },
           "last_update": {
-            "update_id": "lane-update:wl-active-0002:adopt:stream:amaterasu:v2-lead0002",
+            "update_id": "lane-update:wl-active-0002:adopt:stream:fixture-host:v2-lead0002",
             "kind": "lane_started",
             "event_id": 1001,
             "ts": "2026-10-07T18:00:00.000Z"
@@ -309,7 +309,7 @@
           "first_admitted_at": "2026-10-07T16:00:00.000Z",
           "done_at": null,
           "lead": {
-            "stream_id": "amaterasu:v2-lead0004",
+            "stream_id": "fixture-host:v2-lead0004",
             "generation": "gen-lead-0004-old",
             "qualifies": false,
             "status": "open",
@@ -331,7 +331,7 @@
             "eta_stale": true
           },
           "visible_chat": {
-            "stream_id": "amaterasu:v2-chat0004",
+            "stream_id": "fixture-host:v2-chat0004",
             "generation": "gen-chat-0004-old",
             "kind": "session",
             "available": "unavailable"
@@ -351,7 +351,7 @@
           "first_admitted_at": "2026-10-07T12:00:00.000Z",
           "done_at": null,
           "lead": {
-            "stream_id": "amaterasu:v2-lead0003",
+            "stream_id": "fixture-host:v2-lead0003",
             "generation": "gen-lead-0003",
             "qualifies": false,
             "status": "closed",
@@ -373,7 +373,7 @@
             "eta_stale": true
           },
           "visible_chat": {
-            "stream_id": "amaterasu:v2-lead0003",
+            "stream_id": "fixture-host:v2-lead0003",
             "generation": "gen-lead-0003",
             "kind": "session",
             "available": "history"
@@ -402,8 +402,8 @@
     "lanes": [
       {
         "lane_id": "wl-blocked-0001",
-        "title": "Thoth daemon deploy",
-        "summary": "Ship chat-stream-v2 candidate to Thoth",
+        "title": "Sample daemon deploy",
+        "summary": "Ship the sample candidate to the sample host",
         "state": "blocked",
         "state_reason": "fd",
         "blocker": "Waiting for operator deploy window",
@@ -413,7 +413,7 @@
         "first_admitted_at": "2026-10-07T17:00:00.000Z",
         "done_at": null,
         "lead": {
-          "stream_id": "amaterasu:v2-lead0001",
+          "stream_id": "fixture-host:v2-lead0001",
           "generation": "gen-lead-0001",
           "qualifies": true,
           "status": "open",
@@ -435,7 +435,7 @@
           "eta_stale": false
         },
         "visible_chat": {
-          "stream_id": "amaterasu:v2-lead0001",
+          "stream_id": "fixture-host:v2-lead0001",
           "generation": "gen-lead-0001",
           "kind": "session",
           "available": "open"
@@ -460,7 +460,7 @@
         "first_admitted_at": "2026-10-07T18:00:00.000Z",
         "done_at": null,
         "lead": {
-          "stream_id": "amaterasu:v2-lead0002",
+          "stream_id": "fixture-host:v2-lead0002",
           "generation": "gen-lead-0002",
           "qualifies": true,
           "status": "open",
@@ -488,7 +488,7 @@
           "available": "open"
         },
         "last_update": {
-          "update_id": "lane-update:wl-active-0002:adopt:stream:amaterasu:v2-lead0002",
+          "update_id": "lane-update:wl-active-0002:adopt:stream:fixture-host:v2-lead0002",
           "kind": "lane_started",
           "event_id": 1001,
           "ts": "2026-10-07T18:00:00.000Z"
@@ -507,7 +507,7 @@
         "first_admitted_at": "2026-10-07T16:00:00.000Z",
         "done_at": null,
         "lead": {
-          "stream_id": "amaterasu:v2-lead0004",
+          "stream_id": "fixture-host:v2-lead0004",
           "generation": "gen-lead-0004-old",
           "qualifies": false,
           "status": "open",
@@ -529,7 +529,7 @@
           "eta_stale": true
         },
         "visible_chat": {
-          "stream_id": "amaterasu:v2-chat0004",
+          "stream_id": "fixture-host:v2-chat0004",
           "generation": "gen-chat-0004-old",
           "kind": "session",
           "available": "unavailable"
@@ -549,7 +549,7 @@
         "first_admitted_at": "2026-10-07T12:00:00.000Z",
         "done_at": null,
         "lead": {
-          "stream_id": "amaterasu:v2-lead0003",
+          "stream_id": "fixture-host:v2-lead0003",
           "generation": "gen-lead-0003",
           "qualifies": false,
           "status": "closed",
@@ -571,7 +571,7 @@
           "eta_stale": true
         },
         "visible_chat": {
-          "stream_id": "amaterasu:v2-lead0003",
+          "stream_id": "fixture-host:v2-lead0003",
           "generation": "gen-lead-0003",
           "kind": "session",
           "available": "history"
@@ -620,7 +620,7 @@
         "provider": "composite",
         "kind": "ASSIST_TEXT",
         "text": "Work lanes mobile slice \u2014 Header count, lanes list, lane_update card",
-        "message_id": "publication:lane-update:wl-active-0002:adopt:stream:amaterasu:v2-lead0002",
+        "message_id": "publication:lane-update:wl-active-0002:adopt:stream:fixture-host:v2-lead0002",
         "reply_to_message_id": null,
         "reply_to_question_id": null,
         "publish_kind": "lane_update",
@@ -629,21 +629,21 @@
         "raw": {
           "assistant_composite": {
             "published_by": {
-              "stream_id": "thoth:v2-fdseat",
+              "stream_id": "fixture-fd:v2-fdseat",
               "generation": "gen-fd"
             }
           },
           "publish_kind": "lane_update",
           "dispatch_id": "",
-          "actor_stream_id": "thoth:v2-fdseat",
+          "actor_stream_id": "fixture-fd:v2-fdseat",
           "lane_update": {
-            "update_id": "lane-update:wl-active-0002:adopt:stream:amaterasu:v2-lead0002",
+            "update_id": "lane-update:wl-active-0002:adopt:stream:fixture-host:v2-lead0002",
             "lane_id": "wl-active-0002",
             "kind": "lane_started",
             "summary": "Work lanes mobile slice \u2014 Header count, lanes list, lane_update card",
             "source": {
               "type": "adoption",
-              "id": "adopt:stream:amaterasu:v2-lead0002"
+              "id": "adopt:stream:fixture-host:v2-lead0002"
             },
             "state": "active",
             "prior_state": null,
@@ -671,13 +671,13 @@
         "raw": {
           "assistant_composite": {
             "published_by": {
-              "stream_id": "thoth:v2-fdseat",
+              "stream_id": "fixture-fd:v2-fdseat",
               "generation": "gen-fd"
             }
           },
           "publish_kind": "lane_update",
           "dispatch_id": "",
-          "actor_stream_id": "thoth:v2-fdseat",
+          "actor_stream_id": "fixture-fd:v2-fdseat",
           "lane_update": {
             "update_id": "lane-update:wl-blocked-0001:req-block-1",
             "lane_id": "wl-blocked-0001",
@@ -690,7 +690,7 @@
             "state": "blocked",
             "prior_state": "active",
             "owner_kind": "fd",
-            "title": "Thoth daemon deploy",
+            "title": "Sample daemon deploy",
             "ts": "2026-10-07T19:00:00.000Z"
           }
         },
@@ -713,13 +713,13 @@
         "raw": {
           "assistant_composite": {
             "published_by": {
-              "stream_id": "thoth:v2-fdseat",
+              "stream_id": "fixture-fd:v2-fdseat",
               "generation": "gen-fd"
             }
           },
           "publish_kind": "lane_update",
           "dispatch_id": "",
-          "actor_stream_id": "thoth:v2-fdseat",
+          "actor_stream_id": "fixture-fd:v2-fdseat",
           "lane_update": {
             "update_id": "lane-update:wl-paused-0003:req-unblock-3",
             "lane_id": "wl-paused-0003",
@@ -755,13 +755,13 @@
         "raw": {
           "assistant_composite": {
             "published_by": {
-              "stream_id": "thoth:v2-fdseat",
+              "stream_id": "fixture-fd:v2-fdseat",
               "generation": "gen-fd"
             }
           },
           "publish_kind": "lane_update",
           "dispatch_id": "",
-          "actor_stream_id": "thoth:v2-fdseat",
+          "actor_stream_id": "fixture-fd:v2-fdseat",
           "lane_update": {
             "update_id": "lane-update:wl-done-0005:req-done-5",
             "lane_id": "wl-done-0005",
@@ -797,13 +797,13 @@
         "raw": {
           "assistant_composite": {
             "published_by": {
-              "stream_id": "thoth:v2-fdseat",
+              "stream_id": "fixture-fd:v2-fdseat",
               "generation": "gen-fd"
             }
           },
           "publish_kind": "lane_update",
           "dispatch_id": "",
-          "actor_stream_id": "thoth:v2-fdseat",
+          "actor_stream_id": "fixture-fd:v2-fdseat",
           "lane_update": {
             "update_id": "lane-update:wl-blocked-0001:decision-deploy-order",
             "lane_id": "wl-blocked-0001",
@@ -816,7 +816,7 @@
             "state": "active",
             "prior_state": "active",
             "owner_kind": "fd",
-            "title": "Thoth daemon deploy",
+            "title": "Sample daemon deploy",
             "ts": "2026-10-07T18:20:00.000Z"
           }
         },
@@ -839,13 +839,13 @@
         "raw": {
           "assistant_composite": {
             "published_by": {
-              "stream_id": "thoth:v2-fdseat",
+              "stream_id": "fixture-fd:v2-fdseat",
               "generation": "gen-fd"
             }
           },
           "publish_kind": "lane_update",
           "dispatch_id": "",
-          "actor_stream_id": "thoth:v2-fdseat",
+          "actor_stream_id": "fixture-fd:v2-fdseat",
           "lane_update": {
             "update_id": "lane-update:wl-active-0002:m1-store",
             "lane_id": "wl-active-0002",
@@ -888,7 +888,7 @@
     "tap": {
       "wl-blocked-0001": {
         "action": "open_chat",
-        "stream_id": "amaterasu:v2-lead0001"
+        "stream_id": "fixture-host:v2-lead0001"
       },
       "wl-active-0002": {
         "action": "open_chat",
@@ -899,7 +899,7 @@
       },
       "wl-paused-0003": {
         "action": "history",
-        "stream_id": "amaterasu:v2-lead0003",
+        "stream_id": "fixture-host:v2-lead0003",
         "generation": "gen-lead-0003"
       }
     },

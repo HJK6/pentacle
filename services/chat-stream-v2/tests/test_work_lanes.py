@@ -519,14 +519,14 @@ def test_real_notify_confirmation_round_trip_d5(tmp_path):
     from test_question_contract_d3 import _FakeSessions, _ask
 
     async def go():
-        producer = "hosta:v2-fd"
+        producer = "fixture-fd:v2-fd"
         sessions = _FakeSessions({producer: {"visibility": "visible", "status": "open", "session_generation": "g1"}})
         notify = Notify(str(tmp_path / "notifications.db"), sessions=sessions)
         await notify.start()
         try:
             results = {}
             for qid, auth in (("q-op", {"operator_authenticated": True}),
-                              ("q-relay", {"token_verified": True, "stream_id": "hosta:v2-other"})):
+                              ("q-relay", {"token_verified": True, "stream_id": "fixture-relay:v2-other"})):
                 ask = _ask(qid, producer=producer, options=[{"label": "Confirm", "value": "Confirm"},
                                                              {"label": "Not yet", "value": "Not yet"}])
                 ask["envelope"]["context"] = {"schema": "WorkLaneConfirmationV1", "lane_id": "wl-1",
