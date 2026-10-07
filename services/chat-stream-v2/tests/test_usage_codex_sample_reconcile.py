@@ -87,15 +87,15 @@ def make_ledger(path: Path, native: str, cumulative: dict, rows: dict) -> str:
     conn.execute('CREATE TABLE v2_usage_identity (host TEXT, provider TEXT, native_session_id TEXT, account_id TEXT, '
                  'account_source TEXT, first_observed_at TEXT, conflict INT, cli_version TEXT)')
     conn.execute('CREATE TABLE v2_usage_state (stream_id TEXT, generation TEXT, reasons TEXT)')
-    conn.execute("INSERT INTO v2_usage_records VALUES ('thoth','codex',?,'cumulative','thoth:s1','g1',?)",
+    conn.execute("INSERT INTO v2_usage_records VALUES ('ledger-host','codex',?,'cumulative','ledger-host:s1','g1',?)",
                  (native, json.dumps({'input_total': cumulative['input_tokens'], 'cached_input': cumulative['cached_input_tokens'],
                                       'output': cumulative['output_tokens'], 'reasoning': cumulative['reasoning_output_tokens']})))
     for rid, use in rows.items():
-        conn.execute("INSERT INTO v2_usage_codex_responses VALUES ('thoth',?,?,NULL,'m',?,?,0,?,?)",
+        conn.execute("INSERT INTO v2_usage_codex_responses VALUES ('ledger-host',?,?,NULL,'m',?,?,0,?,?)",
                      (native, rid, use['input_tokens'], use['cached_input_tokens'], use['output_tokens'],
                       use['reasoning_output_tokens']))
-    conn.execute("INSERT INTO v2_usage_identity VALUES ('thoth','codex',?,'acct-1','transcript',NULL,0,'0.159.0')", (native,))
-    conn.execute("INSERT INTO v2_usage_state VALUES ('thoth:s1','g1','[\"history_not_verified\"]')")
+    conn.execute("INSERT INTO v2_usage_identity VALUES ('ledger-host','codex',?,'acct-1','transcript',NULL,0,'0.159.0')", (native,))
+    conn.execute("INSERT INTO v2_usage_state VALUES ('ledger-host:s1','g1','[\"history_not_verified\"]')")
     conn.commit()
     conn.close()
     return str(path)
@@ -122,7 +122,7 @@ def test_complete_session_predicate_hits_when_rows_are_complete(complete, tmp_pa
     ledger = make_ledger(tmp_path / 'ledger.sqlite', NATIVE, cumulative,
                          {'resp-1': R1, 'resp-2': R2, 'resp-3': R3, 'resp-4': R4})
     conn = rec.open_ro(ledger)
-    row = rec.reconcile('thoth', facts, rec.ledger_view(conn, 'thoth', NATIVE))
+    row = rec.reconcile('ledger-host', facts, rec.ledger_view(conn, 'ledger-host', NATIVE))
     assert row['rollup_class'] == 'unverifiable'                 # rows 1000 > ledger 300 in the input bucket
     assert row['ledger_vs_final'] == 'equal' and row['ids_equal'] is True
     assert row['rows_equal_thread_final'] is True and row['ledger_le_thread_final'] is True
@@ -135,7 +135,7 @@ def test_incomplete_rows_do_not_hit_the_predicate(complete, tmp_path):
     facts = rec.analyze_transcript(complete)
     ledger = make_ledger(tmp_path / 'ledger.sqlite', NATIVE, total(R1, R2),
                          {'resp-2': R2, 'resp-3': R3, 'resp-4': R4})   # head row missing
-    row = rec.reconcile('thoth', facts, rec.ledger_view(rec.open_ro(ledger), 'thoth', NATIVE))
+    row = rec.reconcile('ledger-host', facts, rec.ledger_view(rec.open_ro(ledger), 'ledger-host', NATIVE))
     assert row['ids_only_in_transcript'] == 1 and row['ids_equal'] is False
     assert row['predicate_rows_authoritative'] is False
 
@@ -145,7 +145,7 @@ def test_counter_reset_is_flagged_and_refused(reset, tmp_path):
     assert facts['resets'] == [2]                                # the third token_count total fell below the second
     ledger = make_ledger(tmp_path / 'ledger.sqlite', RESET_NATIVE, total(R1, R2),
                          {'resp-1': R1, 'resp-2': R2, 'resp-3': R3})
-    row = rec.reconcile('thoth', facts, rec.ledger_view(rec.open_ro(ledger), 'thoth', RESET_NATIVE))
+    row = rec.reconcile('ledger-host', facts, rec.ledger_view(rec.open_ro(ledger), 'ledger-host', RESET_NATIVE))
     assert row['counter_resets'] == 1
     assert row['predicate_rows_authoritative'] is False          # a reset session is never classed by this predicate
 
@@ -170,14 +170,14 @@ def test_ledger_has_no_write_path(complete, tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         conn.execute("DELETE FROM v2_usage_records")
     with pytest.raises(sqlite3.OperationalError):
-        conn.execute("INSERT INTO v2_usage_codex_responses VALUES ('thoth','x','y',NULL,'m',1,1,0,1,1)")
+        conn.execute("INSERT INTO v2_usage_codex_responses VALUES ('ledger-host','x','y',NULL,'m',1,1,0,1,1)")
     source = Path(rec.__file__).read_text()
     assert not any(word in source.upper() for word in ('INSERT INTO', 'UPDATE ', 'DELETE FROM', 'DROP TABLE', 'ALTER TABLE'))
 
 
 def test_sample_is_seeded_and_stratified(tmp_path):
     pop = [{'host': h, 'native': f'{h}-{i}', 'account': a, 'ratio_bucket': b, 'size': s}
-           for h in ('thoth', 'merlin') for a in ('known', 'unknown') for b in ('1-1.2', '>2') for s in ('big', 'small')
+           for h in ('ledger-host', 'peer-host') for a in ('known', 'unknown') for b in ('1-1.2', '>2') for s in ('big', 'small')
            for i in range(3)]
     first = rec.select_sample(pop, n=8, seed=7)
     assert first == rec.select_sample(pop, n=8, seed=7)

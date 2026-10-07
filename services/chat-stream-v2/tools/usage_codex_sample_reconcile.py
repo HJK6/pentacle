@@ -7,7 +7,7 @@ compares three sources of token mass: the original rollout transcript, the cumul
 
 There is no write path: the ledger is opened with ``mode=ro`` and only ``SELECT`` statements are issued; the
 transcript is opened for reading; output goes to stdout or a caller-named CSV/JSON file. Native session ids
-and account ids are hashed in every redacted output. Stdlib only, Python 3.9 compatible (Thoth).
+and account ids are hashed in every redacted output. Stdlib only, Python 3.9 compatible (the ledger host's system interpreter).
 
     transcripts  read rollout files on THIS host        -> JSON lines of transcript facts (run over ssh)
     sample       stratified, seeded session selection   -> JSON (ledger snapshot only)
