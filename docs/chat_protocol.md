@@ -60,10 +60,44 @@ The public service may expose the following generic families:
 | `send_image` | attach an already-uploaded image to the caller's OWN conversation as an agent-authored transcript event |
 | `subscribe`, `unsubscribe` | event visibility controls |
 | `watch`, `wake` | optional local notifications |
+| `household.*` | operator-only adapter to the Cosmo household store (see below) |
 
 Each implementation must document the exact fields and error codes it registers. Unsupported legacy verbs return a typed error rather than silently changing behavior.
 
 Image attachments (both operator→agent and agent→operator) reuse one content-addressed blob path: the client uploads bytes with the chunked `upload_blob_init` / `upload_blob_chunk` verbs, then references the blob by its sha256 in an attachment descriptor `{key, mime, bytes, width?, height?}` (supported mime: `image/jpeg`, `image/png`; per-attachment and per-message size/count limits apply). `send_image` is the agent-authored form: the daemon authorizes the destination from the caller's verified stream token — a seat may attach only to its OWN conversation — confirms the referenced blob is present, and emits exactly one agent-authored transcript event carrying the attachment (no pane injection). It is idempotent by `request_id`, so a retry adds no second transcript row. Clients fetch the bytes for display through the existing blob-read path and render the same image bubble/viewer regardless of author. Agent-side usage: `agent-orch send-image` (see the agent-orch README "Send an image").
+
+## Household (Cosmo) adapter
+
+`services/chat-stream-v2/household.py` lets an operator-authenticated client (Pentacle mobile's
+Personal tab) read and change the operator's lists and calendar in Cosmo, the one authoritative
+household store. The daemon keeps no household state, cache or broadcast.
+
+- **Who may call.** Only connections whose server-injected `_auth_context.operator_authenticated`
+  is true. Seats, Nexus seats, service producers, scoped (Dot/Cosmo) credentials and
+  unauthenticated callers get `<verb>.error` `unauthorized` and no Cosmo call is made.
+- **Credential.** Cosmo's optional `pentacle` role (acts for Vamshi; `created_by=app`; cannot set
+  priority or due dates). The bearer token is read at call time from `COSMO_PENTACLE_TOKEN_FILE`
+  (default `~/.cosmo/pentacle.token`, mode 0600) and used only in the `Authorization` header.
+  Cosmo URL: `PENTACLE_COSMO_URL` (default the Thoth tailnet address on port 8443). Cosmo enforces
+  visibility (`vamshi` + `shared`); the adapter never sends `scope`, so new rows are Vamshi-private.
+- **Verbs** (each accepts exactly the listed fields; anything else is `invalid_request`):
+
+| Verb | Fields | Result |
+|---|---|---|
+| `household.snapshot` | `month?` (`YYYY-MM`, 2000-01…2100-12, default today's America/Chicago month) | `{today, month, lists:{tasks,grocery,meals,chores,study}, events, server_now}`; open items only; events from that month plus today…today+7, de-duplicated |
+| `household.item.add` | `list`, `label` (1–1000 chars) | `{item}` |
+| `household.item.done` | `item_id` | `{item}` (Cosmo keeps it 5 s, then removes it) |
+| `household.item.remove` | `item_id` | `{item_id}` |
+| `household.event.add` | `date` (`YYYY-MM-DD`), `time` (`HH:MM` or null), `title` (1–500), `who` (`me`=Aliyah, `vamshi`, `both`; display only) | `{event}` |
+| `household.event.remove` | `event_id` | `{event_id}` |
+
+- **Errors** (`error_code`): `unauthorized`; `invalid_request`; `invalid_range` (bad `month`);
+  `not_found` (Cosmo 404/410, including rows outside the operator's audience); `forbidden` (403);
+  `unavailable` (token file missing, connection refused, Cosmo 401, any snapshot sub-call failing,
+  timing out or exceeding 1 MiB); `unknown_outcome` (a change was sent but not confirmed: timeout or
+  connection lost while waiting, or an unexpected status). Calls are never retried; after
+  `unknown_outcome` the client reads back with `household.snapshot` instead of resending.
+- **Bounds.** Seven concurrent GETs per snapshot, 5 s per call, 8 s overall, all-or-nothing.
 
 ## Session interrupt
 
