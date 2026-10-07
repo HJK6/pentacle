@@ -23,6 +23,12 @@ NOW_MS = 1_791_000_000_000  # fixed "now"
 SENTINEL_TOKEN = "UNIQUE-SENTINEL-VALUE-MUST-NOT-LEAK-7f3a9c"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_usage_history(tmp_path, monkeypatch):
+    """Readback history lines never reach a real ledger host's file."""
+    monkeypatch.setenv("PENTACLE_USAGE_HISTORY_PATH", str(tmp_path / "usage_history.jsonl"))
+
+
 def _cache(**over):
     base = {
         "oauth_account_uuid": "acct-A",
@@ -221,8 +227,10 @@ def test_usage_cli_token_never_emitted(monkeypatch, tmp_path):
     assert SENTINEL_TOKEN not in proc.stdout
     assert SENTINEL_TOKEN not in proc.stderr
     plucked = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert set(plucked) == {"oauth_account_uuid", "cache_account_uuid", "fetched_at_ms",
-                            "seven_day_pct", "seven_day_resets", "five_hour_pct", "five_hour_resets"}
+    assert set(plucked) == {"oauth_account_uuid", "oauth_organization_uuid", "cache_account_uuid",
+                            "fetched_at_ms", "seven_day_pct", "seven_day_resets",
+                            "five_hour_pct", "five_hour_resets",
+                            "seven_day_fable_pct", "seven_day_fable_resets"}
     assert plucked["seven_day_pct"] == 85
     # And the full readback path never surfaces the token either.
     row = ur.classify_claude_cache("merlin", plucked, now_ms=NOW_MS + 1000)
@@ -406,3 +414,67 @@ def test_usage_cli_unknown_host():
     with redirect_stderr(err):
         rc = cli.usage(Namespace(host="nope", json=False, max_age_seconds=None))
     assert rc == 1 and "unknown host" in err.getvalue()
+
+
+# --- provenance: account at observation time + history lines ---------------
+# spec_pentacle__usage_provenance_export_2026_10 AC5
+def _remote_pluck(**over):
+    base = {
+        "oauth_account_uuid": "acct-A", "oauth_organization_uuid": "org-A",
+        "cache_account_uuid": "acct-A", "fetched_at_ms": 1791348948799,
+        "seven_day_pct": 45, "seven_day_resets": "2026-10-11T07:00:00.463938+00:00",
+        "five_hour_pct": 1, "five_hour_resets": None,
+        "seven_day_fable_pct": 24, "seven_day_fable_resets": "2026-10-11T07:00:00+00:00",
+    }
+    base.update(over)
+    return base
+
+
+def _read_amaterasu(pluck):
+    def runner(target, command, **kw):
+        if kw.get("input_text") == ur.CLAUDE_CACHE_PLUCK:
+            return 0, json.dumps(pluck), ""
+        return 1, "", "not reached"
+    machine = {"name": "amaterasu", "ssh_target": "u@amaterasu"}
+    return ur.read_remote_claude(machine, now_ms=1791348950000, max_age_s=600, runner=runner)
+
+
+def test_readback_row_and_history_carry_account_at_observation(tmp_path):
+    history = tmp_path / "usage_history.jsonl"
+    row = _read_amaterasu(_remote_pluck())
+    assert row["account_id"] == "org-A" and row["outcome"] == ur.OUTCOME_OK
+    lines = [json.loads(line) for line in history.read_text().splitlines()]
+    assert lines == [
+        {"observed_at": "2026-10-07T04:55:48.799Z", "probed_at": "2026-10-07T04:55:50Z", "host": "amaterasu",
+         "provider": "claude", "account_id": "org-A", "window_kind": "seven_day", "window_minutes": 10080,
+         "pct": 45, "resets_at": "2026-10-11T07:00:00.463Z", "source": "cache"},
+        {"observed_at": "2026-10-07T04:55:48.799Z", "probed_at": "2026-10-07T04:55:50Z", "host": "amaterasu",
+         "provider": "claude", "account_id": "org-A", "window_kind": "seven_day_fable", "window_minutes": 10080,
+         "pct": 24, "resets_at": "2026-10-11T07:00:00Z", "source": "cache"},
+    ]
+    _read_amaterasu(_remote_pluck())  # the same snapshot is one observation
+    assert len(history.read_text().splitlines()) == 2
+    # Account switch on the host: a new snapshot carries the new org.
+    _read_amaterasu(_remote_pluck(oauth_organization_uuid="org-B", fetched_at_ms=1791349000000))
+    assert [json.loads(line)["account_id"] for line in history.read_text().splitlines()] == [
+        "org-A", "org-A", "org-B", "org-B"]
+
+
+def test_readback_account_mismatch_and_invalid_fetch_time(tmp_path):
+    history = tmp_path / "usage_history.jsonl"
+    _read_amaterasu(_remote_pluck(cache_account_uuid="acct-OLD"))
+    assert {json.loads(line)["account_id"] for line in history.read_text().splitlines()} == {None}
+    history.unlink()
+    for bad in (None, 0, "1791348948799", True):
+        _read_amaterasu(_remote_pluck(fetched_at_ms=bad))
+    assert not history.exists()
+
+
+def test_readback_history_only_on_ledger_host(tmp_path, monkeypatch):
+    monkeypatch.delenv("PENTACLE_USAGE_HISTORY_PATH")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert ur.history_path({}) is None  # no sessions.db beside it: not the ledger host
+    data = tmp_path / ".local/share/pentacle-stream"
+    data.mkdir(parents=True)
+    (data / "sessions.db").write_bytes(b"")
+    assert ur.history_path({}) == data / "usage_history.jsonl"

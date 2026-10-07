@@ -96,7 +96,8 @@ _FULL_GIT_SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 _RECEIPT_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _SEND_REQUEST_ID_RE = re.compile(r"send-[A-Za-z0-9_-]{1,123}\Z")
 _PROVENANCE_ID_MAX = 256
-SCHEMA_VERSION = 1
+#: 2 adds the usage provenance tables (store_usage.DDL); older daemons ignore both.
+SCHEMA_VERSION = 2
 _TRUSTED_STATUS_NOTICE_KINDS = frozenset({"status_card", "status_card_combined"})
 _TRUSTED_NOTIFICATION_ANSWER_METADATA_KEYS = frozenset({
     "canonical_intent",
@@ -1635,7 +1636,7 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
                 conn.execute("ALTER TABLE v2_schedules ADD COLUMN no_watch INTEGER NOT NULL DEFAULT 0")
             conn.execute(SPAWN_OUTCOME_IDEMPOTENCY_INDEX_DDL)
             conn.execute(STREAM_RESERVATION_IDEMPOTENCY_INDEX_DDL)
-            if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+            if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             for table in ("sessions", "v2_schedules"):
                 if "objective" not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:

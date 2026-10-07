@@ -82,6 +82,98 @@ Remote inventory rows can be displayed, but a daemon never reads a remote row's
 provider path or mutates its accounting. Each host needs its own activated
 collector; this feature adds no cross-host accounting transport or fleet totals.
 
+## Provenance
+
+Provenance joins each ledger record to an account, a model and an observation
+time without touching admission: nothing below reads or writes
+`v2_usage_records`/`v2_usage_state` totals, and stream open/closed state and
+session generation are ignored, so closed and archived native sessions accept
+it. Store open adds three tables and stamps `PRAGMA user_version = 2`; an older
+daemon ignores them, so rollback is reinstalling the previous release.
+
+| Table | Key | Holds |
+|---|---|---|
+| `v2_usage_provenance` | ledger key (host, provider, native session, record key) | Claude `observed_at`, `model` per `message.id` |
+| `v2_usage_identity` | host, provider, native session | `account_id`, `account_source` (`transcript`/`unknown`), `conflict`, `first_observed_at`, `cli_version` |
+| `v2_usage_codex_responses` | host, native session, `response_id` | Codex per-response `observed_at`, `model`, `input`, `cached_input`, `cache_write_input`, `output`, `reasoning_output` |
+
+The Codex response table is detail beside the one cumulative ledger row; it is
+not a ledger table and never changes totals.
+
+**Identity.** Claude: every `credential_org` attachment's `organizationUuid`
+(Claude Code ≥ 2.1.283). Codex: `session_meta.payload.creator_account_id`
+(CLI ≥ 0.160.0). One id is `transcript`; a whole transcript with none is
+`unknown`; two different ids set `conflict=1` with a null account. Conflict is
+sticky: once set, no later live, replay or backfill item repopulates the
+account. A null account is filled only while `conflict=0`. Identity is never
+derived from the host or the current login, and a live span without an identity
+record carries `identity: null` rather than `unknown`.
+
+**Records.** Claude: one `claude_record` per non-sidechain assistant
+`message.id`, keeping the copy with the largest `output_tokens`; upsert fills
+nulls only. Codex: one `codex_response` per `token_usage_record.response_id`,
+model from the enclosing `turn_context`; insert-or-ignore, and a replay whose
+values differ is counted `response_conflict` and ignored.
+
+**Wire.** `event.push` carries an optional `usage_provenance` block
+`{version: 1, items: [...], dry_run?}` (≤ 2000 items) and requires the source
+host proof. Every item has exactly `kind`, `provider`, `native_session_id`,
+`source_file_identity_digest`, `identity`, `data`; `data` keys are fixed per
+kind (`claude_record`, `codex_response`, `rate_limit`). A `claude_record` or
+`codex_response` needs a ledger row for that native session on the
+authenticated host (`unknown_native_session`; a missing Claude record key is
+`unknown_record`). A Claude `rate_limit` is `unsupported_kind_for_provider`.
+The ack's `usage_provenance` block reports `counts` per outcome, the known and
+unknown native sessions, and per-item rejections; a block-level `error` leaves
+the satellite's batch queued. `dry_run` validates and classifies in a rolled
+back transaction and writes no history. Timestamps are stored as UTC ISO-8601
+with `Z` (millisecond precision, omitted when zero).
+
+**Exporters.** The satellite tail and Thoth-local ingest emit provenance for
+live spans through one `ProvenanceSink` (`usage_provenance.py`). Backfill walks
+every local transcript once: Claude `~/.claude/projects/**/*.jsonl` (including
+`subagents/`) and Codex `~/.codex/sessions/**/rollout-*.jsonl`, in batches of
+500, resumable by a per-file (size, mtime) cursor; a re-run is a no-op.
+
+```
+# satellite host (its satellite.env supplies the WS URL and secrets)
+python3 services/chat-stream-v2/satellite.py --backfill --dry-run
+python3 services/chat-stream-v2/satellite.py --backfill
+# ledger host (Thoth), beside the running daemon
+python3 services/chat-stream-v2/tools/backfill_usage_provenance.py \
+  --db ~/.local/share/pentacle-stream/sessions.db --host thoth [--dry-run]
+```
+
+Records whose transcript is gone stay without provenance; nothing is filled
+from the current login. `agent-orch inspect <stream> --json` returns
+`usage_provenance`: `account_id`, `account_source`, `conflict`,
+`provenance_coverage` (`records`, `with_provenance`: a Claude record with a
+provenance row, a Codex cumulative record whose session has a response row) and
+the per-native-session identities.
+
+## Percent history
+
+`usage_history.jsonl` beside `sessions.db` on Thoth is append-only. Each line
+has exactly `observed_at`, `probed_at`, `host`, `provider`, `account_id`,
+`window_kind`, `window_minutes`, `pct`, `resets_at`, `source`, and every value
+comes from one observation:
+
+| `source` | Writer | Account | `observed_at` |
+|---|---|---|---|
+| `cache` | usage collector (Thoth `~/.claude.json`), `agent-orch usage --host <satellite>` | OAuth `organizationUuid` only when `cachedUsageUtilization.accountUuid == oauthAccount.accountUuid` in the same read, else null | `fetchedAtMs` (exact ms); a missing or invalid value writes no line |
+| `probe` | usage collector's existing Claude scrape and Codex app-server probe | null | `probed_at`; display only, excluded from fitting |
+| `rollout` | daemon, from Codex `rate_limit` items | `creator_account_id` or null | rollout record time; `probed_at` is daemon receipt; `host` is the authenticated pusher |
+
+Claude windows are `seven_day` and `seven_day_fable` (`window_minutes`
+10080; Fable from `seven_day_fable` or the scoped weekly `limits` row). Codex
+windows use the rollout `limit_id` (`codex`) and the window's own duration, so
+a 300-minute and a 10080-minute window are separate lines. The writer drops a
+repeated observation: rollout lines by `(provider, account_id, window_kind,
+window_minutes, resets_at, pct)` with the first `observed_at` kept, cache lines
+by the same snapshot; consumers apply the same tuple. The readback writes only
+where `sessions.db` sits beside the file (Thoth). The Codex probe contract is
+unchanged. Volume is about 300 lines a day; no rotation.
+
 ## Reports and rollout
 
 New completion reports store a server-authored `usage_snapshot` in the same
@@ -96,8 +188,10 @@ records a verified database backup and the previous running artifact/PID on
 each host. This lane does not restart or deploy daemons. Keep the database
 preimage and accepted source identity with the release's rollback evidence.
 
-Acceptance is automated in `services/chat-stream-v2/tests/test_usage_accounting.py`
-and `services/agent-orch/tests/test_usage_cli.py`: native-file replay, restart,
+Acceptance is automated in `services/chat-stream-v2/tests/test_usage_accounting.py`,
+`services/chat-stream-v2/tests/test_usage_provenance.py` (provenance and history),
+`services/agent-orch/tests/test_usage_readback_cli.py` and
+`services/agent-orch/tests/test_usage_cli.py`: native-file replay, restart,
 truncation, invalid input, generation/host fences, transaction rollback, report
 interleaving, lineage, attribution, migration and public readbacks. The v2 merge
 gate and agent-orch tests are the final local source gates; passing them does not

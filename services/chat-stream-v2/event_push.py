@@ -71,7 +71,7 @@ STALE_ALERT_MIN_INTERVAL_S = 300.0
 
 _FULL_GIT_SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
-_HOST_PROOF_FIELDS = frozenset({"type", "request_id", "push_secret", "satellite_sha", "satellite_pid", "wire_version", "host", "events", "usage", "high_water", "inventory", "frozen_streams", "source_host_proof"})
+_HOST_PROOF_FIELDS = frozenset({"type", "request_id", "push_secret", "satellite_sha", "satellite_pid", "wire_version", "host", "events", "usage", "usage_provenance", "high_water", "inventory", "frozen_streams", "source_host_proof"})
 _USAGE_REQUIRED_FIELDS = frozenset({
     "stream_id", "provider", "session_generation", "source_pane_pid",
     "native_session_id", "source_file_identity_digest", "records",
@@ -105,6 +105,7 @@ class EventPush:
         daemon_sha: str = "",
         host_stats_handler: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
         host_secrets: Mapping[str, str] | None = None,
+        provenance: Any = None,
     ) -> None:
         self.store = store
         self.broadcast = broadcast
@@ -121,6 +122,8 @@ class EventPush:
             str(host): str(secret) for host, secret in (host_secrets or {}).items()
             if str(host) and str(secret)
         }
+        #: `usage_provenance.ProvenanceSink`; metadata only, never token admission.
+        self.provenance = provenance
         self._last_alert: dict[tuple[str, str], float] = {}
         # A rejected tail cannot offer an event proving that its row opened
         # again.  Keep its observed lifecycle only until that transition, then
@@ -377,7 +380,10 @@ class EventPush:
         # New satellites prove the source host on every event.push. Legacy
         # event-only callers remain compatible until they send a usage item;
         # a supplied proof is never optional or ignored.
-        source_proof_required = "usage" in msg or msg.get("source_host_proof") is not None
+        source_proof_required = (
+            "usage" in msg or "usage_provenance" in msg
+            or msg.get("source_host_proof") is not None
+        )
         if source_proof_required:
             authenticated_source_host = await self._authenticate_source_host(msg)
             if authenticated_source_host is None:
@@ -628,13 +634,29 @@ class EventPush:
                     log.warning("event.push usage inventory broadcast failed host=%s: %s", host, exc)
                     return err("ingest_failed")
 
+        # Provenance runs after usage so this push's ledger rows can match.
+        # It never touches token totals, and its failure is reported in its own
+        # ack block rather than failing the already-durable events and usage.
+        provenance_ack = None
+        if "usage_provenance" in msg:
+            if self.provenance is None:
+                provenance_ack = {"error": "provenance_unconfigured"}
+            else:
+                try:
+                    provenance_ack = await self.provenance.admit(
+                        authenticated_source_host, msg.get("usage_provenance"),
+                    )
+                except Exception as exc:  # noqa: BLE001 - satellite retries the batch
+                    log.warning("event.push provenance failed host=%s: %s", host, exc)
+                    provenance_ack = {"error": "provenance_failed"}
+
         # High-water marks: echo the per-file offsets this batch reached so the
         # satellite advances its in-memory offset ONLY after a durable accept.
         # A dropped ack tells the satellite to stop its stale stream tail; failed
         # acks leave offsets unmoved, preserving at-least-once delivery.
         await self._remember_drops(new_drops)
         high_water = msg.get("high_water") if isinstance(msg.get("high_water"), dict) else {}
-        return {
+        reply = {
             "type": "event.push.ok",
             "request_id": rid,
             "accepted": len(entries),
@@ -649,6 +671,9 @@ class EventPush:
             "usage_replayed": usage_replayed,
             "usage_rejected": usage_rejected,
         }
+        if provenance_ack is not None:
+            reply["usage_provenance"] = provenance_ack
+        return reply
 
     async def _stream_lifecycle_state(self, stream_id: str) -> tuple[str, str]:
         """Return the durable status and generation for one source stream."""

@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from usage_history import (
+    HISTORY_FILENAME, HistoryLog, claude_cache_lines, claude_probe_lines,
+    codex_probe_lines,
+)
 from usage_state import (
     UsageStateStore,
     _validate_codex_lkg,
@@ -21,6 +27,7 @@ _CODEX_USAGE_FIELDS = frozenset({
     "pct", "resets_text", "resets_at_iso", "upstream_reported_at",
 })
 _BENIGN_STATUSES = frozenset({"no_update", "fallback_required"})
+log = logging.getLogger("chat_streamd_v2.usage_collector")
 
 
 def _now() -> str:
@@ -151,12 +158,39 @@ class UsageStateCollector:
         codex_command: tuple[str, ...],
         run=subprocess.run,
         now_fn=_now,
+        claude_config_path: str | Path | None = None,
+        history_path: str | Path | None = None,
+        host: str | None = None,
     ) -> None:
         self._store = UsageStateStore(state_path)
         self._claude_command = claude_command
         self._codex_command = codex_command
         self._run = run
         self._now = now_fn
+        #: ``~/.claude.json`` for same-observation ``cache`` history lines;
+        #: None disables the cache reader (the display probe is unchanged).
+        self._claude_config_path = Path(claude_config_path).expanduser() if claude_config_path else None
+        self._history = HistoryLog(
+            Path(history_path) if history_path else Path(state_path).with_name(HISTORY_FILENAME)
+        )
+        self._host = host or os.environ.get("PENTACLE_HOST_ID") or os.environ.get("AGENT_ORCH_HOST_ID") or "thoth"
+        self._history_lines: list[dict] = []
+
+    def _record_history(self) -> None:
+        """Append this run's percent observations; never fails the state write."""
+        lines = self._history_lines
+        self._history_lines = []
+        if self._claude_config_path is not None:
+            try:
+                with self._claude_config_path.open(encoding="utf-8") as handle:
+                    data = json.load(handle)
+                lines = claude_cache_lines(data, host=self._host, probed_at=self._now()) + lines
+            except (OSError, ValueError) as exc:
+                log.warning("claude cache unreadable for usage history: %s", type(exc).__name__)
+        try:
+            self._history.append(lines)
+        except OSError as exc:
+            log.warning("usage history append failed: %s", exc)
 
     def _json(self, command: tuple[str, ...]) -> dict | None:
         """Return the CLI's observation dict, or ``None`` for a benign no-update.
@@ -197,6 +231,7 @@ class UsageStateCollector:
                 health = _ok(done)
                 canonical_state(rows, health)  # reject malformed rows -> _failed
                 lkg, claude_health = rows, health
+                self._history_lines += claude_probe_lines(payload, host=self._host, probed_at=done)
         except Exception as exc:
             claude_health = _failed(claude_health, self._now(), provider="claude", error=exc)
         try:
@@ -206,6 +241,8 @@ class UsageStateCollector:
                 row = _codex_row(payload, done)
                 _validate_codex_lkg(row)  # reject malformed row -> _failed
                 codex_lkg, codex_health = row, _ok(done)
+                self._history_lines += codex_probe_lines(payload, host=self._host, probed_at=done)
         except Exception as exc:
             codex_health = _failed(codex_health, self._now(), provider="codex", error=exc)
         self._store.save(lkg, claude_health, codex_lkg=codex_lkg, codex_health=codex_health)
+        self._record_history()

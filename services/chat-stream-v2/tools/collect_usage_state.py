@@ -25,6 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--skip-codex", action="store_true", help="collect only Claude; preserve prior Codex state without probing")
     parser.add_argument("--skip-claude", action="store_true", help="collect only Codex; preserve prior Claude/Fable state without probing")
+    parser.add_argument("--claude-config", type=Path, default=Path.home() / ".claude.json",
+                        help="Claude Code config whose cached utilization feeds usage_history.jsonl")
     args = parser.parse_args(argv)
     UsageStateCollector(
         state_path=args.state,
@@ -32,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
                         else (sys.executable, str(args.shared_scripts / "check_claude_usage.py"), "--local-fallback", "--json")),
         codex_command=((sys.executable, "-c", 'print(\'{"status":"no_update"}\')') if args.skip_codex
                        else (sys.executable, str(args.shared_scripts / "check_codex_usage.py"), "--json")),
+        claude_config_path=args.claude_config,
     ).run_once()
     return 0
 

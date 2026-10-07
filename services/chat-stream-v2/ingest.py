@@ -38,7 +38,7 @@ import logging
 import os
 import shlex
 import stat as stat_module
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -49,6 +49,8 @@ from message_envelopes import annotate_message_envelope
 from prockill import process_tree, process_record
 from store import ENTRY_DROPPED
 from tmux_transport import TRANSCRIPT_DIRS, _exec
+from usage_accounting import native_provenance
+from usage_provenance import MAX_ITEMS as PROVENANCE_MAX_ITEMS, PAYLOAD_VERSION as PROVENANCE_VERSION
 from v2_runtime import env_number
 
 log = logging.getLogger("chat_streamd_v2.ingest")
@@ -123,6 +125,8 @@ class _StreamIngest:
     activity_restored: bool = False
     failures: int = 0         # consecutive failures → this stream's backoff
     next_attempt_monotonic: float = 0.0  # earliest retry time (per-stream backoff)
+    #: Cross-span provenance context (Codex identity, turn models); reset on rebind.
+    provenance_state: dict = field(default_factory=dict)
 
 
 def _jsonl_event_identity(payload: dict) -> tuple:
@@ -263,10 +267,13 @@ class Ingest:
         config: IngestConfig | None = None,
         routing_integrity: Any = None,
         inventory_emitter: Any = None,
+        provenance: Any = None,
     ) -> None:
         self.store = store
         self.sessions = sessions
         self.tmux = tmux
+        #: `usage_provenance.ProvenanceSink` shared with event.push (metadata only).
+        self.provenance = provenance
         self.broadcast = broadcast
         self.local_host = local_host
         self.recent_limit = recent_limit
@@ -276,6 +283,23 @@ class Ingest:
         self._streams: dict[str, _StreamIngest] = {}
         self._last_visited_sid: str | None = None
         self._previous_inventory: tuple[str, ...] = ()
+
+    async def _record_provenance(self, sid: str, provider: str, records: list[dict], st: _StreamIngest) -> None:
+        """Thoth-local provenance through the same sink as satellites; best effort."""
+        if self.provenance is None or not records:
+            return
+        try:
+            items = native_provenance(
+                provider, records, native_session_id=st.session_id or None,
+                state=st.provenance_state,
+            )
+            for start in range(0, len(items), PROVENANCE_MAX_ITEMS):
+                await self.provenance.admit(self.local_host, {
+                    "version": PROVENANCE_VERSION,
+                    "items": items[start:start + PROVENANCE_MAX_ITEMS],
+                })
+        except Exception as exc:  # noqa: BLE001 - backfill is the authority; ingest continues
+            log.warning("usage provenance failed sid=%s: %s", sid, exc)
 
     # -- loop --------------------------------------------------------------
 
@@ -601,6 +625,7 @@ class Ingest:
             if usage is None:
                 return 0
             self.sessions.apply_durable(sid, usage=usage)
+            await self._record_provenance(sid, str(row.get("provider")), records, st)
 
         if not records:
             st.offset = new_offset

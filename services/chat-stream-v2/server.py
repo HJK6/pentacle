@@ -2611,6 +2611,14 @@ class Server:
                 "role_source": role_source_for(session, (stored or {}).get("role_source")),
             }
         close_audit = await self.store.latest_close_audit(stream_id)
+        usage_provenance = None
+        if hasattr(self.store, "usage_provenance_summary"):
+            try:
+                usage_provenance = await self.store.usage_provenance_summary(
+                    stream_id, str(session.get("session_generation") or ""),
+                )
+            except Exception as exc:  # noqa: BLE001 - inspect stays available
+                log.warning("inspect usage provenance failed sid=%s: %s", stream_id, exc)
         return {
             "type": "inspect_stream.ok",
             "stream_id": stream_id,
@@ -2621,6 +2629,7 @@ class Server:
             "close_audit": close_audit,
             "lane_ruling": (await self.lane_rulings.latest_for_target(stream_id)) if self.lane_rulings else None,
             "deferred_reap": await self.store.get_deferred_reap(stream_id),
+            "usage_provenance": usage_provenance,
         }
 
     async def _on_rename(self, msg: dict[str, Any]) -> dict[str, Any]:

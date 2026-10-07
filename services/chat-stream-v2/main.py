@@ -61,6 +61,8 @@ from outbound_notices import (
 from presence import PresenceConfig, RemotePresence
 from reconciler import ReconcileConfig, SessionReconciler
 from event_push import EventPush
+from usage_history import HISTORY_FILENAME, HistoryLog
+from usage_provenance import ProvenanceSink
 from retention import RetentionConfig, RetentionJob
 from routing_integrity import RoutingIntegrity
 from server import RECENT_LIMIT, Server
@@ -632,6 +634,12 @@ async def run(args: argparse.Namespace) -> int:
     # `event.push`: per-host satellite ingest sink (satellite.py tails remote
     # transcripts and pushes here). Reuses the same append_session_event floor +
     # broadcast-iff-inserted as local ingest.
+    # Usage provenance (metadata only): satellites via event.push and local
+    # ingest share one sink; Codex rate-limit lines land beside sessions.db.
+    provenance_sink = ProvenanceSink(
+        store.record_provenance,
+        HistoryLog(Path(args.db).with_name(HISTORY_FILENAME)) if args.db != ":memory:" else None,
+    )
     event_push = EventPush(
         store, server.broadcast, alerts, recent_limit=RECENT_LIMIT,
         enabled=not args.disable_event_push_ingest,
@@ -640,6 +648,7 @@ async def run(args: argparse.Namespace) -> int:
         sessions=sessions,
         inventory_emitter=inventory_emitter,
         host_stats_handler=server.merge_host_stats,
+        provenance=provenance_sink,
     )
     server.handlers.update(event_push.wire_handlers())
     from watch_wake import WatchWake, run_reconcile_callbacks
@@ -855,7 +864,8 @@ async def run(args: argparse.Namespace) -> int:
         ingest = Ingest(store, sessions, tmux, server.broadcast,
                         local_host=args.local_host, recent_limit=RECENT_LIMIT, config=icfg,
                         routing_integrity=routing_integrity,
-                        inventory_emitter=inventory_emitter)
+                        inventory_emitter=inventory_emitter,
+                        provenance=provenance_sink)
         tasks.append(asyncio.create_task(ingest.run_forever(), name="ingest"))
         log.info("ingest: every %.1fs, cap %d events/pass", icfg.interval_s, icfg.max_events_per_pass)
 

@@ -22,6 +22,23 @@ DDL = (
         record_key TEXT NOT NULL, stream_id TEXT NOT NULL, generation TEXT NOT NULL,
         tokens TEXT NOT NULL,
         PRIMARY KEY(host,provider,native_session_id,record_key))''',
+    # Provenance (docs/usage_accounting.md § Provenance): metadata only, joined
+    # to v2_usage_records by the identical key and never read by admission.
+    '''CREATE TABLE IF NOT EXISTS v2_usage_provenance (
+        host TEXT NOT NULL, provider TEXT NOT NULL, native_session_id TEXT NOT NULL,
+        record_key TEXT NOT NULL, observed_at TEXT, model TEXT,
+        PRIMARY KEY(host,provider,native_session_id,record_key))''',
+    '''CREATE TABLE IF NOT EXISTS v2_usage_identity (
+        host TEXT NOT NULL, provider TEXT NOT NULL, native_session_id TEXT NOT NULL,
+        account_id TEXT, account_source TEXT NOT NULL, first_observed_at TEXT,
+        conflict INTEGER NOT NULL DEFAULT 0, cli_version TEXT,
+        PRIMARY KEY(host,provider,native_session_id))''',
+    '''CREATE TABLE IF NOT EXISTS v2_usage_codex_responses (
+        host TEXT NOT NULL, native_session_id TEXT NOT NULL, response_id TEXT NOT NULL,
+        observed_at TEXT, model TEXT, input INTEGER NOT NULL, cached_input INTEGER NOT NULL,
+        cache_write_input INTEGER NOT NULL, output INTEGER NOT NULL,
+        reasoning_output INTEGER NOT NULL,
+        PRIMARY KEY(host,native_session_id,response_id))''',
 )
 SOURCE_FIELDS = ('jsonl_path', 'claude_session_id', 'observer_binding', 'pane_pid')
 
@@ -72,6 +89,14 @@ def snapshot_conn(conn, row: dict[str, Any]) -> dict[str, Any]:
 
 
 class UsageStoreMixin:
+    async def record_provenance(self, host: str, items: list[dict[str, Any]], *,
+                                dry_run: bool = False) -> dict[str, Any]:
+        """Persist validated provenance items for ``host`` on the Store worker."""
+        return await self.submit(lambda conn: record_provenance_conn(conn, host, items, dry_run=dry_run))
+
+    async def usage_provenance_summary(self, stream_id: str, generation: str) -> dict[str, Any]:
+        return await self.submit(lambda conn: provenance_summary_conn(conn, stream_id, generation))
+
     async def record_usage(self, expected: dict[str, Any], records: list[dict[str, Any]], *,
                            native_session_id: str, collection_host: str,
                            malformed: bool = False,
@@ -211,3 +236,189 @@ class UsageStoreMixin:
             }
 
         return await self.submit(operation)
+
+
+def _min_iso(left: str | None, right: str | None) -> str | None:
+    return min(value for value in (left, right) if value) if (left or right) else None
+
+
+def _merge_identity(conn, host: str, provider: str, native: str,
+                    identity: dict[str, Any], observed_at: str | None) -> bool:
+    """Apply one transcript identity; conflict is sticky and monotonic."""
+    row = conn.execute(
+        'SELECT * FROM v2_usage_identity WHERE host=? AND provider=? AND native_session_id=?',
+        (host, provider, native),
+    ).fetchone()
+    incoming_account = identity['account_id']
+    incoming_conflict = int(identity['conflict'])
+    if row is None:
+        conn.execute(
+            'INSERT INTO v2_usage_identity (host,provider,native_session_id,account_id,account_source,'
+            'first_observed_at,conflict,cli_version) VALUES (?,?,?,?,?,?,?,?)',
+            (host, provider, native, None if incoming_conflict else incoming_account,
+             identity['account_source'], observed_at, incoming_conflict, identity['cli_version']),
+        )
+        return True
+    account, source, conflict = row['account_id'], row['account_source'], int(row['conflict'])
+    if not conflict:
+        if incoming_conflict or (incoming_account and account and incoming_account != account):
+            account, source, conflict = None, 'transcript', 1
+        elif incoming_account and not account:
+            account, source = incoming_account, 'transcript'
+    first = _min_iso(row['first_observed_at'], observed_at)
+    cli_version = row['cli_version'] or identity['cli_version']
+    if (account, source, conflict, first, cli_version) == (
+        row['account_id'], row['account_source'], int(row['conflict']), row['first_observed_at'], row['cli_version'],
+    ):
+        return False
+    conn.execute(
+        'UPDATE v2_usage_identity SET account_id=?,account_source=?,conflict=?,first_observed_at=?,cli_version=? '
+        'WHERE host=? AND provider=? AND native_session_id=?',
+        (account, source, conflict, first, cli_version, host, provider, native),
+    )
+    return True
+
+
+def record_provenance_conn(conn, host: str, items: list[dict[str, Any]], *,
+                           dry_run: bool = False) -> dict[str, Any]:
+    """Apply validated claude_record/codex_response items in one transaction.
+
+    Never reads or writes v2_usage_records/v2_usage_state beyond the existence
+    lookup that proves the native session belongs to ``host``. Returns per-item
+    outcomes in input order: recorded, replayed, response_conflict,
+    unknown_native_session or unknown_record.
+    """
+    outcomes: list[str] = []
+    identities = 0
+    known_sessions: dict[tuple[str, str], bool] = {}
+    with conn:
+        conn.execute('BEGIN' if dry_run else 'BEGIN IMMEDIATE')
+        for item in items:
+            provider, native, data = item['provider'], item['native_session_id'], item['data']
+            session_key = (provider, native)
+            if session_key not in known_sessions:
+                known_sessions[session_key] = conn.execute(
+                    'SELECT 1 FROM v2_usage_records WHERE host=? AND provider=? AND native_session_id=? LIMIT 1',
+                    (host, provider, native),
+                ).fetchone() is not None
+            if not known_sessions[session_key]:
+                outcomes.append('unknown_native_session')
+                continue
+            if item['kind'] == 'claude_record':
+                ledger = conn.execute(
+                    'SELECT 1 FROM v2_usage_records WHERE host=? AND provider=? AND native_session_id=? AND record_key=?',
+                    (host, provider, native, data['record_key']),
+                ).fetchone()
+                if ledger is None:
+                    outcomes.append('unknown_record')
+                    continue
+                key = (host, provider, native, data['record_key'])
+                row = conn.execute(
+                    'SELECT observed_at, model FROM v2_usage_provenance '
+                    'WHERE host=? AND provider=? AND native_session_id=? AND record_key=?', key,
+                ).fetchone()
+                if row is None:
+                    if not dry_run:
+                        conn.execute(
+                            'INSERT INTO v2_usage_provenance (host,provider,native_session_id,record_key,observed_at,model) '
+                            'VALUES (?,?,?,?,?,?)', (*key, data['observed_at'], data['model']),
+                        )
+                    outcomes.append('recorded')
+                else:
+                    # Null-fill only: a known value is never replaced.
+                    observed_at = row['observed_at'] or data['observed_at']
+                    model = row['model'] or data['model']
+                    if (observed_at, model) == (row['observed_at'], row['model']):
+                        outcomes.append('replayed')
+                    else:
+                        if not dry_run:
+                            conn.execute(
+                                'UPDATE v2_usage_provenance SET observed_at=?, model=? '
+                                'WHERE host=? AND provider=? AND native_session_id=? AND record_key=?',
+                                (observed_at, model, *key),
+                            )
+                        outcomes.append('recorded')
+            else:
+                values = tuple(data[field] for field in (
+                    'observed_at', 'model', 'input', 'cached_input', 'cache_write_input', 'output', 'reasoning_output',
+                ))
+                row = conn.execute(
+                    'SELECT observed_at, model, input, cached_input, cache_write_input, output, reasoning_output '
+                    'FROM v2_usage_codex_responses WHERE host=? AND native_session_id=? AND response_id=?',
+                    (host, native, data['response_id']),
+                ).fetchone()
+                if row is None:
+                    if not dry_run:
+                        conn.execute(
+                            'INSERT INTO v2_usage_codex_responses (host,native_session_id,response_id,observed_at,model,'
+                            'input,cached_input,cache_write_input,output,reasoning_output) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                            (host, native, data['response_id'], *values),
+                        )
+                    outcomes.append('recorded')
+                else:
+                    # Responses are immutable: insert-or-ignore, a differing replay is counted.
+                    outcomes.append('replayed' if tuple(row) == values else 'response_conflict')
+            identity = item['identity']
+            if identity is not None and not dry_run:
+                identities += _merge_identity(conn, host, provider, native, identity, data.get('observed_at'))
+        if dry_run:
+            conn.rollback()
+    return {'outcomes': outcomes, 'identities_changed': identities,
+            'known_native_sessions': sorted(f'{provider}:{native}' for (provider, native), known in known_sessions.items() if known),
+            'unknown_native_sessions': sorted(f'{provider}:{native}' for (provider, native), known in known_sessions.items() if not known)}
+
+
+def provenance_summary_conn(conn, stream_id: str, generation: str) -> dict[str, Any]:
+    """Identity and coverage for one stream generation (read-only).
+
+    Coverage counts this generation's ledger records that have provenance: a
+    Claude record with a v2_usage_provenance row, a Codex cumulative record
+    whose native session has at least one v2_usage_codex_responses row.
+    """
+    rows = conn.execute(
+        'SELECT host, provider, native_session_id, record_key FROM v2_usage_records '
+        'WHERE stream_id=? AND generation=?', (stream_id, generation),
+    ).fetchall()
+    covered = 0
+    sessions: dict[tuple[str, str, str], None] = {}
+    for row in rows:
+        sessions.setdefault((row['host'], row['provider'], row['native_session_id']), None)
+        if row['provider'] == 'codex':
+            hit = conn.execute(
+                'SELECT 1 FROM v2_usage_codex_responses WHERE host=? AND native_session_id=? LIMIT 1',
+                (row['host'], row['native_session_id']),
+            ).fetchone()
+        else:
+            hit = conn.execute(
+                'SELECT 1 FROM v2_usage_provenance WHERE host=? AND provider=? AND native_session_id=? AND record_key=?',
+                tuple(row),
+            ).fetchone()
+        covered += hit is not None
+    identities = []
+    for host, provider, native in sessions:
+        identity = conn.execute(
+            'SELECT account_id, account_source, conflict, cli_version FROM v2_usage_identity '
+            'WHERE host=? AND provider=? AND native_session_id=?', (host, provider, native),
+        ).fetchone()
+        identities.append({
+            'native_session_id': native, 'provider': provider,
+            'account_id': identity['account_id'] if identity else None,
+            'account_source': identity['account_source'] if identity else 'unknown',
+            'conflict': int(identity['conflict']) if identity else 0,
+            'cli_version': identity['cli_version'] if identity else None,
+        })
+    accounts = {entry['account_id'] for entry in identities}
+    conflict = int(any(entry['conflict'] for entry in identities))
+    if conflict or len(accounts) != 1 or None in accounts:
+        account_id = None
+    else:
+        account_id = next(iter(accounts))
+    if account_id is not None and all(entry['account_source'] == 'transcript' for entry in identities):
+        account_source = 'transcript'
+    else:
+        account_source = 'unknown'
+    return {
+        'account_id': account_id, 'account_source': account_source, 'conflict': conflict,
+        'provenance_coverage': {'records': len(rows), 'with_provenance': covered},
+        'native_sessions': identities,
+    }

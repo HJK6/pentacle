@@ -64,18 +64,22 @@ CLAUDE_CACHE_PLUCK = r"""
 import json, os
 out = {
     "oauth_account_uuid": None,
+    "oauth_organization_uuid": None,
     "cache_account_uuid": None,
     "fetched_at_ms": None,
     "seven_day_pct": None,
     "seven_day_resets": None,
     "five_hour_pct": None,
     "five_hour_resets": None,
+    "seven_day_fable_pct": None,
+    "seven_day_fable_resets": None,
 }
 try:
     with open(os.path.expanduser("~/.claude.json")) as handle:
         data = json.load(handle)
     oauth = data.get("oauthAccount") or {}
     out["oauth_account_uuid"] = oauth.get("accountUuid")
+    out["oauth_organization_uuid"] = oauth.get("organizationUuid")
     cache = data.get("cachedUsageUtilization") or {}
     out["cache_account_uuid"] = cache.get("accountUuid")
     out["fetched_at_ms"] = cache.get("fetchedAtMs")
@@ -86,6 +90,20 @@ try:
     out["seven_day_resets"] = seven.get("resets_at")
     out["five_hour_pct"] = five.get("utilization")
     out["five_hour_resets"] = five.get("resets_at")
+    fable = util.get("seven_day_fable")
+    if isinstance(fable, dict):
+        out["seven_day_fable_pct"] = fable.get("utilization")
+        out["seven_day_fable_resets"] = fable.get("resets_at")
+    else:
+        for entry in util.get("limits") or ():
+            scope = (entry.get("scope") or {}) if isinstance(entry, dict) else {}
+            model = (scope.get("model") or {}) if isinstance(scope, dict) else {}
+            if (isinstance(entry, dict) and entry.get("kind") == "weekly_scoped"
+                    and isinstance(model, dict)
+                    and str(model.get("display_name") or "").strip().casefold() == "fable"):
+                out["seven_day_fable_pct"] = entry.get("percent")
+                out["seven_day_fable_resets"] = entry.get("resets_at")
+                break
 except Exception:
     pass
 print(json.dumps(out))
@@ -215,7 +233,7 @@ def _parse_json_obj(text: str) -> dict | None:
 
 def _row(host, provider, outcome, *, pct=None, resets_at_iso=None, resets_text=None,
          source=None, probed_at=None, fetched_at=None, age_seconds=None,
-         five_hour_pct=None, note=None) -> dict:
+         five_hour_pct=None, note=None, account_id=None) -> dict:
     if outcome not in PCT_OUTCOMES:
         pct = None  # never a fabricated value for an unavailable outcome
     return {
@@ -231,6 +249,7 @@ def _row(host, provider, outcome, *, pct=None, resets_at_iso=None, resets_text=N
         "age_seconds": age_seconds,
         "five_hour_pct": five_hour_pct,
         "note": note,
+        "account_id": account_id,
     }
 
 
@@ -266,8 +285,10 @@ def classify_claude_cache(host: str, plucked: dict, *, now_ms: int,
         age_seconds = max(0, int(age_ms / 1000))
         outcome = OUTCOME_OK if age_ms <= max_age_s * 1000 else OUTCOME_STALE
     five_pct = _coerce_pct(plucked.get("five_hour_pct"))
+    org = plucked.get("oauth_organization_uuid")
     return _row(
         host, "claude", outcome,
+        account_id=org if isinstance(org, str) and org else None,
         pct=seven_pct,
         resets_at_iso=plucked.get("seven_day_resets"),
         source="claude-cache",
@@ -430,6 +451,141 @@ def read_local(host: str, env: dict | None = None) -> list[dict]:
     return parse_cadence_state(host, state)
 
 
+# --- percent history (usage_history.jsonl) -----------------------------------
+# Same line format as chat-stream-v2/usage_history.py (pinned by a parity test;
+# agent-orch cannot import daemon modules). Lines are written only on the host
+# whose ledger lives beside the file (sessions.db present), i.e. Thoth.
+HISTORY_FIELDS = (
+    "observed_at", "probed_at", "host", "provider", "account_id",
+    "window_kind", "window_minutes", "pct", "resets_at", "source",
+)
+
+
+def _history_iso_from_ms(value) -> str | None:
+    """Exact UTC ISO-8601 ``Z`` for positive integer epoch ms; else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+        value = int(value)
+    seconds, millis = divmod(value, 1000)
+    try:
+        stamp = datetime.fromtimestamp(seconds, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    except (OverflowError, OSError, ValueError):
+        return None
+    return f"{stamp}.{millis:03d}Z" if millis else f"{stamp}Z"
+
+
+def _history_iso(value) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None
+    moment = moment.astimezone(timezone.utc)
+    stamp = moment.strftime("%Y-%m-%dT%H:%M:%S")
+    millis = moment.microsecond // 1000
+    return f"{stamp}.{millis:03d}Z" if millis else f"{stamp}Z"
+
+
+def claude_cache_history_lines(host: str, plucked: dict, *, probed_at: str | None) -> list[dict]:
+    """``cache`` lines from ONE pluck: account only on the same-read C1 match."""
+    if not isinstance(plucked, dict) or not probed_at:
+        return []
+    observed_at = _history_iso_from_ms(plucked.get("fetched_at_ms"))
+    if observed_at is None:
+        return []
+    cache_uuid = plucked.get("cache_account_uuid")
+    org = plucked.get("oauth_organization_uuid")
+    account_id = org if (
+        isinstance(cache_uuid, str) and cache_uuid
+        and cache_uuid == plucked.get("oauth_account_uuid")
+        and isinstance(org, str) and org
+    ) else None
+    lines = []
+    for window_kind, pct_key, resets_key in (
+        ("seven_day", "seven_day_pct", "seven_day_resets"),
+        ("seven_day_fable", "seven_day_fable_pct", "seven_day_fable_resets"),
+    ):
+        raw = plucked.get(pct_key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            continue
+        pct = int(round(raw))
+        if not 0 <= pct <= 100:
+            continue
+        lines.append({
+            "observed_at": observed_at, "probed_at": probed_at, "host": host,
+            "provider": "claude", "account_id": account_id, "window_kind": window_kind,
+            "window_minutes": 10080, "pct": pct,
+            "resets_at": _history_iso(plucked.get(resets_key)), "source": "cache",
+        })
+    return lines
+
+
+def history_path(env: dict | None = None) -> Path | None:
+    env = os.environ if env is None else env
+    # The process environment also counts so a caller-supplied env dict (tests,
+    # probes) can never redirect lines into the real ledger host's file.
+    override = env.get("PENTACLE_USAGE_HISTORY_PATH") or os.environ.get("PENTACLE_USAGE_HISTORY_PATH")
+    if override:
+        return Path(os.path.expanduser(override))
+    base = Path.home() / ".local/share/pentacle-stream"
+    return base / "usage_history.jsonl" if (base / "sessions.db").exists() else None
+
+
+def _cache_key(line: dict) -> tuple:
+    return ("cache", line.get("host"), line.get("observed_at"), line.get("provider"),
+            line.get("account_id"), line.get("window_kind"), line.get("window_minutes"),
+            line.get("resets_at"), line.get("pct"))
+
+
+def append_history(lines: list[dict], env: dict | None = None) -> int:
+    """Locked append of cache lines not already recorded; returns lines written."""
+    path = history_path(env)
+    if path is None or not lines:
+        return 0
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            handle.seek(0)
+            seen = set()
+            tail = b""
+            for raw in handle:
+                tail = raw
+                try:
+                    line = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(line, dict) and line.get("source") == "cache":
+                    seen.add(_cache_key(line))
+            out = []
+            for line in lines:
+                key = _cache_key(line)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(json.dumps({field: line[field] for field in HISTORY_FIELDS},
+                                      separators=(",", ":")) + "\n")
+            if out:
+                prefix = "\n" if tail and not tail.endswith(b"\n") else ""
+                handle.seek(0, os.SEEK_END)
+                handle.write((prefix + "".join(out)).encode("utf-8"))
+                handle.flush()
+            return len(out)
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 # --- remote (satellite) read ------------------------------------------------
 def _remote_python_bin(machine: dict) -> str:
     # System python3 suffices: both probes and the pluck are stdlib-only.
@@ -478,6 +634,10 @@ def read_remote_claude(machine: dict, *, now_ms: int, max_age_s: int,
             plucked = json.loads(out.strip().splitlines()[-1])
         except (ValueError, IndexError):
             plucked = {}
+    try:
+        append_history(claude_cache_history_lines(host, plucked, probed_at=_history_iso_from_ms(now_ms)), env)
+    except OSError:
+        pass  # history is best effort; the readback row is the command's result
     result = classify_claude_cache(host, plucked, now_ms=now_ms, max_age_s=max_age_s)
     if not result.get("fallback"):
         return result

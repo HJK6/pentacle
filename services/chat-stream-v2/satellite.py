@@ -61,7 +61,7 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import websockets
@@ -71,6 +71,12 @@ from codex_rollout_norm import codex_session_identity, normalize_codex_rollout_r
 from machine_stats import STATS_INTERVAL_S, WIRE_VERSION as STATS_WIRE_VERSION, sample_machine_stats
 from mirror import _provider_from_session_name
 from logging_config import configure_logging
+from usage_accounting import native_provenance
+from usage_provenance import (
+    BACKFILL_BATCH, DEFAULT_CODEX_ROOT, MAX_ITEMS as PROVENANCE_MAX_ITEMS,
+    PAYLOAD_VERSION as PROVENANCE_VERSION, BackfillCursor, codex_header_records,
+    run_backfill,
+)
 
 log = logging.getLogger("chat_streamd_v2.satellite")
 
@@ -223,6 +229,8 @@ class _StreamTail:
     provider: str = ""                  # inferred from the bound transcript path
     source_pane_pid: str = ""           # ephemeral proof for a Codex push only
     primed: bool = False                # first-bind history-horizon seek applied?
+    #: Cross-span provenance context (Codex identity, turn models); reset on rebind.
+    provenance_state: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -477,6 +485,11 @@ class Satellite:
         self._pending_usage: dict[str, dict[str, object]] = {}
         self._pass_usage: dict[str, dict[str, object]] = {}
         self._usage_path_streams: dict[str, set[str]] = {}
+        #: Live provenance awaiting a daemon ack, keyed so a re-collected span
+        #: never duplicates an item; backfill remains the completeness authority.
+        self._pass_provenance: dict[str, list[dict]] = {}
+        self._pending_provenance: dict[tuple, dict] = {}
+        self._inflight_provenance: list[tuple] = []
 
     def _read_sha(self) -> str:
         try:
@@ -749,6 +762,7 @@ class Satellite:
             self._usage_fences = {}
         self._pass_usage = {}
         self._usage_path_streams = {}
+        self._pass_provenance = {}
         if discovered is None:
             discovered = self._discover()
         else:
@@ -794,6 +808,7 @@ class Satellite:
                 st.path, st.offset, st.provider_session_id, st.provider, st.source_pane_pid, st.primed = (
                     path, 0, "", "", "", fork_rebind
                 )
+                st.provenance_state = {}
             if st.source_pane_pid == f"!{pane.pane_pid}":
                 continue
             st.provider = provider
@@ -829,6 +844,7 @@ class Satellite:
                     self._usage_path_streams.setdefault(path, set()).add(f"{self.config.host}:{name}")
                     self._pending_usage.setdefault(f"{self.config.host}:{name}", usage)
                     self._pending_usage[f"{self.config.host}:{name}"] = usage
+                self._queue_provenance(self._pass_provenance.get(f"{self.config.host}:{name}") or ())
         return events, high_water, capped
 
     def _collect_stream(self, st: _StreamTail, budget: int, out: list[dict]) -> tuple[int, bool]:
@@ -949,7 +965,64 @@ class Satellite:
             if not hasattr(self, "_pass_usage"):
                 self._pass_usage = {}
             self._pass_usage[f"{self.config.host}:{st.session_name}"] = candidate
+        provenance = self._provenance_items(st, provider, records, record_end_offsets, consumed_to)
+        if provenance:
+            if not hasattr(self, "_pass_provenance"):
+                self._pass_provenance = {}
+            self._pass_provenance[f"{self.config.host}:{st.session_name}"] = provenance
         return consumed_to, capped
+
+    def _provenance_items(
+        self, st: _StreamTail, provider: str, records: list[dict],
+        record_end_offsets: list[int], consumed_to: int,
+    ) -> list[dict]:
+        """Metadata-only provenance for the consumed prefix of this span."""
+        included = [
+            record for record, end_offset in zip(records, record_end_offsets)
+            if end_offset <= consumed_to
+        ]
+        if not included:
+            return []
+        try:
+            if provider == "codex" and not st.provenance_state.get("meta_seen"):
+                # The history horizon may begin after session_meta; seed the
+                # session identity from the immutable head once per bind.
+                native_provenance(
+                    "codex", codex_header_records(st.path),
+                    native_session_id=st.provider_session_id or None,
+                    state=st.provenance_state,
+                )
+            return native_provenance(
+                provider, included,
+                native_session_id=(st.provider_session_id or None) if provider == "codex" else None,
+                source_file_identity_digest=self._source_file_identity_digest(st.path),
+                state=st.provenance_state,
+            )
+        except Exception as exc:  # noqa: BLE001 - provenance never blocks chat/usage
+            log.warning("stream %s provenance failed: %s", st.session_name, exc)
+            return []
+
+    @staticmethod
+    def _provenance_key(item: dict) -> tuple:
+        data = item.get("data") or {}
+        if item.get("kind") == "rate_limit":
+            return ("rate_limit", data.get("account_id"), data.get("window_kind"),
+                    data.get("window_minutes"), str(data.get("resets_at")), data.get("pct"))
+        return (item.get("kind"), item.get("native_session_id"),
+                data.get("record_key") or data.get("response_id"))
+
+    def _queue_provenance(self, items) -> None:
+        pending = self._pending_provenance
+        for item in items:
+            pending.pop(self._provenance_key(item), None)
+            pending[self._provenance_key(item)] = item
+        overflow = len(pending) - 4 * PROVENANCE_MAX_ITEMS
+        if overflow > 0:
+            # An unacknowledging daemon must not grow memory without bound;
+            # dropped items are recovered by `--backfill`.
+            for key in list(pending)[:overflow]:
+                pending.pop(key, None)
+            log.warning("provenance queue overflow: dropped %d oldest items", overflow)
 
     # -- push / ack -----------------------------------------------------------
 
@@ -1035,6 +1108,13 @@ class Satellite:
         pending_usage = getattr(self, "_pending_usage", {})
         if pending_usage:
             frame["usage"] = [pending_usage[sid] for sid in sorted(pending_usage)]
+        pending_provenance = getattr(self, "_pending_provenance", {})
+        self._inflight_provenance = list(pending_provenance)[:PROVENANCE_MAX_ITEMS]
+        if self._inflight_provenance:
+            frame["usage_provenance"] = {
+                "version": PROVENANCE_VERSION,
+                "items": [pending_provenance[key] for key in self._inflight_provenance],
+            }
         proof = self._source_host_proof(os.getpid())
         if proof is not None:
             frame["source_host_proof"] = proof
@@ -1069,6 +1149,14 @@ class Satellite:
         if kind != "event.push.ok":
             return None
         usage_was_acknowledged = "usage_recorded" in ack or "usage_replayed" in ack or "usage_rejected" in ack
+        provenance_ack = ack.get("usage_provenance")
+        if isinstance(provenance_ack, dict) and not provenance_ack.get("error"):
+            # Per-item rejections are final (backfill is the authority); only a
+            # whole-block error keeps the batch for the next push.
+            pending_provenance = getattr(self, "_pending_provenance", {})
+            for key in getattr(self, "_inflight_provenance", ()):
+                pending_provenance.pop(key, None)
+            self._inflight_provenance = []
         usage_rejected_streams = {
             str(item.get("stream_id") or "")
             for item in (ack.get("usage_rejected") or ())
@@ -1218,13 +1306,84 @@ class Satellite:
                 await asyncio.sleep(back)
 
 
+async def _backfill(sat: Satellite, args) -> dict:
+    """One-shot provenance backfill over this host's transcripts (spec AC7)."""
+    roots = {}
+    if args.provider in ("all", "claude"):
+        roots["claude"] = args.claude_root or sat.config.claude_projects_root
+    if args.provider in ("all", "codex"):
+        roots["codex"] = args.codex_root or DEFAULT_CODEX_ROOT
+    cursor = BackfillCursor(None if args.no_cursor else args.cursor)
+    async with websockets.connect(
+        sat.config.bart_ws, max_size=WS_MAX_SIZE,
+        ping_interval=20, ping_timeout=20, close_timeout=10,
+    ) as ws:
+        async def push(items: list[dict], dry_run: bool) -> dict:
+            sat._req += 1
+            rid = sat._req
+            frame = {
+                "type": "event.push", "request_id": rid,
+                "push_secret": sat.config.push_secret, "satellite_sha": sat.sha,
+                "satellite_pid": os.getpid(), "wire_version": WIRE_VERSION,
+                "host": sat.config.host, "events": [], "high_water": {},
+                "usage_provenance": {"version": PROVENANCE_VERSION, "items": items, "dry_run": dry_run},
+            }
+            proof = sat._source_host_proof(os.getpid())
+            if proof is not None:
+                frame["source_host_proof"] = proof
+            await ws.send(json.dumps(frame))
+            deadline = asyncio.get_running_loop().time() + max(sat.config.ack_timeout_s, 120.0)
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    return {"error": "ack_timeout"}
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=remaining))
+                if not isinstance(msg, dict) or msg.get("request_id") != rid:
+                    continue
+                if msg.get("type") != "event.push.ok":
+                    return {"error": str(msg.get("error") or msg.get("type") or "push_failed")}
+                return msg.get("usage_provenance") or {"error": "provenance_unacknowledged"}
+
+        summary = await run_backfill(push, roots=roots, cursor=cursor,
+                                     dry_run=args.dry_run, batch=args.batch)
+    summary["host"] = sat.config.host
+    summary["satellite_sha"] = sat.sha
+    return summary
+
+
+def _parse_args(argv: list[str] | None):
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Pentacle per-host ingest satellite")
+    parser.add_argument("--backfill", action="store_true",
+                        help="push usage provenance for every local transcript once, then exit")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="with --backfill: report native sessions found vs known, write nothing")
+    parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
+    parser.add_argument("--cursor", default="~/.local/state/pentacle-satellite/provenance_backfill.json")
+    parser.add_argument("--no-cursor", action="store_true", help="ignore and do not write the resume cursor")
+    parser.add_argument("--claude-root", default="")
+    parser.add_argument("--codex-root", default="")
+    parser.add_argument("--batch", type=int, default=BACKFILL_BATCH)
+    return parser.parse_args(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_logging(os.environ.get("PENTACLE_SATELLITE_LOG_LEVEL", "INFO"))
+    args = _parse_args(argv)
     cfg = SatelliteConfig.from_env()
     if not cfg.host:
         log.error("no host configured (set PENTACLE_SATELLITE_HOST)")
         return 2
     sat = Satellite(cfg)
+    if args.backfill:
+        if not 1 <= args.batch <= PROVENANCE_MAX_ITEMS:
+            log.error("--batch must be 1..%d", PROVENANCE_MAX_ITEMS)
+            return 2
+        summary = asyncio.run(_backfill(sat, args))
+        print(json.dumps(summary, sort_keys=True))
+        failed = sum(int(p.get("batches_failed", 0)) for p in summary["providers"].values())
+        return 1 if failed else 0
     try:
         asyncio.run(sat.run_forever())
     except KeyboardInterrupt:
