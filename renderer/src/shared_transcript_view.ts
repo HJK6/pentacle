@@ -38,6 +38,7 @@ import type {
   ChatAttachment,
 } from 'pentacle-chat-core';
 import { formatAssistantActivity, parseMarkdown, parsePentacleQuestionAnswerText, interpretPentacleEvent } from 'pentacle-chat-core';
+import { validVoiceMetadata } from './voice_metadata';
 
 // Chrome colors are a DESKTOP concern (legacy `chat_ui_state.js#hostChrome`),
 // not part of the shared core's host theme. app.js already computes chrome via
@@ -503,7 +504,11 @@ function renderTranscriptItemBodyHtml(
     const activityStatus = activityLabel ? `<div class="slot-chat-assistant-activity" role="status">${escapeHtml(activityLabel)}</div>` : '';
 
     const attachments = renderAttachmentsHtml((item as PentacleTranscriptItem & { attachments?: RenderAttachment[] }).attachments);
-    return `<article class="slot-chat-row is-user${rowClass}" aria-label="User message" data-copy-kind="message">${attachments}${item.text.trim() ? `<div class="slot-chat-user-bubble">${renderAnswerBody(item.text)}</div>${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}` : ''}${status}${activityStatus}</article>`;
+    const voice = validVoiceMetadata((item as PentacleTranscriptItem & { voice?: unknown }).voice);
+    const seconds = voice ? Math.floor(voice.duration_s) : 0;
+    const duration = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+    const voiceCaption = voice && item.text.trim() ? `<div class="slot-chat-voice-caption" aria-label="Transcribed from voice, ${duration}"><svg class="voice-mic-glyph" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span>${duration}</span></div>` : '';
+    return `<article class="slot-chat-row is-user${rowClass}" aria-label="User message" data-copy-kind="message">${attachments}${item.text.trim() ? `<div class="slot-chat-user-bubble">${renderAnswerBody(item.text)}</div>${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}` : ''}${voiceCaption}${status}${activityStatus}</article>`;
   }
   if (rule === 'terminal:divider' || rule === 'activity:turn-summary') {
     if (!shouldShowTurnDuration(options)) return '';

@@ -131,6 +131,25 @@
 .slot-chat-voice-status { flex: 1; }
 .slot-chat-voice-take button { cursor: pointer; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 8px; padding: 4px 8px; }
 
+/* Pending audio stays on the user side until the ordinary text row replaces
+   it. The play glyph is decoration; this lane does not expose audio playback. */
+.slot-chat-voice-take.is-pending { flex-direction: column; align-items: flex-end; width: fit-content; max-width: 84%; margin-left: auto; gap: 6px; padding: 0; border: 0; border-radius: 0; }
+.voice-pending-bubble { display: flex; align-items: center; gap: 10px; padding: 10px 14px; color: var(--cosmic-green, #3dff66); border: 1px solid rgba(61, 255, 102, 0.33); background: rgba(61, 255, 102, 0.09); clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px); }
+.voice-pending-play { flex: 0 0 12px; }
+.voice-pending-bars { display: flex; align-items: center; gap: 2px; height: 22px; }
+.voice-pending-bar { flex: 0 0 2.5px; width: 2.5px; border-radius: 2px; background: var(--cosmic-green, #3dff66); }
+.voice-pending-duration { color: var(--cosmic-text, #d7e2d9); font-family: var(--cosmic-font-mono-medium, monospace); font-size: 12px; font-variant-numeric: tabular-nums; }
+.voice-pending-caption { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 6px; color: var(--cosmic-muted, #607c67); }
+.voice-transcribing-label { font-family: var(--cosmic-font-mono-medium, monospace); font-size: 9px; letter-spacing: 1px; }
+.voice-pending-spinner { width: 9px; height: 9px; border: 1px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: voice-transcribing-spin 900ms linear infinite; }
+.voice-pending-caption .voice-pending-discard { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 0; }
+.voice-pending-error { color: var(--cosmic-amber, #ffbf69); font-size: 11px; }
+.voice-pending-caption .voice-pending-retry { color: var(--cosmic-amber, #ffbf69); font-family: var(--cosmic-font-mono-medium, monospace); font-size: 9px; letter-spacing: 1px; text-transform: uppercase; }
+.voice-pending-interrupted { color: var(--cosmic-muted, #607c67); font-family: var(--cosmic-font-mono-medium, monospace); font-size: 9px; }
+.slot-chat-voice-caption { display: flex; align-items: center; justify-content: flex-end; align-self: flex-end; gap: 4px; color: var(--cosmic-green, #3dff66); font-family: var(--cosmic-font-mono-medium, monospace); font-size: 9px; font-variant-numeric: tabular-nums; }
+@keyframes voice-transcribing-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .voice-pending-spinner { animation: none; } }
+
 /* Mobile voice contract: the capsule is the field, without a second frame.
    Keep the draft and attachments intact while temporarily replacing its face. */
 .cosmic .slot-chat-compose.is-voice-recording { display: flex; gap: 6px; padding: 5px 6px 5px 9px; border-radius: 24px; border-color: rgba(61, 255, 102, 0.4); background: rgba(61, 255, 102, 0.055); box-shadow: 0 0 22px rgba(61, 255, 102, 0.16); }
