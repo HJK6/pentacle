@@ -6452,18 +6452,26 @@ function switchView(view) {
   } else {
     // Hide chat panels
     document.getElementById('panel-sessions').style.display = 'none';
+    const visible = window.visibleDashboards(CONFIG);
+    if (!visible.some(d => d.id === state.selectedDashboard)) {
+      state.selectedDashboard = visible[0]?.id || null;
+    }
     renderDashboardList();
-    if (!state.selectedDashboard && window.DASHBOARDS.length > 0) {
-      const preferred = window.DASHBOARDS.find(d => d.id === 'foreclosure-pipeline');
-      selectDashboard((preferred || window.DASHBOARDS[0]).id);
-    } else if (state.selectedDashboard) {
+    if (state.selectedDashboard) {
       mountAndPoll(state.selectedDashboard);
+    } else {
+      const container = document.getElementById('dashboard-content');
+      container.replaceChildren();
+      const empty = document.createElement('p');
+      empty.className = 'dashboards-empty';
+      empty.textContent = 'No dashboards configured';
+      container.appendChild(empty);
     }
   }
 }
 
 function selectDashboard(id) {
-  if (state.selectedDashboard === id) return;
+  if (state.selectedDashboard === id || !window.visibleDashboards(CONFIG).some(d => d.id === id)) return;
   stopDashboardPolling();
   unmountCurrentDashboard();
   state.selectedDashboard = id;
@@ -6474,7 +6482,7 @@ function selectDashboard(id) {
 }
 
 function mountAndPoll(id) {
-  const db = window.DASHBOARDS.find(d => d.id === id);
+  const db = window.visibleDashboards(CONFIG).find(d => d.id === id);
   if (!db) return;
   // Reset dashboard state for fresh mount
   state.dashboardState = 'loading';
@@ -6501,20 +6509,51 @@ function unmountCurrentDashboard() {
 function renderDashboardList() {
   const list = document.getElementById('dashboard-list');
   if (!list) return;
-  list.innerHTML = window.DASHBOARDS.map(d => {
-    const isActive = d.id === state.selectedDashboard;
-    return `<div class="dashboard-item ${isActive ? 'active' : ''}" data-dashboard-id="${d.id}">
-      <div class="dashboard-item-top">
-        <span class="dashboard-dot" style="background:${d.color}"></span>
-        <span class="dashboard-name">${d.name}</span>
-      </div>
-      <div class="dashboard-desc">${d.description}</div>
-    </div>`;
-  }).join('');
-
-  list.querySelectorAll('.dashboard-item').forEach(el => {
-    el.addEventListener('click', () => selectDashboard(el.dataset.dashboardId));
-  });
+  list.replaceChildren();
+  const visible = window.visibleDashboards(CONFIG);
+  if (!visible.length) {
+    const empty = document.createElement('p');
+    empty.className = 'dashboards-empty';
+    empty.textContent = 'No dashboards configured';
+    list.appendChild(empty);
+    return;
+  }
+  for (const retired of [false, true]) {
+    const boards = visible.filter(d => (d.retired === true) === retired);
+    if (!boards.length) continue;
+    const group = document.createElement('section');
+    const title = document.createElement('h2');
+    title.className = 'dashboard-group-title';
+    title.id = `dashboard-group-${retired ? 'retired' : 'active'}`;
+    title.textContent = retired ? 'RETIRED' : 'ACTIVE';
+    group.setAttribute('aria-labelledby', title.id);
+    group.appendChild(title);
+    for (const d of boards) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'dashboard-item';
+      item.classList.toggle('active', d.id === state.selectedDashboard);
+      item.setAttribute('aria-current', String(d.id === state.selectedDashboard));
+      item.dataset.dashboardId = d.id;
+      const top = document.createElement('span');
+      top.className = 'dashboard-item-top';
+      const dot = document.createElement('span');
+      dot.className = 'dashboard-dot';
+      dot.setAttribute('aria-hidden', 'true');
+      dot.style.background = d.color || 'var(--cosmic-green)';
+      const name = document.createElement('span');
+      name.className = 'dashboard-name';
+      name.textContent = d.name;
+      top.append(dot, name);
+      const description = document.createElement('span');
+      description.className = 'dashboard-desc';
+      description.textContent = d.description || '';
+      item.append(top, description);
+      item.addEventListener('click', () => selectDashboard(d.id));
+      group.appendChild(item);
+    }
+    list.appendChild(group);
+  }
 }
 
 // ── Dashboard Polling ─────────────────────────────────────────

@@ -189,3 +189,66 @@
 .cosmic.cosmic-myth {
   font-family: var(--cosmic-font-myth);
 }
+
+/* Dashboard-only opt-in: share cosmic tokens without changing chat styles. */
+#panel-dashboards.cosmic {
+  background: var(--cosmic-panel);
+  color: var(--cosmic-text);
+}
+#panel-dashboards .dashboard-list {
+  padding: var(--cosmic-card-gap) 0;
+}
+#panel-dashboards .dashboard-group-title {
+  margin: 0;
+  padding: 12px var(--cosmic-screen-pad) 8px;
+  color: var(--cosmic-muted);
+  font: 400 var(--cosmic-type-label)/1.5 var(--cosmic-font-mono);
+  letter-spacing: 0.14em;
+}
+#panel-dashboards .dashboard-item {
+  display: block;
+  width: 100%;
+  padding: var(--cosmic-card-pad-y) var(--cosmic-card-pad-x);
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--cosmic-text);
+  text-align: left;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+#panel-dashboards .dashboard-item:hover,
+#panel-dashboards .dashboard-item.active {
+  background: var(--cosmic-codepanel);
+}
+#panel-dashboards .dashboard-item.active {
+  border-left-color: var(--cosmic-green);
+}
+#panel-dashboards .dashboard-item:focus-visible {
+  outline: 1px solid var(--cosmic-green);
+  outline-offset: -3px;
+}
+#panel-dashboards .dashboard-name {
+  color: var(--cosmic-text);
+  font: 600 var(--cosmic-type-section-title)/1.3 var(--cosmic-font-display);
+  overflow-wrap: anywhere;
+}
+#panel-dashboards .dashboard-desc {
+  display: block;
+  margin-top: 4px;
+  color: var(--cosmic-dim);
+  font: 400 var(--cosmic-type-meta)/1.6 var(--cosmic-font-mono);
+  overflow-wrap: anywhere;
+}
+#dashboard-content.cosmic {
+  background: var(--cosmic-ink);
+}
+#panel-dashboards .dashboards-empty,
+#dashboard-content .dashboards-empty {
+  padding: var(--cosmic-screen-pad);
+  color: var(--cosmic-muted);
+  font: 400 var(--cosmic-type-preview)/1.6 var(--cosmic-font-mono);
+}
+@media (prefers-reduced-motion: reduce) {
+  #panel-dashboards .dashboard-item { transition: none; }
+}

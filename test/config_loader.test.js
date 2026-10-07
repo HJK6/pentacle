@@ -81,3 +81,8 @@ test('config candidates use the public local overlay and bundled example', () =>
   assert.equal(paths[0], path.join(base, 'pentacle.config.js'));
   assert.equal(paths[1], path.join(base, 'pentacle.config.example.js'));
 });
+
+test('dashboards visibility and modeler settings are supported without exposing their values', () => {
+  assert.deepEqual(configWarnings({ dashboards: { hidden: ['synthetic-retired'], showRetired: true,
+    modeler3d: { url: 'http://127.0.0.1:9031/synthetic-viewer' } } }), []);
+});
