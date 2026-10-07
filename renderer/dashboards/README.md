@@ -8,6 +8,8 @@ Definitions declare an ID and manifest plus either `render(state, ctx)` or `moun
 
 Generate and verify the dependency with its `npm run build`, `npm run check:dist` and `npm test`. Do not edit generated files independently or silently load private producer modules. Missing shared definitions or writers must remain visibly unavailable.
 
+Personal boards arrive at runtime through the operator's `dashboard-catalog` asset and the web host's authenticated `/dashboards/private/<catalog_version>/` route; see [Runtime catalog](../../docs/dashboards_view.md#runtime-catalog). Public source ships no personal board ids, endpoints or bundles.
+
 ## Visibility and selection
 
 Adapters self-register in `window.DASHBOARDS`. Their optional `retired: true`

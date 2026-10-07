@@ -25,6 +25,7 @@ const { spawn, execFileSync } = require('child_process');
 
 const cdp = require('./lib/cdp');
 const scenarios = require('./lib/web_scenarios');
+const catalogFixtures = require('./lib/dashboard_catalog_fixture');
 const { startModelerFixture } = require('./lib/modeler_fixture_server');
 const { withRuntimeDirectory, execWithRuntimeDirectory } = require('./lib/runtime_directory');
 const { main: startHost } = require('../../server');
@@ -162,12 +163,18 @@ class Report {
   }
 }
 
-function writeProfile(scratch, daemonPort, modelerFixtureUrl = null, configured = false) {
+function writeProfile(scratch, daemonPort, modelerFixtureUrl = null, configured = false, catalog = null) {
+  const dashboards = {
+    ...(configured && modelerFixtureUrl ? { modeler3d: { url: modelerFixtureUrl } } : {}),
+    // Only the dashboard_catalog scenario turns this on; the default gate
+    // profile has no catalog (the public empty default).
+    ...(catalog ? { catalogSpecId: catalog.specId, catalogRoot: catalog.root } : {}),
+  };
   const config = {
     appName: 'Pentacle',
     features: { mic: false, chatUi: true, inputBar: true, dashboards: true },
     ...(modelerFixtureUrl ? { dashboardHub: { url: modelerFixtureUrl, scraperBotUrl: modelerFixtureUrl } } : {}),
-    ...(configured && modelerFixtureUrl ? { dashboards: { modeler3d: { url: modelerFixtureUrl } } } : {}),
+    ...(Object.keys(dashboards).length ? { dashboards } : {}),
     tmux: 'tmux',
     // Contrast scenarios exercise real machine glyphs, which require multiple hosts.
     hosts: { local: { kind: 'local' }, local2: { kind: 'local' } },
@@ -346,6 +353,22 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       writeProfile(scratch, daemon.port, runtime.modelerFixture.url, configured);
       await restartHost();
     } : null;
+    // Dashboard catalog hooks (hermetic runs only): a scratch catalog root
+    // (or PENTACLE_TEST_CATALOG_ROOT), and assets seeded into the fixture
+    // daemon's own asset DB through the production AssetStore.
+    const catalogEnv = { python: args.python, assetsDb: path.join(scratch, 'assets.db'), scratch };
+    const catalogFixture = fixture ? catalogFixtures.buildCatalogFixture(scratch, { hostedUrl: runtime.modelerFixture.url }) : null;
+    const catalog = catalogFixture ? {
+      fixture: catalogFixture,
+      configure: async (enabled) => {
+        writeProfile(scratch, daemon.port, runtime.modelerFixture.url, false, enabled ? catalogFixture : null);
+        await restartHost();
+      },
+      install: (index) => catalogFixtures.installVersion(catalogFixture, index),
+      publish: (index) => catalogFixtures.publishCatalog(catalogFixture, catalogEnv, index),
+      seedReports: () => catalogFixtures.seedReports(catalogFixture, catalogEnv),
+      remove: () => catalogFixtures.deleteCatalog(catalogFixture, catalogEnv),
+    } : null;
 
     // Daemon lifecycle primitives (hermetic runs only), so a scenario can model
     // a chat-stream daemon blip around a host restart — the real trigger for the
@@ -410,7 +433,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     if (!session) throw cdpErr || new Error('could not attach Chrome over CDP');
 
     const ctx = { session, report, cdp, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
-      configureModeler, modelerFixtureUrl: runtime.modelerFixture?.url };
+      configureModeler, modelerFixtureUrl: runtime.modelerFixture?.url, catalog };
     let failed = 0;
     for (const [name, fn] of scenarios.SCENARIOS) {
       console.log(`\n▸ ${name}`);

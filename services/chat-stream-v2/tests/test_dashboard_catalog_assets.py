@@ -117,13 +117,13 @@ def test_reader_grammar_excludes_all_zero_and_variable_width_revisions():
 
 def test_metadata_carries_owner_stream_and_producer(tmp_path):
     async def scenario(assets):
-        await _publish(assets, "hosta:seat1", "example-report-20261007T1300Z",
+        await _publish(assets, "fixturehost:seat1", "example-report-20261007T1300Z",
                        producer="hostx:example-producer")
         return await assets.asset({"type": "asset.list", "request_id": "l", "spec_id": SPEC_ID})
 
     reply = _run(tmp_path, scenario)
     [meta] = reply["assets"]
-    assert meta["stream_id"] == "hosta:seat1"
+    assert meta["stream_id"] == "fixturehost:seat1"
     assert meta["producer"] == "hostx:example-producer"
     assert "body" not in meta
 
@@ -137,7 +137,7 @@ def test_spec_scoped_list_then_get_with_listed_stream_id(tmp_path, content_type)
             else _report_body(asset_id))
 
     async def scenario(assets):
-        await _publish(assets, "hosta:publisher-seat", asset_id, content_type=content_type,
+        await _publish(assets, "fixturehost:publisher-seat", asset_id, content_type=content_type,
                        body=body, spec_id=CATALOG_SPEC_ID)
         listed = await assets.asset({"type": "asset.list", "request_id": "l",
                                      "spec_id": CATALOG_SPEC_ID})
@@ -161,9 +161,9 @@ def test_catalog_republish_from_another_seat_keeps_owner_anchor(tmp_path):
     next_catalog = dict(catalog, catalog_version="0.1.1+bbbbbbb")
 
     async def scenario(assets):
-        await _publish(assets, "hosta:seat1", "dashboard-catalog", content_type="dashboard-catalog",
+        await _publish(assets, "fixturehost:seat1", "dashboard-catalog", content_type="dashboard-catalog",
                        body=json.dumps(catalog), spec_id=CATALOG_SPEC_ID)
-        await _publish(assets, "hosta:seat2", "dashboard-catalog", content_type="dashboard-catalog",
+        await _publish(assets, "fixturehost:seat2", "dashboard-catalog", content_type="dashboard-catalog",
                        body=json.dumps(next_catalog), spec_id=CATALOG_SPEC_ID)
         listed = await assets.asset({"type": "asset.list", "request_id": "l",
                                      "spec_id": CATALOG_SPEC_ID})
@@ -174,7 +174,7 @@ def test_catalog_republish_from_another_seat_keeps_owner_anchor(tmp_path):
         return meta, got
 
     meta, got = _run(tmp_path, scenario)
-    assert meta["stream_id"] == "hosta:seat1"
+    assert meta["stream_id"] == "fixturehost:seat1"
     assert json.loads(got["asset"]["body"])["catalog_version"] == "0.1.1+bbbbbbb"
 
 
@@ -186,7 +186,7 @@ def test_report_window_filters_before_sort_and_limit(tmp_path, case):
         for index, row in enumerate(case["rows"]):
             body = (json.dumps(CATALOG_CASES["valid"][0]["catalog"])
                     if row["content_type"] == "dashboard-catalog" else None)
-            await _publish(assets, f"hosta:seat{index}", row["asset_id"],
+            await _publish(assets, f"fixturehost:seat{index}", row["asset_id"],
                            content_type=row["content_type"], body=body, producer=row["producer"])
         return await assets.asset({"type": "asset.list", "request_id": "l", **case["request"]})
 
@@ -202,7 +202,7 @@ def test_full_window_overflow_returns_exactly_w_rows(tmp_path):
 
     async def scenario(assets):
         for index, row in enumerate(case["rows"]):
-            await _publish(assets, f"hosta:seat{index}", row["asset_id"], producer=row["producer"])
+            await _publish(assets, f"fixturehost:seat{index}", row["asset_id"], producer=row["producer"])
         return await assets.asset({"type": "asset.list", "request_id": "l", **case["request"]})
 
     reply = _run(tmp_path, scenario)
@@ -214,7 +214,7 @@ def test_full_window_overflow_returns_exactly_w_rows(tmp_path):
 def test_list_without_filters_is_unchanged(tmp_path):
     async def scenario(assets):
         for asset_id in ["example-report-a", "example-report-c", "example-report-b"]:
-            await _publish(assets, "hosta:seat1", asset_id)
+            await _publish(assets, "fixturehost:seat1", asset_id)
         return await assets.asset({"type": "asset.list", "request_id": "l",
                                    "spec_id": SPEC_ID, "limit": 2})
 
