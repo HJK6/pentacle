@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "_comment": "Synthetic example only. The real file lives at ~/.local/share/pentacle-stream/calibration_config.json on Thoth, mode 0600, and is never committed.",
+  "unplaceable_threshold": 0.01,
+  "windows": {
+    "anchor": "2026-01-07T16:00:00Z",
+    "days": 7,
+    "excluded": ["2026-01-14T16:00:00Z"]
+  },
+  "accounts": [
+    {
+      "label": "fleet_only",
+      "account_id": "00000000-0000-4000-8000-000000000001",
+      "provider": "claude",
+      "role": "fleet_only",
+      "hosts": null
+    },
+    {
+      "label": "shared",
+      "account_id": "00000000-0000-4000-8000-000000000002",
+      "provider": "claude",
+      "role": "shared",
+      "hosts": null,
+      "transfer_from": null,
+      "justification": null
+    }
+  ]
+}

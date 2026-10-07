@@ -179,6 +179,126 @@ by the same snapshot; consumers apply the same tuple. The readback writes only
 where `sessions.db` sits beside the file (Thoth). The Codex probe contract is
 unchanged. Volume is about 300 lines a day; no rotation.
 
+## Rollup and calibration
+
+`agent-orch usage rollup` runs `services/chat-stream-v2/tools/usage_rollup.py`
+on Thoth (stdlib, Python 3.9+). It reads `sessions.db`, `sessions_archive.db`,
+`notifications.db` and `usage_history.jsonl` with `mode=ro`, plus work-item
+frontmatter under `~/agent-workspace/triforce-memory/work`. Its only write is
+`--calibrate` output. It never changes admission, attribution storage or the
+daemon. Scope is **Claude only**. Codex streams are listed as
+`{provider: codex, status: deferred}` with their unpriced cumulative ledger
+totals until `spec_pentacle__usage_codex_rollup_and_calibration_2026_10` ships.
+
+```
+agent-orch usage rollup --spec <spec_id>... [--since ISO] [--until ISO] --json
+agent-orch usage rollup --project <epic_id|repo> --json
+agent-orch usage rollup --comparables --repo <repo> [--kind feature|defect|infra|convention|analysis] [--n 20]
+agent-orch usage rollup --calibrate [--redact] --json
+```
+
+**Attribution.** A stream counts toward its first spec id, which is the same
+rule as the snapshot. An unattributed predecessor in a `handoff_from_stream_id`
+chain folds into its successor's spec (`folded_streams`). A predecessor that
+already has its own spec keeps it. A project is an epic (`epic:` frontmatter) or
+a repo prefix (`spec_<repo>__…`, `-` equals `_`), and it counts each stream once.
+`fleet_totals` always reports attributed and unattributed Claude tokens and
+dollars per account. A stream that has no seat row counts as unattributed.
+
+**Per spec / project (`claude`).** Each record falls into exactly one partition:
+
+| partition | rule |
+|---|---|
+| `untimed` | no provenance row, or a row with null or invalid `observed_at`; it is **unplaceable** in time, since seat lifetime and collection times are not usage bounds |
+| `unpriced` | timed, but the model is missing from `tools/usage_rollup_config/pricing.json` |
+| `unknown_account` | timed and priced, but the identity is unknown or in conflict |
+| `measured` | timed, priced, with a known account |
+
+Each scope reports `by_model_account` (tokens by bucket and dollars; an unpriced
+model shows `dollars: null, bucket: unpriced`, never zero), `by_account` (tokens,
+dollars, and `weekly_pct` computed from `calibration.json`, or null with a reason),
+`provenance_row_coverage` (records with a row ÷ records), and `measured_coverage`.
+For a scope, `measured_coverage` is measured ÷ all tokens of the scope, so
+untimed records stay in the denominator. Dollars are API-equivalent weights,
+versioned by `pricing.json` `version`. They are a proxy, not billing.
+
+**Time (`time`).** `elapsed_delivery_h` is `{value_h, endpoint: close}` from the
+first seat open to the last seat close. It is reported only for a `completed`
+work item that has `completed_at`, when every chain seat has a `closed_at`.
+Otherwise it is `{censored: true, elapsed_so_far_h, reason}`, with reason
+`not_completed`, `open_seat`, `no_close` or `no_seats`. QA reports are never an
+endpoint. Censored items are excluded from comparables. `known_wait_h` is the
+union of question-card and hold intervals, clipped to the union of seat
+intervals. `activity_proxy_h` is the union of Claude inter-response gaps of 10
+minutes or less. It is labelled a proxy, and it is null when any record lacks
+provenance. `qa_rounds` counts reports that carry a `qa_verdict`.
+`time_to_first_qa_h` is measured from the first seat open.
+
+**Comparables.** These are completed specs by repo prefix, optionally filtered
+by a kind tag from `{feature, defect, infra, convention, analysis}`; the legacy
+tag `bug` reads as `defect`. Results run newest first, capped at `--n`, and give
+`p25`/`median`/`p75` (inclusive linear quantiles) of `elapsed_delivery_h`,
+dollars and weekly percent per account. With fewer than 3 matches the result is
+`status: insufficient_comparables`, and `rows` lists the matches found.
+
+**Calibration (`--calibrate`).** This fits one quota: Claude `seven_day`
+(`window_minutes` 10080). `seven_day_fable` and other kinds are listed under
+`reported_only`. The output is one entry per Claude account, per (account,
+`claude`, `seven_day`), and goes to `~/.local/share/pentacle-stream/calibration.json`
+(mode 0600; `--calibration-out` overrides). Every entry carries:
+
+- `measured_rollup`: the account's measured, unpriced and ambiguous tokens, plus dollars.
+- `provenance_row_coverage` and `measured_coverage`.
+- `unplaceable`: the ratio and threshold.
+- `methods`: points and samples, each with its exclusion reason.
+- `exclusions`.
+- A `coefficient` in `usd_per_pct`, or `null` with `status`/`reason`.
+
+Coverage is partitioned per (provider, account, quota). A record that belongs to
+another account never enters this account's numerator or denominator. Unknown,
+conflict and unpriced-unknown mass counts in the denominator of every account
+whose `hosts` could own it, which is every host unless the config narrows it.
+`measured_coverage` = measured ÷ (measured + unpriced + unknown_account), token-weighted.
+
+- **Unplaceable gate.** If untimed Claude tokens exceed `unplaceable_threshold`
+  (default 1 %) of all Claude ledger tokens, every window and interval is
+  `eligibility: unknown`. Its coverage is then withheld (`measured_coverage: null`,
+  `measured_coverage_if_bounded` printed) and no coefficient is published. The
+  ratio is printed with every entry, and `unplaceable.by_host_account` gives the mass.
+- **Method A `full_week_100`** (fleet-only account). Windows run from the
+  config anchor (Wed 16:00Z) for `days` 7. For each window, `dollars` = Σ measured
+  dollars of the account in the window, and `usd_per_pct` = dollars ÷ 100,
+  `bias: floor`. A point is used only if the window is completed, not in
+  `windows.excluded`, eligible, and has coverage ≥ 0.90. The coefficient is the
+  median of the used points.
+- **Method B `history_regression`** (fleet-only account). Samples are
+  consecutive deduped non-probe `seven_day` history lines of the account. Each
+  is a Δpct paired with the measured dollars in (t₁, t₂]. A sample is excluded
+  for any of: `probe_source`, `reset_unknown`, `reset_crossing` (`resets_at`
+  compared to the minute), `stale` (same `observed_at`), `non_positive_delta`,
+  `interval_over_24h`, `eligibility_unknown`, or coverage below 0.95. The fit
+  is least squares through the origin, and `residual_mape_pct` is the median
+  absolute percent error of Δpct. The method activates only with ≥ 10 valid
+  samples spanning ≥ 30 points. An active Method B supersedes Method A.
+- **Shared account.** It gets `conversion: null, reason: "shared account; not
+  fitted"` unless its config entry sets `transfer_from` together with a
+  `justification`. In that case `basis: transferred`, and each window carries
+  `external_residual` = observed pct − predicted pct, labelled as an estimate
+  of non-fleet use.
+
+**Private config.** Real account ids and labels live only on Thoth in
+`~/.local/share/pentacle-stream/calibration_config.json`, which must be mode
+0600 and outside the repository; anything else is refused. The schema is
+`tools/usage_rollup_config/calibration_config.example.json` (synthetic ids). A
+missing config leaves every account `not_configured`. The public example is
+never read. `--redact` replaces account ids with config labels (or
+`unconfigured_account_<n>`) in printed output. Use it for receipts. The
+private `calibration.json` keeps the real ids for weekly-percent lookups.
+
+Acceptance: `services/chat-stream-v2/tests/test_usage_rollup.py` (AC1–AC9
+fixtures on the real Store schema) and
+`services/agent-orch/tests/test_usage_rollup_cli.py`.
+
 ## Reports and rollout
 
 New completion reports store a server-authored `usage_snapshot` in the same

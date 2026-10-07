@@ -1,0 +1,19 @@
+{
+  "version": "2026-10-07.1",
+  "unit": "usd_per_mtok",
+  "basis": "API-equivalent weights named in spec_pentacle__usage_rollup_and_calibration_2026_10; a weighted proxy for limit consumption, not billing.",
+  "classes": {
+    "opus": {"uncached_input": 15.0, "cache_write": 18.75, "cache_read": 1.5, "output": 75.0},
+    "sonnet": {"uncached_input": 3.0, "cache_write": 3.75, "cache_read": 0.3, "output": 15.0},
+    "zero": {"uncached_input": 0.0, "cache_write": 0.0, "cache_read": 0.0, "output": 0.0}
+  },
+  "models": {
+    "claude-opus-4-8": {"class": "opus"},
+    "claude-opus-5": {"class": "opus"},
+    "claude-opus-5-5": {"class": "opus"},
+    "claude-fable-5-1": {"class": "opus", "assumption": "Fable priced as Opus-class (named assumption)"},
+    "claude-sonnet-5": {"class": "sonnet"},
+    "claude-sonnet-5-5": {"class": "sonnet"},
+    "<synthetic>": {"class": "zero", "assumption": "Claude Code synthetic messages carry no model usage"}
+  }
+}

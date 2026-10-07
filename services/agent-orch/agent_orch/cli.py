@@ -4795,6 +4795,23 @@ def usage(args: argparse.Namespace) -> int:
     return 0
 
 
+USAGE_ROLLUP_TOOL = Path(__file__).resolve().parents[2] / "chat-stream-v2" / "tools" / "usage_rollup.py"
+
+
+def usage_rollup_passthrough(rollup_args: list[str]) -> int:
+    """`agent-orch usage rollup ...`: run the read-only rollup tool from this checkout.
+
+    The tool reads the Thoth ledger (docs/usage_accounting.md § Rollup and
+    calibration); every token after `rollup` is passed verbatim, so its own
+    --help, --json and selectors apply. PENTACLE_USAGE_ROLLUP_TOOL overrides the path.
+    """
+    tool = Path(os.environ.get("PENTACLE_USAGE_ROLLUP_TOOL") or USAGE_ROLLUP_TOOL)
+    if not tool.is_file():
+        print(f"agent-orch usage rollup: tool not found at {tool}", file=sys.stderr)
+        return 2
+    return subprocess.call([sys.executable, str(tool), *rollup_args])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = AgentOrchArgumentParser(prog="agent-orch")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -5841,7 +5858,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     usage_parser = subparsers.add_parser(
         "usage",
-        description="read one host's current Claude/Codex account-period usage (/usage limits) once",
+        description="read one host's current Claude/Codex account-period usage (/usage limits) once; "
+                    "`agent-orch usage rollup --help` for the per-spec/project rollup and calibration",
     )
     usage_parser.add_argument("--host", required=True, help="host name from machines.json (e.g. thoth, merlin, amaterasu)")
     usage_parser.add_argument("--json", action="store_true")
@@ -5900,6 +5918,10 @@ def main(argv: list[str] | None = None) -> int:
     effective_argv = sys.argv[1:] if argv is None else argv
     if effective_argv and effective_argv[0] == "ssh":
         return ssh_passthrough(list(effective_argv[1:]))
+    # `agent-orch usage rollup ...` is likewise sliced before argparse so the
+    # tool's own flags (--spec, --json, --help) pass through untouched.
+    if len(effective_argv) >= 2 and effective_argv[0] == "usage" and effective_argv[1] == "rollup":
+        return usage_rollup_passthrough(list(effective_argv[2:]))
     # `agent-orch spawn cancel|status <...>` is surfaced UX for the
     # `spawn-cancel`/`spawn-status` sibling verbs (a flat `spawn` parser cannot
     # host subcommands). Rewrite only the exact two-token prefix; `spawn --help`
