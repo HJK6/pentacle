@@ -58,8 +58,13 @@ async function webWorkLanes(ctx) {
     // Pane attach is irrelevant here; keep the ordinary-session open path off the real tmux.
     await session.eval(`(() => { window.cc.createPty = async () => '%unused-work-lanes-fixture'; window.cc.killPty = async () => true; return true; })()`);
 
-    const before = await session.eval(`document.getElementById('stats').textContent`);
-    report.ok('before any lane frame the header is the legacy session line', !/lanes/.test(before), { before });
+    // The seeded gate daemon is lane-aware (work_lanes_v1) and owns no lanes, so before any injected frame the
+    // header already leads with the daemon's own empty inventory: "0 lanes | N sessions …", and no lane rows.
+    const before = await waitForValue(session, cdp, `document.getElementById('stats').textContent`, (v) => /^0 lanes \| \d+ sessions/.test(v),
+      { timeoutMs, label: 'header leads with the daemon\'s empty lane inventory' });
+    const rowsBefore = await session.eval(`document.querySelectorAll('#session-list .lane-row').length`);
+    report.ok('before any injected frame the header shows the daemon\'s own empty inventory (0 lanes) and no lane rows',
+      /^0 lanes \| \d+ sessions/.test(before) && rowsBefore === 0, { before, rowsBefore });
 
     await inject(frame);
     const stats = await waitForValue(session, cdp, `document.getElementById('stats').textContent`, (v) => /^4 lanes \|/.test(v),
