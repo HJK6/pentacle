@@ -6422,6 +6422,8 @@ document.getElementById('modal-input').addEventListener('keydown', (e) => {
 
 // ── View Switcher (Chats / Dashboards) ───────────────────────
 
+require('./dashboards/modeler-3d');
+
 function switchView(view) {
   if (state.currentView === view) return;
   window.PentacleHarness?.emit?.('view:switch', { data: { view } });
@@ -6491,7 +6493,7 @@ function mountAndPoll(id) {
   state.dashboardLastUpdated = null;
   const container = document.getElementById('dashboard-content');
   container.innerHTML = ''; // clear previous
-  state.dashboardRefs = db.mount(container);
+  state.dashboardRefs = db.mount(container, { config: CONFIG });
   window.PentacleHarness?.emit?.('dashboard:mount', { data: { id, name: db.name } });
   updateDashboardStatusBadge();
   startDashboardPolling();

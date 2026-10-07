@@ -21,6 +21,7 @@ function setup(config = {}, boards) {
   const calls = [];
   const context = vm.createContext({ window, document: window.document, CONFIG: config, state,
     gridColResizers: [], sidebarResizer: null, scheduleVisibleSlotFits() {},
+    require: name => { assert.equal(name, './dashboards/modeler-3d'); },
     setInterval: () => { throw Error('non-polling fixtures must not poll'); }, clearInterval() {}, console });
   vm.runInContext(registry, context);
   window.DASHBOARDS.push(...(boards || [

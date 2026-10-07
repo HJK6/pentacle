@@ -252,3 +252,57 @@
 @media (prefers-reduced-motion: reduce) {
   #panel-dashboards .dashboard-item { transition: none; }
 }
+
+#dashboard-content .modeler-3d {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  color: var(--cosmic-text);
+  font-family: var(--cosmic-font-display);
+}
+#dashboard-content .modeler-header,
+#dashboard-content .modeler-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--cosmic-card-gap);
+}
+#dashboard-content .modeler-header { justify-content: space-between; }
+#dashboard-content .modeler-header h1 {
+  margin: 0;
+  font: 600 var(--cosmic-type-title)/1.4 var(--cosmic-font-display);
+}
+#dashboard-content .modeler-controls a,
+#dashboard-content .modeler-controls button {
+  padding: 8px 12px;
+  border: 1px solid var(--cosmic-line);
+  border-radius: 4px;
+  background: var(--cosmic-panel);
+  color: var(--cosmic-green);
+  font: 400 var(--cosmic-type-meta)/1.5 var(--cosmic-font-mono);
+  text-decoration: none;
+  cursor: pointer;
+}
+#dashboard-content .modeler-controls a[aria-disabled="true"] {
+  color: var(--cosmic-muted);
+  cursor: default;
+}
+#dashboard-content .modeler-controls :focus-visible {
+  outline: 1px solid var(--cosmic-green);
+  outline-offset: 2px;
+}
+#dashboard-content .modeler-status,
+#dashboard-content .modeler-open-error {
+  color: var(--cosmic-dim);
+  font: 400 var(--cosmic-type-preview)/1.6 var(--cosmic-font-mono);
+}
+#dashboard-content [data-modeler-state="blocked"] .modeler-status,
+#dashboard-content .modeler-open-error { color: var(--cosmic-amber); }
+#dashboard-content .modeler-viewport { flex: 1; display: flex; }
+#dashboard-content .modeler-viewport iframe {
+  width: 100%;
+  min-height: 60vh;
+  flex: 1;
+  border: 1px solid var(--cosmic-line);
+  background: var(--cosmic-panel);
+}
