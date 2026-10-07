@@ -66,7 +66,8 @@ def _fable_window(utilization: dict[str, Any]) -> tuple[Any, Any]:
     direct = utilization.get('seven_day_fable')
     if isinstance(direct, dict):
         return direct.get('utilization'), direct.get('resets_at')
-    for entry in utilization.get('limits') or ():
+    limits = utilization.get('limits')
+    for entry in limits if isinstance(limits, list) else ():
         if not isinstance(entry, dict) or entry.get('kind') != 'weekly_scoped':
             continue
         scope = entry.get('scope') if isinstance(entry.get('scope'), dict) else {}

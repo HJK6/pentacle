@@ -131,7 +131,11 @@ back transaction and writes no history. Timestamps are stored as UTC ISO-8601
 with `Z` (millisecond precision, omitted when zero).
 
 **Exporters.** The satellite tail and Thoth-local ingest emit provenance for
-live spans through one `ProvenanceSink` (`usage_provenance.py`). Backfill walks
+live spans through one `ProvenanceSink` (`usage_provenance.py`); cross-span
+context resets whenever a tail binds another file or native session. The
+satellite attaches pending items within a byte budget (events take
+precedence), keeps at most 8000 queued, and stops attaching until reconnect
+when an ack lacks the `usage_provenance` block (an older daemon). Backfill walks
 every local transcript once: Claude `~/.claude/projects/**/*.jsonl` (including
 `subagents/`) and Codex `~/.codex/sessions/**/rollout-*.jsonl`, in batches of
 500, resumable by a per-file (size, mtime) cursor; a re-run is a no-op.

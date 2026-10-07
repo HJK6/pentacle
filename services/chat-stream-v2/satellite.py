@@ -489,7 +489,9 @@ class Satellite:
         #: never duplicates an item; backfill remains the completeness authority.
         self._pass_provenance: dict[str, list[dict]] = {}
         self._pending_provenance: dict[tuple, dict] = {}
-        self._inflight_provenance: list[tuple] = []
+        self._inflight_provenance: dict[tuple, dict] = {}
+        #: None until an ack shows whether the daemon understands provenance.
+        self._provenance_supported: bool | None = None
 
     def _read_sha(self) -> str:
         try:
@@ -984,6 +986,10 @@ class Satellite:
         if not included:
             return []
         try:
+            bound = (st.path, st.provider_session_id)
+            if st.provenance_state.get("_bound") != bound:
+                st.provenance_state.clear()
+                st.provenance_state["_bound"] = bound
             if provider == "codex" and not st.provenance_state.get("meta_seen"):
                 # The history horizon may begin after session_meta; seed the
                 # session identity from the immutable head once per bind.
@@ -1001,6 +1007,25 @@ class Satellite:
         except Exception as exc:  # noqa: BLE001 - provenance never blocks chat/usage
             log.warning("stream %s provenance failed: %s", st.session_name, exc)
             return []
+
+    def _attach_provenance(self, frame: dict) -> None:
+        """Attach pending provenance within a byte budget so it never pushes a
+        frame past the WebSocket limit (events always take precedence)."""
+        self._inflight_provenance = {}
+        pending = getattr(self, "_pending_provenance", {})
+        if not pending or getattr(self, "_provenance_supported", True) is False:
+            return
+        budget = int(WS_MAX_SIZE * 0.75) - len(json.dumps(frame)) - 128  # block envelope
+        items = []
+        for key, item in pending.items():
+            size = len(json.dumps(item)) + 2
+            if len(items) >= PROVENANCE_MAX_ITEMS or size > budget:
+                break
+            budget -= size
+            items.append(item)
+            self._inflight_provenance[key] = item
+        if items:
+            frame["usage_provenance"] = {"version": PROVENANCE_VERSION, "items": items}
 
     @staticmethod
     def _provenance_key(item: dict) -> tuple:
@@ -1108,16 +1133,10 @@ class Satellite:
         pending_usage = getattr(self, "_pending_usage", {})
         if pending_usage:
             frame["usage"] = [pending_usage[sid] for sid in sorted(pending_usage)]
-        pending_provenance = getattr(self, "_pending_provenance", {})
-        self._inflight_provenance = list(pending_provenance)[:PROVENANCE_MAX_ITEMS]
-        if self._inflight_provenance:
-            frame["usage_provenance"] = {
-                "version": PROVENANCE_VERSION,
-                "items": [pending_provenance[key] for key in self._inflight_provenance],
-            }
         proof = self._source_host_proof(os.getpid())
         if proof is not None:
             frame["source_host_proof"] = proof
+        self._attach_provenance(frame)
         await ws.send(json.dumps(frame))
         # Read frames until our reply arrives; the daemon fans broadcasts (incl.
         # our own chat.event echoes) to every client — those are ignored here.
@@ -1150,13 +1169,18 @@ class Satellite:
             return None
         usage_was_acknowledged = "usage_recorded" in ack or "usage_replayed" in ack or "usage_rejected" in ack
         provenance_ack = ack.get("usage_provenance")
+        if getattr(self, "_inflight_provenance", None):
+            # A daemon that ignores the block (older release) stops further
+            # attachment until reconnect; backfill recovers what it missed.
+            self._provenance_supported = isinstance(provenance_ack, dict)
         if isinstance(provenance_ack, dict) and not provenance_ack.get("error"):
             # Per-item rejections are final (backfill is the authority); only a
             # whole-block error keeps the batch for the next push.
             pending_provenance = getattr(self, "_pending_provenance", {})
-            for key in getattr(self, "_inflight_provenance", ()):
-                pending_provenance.pop(key, None)
-            self._inflight_provenance = []
+            for key, sent in getattr(self, "_inflight_provenance", {}).items():
+                if pending_provenance.get(key) is sent:  # never drop a newer replacement
+                    pending_provenance.pop(key, None)
+        self._inflight_provenance = {}
         usage_rejected_streams = {
             str(item.get("stream_id") or "")
             for item in (ack.get("usage_rejected") or ())
@@ -1255,6 +1279,7 @@ class Satellite:
         (raises ConnectionClosed) — the outer loop reconnects."""
         cfg = self.config
         delay = cfg.interval_s if cfg.first_delay_s is None else cfg.first_delay_s
+        self._provenance_supported = None  # re-probe the (possibly redeployed) daemon
         if not cfg.disabled:
             ack = await self._send_host_stats(ws)
             version = ack.get("version") if isinstance(ack, dict) else None

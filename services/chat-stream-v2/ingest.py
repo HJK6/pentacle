@@ -289,6 +289,11 @@ class Ingest:
         if self.provenance is None or not records:
             return
         try:
+            bound = (st.path, st.session_id)
+            if st.provenance_state.get("_bound") != bound:
+                # Rebind (new file or native session) within one generation.
+                st.provenance_state.clear()
+                st.provenance_state["_bound"] = bound
             items = native_provenance(
                 provider, records, native_session_id=st.session_id or None,
                 state=st.provenance_state,

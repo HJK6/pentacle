@@ -209,6 +209,9 @@ def _codex_provenance(records: list[dict[str, Any]], *, native_session_id: str |
     models); a complete transcript needs none.
     """
     state = state if state is not None else {}
+    if native_session_id and state.get('native_session_id') not in (None, native_session_id):
+        # A rebind to another native session must never inherit its identity.
+        state.clear()
     state.setdefault('turn_models', {})
     accounts: list[str] = list(state.get('accounts') or [])
     meta_seen = bool(state.get('meta_seen'))
@@ -246,6 +249,9 @@ def _codex_provenance(records: list[dict[str, Any]], *, native_session_id: str |
             usage = payload.get('usage')
             if response_id is None or response_id in seen_responses or not isinstance(usage, dict):
                 continue
+            owner = _text(payload.get('session_id') or payload.get('thread_id'))
+            if owner is not None and native is not None and owner != native:
+                continue  # a copied parent response belongs to the parent session
             values = {target: usage.get(source) for target, source in _CODEX_RESPONSE_USAGE}
             if any(type(value) is not int or value < 0 for value in values.values()):
                 continue

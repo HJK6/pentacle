@@ -804,3 +804,85 @@ def test_satellite_backfill_cli_over_event_push(tmp_path: Path, monkeypatch, cap
             store.stop()
 
     asyncio.run(run())
+
+
+# --- QA 0801faa5 repairs ---------------------------------------------------
+
+def test_codex_state_never_carries_identity_across_native_sessions() -> None:
+    """F1: a rebind to another native session starts from a clean identity."""
+    state: dict = {}
+    first = native_provenance("codex", _codex_rollout(account="acct-A", native="s1", responses=1),
+                              native_session_id="s1", state=state)
+    second = native_provenance("codex", _codex_rollout(account=None, cli="0.156.0", native="s2", responses=1),
+                               native_session_id="s2", state=state)
+    assert _identity(first)["account_id"] == "acct-A"
+    assert _identity(second) == {"account_id": None, "account_source": "unknown", "conflict": 0, "cli_version": "0.156.0"}
+    third = native_provenance("codex", _codex_rollout(account="acct-B", native="s3", responses=1),
+                              native_session_id="s3", state=state)
+    assert _identity(third)["account_id"] == "acct-B" and _identity(third)["conflict"] == 0
+
+
+def test_local_ingest_rebind_resets_provenance_state(tmp_path: Path) -> None:
+    from ingest import _StreamIngest, Ingest
+
+    seen: list[dict] = []
+
+    class Sink:
+        async def admit(self, _host, payload):
+            seen.extend(payload["items"])
+            return {}
+
+    ingest = Ingest(None, None, None, lambda _: asyncio.sleep(0), local_host="thoth", recent_limit=20, provenance=Sink())
+    st = _StreamIngest(path="/a.jsonl", session_id="s1")
+    asyncio.run(ingest._record_provenance("thoth:v2-x", "codex", _codex_rollout(account="acct-A", native="s1", responses=1), st))
+    st.path, st.session_id = "/b.jsonl", "s2"
+    asyncio.run(ingest._record_provenance("thoth:v2-x", "codex", _codex_rollout(account=None, native="s2", responses=1)[1:], st))
+    assert [item["identity"] for item in seen if item["kind"] == "codex_response"][-1] is None
+    assert {item["data"]["account_id"] for item in seen[-2:] if item["kind"] == "rate_limit"} == {None}
+
+
+def test_copied_parent_responses_stay_with_their_session() -> None:
+    """F4: a token_usage_record naming another session is not this session's."""
+    records = _codex_rollout(native="child", responses=2)
+    for record in records:
+        if record["type"] == "token_usage_record":
+            record["payload"]["session_id"] = "child"
+    records[2]["payload"]["session_id"] = "parent"
+    responses = [i for i in native_provenance("codex", records, complete=True) if i["kind"] == "codex_response"]
+    assert [i["data"]["response_id"] for i in responses] == ["resp-1"]
+
+
+def test_satellite_provenance_respects_byte_budget_and_unaware_daemon(tmp_path: Path) -> None:
+    """F2/F3: provenance never pushes a frame past the WS budget, stops for a
+    daemon that ignores it, and an ack never drops a newer replacement."""
+    import satellite
+    from satellite import Satellite, SatelliteConfig
+
+    sat = Satellite(SatelliteConfig(host=HOST, checkout=str(tmp_path)))
+    items = native_provenance("claude", [_claude_assistant(f"m{i}") for i in range(50)], complete=True)
+    sat._queue_provenance(items)
+    big = {"events": ["x" * (int(satellite.WS_MAX_SIZE * 0.75) - 2000)]}
+    sat._attach_provenance(big)
+    assert 0 < len(big["usage_provenance"]["items"]) < 50
+    assert len(json.dumps(big)) <= int(satellite.WS_MAX_SIZE * 0.75)
+    frame: dict = {}
+    sat._attach_provenance(frame)
+    sent_key = next(iter(sat._inflight_provenance))
+    replacement = dict(sat._pending_provenance[sent_key])
+    sat._queue_provenance([replacement])
+    sat._apply_ack({"type": "event.push.ok", "usage_provenance": {"counts": {}}}, {})
+    assert sat._pending_provenance.get(sent_key) is replacement and len(sat._pending_provenance) == 1
+    sat._attach_provenance(frame)
+    sat._apply_ack({"type": "event.push.ok"}, {})  # an older daemon: no usage_provenance key
+    assert sat._provenance_supported is False
+    unaware: dict = {}
+    sat._attach_provenance(unaware)
+    assert "usage_provenance" not in unaware
+
+
+def test_collector_history_survives_malformed_limits(tmp_path: Path) -> None:
+    """F5: a malformed limits value never fails the collector or the cache line."""
+    data = _claude_json()
+    data["cachedUsageUtilization"]["utilization"]["limits"] = 7
+    lines = claude_cache_lines(data, host="thoth", probed_at="p")
+    assert [line["window_kind"] for line in lines] == ["seven_day"]

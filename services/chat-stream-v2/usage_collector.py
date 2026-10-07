@@ -185,11 +185,11 @@ class UsageStateCollector:
                 with self._claude_config_path.open(encoding="utf-8") as handle:
                     data = json.load(handle)
                 lines = claude_cache_lines(data, host=self._host, probed_at=self._now()) + lines
-            except (OSError, ValueError) as exc:
+            except Exception as exc:  # noqa: BLE001 - history never fails the collector run
                 log.warning("claude cache unreadable for usage history: %s", type(exc).__name__)
         try:
             self._history.append(lines)
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 - history never fails the collector run
             log.warning("usage history append failed: %s", exc)
 
     def _json(self, command: tuple[str, ...]) -> dict | None:
