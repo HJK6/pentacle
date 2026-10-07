@@ -610,7 +610,8 @@
         }
       }
     ],
-    "next_before_updated_at": null
+    "next_before_updated_at": null,
+    "next_before_lane_id": null
   },
   "lane_update_events": [
     {

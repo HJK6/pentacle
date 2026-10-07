@@ -193,6 +193,11 @@ def _chat_available(conn: sqlite3.Connection, lane: dict[str, Any]) -> tuple[str
     row = _session_conn(conn, target)
     if row is None or row.get("session_generation") != lane.get("visible_chat_generation"):
         return "session", "unavailable"
+    # Re-apply the pointer validator: a chat that became hidden, protected,
+    # composite or a direct-primary binding is unavailable, never a destination.
+    if ((row.get("visibility") or "default") not in ("default", "visible") or _is_composite(row)
+            or _protected(row) or target in _binding_streams_conn(conn, None)):
+        return "session", "unavailable"
     if row.get("status") == "open":
         return "session", "open"
     tail = conn.execute(
@@ -284,10 +289,12 @@ def operator_lane_guard_conn(conn, *, lane_id: str | None, action: str, actor_st
     Returns the question id to consume, or None when the lane is not operator-owned.
     """
     if not lane_id:
+        if confirmation is not None:
+            raise ValueError("work_lane_operator_confirmation_mismatch")
         return None
     row = conn.execute("SELECT owner_kind FROM v2_assistant_composite_lanes WHERE lane_id=?",
                        (lane_id,)).fetchone()
-    if row is None or row["owner_kind"] != "operator":
+    if (row is None or row["owner_kind"] != "operator") and confirmation is None:
         return None
     question_id = _verify_confirmation(confirmation, lane_id=lane_id, action=action,
                                        actor_stream_id=actor_stream_id)
@@ -559,6 +566,13 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if to == prior_state:
                 raise ValueError("work_lane_state_unchanged")
             reason = _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")
+            # D5: a supplied confirmation must name exactly this lane and action;
+            # an operator lane's done always needs one.
+            if "operator_confirmation" in payload or (to == "done" and lane.get("owner_kind") == "operator"):
+                consumed = _verify_confirmation(payload.get("operator_confirmation") and confirmation,
+                                                lane_id=lane["lane_id"], action="set_state:" + to,
+                                                actor_stream_id=actor)
+                _consume_confirmation_conn(conn, consumed)
             changes["work_state"] = to
             changes["work_state_reason"] = "reopened" if prior_state == "done" else "fd"
             if to == "active":
@@ -575,10 +589,6 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                                 required=True)
                 changes["done_at"] = stamp
                 if lane.get("owner_kind") == "operator":
-                    consumed = _verify_confirmation(payload.get("operator_confirmation") and confirmation,
-                                                    lane_id=lane["lane_id"], action="set_state:done",
-                                                    actor_stream_id=actor)
-                    _consume_confirmation_conn(conn, consumed)
                     changes["work_state_reason"] = "operator_confirmed"
                 update = ("lane_completed", "transition", outcome)
             elif prior_state == "blocked" and to in ("active", "paused"):
@@ -587,6 +597,8 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                           resolution or f"Blocker cleared: {lane.get('blocker') or ''}"[:UPDATE_TEXT_MAX])
             if prior_state == "blocked":
                 event_payload = dict(payload, cleared_blocker=lane.get("blocker"))
+            if prior_state == "done":
+                update = None  # D6: reopen emits no update, whatever the reopened state
             del reason  # recorded on the event row only, never published
         elif operation == "set_lead":
             if set(payload) - {"lead", "visible_chat"} or "lead" not in payload:
@@ -628,11 +640,12 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if to == lane.get("owner_kind"):
                 raise ValueError("work_lane_owner_unchanged")
             changes["owner_kind"] = to
-            if to == "fd":
+            if to == "fd" or "operator_confirmation" in payload:
                 consumed = _verify_confirmation(payload.get("operator_confirmation") and confirmation,
-                                                lane_id=lane["lane_id"], action="set_owner:fd",
+                                                lane_id=lane["lane_id"], action="set_owner:" + to,
                                                 actor_stream_id=actor)
                 _consume_confirmation_conn(conn, consumed)
+            if to == "fd":
                 update = ("major_decision", "decision",
                           f"Handed to FD: {lane.get('title') or lane['lane_id']}"[:UPDATE_TEXT_MAX])
         elif operation == "update":

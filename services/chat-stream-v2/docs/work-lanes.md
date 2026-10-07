@@ -20,14 +20,17 @@ Clients send `capabilities.work_lanes_v1: true` in `hello`. Only such non-scoped
 
 ## List RPC
 
-Request: `{"type":"work_lanes.list","include_done":bool,"limit":<=200,"before_updated_at":<iso>|null}`.
+Request: `{"type":"work_lanes.list","include_done":bool,"limit":<=200,"before_updated_at":<iso>|null,"before_lane_id":<id>|null}`.
 
-Reply: `{"type":"work_lanes.list.ok","include_done","lanes":[…same lane shape…],"next_before_updated_at"}`.
+Reply: `{"type":"work_lanes.list.ok","include_done","lanes":[…same lane shape…],"next_before_updated_at","next_before_lane_id"}`.
+
+Paging uses the compound key (`updated_at`, `lane_id`), descending, so lanes with the same `updated_at` are never dropped. To fetch the next page, pass both `next_before_*` values back as `before_updated_at` and `before_lane_id`. Both are null on the last page. Within a page, lanes come in server order.
 
 ## Tap target (per `visible_chat.available`)
 
 - `open`: open the chat. For a session, use `stream_id`; for the composite, open Bart's chat.
-- `history`: show a read-only transcript. Fetch it with `{"type":"request_stream_events","stream_id":…,"generation":…,…}` using the existing limits and paging. The daemon serves a closed stream only when `(stream_id, generation)` is the visible chat of a first-class lane and the pointer still validates. It refuses scoped clients and hidden or backend seats.
+- `history`: show a read-only transcript. Fetch it with `{"type":"request_stream_events","stream_id":…,"generation":…,…}` using the existing limits and paging. Scoped clients stay confined to their scope stream. The lane exception admits an operator-authenticated, non-scoped client when `(stream_id, generation)` is the visible chat of a first-class lane and the pointer still validates. Note that the inherited `request_stream_events` gate already serves a stream that is absent from the open inventory to non-scoped clients, so the lane check is not the only path to a closed tail.
+- The projection re-applies the pointer validator on every read. A visible chat that has since become hidden, protected, composite or a direct-primary binding presents `available: "unavailable"`.
 - `unavailable`: render an explicit "Chat unavailable" state and keep the lane visible. Never fall back to Bart, a hidden worker or a new generation.
 
 ## Lane updates

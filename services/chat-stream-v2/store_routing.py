@@ -1452,8 +1452,11 @@ class _RoutingStoreMixin:
                 guarded_action = ("lane.close" if operation == "lane.close" else
                                   "lane.decision:cancel" if operation == "lane.decision"
                                   and payload.get("transition") == "cancel" else None)
+                if guarded_action is None and operator_confirmation is not None:
+                    raise ValueError("work_lane_operator_confirmation_mismatch")
                 if guarded_action is not None:
-                    # Owner-kind guard (work lanes D5): only rows with owner_kind='operator'.
+                    # Owner-kind guard (work lanes D5): operator lanes need a confirmation;
+                    # a supplied one must match this lane and action on any lane.
                     from store_work_lanes import operator_lane_guard_conn, record_routing_confirmation_conn
                     consumed = operator_lane_guard_conn(
                         conn, lane_id=lane_id, action=guarded_action,

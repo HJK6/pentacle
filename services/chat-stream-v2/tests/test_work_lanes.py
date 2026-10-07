@@ -352,7 +352,7 @@ def test_emit_started_once_and_owner_kind_v13():
                 await env.op("set_state", {"to": "done", "outcome": "x", "operator_confirmation": c},
                              lane=lid, version=1)
             assert code(e) == "work_lane_operator_confirmation_mismatch", c
-        # a done confirmation cannot authorize blocked (blocked is unguarded anyway: it ignores it)
+        # mismatched-target refusals for unguarded targets: test_supplied_confirmation_must_match_operation_qa_f2
         good = env.confirm("q-good", lid, "set_state:done")
         r = await env.op("set_state", {"to": "done", "outcome": "x", "operator_confirmation": good},
                          lane=lid, version=1)
@@ -548,3 +548,79 @@ def test_real_notify_confirmation_round_trip_d5(tmp_path):
         finally:
             await notify.stop()
     asyncio.run(go())
+
+
+def test_supplied_confirmation_must_match_operation_qa_f2():
+    async def body(env):
+        lead = await env.seat("f2-lead", role="lead")
+        lid = (await env.adopt(key="stream:f2", owner="operator", lead=lead))["lane"]["lane_id"]
+        done_q = env.confirm("q-f2-done", lid, "set_state:done")
+        with pytest.raises(ValueError) as e:  # a done confirmation cannot ride on blocked
+            await env.op("set_state", {"to": "blocked", "blocker": "b", "operator_confirmation": done_q},
+                         lane=lid, version=1)
+        assert code(e) == "work_lane_operator_confirmation_mismatch"
+        fd_lead = await env.seat("f2-fd", role="lead", parent_stream_id=FD)
+        fd_lane = (await env.adopt(key="stream:f2-fd", lead=fd_lead))["lane"]["lane_id"]
+        own_q = env.confirm("q-f2-own", fd_lane, "set_owner:fd")
+        with pytest.raises(ValueError) as e:  # set_owner:fd cannot authorize set_owner:operator
+            await env.op("set_owner", {"to": "operator", "operator_confirmation": own_q},
+                         lane=fd_lane, version=1)
+        assert code(e) == "work_lane_operator_confirmation_mismatch"
+        close_q = env.confirm("q-f2-close", fd_lane, "set_state:done")
+        with pytest.raises(ValueError) as e:  # routing: a done confirmation is not lane.close
+            await env.store.apply_assistant_composite_operation(
+                stream_id=ASSISTANT, operation_id="f2-close", operation="lane.close", lane_id=fd_lane,
+                actor_stream_id=FD, payload={"completion_message_id": "m", "completion_disposition": "accepted"},
+                dispatch_id="d", expected_lane_version=1, operator_confirmation=env.confirmations["q-f2-close"])
+        assert code(e) == "work_lane_operator_confirmation_mismatch"
+        del close_q
+    run(body)
+
+
+def test_reopen_emits_no_update_even_to_blocked_qa_f4():
+    async def body(env):
+        lid = (await env.adopt(key="stream:f4"))["lane"]["lane_id"]
+        await env.op("set_state", {"to": "done", "outcome": "ok"}, lane=lid, version=1)
+        r = await env.op("set_state", {"to": "blocked", "blocker": "again"}, lane=lid, version=2)
+        assert r["update"] is None and r["lane"]["work_state_reason"] == "reopened"
+        assert r["lane"]["blocker"] == "again"
+    run(body)
+
+
+def test_projection_rechecks_visible_chat_eligibility_qa_f3():
+    async def body(env):
+        chat = await env.seat("f3-chat")
+        await env.adopt(key="stream:f3", state="paused", lead=False, owner="operator",
+                        chat={"stream_id": chat[0], "generation": chat[1]})
+        assert (await env.store.work_lane_rows())[0]["_chat_available"] == "open"
+        await env.store.update_session("amaterasu", "f3-chat", visibility="hidden")
+        assert (await env.store.work_lane_rows())[0]["_chat_available"] == "unavailable"
+    run(body)
+
+
+def test_list_paging_is_tie_safe_qa_f1():
+    async def body(env):
+        from work_lanes_projection import WorkLanesInventory
+        for key in ("stream:t1", "stream:t2", "stream:t3"):
+            await env.adopt(key=key, state="paused", lead=False, owner="operator")
+
+        def tie(conn):
+            conn.execute("UPDATE v2_assistant_composite_lanes SET updated_at='2026-10-07T17:00:00.000Z' "
+                         "WHERE work_state IS NOT NULL")
+            conn.commit()
+        await env.store.submit(tie)
+
+        class _NoSessions:
+            def list_open(self):
+                return []
+        inv = WorkLanesInventory(env.store, _NoSessions(), None)
+        seen, cursor = [], {}
+        for _ in range(5):
+            page = await inv.list(limit=1, **cursor)
+            seen += [lane["lane_id"] for lane in page["lanes"]]
+            if not page["next_before_updated_at"]:
+                break
+            cursor = {"before_updated_at": page["next_before_updated_at"],
+                      "before_lane_id": page["next_before_lane_id"]}
+        assert len(seen) == 3 and len(set(seen)) == 3
+    run(body)

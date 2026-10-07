@@ -3402,8 +3402,11 @@ class Server:
         before = msg.get("before_updated_at")
         if before is not None and not isinstance(before, str):
             raise VerbError("work_lanes_list_invalid", "before_updated_at must be a string")
+        before_lane_id = msg.get("before_lane_id")
+        if before_lane_id is not None and not isinstance(before_lane_id, str):
+            raise VerbError("work_lanes_list_invalid", "before_lane_id must be a string")
         return await self.work_lanes.list(include_done=bool(msg.get("include_done")), limit=limit,
-                                          before_updated_at=before)
+                                          before_updated_at=before, before_lane_id=before_lane_id)
 
     async def _on_work_lanes_show(self, msg: dict[str, Any]) -> dict[str, Any]:
         self._work_lanes_reader(msg)

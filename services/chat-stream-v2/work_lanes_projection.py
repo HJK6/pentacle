@@ -176,18 +176,20 @@ class WorkLanesInventory:
         return build_frame(rows, presence_index(self.sessions.list_open()))
 
     async def list(self, *, include_done: bool = False, limit: int = 200,
-                   before_updated_at: str | None = None) -> dict[str, Any]:
+                   before_updated_at: str | None = None, before_lane_id: str | None = None) -> dict[str, Any]:
+        """Page by the compound key (updated_at, lane_id) descending, so ties never drop lanes."""
         rows = await self.store.work_lane_rows(include_done=include_done)
         lanes = project_lanes(rows, presence_index(self.sessions.list_open()))
-        lanes.sort(key=lambda lane: (str(lane.get("updated_at") or ""), lane["lane_id"]), reverse=True)
+        key = lambda lane: (str(lane.get("updated_at") or ""), lane["lane_id"])  # noqa: E731
+        lanes.sort(key=key, reverse=True)
         if before_updated_at:
-            lanes = [lane for lane in lanes if str(lane.get("updated_at") or "") < before_updated_at]
+            cursor = (before_updated_at, before_lane_id or "\uffff")
+            lanes = [lane for lane in lanes if key(lane) < cursor]
         page = lanes[:limit]
-        more = len(lanes) > limit
-        page = server_order(page)
-        return {"type": "work_lanes.list.ok", "include_done": include_done, "lanes": page,
-                "next_before_updated_at": (min(str(lane.get("updated_at") or "") for lane in page)
-                                           if more and page else None)}
+        last = page[-1] if page and len(lanes) > limit else None
+        return {"type": "work_lanes.list.ok", "include_done": include_done, "lanes": server_order(page),
+                "next_before_updated_at": str(last.get("updated_at") or "") if last else None,
+                "next_before_lane_id": last["lane_id"] if last else None}
 
     async def emit_if_changed(self) -> bool:
         async with self._lock:
