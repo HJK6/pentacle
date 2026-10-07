@@ -116,16 +116,22 @@ class FrontDeskDigest:
                 raise
         log.info('subsystem=front_desk_digest bug_ref=front_desk_wake_reduction action=%s target=%s',
                  'drop' if drop else 'hold', target_stream_id)
-        return self._held_reply(verb)
+        return self._held_reply(verb, None if drop else nid)
 
     @staticmethod
     def _held_id(target, verb, identity):
         return 'frontdesk-held:'+hashlib.sha256((target+'\0'+verb+'\0'+identity).encode()).hexdigest()
 
     @staticmethod
-    def _held_reply(verb):
-        return {'type':verb+'.ok', 'delivery_status':'persisted', 'submission_confirmed':False,
-                'action_committed':True, 'assistant_backend_ingress':'persisted_suppressed'}
+    def _held_reply(verb, hold_id=None):
+        # `front_desk_hold_id` names the durable held notice (absent for a drop),
+        # so a queued composite tell can be dequeued only on a hold that survives
+        # a restart.
+        reply = {'type':verb+'.ok', 'delivery_status':'persisted', 'submission_confirmed':False,
+                 'action_committed':True, 'assistant_backend_ingress':'persisted_suppressed'}
+        if hold_id:
+            reply['front_desk_hold_id'] = hold_id
+        return reply
 
     async def _retained_tell_hold(self, target, body, msg, tell_key):
         """Recover or refuse a caller-keyed tell whose deterministic hold exists.
@@ -145,7 +151,7 @@ class FrontDeskDigest:
                     target, msg.get('from_stream_id') or '')):
             from comms import Comms
             raise Comms._conflict(tell_key)
-        return self._held_reply('tell')
+        return self._held_reply('tell', nid)
 
     async def _rows(self, target):
         return await self.store.submit(lambda conn: [dict(row) for row in conn.execute(

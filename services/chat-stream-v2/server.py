@@ -2980,11 +2980,14 @@ class Server:
             # chatter persisted without a paste).
             "_assistant_composite_backend_dispatch": True,
         })
-        return {
+        delivered = {
             "type": "tell.ok", "to_stream_id": composite_stream_id, "tell_id": tell_id,
             "delivery_status": reply.get("delivery_status"),
             "submission_confirmed": reply.get("submission_confirmed"),
         }
+        if reply.get("front_desk_hold_id"):
+            delivered["front_desk_hold_id"] = reply["front_desk_hold_id"]
+        return delivered
 
     async def _flush_composite_tells(self, composite: Any) -> int:
         """Deliver this composite's queued tells, in order, to the new binding.
@@ -3003,7 +3006,8 @@ class Server:
                 break
             if result is None:
                 break
-            if not self._composite_tell_committed(result):
+            if not (self._composite_tell_committed(result)
+                    or await self._composite_tell_durably_held(result)):
                 # Delivery is not yet committed (e.g. pasted_unsubmitted: the
                 # paste sits in an active draft and the target has not received
                 # it as input).  Keep the row queued and stop in order — a later
@@ -3013,6 +3017,21 @@ class Server:
             await self.store.delete_composite_tell(seq=row["seq"])
             delivered += 1
         return delivered
+
+    async def _composite_tell_durably_held(self, reply: dict[str, Any]) -> bool:
+        """Whether the front-desk digest durably holds this tell for the bound seat.
+
+        A peer tell to the front desk is delivered into the digest hold (no paste),
+        the same as while bound. Only a hold whose notice row survives a restart
+        counts; a drop or any reply without that row stays queued. A replay of the
+        same tell_id recovers the same hold, so this never double-delivers.
+        """
+        hold_id = str(reply.get("front_desk_hold_id") or "")
+        if reply.get("delivery_status") != "persisted" or not hold_id:
+            return False
+        row = await self.store.submit(lambda conn: conn.execute(
+            "SELECT 1 FROM v2_outbound_notices WHERE notice_id=?", (hold_id,)).fetchone())
+        return row is not None
 
     @staticmethod
     def _composite_tell_committed(reply: dict[str, Any]) -> bool:

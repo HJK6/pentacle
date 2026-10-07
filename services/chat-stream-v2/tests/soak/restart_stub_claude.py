@@ -14,6 +14,9 @@ Control is file based so the harness can drive each stage deterministically:
   $RESTART_STUB_CONTROL/<session>.booting   written while holding readiness
   $RESTART_STUB_CONTROL/<session>.pasted    written when a submission is held
   $RESTART_STUB_CONTROL/<session>.inputs    one JSON line per received submission
+
+`--resume <id>` (the real resume path) reuses that native session id, so the
+resumed seat appends to the transcript the first generation wrote.
 """
 from __future__ import annotations
 
@@ -52,7 +55,9 @@ def _chrome() -> None:
 
 def main() -> int:
     argv = sys.argv[1:]
-    session_id = argv[argv.index("--session-id") + 1] if "--session-id" in argv else uuid.uuid4().hex
+    # `claude --resume <id>` continues the same native session (and transcript).
+    flag = next((f for f in ("--session-id", "--resume") if f in argv), None)
+    session_id = argv[argv.index(flag) + 1] if flag else uuid.uuid4().hex
     try:
         attrs = termios.tcgetattr(0)
         attrs[3] &= ~termios.ECHO

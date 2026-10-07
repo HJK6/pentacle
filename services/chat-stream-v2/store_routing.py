@@ -336,6 +336,29 @@ def _assistant_actor_conn(conn, actor, generation):
     return dict(row)
 
 
+def _closed_bound_target_conn(conn, target, generation):
+    """Whether `target` is a closed seat still at the bound `generation`.
+
+    Only a dead bound target qualifies: the row is closed at exactly the
+    generation the direct binding names, and no durable binding names that
+    stream at another generation. A live seat at another generation (resumed,
+    not yet rebound) or any other closed row stays a conflict.
+    """
+    host, _, name = str(target or "").partition(":")
+    row = conn.execute(
+        "SELECT s.status,g.generation FROM sessions s "
+        "JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
+        "WHERE s.host=? AND s.session_name=?", (host, name),
+    ).fetchone()
+    if row is None or row["status"] != "closed" or not generation or row["generation"] != generation:
+        return False
+    moved = conn.execute(
+        "SELECT 1 FROM v2_assistant_direct_binding WHERE stream_id=? AND generation!=?",
+        (target, generation),
+    ).fetchone()
+    return moved is None
+
+
 def _assistant_lane_receipt_conn(conn, stream_id, lane_id):
     """Current lane snapshot under the operation transaction, including replay.
 
@@ -797,7 +820,11 @@ class _RoutingStoreMixin:
                     try:
                         _assistant_actor_conn(conn, direct_target_stream_id, direct_target_generation)
                     except ValueError as exc:
-                        raise ValueError("assistant_direct_generation_conflict") from exc
+                        # A bound seat the reconciler closed (pane gone) is an
+                        # unbound target, not a conflict: admit so the route
+                        # queues and replays after the recovery rebind.
+                        if not _closed_bound_target_conn(conn, direct_target_stream_id, direct_target_generation):
+                            raise ValueError("assistant_direct_generation_conflict") from exc
                 session = conn.execute(
                     "SELECT created_at,status,provider FROM sessions WHERE host=? AND session_name=?",
                     (host, session_name),
