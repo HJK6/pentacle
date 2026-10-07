@@ -128,6 +128,31 @@
   border-radius: 12px;
   font-size: 13px;
 }
-.slot-chat-voice-take span { flex: 1; }
+.slot-chat-voice-status { flex: 1; }
 .slot-chat-voice-take button { cursor: pointer; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 8px; padding: 4px 8px; }
-.slot-chat-compose-mic.is-recording { color: #ff6b81; box-shadow: 0 0 0 2px currentColor; }
+
+/* Mobile voice contract: the capsule is the field, without a second frame.
+   Keep the draft and attachments intact while temporarily replacing its face. */
+.cosmic .slot-chat-compose.is-voice-recording { display: flex; gap: 6px; padding: 5px 6px 5px 9px; border-radius: 24px; border-color: rgba(61, 255, 102, 0.4); background: rgba(61, 255, 102, 0.055); box-shadow: 0 0 22px rgba(61, 255, 102, 0.16); }
+.cosmic .slot-chat-compose.is-voice-recording .slot-chat-plus-wrap,
+.cosmic .slot-chat-compose.is-voice-recording .slot-chat-compose-input,
+.cosmic .slot-chat-compose.is-voice-recording .slot-chat-attachment-tray,
+.cosmic .slot-chat-compose.is-voice-recording .slot-chat-compose-send { display: none !important; }
+.slot-chat-voice-take.voice-recording-strip { order: 1; flex: 1; min-width: 0; height: 44px; gap: 10px; margin: 0; padding: 0; border: 0; border-radius: 0; color: var(--cosmic-green, #3dff66); }
+.voice-recording-strip .voice-recording-discard { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; width: 24px; height: 34px; padding: 0; border: 0; border-radius: 0; color: var(--cosmic-muted, #607c67); }
+.voice-recording-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 3.5px; background: var(--cosmic-green, #3dff66); animation: voice-record-blink 1s steps(1, end) infinite; }
+.voice-recording-timer { flex: 0 0 auto; font-family: var(--cosmic-font-mono-medium, monospace); font-size: 12px; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
+.voice-recording-bars { flex: 1; min-width: 0; height: 26px; display: flex; align-items: center; justify-content: flex-end; gap: 2px; overflow: hidden; }
+.voice-recording-bar { flex: 0 0 2.5px; width: 2.5px; border-radius: 2px; background: var(--cosmic-green, #3dff66); animation: voice-bar-grow 180ms ease-out both; }
+.cosmic .slot-chat-compose-mic.is-recording { order: 2; position: relative; width: 40px; height: 40px; padding: 0; border: 1px solid var(--cosmic-green, #3dff66); border-radius: 50%; background: var(--cosmic-green, #3dff66); color: var(--cosmic-ink, #080b0a); box-shadow: none; }
+.slot-chat-compose-mic.is-recording .voice-mic-glyph { width: 17px; height: 17px; }
+.voice-record-ring { position: absolute; inset: -1px; border: 1.5px solid var(--cosmic-green, #3dff66); border-radius: 50%; opacity: 0; pointer-events: none; animation: voice-record-pulse 1.4s ease-out infinite; }
+.voice-record-ring:nth-child(2) { animation-delay: 0.7s; }
+.voice-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+@keyframes voice-bar-grow { from { transform: scaleY(0.2); } to { transform: scaleY(1); } }
+@keyframes voice-record-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+@keyframes voice-record-pulse { from { opacity: 0.4; transform: scale(1); } to { opacity: 0; transform: scale(1.35); } }
+@media (prefers-reduced-motion: reduce) {
+  .voice-recording-dot, .voice-recording-bar { animation: none; }
+  .voice-record-ring { display: none; }
+}

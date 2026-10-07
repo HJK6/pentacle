@@ -1,8 +1,12 @@
 'use strict';
 
 const MAX_DURATION_S = 300;
+const SAMPLE_INTERVAL_MS = 90;
+const DISPLAY_BARS = 46;
 const BUG_REF = 'spec_pentacle__web_chat_mic_button_2026_10';
 const durationLabel = seconds => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+const clampLevel = level => Number.isFinite(level) ? Math.max(0, Math.min(1, level)) : 0;
+const nowMs = env => env.performance?.now?.() ?? Date.now();
 function failureMessage(error) {
   const code = error?.error_code || error?.error || error?.code || error?.message;
   if (error?.name === 'NotAllowedError') return 'Microphone permission denied. Allow microphone access and Retry.';
@@ -80,37 +84,51 @@ function encodeWav(chunks, sampleRate) {
 }
 
 function createBrowserRecorder(env = globalThis) {
-  let stream; let context; let source; let processor; let recorder; let chunks; let started;
+  let stream; let context; let source; let analyser; let samples; let processor; let recorder; let chunks; let started;
   async function cleanup() {
     if (processor) { processor.onaudioprocess = null; processor.disconnect(); }
+    analyser?.disconnect();
     source?.disconnect(); stream?.getTracks().forEach(track => track.stop());
     if (context) await context.close().catch(() => {});
-    stream = context = source = processor = recorder = null;
+    stream = context = source = analyser = samples = processor = recorder = null;
   }
   return {
     async start() {
       try {
         stream = await env.navigator.mediaDevices.getUserMedia({ audio: true }); chunks = [];
+        const AudioContext = env.AudioContext || env.webkitAudioContext;
+        if (!AudioContext) throw new Error('Audio capture and metering are unavailable in this browser.');
+        context = new AudioContext(); await context.resume();
+        source = context.createMediaStreamSource(stream);
+        analyser = context.createAnalyser(); analyser.fftSize = 2048;
+        samples = new Float32Array(analyser.fftSize);
+        source.connect(analyser); // Meter the same stream; never play the microphone through speakers.
         if (env.MediaRecorder?.isTypeSupported?.('audio/mp4')) {
           recorder = new env.MediaRecorder(stream, { mimeType: 'audio/mp4' });
           recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
           recorder.start();
         } else {
-          const AudioContext = env.AudioContext || env.webkitAudioContext;
-          if (!AudioContext) throw new Error('Audio capture is unavailable in this browser.');
-          context = new AudioContext(); await context.resume();
-          source = context.createMediaStreamSource(stream);
           // PCM capture is the fallback because webm/ogg are not daemon codecs.
           processor = context.createScriptProcessor(4096, 1, 1);
           processor.onaudioprocess = event => chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
           source.connect(processor); processor.connect(context.destination);
         }
-        started = Date.now();
+        started = nowMs(env);
       } catch (error) { await cleanup(); throw error; }
+    },
+    poll() {
+      if (!analyser) return { level: 0, durationMs: 0 };
+      analyser.getFloatTimeDomainData(samples);
+      let power = 0; for (const value of samples) power += value * value;
+      const rms = Math.sqrt(power / samples.length);
+      // Mobile's native dBFS meter maps -60..0 dB to 0..1. Browser PCM RMS
+      // supplies the equivalent level without a transcription/audio side path.
+      const level = rms > 0 ? clampLevel((20 * Math.log10(rms) + 60) / 60) : 0;
+      return { level, durationMs: Math.max(0, nowMs(env) - started) };
     },
     async stop() {
       try {
-        const durationS = Math.max(1, Math.min(MAX_DURATION_S, (Date.now() - started) / 1000));
+        const durationS = Math.max(1, Math.min(MAX_DURATION_S, (nowMs(env) - started) / 1000));
         let blob;
         if (recorder) {
           await new Promise((resolve, reject) => { recorder.onstop = resolve; recorder.onerror = event => reject(event.error || new Error('Audio capture failed.')); recorder.stop(); });
@@ -128,24 +146,66 @@ function createBrowserRecorder(env = globalThis) {
 }
 
 let captureOwner = null;
-function bindComposerMic({ web, env = globalThis, button, panel, takeMount, roomToggle, getStreamId, recorder = createBrowserRecorder(env), upload, transcribe, send, telemetry }) {
+function bindComposerMic({ web, env = globalThis, button, panel, composer = button.closest('.slot-chat-compose'), takeMount, roomToggle, getStreamId, recorder = createBrowserRecorder(env), upload, transcribe, send, telemetry }) {
   if (!web) { button.addEventListener('click', roomToggle); return; }
   button.setAttribute('aria-label', 'Record voice message'); button.title = 'Record voice message';
+  button.innerHTML = '<svg class="voice-mic-glyph" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
   if (!env.isSecureContext || typeof env.navigator?.mediaDevices?.getUserMedia !== 'function') {
     button.disabled = true; button.title = 'Microphone recording is unavailable. Use a secure browser with microphone support.'; return;
   }
   const panelParent = panel.parentNode; const panelNext = panel.nextSibling;
   const owner = {}; let phase = 'idle'; let started; let tick; let origin; let take; let generation = 0;
+  let levels = []; let timer; let bars;
   panel.setAttribute('aria-live', 'polite'); panel.className = 'slot-chat-voice-take'; panel.hidden = true;
-  const clearTick = () => { if (tick) env.clearInterval(tick); tick = null; };
-  const reset = () => { clearTick(); phase = 'idle'; button.disabled = false; button.classList.remove('is-recording'); button.setAttribute('aria-label', 'Record voice message'); panel.hidden = true; panel.replaceChildren(); panelParent.insertBefore(panel, panelNext); if (captureOwner === owner) captureOwner = null; };
+  const clearTick = () => { if (tick != null) env.clearInterval(tick); tick = null; };
+  function recordingFace(active) {
+    composer?.classList.toggle('is-voice-recording', active);
+    button.classList.toggle('is-recording', active);
+    const label = active ? 'Stop and send' : 'Record voice message';
+    button.setAttribute('aria-label', label); button.title = label;
+    button.querySelectorAll('.voice-record-ring').forEach(ring => ring.remove());
+    if (active) for (let i = 0; i < 2; i++) {
+      const ring = panel.ownerDocument.createElement('span'); ring.className = 'voice-record-ring';
+      ring.setAttribute('aria-hidden', 'true'); button.prepend(ring);
+    }
+    if (!active) {
+      panel.classList.remove('is-recording', 'voice-recording-strip');
+      panel.setAttribute('aria-live', 'polite');
+      if (composer && panel.parentNode === composer) panelParent.insertBefore(panel, panelNext);
+    }
+  }
+  const reset = () => { clearTick(); phase = 'idle'; button.disabled = false; recordingFace(false); panel.hidden = true; panel.replaceChildren(); panelParent.insertBefore(panel, panelNext); levels = []; timer = bars = null; if (captureOwner === owner) captureOwner = null; };
   function paint(text, retry, cancel) {
     panel.hidden = false; panel.replaceChildren();
-    const label = panel.ownerDocument.createElement('span'); label.textContent = text; panel.appendChild(label);
+    const label = panel.ownerDocument.createElement('span'); label.className = 'slot-chat-voice-status'; label.textContent = text; panel.appendChild(label);
     for (const [title, action] of [['Retry', retry], ['Cancel', cancel]]) if (action) {
       const control = panel.ownerDocument.createElement('button'); control.type = 'button'; control.textContent = title;
       control.addEventListener('click', action); panel.appendChild(control);
     }
+  }
+  function paintRecording() {
+    recordingFace(true); levels = [];
+    panel.hidden = false; panel.classList.add('is-recording', 'voice-recording-strip');
+    // Do not announce every metering sample. The accessible label and tabular
+    // timer stay available without a continuously changing live region.
+    panel.setAttribute('aria-live', 'off');
+    panel.innerHTML = '<span class="voice-sr-only">Recording</span><button type="button" class="voice-recording-discard" aria-label="Discard recording"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg><span class="voice-sr-only">Cancel recording</span></button><span class="voice-recording-dot" aria-hidden="true"></span><span class="voice-recording-timer" role="timer">0:00</span><div class="voice-recording-bars" aria-hidden="true"></div>';
+    panel.querySelector('.voice-recording-discard').addEventListener('click', cancel);
+    timer = panel.querySelector('.voice-recording-timer'); bars = panel.querySelector('.voice-recording-bars');
+    if (composer) composer.insertBefore(panel, button);
+  }
+  function sample() {
+    if (phase !== 'recording') return;
+    const reading = recorder.poll?.();
+    const seconds = (reading?.durationMs ?? nowMs(env) - started) / 1000;
+    const level = clampLevel(reading?.level ?? 0);
+    const bar = panel.ownerDocument.createElement('div'); bar.className = 'voice-recording-bar';
+    bar.dataset.sample = String(levels.length); levels.push(level);
+    bar.style.height = `${Math.max(1, Math.round(level * 26))}px`; bar.style.opacity = String(0.45 + level * 0.55);
+    bars.appendChild(bar);
+    while (bars.children.length > DISPLAY_BARS) bars.firstElementChild.remove();
+    timer.textContent = durationLabel(seconds);
+    if (seconds >= MAX_DURATION_S) void stop();
   }
   async function cancel() {
     generation++; clearTick(); take?.discard(); take = null;
@@ -164,9 +224,8 @@ function bindComposerMic({ web, env = globalThis, button, panel, takeMount, room
     try {
       await recorder.start();
       if (gen !== generation) { await recorder.discard(); reset(); return; }
-      phase = 'recording'; started = Date.now(); button.disabled = false; button.classList.add('is-recording'); button.setAttribute('aria-label', 'Stop recording');
-      const update = () => { const seconds = (Date.now() - started) / 1000; paint(`Recording · ${durationLabel(seconds)}`, null, cancel); if (seconds >= MAX_DURATION_S) void stop(); };
-      update(); tick = env.setInterval(update, 250);
+      phase = 'recording'; started = nowMs(env); button.disabled = false;
+      paintRecording(); tick = env.setInterval(sample, SAMPLE_INTERVAL_MS);
       telemetry?.('chat_voice_record_started', { subsystem: 'web_voice', bug_ref: BUG_REF, stream_id: origin });
     } catch (error) {
       if (gen !== generation) { reset(); return; }
@@ -176,7 +235,7 @@ function bindComposerMic({ web, env = globalThis, button, panel, takeMount, room
   async function stop() {
     if (phase !== 'recording') return;
     const gen = generation;
-    clearTick(); phase = 'stopping'; button.disabled = true; button.classList.remove('is-recording'); paint('Finishing recording…');
+    clearTick(); phase = 'stopping'; button.disabled = true; recordingFace(false); paint('Finishing recording…');
     try {
       const audio = await recorder.stop();
       if (gen !== generation) return;
