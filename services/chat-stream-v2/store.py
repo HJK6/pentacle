@@ -51,6 +51,7 @@ from store_assistant_binding import (
     AssistantBindingStoreMixin, _binding_conn, migrate_binding_to_named,
 )
 from assistant_lane_rulings import RULING_REQUESTS_DDL, BART_LANE_OWNERSHIP_DDL, RULING_AUDIT_DDL
+from voice_answers import VOICE_ANSWER_ACKS_DDL, VOICE_ANSWER_BINDINGS_DDL, VoiceAnswersStoreMixin
 import store_consent as consent
 from store_qa import QaStoreMixin
 from store_exchange import ExchangeStoreMixin
@@ -1370,7 +1371,7 @@ def _iso_epoch(value: object) -> float | None:
         return None
 
 
-class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin):
+class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000) -> None:
@@ -1531,6 +1532,8 @@ class Store(store_attachments.AttachmentStoreMixin, QaStoreMixin, store_usage.Us
             conn.execute(ASSISTANT_COMPOSITE_OPERATIONS_DDL)
             conn.execute(ASSISTANT_COMPOSITE_TERMINAL_REPORTS_DDL)
             conn.execute(ASSISTANT_COMPOSITE_QUESTION_BRIDGES_DDL)
+            conn.execute(VOICE_ANSWER_BINDINGS_DDL)
+            conn.execute(VOICE_ANSWER_ACKS_DDL)
             if "route_target_generation" not in {
                 r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_routes)")
             }:

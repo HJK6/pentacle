@@ -73,6 +73,7 @@ from store import Store
 from submission_events import DurableUserEventProof
 from uiverbs import UIVerbs
 from usage_publisher import UsageStatePublisher
+from voice_answers import dispatch_block as voice_answers_dispatch_block
 from window_schedule import WindowSchedule
 
 log = logging.getLogger("chat_streamd_v2")
@@ -426,7 +427,9 @@ async def run(args: argparse.Namespace) -> int:
                 "<assistant-original-input>\n"
                 f"{body}\n"
                 "</assistant-original-input>"
-            )
+            ) + voice_answers_dispatch_block(await store.get_voice_answer_binding_for_input(
+                stream_id=route_stream_id, input_identity=source_message_id,
+            ))
         return await comms.send_assistant_backend({
             "host": host,
             "session_name": session_name,
@@ -439,6 +442,12 @@ async def run(args: argparse.Namespace) -> int:
             if route_payload.get("admission_mode") == "direct_primary" else None,
         })
 
+    async def _validate_voice_answers(binding, *, stream_id):
+        # Notify is built after the composites; resolve it at call time.
+        if server.notify is None:
+            raise RuntimeError("voice answers validation unavailable")
+        return await server.notify.validate_voice_answers(binding, stream_id=stream_id)
+
     assistant_composites: dict[str, AssistantComposite] = {}
     for _name, _cfg in assistant_configs.items():
         assistant_composites[_name] = AssistantComposite(
@@ -450,6 +459,7 @@ async def run(args: argparse.Namespace) -> int:
             question_operation=server._assistant_question_operation,
             question_answer=server._assistant_question_answer,
             publication_attachments=server._assistant_publication_attachments,
+            voice_answers_validate=_validate_voice_answers,
         )
     server.assistant_composites = assistant_composites
     # Primary (bart) alias: existing single-composite call sites (notify binding,
