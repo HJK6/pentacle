@@ -675,6 +675,9 @@ class Server:
         from watch_wake import WatchWake
         self.watch_wake = WatchWake(getattr(self.sessions, "store", None), self.sessions)
         self.handlers.update(self.watch_wake.wire_handlers())
+        # Operator-only adapter to the Cosmo household store (Pentacle Personal).
+        from household import Household
+        self.handlers.update(Household().wire_handlers())
         self.runtime_sha = ""
         self._host_stats: dict[str, dict[str, Any]] = {}
         self._host_stats_order_lock = asyncio.Lock()
@@ -3129,7 +3132,7 @@ class Server:
         ack: dict[str, Any] = {"type": "send.result", "to_stream_id": composite_stream_id}
         if isinstance(result, dict):
             for key in ("delivery", "state", "submission_confirmed",
-                        "action_committed", "submission_attempts"):
+                        "action_committed", "submission_attempts", "provider_queued"):
                 if key in result:
                     ack[key] = result[key]
         if msg.get("request_id") is not None:
