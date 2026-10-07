@@ -52,6 +52,7 @@ from ingest import _identity_key, broadcast_assistant_mirror, codex_source_pane_
 from machine_stats import WIRE_VERSION as STATS_WIRE_VERSION, validate_machine_stats
 from message_envelopes import annotate_message_envelope
 from store import ENTRY_DROPPED
+from store_usage import USAGE_CLOSE_GRACE_S, usage_row_admissible
 
 log = logging.getLogger("chat_streamd_v2.event_push")
 
@@ -268,6 +269,9 @@ class EventPush:
     async def _usage_fences(self, host: str) -> list[dict[str, str]]:
         """Return current coordinator-issued usage fences to a satellite."""
         rows = await self.store.list_open_sessions_with_event_summary()
+        # A seat that closed moments ago keeps its fence for the grace window, so a satellite
+        # still holding its first span (read before any fence) can deliver it.
+        rows = [*rows, *(await self.store.list_usage_grace_rows(host))]
         fences: list[dict[str, str]] = []
         for row in rows:
             if row.get("host") != host or row.get("provider") not in {"codex", "claude"}:
@@ -297,7 +301,7 @@ class EventPush:
                 continue
             host, _, session_name = stream_id.partition(":")
             row = await self.store.fetch_session(host, session_name)
-            if row is None or row.get("status") != "open":
+            if not usage_row_admissible(row, close_grace_s=USAGE_CLOSE_GRACE_S):
                 rejected.append({"stream_id": stream_id, "reason": "session_not_open"})
                 continue
             if row.get("host") != authenticated_host:
@@ -317,6 +321,7 @@ class EventPush:
                 native_session_id=item["native_session_id"],
                 collection_host=authenticated_host,
                 source_file_identity_digest=item["source_file_identity_digest"],
+                close_grace_s=USAGE_CLOSE_GRACE_S,
             )
             if not outcome.get("accepted"):
                 rejected.append({"stream_id": stream_id, "reason": str(outcome.get("reason") or "usage_rejected")})

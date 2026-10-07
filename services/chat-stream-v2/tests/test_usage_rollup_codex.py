@@ -394,3 +394,34 @@ def test_usage_codex_ac7_zero_delta_run_extends_interval(cx: Cx) -> None:
     # repeated rollout lines dedupe by (account, kind, minutes, resets_at, pct); the run still extends the
     # interval to the base's first observation, so the row after the second 10 stays in this sample
     assert s['delta_pct'] == 2 and s['from'] == at(0) and s['tokens']['measured'] == 1500
+
+
+def test_usage_codex_ac5_outside_mass_is_per_account(cx: Cx) -> None:
+    cx.seat('thoth:cx', created=at(0), specs=('spec_demo__cx',), provider='codex')
+    cx.session('a', [(at(60), SOL, 10, 0, 0)], cumulative=u(50))  # ACCT: unreconciled 40
+    cx.session('b', [(at(60), SOL, 10, 0, 0)], account=ACCT2, cumulative=u(90))  # ACCT2: unreconciled 80
+    cx.session('u', [(at(60), SOL, 10, 0, 0)], account=None, cumulative=u(15))  # unknown: unreconciled 5, ownable by both
+    result = cx.run('--calibrate')
+    outside = {e['account_id']: e['identity_mass_by_host'][0]['outside_window_sum']['unreconciled']
+               for e in result['calibration']['codex']['entries']}
+    assert outside == {ACCT: 45, ACCT2: 85}
+    fleet = result['calibration']['codex']['identity_mass_by_host'][0]['outside_window_sum']['unreconciled']
+    assert fleet == 125
+
+
+@pytest.mark.parametrize('order', [0, 1])
+def test_usage_codex_ac2_alias_chain_rejected_in_either_order(cx: Cx, order: int) -> None:
+    third = '00000000-0000-4000-8000-0000000000c3'
+    cx.seat('thoth:cx', created=at(0), specs=('spec_demo__cx',), provider='codex')
+    cx.session('a', [(at(60), SOL, 100, 0, 0)])
+    cx.session('b', [(at(60), SOL, 200, 0, 0)], account=ACCT2)
+    cx.session('c', [(at(60), SOL, 400, 0, 0)], account=third)
+    path = cx.config(accounts=[])
+    data = json.loads(path.read_text())
+    chain = [{'account_id': ACCT, 'alias_of': ACCT2, 'justification': 'synthetic'},
+             {'account_id': ACCT2, 'alias_of': third, 'justification': 'synthetic'}]
+    data['account_aliases'] = chain if order == 0 else chain[::-1]
+    path.write_text(json.dumps(data))
+    codex = cx.run('--calibrate')['calibration']['codex']
+    assert {a['status'] for a in codex['account_aliases']} == {'rejected'}
+    assert sorted(e['account_id'] for e in codex['entries']) == sorted([ACCT, ACCT2, third])

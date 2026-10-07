@@ -1138,10 +1138,18 @@ def unplaceable_summary(records: list[Rec], threshold: float, retired: set[str] 
             'retired_mass': [{'provider': 'claude', 'host': h, 'tokens': t} for h, t in sorted(retired_mass.items())]}
 
 
-def codex_outside(sessions: list[CodexSession], retired: set[str]) -> dict[str, dict[str, int]]:
-    """Per-host Codex mass outside every window, classified once: retired -> unverifiable -> unreconciled -> untimed."""
+def codex_outside(sessions: list[CodexSession], retired: set[str],
+                  acct: Account | None = None) -> dict[str, dict[str, int]]:
+    """Per-host Codex mass outside every window, classified once: retired -> unverifiable -> unreconciled -> untimed.
+
+    With an account, only mass that account could own counts: its own sessions, plus unknown/conflict
+    sessions on hosts it may own (the same rule as its unknown_account window bucket).
+    """
     outside: dict[str, dict[str, int]] = {}
     for session in sessions:
+        if acct is not None and not (session.account == acct.id
+                                     or (session.account is None and acct.may_own(session.host))):
+            continue
         host = outside.setdefault(session.host, dict.fromkeys(CODEX_OUTSIDE, 0))
         if session.host in retired:
             host['retired'] += session.total
@@ -1534,6 +1542,10 @@ def codex_aliases(config: dict[str, Any] | None) -> tuple[dict[str, str], list[d
     for item in listed:
         if not isinstance(item, dict) or not item.get('account_id') or not item.get('alias_of'):
             raise RollupError('calibration config: each account_aliases entry needs account_id and alias_of')
+    # Order-independent: an id may be an alias source once, and never both a source and a target.
+    sources = [i['account_id'] for i in listed]
+    targets = {i['alias_of'] for i in listed}
+    for item in listed:
         row = {'provider': item.get('provider') or 'codex', 'account_id': item['account_id'],
                'alias_of': item['alias_of']}
         justification = item.get('justification')
@@ -1541,8 +1553,9 @@ def codex_aliases(config: dict[str, Any] | None) -> tuple[dict[str, str], list[d
             reason = 'only codex aliases are supported'
         elif not (isinstance(justification, str) and justification.strip()):
             reason = 'alias requires a justification'
-        elif item['account_id'] == item['alias_of'] or item['alias_of'] in mapping or item['account_id'] in mapping:
-            reason = 'alias is self-referential or chained'
+        elif (item['account_id'] == item['alias_of'] or sources.count(item['account_id']) > 1
+              or item['account_id'] in targets or item['alias_of'] in sources):
+            reason = 'alias is self-referential, duplicated or chained'
         else:
             mapping[item['account_id']] = item['alias_of']
             report.append({**row, 'status': 'applied', 'basis': 'aliased', 'justification': justification})
@@ -1611,6 +1624,7 @@ def calibrate_codex(src: Sources, config: dict[str, Any], threshold: float, reti
         own = [s for s in sessions if s.account == account_id]
         own_live = [s for s in own if s.host not in retired]
         part = account_partition(acct, timeline.recs)
+        mine = codex_outside(sessions, retired, acct)
         masses = {k: sum(s.masses()[k] for s in own_live) for k in ('placed', 'untimed', 'unreconciled', 'unverifiable')}
         denom = sum(masses.values())
         entry: dict[str, Any] = {
@@ -1626,13 +1640,13 @@ def calibrate_codex(src: Sources, config: dict[str, Any], threshold: float, reti
                                 'unverifiable_tokens': masses['unverifiable'],
                                 'retired_tokens': sum(s.total for s in own if s.host in retired),
                                 'dollars_label': DOLLARS_LABEL},
-            'identity_mass_by_host': identity_mass(part['by_host'], outside, 'codex'),
+            'identity_mass_by_host': identity_mass(part['by_host'], mine, 'codex'),
             'reported_only': [r for r in reported_only if r['account_id'] == account_id],
         }
         if account_id in aliased:
             entry['aliased_from'] = sorted(aliased[account_id])
         entry.update(_coverage_fields(part, eligible))
-        c = method_c(acct, timeline, history, eligible, outside)
+        c = method_c(acct, timeline, history, eligible, mine)
         entry['methods'] = {'history_regression': c}
         entry['method'] = 'history_regression'
         if c['coefficient'] is not None:

@@ -219,10 +219,21 @@ class SatelliteConfig:
 
 EARLY_FENCE_MIN_S = 5.0
 MAX_HELD_USAGE_RECORDS = 5000
+#: Matches the coordinator's USAGE_CLOSE_GRACE_S: a closed seat's fence is issued that long.
+HELD_USAGE_TTL_S = 600.0
+
+
+def _fence_matches(fence: object, provider: str, source_pid: str) -> bool:
+    return (
+        isinstance(fence, dict)
+        and fence.get("provider") == provider
+        and fence.get("source_pane_pid") == source_pid
+        and bool(fence.get("session_generation"))
+    )
 
 
 def _merge_usage_records(held: list[dict], new: list[dict]) -> list[dict]:
-    """Order-preserving union of sanitized usage records (identical re-reads collapse)."""
+    """Order-preserving union of sanitized usage records (identical re-reads collapse); callers bound it."""
     seen = {json.dumps(record, sort_keys=True) for record in held}
     merged = list(held)
     for record in new:
@@ -230,7 +241,7 @@ def _merge_usage_records(held: list[dict], new: list[dict]) -> list[dict]:
         if key not in seen:
             seen.add(key)
             merged.append(record)
-    return merged[-MAX_HELD_USAGE_RECORDS:]
+    return merged
 
 
 @dataclass
@@ -740,16 +751,11 @@ class Satellite:
         stream_id = f"{self.config.host}:{st.session_name}"
         fences = getattr(self, "_usage_fences", {}).get(stream_id)
         source_pid = str(st.source_pane_pid or "").removeprefix("!")
-        if not isinstance(fences, dict):
+        if not _fence_matches(fences, provider, source_pid):
+            # No fence yet, or one for another pane/provider: hold this bind's records until one matches.
             self._hold_unfenced_usage(st, provider, records, record_end_offsets, consumed_to, source_pid)
             return None
-        if (
-            fences.get("provider") != provider
-            or fences.get("source_pane_pid") != source_pid
-            or not fences.get("session_generation")
-            or not st.provider_session_id
-            or not source_pid
-        ):
+        if not st.provider_session_id or not source_pid:
             return None
         included = [
             record for record, end_offset in zip(records, record_end_offsets)
@@ -794,26 +800,42 @@ class Satellite:
         }
         held = self._unfenced_usage.get(stream_id)
         if held is None or held.get("bind") != bind:
-            held = self._unfenced_usage[stream_id] = {"bind": bind, "records": []}
-        held["records"] = _merge_usage_records(held["records"], wire_records)
+            held = self._unfenced_usage[stream_id] = {"bind": bind, "records": [], "closed_at": None}
+        merged = _merge_usage_records(held["records"], wire_records)
+        if len(merged) > MAX_HELD_USAGE_RECORDS:
+            log.warning("stream %s: %d held pre-fence usage records exceed %d; the oldest are dropped "
+                        "and this stream's usage will be incomplete", stream_id, len(merged),
+                        MAX_HELD_USAGE_RECORDS)
+            merged = merged[-MAX_HELD_USAGE_RECORDS:]
+        held["records"] = merged
 
-    def _release_unfenced_usage(self, stream_id: str, st: _StreamTail) -> None:
-        """Offer held records once this stream's fence matches the bind they were read from."""
+    def _release_unfenced_usage(self, stream_id: str, st: _StreamTail | None) -> None:
+        """Offer held records once this stream's fence matches the bind they were read from.
+
+        `st` is None once the seat has left tmux: the held span then waits (up to
+        HELD_USAGE_TTL_S) for the coordinator's grace fence of the just-closed row.
+        """
         held = getattr(self, "_unfenced_usage", {}).get(stream_id)
         if held is None:
             return
         bind = held["bind"]
-        if st.path != bind["path"] or st.provider_session_id != bind["native_session_id"]:
+        if st is not None and (
+            st.path != bind["path"]
+            or st.provider_session_id != bind["native_session_id"]
+            or (st.provider or bind["provider"]) != bind["provider"]
+            or str(st.source_pane_pid or "").removeprefix("!") != bind["source_pane_pid"]
+        ):
             self._unfenced_usage.pop(stream_id, None)  # rebound: the held span belongs to another bind
             return
-        fences = getattr(self, "_usage_fences", {}).get(stream_id)
-        if not isinstance(fences, dict):
-            return
-        if (
-            fences.get("provider") != bind["provider"]
-            or fences.get("source_pane_pid") != bind["source_pane_pid"]
-            or not fences.get("session_generation")
+        if st is None and held.get("closed_at") is not None and (
+            time.monotonic() - float(held["closed_at"]) > HELD_USAGE_TTL_S
         ):
+            log.warning("stream %s: held pre-fence usage dropped; no matching fence within %ss of close",
+                        stream_id, int(HELD_USAGE_TTL_S))
+            self._unfenced_usage.pop(stream_id, None)
+            return
+        fences = getattr(self, "_usage_fences", {}).get(stream_id)
+        if not _fence_matches(fences, bind["provider"], bind["source_pane_pid"]):
             return
         candidate = {
             "stream_id": stream_id,
@@ -836,7 +858,12 @@ class Satellite:
                         "source_file_identity_digest")
         )
         if same:
-            usage = {**usage, "records": _merge_usage_records(pending["records"], usage["records"])}
+            merged = _merge_usage_records(pending["records"], usage["records"])
+            if len(merged) > MAX_HELD_USAGE_RECORDS:
+                log.warning("stream %s: %d unacknowledged usage records exceed %d; the oldest are dropped",
+                            stream_id, len(merged), MAX_HELD_USAGE_RECORDS)
+                merged = merged[-MAX_HELD_USAGE_RECORDS:]
+            usage = {**usage, "records": merged}
         self._pending_usage[stream_id] = usage
 
     def _collect(
@@ -875,7 +902,9 @@ class Satellite:
         for name in list(self._tails):
             if name not in discovered:
                 self._tails.pop(name, None)
-                getattr(self, "_unfenced_usage", {}).pop(f"{cfg.host}:{name}", None)
+                held = getattr(self, "_unfenced_usage", {}).get(f"{cfg.host}:{name}")
+                if held is not None and held.get("closed_at") is None:
+                    held["closed_at"] = time.monotonic()  # kept for the coordinator's close-grace fence
 
         budget = cfg.max_events_per_pass
         events: list[dict] = []
@@ -940,6 +969,9 @@ class Satellite:
                     self._queue_usage(f"{self.config.host}:{name}", usage)
                 self._queue_provenance(self._pass_provenance.get(f"{self.config.host}:{name}") or ())
             self._release_unfenced_usage(f"{self.config.host}:{name}", st)
+        for stream_id in list(getattr(self, "_unfenced_usage", {})):
+            if stream_id.removeprefix(f"{cfg.host}:") not in self._tails:
+                self._release_unfenced_usage(stream_id, None)
         return events, high_water, capped
 
     def _collect_stream(self, st: _StreamTail, budget: int, out: list[dict]) -> tuple[int, bool]:
@@ -1387,7 +1419,7 @@ class Satellite:
                 continue           # kill switch: stay connected, push nothing
             since_stats = time.monotonic() - self._last_stats_at
             if since_stats >= STATS_INTERVAL_S or (
-                since_stats >= EARLY_FENCE_MIN_S and self._awaiting_first_fence()
+                since_stats >= EARLY_FENCE_MIN_S and self._awaiting_matching_fence()
             ):
                 ack = await self._send_host_stats(ws)
                 version = ack.get("version") if isinstance(ack, dict) else None
@@ -1405,10 +1437,13 @@ class Satellite:
                 # Blocking git work (and a possible exec-restart) off the loop.
                 await asyncio.to_thread(self._maybe_update, target)
 
-    def _awaiting_first_fence(self) -> bool:
-        """A held span whose stream has no fence yet: fetch fences early instead of waiting 30 s."""
+    def _awaiting_matching_fence(self) -> bool:
+        """A held span without a matching fence: fetch fences early (rate-limited) instead of every 30 s."""
         fences = getattr(self, "_usage_fences", {})
-        return any(stream_id not in fences for stream_id in getattr(self, "_unfenced_usage", {}))
+        return any(
+            not _fence_matches(fences.get(stream_id), held["bind"]["provider"], held["bind"]["source_pane_pid"])
+            for stream_id, held in getattr(self, "_unfenced_usage", {}).items()
+        )
 
     async def run_forever(self) -> None:
         cfg = self.config

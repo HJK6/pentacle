@@ -13,8 +13,11 @@ import sqlite3
 from pathlib import Path
 
 from event_push import EventPush
+import satellite
 from satellite import Satellite, SatelliteConfig, _DiscoveredPane
 from store import Store
+from store_usage import USAGE_CLOSE_GRACE_S, usage_row_admissible
+from v2_runtime import iso_now
 from test_usage_provenance import (HOST, HOST_SECRET, SATELLITE_SHA, _Alerts, _claude_assistant, _credential,
                                    _secret)
 
@@ -86,9 +89,7 @@ def test_ac10_short_seat_first_span_before_fence_is_accounted_once(tmp_path: Pat
     async def run() -> None:
         store, _ep, ws, db = _daemon(tmp_path)
         try:
-            await store.open_session(HOST, NAME, provider='claude', pane_pid=str(PANE), session_generation='gen-a',
-                                     observer_binding={'executable': '/usr/bin/claude', 'pane_pid': str(PANE),
-                                                       'pane_started_at': 'start-a'})
+            await _open(store)
             path = tmp_path / 'native-claude.jsonl'
             path.write_text(''.join(json.dumps(r) + '\n' for r in [
                 _credential('00000000-0000-4000-8000-00000000000a'),
@@ -118,20 +119,26 @@ def test_ac10_short_seat_first_span_before_fence_is_accounted_once(tmp_path: Pat
     asyncio.run(run())
 
 
-def test_ac10_held_span_merges_with_a_later_reply_and_a_closed_seat_drops_it(tmp_path: Path) -> None:
+BINDING = {'executable': '/usr/bin/claude', 'pane_pid': str(PANE), 'pane_started_at': 'start-a'}
+
+
+async def _open(store: Store) -> None:
+    await store.open_session(HOST, NAME, provider='claude', pane_pid=str(PANE), session_generation='gen-a',
+                             observer_binding=BINDING)
+
+
+def test_ac10_held_span_merges_with_a_later_reply(tmp_path: Path) -> None:
     async def run() -> None:
         store, _ep, ws, db = _daemon(tmp_path)
         try:
-            await store.open_session(HOST, NAME, provider='claude', pane_pid=str(PANE), session_generation='gen-a',
-                                     observer_binding={'executable': '/usr/bin/claude', 'pane_pid': str(PANE),
-                                                       'pane_started_at': 'start-a'})
+            await _open(store)
             path = tmp_path / 'native-claude.jsonl'
             path.write_text(json.dumps(_reply('m1', output=7)) + '\n')
             sat = _satellite(tmp_path)
             await _pass(sat, ws, path)
-            assert sat._awaiting_first_fence()  # the session loop fetches fences early (EARLY_FENCE_MIN_S)
+            assert sat._awaiting_matching_fence()  # the session loop fetches fences early (EARLY_FENCE_MIN_S)
             await sat._send_host_stats(ws)
-            assert not sat._awaiting_first_fence()
+            assert not sat._awaiting_matching_fence()
             with path.open('a') as fh:  # a second reply lands before the next pass
                 fh.write(json.dumps(_reply('m2', output=3)) + '\n')
             ack = await _pass(sat, ws, path)
@@ -143,11 +150,80 @@ def test_ac10_held_span_merges_with_a_later_reply_and_a_closed_seat_drops_it(tmp
 
     asyncio.run(run())
 
+
+def test_ac10_seat_closed_before_any_fence_is_accounted_once(tmp_path: Path) -> None:
+    """The seat answers and closes before the satellite ever holds its fence."""
+    async def run() -> None:
+        store, _ep, ws, db = _daemon(tmp_path)
+        try:
+            await _open(store)
+            path = tmp_path / 'native-claude.jsonl'
+            path.write_text(json.dumps(_reply('m1', output=7)) + '\n')
+            sat = _satellite(tmp_path)
+            await _pass(sat, ws, path)
+            assert ws.frames[-1]['events'] and 'usage' not in ws.frames[-1]
+            await store.mark_closed(HOST, NAME, closed_at=iso_now(), pane_status='pane_dead')
+            events, high_water, _ = sat._collect({})  # the seat left tmux: its tail is forgotten
+            assert events == [] and NAME not in sat._tails
+            stats = await sat._send_host_stats(ws)  # the just-closed row keeps its fence for the grace window
+            assert [f['stream_id'] for f in stats['usage_fences']] == [STREAM]
+            events, high_water, _ = sat._collect({})
+            ack = await sat._push(ws, events, high_water)
+            sat._apply_ack(ack, high_water)
+            assert ack.get('usage_recorded') == 1 and ws.frames[-1]['events'] == []
+            assert [key for key, _ in _ledger(db)] == ['m1']
+            assert sat._unfenced_usage == {} and not sat._awaiting_matching_fence()
+            ack = await sat._push(ws, *sat._collect({})[:2])  # nothing further is offered
+            assert 'usage' not in ws.frames[-1]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_ac10_stale_pane_fence_holds_until_the_matching_fence(tmp_path: Path) -> None:
+    async def run() -> None:
+        store, _ep, ws, db = _daemon(tmp_path)
+        try:
+            await _open(store)
+            path = tmp_path / 'native-claude.jsonl'
+            path.write_text(json.dumps(_reply('m1', output=7)) + '\n')
+            sat = _satellite(tmp_path)
+            sat._usage_fences = {STREAM: {'stream_id': STREAM, 'session_generation': 'gen-old',
+                                          'provider': 'claude', 'source_pane_pid': '99'}}
+            await _pass(sat, ws, path)
+            assert 'usage' not in ws.frames[-1] and sat._awaiting_matching_fence()
+            await sat._send_host_stats(ws)
+            ack = await _pass(sat, ws, path)
+            assert ack.get('usage_recorded') == 1 and [key for key, _ in _ledger(db)] == ['m1']
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_ac10_held_span_after_close_expires_and_rebind_drops(tmp_path: Path, monkeypatch) -> None:
     sat = _satellite(tmp_path)
-    other = tmp_path / 'other.jsonl'
-    other.write_text(json.dumps(_reply('x1', output=1)) + '\n')
-    sat._collect({NAME: _DiscoveredPane(NAME, 'claude', str(other), pane_pid=PANE)})
+    path = tmp_path / 'native-claude.jsonl'
+    path.write_text(json.dumps(_reply('x1', output=1)) + '\n')
+    sat._collect({NAME: _DiscoveredPane(NAME, 'claude', str(path), pane_pid=PANE)})
     assert STREAM in sat._unfenced_usage
-    sat._usage_fences = {}
-    sat._collect({})  # the seat is gone before any fence: the held span is dropped with its tail
+    other = tmp_path / 'other.jsonl'  # the tail rebinds to another transcript: the held span is dropped
+    other.write_text(json.dumps({**_reply('y1', output=1), 'sessionId': 'native-other'}) + '\n')
+    sat._collect({NAME: _DiscoveredPane(NAME, 'claude', str(other), pane_pid=PANE)})
+    assert [r['message']['id'] for r in sat._unfenced_usage[STREAM]['records']] == ['y1']
+    sat._collect({})  # closed: kept for the grace fence
+    assert STREAM in sat._unfenced_usage
+    clock = satellite.time.monotonic() + satellite.HELD_USAGE_TTL_S + 1
+    monkeypatch.setattr(satellite.time, 'monotonic', lambda: clock)
+    sat._collect({})
     assert sat._unfenced_usage == {}
+
+
+def test_ac10_daemon_grace_window_bounds_closed_row_admission() -> None:
+    row = {'status': 'closed', 'closed_at': '2026-10-07T14:00:00Z'}
+    at = 1_791_381_600.0  # 2026-10-07T14:00:00Z
+    assert usage_row_admissible(row, close_grace_s=USAGE_CLOSE_GRACE_S, now=at + USAGE_CLOSE_GRACE_S)
+    assert not usage_row_admissible(row, close_grace_s=USAGE_CLOSE_GRACE_S, now=at + USAGE_CLOSE_GRACE_S + 1)
+    assert not usage_row_admissible(row, now=at)  # local ingest: open rows only
+    assert usage_row_admissible({'status': 'open'})
