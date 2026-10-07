@@ -255,6 +255,7 @@ the dollar quantiles. With fewer than 3 matches the result is
 - `measured_rollup`: the account's measured, unpriced and ambiguous tokens, plus dollars.
 - `provenance_row_coverage` and `measured_coverage`.
 - `unplaceable`: the ratio and threshold.
+- `identity_mass_by_host` (see below).
 - `methods`: points and samples, each with its exclusion reason.
 - `exclusions`.
 - A `coefficient` in `usd_per_pct`, or `null` with `status`/`reason`.
@@ -270,18 +271,46 @@ whose `hosts` could own it, which is every host unless the config narrows it.
   `eligibility: unknown`. Its coverage is then withheld (`measured_coverage: null`,
   `measured_coverage_if_bounded` printed) and no coefficient is published. The
   ratio is printed with every entry, and `unplaceable.by_host_account` gives the mass.
+  Tokens of an honoured retired host (below) are removed from both numerator and
+  denominator and reported as `unplaceable.retired_mass` per (provider, host).
+- **Retired hosts.** The private config may list `retired_hosts`. A listed host
+  is honoured only if, at run time, it has no open seat in `sessions` and no
+  `v2_usage_state` row updated in the last 7 days. Otherwise the entry is
+  ignored with a printed warning. `retired_hosts` in the output gives each
+  entry's `status` (`honoured` or `ignored`, with `reason`). Retired hosts only
+  change calibration; per-spec and project rollups are unchanged.
+- **Identity mass by host.** Each Claude record is classified once, in this
+  order: `retired` (an honoured retired host, whatever its time or identity),
+  then `untimed`, then a window bucket for timed records (`measured`,
+  `unpriced`, `unknown_account`, with `conflict` as a labelled sub-count of
+  `unknown_account`). A retired host's records therefore enter no window. Every
+  entry, every Method A point, the Method B `interval_union`, and the top level
+  carry `identity_mass_by_host`: one row per (provider, host) with the three
+  window buckets plus `conflict` under `window`. The `untimed` and `retired`
+  totals for that host, fleet-wide since they cannot be placed in a window, sit
+  under `outside_window_sum`. Summed over hosts, the `window` buckets equal the
+  parent's `measured + unpriced + unknown_account` exactly. The top level is
+  fleet-wide, not per account.
 - **Method A `full_week_100`** (fleet-only account). Windows run from the
   config anchor (Wed 16:00Z) for `days` 7. For each window, `dollars` = Σ measured
   dollars of the account in the window, and `usd_per_pct` = dollars ÷ 100,
   `bias: floor`. A point is used only if the window is completed, not in
   `windows.excluded`, eligible, and has coverage ≥ 0.90. The coefficient is the
   median of the used points.
-- **Method B `history_regression`** (fleet-only account). Samples are
-  consecutive deduped non-probe `seven_day` history lines of the account. Each
-  is a Δpct paired with the measured dollars in (t₁, t₂]. A sample is excluded
-  for any of: `probe_source`, `reset_unknown`, `reset_crossing` (`resets_at`
-  compared to the minute), `stale` (same `observed_at`), `non_positive_delta`,
-  `interval_over_24h`, `eligibility_unknown`, or coverage below 0.95. The fit
+- **Method B `history_regression`** (fleet-only account). Observations are the
+  deduped non-probe `seven_day` history lines of the account, in time order. A
+  sample is formed at every observation whose `pct` is above the `pct` of the
+  previous pct-change observation (the base). Δ = 0 observations extend the open
+  interval instead of closing it, so their tokens stay in the next sample. A
+  `pct` decrease forms no sample, starts a new base, and is listed as
+  `pct_decrease_new_base`. Each sample pairs Δpct = pct_k − pct_base with the
+  measured dollars in (t_base, t_k] and reports `tokens` and `observations`. A
+  sample is excluded for any of the following, judged over the whole interval:
+  `probe_source` (the line is dropped before pairing), `reset_unknown`,
+  `reset_crossing` (any `resets_at` in the interval differs, compared to the
+  minute), `stale` (same `observed_at`), `interval_over_24h`,
+  `eligibility_unknown`, or coverage below 0.95. `interval_union` gives the
+  tokens and identity mass over all formed sample intervals. The fit
   is least squares through the origin, and `residual_mape_pct` is the median
   absolute percent error of Δpct. Malformed history lines are listed as
   `invalid_line`. The method activates only with ≥ 10 valid samples spanning
@@ -298,7 +327,7 @@ whose `hosts` could own it, which is every host unless the config narrows it.
 non-identifying role names (for example `fleet_only`, `shared`), because
 `--redact` prints them. Each account needs an explicit `role`: `fleet_only` is
 fitted, `shared` follows the transfer rule, and any other or missing role is
-`not_fitted`. The schema is
+`not_fitted`. `retired_hosts` lists retired execution hosts by name only. The schema is
 `tools/usage_rollup_config/calibration_config.example.json` (synthetic ids). A
 missing config leaves every account `not_configured`. The public example is
 never read. `--redact` replaces account ids with config labels (or
@@ -306,7 +335,8 @@ never read. `--redact` replaces account ids with config labels (or
 private `calibration.json` keeps the real ids for weekly-percent lookups.
 
 Acceptance: `services/chat-stream-v2/tests/test_usage_rollup.py` (AC1–AC9
-fixtures on the real Store schema) and
+fixtures on the real Store schema, plus the `test_usage_calibration_amend_*`
+fixtures of `spec_pentacle__usage_calibration_amendments_2026_10`) and
 `services/agent-orch/tests/test_usage_rollup_cli.py`.
 
 ## Reports and rollout
