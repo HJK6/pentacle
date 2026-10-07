@@ -1,0 +1,191 @@
+"""Client side of daemon restart continuity (spec_pentacle__daemon_restart_continuity_2026_10).
+
+Restart-matrix cells C1 (await across an outage) and C2 post-admission (the
+early `spawn.ok state=starting` reply followed by a dropped socket). The real
+daemon journeys live in `services/chat-stream-v2/tests/soak/test_restart_continuity.py`;
+these pin the client contract without a daemon.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+import websockets
+from websockets.frames import Close
+
+from agent_orch import wsclient
+from agent_orch.config import Config
+
+
+class ReplyingSocket:
+    def __init__(self, reply_type: str) -> None:
+        self.reply_type = reply_type
+        self.sent: list[dict] = []
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(json.loads(raw))
+
+    async def recv(self) -> str:
+        request = self.sent[-1]
+        return json.dumps({"type": self.reply_type, "ok": True, "request_id": request["request_id"]})
+
+    async def close(self) -> None:
+        return None
+
+
+def fast_retry(monkeypatch, *, deadline: str | None = None) -> None:
+    monkeypatch.delenv("AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS", raising=False)
+    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_BACKOFF_BASE_S", "0.001")
+    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_BACKOFF_CAP_S", "0.001")
+    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_JITTER_FRACTION", "0")
+    if deadline is None:
+        monkeypatch.delenv("AGENT_ORCH_RPC_RETRY_DEADLINE_S", raising=False)
+    else:
+        monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_DEADLINE_S", deadline)
+
+
+def refused_then(monkeypatch, refusals: int, reply_type: str) -> list[int]:
+    connects = [0]
+
+    async def connect(config, **_kwargs):
+        connects[0] += 1
+        if connects[0] <= refusals:
+            raise ConnectionRefusedError(111, "Connect call failed")
+        return ReplyingSocket(reply_type)
+
+    monkeypatch.setattr(wsclient, "_connect_rpc_ready", connect)
+    return connects
+
+
+def config(tmp_path) -> Config:
+    return Config("ws://127.0.0.1:9", "", "testhost", tmp_path)
+
+
+def test_await_survives_outage_longer_than_three_attempts(monkeypatch, tmp_path):
+    """C1: a refused daemon for longer than the old 3-attempt bound is survived
+    inside the verb's own deadline, and the retried await returns the report."""
+    fast_retry(monkeypatch)
+    connects = refused_then(monkeypatch, 12, "await_report.ok")
+    payload = {"type": "await_report", "request_id": "await-c1", "stream_id": "testhost:child", "msg_id": 0}
+
+    response = asyncio.run(wsclient._one_shot_rpc(config(tmp_path), payload, prefix="await_report", timeout=5))
+
+    assert response["type"] == "await_report.ok"
+    assert connects[0] == 13
+
+
+def test_transport_retry_is_bounded_by_the_verb_deadline(monkeypatch, tmp_path):
+    fast_retry(monkeypatch, deadline="0.3")
+    connects = refused_then(monkeypatch, 10**9, "await_report.ok")
+    payload = {"type": "await_report", "request_id": "await-dl", "stream_id": "testhost:child", "msg_id": 0}
+
+    response = asyncio.run(wsclient._one_shot_rpc(config(tmp_path), payload, prefix="await_report", timeout=5))
+
+    assert response["type"] == "await_report.indeterminate"
+    assert response["reason"] == "retry_deadline_exceeded"
+    assert response["attempts"] == connects[0] > 3
+
+
+def test_explicit_max_attempts_still_bounds_transport_retries(monkeypatch, tmp_path):
+    """Regression control: the env override keeps its exact meaning."""
+    fast_retry(monkeypatch)
+    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS", "3")
+    connects = refused_then(monkeypatch, 10**9, "await_report.ok")
+    payload = {"type": "await_report", "request_id": "await-max", "stream_id": "testhost:child", "msg_id": 0}
+
+    response = asyncio.run(wsclient._one_shot_rpc(config(tmp_path), payload, prefix="await_report", timeout=5))
+
+    assert response == {"type": "await_report.indeterminate", "request_id": "await-max",
+                        "reason": "retry_exhausted", "attempts": 3,
+                        "message": "[Errno 111] Connect call failed"}
+    assert connects[0] == 3
+
+
+def test_non_retry_eligible_verb_still_fails_fast(monkeypatch, tmp_path):
+    """Regression control: `close` is single-shot and raises the transport error."""
+    fast_retry(monkeypatch)
+    connects = refused_then(monkeypatch, 10**9, "close.ok")
+    payload = {"type": "close", "request_id": "close-1", "host": "testhost", "session_name": "x"}
+
+    with pytest.raises(ConnectionRefusedError):
+        asyncio.run(wsclient._one_shot_rpc(config(tmp_path), payload, prefix="close", timeout=5))
+    assert connects[0] == 1
+
+
+def _closed_1001() -> Exception:
+    return websockets.exceptions.ConnectionClosedOK(Close(1001, ""), Close(1001, ""), True)
+
+
+def _accepted() -> dict:
+    return {"type": "spawn.ok", "ok": True, "request_id": "spawn-c2", "stream_id": "testhost:v2-c2",
+            "state": "starting", "reason": "admitted",
+            "session": {"stream_id": "testhost:v2-c2", "state": "starting"},
+            "initial_prompt_delivery": {"state": "staged"}}
+
+
+@pytest.mark.parametrize("loss", [_closed_1001, lambda: ConnectionRefusedError(111, "refused")])
+def test_admitted_spawn_recovers_terminal_state_after_socket_loss(monkeypatch, tmp_path, loss):
+    """C2 post-admission: after `spawn.ok state=starting` the daemon restarts;
+    the client resolves the same request through await_spawn instead of
+    returning a bare `connection_dropped`."""
+    async def connect_ready(*_args, **_kwargs):
+        raise loss()
+
+    calls: list[dict] = []
+
+    async def await_spawn_once(_config, payload, *, timeout):
+        calls.append(payload)
+        if len(calls) == 1:
+            return {"type": "await_spawn.ok", "ok": True, "state": "starting", "stream_id": "testhost:v2-c2",
+                    "pending_reconcile": True}
+        return {"type": "await_spawn.ok", "ok": True, "state": "ready", "stream_id": "testhost:v2-c2",
+                "session": {"stream_id": "testhost:v2-c2", "state": "ready"}}
+
+    monkeypatch.setattr(wsclient, "_connect_ready", connect_ready)
+    monkeypatch.setattr(wsclient, "await_spawn_once", await_spawn_once)
+
+    result = asyncio.run(wsclient._await_starting_spawn(config(tmp_path), _accepted(),
+                                                        deadline=wsclient.time.monotonic() + 30))
+
+    assert result["type"] == "spawn.ok" and result["state"] == "ready"
+    assert result["stream_id"] == "testhost:v2-c2" and result["request_id"] == "spawn-c2"
+    assert all(call == {"spawn_request_id": "spawn-c2"} for call in calls)
+
+
+def test_admitted_spawn_socket_loss_reports_recorded_failure(monkeypatch, tmp_path):
+    async def connect_ready(*_args, **_kwargs):
+        raise _closed_1001()
+
+    async def await_spawn_once(_config, payload, *, timeout):
+        return {"type": "await_spawn.error", "ok": False, "error_code": "spawn_failed",
+                "error": "boot_not_ready: claude TUI not ready", "stream_id": "testhost:v2-c2"}
+
+    monkeypatch.setattr(wsclient, "_connect_ready", connect_ready)
+    monkeypatch.setattr(wsclient, "await_spawn_once", await_spawn_once)
+
+    result = asyncio.run(wsclient._await_starting_spawn(config(tmp_path), _accepted(),
+                                                        deadline=wsclient.time.monotonic() + 30))
+
+    assert result["type"] == "spawn.error"
+    assert result["error"] == "boot_not_ready: claude TUI not ready"
+    assert result["request_id"] == "spawn-c2" and result["stream_id"] == "testhost:v2-c2"
+
+
+def test_admitted_spawn_socket_loss_until_deadline_is_typed_indeterminate(monkeypatch, tmp_path):
+    async def connect_ready(*_args, **_kwargs):
+        raise _closed_1001()
+
+    async def await_spawn_once(_config, payload, *, timeout):
+        return {"type": "await_spawn.indeterminate", "request_id": "x", "reason": "retry_deadline_exceeded",
+                "attempts": 9}
+
+    monkeypatch.setattr(wsclient, "_connect_ready", connect_ready)
+    monkeypatch.setattr(wsclient, "await_spawn_once", await_spawn_once)
+
+    result = asyncio.run(wsclient._await_starting_spawn(config(tmp_path), _accepted(),
+                                                        deadline=wsclient.time.monotonic() + 30))
+
+    assert result["type"] == "spawn.indeterminate"
+    assert result["request_id"] == "spawn-c2" and result["stream_id"] == "testhost:v2-c2"
+    assert result["initial_prompt_delivery"]["state"] == "indeterminate"

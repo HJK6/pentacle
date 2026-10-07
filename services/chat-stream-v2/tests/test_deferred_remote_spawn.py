@@ -197,7 +197,10 @@ def test_matching_terminal_outcome_still_suppresses_recurring_reconciliation() -
     assert probed == []
 
 
-def test_startup_reconcile_keeps_terminal_and_indeterminate_outcomes() -> None:
+def test_startup_reconcile_keeps_terminal_and_settles_indeterminate_outcomes() -> None:
+    """A definite outcome stays settled. A retained `indeterminate` handle is
+    reconciled (restart continuity, spec_pentacle__daemon_restart_continuity_2026_10
+    H1): its remote pane is provably gone, so it settles failed and is released."""
     async def run() -> tuple[dict[str, int], dict, dict, list[str]]:
         store = Store(":memory:")
         store.start()
@@ -229,10 +232,10 @@ def test_startup_reconcile_keeps_terminal_and_indeterminate_outcomes() -> None:
             store.stop()
 
     result, fresh, expired, reservations = asyncio.run(run())
-    assert result == {"adopted": 0, "released": 1}
-    assert fresh["state"] == "indeterminate"
-    assert expired["state"] == "failed"
-    assert reservations == ["fresh-terminal"]
+    assert result == {"adopted": 0, "released": 2}
+    assert fresh["state"] == "failed" and fresh["request_id"] == "request-fresh"
+    assert expired["state"] == "failed" and expired["reason"] == "failed first"
+    assert reservations == []
 
 
 def test_past_deadline_failed_reservation_is_released() -> None:

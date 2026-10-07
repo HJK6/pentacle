@@ -941,6 +941,10 @@ async def run(args: argparse.Namespace) -> int:
 
     await stop
     log.info("shutdown requested")
+    # Restart continuity: no new spawn admission once stopping, then hand every
+    # in-flight admitted spawn to durable state while the store still runs.
+    server.spawn_ready.clear()
+    await spawnctl.drain_background_spawns()
 
     # Bounded, cancellation-aware shutdown (B14). Never touches panes (B10).
     # Background tasks stop before the store does, so none is mid-submit when

@@ -93,6 +93,9 @@ from store import STREAM_TOKEN_HASH_VERSION, normalize_spec_binding_provenance, 
 log = logging.getLogger("chat_streamd_v2.spawnctl")
 
 RESERVATION_TTL_S = 180.0
+#: Shutdown bound for in-flight admitted spawns to write their interruption
+#: outcome and release intent ownership while the store is still running.
+SHUTDOWN_SPAWN_DRAIN_S = 10.0
 RESERVED_LIFECYCLE_ACTORS = frozenset({"daemon:scheduler"})
 BOOT_READY_HARD_DEADLINE_S = 180.0
 CREATION_PROBE_TIMEOUT_S = BOOT_READY_HARD_DEADLINE_S
@@ -276,6 +279,8 @@ class SpawnCtl:
         #: obligation. The task remains owned here until it records a terminal
         #: delivered/failed outcome and cleans up any pane it created.
         self._background_spawns: set[asyncio.Task[Any]] = set()
+        # Spawn tasks between persisting the pre-paste watermark and the paste.
+        self._delivery_critical: set[asyncio.Task[Any] | None] = set()
         # Task-owned source fences cannot be supplied in a client payload.
         self._handoff_fences: dict[asyncio.Task[Any], tuple[str, str]] = {}
         self._codex_boot_semaphores: dict[str, asyncio.Semaphore] = {}
@@ -1239,6 +1244,34 @@ class SpawnCtl:
 
     # -- spawn -------------------------------------------------------------
 
+    async def drain_background_spawns(self, timeout_s: float = SHUTDOWN_SPAWN_DRAIN_S) -> dict[str, int]:
+        """Graceful-shutdown handoff for admitted spawns (restart continuity).
+
+        Requester disconnects never cancel a spawn, so at shutdown its task is
+        still running. Cancel it while the store is running so the interruption
+        path persists its durable handoff (retained intent, `indeterminate`
+        outcome for an admitted row, owner released for the next instance)
+        instead of losing those writes to "store is not running" at loop
+        teardown. Never touches panes."""
+        pending = [task for task in self._background_spawns if not task.done()]
+        # Let a spawn finish an in-progress watermark-to-paste step (bounded):
+        # cancelling between them strands a live pane that adoption must not paste.
+        settle_deadline = time.monotonic() + timeout_s / 2
+        while (
+            any(task in self._delivery_critical and not task.done() for task in pending)
+            and time.monotonic() < settle_deadline
+        ):
+            await asyncio.sleep(0.02)
+        for task in pending:
+            task.cancel()
+        unfinished: set[asyncio.Task[Any]] = set()
+        if pending:
+            _done, unfinished = await asyncio.wait(pending, timeout=timeout_s)
+        if pending:
+            log.info("drained in-flight spawns at shutdown: cancelled=%d unfinished=%d",
+                     len(pending), len(unfinished))
+        return {"cancelled": len(pending), "unfinished": len(unfinished)}
+
     @staticmethod
     def _finish_background_spawn(task: asyncio.Task[Any], pending: set[asyncio.Task[Any]]) -> None:
         pending.discard(task)
@@ -1553,6 +1586,16 @@ class SpawnCtl:
                 )
                 reply.update(admitted)
                 return reply
+            if state == "indeterminate" and await self._reservation_retained(host, recorded_name, recorded_request_id):
+                # An interrupted/unproven spawn whose recovery handle is still
+                # retained is being reconciled, not failed: replay it as the
+                # same in-flight starting handle (no second pane).
+                reply = self._starting_spawn_reply(
+                    host, recorded_name, recorded_request_id,
+                    "reconciling_interrupted_spawn", receipt,
+                )
+                reply.update(admitted)
+                return reply
             # A terminal FAILED (or other non-delivered terminal) outcome replays
             # the stored FAILURE truthfully (Outcome Matrix class B) — NOT as
             # pending. Same key = same operation; to re-attempt, use a new key.
@@ -1576,6 +1619,12 @@ class SpawnCtl:
         )
         reply.update(admitted)
         return reply
+
+    async def _reservation_retained(self, host: str, name: str, request_id: str) -> bool:
+        return any(
+            (res.get("host"), res.get("session_name"), str(res.get("request_id") or "")) == (host, name, request_id)
+            for res in await self.store.reservations(include_expired=True)
+        )
 
     @staticmethod
     def _frozen_reason(host: str, hold: dict[str, Any] | None) -> str:
@@ -2691,40 +2740,48 @@ class SpawnCtl:
             before = await tmux.capture(name)  # anchor the receipt (QA #15)
             stream_id = f"{host}:{name}"
             watermark = None
-            if provider in SUBMIT_PREDICATES or host != self.sessions.local_host:
-                watermark = await self._watermark_before_action(
-                    stream_id, absolute_deadline=release_deadline,
+            # Watermark-to-paste is the one window a shutdown drain must not cut:
+            # once the intent carries the pre-paste watermark, adoption may never
+            # paste again, so the paste has to land (S3/S2 restart continuity).
+            delivery_task = asyncio.current_task()
+            self._delivery_critical.add(delivery_task)
+            try:
+                if provider in SUBMIT_PREDICATES or host != self.sessions.local_host:
+                    watermark = await self._watermark_before_action(
+                        stream_id, absolute_deadline=release_deadline,
+                    )
+                    proof_watermark_fields = {
+                        "proof_watermark": watermark.daemon_seq,
+                        "proof_watermark_state": watermark.state,
+                        **({"proof_watermark_reason": watermark.reason} if watermark.reason else {}),
+                    }
+                    receipt.update(proof_watermark_fields)
+                    delivery_receipt.update(proof_watermark_fields)
+                    # The reservation intent is the crash-window recovery handle.
+                    # Refresh its receipt before the paste so adoption can use the
+                    # exact pre-action boundary even if the daemon dies before the
+                    # indeterminate outcome row is written.  This is deliberately
+                    # an update of the existing intent, not a new admission.
+                    await self.store.record_spawn_intent(
+                        host, name,
+                        {
+                            "open_fields": open_flds,
+                            "brief": brief,
+                            "delivery_receipt": delivery_receipt,
+                            "operator_initiated_top_level": (
+                                not open_flds.get("parent_stream_id")
+                                and not open_flds.get("handoff_from_stream_id")
+                                and bool((msg.get("_auth_context") or {}).get("operator_authenticated"))
+                            ),
+                        }, request_id=request_id, nonce=nonce,
+                    )
+                submission_deadline = release_deadline or (
+                    time.monotonic() + SPAWN_SUBMISSION_PROOF_BOUND_S
                 )
-                proof_watermark_fields = {
-                    "proof_watermark": watermark.daemon_seq,
-                    "proof_watermark_state": watermark.state,
-                    **({"proof_watermark_reason": watermark.reason} if watermark.reason else {}),
-                }
-                receipt.update(proof_watermark_fields)
-                delivery_receipt.update(proof_watermark_fields)
-                # The reservation intent is the crash-window recovery handle.
-                # Refresh its receipt before the paste so adoption can use the
-                # exact pre-action boundary even if the daemon dies before the
-                # indeterminate outcome row is written.  This is deliberately
-                # an update of the existing intent, not a new admission.
-                await self.store.record_spawn_intent(
-                    host, name,
-                    {
-                        "open_fields": open_flds,
-                        "brief": brief,
-                        "delivery_receipt": delivery_receipt,
-                        "operator_initiated_top_level": (
-                            not open_flds.get("parent_stream_id")
-                            and not open_flds.get("handoff_from_stream_id")
-                            and bool((msg.get("_auth_context") or {}).get("operator_authenticated"))
-                        ),
-                    }, request_id=request_id, nonce=nonce,
-                )
-            submission_deadline = release_deadline or (
-                time.monotonic() + SPAWN_SUBMISSION_PROOF_BOUND_S
-            )
-            initial_proof_timeout_s = SPAWN_SUBMISSION_PROOF_BOUND_S
-            await tmux.paste(name, brief)
+                initial_proof_timeout_s = SPAWN_SUBMISSION_PROOF_BOUND_S
+                await tmux.paste(name, brief)
+            finally:
+                self._delivery_critical.discard(delivery_task)
             self._submission_attempts[stream_id] = 1
             try:
                 if host == self.sessions.local_host:
@@ -3415,11 +3472,14 @@ class SpawnCtl:
             request_id = str(res.get("request_id") or "").strip()
             outcome = await self.store.get_spawn_outcome(host, name)
             outcome_request_id = str((outcome or {}).get("request_id") or "").strip()
+            # `indeterminate` is the interruption/unproven handle, retained for
+            # exactly this pass (see the BaseException path in `_spawn_impl`):
+            # it is settled only once a later reconciliation records delivered
+            # or failed.
             if (
                 request_id
                 and outcome_request_id == request_id
-                and str((outcome or {}).get("state") or "")
-                in {"delivered", "failed", "indeterminate"}
+                and str((outcome or {}).get("state") or "") in {"delivered", "failed"}
             ):
                 if float(res.get("expires_at") or 0.0) < time.time():
                     released += int(
@@ -3787,6 +3847,8 @@ class SpawnCtl:
             state, evidence, reason = await self._settle_adoption(
                 host, name, brief, tmux,
                 delivery_receipt=receipt if isinstance(receipt, dict) else None,
+                resume={"request_id": request_id, "nonce": str((reservation or {}).get("nonce") or ""),
+                        "intent": intent, "expires_at": float((reservation or {}).get("expires_at") or 0.0)},
             )
         except Exception:  # noqa: BLE001 - one bad intent never aborts the boot pass
             # Preserve the reservation: a definite failure could release the
@@ -3992,6 +4054,7 @@ class SpawnCtl:
     async def _settle_adoption(
         self, host: str, name: str, brief: str, tmux: tmux_transport.Tmux,
         *, delivery_receipt: dict[str, Any] | None = None,
+        resume: dict[str, Any] | None = None,
     ) -> tuple[str, str, str]:
         """QA #16 FINAL reconcile for an adopted LIVE pane. Returns
         `(state, delivery_evidence, reason)`; state is `delivered`, `failed`, or
@@ -4050,6 +4113,19 @@ class SpawnCtl:
                 "live_pane_unproven",
                 "legacy Codex initial prompt lacks native first-event proof",
             )
+        if (
+            resume is not None
+            and provider in READY_PREDICATES
+            and self._brief_never_pasted(delivery_receipt)
+            and time.time() <= float(resume.get("expires_at") or 0.0) + BOOT_READY_HARD_DEADLINE_S
+        ):
+            final, delivery_receipt = await self._paste_unpasted_adopted_brief(
+                host, name, brief, provider, tmux, receipt=delivery_receipt or {}, resume=resume,
+            )
+            if final is not None:
+                return final
+            # Fall through: the one paste is proved exactly like any post-paste
+            # adoption (post-watermark USER event, else the transcript needle).
         needle = tmux_transport.receipt_needle(brief)
         deadline = time.monotonic() + ADOPTION_BOOT_DEADLINE_S
         event_proof: EventProof | None = None
@@ -4122,6 +4198,59 @@ class SpawnCtl:
                 log.warning("adoption: %s never created a provider transcript; agent_never_started", name)
                 return "failed", "agent_never_started", "boot deadline expired with no provider transcript ever created"
             await asyncio.sleep(min(tmux_transport.POLL_INTERVAL_S, max(0.0, deadline - time.monotonic())))
+
+    @staticmethod
+    def _brief_never_pasted(receipt: dict[str, Any] | None) -> bool:
+        """True only when the intent proves no paste was ever attempted.
+
+        `_spawn_fenced` persists the pre-paste proof watermark into the intent
+        before every provider paste, so a pasted-transport intent without one
+        is a spawn interrupted before delivery (restart stage S2)."""
+        return (
+            isinstance(receipt, dict)
+            and str(receipt.get("transport") or "") in {"staged", "direct"}
+            and "proof_watermark_state" not in receipt
+            and str(receipt.get("state") or "") not in {"delivered", "indeterminate"}
+        )
+
+    async def _paste_unpasted_adopted_brief(
+        self, host: str, name: str, brief: str, provider: str, tmux: tmux_transport.Tmux,
+        *, receipt: dict[str, Any], resume: dict[str, Any],
+    ) -> tuple[tuple[str, str, str] | None, dict[str, Any]]:
+        """Make the interrupted spawn's one paste on its adopted pane.
+
+        Returns `(final, receipt)`: a final settle tuple when no paste is made,
+        else `None` and the re-fenced receipt for the post-paste proof. The
+        intent is re-fenced with the pre-paste watermark first, so a crash after
+        this point is the post-paste case adoption proves and never re-pastes."""
+        stream_id = f"{host}:{name}"
+        ready = await self._await_provider_ready(
+            name, provider, tmux, absolute_deadline=time.monotonic() + ADOPTION_BOOT_DEADLINE_S,
+        )
+        if not ready.ready:
+            if not await tmux.has_session(name):
+                return ("failed", "pane_died_during_boot", "adopted pane died before its brief was delivered"), receipt
+            return (
+                "indeterminate", "provider_booting",
+                "adopted_unpasted_brief: provider not ready yet; a later reconcile delivers it",
+            ), receipt
+        watermark = await self._watermark_before_action(stream_id)
+        receipt = {
+            **receipt,
+            "proof_watermark": watermark.daemon_seq,
+            "proof_watermark_state": watermark.state,
+            **({"proof_watermark_reason": watermark.reason} if watermark.reason else {}),
+            "resumed_after_restart": True,
+        }
+        intent = {**dict(resume.get("intent") or {}), "delivery_receipt": receipt}
+        if not await self.store.record_spawn_intent(
+            host, name, intent, request_id=str(resume.get("request_id") or ""),
+            nonce=str(resume.get("nonce") or ""),
+        ):
+            return ("indeterminate", "live_pane_unproven", "spawn_fence_lost before resumed delivery"), receipt
+        await tmux.paste(name, brief)
+        log.info("adoption pasted the never-delivered brief once for %s", stream_id)
+        return None, receipt
 
     async def _transcript_status(
         self, name: str, needle: str, *, host: str | None = None,

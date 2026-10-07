@@ -28,6 +28,7 @@ from agent_orch.config import Config  # noqa: E402
 from agent_orch.triage import parse_frontmatter  # noqa: E402
 from agent_orch import prompt_protocol, wsclient  # noqa: E402
 from tools.live_window import authenticated_operator_connection  # noqa: E402
+from websockets.exceptions import ConnectionClosed  # noqa: E402
 from message_envelopes import match_message_envelope  # noqa: E402
 
 ZONE = ZoneInfo("America/Chicago")
@@ -1264,6 +1265,52 @@ def retain_weekly_summary(settings, run_id):
                 "due": True, "summary": summary}
 
 
+# A daemon restart surfaces as a refused/reset socket or a closed websocket.
+# Nothing else (a missing token file, a disk error) is a transport loss.
+TRANSPORT_ERRORS = (ConnectionError, ConnectionClosed)
+_SECRET_FIELD = r"[A-Za-z0-9_-]*(?:token|secret|password|passwd|api[_-]?key|authorization|credential)[A-Za-z0-9_-]*"
+_SECRET_PATTERNS = (
+    # key: value / key=value / "key": "value" (quotes optional, Bearer prefix optional)
+    re.compile(rf"""(?i)(["']?\b{_SECRET_FIELD}["']?\s*[:=]\s*)(["']?)(?:bearer\s+)?[^\s"',;&}}]+\2"""),
+    re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]+"),
+)
+
+
+def sanitize_error(exc):
+    """Durable one-line failure text: type and message, credentials and control bytes removed."""
+    text = exc if isinstance(exc, str) else f"{type(exc).__name__}: {exc}"
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub(lambda m: f"{m.group(1)}[redacted]", text)
+    return re.sub(r"[\x00-\x1f\x7f]", " ", text)[:300]
+
+
+def record_failure(root, run_id, *, stage, error, notice):
+    """Append one failure to the run's durable failure state and return its seq.
+
+    The top-level fields always describe the latest failure; earlier ones move
+    to a bounded per-failure `history`, each keeping its own notice state."""
+    path = root / "failure.json"
+    state = read(path, {})
+    history = list(state.get("history", []))
+    if state.get("error"):
+        history.append({k: state[k] for k in ("seq", "at", "stage", "error", "notice", "cleanup_error", "notice_error") if k in state})
+    seq = int(state.get("seq") or len(history)) + 1
+    atomic(path, {"run_id": run_id, "seq": seq, "at": now_iso(), "stage": stage, "error": error,
+                  "notice": notice, "latest": True, "history": history[-8:]})
+    return seq
+
+
+def annotate_failure(root, run_id, seq=None, **fields):
+    """Merge fields into the latest failure (or the history entry for `seq`)."""
+    path = root / "failure.json"
+    state = read(path, {})
+    if seq is not None and state.get("seq") != seq:
+        state["history"] = [{**h, **fields} if h.get("seq") == seq else h for h in state.get("history", [])]
+        atomic(path, state)
+        return
+    atomic(path, {**state, "run_id": run_id, **fields})
+
+
 class Pipeline:
     def __init__(self, settings, rpc=wsclient):
         self.settings, self.rpc, self.config = settings, rpc, settings.rpc()
@@ -1358,21 +1405,55 @@ class Pipeline:
         atomic(receipt_path, stage)
         return stage
 
+    def queue_failure_notice(self, manifest, *, seq, stage, failure):
+        """Persist the failure notice before any RPC: the daemon may be down.
+        A newer failure supersedes an older notice that never landed."""
+        root = self.settings.state_root / "runs" / manifest["run_id"]
+        path = root / "failure-delivery.json"
+        record = read(path, {"attempts": []})
+        prior = record.get("pending")
+        if prior and prior.get("seq") != seq:
+            annotate_failure(root, manifest["run_id"], seq=prior.get("seq"), notice=f"superseded by failure {seq}")
+        record["pending"] = {"seq": seq, "stage": stage, "failure": failure, "at": now_iso()}
+        atomic(path, record)
+
+    def supersede_pending_notice(self, manifest, reason):
+        root = self.settings.state_root / "runs" / manifest["run_id"]
+        path = root / "failure-delivery.json"
+        record = read(path, {"attempts": []})
+        pending = record.get("pending")
+        if pending:
+            record["pending"] = None
+            atomic(path, record)
+            annotate_failure(root, manifest["run_id"], seq=pending.get("seq"), notice=f"superseded: {reason}")
+
     async def deliver(self, manifest, final=None, failure=None):
         root = self.settings.state_root / "runs" / manifest["run_id"]
         path = root / ("failure-delivery.json" if failure else "delivery.json")
         record = read(path, {"attempts": []})
         if (root / "review.json").exists():
             return record
+        pending = record.get("pending") if failure else None
+        if failure and not pending:
+            return record
         binding = await self.binding()
         target, generation = binding["stream_id"], binding["session_generation"]
-        attempt = next((a for a in record["attempts"] if a["target"] == target and a["generation"] == generation), None)
+        seq = pending.get("seq") if pending else None
+        attempt = next((a for a in record["attempts"] if a["target"] == target and a["generation"] == generation
+                        and a.get("seq") == seq), None)
         if attempt and attempt.get("confirmed"):
+            if pending:
+                self._notice_landed(manifest, record, path, seq)
             return record
         if not attempt:
-            key = "daily-retro-" + digest([self.settings.namespace, manifest["run_id"], target, generation, bool(failure)])[:32]
+            # One notice per failure: the key carries the failure seq (absent for
+            # the ready REPORT, which keeps its historical key).
+            key = "daily-retro-" + digest([self.settings.namespace, manifest["run_id"], target, generation, bool(failure),
+                                           *([seq] if pending else [])])[:32]
             if failure:
-                body = f"REPORT daily-retro failure {manifest['run_id']}: {failure}. Retained state: {root}. Retry with existing producer; no operator notification for routine retries."
+                body = (f"REPORT daily-retro failure {manifest['run_id']} stage {pending.get('stage')}: {pending['failure']}. "
+                        f"Retained state: {root}. The next producer pass resumes the retained stage without a new worker; "
+                        "no operator notification for routine retries.")
             else:
                 summary = ""
                 if manifest.get("consolidation"):
@@ -1390,7 +1471,7 @@ class Pipeline:
                         "If record-review returns a due weekly_summary, publish its compact accounting once, leading with gap_accounting.headline (new-this-week and actionable current, baseline as one separate labelled line), then denominators and coverage limits; never sum repeated daily source gaps. "
                         "Ask only for an actual missing grant through the existing versioned decision helper; routine authorized work needs no operator permission.")
             host, session = target.split(":", 1)
-            attempt = {"target": target, "generation": generation, "request_id": key,
+            attempt = {"target": target, "generation": generation, "request_id": key, **({"seq": seq} if pending else {}),
                        "payload": {"host": host, "session_name": session, "text": body,
                                    "request_id": key, "optimistic_id": key}}
             record["attempts"].append(attempt)
@@ -1405,9 +1486,17 @@ class Pipeline:
         attempt["at"] = now_iso()
         attempt["collection_to_delivery_seconds"] = (datetime.fromisoformat(attempt["at"]) - datetime.fromisoformat(manifest["collected_at"])).total_seconds()
         atomic(path, record)
+        if pending and attempt["confirmed"]:
+            self._notice_landed(manifest, record, path, seq)
         if not attempt["confirmed"]:
             raise RuntimeError("delivery pending; exact target/body/key retained")
         return record
+
+    def _notice_landed(self, manifest, record, path, seq):
+        record["pending"] = None
+        atomic(path, record)
+        annotate_failure(self.settings.state_root / "runs" / manifest["run_id"], manifest["run_id"],
+                         seq=seq, notice="delivered")
 
     async def cleanup(self, manifest, force=False):
         root = self.settings.state_root / "runs" / manifest["run_id"]
@@ -1443,22 +1532,40 @@ class Pipeline:
     async def run_manifest(self, manifest):
         root = self.settings.state_root / "runs" / manifest["run_id"]
         if (root / "review.json").exists():
+            self.supersede_pending_notice(manifest, "review recorded")
             await self.cleanup(manifest)
             return False
+        if read(root / "failure-delivery.json", {}).get("pending"):
+            try:  # A notice that could not reach the daemon stays durable until it lands.
+                await self.deliver(manifest, failure=True)
+            except Exception as notice_error:
+                annotate_failure(root, manifest["run_id"], notice_error=sanitize_error(notice_error))
+        primary = None
         try:
             sol = await self.worker(manifest, "sol")
             astra = await self.worker(manifest, "astra", sol["packet"])
             await self.deliver(manifest, astra)
             return True
-        except Exception as exc:
-            atomic(root / "failure.json", {"at": now_iso(), "error": str(exc)})
-            try:
-                await self.deliver(manifest, failure=str(exc))
-            except Exception as delivery_error:
-                atomic(root / "failure-notice-error.json", {"error": str(delivery_error)})
+        except BaseException as exc:
+            primary = exc
+            stage = next((n for n in ("sol", "astra") if not read(root / f"{n}.json", {}).get("packet")), "delivery")
+            error = sanitize_error(exc)
+            seq = record_failure(root, manifest["run_id"], stage=stage, error=error, notice="pending")
+            self.queue_failure_notice(manifest, seq=seq, stage=stage, failure=error)
+            if isinstance(exc, Exception):
+                try:
+                    await self.deliver(manifest, failure=True)
+                except Exception as delivery_error:
+                    annotate_failure(root, manifest["run_id"], notice_error=sanitize_error(delivery_error))
             raise
         finally:
-            await self.cleanup(manifest)
+            try:
+                await self.cleanup(manifest)
+            except Exception as cleanup_error:
+                # Cleanup is retried by the next pass; it never replaces the primary error.
+                if primary is None:
+                    raise
+                annotate_failure(root, manifest["run_id"], cleanup_error=sanitize_error(cleanup_error))
 
     async def history_run(self, baseline_path, batch, no_deliver=False):
         history_baseline(self.settings, baseline_path)
@@ -1500,7 +1607,9 @@ class Pipeline:
                     sol = await self.worker(manifest, "sol")
                     await self.worker(manifest, "astra", sol["packet"])
                 except Exception as exc:
-                    atomic(root / "failure.json", {"at": now_iso(), "error": str(exc)})
+                    stage = next((n for n in ("sol", "astra") if not read(root / f"{n}.json", {}).get("packet")), "astra")
+                    record_failure(root, manifest["run_id"], stage=stage, error=sanitize_error(exc),
+                                   notice="not required: no-deliver history batch")
                     raise
                 finally:
                     await self.cleanup(manifest, force=True)
@@ -1888,7 +1997,23 @@ class ProducerTransport:
         def invoke():
             with authenticated_operator_connection(self.settings.ws_url, self.settings.token_path, timeout + 2) as connection:
                 return connection.rpc(payload)
-        return await asyncio.to_thread(invoke)
+        if not wsclient._is_rpc_retry_eligible(payload):
+            return await asyncio.to_thread(invoke)
+        # Same reconnect contract as the agent-orch client: a daemon restart is
+        # survived inside the verb's own retry deadline (await/spawn re-sends are
+        # ledger-resolved or idempotency-keyed), then the transport error stands.
+        policy = wsclient._rpc_retry_policy_from_env(timeout)
+        deadline = wsclient._retry_deadline(monotonic(), policy)
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return await asyncio.to_thread(invoke)
+            except TRANSPORT_ERRORS:
+                delay, _reason = wsclient._transport_retry_next_delay(policy, deadline, attempt)
+                if delay is None:
+                    raise
+                await asyncio.sleep(delay)
 
     async def spawn_once(self, config, payload):
         if not any(stage.get("payload") == payload for stage in self.stages()):

@@ -123,6 +123,34 @@ python services/chat-stream-v2/tools/daily_retro.py run --config /absolute/confi
 python services/chat-stream-v2/tools/daily_retro.py run --config /absolute/config.json --on-demand
 ```
 
+## Interruption and recovery
+
+A daemon restart can drop the producer's connection while a worker's terminal
+report is already retained, or while the daemon is still down. The producer's
+retry-eligible RPCs (`await_report`, `await_spawn`, keyed `spawn`) reconnect under
+the agent-orch client contract. A refused or dropped socket is retried with capped
+backoff until the verb's own retry deadline; `AGENT_ORCH_RPC_RETRY_DEADLINE_S`
+bounds that window. The producer then re-awaits the same owned report from the
+ledger. It never spawns another worker and never reruns a completed stage. Only
+connection loss counts: an `OSError` such as a missing token file fails at once.
+
+A pass that still fails appends to `runs/<date>/failure.json`. The top level holds
+the latest failure (`seq`, `stage`, sanitized `error`, `notice`, `latest: true`),
+and earlier failures move to a bounded `history`, each with its own notice state.
+Sanitizing removes control bytes and credential values (`Authorization: Bearer`,
+`*token*`, `api_key`, `password`, `secret`, quoted or `key=value`). Cleanup errors
+are recorded as `cleanup_error` and never replace the primary error; cleanup is
+retried on the next pass.
+
+The failure notice is queued in `failure-delivery.json` (`pending`) before any
+RPC, including on an interrupt, because the daemon may be unreachable. Its
+delivery key carries the failure `seq`, so each failure gets exactly one notice. A
+newer failure supersedes an older notice that never landed, and a recorded review
+supersedes a pending notice. The next scheduled or `--on-demand` pass flushes the
+pending notice once (receipt-reconciled, never resent), then resumes the retained
+stage. There is no timer or retry loop: while the daemon stays down past the
+reconnect window, the next attempt is the next pass.
+
 RunAtLoad catches missed executions after 05:00. Before 05:00 a timer invocation
 does nothing; authorized activation uses `--on-demand`. Install only when
 `/etc/localtime` resolves America/Chicago. Render the plist's interpreter, release,

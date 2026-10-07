@@ -1563,3 +1563,184 @@ def test_compiled_packet_and_hash_cannot_replace_frozen_inputs(config):
     with pytest.raises(ValueError,match='immutable inputs'):
         asyncio.run(pipeline.history_consolidate(baseline,[1]))
     assert len(rpc.sent)==1
+
+
+# --- daemon restart continuity (spec_pentacle__daemon_restart_continuity_2026_10) ---
+# Matrix cells C4/C4b run the real `run --on-demand` path against a disposable
+# daemon (tests/soak/test_restart_continuity.py); these pin the driver contract.
+
+
+class DaemonDown(Transport):
+    """The daemon restarted under the Astra await and stays down."""
+    def __init__(self):
+        super().__init__()
+        self.down = False
+
+    def _gate(self):
+        if self.down:
+            raise ConnectionRefusedError(111, "Connect call failed ('127.0.0.1', 7791)")
+
+    async def await_report_once(self, config, stream, msg_id, **kwargs):
+        if "astra" in stream:
+            self.down = True
+        self._gate()
+        return await super().await_report_once(config, stream, msg_id, **kwargs)
+
+    async def assistant_once(self, config, payload):
+        self._gate()
+        return await super().assistant_once(config, payload)
+
+    async def close_once(self, config, stream, **kwargs):
+        self._gate()
+        return await super().close_once(config, stream, **kwargs)
+
+    async def send_receipt_once(self, config, target, key):
+        self._gate()
+        return await super().send_receipt_once(config, target, key)
+
+
+def test_unrecoverable_outage_persists_failure_then_flushes_notice_once(config):
+    """C4b: primary error survives cleanup, notice queued before any RPC, flushed once."""
+    source(config.memory_root, "one", body="No lessons.")
+    rpc = DaemonDown()
+    pipeline = retro.Pipeline(config, rpc)
+    with pytest.raises(ConnectionRefusedError):
+        asyncio.run(pipeline.run(at()))
+    root = config.state_root / "runs/2026-09-28"
+    failure = retro.read(root / "failure.json")
+    assert failure["run_id"] == "2026-09-28" and failure["stage"] == "astra" and failure["seq"] == 1
+    assert failure["error"].startswith("ConnectionRefusedError: ") and failure["notice"] == "pending"
+    assert "cleanup_error" in failure and "notice_error" in failure
+    assert retro.read(root / "failure-delivery.json")["pending"]["seq"] == 1
+    rpc.down = False
+    rpc.await_report_once = Transport.await_report_once.__get__(rpc)
+    assert asyncio.run(pipeline.run(at()))["delivered"] == ["2026-09-28"]
+    bodies = [r["payload"]["text"] for r in rpc.sent.values()]
+    assert sum(b.startswith("REPORT daily-retro failure") for b in bodies) == 1
+    assert sum(b.startswith("REPORT daily-retro ready") for b in bodies) == 1
+    assert len(rpc.spawns) == 2  # no respawn: Sol and Astra once each
+    assert retro.read(root / "failure.json")["notice"] == "delivered"
+    asyncio.run(pipeline.run(at()))
+    assert len(rpc.sent) == 2  # the delivered notice is never resent
+
+
+def test_cleanup_error_never_replaces_primary_error(config):
+    source(config.memory_root, "one")
+    class CleanupDown(Transport):
+        async def await_report_once(self, config, stream, msg_id, **kwargs):
+            if "astra" in stream:
+                raise RuntimeError("primary astra failure")
+            return await super().await_report_once(config, stream, msg_id, **kwargs)
+        async def close_once(self, config, stream, **kwargs):
+            raise ConnectionRefusedError(111, "refused")
+    with pytest.raises(RuntimeError, match="primary astra failure"):
+        asyncio.run(retro.Pipeline(config, CleanupDown()).run(at()))
+    failure = retro.read(config.state_root / "runs/2026-09-28/failure.json")
+    assert failure["error"] == "RuntimeError: primary astra failure"
+    assert failure["cleanup_error"].startswith("ConnectionRefusedError")
+
+
+def test_interrupt_queues_notice_truthfully_without_rpc(config):
+    """Finding (c): a BaseException exit queues the notice; no delivery RPC is made."""
+    source(config.memory_root, "one")
+    class Interrupted(Transport):
+        async def await_report_once(self, config, stream, msg_id, **kwargs):
+            if "astra" in stream:
+                raise KeyboardInterrupt
+            return await super().await_report_once(config, stream, msg_id, **kwargs)
+        async def assistant_once(self, config, payload):
+            raise AssertionError("no delivery RPC on an interrupt")
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(retro.Pipeline(config, Interrupted()).run(at()))
+    root = config.state_root / "runs/2026-09-28"
+    assert retro.read(root / "failure.json")["notice"] == "pending"
+    assert retro.read(root / "failure-delivery.json")["pending"]["stage"] == "astra"
+
+
+def test_newer_failure_supersedes_unlanded_notice_and_keeps_history(config):
+    """Finding (a): one notice per failure; the latest is marked, earlier kept."""
+    source(config.memory_root, "one")
+    rpc = DaemonDown()
+    pipeline = retro.Pipeline(config, rpc)
+    for down_from_start in (False, True):  # the second pass cannot flush notice 1
+        rpc.down = down_from_start
+        with pytest.raises(ConnectionRefusedError):
+            asyncio.run(pipeline.run(at()))
+    failure = retro.read(config.state_root / "runs/2026-09-28/failure.json")
+    assert failure["seq"] == 2 and failure["latest"] is True and failure["notice"] == "pending"
+    assert [h["seq"] for h in failure["history"]] == [1]
+    assert failure["history"][0]["notice"] == "superseded by failure 2"
+    pending = retro.read(config.state_root / "runs/2026-09-28/failure-delivery.json")["pending"]
+    assert pending["seq"] == 2
+
+
+def test_recorded_review_supersedes_pending_notice(config, monkeypatch):
+    """Finding (d): a later-reviewed run never leaves a stale pending notice."""
+    source(config.memory_root, "one")
+    rpc = DaemonDown()
+    pipeline = retro.Pipeline(config, rpc)
+    with pytest.raises(ConnectionRefusedError):
+        asyncio.run(pipeline.run(at()))
+    root = config.state_root / "runs/2026-09-28"
+    retro.atomic(root / "review.json", {"recorded": True})
+    rpc.down = False
+    asyncio.run(pipeline.run(at()))
+    assert retro.read(root / "failure-delivery.json")["pending"] is None
+    assert retro.read(root / "failure.json")["notice"] == "superseded: review recorded"
+    assert not rpc.sent
+
+
+@pytest.mark.parametrize("raw", [
+    "Authorization: Bearer abc.DEF-123",
+    "GET /x?access_token=abc123&y=1",
+    "api_key='k-123'",
+    '{"stream_token": "s3cr3t"}',
+    "password=hunter2",
+    "header Bearer abc.def",
+])
+def test_sanitize_error_redacts_credential_forms(raw):
+    """Finding (b)."""
+    text = retro.sanitize_error(RuntimeError(raw + "\nnext line"))
+    for secret in ("abc.DEF-123", "abc123", "k-123", "s3cr3t", "hunter2", "abc.def"):
+        assert secret not in text
+    assert "[redacted]" in text and "\n" not in text and text.startswith("RuntimeError: ")
+
+
+def test_producer_transport_reconnects_only_transport_loss(config, monkeypatch):
+    """C4 via the shared client contract; finding (e): only a refused/dropped
+    socket is reconnected, and only for retry-eligible verbs."""
+    monkeypatch.delenv("AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS", raising=False)
+    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_BACKOFF_BASE_S", "0.001")
+    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_BACKOFF_CAP_S", "0.001")
+    calls = []
+    failures = []
+
+    class Connection:
+        def __enter__(self):
+            calls.append(1)
+            if failures:
+                raise failures.pop(0)
+            return self
+        def __exit__(self, *exc):
+            return False
+        def rpc(self, payload):
+            return {"type": "await_report.ok", "ok": True, "stream_id": payload["stream_id"]}
+
+    monkeypatch.setattr(retro, "authenticated_operator_connection", lambda *a: Connection())
+    retro.atomic(config.state_root / "runs/2026-09-28/astra.json", {"stream_id": "fixture:astra", "generation": "g"})
+    transport = retro.ProducerTransport(config)
+    failures[:] = [ConnectionRefusedError(111, "refused")] * 6
+    payload = {"type": "await_report", "stream_id": "fixture:astra", "msg_id": 0}
+    assert asyncio.run(transport.call(payload))["type"] == "await_report.ok"
+    assert len(calls) == 7
+    calls.clear()
+    failures[:] = [FileNotFoundError(2, "operator token missing")]
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(transport.call(payload))
+    assert len(calls) == 1
+    calls.clear()
+    failures[:] = [ConnectionRefusedError(111, "refused")]
+    with pytest.raises(ConnectionRefusedError):
+        asyncio.run(transport.call({"type": "close", "host": "fixture", "session_name": "astra",
+                                    "expected_generation": "g"}))
+    assert len(calls) == 1

@@ -56,6 +56,18 @@ transaction. A pending close is separate from the verified-death `session_reap`
 ledger. See the [close protocol](chat_protocol.md#close-on-an-offline-host) for
 request and reply semantics.
 
+## Restart continuity
+
+A restart is expected to leave every admitted spawn finished once or durably
+failed; see [restart continuity](../services/chat-stream-v2/docs/restart-continuity.md).
+The daemon log records the handoff and recovery: `drained in-flight spawns at
+shutdown: cancelled=N unfinished=M` on a graceful stop (unfinished should be 0),
+`spawn intents: {...}` after the startup reconcile pass, and `adoption pasted the
+never-delivered brief once for <stream>` when a spawn interrupted before its paste
+is completed. `agent-orch spawn-status <key|request_id>` shows the durable outcome;
+`indeterminate` with a retained reservation means reconciliation is still in
+progress, not failure.
+
 ## Nonexistent controls
 
 Do not configure `--daemon-stats-*` options or `PENTACLE_DAEMON_STATS_*` variables: `services/chat-stream-v2/main.py --help` exposes neither. There is no v2 `daemon_stats.jsonl` output path to tail or rotate.

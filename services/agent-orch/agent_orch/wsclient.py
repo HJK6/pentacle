@@ -131,6 +131,11 @@ class RetryPolicy:
     backoff_cap_s: float
     jitter_fraction: float
     deadline_s: float
+    # Transport failures (refused/dropped socket) on retry-eligible verbs retry
+    # until `deadline_s` instead of stopping at `max_attempts`, so a daemon
+    # restart shorter than the verb's own deadline is survived. Off when
+    # AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS is set explicitly.
+    transport_deadline_bound: bool = False
 
 
 def _float_from_env(name: str, default: float, *, max_value: float, min_value: float | None = None) -> float:
@@ -240,6 +245,7 @@ def _rpc_retry_policy_from_env(call_timeout: float) -> RetryPolicy:
         max_value=RPC_RETRY_DEADLINE_MAX_S,
     )
     max_attempts = _int_from_env("AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS", 3, max_value=100)
+    transport_deadline_bound = os.environ.get("AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS") is None
     call_deadline = call_timeout if call_timeout > 0 else 30.0
     # Decouple the TOTAL retry deadline from a single call timeout. The retry
     # loop splits the remaining deadline across the attempts still left
@@ -275,6 +281,7 @@ def _rpc_retry_policy_from_env(call_timeout: float) -> RetryPolicy:
             max_value=10.0,
         ),
         deadline_s=deadline_s,
+        transport_deadline_bound=transport_deadline_bound,
     )
 
 
@@ -319,7 +326,17 @@ def _retry_next_delay(policy: RetryPolicy, deadline: float, attempt: int) -> tup
     return delay, ""
 
 
-def _log_rpc_retry(verb: str, attempt: int, max_attempts: int, reason: str, backoff_s: float) -> None:
+def _transport_retry_next_delay(policy: RetryPolicy, deadline: float, attempt: int) -> tuple[float | None, str]:
+    """Next delay after a refused/dropped socket: deadline-bound, capped backoff."""
+    if not policy.transport_deadline_bound:
+        return _retry_next_delay(policy, deadline, attempt)
+    delay = _retry_backoff_s(policy, attempt)
+    if delay >= deadline - time.monotonic():
+        return None, "retry_deadline_exceeded"
+    return delay, ""
+
+
+def _log_rpc_retry(verb: str, attempt: int, max_attempts: int | str, reason: str, backoff_s: float) -> None:
     logger.warning(
         "agent-orch rpc retry verb=%s attempt=%s/%s reason=%s backoff=%.3fs",
         verb,
@@ -1644,7 +1661,13 @@ async def _one_shot_rpc(
         finally:
             if ws is not None:
                 await ws.close()
-        delay, giveup_reason = _retry_next_delay(retry_policy, retry_deadline, attempts)
+        attempt_bound: int | str = retry_policy.max_attempts
+        if retry_reason == "websocket_send_failed":
+            delay, giveup_reason = _transport_retry_next_delay(retry_policy, retry_deadline, attempts)
+            if retry_policy.transport_deadline_bound:
+                attempt_bound = "deadline"
+        else:
+            delay, giveup_reason = _retry_next_delay(retry_policy, retry_deadline, attempts)
         if delay is None:
             _log_rpc_giveup(verb, attempts, giveup_reason)
             return _retry_failure_response(
@@ -1655,7 +1678,7 @@ async def _one_shot_rpc(
                 sent=sent_any,
                 message=last_message,
             )
-        _log_rpc_retry(verb, attempts + 1, retry_policy.max_attempts, retry_reason, delay)
+        _log_rpc_retry(verb, attempts + 1, attempt_bound, retry_reason, delay)
         await asyncio.sleep(delay)
 
 
@@ -2275,7 +2298,39 @@ async def _await_starting_spawn(
         session = inventory_session(message)
         return bool(session and session.get("state") in {"ready", "failed"})
 
-    ws, snapshot = await _connect_ready(config, max(0.1, deadline - time.monotonic()))
+    async def recover_after_transport_loss() -> dict[str, Any]:
+        """The admitted spawn outlives a dropped daemon socket (restart).
+
+        Resolve its terminal state through `await_spawn` by request id, whose
+        one-shot RPC is retry-eligible and deadline-bound; never report a bare
+        transport error for a seat whose admission was already acknowledged.
+        """
+        request_id = str(accepted.get("request_id") or "").strip()
+        payload = {"spawn_request_id": request_id} if request_id else {"stream_id": stream_id}
+        last: dict[str, Any] = {}
+        while (remaining := deadline - time.monotonic()) > 0:
+            last = await await_spawn_once(config, dict(payload), timeout=min(30.0, max(0.1, remaining)))
+            session = last.get("session") if isinstance(last.get("session"), dict) else None
+            if last.get("type") == "await_spawn.ok" and last.get("state") == "ready":
+                return {**accepted, "stream_id": stream_id, "state": "ready",
+                        "session": session or accepted.get("session")}
+            if last.get("type") == "await_spawn.error":
+                return {"type": "spawn.error", "ok": False, "request_id": accepted.get("request_id"),
+                        "stream_id": stream_id, "error_code": last.get("error_code") or "spawn_failed",
+                        "error": last.get("error") or "spawn failed after admission", "session": session}
+            if last.get("type") != "await_spawn.ok":
+                break  # retry deadline exhausted inside the one-shot RPC
+            await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+        outcome_receipt = last.get("initial_prompt_delivery") if isinstance(last.get("initial_prompt_delivery"), dict) else None
+        return indeterminate(
+            last.get("session") if isinstance(last.get("session"), dict) else None,
+            outcome_receipt or (receipt if isinstance(receipt, dict) else {}),
+        )
+
+    try:
+        ws, snapshot = await _connect_ready(config, max(0.1, deadline - time.monotonic()))
+    except (OSError, websockets.exceptions.ConnectionClosed):
+        return await recover_after_transport_loss()
     try:
         if terminal_inventory(snapshot):
             inventory = snapshot
@@ -2289,6 +2344,8 @@ async def _await_starting_spawn(
             )
     except TimeoutError:
         return await durable_indeterminate(inventory_session(snapshot)) or accepted
+    except (OSError, websockets.exceptions.ConnectionClosed):
+        return await recover_after_transport_loss()
     finally:
         await ws.close()
     session = inventory_session(inventory)
