@@ -891,9 +891,12 @@ class Ingest:
         candidates = await _open_writable_transcripts(root[0])
         fragment = "/.codex/sessions/" if row.get("provider") == "codex" else "/.claude/"
         candidates = [candidate for candidate in candidates if fragment in candidate[0]]
-        if len(candidates) != 1:
+        selected = await _select_first_bind_candidate(
+            candidates, provider=str(row.get("provider") or ""),
+        )
+        if selected is None:
             return ""
-        path, identity = candidates[0]
+        path, identity = selected
         if state is not None:
             state.selected_file_id = identity
         return path
@@ -927,6 +930,75 @@ def _native_session_identity_from_fd(fd: int, provider: str) -> str:
         if isinstance(record, dict) and (record.get("sessionId") or record.get("session_id")):
             return str(record.get("sessionId") or record.get("session_id"))
     return ""
+
+
+def _codex_rollout_role_from_fd(fd: int) -> str | None:
+    """Classify a Codex rollout from its authenticated session header.
+
+    Codex 0.157 can keep the interactive rollout and provider-owned subagent
+    rollouts writable in the same proven process.  Only the interactive CLI
+    rollout belongs to the pane conversation; explicit subagent sources are
+    safe to exclude.  Unknown/malformed source metadata remains ambiguous and
+    fails closed rather than being guessed from recency, model, or path.
+    """
+    try:
+        prefix = os.pread(fd, 64 * 1024, 0)
+    except OSError:
+        return None
+    for line in prefix.decode("utf-8", "replace").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("type") != "session_meta":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        source = payload.get("source")
+        if source == "cli":
+            return "interactive"
+        if isinstance(source, dict) and isinstance(source.get("subagent"), dict):
+            return "subagent"
+        return None
+    return None
+
+
+def _codex_candidate_role(
+    path: str, expected_identity: tuple[int, int],
+) -> str | None:
+    """Read one candidate without allowing a path swap after the lsof proof."""
+    fd = _open_descriptor(path)
+    if fd is None:
+        return None
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != expected_identity:
+            return None
+        return _codex_rollout_role_from_fd(fd)
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+async def _select_first_bind_candidate(
+    candidates: list[tuple[str, tuple[int, int]]], *, provider: str,
+) -> tuple[str, tuple[int, int]] | None:
+    """Select one process-proven transcript while preserving fail-closed binds."""
+    if provider != "codex":
+        return candidates[0] if len(candidates) == 1 else None
+    interactive: list[tuple[str, tuple[int, int]]] = []
+    for candidate in candidates:
+        role = await asyncio.to_thread(_codex_candidate_role, *candidate)
+        if role is None:
+            return None
+        if role == "interactive":
+            interactive.append(candidate)
+    return interactive[0] if len(interactive) == 1 else None
 
 
 def _provider_from_session_name(name: str) -> str | None:
