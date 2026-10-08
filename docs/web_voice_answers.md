@@ -150,9 +150,12 @@ closed-chat-slot; host-restart-restores-input.
 
 Required candidate checks are `npm test`, `npm run build:web` (and
 `npm run prestart` when needed), and the complete `node test/e2e/web_gate.js`.
-At authoring, the new focused oracle tests and isolated fixture seed/import
-checks were run; the browser scenario is **NOT RUN, pending the final candidate
-gate**. The default Python lacked `boto3`; fixture imports passed with a prepared
-daemon environment. Use `PENTACLE_PYTHON` when the gate needs that environment.
-Unit/build success cannot certify unrun browser scenarios. Live transcription,
-deployed HTTPS and physical-microphone acceptance remain untested.
+The focused oracle tests and fixture setup checks pass. The complete local
+gate was attempted with a prepared Python environment: the isolated daemon
+and web host started, but Chrome exited before any scenario with
+`process_singleton_posix.cc: socket() failed: Operation not permitted`.
+CDP then reported `ECONNREFUSED`. Browser scenarios are therefore **NOT RUN**;
+unit/build success does not certify them. The fixture daemon and generated
+operator credential were cleaned up. The fleet must run the full gate on the
+candidate in its supported browser environment. Live transcription, deployed
+HTTPS and physical-microphone acceptance remain untested.
