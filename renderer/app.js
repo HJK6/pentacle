@@ -3803,6 +3803,7 @@ function renderSlotChat(slot) {
         transcribe: payload => window.cc.chatTranscribeBlob(payload),
         send: ({ streamId: target, text, meta }) => assertAssistantDirectSlot(slot)
           ? window.PentacleChatStore.sendTurn(target, text, [], { meta }) : '',
+        sendPlain: optimisticId => window.PentacleChatStore.sendVoiceAsPlainNote(optimisticId),
         telemetry: (event, tags) => window.PentacleChatCore?.logTelemetry?.(event, tags),
         onFinished: leaveQuestions, onDiscarded: leaveQuestions,
         onRecordingChange: () => scheduleSlotChatRender(slot),

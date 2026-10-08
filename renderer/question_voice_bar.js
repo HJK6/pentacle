@@ -6,7 +6,7 @@ const { createSegments, selectedSet, isVoiceEligible, registerVoiceAnswersBindin
 // The deck adds coverage and interaction to the existing capture/upload/ASR unit.
 // Its second controller participates in web_voice's module-wide captureOwner.
 function createQuestionVoiceBar({ env = globalThis, mount, takeMount, scope = takeMount, getStreamId,
-  upload, transcribe, send, telemetry, onFinished = () => {}, onDiscarded = () => {}, onRecordingChange = () => {},
+  upload, transcribe, send, sendPlain, telemetry, onFinished = () => {}, onDiscarded = () => {}, onRecordingChange = () => {},
   recorder = createBrowserRecorder(env), bindMic = bindComposerMic }) {
   const doc = mount.ownerDocument;
   const mic = doc.createElement('button'); mic.type = 'button';
@@ -143,6 +143,14 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, scope = ta
     event.preventDefault(); event.stopImmediatePropagation(); requestLeave();
   };
   doc.addEventListener('keydown', escape, true);
+  const plainClick = event => {
+    const button = event.target.closest?.('[data-question-voice-plain]');
+    if (!button || !takeMount?.contains(button) || button.disabled) return;
+    event.preventDefault(); event.stopPropagation();
+    button.disabled = true;
+    if (!sendPlain?.(button.dataset.optimisticId || '')) button.disabled = false;
+  };
+  takeMount?.addEventListener('click', plainClick);
   return {
     update({ entries, activeKey, header, before = null, stateMount, barMount = mount }) {
       pages = entries; currentKey = activeKey;
@@ -154,7 +162,7 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, scope = ta
     },
     requestLeave, cancel,
     snapshot: () => ({ ...controller?.snapshot(), n: segments?.n ?? 0, selected: segments ? selectedSet(segments, pages, surfaceStreamId) : frozen }),
-    async dispose() { destroyed = true; observer.disconnect(); doc.removeEventListener('keydown', escape, true); await cancel(); mic.remove(); bar.remove(); },
+    async dispose() { destroyed = true; observer.disconnect(); doc.removeEventListener('keydown', escape, true); takeMount?.removeEventListener('click', plainClick); await cancel(); mic.remove(); bar.remove(); },
     ...(env.PentacleHarness ? { setBindingTransformForTest(fn) { transformBinding = fn; } } : {}),
   };
 }

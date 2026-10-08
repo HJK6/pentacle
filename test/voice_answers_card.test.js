@@ -258,3 +258,17 @@ for (const interrupted of [false, true]) test(`finishing capture clears pending 
   assert.equal(u.doc.querySelector('[data-question-voice-confirm]').hidden, true);
   assert.equal(departures, 0); assert.equal(u.sent.length, 1);
 });
+test('USER plain-voice control invokes conversion only on explicit click and is removed on slot teardown', async t => {
+  const h = await appFixture(t); const doc = h.dom.window.document; const calls = [];
+  h.dom.window.PentacleChatStore.sendVoiceAsPlainNote = id => { calls.push(id); return true; };
+  const button = doc.createElement('button'); button.type = 'button'; button.dataset.questionVoicePlain = '';
+  button.dataset.optimisticId = 'optimistic-refused'; button.textContent = 'Send as plain voice note';
+  doc.querySelector('#cell-0 .slot-chat-list').appendChild(button);
+  await flush(); assert.deepEqual(calls, [], 'neither render nor a timer converts automatically');
+  doc.querySelector('#cell-0 .slot-chat-list').appendChild(button);
+  assert.equal(button.isConnected, true);
+  button.click(); button.click(); assert.deepEqual(calls, ['optimistic-refused']); assert.equal(button.disabled, true);
+  await vm.runInContext('state.slotChatRefs[0].questionVoiceController.dispose()', h.context);
+  button.disabled = false; button.click(); assert.deepEqual(calls, ['optimistic-refused'], 'disposed slot no longer handles its old transcript');
+  assert.equal(h.sendCalls.length, 0); assert.equal(h.notificationResolveCalls.length, 0);
+});
