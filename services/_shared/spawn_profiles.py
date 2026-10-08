@@ -33,6 +33,7 @@ DEFAULT_SPAWN_QUEUE_TIMEOUT_SECONDS = 180
 SPAWN_DEFAULTS_PATH = Path(__file__).resolve().with_name("spawn_defaults.json")
 MODELS = {
     "claude": {
+        "claude-haiku-5-5": {"aliases": ("claude-haiku-5-5",), "efforts": ("high",)},
         "claude-opus-4-8": {"aliases": ("opus", "claude-opus-4-8"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "claude-opus-5-5": {"aliases": ("claude-opus-5-5", "opus-5.5", "opus-5"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "claude-opus-5": {"aliases": ("claude-opus-5",), "efforts": ("low", "medium", "high", "xhigh", "max")},
