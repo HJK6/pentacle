@@ -95,6 +95,8 @@ RPC_RETRY_ELIGIBLE_TYPES = frozenset(
         "watch.register", "watch.list", "watch.cancel",
         "await_report",
         "await_spawn",
+        # Read-only, and daemon-deduped on (watch_id, request_id).
+        "external_work.show", "external_work.record",
         "fetch_blob",
         "inspect_stream",
         "thread.read",
@@ -1824,6 +1826,19 @@ async def assistant_once(config: Config, payload: dict[str, Any], *, timeout: fl
     prefix = verb
     payload.setdefault("request_id", f"assistant-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix=prefix, timeout=timeout, from_stream_id=from_stream_id)
+
+
+async def external_work_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+    """Call `external_work.show|record` as this seat; the daemon admits only the current front desk."""
+    if payload.get("type") not in {"external_work.show", "external_work.record"}:
+        raise ValueError("external_work_verb_invalid")
+    from_stream_id = _resolved_rpc_from_stream_id()
+    stream_token = _stream_token_from_env()
+    if from_stream_id and stream_token:
+        payload.update(from_stream_id=from_stream_id, stream_token=stream_token)
+    payload.setdefault("request_id", f"external-work-{uuid.uuid4()}")
+    return await _one_shot_rpc(config, payload, prefix="external_work", timeout=timeout,
+                               from_stream_id=from_stream_id)
 
 
 async def send_image_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:

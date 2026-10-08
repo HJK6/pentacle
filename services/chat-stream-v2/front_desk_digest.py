@@ -97,7 +97,7 @@ class FrontDeskDigest:
         wake = (auth.get('operator_authenticated') is True
                 or msg.get('_assistant_operator_authenticated') is True
                 or re.match(r'^(GATE|BLOCKER)\b', text, re.I)
-                or kind in {'report', 'notification_answer', 'wake', 'wake_urgent', 'wake_missed'}
+                or kind in {'report', 'notification_answer', 'wake', 'wake_urgent', 'wake_missed', 'external_work_due'}
                 or text.startswith('[child_report_ready'))
         if not drop and wake:
             return None

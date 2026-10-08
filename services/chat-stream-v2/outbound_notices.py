@@ -32,6 +32,8 @@ NOTICE_KIND_STATUS_CARD = "status_card"
 NOTICE_KIND_STATUS_CARD_COMBINED = "status_card_combined"
 NOTICE_KIND_TREE_IDLE = "tree_idle"
 NOTICE_KIND_LANE_DIGEST = "lane_digest"
+# A reminder that the front desk owes an external-work check; see external_work.py.
+NOTICE_KIND_EXTERNAL_WORK_DUE = "external_work_due"
 # A Bart composite terminal or decision gate is still delivered through this
 # established durable outbox.  It is a narrow authority wake, not a second
 # inbox or routing queue.
@@ -49,6 +51,7 @@ _NON_URGENT_KINDS = frozenset({
     "watch", "wake", "wake_missed",
     NOTICE_KIND_TREE_IDLE,
     NOTICE_KIND_LANE_DIGEST,
+    NOTICE_KIND_EXTERNAL_WORK_DUE,
     NOTICE_KIND_NOTIFICATION_ANSWER,
     NOTICE_KIND_STATUS_CARD,
     NOTICE_KIND_STATUS_CARD_COMBINED,
@@ -133,6 +136,11 @@ class NoticeDecision:
         return cls("retry", reason, next_action)
 
     @classmethod
+    def defer(cls, reason: str, next_action: str = "") -> "NoticeDecision":
+        """Not attempted yet: retry on a later pass without spending a transport attempt."""
+        return cls("defer", reason, next_action)
+
+    @classmethod
     def terminal(cls, reason: str, next_action: str = "") -> "NoticeDecision":
         return cls("terminal", reason, next_action)
 
@@ -162,6 +170,7 @@ class OutboundNoticeQueue:
         self.config = config or OutboundNoticeConfig.from_env()
         self.owner = owner or f"outbound:{os.getpid()}:{uuid.uuid4().hex}"
         self.front_desk_digest = None
+        self.external_work = None
         self._guards: dict[str, Guard] = {}
         self._terminal_callbacks: dict[str, TerminalCallback] = {}
         self._delivered_callbacks: dict[str, Callable[[dict[str, Any]], Awaitable[None]]] = {}
@@ -251,6 +260,11 @@ class OutboundNoticeQueue:
         """Claim due notices atomically and process one bounded batch."""
         if self.front_desk_digest is not None:
             await self.front_desk_digest.tick()
+        if self.external_work is not None:
+            try:
+                await self.external_work.tick()
+            except Exception:  # noqa: BLE001 - a failed check must not skip other notices
+                log.exception("subsystem=external_work action=tick_failed")
         cap = max(1, int(limit or NOTICE_MAX_PER_PASS))
         kind_set = set(kinds) if kinds is not None else None
         notice_ids = await self.store.list_outbound_notice_ids(
@@ -294,6 +308,15 @@ class OutboundNoticeQueue:
                 if decision.action == "terminal":
                     await self._terminal(row, decision.reason, decision.next_action)
                     return "terminal"
+                if decision.action == "defer":
+                    # Nothing was sent, so the next pass must still be a first
+                    # attempt: a counted retry would be an evidence-only readback.
+                    await self.store.fail_outbound_notice(
+                        str(row["notice_id"]), owner=self.owner, error=decision.reason,
+                        next_attempt_at=time.time() + NOTICE_INTERVAL_S,
+                        next_action=decision.next_action, count_attempt=False,
+                    )
+                    return "retry"
                 return await self._retry(row, decision.reason, decision.next_action)
 
         try:

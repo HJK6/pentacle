@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from .config import load_config
-from . import prompt_protocol, triage, work_lane_cli
+from . import external_work_cli, prompt_protocol, triage, work_lane_cli
 from . import role_baseline, schema
 from .stream_id import discover_leader_stream_id_short, env_stream_id
 from .wsclient import (
@@ -31,6 +31,7 @@ from .wsclient import (
     await_report_once,
     close_once,
     coordination_once,
+    external_work_once,
     drain_sessions_once,
     fetch_snapshot,
     grant_token_once,
@@ -5453,6 +5454,7 @@ def build_parser() -> argparse.ArgumentParser:
     nexus_route.set_defaults(func=nexus)
 
     work_lane_cli.add_parser(subparsers)
+    external_work_cli.add_parser(subparsers)
     prompt_parser = subparsers.add_parser("prompt")
     prompt_sub = prompt_parser.add_subparsers(dest="prompt_command", required=True)
     prompt_ask_parser = prompt_sub.add_parser("ask")

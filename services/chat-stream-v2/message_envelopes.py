@@ -207,6 +207,23 @@ def _match_lane_digest(text: str, **_: Any) -> dict[str, Any] | None:
     return _match_fleet_notice("lane_digest", text)
 
 
+def build_external_work_due_body(
+    notice_id: object, *, label: str, queue_ref: str, episode: int, reasons: list[str],
+    last_verified_age_s: int | None, blocked_age_s: int | None,
+) -> str:
+    """Prose reminder for the bound front desk; like a wake it has no client card."""
+    return build_notice_body(notice_id, "\n".join((
+        f"[external_work_due] {label}",
+        f"queue: {queue_ref}",
+        f"episode: {episode}",
+        f"reasons: {', '.join(reasons)}",
+        f"last_verified_age_s: {'never' if last_verified_age_s is None else last_verified_age_s}",
+        f"blocked_age_s: {'none' if blocked_age_s is None else blocked_age_s}",
+        "Read the queue and the actual evidence, then run `agent-orch external-work show` and "
+        "`agent-orch external-work record --file PATH`. This reminder records nothing.",
+    )))
+
+
 def _report_notice_id(report_id: object) -> str:
     digest = hashlib.sha256(str(report_id or "").encode("utf-8")).hexdigest()
     return f"child-report-ready-v2-{digest}"
