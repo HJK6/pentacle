@@ -10,6 +10,27 @@ The recording bar sits between the pager and card. It shows elapsed time, the
 existing audio meter, **k of n answered by voice**, and Done. Below 480 px it
 wraps into two lines. The composer remains available for typed answers.
 
+## Implementation map
+
+- `renderer/question_voice_bar.js` owns the deck capture lifecycle: mic, recording
+  bar, Done, discard confirmation and the busy-recorder message
+- `renderer/voice_answers_binding.js` owns coverage segments, the frozen selected
+  set and the per-recording binding registry
+- `renderer/app.js` owns the question portal, paging and the rule that only a
+  real assistant composite chat can record
+- `main/voice_answers_meta.js` and `main/chat_stream_client.js` own host
+  validation, normalization and the `voice_answers_invalid` refusal
+- `renderer/src/chat_store_controller.ts` and
+  `renderer/src/shared_transcript_view.ts` carry and render the refusal, the
+  daemon status and the plain-note conversion
+- `pentacle-chat-core/src` carries the shared status and bound-item count types
+
+Focused tests: `test/voice_answers_binding.test.js`,
+`test/voice_answers_card.test.js`, `test/voice_answers_meta.test.js`,
+`test/chat_stream_client_voice_answers.test.js` and
+`test/voice_answers_scenario.test.js`. The browser scenario is
+`test/e2e/lib/voice_answers_scenario.js`.
+
 ## Coverage and completion
 
 A single visit of at least 1,500 ms makes an eligible page covered. Separate
@@ -156,5 +177,32 @@ gate must run where Chrome can start. Its loopback daemon needs a Python with
 the `services/chat-stream-v2/requirements.txt` packages (`--python` or
 `PENTACLE_PYTHON`) and runs with `--disable-reconciler`, because fixture
 sessions have no pane and the session reconciler would otherwise close them,
-and their open questions, once a run outlasts one tick. Live transcription,
-deployed HTTPS and physical-microphone acceptance remain untested.
+and their open questions, once a run outlasts one tick. The hermetic gate does
+not exercise live transcription, deployed HTTPS or a physical microphone.
+
+## Live check with saved audio
+
+A deployed HTTPS client can be exercised end to end without a person or a
+physical microphone. The bound assistant seat raises one clearly marked test
+question, because only its questions surface in the assistant chat and the
+daemon drops a binding for any other producer. Headless Chrome then records on
+that card with a saved WAV as the capture device:
+
+```
+--use-fake-ui-for-media-stream --use-fake-device-for-media-stream
+--use-file-for-fake-audio-capture=<absolute path>.wav%noloop
+--disable-features=AudioServiceSandbox
+```
+
+Without `--disable-features=AudioServiceSandbox` the sandboxed audio service
+cannot open the file and the fake device feeds silence. Capture, upload and
+binding still succeed, and the speech model returns a filler phrase instead of
+the spoken text. Prove the capture on a local page first: record a few seconds
+with the same flags and check the level or transcribe the result.
+
+The driver must confirm that the test card is the only visible card before it
+presses the mic, so no real question is covered. A passing run shows the spoken
+text as the transcript, `voice_answers_status.state === 'bound'` on the USER
+echo, and the question answered by the assistant from that recording. This was
+run once against the deployed client after rollout. It does not certify a
+physical microphone or a person's browser permission prompt.
