@@ -97,3 +97,12 @@ Resolved durable answers hydrate through `prompt.list` with `open:false`, so an
 answer is visible even without a transcript echo. The view inserts it by immutable
 resolution time, and a core answer row with the same notification identity takes
 precedence. Consumption timestamps do not move old answers later in the chat.
+
+The P6 voice-answer port adds only `voice_answers` and `voice_answers_status`
+wire types, USER-row status projection, and `voiceAnswersItemCount` from the
+pinned mobile shared core. Optimistic rows carry that metadata through the
+existing send/echo lifecycle; a host-refused binding keeps a failed row until
+explicit conversion to a plain voice note. Coverage never closes a question:
+only daemon acknowledgements update cards and counts. See
+[Web voice answers](web_voice_answers.md) for selection, refusal, capture and
+validation boundaries; no unrelated mobile core changes are included.

@@ -53,6 +53,38 @@ else:
         def __init__(self, path=None):
             super().__init__(path or registry_path)
 
+    # Real assistant-composite admission, binding validation, and USER storage;
+    # only the downstream routing worker is inert. No provider or remote seat
+    # may be contacted by this hermetic fixture.
+    import json
+    import assistant_composite
+    manifest_path = scratch / 'voice-answers-fixture.json'
+    if manifest_path.exists():
+        voice_fixture = json.loads(manifest_path.read_text())
+        if (voice_fixture.get('stream_id') != 'local:web-gate-assistant'
+                or voice_fixture.get('producer_stream_id') != 'local:web-gate-voice-producer'
+                or not voice_fixture.get('producer_generation')):
+            raise ValueError('invalid isolated voice answers fixture')
+        for key in list(os.environ):
+            if key.startswith('PENTACLE_ASSISTANT_'):
+                del os.environ[key]
+        os.environ.update({
+            'PENTACLE_ASSISTANT_COMPOSITE_ENABLED': '1',
+            'PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID': voice_fixture['stream_id'],
+            'PENTACLE_ASSISTANT_COMPOSITE_TITLE': 'Assistant Fixture',
+            'PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID': voice_fixture['producer_stream_id'],
+            'PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION': voice_fixture['producer_generation'],
+            'PENTACLE_ASSISTANT_MIRROR_ENABLED': '0',
+        })
+        original_wake_worker = assistant_composite.AssistantComposite._wake_worker
+
+        def fixture_wake_worker(self):
+            if self.config.stream_id == voice_fixture['stream_id']:
+                return
+            return original_wake_worker(self)
+
+        assistant_composite.AssistantComposite._wake_worker = fixture_wake_worker
+
     # BEGIN HOUSEHOLD FIXTURE: isolated loopback only; no product daemon changes.
     fixture_cosmo_url = os.environ.get('PENTACLE_WEB_GATE_COSMO_URL')
     if fixture_cosmo_url:

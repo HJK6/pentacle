@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const { closedChatSlot } = require('./closed_chat_scenario');
 const { questionFreeText } = require('./question_free_text_scenario');
+const { webVoiceAnswers } = require('./voice_answers_scenario');
 const { runGridSplit } = require('./grid_split_scenario');
 const { publicChatRendererContracts } = require('./public_chat_renderer_contracts');
 const { micPanelAnswerWindow } = require('./mic_panel_scenario');
@@ -500,6 +501,7 @@ const SCENARIOS = [
   ['slot-survives-cc-reconnect', slotSurvivesCcReconnect],
   ['slot-column-split', runGridSplit],
   ['question-free-text', questionFreeText],
+  ['web-voice-answers', webVoiceAnswers],
   ['web-dashboards-revamp', webDashboardsRevamp],
   ['dashboard_catalog', dashboardCatalog],
   // Reloads the page at both ends and injects only the frozen lane wire fixture; runs before closed-chat-slot.

@@ -423,6 +423,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       const cdpPort = args.cdpPort || await freePort();
       chrome = spawn(chromeBin, [
         '--headless=new', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
+        '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
         '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1600,1000', url,
       ], { stdio: ['ignore', 'pipe', 'pipe'] });
       chrome.stdout.on('data', (d) => chromeLog.push(String(d)));
