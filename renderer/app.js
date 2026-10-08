@@ -21,6 +21,11 @@ const { applyVersionedConnectionState } = require('./chat_stream_connection_stat
 const { resolveMicUrl } = require('../main/mic-url');
 const { createSpawnCatalogLoader } = require('./spawn_catalog_loader');
 const { createProviderRelogin } = require('./provider_relogin_ui');
+const householdSelectors = require('./household/selectors');
+const { householdStore } = require('./household/store');
+householdStore.configure({
+  household: (verb, fields) => window.cc.householdCommand(verb, fields),
+});
 const {
   computeBusyBannerState,
   shouldRenderAlwaysOnUi,
@@ -6652,6 +6657,33 @@ function selectDashboard(id) {
   mountAndPoll(id);
 }
 
+function dashboardMountContext(db) {
+  // The catalog loader owns this metadata: copy its validated descriptor's
+  // actions onto the registered adapter. Missing metadata grants nothing.
+  const allowed = new Set(Array.isArray(db.actions) ? db.actions : []);
+  const assetAction = action => async params => {
+    if (!allowed.has(action)) {
+      console.warn('[dashboards] action_not_allowed', { id: db.id, action });
+      return { ok: false, error: 'action_not_allowed' };
+    }
+    return window.cc[action](params);
+  };
+  let assistant;
+  if (allowed.has('assistantState')) {
+    const session = (state.sessions || []).find(isProtectedAssistantSession);
+    assistant = null;
+    if (session) {
+      const hostId = session.hostId;
+      assistant = { name: session.display_name || session.name, hostId,
+        sigilMarkup: (label, size) => machineSigilMarkup(hostId, label, size, 'djinni') };
+    }
+  }
+  return { config: CONFIG,
+    household: allowed.has('household') ? { selectors: householdSelectors, store: householdStore } : undefined,
+    assistant,
+    actions: { assetList: assetAction('assetList'), assetGet: assetAction('assetGet') } };
+}
+
 function mountAndPoll(id) {
   const db = window.visibleDashboards(CONFIG).find(d => d.id === id);
   if (!db) return;
@@ -6662,7 +6694,7 @@ function mountAndPoll(id) {
   state.dashboardLastUpdated = null;
   const container = document.getElementById('dashboard-content');
   container.innerHTML = ''; // clear previous
-  state.dashboardRefs = db.mount(container, { config: CONFIG });
+  state.dashboardRefs = db.mount(container, dashboardMountContext(db));
   window.PentacleHarness?.emit?.('dashboard:mount', { data: { id, name: db.name } });
   updateDashboardStatusBadge();
   startDashboardPolling();

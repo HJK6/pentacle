@@ -53,6 +53,35 @@ else:
         def __init__(self, path=None):
             super().__init__(path or registry_path)
 
+    # BEGIN HOUSEHOLD FIXTURE: isolated loopback only; no product daemon changes.
+    fixture_cosmo_url = os.environ.get('PENTACLE_WEB_GATE_COSMO_URL')
+    if fixture_cosmo_url:
+        from urllib.parse import urlsplit
+        parsed_cosmo_url = urlsplit(fixture_cosmo_url)
+        if (parsed_cosmo_url.hostname != '127.0.0.1'
+                or parsed_cosmo_url.scheme not in ('http', 'https')
+                or parsed_cosmo_url.username is not None
+                or parsed_cosmo_url.password is not None):
+            raise ValueError('household fixture URL must be loopback')
+        fixture_token = scratch / 'cosmo.token'
+        descriptor = os.open(fixture_token, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, 'w') as token:
+            token.write('synthetic-household-fixture-only')
+        os.environ['COSMO_PENTACLE_TOKEN_FILE'] = str(fixture_token)
+        os.environ['PENTACLE_COSMO_URL'] = fixture_cosmo_url
+        os.environ['PENTACLE_COSMO_SELF'] = 'operator'
+        os.environ['PENTACLE_HOUSEHOLD_PARTNER_NAME'] = 'Partner Fixture'
+        import household
+        original_household_init = household.Household.__init__
+
+        def fixture_household_init(self, *args, **kwargs):
+            kwargs['allow_insecure'] = True
+            original_household_init(self, *args, **kwargs)
+
+        household.Household.__init__ = fixture_household_init
+    # END HOUSEHOLD FIXTURE
+
     operator_auth.OperatorCredentialRegistry = FixtureRegistry
     sys.argv = [str(ROOT / 'services/chat-stream-v2/main.py'), *sys.argv[2:]]
     runpy.run_path(sys.argv[0], run_name='__main__')

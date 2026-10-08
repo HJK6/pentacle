@@ -157,6 +157,7 @@ window.cc = {
   chatKill: (args) => ipcRenderer.invoke('chat-stream:kill', args || {}),
   chatConsentKey: (args) => ipcRenderer.invoke('chat-stream:consent-key', args || {}),
   chatLifecycleAuthority: (args) => ipcRenderer.invoke('chat-stream:lifecycle-authority', args || {}),
+  householdCommand: (verb, fields) => ipcRenderer.invoke('chat-stream:household', verb, fields || {}),
   requestStreamEvents: (args) => ipcRenderer.invoke('chat-stream:request-stream-events', args || {}),
   scheduleGet: (scheduleId) => ipcRenderer.invoke('chat-stream:schedule-get', scheduleId),
   scheduleCancel: (scheduleId) => ipcRenderer.invoke('chat-stream:schedule-cancel', scheduleId),

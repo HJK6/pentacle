@@ -112,6 +112,14 @@ function nowIso() { return new Date().toISOString(); }
 function normalizeChatStreamError(error) { return String(error?.error || error?.message || error || 'Daemon unavailable'); }
 function resultError(message) { return { ok: false, error: normalizeChatStreamError(message) }; }
 
+function householdErrorCode(error) {
+  if (typeof error?.error_code === 'string' && error.error_code) return error.error_code;
+  if (error?.error === 'timed_out') return 'timed_out';
+  // Client connection rejections use the RPC prefix; daemon errors include the verb.
+  if (error?.type === 'household.error') return 'disconnected';
+  return 'unknown_outcome';
+}
+
 async function command(action) {
   try { return { ok: true, ...await action() }; }
   catch (error) { return { ...resultError(error), code: error?.code, remediation: error?.remediation }; }
@@ -202,6 +210,12 @@ function createCcHandlers({
     target.handle('chat-stream:kill', (_event, args) => command(() => chatStreamClient.killSessionRpc(args)));
     target.handle('chat-stream:consent-key', (_event,args)=>command(()=>chatStreamClient.consentKey(args||{})));
     target.handle('chat-stream:lifecycle-authority', (_event, args) => command(() => chatStreamClient.lifecycleAuthority(args || {})));
+    target.handle('chat-stream:household', async (_event, verb, fields) => {
+      try { return { ok: true, reply: await chatStreamClient.householdCommand(verb, fields || {}) }; }
+      catch (error) {
+        return { ok: false, error_code: householdErrorCode(error), error: normalizeChatStreamError(error) };
+      }
+    });
     target.handle('chat-stream:upload-blob', (_event, payload) => command(() => {
       const encoded = typeof payload?.dataBase64 === 'string' ? payload.dataBase64 : payload?.data;
       const maxBytes = 25 * 1024 * 1024;
