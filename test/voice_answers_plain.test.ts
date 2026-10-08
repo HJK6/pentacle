@@ -105,6 +105,7 @@ test('explicit plain-note conversion re-arms the same row once with fresh metada
   assert.equal(calls[1].requestId, nextSend.request_id);
   assert.equal(calls[1].text, transcript);
   assert.deepEqual(calls[1].meta, { voice: { duration_s: 3.25 } });
+  assert.equal(Object.hasOwn(calls[1].meta!, 'voice_answers'), false, 'omit the key entirely; present-but-undefined is invalid');
   assert.notEqual(calls[1].meta, meta);
   assert.notEqual(calls[1].meta!.voice, meta.voice);
   assert.deepEqual(meta, captured, 'no supplied metadata, recording identity or blob reference is changed');

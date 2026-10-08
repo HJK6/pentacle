@@ -43,3 +43,11 @@ test('a fresh closed binding drops every extra key and nested alias', () => {
   result.items[0].segment.end_s = 99;
   assert.equal(raw.items[0].segment.end_s, 3.2);
 });
+
+test('21 unique-item vector isolates the cap rather than duplicate-key rejection', () => {
+  const fixture = JSON.parse(fs.readFileSync(path.join(directory, 'reject_items.json'), 'utf8'))
+    .find(item => item.name === '21 unique valid items exceed the 20-item cap');
+  assert.equal(new Set(fixture.input.items.map(item => item.key)).size, 21);
+  assert.equal(validateVoiceAnswers({ ...fixture.input, items: fixture.input.items.slice(0, 20) }).items.length, 20);
+  assert.equal(validateVoiceAnswers(fixture.input), null);
+});

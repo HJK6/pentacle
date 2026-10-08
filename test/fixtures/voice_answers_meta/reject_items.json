@@ -316,5 +316,269 @@
       "duration_s": 7
     },
     "expected": null
+  },
+  {
+    "name": "21 unique valid items exceed the 20-item cap",
+    "input": {
+      "version": 1,
+      "recording_id": "rec-9",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "unique-0:0",
+          "question_id": "question-0",
+          "notification_id": "notification-0",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-1:0",
+          "question_id": "question-1",
+          "notification_id": "notification-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-2:0",
+          "question_id": "question-2",
+          "notification_id": "notification-2",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-3:0",
+          "question_id": "question-3",
+          "notification_id": "notification-3",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-4:0",
+          "question_id": "question-4",
+          "notification_id": "notification-4",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-5:0",
+          "question_id": "question-5",
+          "notification_id": "notification-5",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-6:0",
+          "question_id": "question-6",
+          "notification_id": "notification-6",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-7:0",
+          "question_id": "question-7",
+          "notification_id": "notification-7",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-8:0",
+          "question_id": "question-8",
+          "notification_id": "notification-8",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-9:0",
+          "question_id": "question-9",
+          "notification_id": "notification-9",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-10:0",
+          "question_id": "question-10",
+          "notification_id": "notification-10",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-11:0",
+          "question_id": "question-11",
+          "notification_id": "notification-11",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-12:0",
+          "question_id": "question-12",
+          "notification_id": "notification-12",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-13:0",
+          "question_id": "question-13",
+          "notification_id": "notification-13",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-14:0",
+          "question_id": "question-14",
+          "notification_id": "notification-14",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-15:0",
+          "question_id": "question-15",
+          "notification_id": "notification-15",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-16:0",
+          "question_id": "question-16",
+          "notification_id": "notification-16",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-17:0",
+          "question_id": "question-17",
+          "notification_id": "notification-17",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-18:0",
+          "question_id": "question-18",
+          "notification_id": "notification-18",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-19:0",
+          "question_id": "question-19",
+          "notification_id": "notification-19",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "unique-20:0",
+          "question_id": "question-20",
+          "notification_id": "notification-20",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": null
   }
 ]
