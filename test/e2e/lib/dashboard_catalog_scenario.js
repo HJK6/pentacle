@@ -138,8 +138,12 @@ async function dashboardCatalog(ctx) {
     await session.click('#view-chats');
     await session.eval("window.__catalogPreviousList = document.getElementById('dashboard-list').firstChild");
     await session.click('#view-dashboards');
+    // View entry empties the list at once and keeps the previous version
+    // attribute until the load settles; wait for the re-rendered list, since
+    // board clicks are ignored while the catalog is loading.
     await session.waitFor(`document.getElementById('dashboard-content').dataset.catalogVersion === ${JSON.stringify(version)}
-      && document.getElementById('dashboard-list').firstChild !== window.__catalogPreviousList`);
+      && document.getElementById('dashboard-list').firstChild !== window.__catalogPreviousList
+      && !!document.querySelector('#dashboard-list [data-dashboard-id]')`);
   }
   try {
     await observedReload(ctx);
