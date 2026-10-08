@@ -168,6 +168,10 @@ export type PentacleTranscriptItem = {
   // model). Copied from the underlying PentacleEvent so every view (desktop +
   // mobile) renders the media bubble from the same transcript shape. FIFO order.
   attachments?: ChatAttachment[];
+  // P6 verdict/count from the daemon's USER echo, never an answer acknowledgement.
+  voiceAnswersStatus?: { state: 'bound' | 'dropped'; reason?: string; staleKeys: string[] };
+  voiceAnswersItemCount?: number;
+  voiceAnswersInvalid?: boolean;
 };
 
 /** A summary-only row that is safe to paint before transcript derivation. */
@@ -804,7 +808,12 @@ function sameTranscriptItem(a: PentacleTranscriptItem, b: PentacleTranscriptItem
     a.sendState === b.sendState &&
     a.queuedWhileWorking === b.queuedWhileWorking &&
     a.providerQueued === b.providerQueued &&
-    a.attachments === b.attachments
+    a.attachments === b.attachments &&
+    a.voiceAnswersItemCount === b.voiceAnswersItemCount &&
+    a.voiceAnswersInvalid === b.voiceAnswersInvalid &&
+    a.voiceAnswersStatus?.state === b.voiceAnswersStatus?.state &&
+    a.voiceAnswersStatus?.reason === b.voiceAnswersStatus?.reason &&
+    JSON.stringify(a.voiceAnswersStatus?.staleKeys) === JSON.stringify(b.voiceAnswersStatus?.staleKeys)
   );
 }
 
@@ -1858,6 +1867,19 @@ function buildSessionTranscriptRows(
     };
     if (event.attachments && event.attachments.length > 0) {
       nextItem.attachments = event.attachments;
+    }
+    if (nextItem.isUser) {
+      if (send?.failure_reason === 'voice_answers_invalid') nextItem.voiceAnswersInvalid = true;
+      const answersStatus = event.meta?.voice_answers_status;
+      if (answersStatus && (answersStatus.state === 'bound' || answersStatus.state === 'dropped')) {
+        nextItem.voiceAnswersStatus = {
+          state: answersStatus.state,
+          ...(typeof answersStatus.reason === 'string' ? { reason: answersStatus.reason } : {}),
+          staleKeys: Array.isArray(answersStatus.stale_keys) ? answersStatus.stale_keys.filter(key => typeof key === 'string') : [],
+        };
+      }
+      const answerItems = event.meta?.voice_answers?.items;
+      if (Array.isArray(answerItems) && answerItems.length > 0) nextItem.voiceAnswersItemCount = answerItems.length;
     }
     if (send?.queued_at !== undefined || event.queued_at !== undefined) {
       nextItem.queuedWhileWorking = true;

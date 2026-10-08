@@ -1,0 +1,67 @@
+[
+  {
+    "name": "item 0",
+    "input": {
+      "version": 1,
+      "recording_id": "rec-9",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        null
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "item 1",
+    "input": {
+      "version": 1,
+      "recording_id": "rec-9",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        []
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "item 2",
+    "input": {
+      "version": 1,
+      "recording_id": "rec-9",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        1
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "item 3",
+    "input": {
+      "version": 1,
+      "recording_id": "rec-9",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        "item"
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "item 4",
+    "input": {
+      "version": 1,
+      "recording_id": "rec-9",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        true
+      ]
+    },
+    "expected": null
+  }
+]

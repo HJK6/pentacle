@@ -709,7 +709,7 @@ export class ChatStoreController {
       }))
       .then((result) => {
         if (result && result.ok === false) {
-          this.resolveSendDispatchError(streamId, optimisticId, requestId, String(result.error || 'send_error'));
+          this.resolveSendDispatchError(streamId, optimisticId, requestId, String(('error_code' in result && result.error_code) || result.error || 'send_error'));
           return;
         }
         let next = markOptimisticDispatchedByRequestId(this.state, requestId, Date.now(), generation);
