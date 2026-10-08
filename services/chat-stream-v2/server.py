@@ -1571,7 +1571,9 @@ class Server:
 
         cached_hash = self._client_token_hashes.get(websocket)
         claim = str(msg.get("from_stream_id") or "").strip()
-        producer = str(msg.get("producer") or "").strip()
+        # On asset.list `producer` is a row filter (report boards list a spec
+        # by its producer id), not an identity claim.
+        producer = "" if msg.get("type") == "asset.list" else str(msg.get("producer") or "").strip()
         cd_token_matches = self._verify_system_producer_token(msg.get("stream_token"))
         file_sources = self._file_token_sources()
         file_token_matches = {
