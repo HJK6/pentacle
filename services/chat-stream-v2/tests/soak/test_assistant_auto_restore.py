@@ -220,6 +220,76 @@ def test_logout_restores_same_seat_and_binding(tmp_path, evidence):
     assert_pass(rec)
 
 
+def _seed_grant(journey: Journey, revision: int = 5) -> None:
+    """Stand in for the operator's designation: the grant row plus its consented audit row.
+
+    The designation ceremony needs an operator device; the journey under test
+    starts from an existing grant, so the fixture writes that starting state.
+    """
+    conn = sqlite3.connect(journey.cell.daemon.db, timeout=30)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO v2_lifecycle_manager(id,stream_id,session_generation,revision,updated_at) "
+            "VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET stream_id=excluded.stream_id,"
+            "session_generation=excluded.session_generation,revision=excluded.revision",
+            (fm.sid("fd"), journey.old_generation, revision, time.time()))
+        conn.execute(
+            "INSERT INTO v2_lifecycle_authority_audit(action,actor_kind,actor_identity,target_stream_id,"
+            "target_generation,old_revision,new_revision,result,consent_id,created_at) "
+            "VALUES('designate','operator','operator-fixture',?,?,?,?,'applied','consent-soak-1',?)",
+            (fm.sid("fd"), journey.old_generation, revision - 1, revision, time.time()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _manager_reparent(journey: Journey, as_name: str) -> dict[str, Any]:
+    """A fleet reparent of a seat the caller does not own: lifecycle-manager only."""
+    fd = journey.fd
+    return fd.cli(as_name, "reparent", fm.sid("peer"), "--to", fm.sid("planner"),
+                  "--expected-generation", fd.generation("peer"), "--reason", "restore grant journey",
+                  timeout=60)
+
+
+def test_logout_carries_the_lifecycle_grant_with_the_seat(tmp_path, evidence):
+    """R11: the grant on the dead bound seat follows the automatic restore."""
+    rec: dict[str, Any] = {"cell": "R11"}
+    with rm.cell_env(tmp_path / "env", evidence) as cell:
+        j = Journey(cell, enabled=True, fast=False)
+        _seed_grant(j)
+        before = j.fd.lifecycle()
+        refused = _manager_reparent(j, "seedholder")
+        rec["logout"] = j.fd.logout("fd")
+        j.wait_state("restored", timeout=240)
+        after = j.fd.lifecycle()
+        generation = j.fd.generation("fd")
+        episode = (j.episodes() or [{}])[-1]
+        continuity = j.cell.sql(
+            "SELECT actor_identity,actor_generation,target_generation,old_revision,new_revision,result,"
+            "consent_id,request_id FROM v2_lifecycle_authority_audit WHERE action='restore_continuity'")
+        allowed = _manager_reparent(j, "fd")
+        rec["grant"] = {"before": before, "after": after, "continuity": continuity,
+                        "refused": refused["json"], "allowed": allowed["json"]}
+        rec["checks"] = {
+            **j.restored_checks(),
+            "seat_without_the_grant_is_refused": refused["rc"] != 0,
+            "grant_moved_to_the_resumed_generation": len(after) == 1
+                and after[0]["stream_id"] == fm.sid("fd")
+                and after[0]["session_generation"] == generation != j.old_generation
+                and int(after[0]["revision"]) == int(before[0]["revision"]) + 1,
+            "one_continuity_audit_row_with_the_consent": [
+                (r["actor_identity"], r["actor_generation"], r["target_generation"], r["old_revision"],
+                 r["new_revision"], r["result"], r["consent_id"]) for r in continuity
+            ] == [("daemon:assistant-restore", j.old_generation, generation, 5, 6, "applied", "consent-soak-1")],
+            "episode_records_the_carry": episode.get("grant_carry") == "applied"
+                and episode.get("grant_generation") == j.old_generation,
+            "restored_seat_performs_a_manager_only_action": allowed["rc"] == 0,
+        }
+        finish(j, evidence, rec)
+    assert_pass(rec)
+
+
 def test_flag_off_keeps_manual_recovery(tmp_path, evidence):
     rec: dict[str, Any] = {"cell": "R0-off"}
     with rm.cell_env(tmp_path / "env", evidence) as cell:

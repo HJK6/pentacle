@@ -543,3 +543,11 @@ def test_probe_receives_all_oversized_history_as_bounded_chunks(tmp_path: Path, 
         assert "bootstrap_peak_bytes" in output
     finally:
         terminate_process_group(proc)
+
+
+def test_restore_status_broadcast_is_a_push_not_a_reply():
+    """With automatic restore on, the daemon broadcasts its status to every client;
+    a probe waiting for a reply must skip that frame like any other push."""
+    from tools import client_contract_probe
+
+    assert "assistant.restore.changed" in client_contract_probe._PUSH_TYPES

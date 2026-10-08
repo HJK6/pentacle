@@ -12,8 +12,13 @@ daemon restart at any point continues the same episode instead of starting a
 second one.  The automatic trigger is off unless ``PENTACLE_ASSISTANT_AUTO_RESTORE=1``;
 an operator can start or retry an episode with the ``assistant.restore`` verb.
 
-Nothing here designates fleet lifecycle authority: the lifecycle-manager grant
-stays with the operator.
+Nothing here designates fleet lifecycle authority. A grant the operator
+already gave to the bound seat moves with that seat only through an automatic
+episode's own bind transaction (``_carry_restore_grant``): the episode records
+the grant on the dead generation when it is created, and the bind advances it
+by compare-and-set to the generation this episode resumed. A revoked, replaced
+or changed grant, an operator-started or retried episode, and every other
+resume or rebind leave the grant where the operator put it.
 """
 from __future__ import annotations
 
@@ -727,10 +732,14 @@ class AssistantRestore:
         if callable(wake):
             wake()
         revision = int(episode["expected_revision"]) + 1
+        if episode.get("grant_carry") == "applied":
+            grant = (f"The lifecycle-manager grant moved with the seat "
+                     f"(revision {int(episode['grant_revision']) + 1}).")
+        else:
+            grant = "The lifecycle-manager grant is not restored."
         await self._deliver_notice(
             composite,
-            f"Seat restored after a host restart; binding revision {revision}. "
-            "The lifecycle-manager grant is not restored.",
+            f"Seat restored after a host restart; binding revision {revision}. {grant}",
             f"assistant-restore-notice:{episode['episode_id']}",
         )
         await self._hook("during_routing")

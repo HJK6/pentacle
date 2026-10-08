@@ -45,6 +45,8 @@ _PUSH_TYPES = frozenset({
     "host.status", "hosts.stats", "limits.update",
     "notification", "updates", "specs.changed", "asset.update",
     "schedule.inventory", "chat.event", "welcome",
+    # Broadcast to every client when the bound seat's restore status changes.
+    "assistant.restore.changed",
 })
 
 # Locked by lane N's Slice 2 Astra gate. These are evidence constants, not

@@ -48,6 +48,7 @@ from store_assistant_binding import (
     ASSISTANT_BINDING_DDL, ASSISTANT_REBIND_AUDIT_DDL,
     ASSISTANT_REBIND_AUDIT_INDEX_DDL, ASSISTANT_HANDOFF_PROOF_DDL,
     ASSISTANT_RESTORE_EPISODE_DDL, ASSISTANT_RESTORE_ACTIVE_INDEX_DDL,
+    migrate_restore_episode_grant_columns,
     ASSISTANT_RESTORE_AUDIT_DDL, ASSISTANT_RESTORE_AUDIT_REQUEST_INDEX_DDL,
     ASSISTANT_COMPOSITE_TELL_QUEUE_DDL, SCOPED_OWNERSHIP_DDL,
     AssistantBindingStoreMixin, _binding_conn, migrate_binding_to_named,
@@ -1381,6 +1382,9 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _Exter
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000) -> None:
         self._path = path
         self._spec_identity_resolver: Callable[[str | None], str | None] | None = None
+        # (stream_id, session_created_at) -> the stream's other event lifecycles;
+        # read and written only on the store thread.
+        self._other_event_lifecycles: dict[tuple[str, str], tuple[str, ...]] = {}
         self.schedule_schema_health = "initializing"
         # Bounded (QA #8): an unbounded write queue is exactly the growth that
         # helped wedge v1 — a stalled store thread let callers pile work up
@@ -1531,6 +1535,7 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _Exter
             conn.execute(ASSISTANT_REBIND_AUDIT_INDEX_DDL)
             conn.execute(ASSISTANT_HANDOFF_PROOF_DDL)
             conn.execute(ASSISTANT_RESTORE_EPISODE_DDL)
+            migrate_restore_episode_grant_columns(conn)
             conn.execute(ASSISTANT_RESTORE_ACTIVE_INDEX_DDL)
             conn.execute(ASSISTANT_RESTORE_AUDIT_DDL)
             conn.execute(ASSISTANT_RESTORE_AUDIT_REQUEST_INDEX_DDL)
@@ -4842,6 +4847,49 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _Exter
 
         return await self.submit(_op)
 
+    def _recorded_by_other_lifecycle_conn(
+        self, conn: sqlite3.Connection, stream_id: str, session_created_at: str,
+        identity: str | None, event_id: int,
+    ) -> bool:
+        """True when another lifecycle of this stream already holds this record.
+
+        De-duplication is per lifecycle (`session_created_at`), and a resumed
+        seat is reopened with a new one while ingest re-reads its transcript
+        from the start. A record with the same transcript identity under any
+        other lifecycle of the same stream is that re-read history: the caller
+        keeps the row and reports it as not new, so it is neither broadcast as
+        a live event nor mirrored again. The other lifecycles of a stream are
+        fixed once a lifecycle starts appending, so they are listed once.
+        """
+        if identity is None:
+            return False
+        key = (stream_id, session_created_at)
+        others = self._other_event_lifecycles.get(key)
+        if others is None:
+            # One index seek per lifecycle, not a scan of the stream's rows.
+            rows = conn.execute(
+                """WITH RECURSIVE lifecycles(created) AS (
+                       SELECT min(session_created_at) FROM session_event_tail WHERE stream_id=?1
+                       UNION ALL
+                       SELECT (SELECT min(session_created_at) FROM session_event_tail
+                               WHERE stream_id=?1 AND session_created_at > lifecycles.created)
+                       FROM lifecycles WHERE lifecycles.created IS NOT NULL)
+                   SELECT created FROM lifecycles WHERE created IS NOT NULL""",
+                (stream_id,),
+            ).fetchall()
+            others = tuple(str(r[0]) for r in rows if str(r[0]) != session_created_at)
+            if len(self._other_event_lifecycles) >= 4096:
+                self._other_event_lifecycles.clear()
+            self._other_event_lifecycles[key] = others
+        for other in others:
+            if conn.execute(
+                "SELECT 1 FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+                "AND identity=? AND event_id<>? LIMIT 1",
+                (stream_id, other, identity, event_id),
+            ).fetchone():
+                return True
+        return False
+
     async def append_session_events_lifecycle_cas(
         self,
         entries: list[dict[str, Any]],
@@ -4969,6 +5017,12 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _Exter
                         ),
                     )
                     source_id = int(cur.lastrowid) if cur.rowcount > 0 else None
+                    if source_id is not None and self._recorded_by_other_lifecycle_conn(
+                            conn, stream_id, session_created_at, identity, source_id):
+                        # Re-read history of a resumed seat: the row stays for this
+                        # lifecycle's history, but it is not a new event.
+                        inserted.append(None)
+                        continue
                     # The prose mirror must run for every admitted source event,
                     # whichever fence proved the append. A remote claude seat
                     # (satellite event.push) carries a `claude_binding`, not a
@@ -5657,10 +5711,14 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _Exter
                 (stream_id, session_created_at, event_key, event_json,
                  event.get("timestamp"), recorded_at, identity),
             )
-            conn.commit()
             # lastrowid is the AUTOINCREMENT event_id only on a real insert; an
             # IGNORE'd duplicate leaves it stale, so gate on rowcount.
-            return int(cur.lastrowid) if cur.rowcount > 0 else None
+            event_id = int(cur.lastrowid) if cur.rowcount > 0 else None
+            if event_id is not None and self._recorded_by_other_lifecycle_conn(
+                    conn, stream_id, session_created_at, identity, event_id):
+                event_id = None  # re-read history of a resumed seat; kept, not new
+            conn.commit()
+            return event_id
 
         return await self.submit(_op)
 
