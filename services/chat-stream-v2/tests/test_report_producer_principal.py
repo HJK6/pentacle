@@ -532,5 +532,35 @@ def test_reader_list_filtered_by_a_system_producer_id_is_a_filter_not_a_login(cr
             del tokenless['stream_token']
             refused = await dispatch(h.server, reader, tokenless)
             assert refused['error_code'] == 'system_producer_auth_required'
+            # A list that CLAIMS a system producer (from_stream_id and/or a
+            # token that is not that producer's) is still a service attempt:
+            # refused, nothing bound, with or without the row filter.
+            for claim in (
+                {'from_stream_id': BRIEF},
+                {'from_stream_id': BRIEF, 'stream_token': 'wrong-token'},
+                {'from_stream_id': BRIEF, 'stream_token': CD_TOKEN},
+                {'from_stream_id': 'altum-bot-cd'},
+                {'from_stream_id': 'altum-bot-cd', 'stream_token': TOKEN},
+            ):
+                for extra in ({}, {'producer': BRIEF}):
+                    refused = await dispatch(h.server, reader, {**window, **claim, **extra})
+                    assert refused == {'type': 'asset.list.error', 'request_id': 'reader-list',
+                                       'error_code': 'system_producer_auth_required'}, (claim, extra, refused)
+                    assert reader not in h.server._client_system_producers
+            # A valid producer token outside hello does not open the list either.
+            refused = await dispatch(h.server, reader, {**window, 'producer': BRIEF, 'from_stream_id': BRIEF, 'stream_token': TOKEN})
+            assert refused['error_code'] == 'system_producer_auth_required'
+            assert reader not in h.server._client_system_producers
+            # On every other verb the producer field is still an identity claim.
+            for verb in ('asset.get', 'asset.delete', 'asset.health'):
+                for claim in ({'producer': BRIEF}, {'producer': 'altum-bot-cd'}, {'from_stream_id': BRIEF}):
+                    refused = await dispatch(h.server, reader, {
+                        'type': verb, 'request_id': 'reader-claim', 'spec_id': SPEC,
+                        'asset_id': f'daily-report-{CUTOFF}', **claim})
+                    assert refused.get('error_code') == 'system_producer_auth_required', (verb, claim, refused)
+            assert reader not in h.server._client_system_producers
+            # The authenticated producer itself stays limited to its one publish.
+            refused = await dispatch(h.server, producer_peer, {**window, 'producer': BRIEF})
+            assert refused['error_code'] == 'system_producer_forbidden'
             assert len(await h.rows()) == 1
     asyncio.run(run())
