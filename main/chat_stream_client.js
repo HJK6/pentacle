@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const WebSocket = require('ws');
 const perf = require('./perf_telemetry');
+const { validateVoiceAnswers } = require('./voice_answers_meta');
 const { runtimeDirectory, desktopRuntimePath } = require('./runtime_paths');
 const {
   SOURCE_STATE_TO_UI,
@@ -653,6 +654,11 @@ try {
     if (meta?.voice && Number.isFinite(meta.voice.duration_s) && meta.voice.duration_s > 0 && meta.voice.duration_s <= 300) {
       payload.meta = { voice: { duration_s: meta.voice.duration_s } };
     }
+    const va = validateVoiceAnswers(meta?.voice_answers);
+    if (meta && Object.hasOwn(meta, 'voice_answers') && !va) {
+      return Promise.resolve({ ok: false, error_code: 'voice_answers_invalid', error: 'Voice answers binding is invalid' });
+    }
+    if (va) payload.meta = { ...(payload.meta || {}), voice_answers: va };
     this.noteInteraction();
     return this.sendCommand(
       payload,

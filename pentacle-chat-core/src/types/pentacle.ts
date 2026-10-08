@@ -118,6 +118,21 @@ export interface PentacleEvent {
   // rendered bubbles). FIFO order is preserved and mirrors the order the daemon
   // names the paths in its inject instruction line.
   attachments?: ChatAttachment[];
+  // Durable metadata echoed on a USER event; P6 never answers a question locally.
+  meta?: PentacleSendMeta;
+}
+
+/** Additive voice-input metadata, shared with the mobile P6 wire contract. */
+export interface PentacleSendMeta {
+  voice?: { duration_s: number };
+  voice_answers?: {
+    version: number;
+    recording_id: string;
+    blob_sha: string;
+    duration_s: number;
+    items: Array<Record<string, unknown>>;
+  };
+  voice_answers_status?: { state: 'bound' | 'dropped'; reason?: string; stale_keys?: string[] };
 }
 
 export interface PentacleHostStatus {

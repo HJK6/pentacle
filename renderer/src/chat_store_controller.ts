@@ -10,6 +10,7 @@ import {
   applyPentacleSessionInventory,
   applySnapshotWithOptimisticReconciliation,
   sendOptimisticMessage,
+  retryOptimisticSend as rearmOptimisticSend,
   markOptimisticDispatchedByRequestId,
   markOptimisticProviderQueuedByRequestId,
   markOptimisticAckedByRequestId,
@@ -676,6 +677,25 @@ export class ChatStoreController {
     return true;
   }
 
+  /** Explicit USER-row action after the host refuses a question binding. */
+  sendVoiceAsPlainNote(optimisticId: string): boolean {
+    const send = this.state.optimisticSends?.[optimisticId];
+    if (!send || send.status !== 'failed' || send.failure_reason !== 'voice_answers_invalid') return false;
+    const meta = this.voiceMetas.get(optimisticId);
+    if (!meta || !Object.prototype.hasOwnProperty.call(meta, 'voice_answers')) return false;
+    const voice = validVoiceMetadata(meta.voice);
+    if (!voice) return false;
+
+    // Replace rather than mutate the captured metadata. Re-arm synchronously
+    // before notifying listeners so another click cannot dispatch this twice.
+    this.voiceMetas.set(optimisticId, { voice });
+    const requestId = this.nextRequestId('retry');
+    const rearmed = rearmOptimisticSend(this.state, optimisticId, Date.now());
+    this.setState(rotateOptimisticSendRequestId(rearmed, optimisticId, requestId));
+    this.dispatchOptimistic(send.stream_id, optimisticId, requestId, send.text, this.socketGeneration, send.attachments ?? []);
+    return true;
+  }
+
   private replayReconnectSurvivors(generation: number): void {
     for (const optimisticId of eligibleReconnectReplayOptimisticIds(this.state, generation)) {
       const send = this.state.optimisticSends?.[optimisticId];
@@ -709,7 +729,7 @@ export class ChatStoreController {
       }))
       .then((result) => {
         if (result && result.ok === false) {
-          this.resolveSendDispatchError(streamId, optimisticId, requestId, String(result.error || 'send_error'));
+          this.resolveSendDispatchError(streamId, optimisticId, requestId, String('error_code' in result && result.error_code === 'voice_answers_invalid' ? result.error_code : result.error || 'send_error'));
           return;
         }
         let next = markOptimisticDispatchedByRequestId(this.state, requestId, Date.now(), generation);
@@ -896,10 +916,12 @@ export class ChatStoreController {
    * looks like a disconnect) must NOT permanently fail the optimistic — it is
    * marked INDETERMINATE so the daemon's server USER echo (if it received the
    * send) or a send.result/send.indeterminate frame can still reconcile it after
-   * the reconnect. Only a genuine failure while connected is marked FAILED.
+   * the reconnect. A refused question binding is terminal even while offline;
+   * other errors retain their existing connected/transient handling.
    */
   private resolveSendDispatchError(streamId: string, optimisticId: string, requestId: string, reason: string): void {
-    const transient = this.state.connected !== true || /disconnect|closed|not open|reconnect|socket|ECONN|timed out/i.test(reason);
+    const transient = reason !== 'voice_answers_invalid'
+      && (this.state.connected !== true || /disconnect|closed|not open|reconnect|socket|ECONN|timed out/i.test(reason));
     if (transient) {
       this.setState(markOptimisticIndeterminateByRequestId(this.state, requestId, Date.now()));
       return;

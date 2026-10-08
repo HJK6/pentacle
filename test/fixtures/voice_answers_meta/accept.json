@@ -1,0 +1,675 @@
+[
+  {
+    "name": "mobile wire shape",
+    "input": {
+      "version": 1,
+      "recording_id": "rec-9",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": {
+      "version": 1,
+      "recording_id": "rec-9",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "strip unknown keys, trim ids, default prompt, normalize seconds",
+    "input": {
+      "version": 1,
+      "recording_id": " rec-9 ",
+      "blob_sha": " sha256:audio ",
+      "duration_s": 1.2345,
+      "items": [
+        {
+          "key": " n-1:0 ",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "segment": {
+            "start_s": 0.0625,
+            "end_s": 0.1875,
+            "ignored": true
+          },
+          "ignored": true
+        }
+      ],
+      "ignored": true
+    },
+    "expected": {
+      "version": 1,
+      "recording_id": "rec-9",
+      "blob_sha": "sha256:audio",
+      "duration_s": 1.234,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "",
+          "segment": {
+            "start_s": 0.062,
+            "end_s": 0.188
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "segment order checked after rounding",
+    "input": {
+      "version": 1,
+      "recording_id": "rec-9",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 1.0004,
+            "end_s": 1.0003
+          }
+        }
+      ]
+    },
+    "expected": {
+      "version": 1,
+      "recording_id": "rec-9",
+      "blob_sha": "sha256:audio",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 1,
+            "end_s": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "unicode code point limits and full 20 item capacity",
+    "input": {
+      "version": 1,
+      "recording_id": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "blob_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "duration_s": 0,
+      "items": [
+        {
+          "key": "0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "1",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "2",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "3",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "4",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "5",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "6",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "7",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "8",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "9",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "10",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "11",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "12",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "13",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "14",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "15",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "16",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "17",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "18",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "19",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": {
+      "version": 1,
+      "recording_id": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "blob_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "duration_s": 0,
+      "items": [
+        {
+          "key": "0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "1",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "2",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "3",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "4",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "5",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "6",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "7",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "8",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "9",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "10",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "11",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "12",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "13",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "14",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "15",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "16",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "17",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "18",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        },
+        {
+          "key": "19",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "Python whitespace and BOM preservation",
+    "input": {
+      "version": 1,
+      "recording_id": "\u001c rec ",
+      "blob_sha": "﻿",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    },
+    "expected": {
+      "version": 1,
+      "recording_id": "rec",
+      "blob_sha": "﻿",
+      "duration_s": 7,
+      "items": [
+        {
+          "key": "n-1:0",
+          "question_id": "q-1",
+          "notification_id": "n-1",
+          "producer_stream_id": "fixture:worker",
+          "surface_stream_id": "fixture:assistant",
+          "prompt": "Ship it?",
+          "segment": {
+            "start_s": 0,
+            "end_s": 3.2
+          }
+        }
+      ]
+    }
+  }
+]

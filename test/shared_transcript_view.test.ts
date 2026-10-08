@@ -110,6 +110,156 @@ function userItem(over: Record<string, unknown> = {}) {
   } as never;
 }
 
+test('P6: an untranscribed USER voice-answer row shows its question count until text lands', () => {
+  const { container } = newDom();
+  for (const text of ['', ' \n\t ']) {
+    container.innerHTML = renderTranscriptItemHtml(userItem({ text, pending: true, voiceAnswersItemCount: 3 }), CHROME);
+    const count = container.querySelector('[data-voice-answers-count]');
+    assert.equal(count?.textContent, 'ANSWERS 3 QUESTIONS');
+    assert.equal(count?.getAttribute('role'), 'status');
+    assert.equal(container.querySelector('.slot-chat-message-copy'), null, 'placeholder is not copied as a transcript');
+  }
+  container.innerHTML = renderTranscriptItemHtml(userItem({ text: 'My spoken answers', pending: true, voiceAnswersItemCount: 3 }), CHROME);
+  assert.equal(container.querySelector('[data-voice-answers-count]'), null, 'text replaces the pending label even before the pending flag clears');
+  assert.equal(container.querySelector('.slot-chat-user-bubble')?.textContent, 'My spoken answers');
+  assert.equal(container.querySelector('.slot-chat-message-copy')?.getAttribute('data-copy-text'), 'My spoken answers');
+});
+
+test('P6: plain notes and invalid count values never render a voice-answer count', () => {
+  const { container } = newDom();
+  for (const voiceAnswersItemCount of [undefined, null, 0, -1, 1.5, NaN, Infinity, true, '2', '<img src=x onerror=alert(1)>']) {
+    container.innerHTML = renderTranscriptItemHtml(userItem({ text: '', voiceAnswersItemCount }), CHROME);
+    assert.equal(container.querySelector('[data-voice-answers-count]'), null, String(voiceAnswersItemCount));
+    assert.equal(container.querySelector('img, script, [onerror]'), null);
+  }
+});
+
+test('P6: dropped USER bindings show the fixed note without a bound count or resend control', () => {
+  const { container } = newDom();
+  for (const text of ['', 'The questions could not be attached']) {
+    container.innerHTML = renderTranscriptItemHtml(userItem({
+      text, voiceAnswersItemCount: 2,
+      voiceAnswersStatus: { state: 'dropped', reason: '<img src=x onerror=alert(1)>', staleKeys: ['q1'] },
+    }), CHROME);
+    assert.equal(container.querySelector('[data-voice-answers-status]')?.textContent, "Couldn't attach questions");
+    assert.equal(container.querySelector('[data-voice-answers-count]'), null, 'dropped is never presented as bound');
+    assert.equal(container.querySelector('[data-question-voice-plain]'), null, 'daemon already posted the plain voice note');
+    assert.equal(container.querySelector('img, script, [onerror]'), null);
+    if (text) assert.equal(container.querySelector('.slot-chat-user-bubble')?.textContent, text);
+  }
+});
+
+test('P6: bound bindings, including stale keys, do not show a failure note or change the count', () => {
+  const { container } = newDom();
+  for (const staleKeys of [[], ['q1'], ['q1', 'q2']]) {
+    const item = userItem({ text: '', voiceAnswersItemCount: 2, voiceAnswersStatus: { state: 'bound', staleKeys } });
+    const before = JSON.stringify(item);
+    container.innerHTML = renderTranscriptItemHtml(item, CHROME);
+    assert.equal(container.querySelector('[data-voice-answers-status]'), null);
+    assert.equal(container.querySelector('[data-question-voice-plain]'), null);
+    assert.equal(container.querySelector('[data-voice-answers-count]')?.textContent, 'ANSWERS 2 QUESTIONS');
+    assert.equal(JSON.stringify(item), before, 'rendering leaves status, stale keys and count unchanged');
+  }
+});
+
+test('P6: an invalid failed binding replaces generic Retry with an explicit plain-voice control', () => {
+  const { container } = newDom();
+  for (const voiceAnswersStatus of [undefined, { state: 'bound', staleKeys: ['q1'] }, { state: 'dropped', staleKeys: [] }]) {
+    const item = userItem({ text: '', sendState: 'failed', voiceAnswersInvalid: true, voiceAnswersItemCount: 2, voiceAnswersStatus });
+    const before = JSON.stringify(item);
+    container.innerHTML = renderTranscriptItemHtml(item, CHROME);
+    assert.equal(container.querySelectorAll('[data-voice-answers-status]').length, 1, 'one refusal note even with a dropped status');
+    assert.equal(container.querySelector('[data-voice-answers-status]')?.textContent, "Couldn't attach questions");
+    assert.equal(container.querySelector('.slot-chat-send-retry'), null, 'no generic retry of a refused binding');
+    assert.equal(container.querySelector('[data-voice-answers-count]'), null);
+    const plain = container.querySelector('[data-question-voice-plain]') as HTMLButtonElement | null;
+    assert.equal(plain?.textContent, 'Send as plain voice note');
+    assert.equal(plain?.getAttribute('type'), 'button');
+    assert.equal(plain?.getAttribute('data-optimistic-id'), 'opt1');
+    plain?.click();
+    assert.equal(JSON.stringify(item), before, 'rendering and an unwired click never mutate the send');
+  }
+});
+
+test('P6: the plain-voice control escapes its optimistic identity and retains transcript escaping', () => {
+  const optimisticId = 'opt" data-injected="yes"><img src=x onerror=alert(1)>';
+  const text = '<script>alert("voice")</script> & spoken answer';
+  const { container } = newDom();
+  container.innerHTML = renderTranscriptItemHtml(userItem({ text, optimisticId, sendState: 'failed', voiceAnswersInvalid: true }), CHROME);
+  assert.equal(container.querySelector('[data-question-voice-plain]')?.getAttribute('data-optimistic-id'), optimisticId);
+  assert.equal(container.querySelector('.slot-chat-user-bubble')?.textContent, text);
+  assert.equal(container.querySelector('script, img, [onerror], [data-injected]'), null);
+});
+
+test('P6: an invalid failed binding without optimistic identity has a note but no unusable action', () => {
+  const { container } = newDom();
+  container.innerHTML = renderTranscriptItemHtml(userItem({ optimisticId: undefined, sendState: 'failed', voiceAnswersInvalid: true }), CHROME);
+  assert.equal(container.querySelector('[data-voice-answers-status]')?.textContent, "Couldn't attach questions");
+  assert.equal(container.querySelector('[data-question-voice-plain], .slot-chat-send-retry'), null);
+});
+
+test('P6: only the exact invalid-and-failed combination changes the existing send affordance', () => {
+  const { container } = newDom();
+  for (const voiceAnswersInvalid of [undefined, false, 'true', 1]) {
+    container.innerHTML = renderTranscriptItemHtml(userItem({ sendState: 'failed', voiceAnswersInvalid }), CHROME);
+    assert.equal(container.querySelector('.slot-chat-send-retry')?.textContent, 'Retry');
+    assert.equal(container.querySelector('[data-question-voice-plain], [data-voice-answers-status]'), null);
+  }
+  for (const sendState of [undefined, 'sending', 'queued', 'cancelled', 'indeterminate']) {
+    container.innerHTML = renderTranscriptItemHtml(userItem({ sendState, voiceAnswersInvalid: true }), CHROME);
+    assert.equal(container.querySelector('[data-question-voice-plain], [data-voice-answers-status]'), null, String(sendState));
+    assert.equal(!!container.querySelector('.slot-chat-send-retry'), sendState === 'indeterminate');
+  }
+});
+
+test('P6: voice-answer markup is confined to USER rows', () => {
+  const { container } = newDom();
+  for (const displayRule of ['bubble:assistant', 'bubble:agent', 'activity:thinking', 'system:compacted']) {
+    for (const text of ['', 'Assistant output']) {
+      for (const refused of [false, true]) {
+        container.innerHTML = renderTranscriptItemHtml(assistantItem({
+          displayRule, text, sendState: 'failed', optimisticId: 'opt1', voiceAnswersInvalid: refused,
+          voiceAnswersItemCount: 2, voiceAnswersStatus: { state: refused ? 'dropped' : 'bound', staleKeys: [] },
+        }), CHROME);
+        assert.equal(container.querySelector('[data-voice-answers-count], [data-voice-answers-status], [data-question-voice-plain]'), null, displayRule);
+        if (text) assert.ok(container.textContent?.includes(text), 'existing non-user rendering survives');
+      }
+    }
+  }
+});
+
+test('P6: daemon dropped metadata reaches the USER row through the shared selector', () => {
+  const controller = controllerWithEvents([
+    makeEvent({ kind: 'USER', text: 'Spoken answer', meta: { voice_answers_status: { state: 'dropped', reason: 'identity_mismatch', stale_keys: ['q1'] } } }),
+  ]);
+  const before = JSON.stringify(controller.getState());
+  const { container } = newDom();
+  renderStreamTranscript(STREAM, container, { store: controller as never, chrome: CHROME });
+  assert.equal(container.querySelector('[data-voice-answers-status]')?.textContent, "Couldn't attach questions");
+  assert.equal(container.querySelector('.slot-chat-user-bubble')?.textContent, 'Spoken answer');
+  assert.equal(container.querySelector('[data-question-voice-plain]'), null);
+  assert.equal(JSON.stringify(controller.getState()), before, 'status rendering does not change store state');
+});
+
+test('P6: host refusal reaches the failed row and rendering never dispatches an automatic retry', async () => {
+  const controller = controllerWithEvents([]);
+  let sends = 0;
+  controller.setSendBridge(async () => {
+    sends += 1;
+    return { ok: false, error_code: 'voice_answers_invalid', error: 'Voice answers binding is invalid' };
+  });
+  const optimisticId = controller.sendTurn(STREAM, 'Spoken answer');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const before = JSON.stringify(controller.getState());
+  const { container } = newDom();
+  renderStreamTranscript(STREAM, container, { store: controller as never, chrome: CHROME });
+  assert.equal(container.querySelector('[data-voice-answers-status]')?.textContent, "Couldn't attach questions");
+  assert.equal(container.querySelector('[data-question-voice-plain]')?.getAttribute('data-optimistic-id'), optimisticId);
+  assert.equal(container.querySelector('.slot-chat-send-retry'), null);
+  assert.equal(sends, 1, 'only the operator-requested initial send was dispatched');
+  assert.equal(JSON.stringify(controller.getState()), before, 'rendering does not rewrite the failed send');
+});
+
 test('B1: a sending optimistic row renders a "sending…" affordance + is-sending class', () => {
   const html = renderTranscriptItemHtml(userItem({ sendState: 'sending' }), CHROME);
   assert.ok(/slot-chat-row is-user is-sending/.test(html), 'row carries is-sending');

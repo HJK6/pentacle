@@ -74,6 +74,27 @@ async def seed(db: str, host: str, session: str, objective: str, token_file: str
             with open(token_file) as source:
                 token = source.read().strip()
             assert await store.grant_stream_token(host, session, hashlib.sha256(token.encode()).hexdigest(), "sha256:v1") == "ok"
+            if host == 'local' and session == 'web-gate-1':
+                # A separate hidden, bound producer lets voice answers exercise
+                # real composite admission without changing ordinary fixtures.
+                producer = await store.open_session(
+                    host, 'web-gate-voice-producer', visibility='hidden',
+                    role='assistant', provider='claude', pane_status='pane_alive',
+                    objective='Synthetic voice-answer question producer',
+                )
+                # One stream per token hash: derive a distinct producer
+                # credential from the scratch token instead of sharing it.
+                producer_token = hashlib.sha256(f'voice-producer:{token}'.encode()).hexdigest()
+                assert await store.grant_stream_token(
+                    host, 'web-gate-voice-producer', hashlib.sha256(producer_token.encode()).hexdigest(),
+                    'sha256:v1',
+                ) == 'ok'
+                # Identity only. The producer credential is derived from the scratch
+                # token the gate already tracks/removes. Never put it in a page.
+                manifest = {'stream_id': 'local:web-gate-assistant',
+                            'producer_stream_id': 'local:web-gate-voice-producer',
+                            'producer_generation': producer['session_generation']}
+                Path(db).parent.joinpath('voice-answers-fixture.json').write_text(json.dumps(manifest))
         appended = 0
         for index, (kind, text) in enumerate(TRANSCRIPT):
             event = _event(stream_id, kind, text, index)

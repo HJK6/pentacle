@@ -18,7 +18,7 @@ function loaded() { return { ...observation(), state: 'loaded', text: 'Loaded', 
 function chat() { return { sameNodes: true, sameStream: true, sameTranscript: true, sameDraft: true, chatsVisible: true, dashboardsHidden: true, frames: 0 }; }
 
 test('web gate collects the dashboard scenarios before destructive journeys', () => {
-  assert.equal(SCENARIOS.length, 18);
+  assert.equal(SCENARIOS.length, 19);
   const names = SCENARIOS.map(([name]) => name);
   const index = names.indexOf('web-dashboards-revamp');
   assert.ok(index >= 0 && index < names.indexOf('closed-chat-slot'));

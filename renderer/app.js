@@ -1,4 +1,5 @@
 const { bindComposerMic, uploadVoiceBlob } = require('./web_voice');
+const { createQuestionVoiceBar } = require('./question_voice_bar');
 /* global Terminal, FitAddon */
 
 // Load xterm.js and fit addon via require (Electron renderer with nodeIntegration off — use dynamic import)
@@ -1856,7 +1857,7 @@ const closedChatSlots = createClosedChatSlots({
     delete state.questionDrafts[`${streamId}:flow`];
     delete state.questionPageIndexByStream[`${streamId}:flow`];
     clearSlotAttachments(slot);
-    detachSlot(slot);
+    detachSlot(slot, { force: true });
   },
 });
 
@@ -3781,7 +3782,7 @@ function renderSlotChat(slot) {
     }
     const incomplete = entry => !entry.locked && !!answerConstraint(entry.model, draft.answers[entry.key]);
     const unsettled = entries.filter(entry => !entry.locked);
-    const closeQuestions = () => {
+    const leaveQuestions = () => {
       state.desktopQuestionOverlayOpen[streamId] = false;
       closeDesktopQuestionPortal(streamId, refs.questionEl);
       renderSlotChat(slot);
@@ -3791,7 +3792,34 @@ function renderSlotChat(slot) {
         document.querySelector(`#cell-${slot} .slot-chat-question-open`)?.focus({ preventScroll: true });
       });
     };
-    if (!unsettled.length) {
+    // Voice-answer bindings are consumed only by the actual assistant composite.
+    // An assistantDirect alias may intentionally resolve to an ordinary agent.
+    const questionVoiceTarget = () => {
+      const target = chatControlTargetForSlot(slot);
+      return target && !target.error && target.streamSession?.session_kind === 'assistant_composite' ? target : null;
+    };
+    if (!refs.questionVoiceController) {
+      refs.questionVoiceController = createQuestionVoiceBar({
+        env: window, mount: refs.questionEl, takeMount: refs.scrollEl, scope: refs.chatMount,
+        canRecord: () => !!questionVoiceTarget(),
+        getStreamId: () => assertAssistantDirectSlot(slot) ? questionVoiceTarget()?.streamSession.stream_id || null : null,
+        upload: blob => uploadVoiceBlob(window.cc, blob),
+        transcribe: payload => window.cc.chatTranscribeBlob(payload),
+        send: ({ streamId: target, text, meta }) => assertAssistantDirectSlot(slot)
+          && questionVoiceTarget()?.streamSession.stream_id === target
+          ? window.PentacleChatStore.sendTurn(target, text, [], { meta }) : '',
+        sendPlain: optimisticId => window.PentacleChatStore.sendVoiceAsPlainNote(optimisticId),
+        telemetry: (event, tags) => window.PentacleChatCore?.logTelemetry?.(event, tags),
+        onFinished: leaveQuestions, onDiscarded: leaveQuestions,
+        onRecordingChange: () => scheduleSlotChatRender(slot),
+      });
+      if (window.PentacleHarness) refs.questionEl.__questionVoiceController = refs.questionVoiceController;
+    }
+    // Re-evaluate visibility even when this render has no current deck/target.
+    refs.questionVoiceController.refresh();
+    const deckRecording = ['starting', 'recording'].includes(refs.questionVoiceController.snapshot().phase);
+    const closeQuestions = () => { if (!refs.questionVoiceController.requestLeave(leaveQuestions)) leaveQuestions(); };
+    if (!unsettled.length && !deckRecording) {
       state.desktopQuestionOverlayOpen[streamId] = false;
       closeDesktopQuestionPortal(streamId, refs.questionEl);
       refs.questionEl.innerHTML = '';
@@ -3813,6 +3841,7 @@ function renderSlotChat(slot) {
       const activeKey = state.questionPageIndexByStream[draftKey];
       const activeIndex = Math.max(0, entries.findIndex(entry => entry.key === activeKey));
       const navigate = index => {
+        if (!entries.length) return;
         state.questionPageIndexByStream[draftKey] = entries[clampQuestionPageIndex(index, entries.length)].key;
         renderSlotChat(slot);
       };
@@ -3845,7 +3874,7 @@ function renderSlotChat(slot) {
       }
       const container = document.createElement('div');
       container.className = 'slot-chat-question-card';
-      if (entries[activeIndex].notification) container.dataset.notificationId = durableQuestionNotificationId(entries[activeIndex].notification);
+      if (entries[activeIndex]?.notification) container.dataset.notificationId = durableQuestionNotificationId(entries[activeIndex].notification);
       refs.questionEl.appendChild(container);
       const flowQuestion = { multi: true, questions: entries.map((entry, index) => ({
         ...entry.model, index, _draftKey: entry.key, _signature: entry.signature, _locked: entry.locked,
@@ -3934,10 +3963,21 @@ function renderSlotChat(slot) {
       const portal = desktopQuestionPortal(streamId, refs.questionEl);
       portal.style.setProperty('--machine', chrome.accent);
       portal.querySelector('.desktop-question-portal__close').onclick = closeQuestions;
-      if (!portal.contains(document.activeElement)) portal.querySelector('.desktop-question-portal__close').focus({ preventScroll: true });
+      portal.classList.toggle('is-question-voice-recording', deckRecording);
+      portal.setAttribute('aria-modal', String(!deckRecording));
+      refs.questionVoiceController.update({ entries, activeKey: entries[activeIndex]?.key || null,
+        header: portal.querySelector('.desktop-question-portal__header'),
+        before: portal.querySelector('.desktop-question-portal__close'), stateMount: container,
+        barMount: refs.questionEl });
+      const voiceBar = refs.questionEl.querySelector('[data-question-voice-bar]');
+      if (voiceBar) refs.questionEl.insertBefore(voiceBar, container);
+      if (!deckRecording && !portal.contains(document.activeElement)) portal.querySelector('.desktop-question-portal__close').focus({ preventScroll: true });
       portal.onkeydown = event => {
         if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeQuestions(); }
-        if (event.key === 'Tab') {
+        if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !event.target.closest('input, textarea, [contenteditable="true"], [role="textbox"], .slot-chat-compose')) {
+          event.preventDefault(); navigate(activeIndex + (event.key === 'ArrowRight' ? 1 : -1));
+        }
+        if (event.key === 'Tab' && !deckRecording) {
           const controls = [...portal.querySelectorAll('button:not(:disabled), textarea:not(:disabled), input:not(:disabled)')].filter(el => !el.hidden && el.getClientRects().length);
           const first = controls[0], last = controls[controls.length - 1];
           if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
@@ -4401,6 +4441,7 @@ function updateSlotViewMode(slot, mode) {
   if (!chatUiEnabled()) mode = 'terminal';
   if ((isCompositeSlot(slot) || state.slots[slot]?.laneHistory) && mode !== 'asset') mode = 'chat';
   const previousMode = state.slotViewModes[slot];
+  if (mode !== previousMode && state.slotChatRefs[slot]?.questionVoiceController?.requestLeave(() => updateSlotViewMode(slot, mode))) return;
   state.slotViewModes[slot] = mode;
   window.PentacleHarness?.emit?.('slot:viewmode', { slot, data: { mode } });
   const header = document.getElementById(`header-${slot}`);
@@ -5203,6 +5244,7 @@ function firstUnreadReportForStream(streamId) {
 }
 
 async function attachSession(slot, sessionName, displayName, hostId, options = {}) {
+  if (state.slotChatRefs[slot]?.questionVoiceController?.requestLeave(() => { void attachSession(slot, sessionName, displayName, hostId, options); })) return;
   hostId = hostId || 'local';
   // Kill existing terminal in this slot
   detachSlot(slot);
@@ -5447,8 +5489,18 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   updateSlotViewMode(slot, state.slotViewModes[slot]);
 }
 
-function detachSlot(slot) {
+function detachSlot(slot, { force = false } = {}) {
+  if (!force && state.slotChatRefs[slot]?.questionVoiceController?.requestLeave(() => detachSlot(slot))) return;
   closedChatSlots.forget(slot);
+  // A recording deck is nonmodal, so a slot can now be left with its deck open.
+  // The portal lives on document.body: remove the one owning this slot's question
+  // node, or it stays on screen and a re-attach stacks a second deck inside it.
+  const deckQuestionEl = state.slotChatRefs[slot]?.questionEl;
+  const deckStreamId = state.slotChatBoundStream[slot] || (state.slots[slot] ? chatSessionStateForSession(state.slots[slot])?.stream_id : null);
+  if (deckStreamId && deckQuestionEl?.closest('.desktop-question-portal')) {
+    closeDesktopQuestionPortal(deckStreamId, deckQuestionEl);
+    if (state.desktopQuestionOverlayOpen) delete state.desktopQuestionOverlayOpen[deckStreamId];
+  }
   const wasBot = state.botSlots[slot];
   const sessionName = state.slots[slot] && state.slots[slot].name;
 
@@ -5512,6 +5564,7 @@ function detachSlot(slot) {
   syncChatHistoryPins();
   state.slotActiveAsset[slot] = null;
   void state.slotChatRefs[slot]?.voiceController?.cancel();
+  void state.slotChatRefs[slot]?.questionVoiceController?.dispose();
   state.slotChatRefs[slot] = null;
   state.slotChatLastListHtml[slot] = null;
   state.slotChatPendingListRender[slot] = null;

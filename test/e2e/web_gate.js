@@ -227,6 +227,8 @@ async function startDaemon(args, scratch, runtime, fixtures = [
       '--blob-root', path.join(scratch, 'blobs'),
       '--disable-hosts', '--disable-mirror', '--disable-nudges',
       '--disable-outbound-notices', '--disable-remote-presence',
+      // Fixture sessions have no pane; the 60 s reconciler would close them mid-gate.
+      '--disable-reconciler',
     ], { cwd: ROOT, stdio: ['ignore', daemonLog, daemonLog],
       env: { ...process.env, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
     runtime.daemonProc = proc;
@@ -403,6 +405,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
           '--blob-root', path.join(scratch, 'blobs'),
           '--disable-hosts', '--disable-mirror', '--disable-nudges',
           '--disable-outbound-notices', '--disable-remote-presence',
+          // Fixture sessions have no pane; the 60 s reconciler would close them mid-gate.
+          '--disable-reconciler',
         ], { cwd: ROOT, stdio: ['ignore', dlog, dlog],
           env: { ...process.env, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
         runtime.daemonProc = proc;
@@ -423,6 +427,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       const cdpPort = args.cdpPort || await freePort();
       chrome = spawn(chromeBin, [
         '--headless=new', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
+        '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
         '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1600,1000', url,
       ], { stdio: ['ignore', 'pipe', 'pipe'] });
       chrome.stdout.on('data', (d) => chromeLog.push(String(d)));
