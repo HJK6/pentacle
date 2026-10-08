@@ -250,8 +250,12 @@ def _archive(repo: Path, commit: str, destination: Path, stamp: str | None = Non
             "asset_schema": {"path": runtime_support_module, "sha256": support_sha256},
             "dependencies": {"websockets": dependency},
         }
-    except ValueError:
-        pass
+    except ValueError as exc:
+        # Only a commit without the runtime package archives without one; a
+        # missing dependency or support file must not yield a manifest that
+        # stage() cannot install.
+        if str(exc) != "runtime_package_missing":
+            raise
     manifest["archive_sha256"] = _sha256(archive)
     (destination / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
     return manifest

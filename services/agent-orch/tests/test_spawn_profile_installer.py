@@ -288,6 +288,23 @@ def test_manifest_contract_and_stamp_come_from_requested_commit(tmp_path: Path) 
     assert manifest["stamp"] == f"{old_commit[:12]}-{digest[:12]}"
 
 
+def test_archive_refuses_when_the_runtime_dependency_is_missing(tmp_path, monkeypatch) -> None:
+    """An installer interpreter without websockets must not write a manifest
+    that silently lacks runtime_package (stage() then fails after staging)."""
+    repo = Path(__file__).resolve().parents[3]
+    commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    def missing(name):
+        raise installer.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(installer.importlib.metadata, "distribution", missing)
+    destination = tmp_path / "bundle"
+    destination.mkdir()
+    with pytest.raises(ValueError, match="runtime_dependency_missing"):
+        installer._archive(repo, commit, destination)
+    assert not (destination / "manifest.json").exists()
+
+
 def test_remote_passes_one_shell_quoted_command() -> None:
     seen = []
 
