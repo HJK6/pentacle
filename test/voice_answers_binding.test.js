@@ -88,3 +88,31 @@ test('mobile Q1: cap earliest 20 first, then drop closed pages without backfilli
   assert.equal(items.some(item => item.question_id === 'q20'), false, 'the 21st visit must never backfill the removed first item');
   assert.equal(session.n, 21, 'the full durable start count remains frozen');
 });
+
+test('wire key uses the unique notification ID at the 200-code-point cap, never the longer pager key', () => {
+  const { validateVoiceAnswers } = require('../main/voice_answers_meta');
+  let now = 0;
+  const id = '😀'.repeat(200);
+  const entry = page(1, { key: `assistant:stream:durable:${id}:q1`, notification: { notification_id: id, question: { question_id: 'q1', producer_stream_id: 'fixture:producer' } } });
+  const session = createSegments(() => now); session.start([entry], entry.key); now = 1500; session.finish();
+  const items = selectedSet(session, [entry], 'fixture:assistant');
+  assert.ok([...entry.key].length > 200);
+  assert.equal(items[0].key, id); assert.equal([...items[0].key].length, 200);
+  assert.equal(session.covered().has(entry.key), true, 'coverage retains the separate internal identity');
+  assert.ok(validateVoiceAnswers({ version: 1, recording_id: 'cap-take', blob_sha: 'sha', duration_s: 1.5, items }));
+});
+test('distinct near-cap notification identities remain distinct; invalid over-cap IDs are never truncated', () => {
+  const { validateVoiceAnswers } = require('../main/voice_answers_meta');
+  let now = 0;
+  const entries = ['a', 'b'].map((suffix, i) => { const id = 'x'.repeat(199) + suffix; return page(i, {
+    key: `fixture:assistant:durable:${id}:q${i}`, notification: { notification_id: id, question: { question_id: `q${i}`, producer_stream_id: 'fixture:producer' } },
+  }); });
+  const session = createSegments(() => now); session.start(entries, entries[0].key); now = 1500; session.enter(entries[1].key); now = 3000; session.finish();
+  const items = selectedSet(session, entries, 'fixture:assistant');
+  assert.equal(new Set(items.map(item => item.key)).size, 2);
+  assert.ok(validateVoiceAnswers({ version: 1, recording_id: 'cap-pair', blob_sha: 'sha', duration_s: 3, items }));
+  const invalid = { ...entries[0], notification: { ...entries[0].notification, notification_id: 'x'.repeat(201) } };
+  const oversized = selectedSet(session, [invalid], 'fixture:assistant');
+  assert.equal(oversized[0].key, 'x'.repeat(201));
+  assert.equal(validateVoiceAnswers({ version: 1, recording_id: 'invalid-id', blob_sha: 'sha', duration_s: 3, items: oversized }), null);
+});

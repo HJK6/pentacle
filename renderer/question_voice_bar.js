@@ -6,7 +6,7 @@ const { createSegments, selectedSet, isVoiceEligible, registerVoiceAnswersBindin
 // The deck adds coverage and interaction to the existing capture/upload/ASR unit.
 // Its second controller participates in web_voice's module-wide captureOwner.
 function createQuestionVoiceBar({ env = globalThis, mount, takeMount, scope = takeMount, getStreamId,
-  upload, transcribe, send, sendPlain, telemetry, onFinished = () => {}, onDiscarded = () => {}, onRecordingChange = () => {},
+  canRecord = () => true, upload, transcribe, send, sendPlain, telemetry, onFinished = () => {}, onDiscarded = () => {}, onRecordingChange = () => {},
   recorder = createBrowserRecorder(env), bindMic = bindComposerMic }) {
   const doc = mount.ownerDocument;
   const mic = doc.createElement('button'); mic.type = 'button';
@@ -26,11 +26,26 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, scope = ta
   let pages = []; let currentKey = null; let pageState = null; let segments = null;
   let frozen = []; let recordingId = null; let thresholdTimer = null; let pendingLeave = null; let surfaceStreamId = null;
   let controller; let destroyed = false; let transformBinding = value => value;
+  let cancelling = null; let departureAfterCancel = null; let resolveIdle = null; let drainQueued = false;
   let captureReleased = Promise.resolve(); let releaseCapture = () => {}; let lastRecording = false;
   const now = () => env.performance?.now?.() ?? Date.now();
   const live = () => ['recording', 'starting'].includes(controller?.snapshot().phase);
   const clearThreshold = () => { if (thresholdTimer !== null) env.clearTimeout(thresholdTimer); thresholdTimer = null; };
+  function settleIdle() {
+    if (controller?.snapshot().phase !== 'idle') return;
+    const resolve = resolveIdle; resolveIdle = null; resolve?.();
+    if (destroyed || cancelling || !departureAfterCancel || drainQueued) return;
+    drainQueued = true;
+    // The reset can be observed during a render. Depart on the next microtask,
+    // after both capture ownership and the controller's admission guard reset.
+    Promise.resolve().then(() => {
+      drainQueued = false;
+      if (destroyed || cancelling || controller?.snapshot().phase !== 'idle') return;
+      const action = departureAfterCancel; departureAfterCancel = null; action?.();
+    });
+  }
   function paint() {
+    settleIdle();
     if (destroyed) return;
     const recording = !!segments && live();
     if (recording !== lastRecording) {
@@ -38,7 +53,7 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, scope = ta
       Promise.resolve().then(() => { if (!destroyed) onRecordingChange(recording); });
     }
     const covered = segments ? selectedSet(segments, pages, surfaceStreamId) : [];
-    mic.hidden = !live() && !pages.some(isVoiceEligible);
+    mic.hidden = !canRecord() || (!live() && !pages.some(isVoiceEligible));
     mic.setAttribute('aria-label', recording ? 'Finish voice answers' : 'Record answers by voice');
     controls.hidden = !recording;
     const progressText = `${covered.length} of ${segments?.n ?? 0} answered by voice`;
@@ -48,7 +63,7 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, scope = ta
       const page = pages.find(entry => entry.key === currentKey);
       const tap = !isVoiceEligible(page) || (segments && !segments.tracked(currentKey));
       pageState.hidden = !tap && !recording;
-      pageState.textContent = tap ? 'ANSWER BY TAP' : covered.some(item => item.key === currentKey) ? 'ANSWER RECORDED' : 'RECORDING YOUR ANSWER…';
+      pageState.textContent = tap ? 'ANSWER BY TAP' : segments?.covered().has(currentKey) ? 'ANSWER RECORDED' : 'RECORDING YOUR ANSWER…';
       if (tap) pageState.dataset.questionVoiceLegacy = ''; else delete pageState.dataset.questionVoiceLegacy;
     }
     // web_voice owns its pending bubble and metering; only its extra P6 label is ours.
@@ -64,7 +79,7 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, scope = ta
     if (wait !== null && wait !== undefined) thresholdTimer = env.setTimeout(() => { thresholdTimer = null; paint(); }, wait);
   }
   function freeze() {
-    confirmation.hidden = true; pendingLeave = null;
+    confirmation.hidden = true; pendingLeave = null; departureAfterCancel = null;
     if (!segments) return [];
     segments.finish(); frozen = selectedSet(segments, pages, surfaceStreamId); clearThreshold();
     return frozen;
@@ -124,18 +139,30 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, scope = ta
   const observer = new env.MutationObserver(paint);
   observer.observe(panel, { attributes: true, attributeFilter: ['class', 'hidden'], childList: true, subtree: true });
   function requestLeave(action = onDiscarded) {
-    if (controller?.snapshot().phase === 'cancelling') return true;
+    if (cancelling || drainQueued || controller?.snapshot().phase === 'cancelling') { departureAfterCancel = action; return true; }
     if (!live()) return false;
     pendingLeave = action; confirmation.hidden = false; paint(); keep.focus(); return true;
   }
-  async function cancel() {
+  function cancel() {
+    if (cancelling) return cancelling;
     clearThreshold(); confirmation.hidden = true; pendingLeave = null;
     segments = null; frozen = [];
     if (recordingId) releaseVoiceAnswersBinding(recordingId);
-    await controller?.cancel(); await captureReleased; paint();
+    const idle = new Promise(resolve => { resolveIdle = resolve; });
+    cancelling = (async () => {
+      try {
+        await controller?.cancel(); await captureReleased;
+        // Pending start/stop cancellation returns before web_voice resets its
+        // phase. Track release alone is insufficient for reentrant navigation.
+        if (!destroyed && controller && controller.snapshot().phase !== 'idle') await idle;
+      } catch (error) { departureAfterCancel = null; throw error; }
+      finally { resolveIdle = null; cancelling = null; }
+      paint();
+    })();
+    return cancelling;
   }
   keep.addEventListener('click', () => { pendingLeave = null; confirmation.hidden = true; paint(); mic.focus(); });
-  discard.addEventListener('click', async () => { const action = pendingLeave; await cancel(); action?.(); });
+  discard.addEventListener('click', async () => { departureAfterCancel = pendingLeave; await cancel(); });
   done.addEventListener('click', () => { if (controller?.snapshot().phase === 'recording') mic.click(); });
   const escape = event => {
     if (event.key !== 'Escape' || !live()) return;
@@ -160,9 +187,9 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, scope = ta
       pageState = doc.createElement('span'); pageState.dataset.questionVoicePageState = ''; pageState.className = 'question-voice-page-state';
       stateMount?.prepend(pageState); paint();
     },
-    requestLeave, cancel,
+    requestLeave, cancel, refresh: paint,
     snapshot: () => ({ ...controller?.snapshot(), n: segments?.n ?? 0, selected: segments ? selectedSet(segments, pages, surfaceStreamId) : frozen }),
-    async dispose() { destroyed = true; observer.disconnect(); doc.removeEventListener('keydown', escape, true); takeMount?.removeEventListener('click', plainClick); await cancel(); mic.remove(); bar.remove(); },
+    async dispose() { destroyed = true; resolveIdle?.(); resolveIdle = null; observer.disconnect(); doc.removeEventListener('keydown', escape, true); takeMount?.removeEventListener('click', plainClick); await cancel(); mic.remove(); bar.remove(); },
     ...(env.PentacleHarness ? { setBindingTransformForTest(fn) { transformBinding = fn; } } : {}),
   };
 }

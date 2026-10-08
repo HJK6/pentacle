@@ -130,7 +130,7 @@ test('denied capture retains existing permission message and starts no send', as
 // no fleet process or physical microphone. Only platform APIs are fake.
 const vm = require('node:vm');
 const { installRenderer, mountRaceSlot, STREAM } = require('./helpers/renderer_chat');
-async function appFixture(t, isWeb) {
+async function appFixture(t, isWeb, assistant = true) {
   const h = installRenderer({ questionOverride: null }); await flush(); await flush();
   const w = h.dom.window; let now = 0; let starts = 0, roomClicks = 0; const tracks = [];
   Object.defineProperty(w, 'isSecureContext', { value: true });
@@ -154,6 +154,7 @@ async function appFixture(t, isWeb) {
   };
   w.document.getElementById('mic-btn-toggle').addEventListener('click', () => roomClicks++);
   mountRaceSlot(h.context);
+  if (assistant) vm.runInContext("state.slots[0].session_kind='assistant_composite'; state.chatStream.sessions[0].session_kind='assistant_composite';", h.context);
   for (let i = 1; i <= 3; i++) vm.runInContext(`indexDurableQuestionNotification(${JSON.stringify({ notification_id: `voice-${i}`, producer: 'agent_question.v1', state: 'open', title: `Question ${i}`,
     answer_to_stream_id: STREAM, question: { question_id: `q${i}`, producer_stream_id: STREAM, state: 'open', response_mode: 'single_choice', options: [{ label: 'Keep', value: 'keep' }] } })});`, h.context);
   vm.runInContext('renderSlotChat(0)', h.context); w.document.querySelector('.slot-chat-question-open').click();
@@ -165,6 +166,7 @@ async function appFixture(t, isWeb) {
 }
 for (const isWeb of [undefined, true]) test(`actual app deck uses capture and keeps composer reachable (${isWeb})`, async t => {
   const h = await appFixture(t, isWeb); const doc = h.dom.window.document;
+  assert.equal(vm.runInContext('chatControlTargetForSlot(0).streamSession.session_kind', h.context), 'assistant_composite');
   await h.start(); assert.equal(h.starts(), 1); assert.equal(h.roomClicks(), 0);
   const portal = doc.querySelector('.desktop-question-portal'); assert.equal(portal.getAttribute('aria-modal'), 'false');
   doc.querySelector('.slot-chat-compose-input').focus(); assert.equal(doc.activeElement.className.includes('slot-chat-compose-input'), true);
@@ -180,13 +182,13 @@ for (const isWeb of [undefined, true]) test(`actual app deck uses capture and ke
 for (const action of ['view', 'detach', 'attach']) test(`actual ${action} admission keeps state until deck discard, then stops tracks`, async t => {
   const h = await appFixture(t); const doc = h.dom.window.document; await h.start();
   const before = vm.runInContext('JSON.stringify({slot:state.slots[0],view:state.slotViewModes[0],gen:state.slotGen[0]})', h.context);
-  const expression = action === 'view' ? "updateSlotViewMode(0,'terminal')" : action === 'detach' ? 'detachSlot(0)' : "attachSession(0,'replacement','Replacement','local',{laneHistory:{streamId:'fixture:history'}})";
+  const expression = action === 'view' ? "updateSlotViewMode(0,'asset')" : action === 'detach' ? 'detachSlot(0)' : "attachSession(0,'replacement','Replacement','local',{laneHistory:{streamId:'fixture:history'}})";
   vm.runInContext(expression, h.context); await flush();
   assert.equal(vm.runInContext('JSON.stringify({slot:state.slots[0],view:state.slotViewModes[0],gen:state.slotGen[0]})', h.context), before);
   doc.querySelector('[data-question-voice-keep]').click(); assert.equal(h.tracks[0].readyState, 'live');
   vm.runInContext(expression, h.context); doc.querySelector('[data-question-voice-discard]').click(); await flush();
   assert.equal(h.tracks[0].readyState, 'ended');
-  if (action === 'view') assert.equal(vm.runInContext('state.slotViewModes[0]', h.context), 'terminal');
+  if (action === 'view') assert.equal(vm.runInContext('state.slotViewModes[0]', h.context), 'asset');
   if (action === 'detach') assert.equal(vm.runInContext('state.slots[0]', h.context), null);
   if (action === 'attach') assert.equal(vm.runInContext('state.slots[0].name', h.context), 'replacement');
   assert.equal(h.sendCalls.length, 0); assert.equal(h.notificationResolveCalls.length, 0);
@@ -271,4 +273,192 @@ test('USER plain-voice control invokes conversion only on explicit click and is 
   await vm.runInContext('state.slotChatRefs[0].questionVoiceController.dispose()', h.context);
   button.disabled = false; button.click(); assert.deepEqual(calls, ['optimistic-refused'], 'disposed slot no longer handles its old transcript');
   assert.equal(h.sendCalls.length, 0); assert.equal(h.notificationResolveCalls.length, 0);
+});
+test('ordinary agent questions have no available deck mic and cannot start a bound take', async t => {
+  const h = await appFixture(t, true, false), doc = h.dom.window.document;
+  assert.notEqual(vm.runInContext('chatControlTargetForSlot(0).streamSession.session_kind', h.context), 'assistant_composite');
+  const mic = doc.querySelector('[data-question-voice-mic]');
+  assert.equal(mic.hidden, true);
+  mic.click(); await flush();
+  assert.equal(h.starts(), 0, 'programmatic activation is also refused before capture');
+  assert.equal(h.sendCalls.length, 0);
+});
+test('a target that ceases to be assistant-composite cannot receive the frozen bound send', async t => {
+  const h = await appFixture(t, true), w = h.dom.window, doc = w.document; let release; const sends = [];
+  w.cc.chatUploadBlob = async () => ({ ok: true, blob_sha: 'c'.repeat(64) });
+  w.cc.chatTranscribeBlob = () => new Promise(resolve => { release = resolve; });
+  w.PentacleChatStore.sendTurn = (...args) => { sends.push(args); return 'optimistic-must-not-send'; };
+  await h.start(); await h.advance(1500); doc.querySelector('[data-question-voice-done]').click(); await flush();
+  vm.runInContext("state.chatStream.sessions[0].session_kind='agent'; state.slots[0].session_kind='agent'; renderSlotChat(0);", h.context);
+  release({ ok: true, text: 'Synthetic answer' }); await flush();
+  assert.equal(sends.length, 0, 'final dispatch independently enforces the target kind');
+  assert.equal(h.notificationResolveCalls.length, 0);
+});
+test('departure arriving during pending cancellation is retained until capture cleanup settles', async t => {
+  const u = fixture(t, { startPending: true }); await u.start(); const departures = [];
+  const cancelling = u.ctrl.cancel();
+  assert.equal(u.ctrl.requestLeave(() => { assert.ok(u.tracks.every(track => track.readyState === 'ended')); departures.push('queued'); }), true);
+  await flush(); assert.deepEqual(departures, []);
+  u.releaseStart(); await cancelling; await flush();
+  assert.deepEqual(departures, ['queued']); assert.equal(u.sent.length, 0);
+});
+test('a 200-code-point wire key still paints ANSWER RECORDED using the internal pager identity', async t => {
+  const id = '😀'.repeat(200), entry = page(1, { key: `fixture:assistant:durable:${id}:q1`,
+    notification: { notification_id: id, question: { question_id: 'q1', producer_stream_id: 'fixture:producer' } } });
+  const u = fixture(t, { entries: [entry] }); await u.start(); await u.advance(1500);
+  assert.equal(u.doc.querySelector('[data-question-voice-page-state]').textContent, 'ANSWER RECORDED');
+  assert.equal(u.ctrl.snapshot().selected[0].key, id);
+  u.doc.querySelector('[data-question-voice-done]').click(); await flush();
+  assert.equal(u.sent[0].meta.voice_answers.items[0].key, id);
+});
+test('latest queued departure supersedes the earlier confirmed action while cancellation settles', async t => {
+  const u = fixture(t, { startPending: true }); await u.start(); const actions = [];
+  u.ctrl.requestLeave(() => actions.push('old'));
+  u.doc.querySelector('[data-question-voice-discard]').click(); await flush();
+  u.ctrl.requestLeave(() => actions.push('intermediate'));
+  u.ctrl.requestLeave(() => { assert.ok(u.tracks.every(track => track.readyState === 'ended')); actions.push('latest'); });
+  assert.deepEqual(actions, []);
+  u.releaseStart(); await flush();
+  assert.deepEqual(actions, ['latest']); assert.equal(u.sent.length, 0);
+});
+test('ordinary assistant-looking titles and a valid direct alias never authorize voice binding', async t => {
+  const h = await appFixture(t, true, false), doc = h.dom.window.document;
+  vm.runInContext(`
+    state.chatStream.sessions[0].title='Assistant Fixture'; state.chatStream.sessions[0].role='assistant';
+    CONFIG.features.assistantRole='assistant';
+    state.chatStream.sessions[0].session_generation='fixture-generation'; state.chatStream.sessions[0].online=true;
+    state.chatStream.sessions.push({stream_id:'hostc:composite-source',host:'hostc',session_name:'composite-source',session_kind:'assistant_composite'});
+    CONFIG.features.assistantDirectTarget={sourceStreamId:'hostc:composite-source',streamId:${JSON.stringify(STREAM)},generation:'fixture-generation'};
+    state.slots[0].assistantDirect={sourceId:'hostc:composite-source',targetId:${JSON.stringify(STREAM)},generation:'fixture-generation'};
+    renderSlotChat(0);
+  `, h.context);
+  assert.equal(vm.runInContext('!!assistantDirectForSlot(0).error', h.context), false, 'the alias itself is valid');
+  assert.equal(vm.runInContext('chatControlTargetForSlot(0).streamSession.session_kind', h.context), undefined);
+  const mic = doc.querySelector('[data-question-voice-mic]'); assert.equal(mic.hidden, true);
+  mic.click(); await flush(); assert.equal(h.starts(), 0); assert.equal(h.sendCalls.length, 0);
+});
+test('live backdrop cannot dismiss; idle modal and Tab trap return after an empty Done', async t => {
+  const h = await appFixture(t, true), doc = h.dom.window.document; await h.start();
+  let portal = doc.querySelector('.desktop-question-portal'); assert.equal(portal.getAttribute('aria-modal'), 'false');
+  portal.click(); assert.ok(doc.querySelector('.desktop-question-portal'));
+  assert.equal(vm.runInContext('state.slotChatRefs[0].questionVoiceController.snapshot().phase', h.context), 'recording');
+  const liveTab = new h.dom.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }); portal.dispatchEvent(liveTab);
+  assert.equal(liveTab.defaultPrevented, false);
+  doc.querySelector('[data-question-voice-done]').click(); await flush();
+  portal = doc.querySelector('.desktop-question-portal'); assert.ok(portal); assert.equal(portal.getAttribute('aria-modal'), 'true');
+  const controls = [...portal.querySelectorAll('button:not(:disabled), textarea:not(:disabled), input:not(:disabled)')];
+  controls.forEach(node => { node.getClientRects = () => node.closest('[hidden]') ? [] : [{}]; });
+  const visible = controls.filter(node => !node.hidden && node.getClientRects().length); visible.at(-1).focus();
+  const idleTab = new h.dom.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }); visible.at(-1).dispatchEvent(idleTab);
+  assert.equal(idleTab.defaultPrevented, true); assert.equal(doc.activeElement, visible[0]);
+});
+test('portal arrows time visits; composer and nested editable text ignore them', async t => {
+  const h = await appFixture(t, true), doc = h.dom.window.document; await h.start(); await h.advance(1500);
+  const portal = doc.querySelector('.desktop-question-portal');
+  const input = doc.querySelector('.slot-chat-compose-input'); input.focus();
+  input.dispatchEvent(new h.dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  assert.equal(doc.querySelector('[data-notification-id]').dataset.notificationId, 'voice-1');
+  const editable = doc.createElement('div'); editable.setAttribute('contenteditable', 'true'); editable.innerHTML='<span>Editable text</span>'; portal.appendChild(editable);
+  editable.firstChild.dispatchEvent(new h.dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  assert.equal(doc.querySelector('[data-notification-id]').dataset.notificationId, 'voice-1');
+  portal.dispatchEvent(new h.dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })); await h.advance(1500);
+  assert.equal(doc.querySelector('[data-notification-id]').dataset.notificationId, 'voice-2');
+  const selected = vm.runInContext('JSON.stringify(state.slotChatRefs[0].questionVoiceController.snapshot().selected)', h.context);
+  assert.deepEqual(JSON.parse(selected).map(item => [item.question_id,item.segment]), [
+    ['q1',{start_s:0,end_s:1.5}],['q2',{start_s:1.5,end_s:3}],
+  ]);
+});
+for (const change of ['missing', 'disconnected', 'different-composite']) test(`bound dispatch refuses a ${change} target after capture`, async t => {
+  const h = await appFixture(t, true), w = h.dom.window, doc = w.document; let release; const sends = [];
+  w.cc.chatUploadBlob = async () => ({ ok: true, blob_sha: 'd'.repeat(64) });
+  w.cc.chatTranscribeBlob = () => new Promise(resolve => { release = resolve; });
+  w.PentacleChatStore.sendTurn = (...args) => { sends.push(args); return 'must-not-dispatch'; };
+  await h.start(); await h.advance(1500); doc.querySelector('[data-question-voice-done]').click(); await flush();
+  const mutation = change === 'missing' ? 'state.chatStream.sessions=[]'
+    : change === 'disconnected' ? 'state.chatStream.connected=false'
+      : "state.chatStream.sessions[0].stream_id='hostc:another-composite'";
+  vm.runInContext(mutation, h.context);
+  release({ ok: true, text: 'Synthetic answer' }); await flush();
+  assert.equal(sends.length, 0); assert.equal(h.notificationResolveCalls.length, 0);
+});
+
+
+test('queued navigation reenters real admission guard after delayed start cancellation', async t => {
+  const u = fixture(t, { startPending: true }); await u.start(); const actions = []; const observations = [];
+  const depart = () => { observations.push(u.ctrl.snapshot().phase); if (u.ctrl.requestLeave(depart)) return; actions.push('applied'); };
+  depart();
+  u.doc.querySelector('[data-question-voice-discard]').click(); await flush();
+  u.releaseStart(); await flush(); await flush();
+  assert.ok(u.tracks.every(track => track.readyState === 'ended'));
+  assert.deepEqual(actions, ['applied']);
+});
+test('departure during empty Done cancellation must execute after discard', async t => {
+  const u = fixture(t); await u.start(); const actions = []; let release;
+  u.recorder.discard = () => new Promise(resolve => { release = () => { u.tracks.forEach(track => { track.readyState = 'ended'; }); resolve(); }; });
+  u.doc.querySelector('[data-question-voice-done]').click(); await flush();
+  assert.equal(u.ctrl.snapshot().phase, 'cancelling');
+  assert.equal(u.ctrl.requestLeave(() => actions.push('departed')), true);
+  assert.deepEqual(actions, []); release(); await flush(); await flush();
+  assert.ok(u.tracks.every(track => track.readyState === 'ended'));
+  assert.deepEqual(actions, ['departed']);
+});
+test('departure during permission prompt Cancel must execute after late capture cleanup', async t => {
+  const u = fixture(t, { startPending: true }); await u.start(); const actions = [];
+  const cancelButton = [...u.doc.querySelectorAll('.slot-chat-voice-take button')].find(button => button.textContent === 'Cancel');
+  assert.ok(cancelButton); cancelButton.click(); await flush();
+  assert.equal(u.ctrl.snapshot().phase, 'cancelling');
+  assert.equal(u.ctrl.requestLeave(() => actions.push('departed')), true);
+  u.releaseStart(); await flush(); await flush();
+  assert.ok(u.tracks.every(track => track.readyState === 'ended'));
+  assert.deepEqual(actions, ['departed']);
+});
+
+for (const departure of ['view', 'detach', 'attach']) test('actual app: delayed permission discard applies ' + departure, async t => {
+  const h = await appFixture(t, true); const w = h.dom.window, doc = w.document; let release;
+  const getUserMedia = w.navigator.mediaDevices.getUserMedia;
+  w.navigator.mediaDevices.getUserMedia = () => new Promise(resolve => { release = async () => resolve(await getUserMedia()); });
+  await h.start();
+  const expression = departure === 'view' ? "updateSlotViewMode(0,'asset')" : departure === 'detach' ? 'detachSlot(0)' : "attachSession(0,'replacement','Replacement','local',{laneHistory:{streamId:'fixture:history'}})";
+  vm.runInContext(expression, h.context); doc.querySelector('[data-question-voice-discard]').click(); await flush();
+  await release(); await flush(); await flush();
+  assert.ok(h.tracks.every(track => track.readyState === 'ended'));
+  if (departure === 'view') assert.equal(vm.runInContext('state.slotViewModes[0]', h.context), 'asset');
+  if (departure === 'detach') assert.equal(vm.runInContext('state.slots[0]', h.context), null);
+  if (departure === 'attach') assert.equal(vm.runInContext('state.slots[0].name', h.context), 'replacement');
+  assert.equal(h.sendCalls.length, 0); assert.equal(h.notificationResolveCalls.length, 0);
+});
+
+for (const unavailable of ['missing', 'offline', 'ordinary-resolved']) test('target policy: mic blocks ' + unavailable + ' resolved target', async t => {
+  const h = await appFixture(t, true); const doc = h.dom.window.document;
+  const mutation = unavailable === 'missing' ? 'state.chatStream.sessions=[]' : unavailable === 'offline' ? 'state.chatStream.connected=false' : "state.chatStream.sessions[0].session_kind='agent'";
+  vm.runInContext(mutation + '; renderSlotChat(0)', h.context);
+  const mic = doc.querySelector('[data-question-voice-mic]');
+  const wasHidden = mic.hidden;
+  mic.click(); await flush(); assert.equal(h.starts(), 0); assert.equal(h.sendCalls.length, 0);
+  assert.equal(wasHidden, true);
+});
+test('target policy: ordinary composer still records and sends plain voice', async t => {
+  const h = await appFixture(t, true, false); const w = h.dom.window, doc = w.document; const sends = [];
+  w.cc.chatUploadBlob = async () => ({ ok: true, blob_sha: 'e'.repeat(64) });
+  w.cc.chatTranscribeBlob = async () => ({ ok: true, text: 'Ordinary voice' });
+  w.PentacleChatStore.sendTurn = (...args) => { sends.push(args); return 'ordinary-note'; };
+  const mic = doc.querySelector('.slot-chat-compose-mic'); mic.click(); await flush(); await h.advance(1500); mic.click(); await flush(); await flush();
+  assert.equal(h.starts(), 1); assert.equal(sends.length, 1); assert.equal(sends[0][0], STREAM);
+  assert.ok(sends[0][3].meta.voice); assert.equal(Object.hasOwn(sends[0][3].meta, 'voice_answers'), false);
+  assert.ok(h.tracks.every(track => track.readyState === 'ended'));
+});
+test('a newer departure at the idle-reset boundary supersedes the already scheduled departure', async t => {
+  const u = fixture(t, { startPending: true }); await u.start(); const actions = [];
+  const depart = name => { const action = () => { if (u.ctrl.requestLeave(action)) return; actions.push(name); }; return action; };
+  const panel = u.doc.querySelector('.slot-chat-voice-take');
+  const cancelButton = [...panel.querySelectorAll('button')].find(button => button.textContent === 'Cancel');
+  cancelButton.click(); await flush(); u.ctrl.requestLeave(depart('old'));
+  let replaced = false;
+  const observer = new u.env.MutationObserver(() => {
+    if (!replaced && u.ctrl.snapshot().phase === 'idle') { replaced = true; depart('latest')(); }
+  });
+  observer.observe(panel, { attributes: true, childList: true, subtree: true });
+  u.releaseStart(); await flush(); await flush(); observer.disconnect();
+  assert.equal(replaced, true); assert.deepEqual(actions, ['latest']);
+  assert.ok(u.tracks.every(track => track.readyState === 'ended')); assert.equal(u.sent.length, 0);
 });

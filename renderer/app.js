@@ -3792,16 +3792,21 @@ function renderSlotChat(slot) {
         document.querySelector(`#cell-${slot} .slot-chat-question-open`)?.focus({ preventScroll: true });
       });
     };
+    // Voice-answer bindings are consumed only by the actual assistant composite.
+    // An assistantDirect alias may intentionally resolve to an ordinary agent.
+    const questionVoiceTarget = () => {
+      const target = chatControlTargetForSlot(slot);
+      return target && !target.error && target.streamSession?.session_kind === 'assistant_composite' ? target : null;
+    };
     if (!refs.questionVoiceController) {
       refs.questionVoiceController = createQuestionVoiceBar({
         env: window, mount: refs.questionEl, takeMount: refs.scrollEl, scope: refs.chatMount,
-        getStreamId: () => {
-          const target = chatControlTargetForSlot(slot);
-          return assertAssistantDirectSlot(slot) && target && !target.error ? target.streamSession?.stream_id : null;
-        },
+        canRecord: () => !!questionVoiceTarget(),
+        getStreamId: () => assertAssistantDirectSlot(slot) ? questionVoiceTarget()?.streamSession.stream_id || null : null,
         upload: blob => uploadVoiceBlob(window.cc, blob),
         transcribe: payload => window.cc.chatTranscribeBlob(payload),
         send: ({ streamId: target, text, meta }) => assertAssistantDirectSlot(slot)
+          && questionVoiceTarget()?.streamSession.stream_id === target
           ? window.PentacleChatStore.sendTurn(target, text, [], { meta }) : '',
         sendPlain: optimisticId => window.PentacleChatStore.sendVoiceAsPlainNote(optimisticId),
         telemetry: (event, tags) => window.PentacleChatCore?.logTelemetry?.(event, tags),
@@ -3810,6 +3815,8 @@ function renderSlotChat(slot) {
       });
       if (window.PentacleHarness) refs.questionEl.__questionVoiceController = refs.questionVoiceController;
     }
+    // Re-evaluate visibility even when this render has no current deck/target.
+    refs.questionVoiceController.refresh();
     const deckRecording = ['starting', 'recording'].includes(refs.questionVoiceController.snapshot().phase);
     const closeQuestions = () => { if (!refs.questionVoiceController.requestLeave(leaveQuestions)) leaveQuestions(); };
     if (!unsettled.length && !deckRecording) {
@@ -3967,7 +3974,7 @@ function renderSlotChat(slot) {
       if (!deckRecording && !portal.contains(document.activeElement)) portal.querySelector('.desktop-question-portal__close').focus({ preventScroll: true });
       portal.onkeydown = event => {
         if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeQuestions(); }
-        if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !event.target.matches('input, textarea')) {
+        if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !event.target.closest('input, textarea, [contenteditable="true"], [role="textbox"], .slot-chat-compose')) {
           event.preventDefault(); navigate(activeIndex + (event.key === 'ArrowRight' ? 1 : -1));
         }
         if (event.key === 'Tab' && !deckRecording) {

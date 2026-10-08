@@ -61,7 +61,10 @@ function selectedSet(segments, pages, surfaceStreamId) {
   for (const [key, segment] of segments.covered()) {
     const page = byKey.get(key);
     if (!isVoiceEligible(page)) continue;
-    items.push({ key, question_id: page.notification.question.question_id,
+    // A durable web card is one globally unique notification. Its identifier
+    // is also the opaque wire key, avoiding growth from the internal pager key.
+    // Malformed over-limit IDs remain host validation failures, never truncated.
+    items.push({ key: notificationId(page), question_id: page.notification.question.question_id,
       notification_id: notificationId(page), producer_stream_id: page.notification.question.producer_stream_id,
       surface_stream_id: surfaceStreamId, prompt: page.model?.prompt ?? '', segment });
   }
