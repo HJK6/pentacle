@@ -39,7 +39,7 @@ function localFrame() {
   });
 }
 
-async function boot(t, { snapshot = {}, sessions = [SESSION('lead-one'), COMPOSITE, SESSION('other')], requestStreamEvents, realStore = false, manualTimers = false } = {}) {
+async function boot(t, { snapshot = {}, sessions = [SESSION('lead-one'), COMPOSITE, SESSION('other')], requestStreamEvents, realStore = false, manualTimers = false, lanesSidebar = true } = {}) {
   let onFrame = null;
   const calls = [];
   const timers = [];
@@ -53,6 +53,8 @@ async function boot(t, { snapshot = {}, sessions = [SESSION('lead-one'), COMPOSI
     },
   });
   t.after(() => h.dom.window.close());
+  // The sidebar lanes view is off by default; these tests cover it switched on.
+  if (lanesSidebar) h.dom.window.__PENTACLE_WORK_LANES_SIDEBAR__ = true;
   vm.runInContext(bundle, h.context);
   h.dom.window.PentacleChatCore = h.context.PentacleChatCore;
   if (realStore) {
@@ -77,6 +79,19 @@ async function boot(t, { snapshot = {}, sessions = [SESSION('lead-one'), COMPOSI
   };
   return api;
 }
+
+test('by default the sidebar shows no lane count and no Lanes section, from a push or a snapshot', async (t) => {
+  const app = await boot(t, { lanesSidebar: false, snapshot: { work_lanes: fixture.inventory_frame, state_version: 1 } });
+  const sessionRows = () => app.doc.querySelectorAll('#session-list .session-item').length;
+  assert.match(app.stats(), /^\d+ sessions \| \d+ need answer \| \d+ working$/);
+  const before = sessionRows();
+  await app.push({ ...localFrame(), state_version: 2 });
+  assert.match(app.stats(), /^\d+ sessions \| \d+ need answer \| \d+ working$/);
+  assert.equal(app.rows().length, 0);
+  assert.equal(app.doc.querySelector('#session-list .lanes-label, #session-list .lanes-truncated'), null);
+  assert.equal(sessionRows(), before);
+  assert.ok(before > 0);
+});
 
 test('stats line and lanes section appear when the daemon pushes the inventory', async (t) => {
   const app = await boot(t);

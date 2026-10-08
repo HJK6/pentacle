@@ -1861,6 +1861,12 @@ const closedChatSlots = createClosedChatSlots({
   },
 });
 
+// The sidebar lanes view (the "N lanes |" header count and the "Lanes (N)" section) is off by
+// default. Lane frames are still ingested; only tests turn the view on, until it is rebuilt.
+function workLanesSidebarEnabled() {
+  return window.__PENTACLE_WORK_LANES_SIDEBAR__ === true;
+}
+
 // Work lanes (spec_pentacle__first_class_work_lanes_2026_10): the daemon projection is the only
 // lane source. Accepts the push frame and the work_lanes field of snapshot/hello replies.
 function applyWorkLanesPayload(payload) {
@@ -4841,7 +4847,7 @@ function renderSidebar() {
   }));
   const needsAnswerCount = attentionRows.filter((r) => r.attentionTier === 0).length;
   const workingCount = attentionRows.filter((r) => r.attentionTier === 1).length;
-  stats.textContent = workLanesStatsText(state.workLanes, {
+  stats.textContent = workLanesStatsText(workLanesSidebarEnabled() ? state.workLanes : null, {
     sessions: active.length, needsAnswer: needsAnswerCount, working: workingCount,
     search, sourceFiltered: sourceFiltered.length,
   });
@@ -4934,8 +4940,9 @@ function renderSidebar() {
   }
 
   // "Lanes (N)" section above the session tiers: the daemon's open lanes, in its order.
+  // Off unless workLanesSidebarEnabled().
   const core = window.PentacleChatCore;
-  let html = core?.workLaneTapTarget ? renderWorkLanesPanelHtml(state.workLanes, {
+  let html = core?.workLaneTapTarget && workLanesSidebarEnabled() ? renderWorkLanesPanelHtml(state.workLanes, {
     tapTarget: core.workLaneTapTarget,
     etaLabel: core.workLaneEtaLabel,
     nowMs: Date.now(),

@@ -53,7 +53,27 @@ async function webWorkLanes(ctx) {
   const frame = JSON.parse(JSON.stringify(fixtureContract.inventory_frame));
   frame.lanes.find((lane) => lane.lane_id === 'wl-blocked-0001').visible_chat.stream_id = hostLocal;
 
+  let viewHook = null;
   try {
+    // Default: the sidebar lanes view is off. A lane inventory changes neither the header nor the session list.
+    await reload();
+    const sidebarShape = `(() => ({ stats: document.getElementById('stats').textContent,
+      rows: [...document.querySelectorAll('#session-list .session-item')].map((el) => el.dataset.name),
+      labels: [...document.querySelectorAll('#session-list .sidebar-group-label')].map((el) => el.textContent),
+      lanes: document.querySelectorAll('#session-list .lane-row, #session-list .lanes-label, #session-list .lanes-truncated').length }))()`;
+    const offBefore = await waitForValue(session, cdp, sidebarShape, (v) => /^\d+ sessions \|/.test(v.stats) && v.rows.length > 0,
+      { timeoutMs, label: 'session-only header with the lanes view off' });
+    await inject(frame);
+    await cdp.sleep(500);
+    const offAfter = await session.eval(sidebarShape);
+    report.ok('by default a lane inventory adds no lane count, no "Lanes (N)" section and no lane rows',
+      offAfter.lanes === 0 && !/lanes/i.test(offAfter.stats) && !offAfter.labels.some((label) => /lanes/i.test(label)), { offBefore, offAfter });
+    report.ok('by default the session rows and tier labels are unchanged by a lane inventory',
+      JSON.stringify(offAfter.rows) === JSON.stringify(offBefore.rows) && JSON.stringify(offAfter.labels) === JSON.stringify(offBefore.labels),
+      { offBefore, offAfter });
+
+    // The rest covers the view switched on, as the later rebuild will find it.
+    viewHook = await session.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.__PENTACLE_WORK_LANES_SIDEBAR__ = true;' });
     await reload();
     // Pane attach is irrelevant here; keep the ordinary-session open path off the real tmux.
     await session.eval(`(() => { window.cc.createPty = async () => '%unused-work-lanes-fixture'; window.cc.killPty = async () => true; return true; })()`);
@@ -150,6 +170,7 @@ async function webWorkLanes(ctx) {
       JSON.stringify(cards.kinds) === JSON.stringify(['lane_blocked', 'lane_completed', 'lane_started', 'lane_unblocked', 'major_decision', 'milestone']) && cards.prose === 0, cards);
   } finally {
     await session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: hook.identifier }).catch(() => {});
+    if (viewHook) await session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: viewHook.identifier }).catch(() => {});
     await reloadFresh();
     await waitForValue(session, cdp, 'window.cc.getChatStreamState().then((s) => s.connected === true)', (v) => v === true,
       { timeoutMs, label: 'daemon connected after work-lanes cleanup' });
