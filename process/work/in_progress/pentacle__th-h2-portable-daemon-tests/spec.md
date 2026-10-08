@@ -1,3 +1,20 @@
+---
+id: spec_pentacle_th_h2_2026_10
+title: TH-H2 portable daemon tests
+type: spec
+status: in_progress
+canonical: false
+created_at: '2026-10-05'
+updated_at: '2026-10-08'
+source_path: work/in_progress/pentacle__th-h2-portable-daemon-tests/spec.md
+machine: shared
+owner: dot
+tags: [pentacle, test-harness]
+summary: Test-only capability probes, dependency preflight, strict mode and fixture isolation for portable daemon tests.
+related:
+- work_pentacle_th_h2_2026_10
+---
+
 # TH-H2 portable daemon tests
 
 Packet: TH-v1 rev 0.4, H2. Base: 586942610bdaf54c079b57d3324bc87042eb6024.
