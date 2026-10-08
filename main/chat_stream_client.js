@@ -829,6 +829,11 @@ try {
     return this.sendCommand(payload, 'assistant.lifecycle', { requestId: crypto.randomUUID() });
   }
 
+  householdCommand(verb, fields) {
+    if (typeof verb !== 'string' || !verb.startsWith('household.')) throw new Error('Invalid household verb');
+    return this.sendCommand({ ...fields, type: verb }, 'household', { timeoutMs: 12000, rawResponse: true });
+  }
+
   async assistantBinding() {
     return this.sendCommand({ type: 'assistant.binding' }, 'assistant.binding', {
       timeoutMs: 5000,

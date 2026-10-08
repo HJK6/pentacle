@@ -27,6 +27,7 @@ const cdp = require('./lib/cdp');
 const scenarios = require('./lib/web_scenarios');
 const catalogFixtures = require('./lib/dashboard_catalog_fixture');
 const { startModelerFixture } = require('./lib/modeler_fixture_server');
+const { startFakeCosmo } = require('./lib/fake_cosmo_server');
 const { withRuntimeDirectory, execWithRuntimeDirectory } = require('./lib/runtime_directory');
 const { main: startHost } = require('../../server');
 
@@ -226,7 +227,8 @@ async function startDaemon(args, scratch, runtime, fixtures = [
       '--blob-root', path.join(scratch, 'blobs'),
       '--disable-hosts', '--disable-mirror', '--disable-nudges',
       '--disable-outbound-notices', '--disable-remote-presence',
-    ], { cwd: ROOT, stdio: ['ignore', daemonLog, daemonLog] });
+    ], { cwd: ROOT, stdio: ['ignore', daemonLog, daemonLog],
+      env: { ...process.env, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
     runtime.daemonProc = proc;
     let dead = false;
     proc.once('exit', () => { dead = true; });
@@ -266,6 +268,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     try { if (runtime.tmuxSession) tmux(['kill-session', '-t', `=${runtime.tmuxSession}`], { stdio: 'ignore' }); } catch {}
     try { if (runtime.freezeTmux) tmux(['kill-session', '-t', `=${runtime.freezeTmux}`], { stdio: 'ignore' }); } catch {}
     try { if (host) await host.close(); } catch {}
+    let cosmoCleanupError = null;
+    try { if (runtime.fakeCosmo) await runtime.fakeCosmo.close(); } catch (error) { cosmoCleanupError = error; }
     let modelerCleanupError = null;
     try { if (runtime.modelerFixture) await runtime.modelerFixture.close(); } catch (error) { modelerCleanupError = error; }
     // A restarted host runs as a subprocess (see restartHost); kill it too.
@@ -293,12 +297,14 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     if (daemonCleanupError) throw daemonCleanupError;
     if (hostCleanupError) throw hostCleanupError;
     if (modelerCleanupError) throw modelerCleanupError;
+    if (cosmoCleanupError) throw cosmoCleanupError;
     if (!args.keep && (!runtime.fixtureAuthCleanup.registry_removed || !runtime.fixtureAuthCleanup.token_removed)) throw new Error('CLEANUP_FAIL: isolated credential artifacts remain');
   };
 
   try {
     let profile = args.profile;
     if (!profile) {
+      runtime.fakeCosmo = await startFakeCosmo();
       daemon = await startDaemon(args, scratch, runtime);
       runtime.fixtureDaemonPort = daemon.port;
       runtime.modelerFixture = await startModelerFixture();
@@ -397,7 +403,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
           '--blob-root', path.join(scratch, 'blobs'),
           '--disable-hosts', '--disable-mirror', '--disable-nudges',
           '--disable-outbound-notices', '--disable-remote-presence',
-        ], { cwd: ROOT, stdio: ['ignore', dlog, dlog] });
+        ], { cwd: ROOT, stdio: ['ignore', dlog, dlog],
+          env: { ...process.env, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
         runtime.daemonProc = proc;
         let dead = false;
         proc.once('exit', () => { dead = true; });

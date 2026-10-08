@@ -128,6 +128,10 @@ function createTransport({ url, logger = console } = {}) {
           reject(new Error('Provider sign-in connection is unavailable'));
           return;
         }
+        if (method === 'chat-stream:household' && (!socket || socket.readyState !== WebSocket.OPEN)) {
+          reject(Object.assign(new Error('Household connection is unavailable'), { code: 'disconnected' }));
+          return;
+        }
         pending.set(id, { resolve, reject });
         const frame = { id, method, args };
         if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
@@ -382,6 +386,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
     chatKill: (args) => call('chat-stream:kill', args || {}),
     chatConsentKey: (args) => call('chat-stream:consent-key', args || {}),
     chatLifecycleAuthority: (args) => call('chat-stream:lifecycle-authority', args || {}),
+    householdCommand: (verb, fields) => call('chat-stream:household', verb, fields || {}),
     requestStreamEvents: (args) => call('chat-stream:request-stream-events', args || {}),
     scheduleGet: (scheduleId) => call('chat-stream:schedule-get', scheduleId),
     scheduleCancel: (scheduleId) => call('chat-stream:schedule-cancel', scheduleId),
