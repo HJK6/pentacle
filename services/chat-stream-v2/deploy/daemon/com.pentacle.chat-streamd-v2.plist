@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent that starts the chat_streamd v2 daemon at login (macOS).
+
+  Do not edit or copy this template by hand: render and install it with
+  ../install_daemon_service.py (see README.md in this directory). The label is the
+  one ../deploy.py restarts, so a later deploy keeps working with this unit.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pentacle.chat-streamd-v2</string>
+
+  <key>ProgramArguments</key>
+  <array>
+__PENTACLE_PROGRAM_ARGUMENTS__
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd starts jobs with a minimal PATH. The daemon needs tmux, git and
+         the provider CLIs, so the installer pins their directories here. -->
+    <key>PATH</key>
+    <string>__PENTACLE_PATH__</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__PENTACLE_LOG_DIR__/daemon.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PENTACLE_LOG_DIR__/daemon.err.log</string>
+</dict>
+</plist>

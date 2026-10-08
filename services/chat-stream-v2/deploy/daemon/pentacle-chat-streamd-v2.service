@@ -1,0 +1,25 @@
+# systemd user unit that starts the chat_streamd v2 daemon at login (Linux, WSL
+# with systemd).
+#
+# Do not edit or copy this template by hand: render and install it with
+# ../install_daemon_service.py (see README.md in this directory).
+# `loginctl enable-linger "$USER"` makes it start at boot without a login.
+[Unit]
+Description=Pentacle chat_streamd v2 daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__PENTACLE_RELEASE_CHECKOUT__/services/chat-stream-v2
+# A user unit can start with a minimal PATH. The daemon needs tmux, git and the
+# provider CLIs, so the installer pins their directories here.
+Environment=PATH=__PENTACLE_PATH__
+# Optional per-installation settings (PENTACLE_* variables), one KEY=VALUE per line.
+EnvironmentFile=-%h/.config/pentacle/daemon.env
+ExecStart=__PENTACLE_EXEC_START__
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

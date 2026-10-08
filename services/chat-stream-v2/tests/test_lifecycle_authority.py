@@ -828,6 +828,15 @@ def test_retired_source_replays_only_its_exact_receipt(monkeypatch):
         for payload, auth, code in bad:
             await _refused(ctl.spawn({**payload, "request_id": "q3", "_auth_context": auth}, HOST), code)
         assert tmux.created == created
+        # The receipt replay keeps its plain reply after the successor dies: a
+        # retired source is never told to respawn, by error or otherwise.
+        successor_name = successor.split(":", 1)[1]
+        tmux.live.discard(successor_name)
+        env.sessions.apply_live(successor, online=False, pane_status="pane_dead")
+        after_death = await ctl.spawn({**msg, "request_id": "q4", "_auth_context": retired}, HOST)
+        assert after_death["type"] == "spawn.ok" and after_death["stream_id"] == successor
+        assert after_death["do_not_respawn"] is True
+        assert tmux.created == created
 
     scenario(check)
 

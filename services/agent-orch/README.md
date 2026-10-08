@@ -85,6 +85,13 @@ its own `host_overrides` in `services/_shared/spawn_defaults.local.json` next to
 the active policy read-back; handoff policy is colocated in that file but enforced by the
 handoff guard.
 
+A non-handoff `agent-orch spawn` (immediate or scheduled) with no `--model` prints one
+stderr line before the RPC naming the tuple it resolved, for example
+`agent-orch spawn: WARNING: no --model given; using the claude default claude-opus-4-8/high. …`.
+Pass `--model` to choose a tier, or give the host a cheaper default, for example
+`{"schema_version": 1, "host_overrides": {"<host>": {"claude": {"model": "claude-haiku-5-5", "effort": "high"}}}}`.
+Stdout and the exit code are unchanged.
+
 ## Peer messaging
 
 Use `agent-orch send` when the sender owns a `msg_id` and expects a completion report that it will await. The CLI builds a minimal Inbox v1 envelope with `from` set to the discovered leader stream id or `null`, `to` set to the target stream id, `task` set to the prompt text, and empty `inputs` / `extras`. The daemon re-validates that envelope and returns `inbox_invalid` for malformed evidence.
@@ -376,6 +383,14 @@ per-process value. The contract closes that gap:
   key) within the key TTL returns the first outcome — `spawn.ok` with the original
   `stream_id` (and `replayed:true` / `admitted_scope:"idempotency_key"`), or
   `spawn.indeterminate` (exit 3) while the first is still in flight. No duplicate.
+- **A dead seat is an error, not a replay.** When the seat that the key was
+  delivered to is no longer running, the retry returns `spawn.error`
+  `replayed_stream_dead` with the old `stream_id`, `dead_reason` (`closed` or
+  `pane_dead`), `replayed:true` and the admitted-set fields, and creates no pane.
+  The CLI adds a stderr hint and exits 1. Pass a new `--idempotency-key` to start a
+  fresh seat from the same brief. Death is decided by a fresh tmux probe at retry
+  time, never by stored state alone: if the pane still exists or its host cannot
+  be reached, the retry returns the same reply as before.
 - **`agent-orch spawn status <key|request_id>`** lists the outcome and reservation
   rows (state, stream id, payload hash) and any active admission hold, so a caller
   can find the seat before retrying. `found:false` when nothing matches.

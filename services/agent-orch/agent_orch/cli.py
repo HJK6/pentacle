@@ -1053,6 +1053,15 @@ def spawn(args: argparse.Namespace) -> int:
                     )
         else:
             resolved_spawn = resolve_spawn(provider=provider, model=model, effort=effort, host=host)
+            if model is None:
+                print(
+                    "agent-orch spawn: WARNING: no --model given; using the "
+                    f"{resolved_spawn['provider']} default "
+                    f"{resolved_spawn['model']}/{resolved_spawn['effort']}. "
+                    "Pass --model to choose a tier, or set a per-host default with "
+                    "host_overrides in spawn_defaults.local.json.",
+                    file=sys.stderr,
+                )
     except SpawnProfileError as exc:
         print(f"agent-orch spawn: validation failed: {exc.code}: {exc}", file=sys.stderr)
         return 2
@@ -1248,6 +1257,12 @@ def spawn(args: argparse.Namespace) -> int:
             loaded_baseline=loaded_baseline,
         )
     _print_response(response)
+    if response.get("error_code") == "replayed_stream_dead":
+        print(
+            f"agent-orch spawn: seat {response.get('stream_id')} for this spawn key is dead "
+            f"({response.get('dead_reason')}); pass a new --idempotency-key to start a fresh seat.",
+            file=sys.stderr,
+        )
     if response.get("type") == "spawn.indeterminate":
         stream_id = str(response.get("stream_id") or "")
         print(

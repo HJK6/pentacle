@@ -518,3 +518,111 @@ def test_delayed_same_key_fire_after_success_noops_via_persisted_outcome() -> No
     assert second["stream_id"] == first["stream_id"]
     assert second.get("admitted_count") == 1
     assert tmux.created == 1, "the late same-key fire must NOT create a second pane"
+
+
+
+def _spawn_then_retry_after(make_dead, *, retry_overrides: dict | None = None):
+    """Spawn once, change the seat through `make_dead`, retry the same key."""
+
+    async def go():
+        tmux = PerNameTmux()
+        store = Store(":memory:")
+        store.start()
+        try:
+            sessions = Sessions(store, tmux=tmux, local_host=HOST)
+            ctl = SpawnCtl(store, sessions, tmux=tmux)
+            base = {"objective": "Exercise the existing spawn contract", "command": "stub", "idempotency_key": "kD", "request_id": "r1"}
+            first = await ctl.spawn(dict(base), HOST)
+            name = first["stream_id"].split(":", 1)[1]
+            await make_dead(sessions, tmux, name)
+            reply, err = None, None
+            try:
+                reply = await ctl.spawn({**base, "request_id": "r2", **(retry_overrides or {})}, HOST)
+            except VerbError as exc:
+                err = exc
+            return first, reply, err, tmux
+        finally:
+            store.stop()
+
+    return asyncio.run(go())
+
+
+async def _close_seat(sessions, _tmux, name) -> None:
+    await sessions.close(HOST, name, "seat finished")
+
+
+async def _offline_close_seat(sessions, _tmux, name) -> None:
+    """The operator offline close records intent, not process death."""
+    row = await sessions.store.fetch_session(HOST, name)
+    await sessions._close_offline_locked(row, "host offline", None, None)
+
+
+async def _pane_observed_dead(sessions, _tmux, name) -> None:
+    sessions.apply_live(f"{HOST}:{name}", online=False, pane_status="pane_dead")
+
+
+def _then_probe(make_dead, state: str):
+    """After `make_dead`, make the fresh tmux probe answer `state`."""
+
+    async def run(sessions, tmux, name) -> None:
+        await make_dead(sessions, tmux, name)
+        if state == "gone":
+            tmux.live.discard(name)
+        elif state == "alive":
+            tmux.live.add(name)
+        else:
+            async def unreachable(_name: str) -> str:
+                return "unreachable"
+
+            tmux.session_state = unreachable
+
+    return run
+
+
+@pytest.mark.parametrize("make_dead, dead_reason", [
+    (_close_seat, "closed"), (_offline_close_seat, "closed"), (_pane_observed_dead, "pane_dead"),
+])
+def test_same_key_retry_of_a_seat_probed_gone_is_a_typed_error_not_spawn_ok(make_dead, dead_reason) -> None:
+    """A same-key retry whose seat a fresh probe proves gone must not answer
+    `spawn.ok` with the dead stream id. It names the old stream in a typed error
+    so the caller knows to pass a new key; it mints no pane."""
+    first, reply, err, tmux = _spawn_then_retry_after(_then_probe(make_dead, "gone"))
+    assert reply is None, f"dead seat replayed as success: {reply}"
+    assert isinstance(err, VerbError)
+    assert err.code == "replayed_stream_dead"
+    assert err.extra["stream_id"] == first["stream_id"]
+    assert err.extra["dead_reason"] == dead_reason
+    assert err.extra["replayed"] is True
+    assert err.extra["spawn_request_id"] == "r1"
+    assert err.extra["admitted_count"] == 1
+    assert err.extra["admitted_sessions"] == [first["stream_id"]]
+    assert err.extra["admitted_scope"] == "idempotency_key"
+    assert tmux.created == 1
+
+
+@pytest.mark.parametrize("probe", ["alive", "unreachable"])
+@pytest.mark.parametrize("make_dead, expected", [
+    (_close_seat, "starting"), (_offline_close_seat, "starting"), (_pane_observed_dead, "replayed"),
+])
+def test_stored_state_alone_never_declares_a_replayed_seat_dead(make_dead, expected, probe) -> None:
+    """A close can record intent and a pane observation can be stale: unless the
+    fresh probe says `gone`, the retry keeps its existing reply, so the caller is
+    never told to start a second seat beside a pane that may still exist."""
+    first, reply, err, tmux = _spawn_then_retry_after(_then_probe(make_dead, probe))
+    assert err is None, f"death was inferred without proof: {err}"
+    assert reply["type"] == "spawn.ok"
+    assert reply["stream_id"] == first["stream_id"]
+    if expected == "starting":
+        assert reply["state"] == "starting"
+        assert reply["reason"] == "replayed_delivered_no_live_row"
+    else:
+        assert reply["replayed"] is True
+    assert tmux.created == 1
+
+
+def test_new_key_after_a_dead_seat_starts_a_fresh_seat() -> None:
+    first, reply, err, tmux = _spawn_then_retry_after(_close_seat, retry_overrides={"idempotency_key": "kD2"})
+    assert err is None
+    assert reply["type"] == "spawn.ok"
+    assert reply["stream_id"] != first["stream_id"]
+    assert tmux.created == 2
