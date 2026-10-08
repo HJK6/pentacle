@@ -56,7 +56,9 @@ def test_daemon_process_environment_is_not_modified(monkeypatch):
     assert os.environ["PENTACLE_ASSISTANT_AUTO_RESTORE"] == "1"
 
 
-def test_remote_transport_environment_is_unchanged(monkeypatch):
+def test_remote_transport_environment_is_unchanged(monkeypatch, tmp_path):
+    # Building the ssh command prepares a control directory under HOME.
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PENTACLE_ASSISTANT_AUTO_RESTORE", "1")
     seen = _run_and_capture(monkeypatch, Tmux(ssh_target="fixture-peer"))
     assert seen["env"] is None
