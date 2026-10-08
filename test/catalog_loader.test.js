@@ -44,6 +44,8 @@ test('hosted URLs reject parser normalization, userinfo, whitespace, invalid por
   for (const url of ['http://:', 'https:///x', 'https://user@example.test', 'https://@example.test', 'https://example.test:99999', 'https://example.test/a b', 'https:\\example.test', 'https://example.test/' + 'x'.repeat(2048)]) assert.equal(api.plainHttpUrl(url), false, url);
   assert.equal(api.plainHttpUrl('http://[::1]:8080/app'), true);
   assert.equal(api.plainHttpUrl('HTTPS://viewer.example.test/app'), true);
+  assert.equal(api.plainHttpUrl('https://example.test/' + '😀'.repeat(1500)), true);
+  assert.equal(api.plainHttpUrl('https://example.test/' + '😀'.repeat(2048)), false);
 });
 test('unset catalog makes zero transport calls', async () => {
   const h = harness(); assert.equal((await h.loader.refresh()).status, 'unset'); assert.deepEqual(h.calls, []);

@@ -33,7 +33,7 @@
     return width;
   }
   function plainHttpUrl(value) {
-    if (typeof value !== 'string' || value.length > 2048 || /\s/.test(value) || !/^https?:\/\/[^/]/i.test(value)) return false;
+    if (typeof value !== 'string' || chars(value) > 2048 || /\s/.test(value) || !/^https?:\/\/[^/]/i.test(value)) return false;
     try {
       const url = new URL(value); const authority = value.split('/')[2];
       return ['http:', 'https:'].includes(url.protocol) && !!url.hostname && !url.username && !url.password && !authority.includes('@') && !authority.includes('\\');
