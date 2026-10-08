@@ -17,8 +17,8 @@ function domFixture() {
 function complete() {
   const ui = { mic: { visible: true, label: 'Record answers', disabled: false }, bar: { visible: true, text: '2 of 3 answered by voice', role: 'status', timer: '0:04', meterBars: 3, doneLabel: 'Done' }, pageState: 'ANSWER RECORDED', pending: { visible: true, text: 'ANSWERS 2 QUESTIONS', inTranscript: true }, status: "Couldn't attach questions", plain: { visible: true, disabled: false }, badge: { text: '?3', label: '3 open questions' }, dots: [false, false, false], cardIds: ['n3'] };
   const item = (n, start) => ({ key: `k${n}`, question_id: `q${n}`, notification_id: `n${n}`, producer_stream_id: 'local:producer', surface_stream_id: 'local:assistant', prompt: `Question ${n}`, segment: { start_s: start, end_s: start + 1.8 } });
-  const event = { daemon_seq: 101, kind: 'USER', stream_id: 'local:assistant', text: 'Synthetic bound take', meta: { voice: { duration_s: 4.2 }, voice_answers: { version: 1, recording_id: 'take-1', blob_sha: 'a'.repeat(64), duration_s: 4.2, items: [item(1, 0), item(3, 2.3)] }, voice_answers_status: { state: 'bound', stale_keys: [] } } };
-  return { ui, recording: { first: { ...ui, bar: { ...ui.bar, text: '1 of 3 answered by voice' } }, middle: { ...ui, bar: { ...ui.bar, text: '1 of 3 answered by voice' }, pageState: 'RECORDING YOUR ANSWER…' }, last: ui }, pending: { ui, events: [], text: event.text }, bound: { events: [event], text: event.text, ids: ['q1', 'q3'], notificationIds: ['n1', 'n3'], producer: 'local:producer', surface: 'local:assistant', blobSha: 'a'.repeat(64), before: ui, after: ui, states: ['open', 'open', 'open'] }, refusal: { before: [event], after: [event], text: 'Synthetic refused take', failure: 'voice_answers_invalid', ui }, plain: { before: [event], after: [event, { kind: 'USER', text: 'Synthetic refused take', meta: { voice: { duration_s: 2 } } }], text: 'Synthetic refused take' }, cleanup: { uploadsBefore: 2, uploadsAfter: 2, tracks: ['ended'], transcribedBefore: 2, transcribedAfter: 2, eventsBefore: 2, eventsAfter: 2 }, environment: { origin: 'http://127.0.0.1:1234', responseUrl: 'http://127.0.0.1:1234/', status: 200, headers: { 'content-type': 'text/html' }, permission: 'granted', secure: true } };
+  const event = { daemon_seq: null, message_id: 'wire-bound', kind: 'USER', stream_id: 'local:assistant', text: 'Synthetic bound take', meta: { voice: { duration_s: 4.2 }, voice_answers: { version: 1, recording_id: 'take-1', blob_sha: 'a'.repeat(64), duration_s: 4.2, items: [item(1, 0), item(3, 2.3)] }, voice_answers_status: { state: 'bound', stale_keys: [] } } };
+  return { ui, recording: { first: { ...ui, bar: { ...ui.bar, text: '1 of 3 answered by voice' } }, middle: { ...ui, bar: { ...ui.bar, text: '1 of 3 answered by voice' }, pageState: 'RECORDING YOUR ANSWER…' }, last: ui }, pending: { ui, events: [], text: event.text }, bound: { events: [event], text: event.text, ids: ['q1', 'q3'], notificationIds: ['n1', 'n3'], producer: 'local:producer', surface: 'local:assistant', blobSha: 'a'.repeat(64), before: ui, after: ui, states: ['open', 'open', 'open'] }, refusal: { before: [event], after: [event], text: 'Synthetic refused take', failure: 'voice_answers_invalid', ui }, plain: { before: [event], after: [event, { kind: 'USER', message_id: 'wire-plain', text: 'Synthetic refused take', meta: { voice: { duration_s: 2 } } }], text: 'Synthetic refused take' }, cleanup: { uploadsBefore: 2, uploadsAfter: 2, tracks: ['ended'], transcribedBefore: 2, transcribedAfter: 2, eventsBefore: 2, eventsAfter: 2 }, environment: { origin: 'http://127.0.0.1:1234', responseUrl: 'http://127.0.0.1:1234/', status: 200, headers: { 'content-type': 'text/html' }, permission: 'granted', secure: true } };
 }
 const groups = { recording: recordingChecks, pending: pendingChecks, bound: boundChecks, refusal: refusalChecks, plain: plainChecks, cleanup: cleanupChecks, environment: environmentChecks };
 test('M3 every complete synthetic observation satisfies the shared gate predicates', () => {
@@ -34,8 +34,10 @@ const negatives = [
   ['recording', 4, 'missing meter', o => { o.last.bar = { ...o.last.bar, meterBars: 0 }; }],
   ['pending', 0, 'missing count bubble', o => { o.ui.pending.visible = false; }],
   ['pending', 0, 'pending bubble outside transcript', o => { o.ui.pending.inTranscript = false; }],
-  ['pending', 1, 'send before ASR release', o => { o.events = [{ kind: 'USER', text: o.text }]; }],
-  ['bound', 0, 'optimistic row mistaken for daemon echo', o => { o.events[0].daemon_seq = -1; }],
+  ['pending', 1, 'send before ASR release', o => { o.events = [{ kind: 'USER', message_id: 'wire-early', text: o.text }]; }],
+  ['bound', 0, 'row without daemon-authored status mistaken for daemon echo', o => { delete o.events[0].meta.voice_answers_status; }],
+  ['bound', 0, 'local optimistic row mistaken for daemon echo', o => { o.events[0].message_id = null; }],
+  ['plain', 0, 'local optimistic row counted as the plain send', o => { o.after[1].message_id = null; }],
   ['bound', 0, 'missing daemon USER', o => { o.events = []; }],
   ['bound', 0, 'duplicate USER', o => { o.events.push(structuredClone(o.events[0])); }],
   ['bound', 1, 'missing voice duration', o => { delete o.events[0].meta.voice; }],
@@ -52,7 +54,7 @@ const negatives = [
   ['refusal', 0, 'wrong typed refusal', o => { o.failure = 'send_error'; }],
   ['refusal', 1, 'missing refusal note', o => { o.ui.status = ''; }],
   ['refusal', 1, 'missing explicit plain action', o => { o.ui.plain.visible = false; }],
-  ['refusal', 2, 'silent send after refusal', o => { o.after.push({ kind: 'USER', text: o.text }); }],
+  ['refusal', 2, 'silent send after refusal', o => { o.after.push({ kind: 'USER', message_id: 'wire-silent', text: o.text }); }],
   ['plain', 0, 'no plain send', o => { o.after = o.before; }],
   ['plain', 0, 'duplicate plain send', o => { o.after.push(structuredClone(o.after[1])); }],
   ['plain', 1, 'plain conversion keeps binding', o => { o.after[1].meta.voice_answers = {}; }],

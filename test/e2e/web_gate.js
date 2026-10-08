@@ -227,6 +227,8 @@ async function startDaemon(args, scratch, runtime, fixtures = [
       '--blob-root', path.join(scratch, 'blobs'),
       '--disable-hosts', '--disable-mirror', '--disable-nudges',
       '--disable-outbound-notices', '--disable-remote-presence',
+      // Fixture sessions have no pane; the 60 s reconciler would close them mid-gate.
+      '--disable-reconciler',
     ], { cwd: ROOT, stdio: ['ignore', daemonLog, daemonLog],
       env: { ...process.env, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
     runtime.daemonProc = proc;
@@ -403,6 +405,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
           '--blob-root', path.join(scratch, 'blobs'),
           '--disable-hosts', '--disable-mirror', '--disable-nudges',
           '--disable-outbound-notices', '--disable-remote-presence',
+          // Fixture sessions have no pane; the 60 s reconciler would close them mid-gate.
+          '--disable-reconciler',
         ], { cwd: ROOT, stdio: ['ignore', dlog, dlog],
           env: { ...process.env, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
         runtime.daemonProc = proc;

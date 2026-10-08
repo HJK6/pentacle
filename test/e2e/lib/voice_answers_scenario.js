@@ -29,7 +29,9 @@ function readQuestionVoiceDom(doc, streamId) {
     cardIds: [...doc.querySelectorAll('.slot-chat-question-card[data-notification-id]')].map(node => node.dataset.notificationId),
   };
 }
-const userEvents = events => (events || []).filter(event => event.kind === 'USER');
+// The store also lists local optimistic rows; only a daemon event carries the
+// wire message_id. Composite USER events have no daemon_seq to rely on.
+const userEvents = events => (events || []).filter(event => event.kind === 'USER' && typeof event.message_id === 'string' && !!event.message_id);
 const turns = (events, text) => userEvents(events).filter(event => event.text === text);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 function recordingChecks({ first, middle, last }) {
@@ -51,7 +53,7 @@ function boundChecks(o) {
   const matching = turns(o.events, o.text); const event = matching[0]; const binding = event?.meta?.voice_answers; const status = event?.meta?.voice_answers_status;
   const items = binding?.items || [];
   return [
-    ['real daemon USER readback contains exactly one voice-answer turn', matching.length === 1 && event.stream_id === o.surface && Number.isFinite(event.daemon_seq) && event.daemon_seq > 0, matching],
+    ['real daemon USER readback contains exactly one voice-answer turn', matching.length === 1 && event.stream_id === o.surface && !!status && typeof status === 'object', matching],
     ['real host bridge preserves positive voice duration', Number.isFinite(event?.meta?.voice?.duration_s) && event.meta.voice.duration_s > 0, event?.meta?.voice],
     ['real composite binding carries only pages 1 and 3 with eligible ordered segments', binding?.version === 1 && !!binding.recording_id && binding.blob_sha === o.blobSha && Number.isFinite(binding.duration_s) && binding.duration_s > 0
       && same(items.map(item => item.question_id), o.ids) && same(items.map(item => item.notification_id), o.notificationIds)
@@ -67,7 +69,7 @@ function refusalChecks(o) {
   return [
     ['tampered binding receives typed voice_answers_invalid from real host bridge', o.failure === 'voice_answers_invalid', { failure: o.failure }],
     ["host refusal visibly offers Couldn't attach questions and explicit plain conversion", o.ui.status.includes("Couldn't attach questions") && o.ui.plain.visible && !o.ui.plain.disabled, o.ui],
-    ['refused binding sends nothing before user action', userEvents(o.before).length === userEvents(o.after).length && turns(o.after, o.text).length === 0, { before: userEvents(o.before).length, after: userEvents(o.after).length }],
+    ['refused binding sends nothing before user action', userEvents(o.before).length === userEvents(o.after).length && turns(o.after, o.text).length === 0, { before: userEvents(o.before).map(event => event.text), after: userEvents(o.after).map(event => event.text), ids: userEvents(o.after).map(event => event.message_id) }],
   ];
 }
 function plainChecks(o) {
@@ -96,14 +98,22 @@ function environmentChecks(o) {
 async function webVoiceAnswers({ session, report, fixture, runtime, cdp }) {
   if (!fixture || !runtime.fixtureTokens) { report.note('web-voice-answers excluded: requires the isolated composite fixture'); return; }
   const surface = 'local:web-gate-assistant'; const producer = 'local:web-gate-voice-producer';
-  const authority = { ...runtime, fixtureTokens: { ...runtime.fixtureTokens, [producer]: runtime.fixtureTokens[fixture.streamId] } };
+  // The seeder derives a distinct producer credential from the scratch fixture
+  // token; the daemon resolves exactly one stream per token hash.
+  const authority = { ...runtime, fixtureTokens: { ...runtime.fixtureTokens, [producer]: require('node:crypto').createHash('sha256').update(`voice-producer:${runtime.fixtureTokens[fixture.streamId]}`).digest('hex') } };
   const json = JSON.stringify;
   const ui = () => session.eval(`(${readQuestionVoiceDom.toString()})(document, ${json(surface)})`);
   const events = () => session.eval(`(async () => {
     const reply = await window.cc.requestStreamEvents({ streamId: ${json(surface)}, limit: 100 });
     if (!reply.ok) throw new Error(reply.error || 'daemon readback failed');
-    return window.PentacleChatStore.getState().events.filter(event => event.stream_id === ${json(surface)} && event.kind === 'USER' && Number.isFinite(event.daemon_seq) && event.daemon_seq > 0);
+    return window.PentacleChatStore.getState().events.filter(event => event.stream_id === ${json(surface)} && event.kind === 'USER');
   })()`);
+  // Confirm a turn from daemon events (wire message_id) after a history
+  // readback; the bound check additionally requires the daemon-authored status.
+  const waitTurn = async text => {
+    for (let attempt = 0; attempt < 60; attempt++) { if (turns(await events(), text).length) return; await cdp.sleep(250); }
+    throw new Error(`daemon readback never returned USER turn: ${text}`);
+  };
   const controller = 'window.__voiceAnswersController';
   const portal = '#desktop-question-portal-local-web-gate-assistant';
   const mic = '[data-question-voice-mic]'; const done = '[data-question-voice-done]';
@@ -111,7 +121,10 @@ async function webVoiceAnswers({ session, report, fixture, runtime, cdp }) {
   const openDeck = async () => {
     await session.waitFor(`window.focusStreamId(${json(surface)}) === true`);
     await session.waitFor(`[...document.querySelectorAll('.grid-cell')].some(cell => cell.querySelector('.cell-label')?.textContent.trim() === 'Assistant Fixture')`);
-    await session.eval(`(() => { const cell = [...document.querySelectorAll('.grid-cell')].find(cell => cell.querySelector('.cell-label')?.textContent.trim() === 'Assistant Fixture'); window.__voiceAnswersCell = cell.id; cell.querySelector('.slot-chat-question-open')?.click(); })()`);
+    // A freshly attached slot hydrates its durable questions asynchronously;
+    // wait for the opener (or an already open deck) instead of clicking once.
+    await session.waitFor(`(() => { const cell = [...document.querySelectorAll('.grid-cell')].find(cell => cell.querySelector('.cell-label')?.textContent.trim() === 'Assistant Fixture'); if (!cell) return false; window.__voiceAnswersCell = cell.id; return !!document.querySelector(${json(portal)}) || !!cell.querySelector('.slot-chat-question-open'); })()`);
+    await session.eval(`(() => { if (!document.querySelector(${json(portal)})) document.getElementById(window.__voiceAnswersCell).querySelector('.slot-chat-question-open').click(); })()`);
     await session.waitFor(`!!document.querySelector(${json(portal + ' ' + mic)}) && document.querySelectorAll(${json(portal + ' .desktop-question-dot')}).length === 3`);
     await session.eval(`window.__voiceAnswersController = [...document.querySelectorAll(${json(portal + ' *')})].find(node => node.__questionVoiceController)?.__questionVoiceController`);
   };
@@ -160,7 +173,7 @@ async function webVoiceAnswers({ session, report, fixture, runtime, cdp }) {
     await session.waitFor('window.__voiceAnswersGate.transcribed.length === 1');
     reportChecks(report, pendingChecks({ ui: await ui(), events: await events(), text: 'Synthetic voice answers take 1' }));
     await session.eval('window.__voiceAnswersGate.hold = false; window.__voiceAnswersGate.release()');
-    await session.waitFor(`window.PentacleChatStore.getState().events.some(event => event.stream_id === ${json(surface)} && event.text === 'Synthetic voice answers take 1' && Number.isFinite(event.daemon_seq) && event.daemon_seq > 0)`);
+    await waitTurn('Synthetic voice answers take 1');
     const states = [];
     for (const questionId of ids) states.push((await fixtureRequest(authority, producer, { type: 'prompt.status', question_id: questionId })).question?.state);
     const boundEvents = await events();
@@ -178,7 +191,7 @@ async function webVoiceAnswers({ session, report, fixture, runtime, cdp }) {
     reportChecks(report, refusalChecks({ before: boundEvents, after: refused, text: 'Synthetic voice answers take 2', failure, ui: await ui() }));
     if (report.dir) await session.screenshot(require('node:path').join(report.dir, 'voice-answers-synthetic-refused.png'));
     await session.eval(`[...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Send as plain voice note').click()`);
-    await session.waitFor(`window.PentacleChatStore.getState().events.some(event => event.stream_id === ${json(surface)} && event.text === 'Synthetic voice answers take 2' && Number.isFinite(event.daemon_seq) && event.daemon_seq > 0)`);
+    await waitTurn('Synthetic voice answers take 2');
     await cdp.sleep(350);
     reportChecks(report, plainChecks({ before: refused, after: await events(), text: 'Synthetic voice answers take 2' }));
     await openDeck(); await session.eval(`(${controller}).setBindingTransformForTest(binding => binding)`);

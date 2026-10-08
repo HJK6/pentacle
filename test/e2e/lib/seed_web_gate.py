@@ -82,12 +82,15 @@ async def seed(db: str, host: str, session: str, objective: str, token_file: str
                     role='assistant', provider='claude', pane_status='pane_alive',
                     objective='Synthetic voice-answer question producer',
                 )
+                # One stream per token hash: derive a distinct producer
+                # credential from the scratch token instead of sharing it.
+                producer_token = hashlib.sha256(f'voice-producer:{token}'.encode()).hexdigest()
                 assert await store.grant_stream_token(
-                    host, 'web-gate-voice-producer', hashlib.sha256(token.encode()).hexdigest(),
+                    host, 'web-gate-voice-producer', hashlib.sha256(producer_token.encode()).hexdigest(),
                     'sha256:v1',
                 ) == 'ok'
-                # Identity only; reuse the scratch producer credential already
-                # tracked/removed by the gate. Never put that token in a page.
+                # Identity only. The producer credential is derived from the scratch
+                # token the gate already tracks/removes. Never put it in a page.
                 manifest = {'stream_id': 'local:web-gate-assistant',
                             'producer_stream_id': 'local:web-gate-voice-producer',
                             'producer_generation': producer['session_generation']}
