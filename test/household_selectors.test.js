@@ -73,3 +73,13 @@ test('mobile vectors: calendar math, labels, toggles and timezone independence',
   try { for(const offset of [840,-720]) { for(const name of methods) Date.prototype[name]=()=>{throw Error(`Local date/zone used ${offset}`);}; assert.equal(run(),baseline); } }
   finally { for(const name of methods) Date.prototype[name]=saved[name]; }
 });
+test('mobile vectors: month paging helpers (shiftMonth, selectionForMonth, dateFieldLabel)', () => {
+  const s=sel(); assert.equal(s.MIN_MONTH,'2000-01'); assert.equal(s.MAX_MONTH,'2100-12');
+  for(const [month,n,expected] of [['2026-10',1,'2026-11'],['2026-12',1,'2027-01'],['2026-01',-1,'2025-12'],['2000-01',-1,'2000-01'],['2100-12',1,'2100-12']]) assert.equal(s.shiftMonth(month,n),expected);
+  assert.equal(s.selectionForMonth('2026-10','2026-10-06'),'2026-10-06');
+  assert.equal(s.selectionForMonth('2026-11','2026-10-06'),'2026-11-01');
+  assert.equal(s.selectionForMonth('2025-10','2026-10-06'),'2025-10-01');
+  assert.equal(s.dateFieldLabel('2026-10-06','2026-10-06'),'TUE OCT 6');
+  assert.equal(s.dateFieldLabel('2026-11-20','2026-10-06'),'FRI NOV 20');
+  assert.equal(s.dateFieldLabel('2027-01-05','2026-10-06'),'TUE JAN 5, 2027');
+});

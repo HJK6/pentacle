@@ -159,6 +159,22 @@ function parseTimeInput(text) {
     }
     return { ok: true, value: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
 }
+// ---- month paging (mobile PR #20 parity) ----
+const MIN_MONTH = '2000-01';
+const MAX_MONTH = '2100-12';
+/** `2026-10` + 1 → `2026-11`; clamped to MIN_MONTH … MAX_MONTH. */
+function shiftMonth(month, n) {
+    const [y, m] = month.split('-').map(Number);
+    const next = new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 7);
+    return next < MIN_MONTH ? MIN_MONTH : next > MAX_MONTH ? MAX_MONTH : next;
+}
+/** The day selected after paging to `month`: today in today's month, otherwise the 1st. */
+const selectionForMonth = (month, today) => month === monthOf(today) ? today : dateIn(month, 1);
+/** New-event date field: `WED OCT 7`, with `, 2027` when the year is not today's. */
+function dateFieldLabel(date, today) {
+    const label = `${dowShort(date).toUpperCase()} ${monthName(date).slice(0, 3).toUpperCase()} ${dayOfMonth(date)}`;
+    return yearOf(date) === yearOf(today) ? label : `${label}, ${yearOf(date)}`;
+}
 /** New-event WHO toggles: Me → `self`, partner → `partner`, both → `both` (display only). */
 function whoFromToggles(toggles) {
     if (toggles.me && toggles.partner)
@@ -169,4 +185,5 @@ function whoFromToggles(toggles) {
 module.exports = { LIST_ORDER, LIST_META, isListId, addDays, monthOf, dayOfMonth, monthName, yearOf,
   dowShort, weekdayIndex, daysInMonth, dateIn, dayLabel, personalHeaderLabel, parseRouteDate,
   sortItems, itemTags, showItemLamp, criticalItems, DEFAULT_PARTNER, partnerName, whoDisplay,
-  isAssistantEvent, byDateTime, eventsOn, todayEvents, upcomingEvents, formatTime, parseTimeInput, whoFromToggles };
+  isAssistantEvent, byDateTime, eventsOn, todayEvents, upcomingEvents, formatTime, parseTimeInput, whoFromToggles,
+  MIN_MONTH, MAX_MONTH, shiftMonth, selectionForMonth, dateFieldLabel };
