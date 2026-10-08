@@ -184,9 +184,11 @@ not exercise live transcription, deployed HTTPS or a physical microphone.
 
 A deployed HTTPS client can be exercised end to end without a person or a
 physical microphone. The bound assistant seat raises one clearly marked test
-question, because only its questions surface in the assistant chat and the
-daemon drops a binding for any other producer. Headless Chrome then records on
-that card with a saved WAV as the capture device:
+question. The assistant chat can also surface questions from other producers
+in its visible question scope. Daemon validation drops a binding whose producer
+is outside that scope or whose stored question identity does not match, so a
+question raised by an unrelated seat cannot be used. Headless Chrome then
+records on that card with a saved WAV as the capture device:
 
 ```
 --use-fake-ui-for-media-stream --use-fake-device-for-media-stream
