@@ -18,6 +18,9 @@ Inspect supported daemon options with:
 .venv-dev/bin/python services/chat-stream-v2/main.py --help
 ```
 
+To start the daemon at login on macOS or Linux, install the opt-in service unit:
+[daemon login service](../services/chat-stream-v2/deploy/daemon/README.md).
+
 ## Machines file
 
 Start from a synthetic local-only configuration. Host ids are public labels; they do not identify a real machine.
