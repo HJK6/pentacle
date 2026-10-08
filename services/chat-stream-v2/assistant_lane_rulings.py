@@ -19,6 +19,7 @@ from typing import Any
 
 from store_assistant_binding import _seat_conn
 from store_lifecycle_authority import MAX_REASON, scrub
+from store_watch_wake import coalesce_notice_conn
 from _shared.spawn_objective import resolve_objective
 
 
@@ -74,6 +75,10 @@ CREATE TABLE IF NOT EXISTS v2_assistant_lane_ruling_audit (
 _STREAM_RE = re.compile(r"^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$")
 _ACTION_KINDS = {"spawn", "session_close", "composite_admit", "composite_close"}
 _TERMINAL = {"done", "denied", "revised", "approved_but_not_closed", "release_blocked"}
+#: Reasons the daemon itself records when a request leaves `pending` without a ruling.
+_UNRULED_REASONS = ("deadline", "authority_unavailable", "authority_disabled")
+#: kv record of the authority loss already told to the front desk.
+_AUTHORITY_LOSS_KEY = "assistant.authority.loss_notice"
 log = logging.getLogger("chat_streamd_v2.assistant_lane_rulings")
 
 
@@ -628,17 +633,40 @@ class AssistantLaneRulings:
                 ).fetchone())
         request = await self.store.submit(op)
         if request and request["state"] == "unruled":
-            await self._notify_unruled(request)
             await self._release(request)
+            await self._notify_unruled(request)
 
-    async def _mirror_unruled(self, request: dict[str, Any]) -> None:
+    @staticmethod
+    def _unruled_outcome(request: dict[str, Any]) -> str | None:
+        """What became of an unruled request, from its persisted release state.
+
+        None while the release is not final. ``admitted`` means the release was
+        accepted, not that a spawned seat is ready.
+        """
+        state = request["state"]
+        if state == "done":
+            return "admitted unruled"
+        if state in {"release_blocked", "approved_but_not_closed"}:
+            try:
+                outcome = json.loads(request.get("outcome_json") or "{}")
+            except ValueError:
+                outcome = {}
+            outcome = outcome if isinstance(outcome, dict) else {}
+            code = outcome.get("error_code")
+            if not code and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", str(outcome.get("error") or "")):
+                code = outcome["error"]  # fence refusals persist their code as the error itself
+            code = re.sub(r"[^A-Za-z0-9_.-]", "", str(code or "release_failed"))[:80] or "release_failed"
+            return f"not released, blocked ({code})"
+        return None
+
+    async def _mirror_unruled(self, request: dict[str, Any], outcome: str) -> None:
         if request.get("mirror_sent"):
             return
         composite = self._composite()
         if composite is None or not composite.enabled:
             return
         rid = request["ruling_request_id"]
-        line = (f"Astra unavailable; proceeded unruled: {request['action']} "
+        line = (f"Astra unavailable; {outcome}: {request['action']} "
                 f"{request['target_stream_id']} ({rid}; {request.get('reason') or 'deadline'}).")
         event = {"stream_id": composite.config.stream_id, "provider": "composite",
                  "kind": "ASSIST_TEXT", "text": line, "publish_kind": "status",
@@ -664,14 +692,94 @@ class AssistantLaneRulings:
         await self.store.submit(mark_mirrored)
 
     async def _notify_unruled(self, request: dict[str, Any]) -> None:
-        """A timeout (deadline) tells only the requesting seat; an unavailable or
-        disabled authority still mirrors to the operator composite surface."""
-        if str(request.get("reason") or "") == "deadline":
-            await self._notice_requester_unruled(request)
-        else:
-            await self._mirror_unruled(request)
+        """Report an unruled request once its release outcome is persisted.
 
-    async def _notice_requester_unruled(self, request: dict[str, Any]) -> None:
+        A timeout (deadline) tells only the requesting seat; an unavailable or
+        disabled authority still mirrors to the operator composite surface.
+        Both state what the release did: admitted, or blocked with its code.
+        """
+        current = await self._fetch(request["ruling_request_id"])
+        if current is None:
+            return
+        outcome = self._unruled_outcome(current)
+        if outcome is None:
+            return  # release still in progress or deferred; a later tick reports it
+        if str(current.get("reason") or "") == "deadline":
+            await self._notice_requester_unruled(current, outcome)
+        else:
+            await self._mirror_unruled(current, outcome)
+
+    @staticmethod
+    def _authority_loss_evidence(seat: dict[str, Any] | None) -> str | None:
+        """Proof that the bound authority seat is gone, or None when unknown.
+
+        A seat that is open with no recorded pane death (as right after a
+        daemon start, before liveness is reconciled) is not treated as lost.
+        """
+        if seat is None:
+            return "seat_unknown"
+        if seat.get("status") != "open":
+            return "seat_closed"
+        if seat.get("pane_status") == "pane_dead" or seat.get("presumed_dead_at"):
+            return "pane_dead"
+        return None
+
+    async def _check_authority_loss(self) -> None:
+        """Tell the front desk once when the bound ruling authority is lost.
+
+        Reads the liveness the reconciler already recorded; it runs with no
+        request pending. It never rebinds and does not change what an
+        unavailable authority means for a request. One notice per continuous
+        loss of one (stream, generation); a verified recovery or a rebind
+        rearms it. The record is durable, so a daemon restart does not repeat it.
+        """
+        composite = self._composite()
+        if composite is None or not composite.enabled or not composite.config.direct_primary:
+            return
+        try:
+            binding = await self.binding()
+        except ValueError:
+            return
+        raw = await self.store.get(_AUTHORITY_LOSS_KEY)
+        try:
+            told = json.loads(raw) if raw else {}
+        except ValueError:
+            told = {}
+        if binding["state"] != "unavailable":
+            if told.get("open"):
+                await self.store.put(_AUTHORITY_LOSS_KEY, _canonical({**told, "open": False}))
+            return
+        stream_id, generation = binding["stream_id"], binding["generation"]
+        host, _, name = stream_id.partition(":")
+        evidence = self._authority_loss_evidence(await self.store.fetch_session(host, name))
+        if evidence is None:
+            return
+        if told.get("open") and told.get("stream_id") == stream_id and told.get("generation") == generation:
+            return
+        epoch = int(told.get("epoch") or 0) + 1
+        notice_id = f"assistant-authority-lost:{stream_id}:{generation or '-'}:{epoch}"
+        notice = dict(
+            notice_id=notice_id, kind="assistant_lane_ruling_result", dedupe_key=notice_id,
+            recipient_stream_id=composite.config.direct_primary_stream_id,
+            tell_id=notice_id, source_stream_id=stream_id, episode_id=None, created_at=None,
+            body="[Assistant lane ruling] " + _canonical({
+                "event": "authority_unavailable", "authority": stream_id, "generation": generation,
+                "evidence": evidence,
+                "effect": "lane spawns, closes and operations are released without a ruling until "
+                          "the authority is rebound or replaced",
+            }),
+            metadata={"authority_generation": composite.config.direct_primary_generation},
+        )
+        record = _canonical({"stream_id": stream_id, "generation": generation, "epoch": epoch, "open": True})
+        def op(conn: sqlite3.Connection) -> None:
+            # One transaction: a crash cannot leave the notice without its epoch,
+            # which would make the next loss reuse this notice id and be deduped.
+            with conn:
+                coalesce_notice_conn(conn, notice, None)
+                conn.execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)", (_AUTHORITY_LOSS_KEY, record))
+        await self.store.submit(op)
+
+    async def _notice_requester_unruled(self, request: dict[str, Any], outcome: str) -> None:
         """Deliver a deadline-passed notice to the requesting seat only.
 
         The operator chat is deliberately not mirrored: a quietly-missed SLA is
@@ -682,7 +790,7 @@ class AssistantLaneRulings:
         rid = request["ruling_request_id"]
         minutes = max(1, int(round(self.sla_s / 60.0)))
         body = ("[Assistant lane ruling] "
-                f"Ruling deadline passed (no answer in {minutes} min); proceeded unruled: "
+                f"Ruling deadline passed (no answer in {minutes} min); {outcome}: "
                 f"{request['action']} {request['target_stream_id']} ({rid}).")
         await self.store.enqueue_outbound_notice(
             notice_id="assistant-lane-ruling-unruled:" + rid,
@@ -815,14 +923,23 @@ class AssistantLaneRulings:
                 return [dict(row) for row in conn.execute(
                     "SELECT * FROM v2_assistant_lane_rulings WHERE state='unruled_disabled'")]
         for request in await self.store.submit(op):
-            await self._notify_unruled(request)
             await self._release(request)
+            await self._notify_unruled(request)
 
     async def tick(self) -> None:
+        try:
+            await self._check_authority_loss()
+        except Exception:
+            log.exception("assistant lane ruling authority-loss check failed; will retry")
         now = time.time()
+        # The last clause re-reports an unruled request whose release is final but
+        # whose outcome line was not written yet (a crash between the two).
         rows = await self.store.submit(lambda conn: [dict(row) for row in conn.execute(
             "SELECT * FROM v2_assistant_lane_rulings WHERE state='pending' "
-            "OR state IN ('approved','unruled','unruled_disabled')",
+            "OR state IN ('approved','unruled','unruled_disabled') "
+            "OR (mirror_sent=0 AND ruling IS NULL AND reason IN (?,?,?) "
+            "    AND state IN ('done','release_blocked','approved_but_not_closed'))",
+            _UNRULED_REASONS,
         )])
         for row in rows:
             if row["state"] == "pending":
@@ -831,9 +948,9 @@ class AssistantLaneRulings:
                 else:
                     await self._enqueue_notice(row)
             else:
-                if row["state"] in {"unruled", "unruled_disabled"}:
-                    await self._notify_unruled(row)
                 await self._release(row)
+                if row["ruling"] is None and row["reason"] in _UNRULED_REASONS:
+                    await self._notify_unruled(row)
 
     def _ensure_worker(self) -> None:
         if self._worker is None or self._worker.done():

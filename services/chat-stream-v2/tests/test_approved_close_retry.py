@@ -308,9 +308,18 @@ def test_existing_unruled_deadline_release_also_preserves_safe_deferral(monkeypa
             await env.rulings.tick()
             row = await env.row()
             assert row["state"] == "unruled" and row["reason"] == "deadline"
-            assert row["ruling"] is None and row["mirror_sent"] == 1
+            # A deferred close is not a final outcome, so nothing is reported yet.
+            assert row["ruling"] is None and row["mirror_sent"] == 0
             assert env.tmux.kills == 0
             env.tmux.text = "ready\n"
             await env.rulings.tick()
-            assert (await env.row())["state"] == "done" and env.tmux.kills == 1
+            done = await env.row()
+            assert done["state"] == "done" and env.tmux.kills == 1
+            # The deadline notice goes out once the close is final, with its outcome.
+            await env.rulings.tick()
+            assert (await env.row())["mirror_sent"] == 1
+            body = await env.store.submit(lambda conn: conn.execute(
+                "SELECT body FROM v2_outbound_notices WHERE notice_id=?",
+                ("assistant-lane-ruling-unruled:" + env.rid,)).fetchone())
+            assert body is not None and "admitted unruled: session_close " in body[0]
     asyncio.run(go())
