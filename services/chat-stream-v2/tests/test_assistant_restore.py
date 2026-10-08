@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import assistant_restore as ar
+import store_assistant_binding
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from assistant_restore import AssistantRestore
 from server import Server
@@ -106,6 +107,10 @@ class Rig:
         self.store = Store(str(tmp_path / "sessions.db"))
         self.tmux = FakeTmux()
         self.clock = Clock()
+        # The store stamps a new episode's next_attempt_at; it must read the
+        # same clock as the owner, or the episode is never due once wall time
+        # passes the fixture instant.
+        monkeypatch.setattr(store_assistant_binding, "_stamp", lambda: ar._iso(self.clock()))
         self.ps: object = PS_GONE
         self.ps_calls: list[str] = []
         self.broadcasts: list[dict] = []
