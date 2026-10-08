@@ -257,11 +257,11 @@ def test_report_window_reads_an_index_range_not_the_namespace(tmp_path):
     store = AssetStore(str(tmp_path / "assets.db"))
     try:
         for producer in ("hostx:example-producer", None):
-            clauses = ["spec_id = ?"] + (["producer = ?"] if producer else []) + ["asset_id >= ? AND asset_id < ?"]
-            params = [SPEC_ID] + ([producer] if producer else []) + ["example-report-", "example-report."]
+            # The plan of the exact statement list_spec_window executes.
+            sql, params = store._spec_window_query(SPEC_ID, limit=12, asset_id_prefix="example-report-",
+                                                   producer=producer)
             plan = " | ".join(row[-1] for row in store._conn.execute(
-                f"EXPLAIN QUERY PLAN SELECT * FROM assets WHERE {' AND '.join(clauses)} "
-                "ORDER BY asset_id DESC LIMIT 12", params).fetchall())
+                f"EXPLAIN QUERY PLAN {sql}", params).fetchall())
             want = "idx_assets_spec_producer_asset" if producer else "idx_assets_spec_asset"
             assert want in plan, plan
             assert "TEMP B-TREE" not in plan, plan

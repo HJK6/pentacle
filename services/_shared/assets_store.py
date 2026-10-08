@@ -414,6 +414,22 @@ class AssetStore:
         restricted to a literal id prefix and/or an exact producer. Served by
         idx_assets_spec_asset / idx_assets_spec_producer_asset, so the scan
         stops after `limit` matching rows instead of reading the namespace."""
+        sql, params = self._spec_window_query(
+            spec_id, limit=limit, asset_id_prefix=asset_id_prefix, producer=producer
+        )
+        with self._lock:
+            self._require_open()
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    @staticmethod
+    def _spec_window_query(
+        spec_id: str,
+        *,
+        limit: int,
+        asset_id_prefix: str | None = None,
+        producer: str | None = None,
+    ) -> tuple[str, tuple[Any, ...]]:
         spec_id = str(spec_id or "").strip()
         if not spec_id:
             raise InvalidAsset("spec_id must be non-empty")
@@ -422,9 +438,14 @@ class AssetStore:
         cols = ", ".join(ASSET_COLUMNS)
         clauses = ["spec_id = ?"]
         params: list[Any] = [spec_id]
+        # The index is named, not left to the planner: SQLite 3.53 serves the
+        # producer filter from idx_assets_spec_asset and reads every other
+        # producer's rows in the range before LIMIT applies.
+        index = "idx_assets_spec_asset"
         if producer is not None:
             clauses.append("producer = ?")
             params.append(producer)
+            index = "idx_assets_spec_producer_asset"
         if asset_id_prefix:
             # Half-open id range [prefix, prefix with its last character
             # incremented): exactly the ids that start with the prefix.
@@ -432,14 +453,11 @@ class AssetStore:
             clauses.append("asset_id >= ? AND asset_id < ?")
             params.extend([asset_id_prefix, upper])
         sql = (
-            f"SELECT {cols} FROM assets WHERE {' AND '.join(clauses)} "
+            f"SELECT {cols} FROM assets INDEXED BY {index} WHERE {' AND '.join(clauses)} "
             "ORDER BY asset_id DESC LIMIT ?"
         )
         params.append(int(limit))
-        with self._lock:
-            self._require_open()
-            rows = self._conn.execute(sql, tuple(params)).fetchall()
-        return [_row_to_dict(row) for row in rows]
+        return sql, tuple(params)
 
     def list_all_assets(self, *, limit: int | None = None) -> list[dict]:
         if limit is not None and int(limit) < 0:
