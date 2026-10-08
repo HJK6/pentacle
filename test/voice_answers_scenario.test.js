@@ -74,6 +74,19 @@ for (const [group, index, label, mutate] of negatives) test(`M3 oracle rejects $
   assert.equal(!!groups[group](o)[index][1], false);
 });
 
+// CI run 37799432234: the store briefly held the daemon USER row and the
+// client-origin row for the same wire message_id. That pair is one turn.
+test('M3 plain oracle counts a daemon row and its client-origin row as one turn', () => {
+  const o = structuredClone(complete().plain);
+  const daemon = { ...o.after[1], daemon_seq: 11 };
+  o.after = [o.after[0], { ...daemon, daemon_seq: null, pending: false, client_origin: true, correlatedDaemonSeq: 11, receiptDirectMatch: true }, daemon];
+  const [[, exactlyOne, matching], [, plainMeta]] = plainChecks(o);
+  assert.equal(exactlyOne, true); assert.equal(plainMeta, true);
+  assert.equal(matching.length, 1); assert.equal(matching[0].daemon_seq, 11, 'the daemon row wins over the client row');
+  o.after.push({ ...daemon, message_id: 'wire-second' });
+  assert.equal(plainChecks(o)[0][1], false, 'a second wire identity is still a double send');
+});
+
 test('M3 browser and unit use the same DOM reader for selectors, state, badges and pending rows', () => {
   const dom = domFixture();
   try {

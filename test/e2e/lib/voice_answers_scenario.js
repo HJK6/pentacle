@@ -29,9 +29,15 @@ function readQuestionVoiceDom(doc, streamId) {
     cardIds: [...doc.querySelectorAll('.slot-chat-question-card[data-notification-id]')].map(node => node.dataset.notificationId),
   };
 }
-// The store also lists local optimistic rows; only a daemon event carries the
-// wire message_id. Composite USER events have no daemon_seq to rely on.
-const userEvents = events => (events || []).filter(event => event.kind === 'USER' && typeof event.message_id === 'string' && !!event.message_id);
+// The store also lists local optimistic rows without a wire message_id, and
+// composite USER events have no daemon_seq to rely on. After the receipt the
+// client-origin row carries the wire message_id too and can briefly sit beside
+// the daemon row: that pair is one turn. Two daemon rows stay a duplicate.
+const userEvents = events => {
+  const rows = (events || []).filter(event => event.kind === 'USER' && typeof event.message_id === 'string' && !!event.message_id);
+  const confirmed = new Set(rows.filter(event => !event.client_origin).map(event => event.message_id));
+  return rows.filter(event => !(event.client_origin && confirmed.has(event.message_id)));
+};
 const turns = (events, text) => userEvents(events).filter(event => event.text === text);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 function recordingChecks({ first, middle, last }) {
