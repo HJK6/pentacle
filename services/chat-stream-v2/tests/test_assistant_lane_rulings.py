@@ -220,7 +220,8 @@ def test_dead_advisor_proceeds_unruled_and_mirrors_once():
             assert retry["ruling_request_id"] == first["ruling_request_id"]
             assert len(spawned.calls) == 1
             events = await store.fetch_session_event_tail("fixture-chat:assistant", limit=20)
-            assert len([e for e in events if "proceeded unruled" in str(e.get("text") or "")]) == 1
+            assert len([e for e in events if "admitted unruled" in str(e.get("text") or "")]) == 1
+            assert all("proceeded unruled" not in str(e.get("text") or "") for e in events)
         finally:
             store.stop()
 
@@ -396,14 +397,14 @@ def test_deadline_wins_over_late_ruling_and_audits_refusal():
             # A missed SLA tells the requesting lead only; it is never mirrored to
             # the operator composite surface.
             events = await store.fetch_session_event_tail("fixture-chat:assistant", limit=20)
-            assert all("proceeded unruled" not in str(e.get("text") or "") for e in events)
+            assert all("unruled" not in str(e.get("text") or "") for e in events)
             unruled = await store.submit(lambda conn: conn.execute(
                 "SELECT recipient_stream_id, body, kind FROM v2_outbound_notices WHERE notice_id=?",
                 ("assistant-lane-ruling-unruled:" + rid,)).fetchone())
             assert unruled is not None
             assert unruled[0] == ROOT and unruled[2] == "assistant_lane_ruling_result"
             assert "Ruling deadline passed (no answer in 10 min)" in unruled[1]
-            assert f"proceeded unruled: spawn {first['stream_id']} ({rid})" in unruled[1]
+            assert f"admitted unruled: spawn {first['stream_id']} ({rid})" in unruled[1]
             audit = await store.submit(lambda conn: [row[0] for row in conn.execute(
                 "SELECT event FROM v2_assistant_lane_ruling_audit WHERE ruling_request_id=? ORDER BY id", (rid,))])
             assert audit == ["request", "timeout", "release", "refused"]
@@ -708,6 +709,233 @@ def test_spawn_notice_carries_resolved_objective_and_acceptance_beyond_excerpt()
             detail = json.loads(notice.split("\n", 1)[1])
             assert detail["brief"]["objective"]
             assert "Verified release proof" in detail["brief"]["acceptance"]
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+# -- truthful unruled wording and the authority-loss notice ------------------ #
+
+
+class BlockedSpawn(RecordingSpawn):
+    """The release is refused after the request went unruled; no seat launches."""
+
+    async def spawn(self, msg, host):
+        self.calls.append((msg, host))
+        raise VerbError("spec_unresolved", "spec-id fixture unresolved")
+
+
+async def _rulings_rig(store, *, advisor_pane="pane_alive", spawnctl=None, authority=ADVISOR):
+    root = await store.open_session("fixture-root", "primary", provider="codex")
+    advisor = await store.open_session("fixture-advisor", "astra", provider="codex", pane_status=advisor_pane)
+    env = {
+        "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+        "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": "fixture-chat:assistant",
+        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": ROOT,
+        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": root["session_generation"],
+    }
+    if authority:
+        env["PENTACLE_ASSISTANT_AUTHORITY_STREAM_ID"] = authority
+    spawned = spawnctl or RecordingSpawn()
+    server = Server(store=store, sessions=Sessions(store, tmux=None, local_host="fixture-chat"),
+                    spawnctl=spawned, local_host="fixture-chat")
+    composite = AssistantComposite(store, config=AssistantCompositeConfig.from_env(env))
+    server.assistant_composite = composite
+    await composite.ensure_projection()
+    return root, advisor, server, spawned
+
+
+def _spawn_msg(root, key):
+    return {"type": "spawn", "role": "lead", "session_name": key, "request_id": key,
+            "idempotency_key": key, "objective": "Implement lane",
+            "_auth_context": {"token_verified": True, "stream_id": ROOT,
+                              "session_generation": root["session_generation"]}}
+
+
+async def _chat_lines(store):
+    return [str(e.get("text") or "") for e in await store.fetch_session_event_tail("fixture-chat:assistant", limit=50)
+            if "Astra unavailable" in str(e.get("text") or "")]
+
+
+async def _loss_notices(store):
+    return await store.submit(lambda conn: [dict(r) for r in conn.execute(
+        "SELECT notice_id, kind, recipient_stream_id, body, metadata FROM v2_outbound_notices "
+        "WHERE notice_id LIKE 'assistant-authority-lost:%' ORDER BY rowid")])
+
+
+async def _set_seat(store, name, **fields):
+    def op(conn):
+        for column, value in fields.items():
+            conn.execute(f"UPDATE sessions SET {column}=? WHERE host='fixture-advisor' AND session_name=?",
+                         (value, name))
+        conn.commit()
+    await store.submit(op)
+
+
+def test_unruled_release_that_is_blocked_is_not_reported_as_proceeded():
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root, _advisor, server, spawned = await _rulings_rig(
+                store, advisor_pane="pane_dead", spawnctl=BlockedSpawn())
+            reply = await server._on_spawn(_spawn_msg(root, "blocked"))
+            assert reply["type"] == "spawn.ruling_release_blocked"
+            assert len(spawned.calls) == 1
+            lines = await _chat_lines(store)
+            assert len(lines) == 1
+            assert "not released, blocked (spec_unresolved)" in lines[0]
+            assert "proceeded" not in lines[0] and "admitted" not in lines[0]
+            assert ": spawn " in lines[0]
+            assert f"({reply['ruling_request_id']}; authority_unavailable)" in lines[0]
+            # Retries and later ticks do not add a second line.
+            await server._on_spawn(_spawn_msg(root, "blocked"))
+            await server.lane_rulings.tick()
+            assert len(await _chat_lines(store)) == 1
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+def test_unruled_release_that_is_admitted_says_admitted_once():
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root, _advisor, server, spawned = await _rulings_rig(store, advisor_pane="pane_dead")
+            reply = await server._on_spawn(_spawn_msg(root, "admitted"))
+            assert reply["type"] == "spawn.ok" and reply["unruled"] is True and len(spawned.calls) == 1
+            await server.lane_rulings.tick()
+            lines = await _chat_lines(store)
+            assert len(lines) == 1 and "admitted unruled: spawn " in lines[0]
+            assert "blocked" not in lines[0] and "proceeded" not in lines[0]
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("spawnctl,expected", [
+    (RecordingSpawn, "admitted unruled: spawn "),
+    (BlockedSpawn, "not released, blocked (spec_unresolved): spawn "),
+])
+def test_deadline_notice_states_the_release_outcome(spawnctl, expected):
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root, _advisor, server, spawned = await _rulings_rig(store, spawnctl=spawnctl())
+            first = await server._on_spawn(_spawn_msg(root, "deadline"))
+            rid = first["ruling_request_id"]
+            await store.submit(lambda conn: conn.execute(
+                "UPDATE v2_assistant_lane_rulings SET deadline=0 WHERE ruling_request_id=?", (rid,)))
+            await server.lane_rulings.tick()
+            await server.lane_rulings.tick()
+            assert len(spawned.calls) == 1
+            body = await store.submit(lambda conn: conn.execute(
+                "SELECT body FROM v2_outbound_notices WHERE notice_id=?",
+                ("assistant-lane-ruling-unruled:" + rid,)).fetchone())
+            assert body is not None
+            assert "Ruling deadline passed (no answer in 10 min); " + expected in body[0]
+            assert "proceeded" not in body[0]
+            assert await _chat_lines(store) == []
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+def test_authority_loss_tells_the_front_desk_once_and_rearms_after_recovery():
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root, advisor, server, spawned = await _rulings_rig(store)
+            await server.lane_rulings.tick()
+            assert await _loss_notices(store) == []
+            # The authority's pane dies with no spawn pending.
+            await _set_seat(store, "astra", pane_status="pane_dead")
+            for _ in range(3):
+                await server.lane_rulings.tick()
+            notices = await _loss_notices(store)
+            assert len(notices) == 1 and spawned.calls == []
+            notice = notices[0]
+            assert notice["recipient_stream_id"] == ROOT
+            assert notice["kind"] == "assistant_lane_ruling_result"
+            assert json.loads(notice["metadata"])["authority_generation"] == root["session_generation"]
+            payload = json.loads(notice["body"].split("] ", 1)[1])
+            assert payload["event"] == "authority_unavailable" and payload["evidence"] == "pane_dead"
+            assert payload["authority"] == ADVISOR and payload["generation"] == advisor["session_generation"]
+            # A daemon restart during the same unavailability does not repeat it.
+            from assistant_lane_rulings import AssistantLaneRulings
+            restarted = AssistantLaneRulings(server)
+            await restarted.tick()
+            assert len(await _loss_notices(store)) == 1
+            # Verified recovery rearms; the next loss is told again.
+            await _set_seat(store, "astra", pane_status="pane_alive")
+            await server.lane_rulings.tick()
+            await _set_seat(store, "astra", status="closed")
+            await server.lane_rulings.tick()
+            await server.lane_rulings.tick()
+            notices = await _loss_notices(store)
+            assert len(notices) == 2
+            assert json.loads(notices[1]["body"].split("] ", 1)[1])["evidence"] == "seat_closed"
+            assert notices[1]["notice_id"] != notices[0]["notice_id"]
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+def test_rebind_to_another_unavailable_authority_is_told_separately():
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root, _advisor, server, _spawned = await _rulings_rig(store, advisor_pane="pane_dead")
+            await store.open_session("fixture-advisor", "second", provider="codex", pane_status="pane_dead")
+            await server.lane_rulings.tick()
+            assert len(await _loss_notices(store)) == 1
+            await store.put("assistant.authority.stream_id", "fixture-advisor:second")
+            await server.lane_rulings.tick()
+            await server.lane_rulings.tick()
+            notices = await _loss_notices(store)
+            assert len(notices) == 2
+            assert json.loads(notices[1]["body"].split("] ", 1)[1])["authority"] == "fixture-advisor:second"
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("setup", ["unknown_pane", "disabled", "unconfigured", "ready"])
+def test_no_authority_loss_notice_without_proof_of_loss(setup):
+    """An unknown pane state (as right after a daemon start) is not a death."""
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            _root, _advisor, server, _spawned = await _rulings_rig(
+                store, authority=None if setup == "unconfigured" else ADVISOR)
+            if setup == "unknown_pane":
+                await _set_seat(store, "astra", pane_status="pane_unknown")
+            if setup == "disabled":
+                await store.put("assistant.authority.stream_id", "disabled")
+            for _ in range(3):
+                await server.lane_rulings.tick()
+            assert await _loss_notices(store) == []
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+def test_authority_seat_that_does_not_exist_is_told_once():
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            _root, _advisor, server, _spawned = await _rulings_rig(store, authority="fixture-advisor:missing")
+            await server.lane_rulings.tick()
+            await server.lane_rulings.tick()
+            notices = await _loss_notices(store)
+            assert len(notices) == 1
+            assert json.loads(notices[0]["body"].split("] ", 1)[1])["evidence"] == "seat_unknown"
         finally:
             store.stop()
     asyncio.run(go())
