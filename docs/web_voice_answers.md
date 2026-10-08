@@ -151,12 +151,10 @@ closed-chat-slot; host-restart-restores-input.
 
 Required candidate checks are `npm test`, `npm run build:web` (and
 `npm run prestart` when needed), and the complete `node test/e2e/web_gate.js`.
-The focused oracle tests and fixture setup checks pass. The complete local
-gate was attempted with a prepared Python environment: the isolated daemon
-and web host started, but Chrome exited before any scenario with
-`process_singleton_posix.cc: socket() failed: Operation not permitted`.
-CDP then reported `ECONNREFUSED`. Browser scenarios are therefore **NOT RUN**;
-unit/build success does not certify them. The fixture daemon and generated
-operator credential were cleaned up. The fleet must run the full gate on the
-candidate in its supported browser environment. Live transcription, deployed
-HTTPS and physical-microphone acceptance remain untested.
+Unit and build success do not certify the browser scenarios: the complete
+gate must run where Chrome can start. Its loopback daemon needs a Python with
+the `services/chat-stream-v2/requirements.txt` packages (`--python` or
+`PENTACLE_PYTHON`) and runs with `--disable-reconciler`, because fixture
+sessions have no pane and the session reconciler would otherwise close them,
+and their open questions, once a run outlasts one tick. Live transcription,
+deployed HTTPS and physical-microphone acceptance remain untested.
