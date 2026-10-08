@@ -1,0 +1,106 @@
+#!/bin/sh
+# pushguard-hook - installed under each stubbed git hook name in the guard directory (the global core.hooksPath).
+#   pre-push : refuse a direct push whose destination is a public or unclassifiable GitHub repo, then chain.
+#   any hook : chain to the repository's original hook of the same name (stdin, args, exit status preserved).
+#   pushguard-hook classify|check <url> : print the verdict for a URL (no git needed; `check` also asks GitHub).
+# Local policy guard, not credential isolation: --no-verify or a hooksPath override bypasses it.
+# Needs only POSIX sh, git, curl (and ssh for SSH-alias resolution). Sends no credentials, ever.
+set -u
+
+self=${0##*/}
+guard_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) || guard_dir=
+
+redact() { printf '%s' "$1" | sed 's#//[^/]*@#//#'; }
+
+# classify URL -> sets SLUG=owner/repo. rc 0 = GitHub repo, 1 = not GitHub, 2 = GitHub but unclassifiable.
+classify() {
+  u=$1; SLUG=; scheme=
+  case $u in
+    *://*) scheme=${u%%://*}; rest=${u#*://}; auth=${rest%%/*}
+           if [ "$auth" = "$rest" ]; then path=; else path=${rest#*/}; fi ;;
+    /*|./*|../*|[A-Za-z]:[\\/]*|"") return 1 ;;
+    *:*)   scheme=ssh; auth=${u%%:*}; path=${u#*:} ;;
+    *)     return 1 ;;
+  esac
+  case $scheme in file) return 1 ;; esac
+  host=${auth##*@}; host=${host%%:*}
+  host=$(printf '%s' "$host" | tr 'A-Z' 'a-z'); host=${host#\[}; host=${host%\]}; host=${host%.}
+  case $host in -*) return 2 ;; esac
+  case $host in
+    github.com|www.github.com|ssh.github.com) ;;
+    *.github.com|*.githubusercontent.com) return 2 ;;
+    *) case $scheme in
+         ssh|ssh+git|git+ssh) real=$(ssh -G -- "$host" 2>/dev/null | sed -n 's/^hostname //p' | head -n 1 | tr 'A-Z' 'a-z'); real=${real%.}
+                              case $real in github.com|ssh.github.com) ;; *) return 1 ;; esac ;;
+         *) return 1 ;;
+       esac ;;
+  esac
+  path=${path#/}; path=${path%/}; path=${path%.git}; path=${path%/}
+  case $path in */*/*|""|*/|/*|*[!A-Za-z0-9._/-]*) return 2 ;; */*) ;; *) return 2 ;; esac
+  case ${path#*/} in .|..) return 2 ;; esac
+  SLUG=$path
+  return 0
+}
+
+# visibility owner/repo -> prints public | notpublic | unknown.
+# Anonymous smart-HTTP probe: 200 = public; 401 = private or nonexistent; anything else = unknown.
+visibility() {
+  code=$(curl -q -sS -L --max-redirs 3 --connect-timeout 5 -m 10 -o /dev/null -w '%{http_code}' \
+         -A 'git/pushguard' "https://github.com/$1.git/info/refs?service=git-upload-pack" 2>/dev/null) || code=000
+  case $code in 200) echo public ;; 401) echo notpublic ;; *) echo unknown ;; esac
+}
+
+refuse() {
+  printf 'pushguard: REFUSED direct push: %s\n' "$*" >&2
+  hint=$(git config --get pushguard.hint 2>/dev/null) || hint=
+  printf 'pushguard: %s\n' "${hint:-direct pushes to public repositories are blocked on this host; use the designated public-write route. Private pushes are unaffected.}" >&2
+  exit 1
+}
+
+guard_pre_push() {
+  url=${2:-}
+  [ -n "$url" ] || refuse "git supplied no push URL"
+  classify "$url"; rc=$?
+  case $rc in
+    1) return 0 ;;
+    2) refuse "unclassifiable GitHub destination $(redact "$url")" ;;
+  esac
+  case $(visibility "$SLUG") in
+    notpublic) return 0 ;;
+    public)    refuse "$SLUG is a public repository" ;;
+    *)         refuse "visibility of $SLUG could not be verified (network/GitHub error)" ;;
+  esac
+}
+
+chain() {
+  d=$(git config --type=path --get pushguard.originalHooksPath 2>/dev/null) || d=
+  if [ -z "$d" ]; then
+    d=$(git rev-parse --git-common-dir 2>/dev/null) || d=
+    [ -n "$d" ] && d=$d/hooks
+  else
+    case $d in /*|[A-Za-z]:[\\/]*) ;; *) top=$(git rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] && d=$top/$d ;; esac
+  fi
+  [ -n "$d" ] && [ -d "$d" ] || exit 0
+  real=$(cd "$d" 2>/dev/null && pwd -P) || exit 0
+  [ "$real" = "$guard_dir" ] && exit 0
+  if [ -f "$d/$self" ] && [ -x "$d/$self" ]; then exec "$d/$self" "$@"; fi
+  exit 0
+}
+
+case $self in
+  pushguard-hook)
+    mode=${1:-}; url=${2:-}
+    case $mode in
+      classify|check) ;;
+      *) echo "usage: pushguard-hook classify|check <url>" >&2; exit 64 ;;
+    esac
+    classify "$url"; rc=$?
+    case $rc in
+      0) if [ "$mode" = check ]; then echo "github $SLUG $(visibility "$SLUG")"; else echo "github $SLUG"; fi ;;
+      1) echo "non-github" ;;
+      *) echo "unclassifiable-github" ;;
+    esac
+    exit 0 ;;
+  pre-push) guard_pre_push "$@" ;;
+esac
+chain "$@"
