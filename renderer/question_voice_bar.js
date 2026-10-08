@@ -5,7 +5,7 @@ const { createSegments, selectedSet, isVoiceEligible, registerVoiceAnswersBindin
 
 // The deck adds coverage and interaction to the existing capture/upload/ASR unit.
 // Its second controller participates in web_voice's module-wide captureOwner.
-function createQuestionVoiceBar({ env = globalThis, mount, takeMount, getStreamId,
+function createQuestionVoiceBar({ env = globalThis, mount, takeMount, scope = takeMount, getStreamId,
   upload, transcribe, send, telemetry, onFinished = () => {}, onDiscarded = () => {}, onRecordingChange = () => {},
   recorder = createBrowserRecorder(env), bindMic = bindComposerMic }) {
   const doc = mount.ownerDocument;
@@ -24,7 +24,7 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, getStreamI
   const discard = doc.createElement('button'); discard.type = 'button'; discard.textContent = 'Discard'; discard.dataset.questionVoiceDiscard = '';
   confirmation.append(keep, discard); bar.appendChild(confirmation); mount.appendChild(bar);
   let pages = []; let currentKey = null; let pageState = null; let segments = null;
-  let frozen = []; let recordingId = null; let thresholdTimer = null; let pendingLeave = null;
+  let frozen = []; let recordingId = null; let thresholdTimer = null; let pendingLeave = null; let surfaceStreamId = null;
   let controller; let destroyed = false; let transformBinding = value => value;
   let captureReleased = Promise.resolve(); let releaseCapture = () => {}; let lastRecording = false;
   const now = () => env.performance?.now?.() ?? Date.now();
@@ -37,12 +37,13 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, getStreamI
       lastRecording = recording;
       Promise.resolve().then(() => { if (!destroyed) onRecordingChange(recording); });
     }
-    const covered = segments ? selectedSet(segments, pages, getStreamId()) : [];
+    const covered = segments ? selectedSet(segments, pages, surfaceStreamId) : [];
     mic.hidden = !live() && !pages.some(isVoiceEligible);
     mic.setAttribute('aria-label', recording ? 'Finish voice answers' : 'Record answers by voice');
     controls.hidden = !recording;
-    progress.textContent = `${covered.length} of ${segments?.n ?? 0} answered by voice`;
-    bar.hidden = panel.hidden && confirmation.hidden;
+    const progressText = `${covered.length} of ${segments?.n ?? 0} answered by voice`;
+    if (progress.textContent !== progressText) progress.textContent = progressText;
+    bar.hidden = (panel.hidden || panel.parentNode !== captureMount) && confirmation.hidden;
     if (pageState) {
       const page = pages.find(entry => entry.key === currentKey);
       const tap = !isVoiceEligible(page) || (segments && !segments.tracked(currentKey));
@@ -63,13 +64,15 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, getStreamI
     if (wait !== null && wait !== undefined) thresholdTimer = env.setTimeout(() => { thresholdTimer = null; paint(); }, wait);
   }
   function freeze() {
+    confirmation.hidden = true; pendingLeave = null;
     if (!segments) return [];
-    segments.finish(); frozen = selectedSet(segments, pages, getStreamId()); clearThreshold();
+    segments.finish(); frozen = selectedSet(segments, pages, surfaceStreamId); clearThreshold();
     return frozen;
   }
   const capture = {
     setInterruptionHandler: callback => recorder.setInterruptionHandler?.(callback),
     async start() {
+      surfaceStreamId = controller?.snapshot().streamId || getStreamId();
       captureReleased = new Promise(resolve => { releaseCapture = resolve; });
       try { await recorder.start(); } catch (error) { releaseCapture(); throw error; }
       if (destroyed) return;
@@ -121,6 +124,7 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, getStreamI
   const observer = new env.MutationObserver(paint);
   observer.observe(panel, { attributes: true, attributeFilter: ['class', 'hidden'], childList: true, subtree: true });
   function requestLeave(action = onDiscarded) {
+    if (controller?.snapshot().phase === 'cancelling') return true;
     if (!live()) return false;
     pendingLeave = action; confirmation.hidden = false; paint(); keep.focus(); return true;
   }
@@ -133,6 +137,12 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, getStreamI
   keep.addEventListener('click', () => { pendingLeave = null; confirmation.hidden = true; paint(); mic.focus(); });
   discard.addEventListener('click', async () => { const action = pendingLeave; await cancel(); action?.(); });
   done.addEventListener('click', () => { if (controller?.snapshot().phase === 'recording') mic.click(); });
+  const escape = event => {
+    if (event.key !== 'Escape' || !live()) return;
+    if (!scope?.contains(event.target) && !mount.contains(event.target) && !mic.contains(event.target)) return;
+    event.preventDefault(); event.stopImmediatePropagation(); requestLeave();
+  };
+  doc.addEventListener('keydown', escape, true);
   return {
     update({ entries, activeKey, header, before = null, stateMount, barMount = mount }) {
       pages = entries; currentKey = activeKey;
@@ -143,8 +153,8 @@ function createQuestionVoiceBar({ env = globalThis, mount, takeMount, getStreamI
       stateMount?.prepend(pageState); paint();
     },
     requestLeave, cancel,
-    snapshot: () => ({ ...controller?.snapshot(), n: segments?.n ?? 0, selected: segments ? selectedSet(segments, pages, getStreamId()) : frozen }),
-    async dispose() { destroyed = true; observer.disconnect(); await cancel(); mic.remove(); bar.remove(); },
+    snapshot: () => ({ ...controller?.snapshot(), n: segments?.n ?? 0, selected: segments ? selectedSet(segments, pages, surfaceStreamId) : frozen }),
+    async dispose() { destroyed = true; observer.disconnect(); doc.removeEventListener('keydown', escape, true); await cancel(); mic.remove(); bar.remove(); },
     ...(env.PentacleHarness ? { setBindingTransformForTest(fn) { transformBinding = fn; } } : {}),
   };
 }

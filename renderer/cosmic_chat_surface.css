@@ -478,15 +478,16 @@
 .desktop-question-portal.cosmic .slot-chat-question-option:hover:not(:disabled) { border-color: var(--machine); }
 
 /* Packet6: the deck owns eligibility UI; daemon acknowledgements own badges. */
-.question-voice-mic { width:32px; height:32px; flex:0 0 32px; border:1px solid currentColor; border-radius:50%; background:transparent; color:var(--cosmic-red, #ff5c6e); display:inline-flex; align-items:center; justify-content:center; cursor:pointer; margin-left:auto; margin-right:10px; }
+.question-voice-mic { position:relative; width:32px; height:32px; flex:0 0 32px; border:1px solid currentColor; border-radius:50%; background:transparent; color:var(--cosmic-red, #ff5c6e); display:inline-flex; align-items:center; justify-content:center; cursor:pointer; margin-left:auto; margin-right:10px; }
 .question-voice-mic.is-recording { background:rgba(255,92,110,.15); }
 .question-voice-mic[hidden], .question-voice-bar[hidden], .question-voice-controls[hidden], [data-question-voice-confirm][hidden], .question-voice-page-state[hidden] { display:none; }
-.question-voice-bar { container-type:inline-size; border:1px solid rgba(255,92,110,.35); border-radius:10px; padding:10px; margin:10px 0; background:#17212c; }
+.question-voice-bar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; container-type:inline-size; border:1px solid rgba(255,92,110,.35); border-radius:10px; padding:10px; margin:10px 0; background:#17212c; }
+.question-voice-capture { flex:1 1 150px; min-width:0; }
 .question-voice-capture .voice-recording-strip { width:100%; margin:0; }
 .question-voice-controls { display:flex; gap:10px; align-items:center; justify-content:space-between; font:12px 'IBM Plex Mono', monospace; }
 [data-question-voice-done] { background:#3dff66; color:#09220d; border:0; border-radius:18px; padding:7px 16px; font-weight:700; cursor:pointer; }
 .question-voice-page-state { display:block; font:11px 'IBM Plex Mono', monospace; color:#a2d9bd; padding:0 0 10px; letter-spacing:.06em; }
-[data-question-voice-confirm] { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+[data-question-voice-confirm] { flex-basis:100%; display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px; }
 [data-question-voice-confirm] button { border:1px solid #738197; background:#14263b; color:#f3f7ff; border-radius:6px; padding:6px 10px; }
 .question-voice-pending-count { font:10px 'IBM Plex Mono',monospace; letter-spacing:.05em; }
 [data-voice-answers-status] { font-size:12px; color:#ffb8bf; }
@@ -495,4 +496,4 @@
 .desktop-question-portal.is-question-voice-recording { background:transparent; align-items:flex-start; pointer-events:none; padding-top:24px; }
 .desktop-question-portal.is-question-voice-recording .desktop-question-portal__frame { pointer-events:auto; min-height:0; max-height:calc(100vh - 230px); overflow:auto; }
 .desktop-question-portal.is-question-voice-recording .desktop-question-portal__body { max-height:calc(100vh - 340px); }
-@container (max-width:480px) { .question-voice-controls { flex-wrap:wrap; } .question-voice-pending-count { flex-basis:100%; } }
+@container (max-width:480px) { .question-voice-capture { flex-basis:100%; } .question-voice-controls { flex-basis:100%; flex-wrap:wrap; } .question-voice-pending-count { flex-basis:100%; } }

@@ -3794,7 +3794,7 @@ function renderSlotChat(slot) {
     };
     if (!refs.questionVoiceController) {
       refs.questionVoiceController = createQuestionVoiceBar({
-        env: window, mount: refs.questionEl, takeMount: refs.scrollEl,
+        env: window, mount: refs.questionEl, takeMount: refs.scrollEl, scope: refs.chatMount,
         getStreamId: () => {
           const target = chatControlTargetForSlot(slot);
           return assertAssistantDirectSlot(slot) && target && !target.error ? target.streamSession?.stream_id : null;
@@ -3833,6 +3833,7 @@ function renderSlotChat(slot) {
       const activeKey = state.questionPageIndexByStream[draftKey];
       const activeIndex = Math.max(0, entries.findIndex(entry => entry.key === activeKey));
       const navigate = index => {
+        if (!entries.length) return;
         state.questionPageIndexByStream[draftKey] = entries[clampQuestionPageIndex(index, entries.length)].key;
         renderSlotChat(slot);
       };

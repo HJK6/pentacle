@@ -11,7 +11,7 @@ function fixture(t, { entries = [page(1), page(2), page(3)], isWeb, deny = false
   const dom = new JSDOM('<header></header><section id="deck"><article></article></section><div id="takes"></div><button id="mic-btn-toggle"></button><button id="composer"></button><div id="composer-panel"></div>');
   const doc = dom.window.document; let now = 0; let nextId = 0; let startedAt = 0; let tracks = [];
   const timers = new Map(), intervals = new Map(), calls = [], sent = [], asr = [];
-  let releaseAsr, releaseStart; let interrupted = false;
+  let releaseAsr, releaseStart; let interrupted = false; let currentStream = 'fixture:assistant';
   const env = { HOST: isWeb === undefined ? {} : { isWeb }, isSecureContext: true, navigator: { mediaDevices: { getUserMedia() {} } },
     MutationObserver: dom.window.MutationObserver, performance: { now: () => now }, crypto: { randomUUID: () => 'synthetic-recording' },
     setTimeout(fn, ms) { const id = ++nextId; timers.set(id, { fn, at: now + ms }); return id; }, clearTimeout(id) { timers.delete(id); },
@@ -27,7 +27,7 @@ function fixture(t, { entries = [page(1), page(2), page(3)], isWeb, deny = false
   };
   let roomClicks = 0; doc.querySelector('#mic-btn-toggle').onclick = () => roomClicks++;
   let recordingChanged = [];
-  const ctrl = createQuestionVoiceBar({ env, mount: doc.querySelector('#deck'), takeMount: doc.querySelector('#takes'), getStreamId: () => 'fixture:assistant', recorder,
+  const ctrl = createQuestionVoiceBar({ env, mount: doc.querySelector('#deck'), takeMount: doc.querySelector('#takes'), getStreamId: () => currentStream, recorder,
     onRecordingChange: value => recordingChanged.push(value),
     async upload() { calls.push('upload'); return { ok: true, blob_sha: 'a'.repeat(64) }; },
     async transcribe(payload) { asr.push(payload); if (hold) await new Promise(resolve => { releaseAsr = resolve; }); return { ok: true, text: 'Synthetic voice answers' }; },
@@ -41,7 +41,7 @@ function fixture(t, { entries = [page(1), page(2), page(3)], isWeb, deny = false
     async start() { doc.querySelector('[data-question-voice-mic]').click(); await flush(); },
     async advance(ms) { now += ms; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.fn(); } for (const fn of [...intervals.values()]) fn(); await flush(); },
     releaseAsr: () => { hold = false; releaseAsr?.(); }, releaseStart: () => releaseStart?.(),
-    interrupt: () => { interrupted = true; },
+    interrupt: () => { interrupted = true; }, target: value => { currentStream = value; },
   };
 }
 test('mic visibility and legacy labels include unbindable durable pages only in n', async t => {
@@ -227,4 +227,34 @@ for (const elapsed of [1000, 1600]) test(`recorder interruption freezes eligible
   assert.equal(u.calls.includes('upload'), elapsed >= 1500);
   assert.ok(u.tracks.every(track => track.readyState === 'ended'));
   if (u.sent.length) assert.equal(u.sent[0].meta.voice_answers.items.length, 1);
+});
+for (const next of [null, 'fixture:changed-target']) test(`binding keeps captured surface when live target becomes ${next}`, async t => {
+  const u = fixture(t); await u.start(); await u.advance(1600); u.target(next);
+  u.doc.querySelector('[data-question-voice-done]').click(); await flush();
+  assert.equal(u.sent.length, 1); assert.equal(u.sent[0].streamId, 'fixture:assistant');
+  assert.equal(u.sent[0].meta.voice_answers.items[0].surface_stream_id, 'fixture:assistant');
+});
+test('Escape from reachable typed composer confirms deck discard and never interrupts a turn', async t => {
+  const h = await appFixture(t); const doc = h.dom.window.document; await h.start(); let interrupts = 0;
+  h.dom.window.PentacleChatStore.cancelCurrentTurn = () => interrupts++;
+  const input = doc.querySelector('.slot-chat-compose-input'); input.focus();
+  input.dispatchEvent(new h.dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  assert.equal(doc.querySelector('[data-question-voice-confirm]').hidden, false); assert.equal(interrupts, 0); assert.equal(h.tracks[0].readyState, 'live');
+});
+test('empty live deck tolerates pager arrows and Done discards after all daemon closures', async t => {
+  const h = await appFixture(t); const doc = h.dom.window.document; await h.start(); await h.advance(1600);
+  vm.runInContext(`for(let i=1;i<=3;i++) indexDurableQuestionNotification({ notification_id:'voice-'+i, producer:'agent_question.v1', state:'answered', question:{state:'answered'}}); renderSlotChat(0);`, h.context);
+  const portal = doc.querySelector('.desktop-question-portal'); assert.ok(portal);
+  portal.dispatchEvent(new h.dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+  assert.equal(doc.querySelector('[data-question-voice-progress]').textContent, '0 of 3 answered by voice');
+  doc.querySelector('[data-question-voice-done]').click(); await flush();
+  assert.equal(h.tracks[0].readyState, 'ended'); assert.equal(h.sendCalls.length, 0);
+});
+for (const interrupted of [false, true]) test(`finishing capture clears pending discard confirmation and held navigation (${interrupted})`, async t => {
+  const u = fixture(t); await u.start(); await u.advance(1600); let departures = 0;
+  u.ctrl.requestLeave(() => departures++);
+  if (interrupted) { u.interrupt(); await u.advance(10); } else u.doc.querySelector('[data-question-voice-done]').click();
+  await flush(); u.update();
+  assert.equal(u.doc.querySelector('[data-question-voice-confirm]').hidden, true);
+  assert.equal(departures, 0); assert.equal(u.sent.length, 1);
 });
