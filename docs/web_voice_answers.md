@@ -25,8 +25,9 @@ until it is covered, then **ANSWER RECORDED**.
 - Questions removed or closed during recording are omitted when Done freezes
   the selected set
 - Selected items follow their segment-start order, rather than pager order
-- At most the earliest 20 eligible covered items are bound; `n` stays the full
-  original durable count
+- The tracker caps the earliest 20 covered pages before removing pages the
+  daemon no longer lists. It never backfills: with 21 covered and the earliest
+  closed, 19 are bound. `n` stays the full original durable count
 
 Coverage is eligibility, never a question acknowledgement. Done, upload,
 transcription and a successful binding leave cards, pager dots and the sidebar
