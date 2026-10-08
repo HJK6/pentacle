@@ -843,6 +843,46 @@ def test_deadline_notice_states_the_release_outcome(spawnctl, expected):
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("outcome,expected", [
+    ({"error": "target_generation_changed"}, "not released, blocked (target_generation_changed)"),
+    ({"error": "boom: it broke", "error_code": "spawn_refused"}, "not released, blocked (spawn_refused)"),
+    ({"error": "boom: it broke"}, "not released, blocked (release_failed)"),
+])
+def test_blocked_outcome_names_the_persisted_code(outcome, expected):
+    from assistant_lane_rulings import AssistantLaneRulings
+    request = {"state": "approved_but_not_closed", "outcome_json": json.dumps(outcome)}
+    assert AssistantLaneRulings._unruled_outcome(request) == expected
+
+
+def test_authority_loss_notice_and_its_record_commit_together(monkeypatch):
+    """A failure between the notice and its epoch must not hide the next loss."""
+    import assistant_lane_rulings as module
+    real = module.coalesce_notice_conn
+    def insert_then_crash(conn, notice, report=None):
+        real(conn, notice, report)
+        raise RuntimeError("crash after enqueue")
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            _root, _advisor, server, _spawned = await _rulings_rig(store)
+            await _set_seat(store, "astra", pane_status="pane_dead")
+            monkeypatch.setattr(module, "coalesce_notice_conn", insert_then_crash)
+            await server.lane_rulings.tick()
+            assert await _loss_notices(store) == []
+            monkeypatch.setattr(module, "coalesce_notice_conn", real)
+            await server.lane_rulings.tick()
+            assert len(await _loss_notices(store)) == 1
+            await _set_seat(store, "astra", pane_status="pane_alive")
+            await server.lane_rulings.tick()
+            await _set_seat(store, "astra", pane_status="pane_dead")
+            await server.lane_rulings.tick()
+            assert len({n["notice_id"] for n in await _loss_notices(store)}) == 2
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
 def test_authority_loss_tells_the_front_desk_once_and_rearms_after_recovery():
     async def go():
         store = Store(":memory:")

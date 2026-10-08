@@ -13,7 +13,8 @@ seat whose state is merely unknown, as right after a daemon start, is not
 reported. The daemon does not rebind the authority; requests keep being
 released without a ruling until you rebind or replace it. The chat line and the
 deadline notice for a request that went unruled state what the release did:
-`admitted unruled`, or `not released, blocked (<code>)` when nothing launched. Successful unchanged-scope spawn
+`admitted unruled`, or `not released, blocked (<code>)` when nothing launched. The
+requester's structured result notice is unchanged and still follows. Successful unchanged-scope spawn
 approvals produce no front-desk tell. Tree-idle and child context-advisory notices
 are dropped; their facts remain available through `agent-orch list` and `inspect`.
 The daemon's own [external-work reminder](../services/chat-stream-v2/docs/external-work.md)

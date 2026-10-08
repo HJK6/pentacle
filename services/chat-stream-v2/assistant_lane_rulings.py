@@ -19,6 +19,7 @@ from typing import Any
 
 from store_assistant_binding import _seat_conn
 from store_lifecycle_authority import MAX_REASON, scrub
+from store_watch_wake import coalesce_notice_conn
 from _shared.spawn_objective import resolve_objective
 
 
@@ -650,7 +651,10 @@ class AssistantLaneRulings:
                 outcome = json.loads(request.get("outcome_json") or "{}")
             except ValueError:
                 outcome = {}
-            code = outcome.get("error_code") if isinstance(outcome, dict) else None
+            outcome = outcome if isinstance(outcome, dict) else {}
+            code = outcome.get("error_code")
+            if not code and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", str(outcome.get("error") or "")):
+                code = outcome["error"]  # fence refusals persist their code as the error itself
             code = re.sub(r"[^A-Za-z0-9_.-]", "", str(code or "release_failed"))[:80] or "release_failed"
             return f"not released, blocked ({code})"
         return None
@@ -754,10 +758,10 @@ class AssistantLaneRulings:
             return
         epoch = int(told.get("epoch") or 0) + 1
         notice_id = f"assistant-authority-lost:{stream_id}:{generation or '-'}:{epoch}"
-        await self.store.enqueue_outbound_notice(
+        notice = dict(
             notice_id=notice_id, kind="assistant_lane_ruling_result", dedupe_key=notice_id,
             recipient_stream_id=composite.config.direct_primary_stream_id,
-            tell_id=notice_id, source_stream_id=stream_id,
+            tell_id=notice_id, source_stream_id=stream_id, episode_id=None, created_at=None,
             body="[Assistant lane ruling] " + _canonical({
                 "event": "authority_unavailable", "authority": stream_id, "generation": generation,
                 "evidence": evidence,
@@ -766,8 +770,14 @@ class AssistantLaneRulings:
             }),
             metadata={"authority_generation": composite.config.direct_primary_generation},
         )
-        await self.store.put(_AUTHORITY_LOSS_KEY, _canonical({
-            "stream_id": stream_id, "generation": generation, "epoch": epoch, "open": True}))
+        record = _canonical({"stream_id": stream_id, "generation": generation, "epoch": epoch, "open": True})
+        def op(conn: sqlite3.Connection) -> None:
+            # One transaction: a crash cannot leave the notice without its epoch,
+            # which would make the next loss reuse this notice id and be deduped.
+            with conn:
+                coalesce_notice_conn(conn, notice, None)
+                conn.execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)", (_AUTHORITY_LOSS_KEY, record))
+        await self.store.submit(op)
 
     async def _notice_requester_unruled(self, request: dict[str, Any], outcome: str) -> None:
         """Deliver a deadline-passed notice to the requesting seat only.
