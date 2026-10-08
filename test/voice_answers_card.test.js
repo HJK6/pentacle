@@ -327,9 +327,9 @@ test('ordinary assistant-looking titles and a valid direct alias never authorize
     state.chatStream.sessions[0].title='Assistant Fixture'; state.chatStream.sessions[0].role='assistant';
     CONFIG.features.assistantRole='assistant';
     state.chatStream.sessions[0].session_generation='fixture-generation'; state.chatStream.sessions[0].online=true;
-    state.chatStream.sessions.push({stream_id:'hostc:composite-source',host:'hostc',session_name:'composite-source',session_kind:'assistant_composite'});
-    CONFIG.features.assistantDirectTarget={sourceStreamId:'hostc:composite-source',streamId:${JSON.stringify(STREAM)},generation:'fixture-generation'};
-    state.slots[0].assistantDirect={sourceId:'hostc:composite-source',targetId:${JSON.stringify(STREAM)},generation:'fixture-generation'};
+    state.chatStream.sessions.push({stream_id:'local:composite-source',host:'local',session_name:'composite-source',session_kind:'assistant_composite'});
+    CONFIG.features.assistantDirectTarget={sourceStreamId:'local:composite-source',streamId:${JSON.stringify(STREAM)},generation:'fixture-generation'};
+    state.slots[0].assistantDirect={sourceId:'local:composite-source',targetId:${JSON.stringify(STREAM)},generation:'fixture-generation'};
     renderSlotChat(0);
   `, h.context);
   assert.equal(vm.runInContext('!!assistantDirectForSlot(0).error', h.context), false, 'the alias itself is valid');
@@ -376,7 +376,7 @@ for (const change of ['missing', 'disconnected', 'different-composite']) test(`b
   await h.start(); await h.advance(1500); doc.querySelector('[data-question-voice-done]').click(); await flush();
   const mutation = change === 'missing' ? 'state.chatStream.sessions=[]'
     : change === 'disconnected' ? 'state.chatStream.connected=false'
-      : "state.chatStream.sessions[0].stream_id='hostc:another-composite'";
+      : "state.chatStream.sessions[0].stream_id='local:another-composite'";
   vm.runInContext(mutation, h.context);
   release({ ok: true, text: 'Synthetic answer' }); await flush();
   assert.equal(sends.length, 0); assert.equal(h.notificationResolveCalls.length, 0);
