@@ -97,11 +97,11 @@ agent-orch assistant rebind --target "$SUCCESSOR_STREAM" \
 agent-orch assistant binding
 ```
 
-Only a current binding owner, an authenticated handoff successor, or the narrowly configured exception can mutate it. Revision CAS, exact live generation/tuple and replay fences remain authoritative. `--clear` removes the durable override only when the startup env binding is still usable; it is not a way to repair a stale env pair. Use owner-authorized `agent-orch spawn --handoff` for continuation and inspect its returned successor/retirement evidence, then read back binding. A dead/stale owner requires the existing authenticated operator recovery/handoff journey; do not run the fresh bootstrap again over retained outputs. Inspect request receipts before retries, and keep automatic recovery off.
+Through `assistant rebind`, only a current binding owner, an authenticated handoff successor, or the narrowly configured exception can mutate it. The daemon-owned restore described under [Automatic restore of the bound seat](#automatic-restore-of-the-bound-seat) is a separate operation with its own checks. Revision CAS, exact live generation/tuple and replay fences remain authoritative. `--clear` removes the durable override only when the startup env binding is still usable; it is not a way to repair a stale env pair. Use owner-authorized `agent-orch spawn --handoff` for continuation and inspect its returned successor/retirement evidence, then read back binding. A dead/stale owner requires the existing authenticated operator recovery/handoff journey; do not run the fresh bootstrap again over retained outputs. Inspect request receipts before retries. The bound-seat restore operation refuses role-protected holders (`PENTACLE_ASSISTANT_ROLE` equal to the holder's role); use their documented recovery path. A bound seat that is not role-protected can be restored by the daemon, as described in [Automatic restore of the bound seat](#automatic-restore-of-the-bound-seat).
 
 ### Rebinding after a seat resume
 
-A host logout kills the bound seat's pane. `agent-orch spawn --resume <session-id>` reopens the same stream at a new generation, but the binding still names the old generation. Until it is rebound, composite inputs and tells are refused `assistant_direct_generation_conflict`, and the resumed seat's own rebind is refused `assistant_rebind_unauthorized` (it is neither the bound pair nor a handoff successor). The configured exception lets a resumed front desk rebind itself:
+A host logout kills the bound seat's pane. `agent-orch spawn --resume <session-id>` reopens the same stream at a new generation, but the binding still names the old generation. The steps below are the manual recipe; the daemon can do the resume and the rebind itself for an unprotected bound seat ([Automatic restore of the bound seat](#automatic-restore-of-the-bound-seat)). Until it is rebound, composite inputs and tells are refused `assistant_direct_generation_conflict`, and the resumed seat's own rebind is refused `assistant_rebind_unauthorized` (it is neither the bound pair nor a handoff successor). The configured exception lets a resumed front desk rebind itself:
 
 1. Set `PENTACLE_ASSISTANT_REBIND_AUTHORIZED_SPEC_IDS` to a JSON array naming one dedicated recovery work item that is attached only to front-desk seats.
 2. Before any planned logout, the front desk must be top-level, visibility `default`, and hold that work item with `spawn_explicit` or `handoff_inherited` provenance. A parented or hidden seat never qualifies, and resume keeps parent and visibility. Move a seat that does not qualify with `agent-orch spawn --handoff --visibility default --spec-id <recovery work item>`: a handoff successor has no parent. The successor then binds itself once with `assistant rebind`, authorized by its handoff proof.
@@ -110,6 +110,51 @@ A host logout kills the bound seat's pane. `agent-orch spawn --resume <session-i
 While the bound seat is dead, tells queue and are flushed after the rebind; a tell held by the front-desk digest counts as delivered. Inputs sent after the daemon has recorded the death are admitted, queued, and replayed to the new generation after the rebind. Known limitation: for about one reconcile interval after a daemon restart, before the death is recorded, an input can be dispatched to the dead generation and is then shown failed. The resumed front desk rebinds first; the operator resends inputs shown failed.
 
 This recipe is for an unprotected front-desk row. When `PENTACLE_ASSISTANT_ROLE` equals the seat's role, a dead row is preserved and `spawn --resume` is refused `resume_session_already_live`; use the authenticated handoff recovery above. A rebind never restores the lifecycle-manager grant. The journey is exercised on a disposable daemon by `PENTACLE_FORCE_LIVE_DAEMON=1 python3 -m pytest tests/soak/test_fd_resume_recovery.py` (in `services/chat-stream-v2`).
+
+### Automatic restore of the bound seat
+
+The daemon can bring a dead bound seat back itself: it resumes the same Claude session on the same stream and moves the binding to the resumed generation. It is off by default.
+
+**What it covers.** A direct-primary composite whose bound seat runs on the daemon's own host, is a Claude seat with a recorded session id, and is not role-protected. A role-protected holder, a router-backed composite, a seat on another host and a non-Claude seat are refused and reported as `ineligible`. It never restores the lifecycle-manager grant: after a restore the operator re-designates that as before.
+
+**Turning it on.** Set `PENTACLE_ASSISTANT_AUTO_RESTORE=1` in the daemon's environment and restart the daemon. Unset, empty or `0` leaves it off; any other value stops the daemon at startup. To hold it during planned maintenance, create the file `assistant-auto-restore.inhibit` beside the daemon database; remove the file to resume. The file stops new automatic work only: a resume that was already sent is still followed to its end, and an operator request is not held.
+
+**When it acts.** Only on proof that the bound seat is dead, checked when a restore starts and again before every attempt:
+
+- the bound row is still the generation the binding names, and is either open or was closed by the reconciler as a dead pane (a seat closed by an operator, by itself or by a handoff is left alone);
+- a fresh `tmux has-session` for the seat answers "no such session" (a timeout or transport error is not proof);
+- the pane process recorded for the seat is gone: `ps` reports no such process, or the pid now belongs to a process with a different start time.
+
+A daemon restart with the pane alive does nothing. If any check cannot be made the daemon waits and reports `waiting_evidence`; it does not guess.
+
+**What it does.** One restore is recorded per dead generation and survives daemon restarts. Each attempt resumes the seat with `--resume` under the daemon's own identity, keeping its stream id, role, visibility, parent and work items, and waits for the seat to be ready. The binding then moves by compare-and-set: if it is still the pair and revision the restore started from, it becomes the resumed generation at revision + 1, with a row in the rebind audit under the actor `daemon:assistant-restore`. If someone rebound the assistant in the meantime, the restore does not change the newer binding and ends as `superseded`; any seat it already resumed stays open and unbound, like the previous holder after any rebind. A rebind made after a successful restore bind is an ordinary hot rebind and remains authoritative: the restore's notice and its revision describe what the restore did, not who holds the assistant now. After a successful bind, queued tells and inputs are delivered and the seat is sent one notice that it was restored, as an ordinary tell (the front-desk digest may hold it like any other).
+
+There are at most four attempts, 30 seconds, 2 minutes and 10 minutes apart. After the fourth failure the restore is `degraded` and stays that way until an operator retries it. A daemon restart does not refill the attempts. An attempt whose outcome is still unknown after 10 minutes also ends the restore as `degraded`; a second attempt is never started on top of an unresolved one. A provider or authentication failure may show up as a launch that fails outright or as an attempt that never resolves; either way the bounded path above ends the restore as `degraded`. The journeys below prove the handling of a failed launch and of a stalled start with a stand-in provider, not real provider authentication.
+
+**Reading the state.** `agent-orch assistant binding` (the `assistant.binding` request) returns a `restore` object:
+
+| Field | Meaning |
+|---|---|
+| `state` | `disabled`, `suspended`, `healthy`, `ineligible`, `waiting_evidence`, `pending`, `spawning`, `spawned`, `bound`, `restored`, `superseded` or `degraded` |
+| `reason` | why, when there is one: for example `holder_revived`, `pane_probe_unknown`, `process_probe_unknown`, `binding_moved`, `attempt_unresolved`, or the spawn error of the last failed attempt |
+| `episode_id`, `trigger` | the restore record and whether it was started automatically (`auto`) or by an operator (`manual`) |
+| `attempt_seq`, `budget_used`, `max_attempts` | attempts ever started, attempts used in the current round, and the limit of 4 |
+| `next_attempt_at` | when the next attempt may start |
+| `predecessor_generation` | the dead generation being restored |
+| `updated_at` | when the record last changed |
+
+`restored` is shown while the binding is the one that restore produced. Connected clients also receive an `assistant.restore.changed` event on each change, and the daemon logs one warning line. No shipped client draws this state yet; read it through the request above.
+
+**Operator request.** An authenticated operator can send `assistant.restore` with a `request_id` and `action`:
+
+- `restore` starts a restore now if the seat is proven dead, also with the automatic option off. If one is already running it returns its state.
+- `retry` gives a `degraded` restore four new attempts. Earlier attempts stay in the audit.
+
+Refusals: `assistant_restore_unauthorized` without operator authority; `bad_request` for a missing `request_id`, one longer than 200 characters, or another `action`; `assistant_restore_not_degraded` when `retry` finds no `degraded` restore for the current binding; `assistant_restore_attempt_unresolved` when the restore degraded with `attempt_unresolved` and that attempt's resume request has not yet ended as failed.
+
+Repeating a `request_id` returns `duplicate: true` and does nothing. There is no `agent-orch` subcommand or client button for this request yet.
+
+**Records.** `v2_assistant_restore_episode` holds one row per restore and `v2_assistant_restore_audit` one row per step (created, each attempt and its outcome, bound, routing completed, exhausted, superseded, budget reset, operator request). The journeys are exercised on a disposable daemon by `PENTACLE_FORCE_LIVE_DAEMON=1 python3 -m pytest tests/soak/test_assistant_auto_restore.py` (in `services/chat-stream-v2`), with a stand-in provider. Before enabling this on an installation, the front-desk enablement gate requires one real-provider restore on a disposable daemon; the journeys above use a stand-in provider and do not establish that proof. The option stays off by default, no client button exists, and the state is readable through the API only.
 
 For reproducible installation evidence, run [the portable first-turn gate](developer_onboarding.md#7-run-validation). It exercises the actual bootstrap, daemon, tmux, native-format counterpart's own candidate publish CLI and real browser, including duplicate publish, stale-generation refusal and restart readback. It does not establish paid-provider login, mobile hardware, microphone or private runtime activation.
 

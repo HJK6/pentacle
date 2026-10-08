@@ -41,6 +41,7 @@ if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide module, never a
 
 from _shared.spawn_objective import objective_error, objective_required_for, resolve_objective
 
+import assistant_restore
 import qa_dispatch
 import store_lifecycle_authority as lifecycle_authority
 
@@ -1850,6 +1851,11 @@ class SpawnCtl:
         # only ever close the row THIS spawn created — never a newer same-name
         # lifecycle that legitimately reused the name after a confirmed close
         # (the live-row VANISH class: a stray close landing on a live successor).
+        # The daemon's own assistant restore names the generation of the seat
+        # it resumes, so it can later recognise that exact seat as its own.
+        restore_generation = assistant_restore.service_session_generation(msg)
+        if restore_generation:
+            open_flds["session_generation"] = restore_generation
         open_flds.setdefault("session_generation", uuid.uuid4().hex)
         open_flds.setdefault("bootstrap_state", "starting")
         spawn_generation = str(open_flds["session_generation"])
