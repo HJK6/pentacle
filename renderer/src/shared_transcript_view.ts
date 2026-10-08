@@ -519,7 +519,16 @@ function renderTranscriptItemBodyHtml(
     const rowClass = sendState ? ` is-${sendState}` : '';
     const receipt = sendState === 'cancelled' || sendState === 'failed' || sendState === 'indeterminate'
       ? sendState : item.receiptCaption || (item.providerQueued ? 'queued' : item.queuedWhileWorking && (sendState === 'queued' || sendState === 'sending') ? 'queued' : sendState);
-    const status = receipt ? renderUserSendStatus(receipt, item.optimisticId) : '';
+    const invalidVoiceAnswers = item.voiceAnswersInvalid === true && sendState === 'failed';
+    const droppedVoiceAnswers = item.voiceAnswersStatus?.state === 'dropped';
+    const status = receipt && !invalidVoiceAnswers ? renderUserSendStatus(receipt, item.optimisticId) : '';
+    const plainVoice = invalidVoiceAnswers && item.optimisticId
+      ? `<button type="button" data-question-voice-plain data-optimistic-id="${escapeHtml(item.optimisticId)}">Send as plain voice note</button>` : '';
+    const voiceAnswersStatus = invalidVoiceAnswers || droppedVoiceAnswers
+      ? `<div class="slot-chat-send-status${invalidVoiceAnswers ? ' is-failed' : ''}"><span data-voice-answers-status role="status">Couldn't attach questions</span>${plainVoice}</div>` : '';
+    const count = item.voiceAnswersItemCount;
+    const voiceAnswersCount = !item.text.trim() && !droppedVoiceAnswers && item.voiceAnswersInvalid !== true && typeof count === 'number' && Number.isSafeInteger(count) && count > 0
+      ? `<div class="slot-chat-user-bubble" data-voice-answers-count role="status">ANSWERS ${count} QUESTIONS</div>` : '';
     // Progress and latency are shown by the slot working indicator; only a
     // pending operator action or a delivery failure is labelled per message.
     const activity = item.assistantActivity;
@@ -531,7 +540,7 @@ function renderTranscriptItemBodyHtml(
     const seconds = voice ? Math.floor(voice.duration_s) : 0;
     const duration = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
     const voiceCaption = voice && item.text.trim() ? `<div class="slot-chat-voice-caption" aria-label="Transcribed from voice, ${duration}"><svg class="voice-mic-glyph" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span>${duration}</span></div>` : '';
-    return `<article class="slot-chat-row is-user${rowClass}" aria-label="User message" data-copy-kind="message">${attachments}${item.text.trim() ? `<div class="slot-chat-user-bubble">${renderAnswerBody(item.text)}</div>${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}` : ''}${voiceCaption}${status}${activityStatus}</article>`;
+    return `<article class="slot-chat-row is-user${rowClass}" aria-label="User message" data-copy-kind="message">${attachments}${item.text.trim() ? `<div class="slot-chat-user-bubble">${renderAnswerBody(item.text)}</div>${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}` : voiceAnswersCount}${voiceCaption}${status}${voiceAnswersStatus}${activityStatus}</article>`;
   }
   if (rule === 'terminal:divider' || rule === 'activity:turn-summary') {
     if (!shouldShowTurnDuration(options)) return '';
