@@ -5,8 +5,11 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import Any
+
+import store_lifecycle_authority as lifecycle_authority
 
 
 ASSISTANT_BINDING_DDL = """
@@ -160,9 +163,29 @@ CREATE TABLE IF NOT EXISTS v2_assistant_restore_episode (
     last_generation TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    grant_stream_id TEXT,
+    grant_generation TEXT,
+    grant_revision INTEGER,
+    grant_carry TEXT,
     UNIQUE(name, stream_id, generation)
 )
 """
+#: The lifecycle-manager grant an automatic episode found on its dead seat
+#: (stream, generation, revision), and what the bind did with it.
+RESTORE_GRANT_COLUMNS = (
+    ("grant_stream_id", "TEXT"), ("grant_generation", "TEXT"),
+    ("grant_revision", "INTEGER"), ("grant_carry", "TEXT"),
+)
+
+
+def migrate_restore_episode_grant_columns(conn: sqlite3.Connection) -> None:
+    """Add the grant columns to an episode table created before they existed."""
+    present = {row[1] for row in conn.execute("PRAGMA table_info(v2_assistant_restore_episode)")}
+    for column, kind in RESTORE_GRANT_COLUMNS:
+        if column not in present:
+            conn.execute(f"ALTER TABLE v2_assistant_restore_episode ADD COLUMN {column} {kind}")
+
+
 ASSISTANT_RESTORE_ACTIVE_INDEX_DDL = (
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_assistant_restore_active "
     "ON v2_assistant_restore_episode(name) "
@@ -187,6 +210,59 @@ ASSISTANT_RESTORE_AUDIT_REQUEST_INDEX_DDL = (
 RESTORE_ACTIVE_STATES = ("pending", "spawning", "spawned", "bound")
 RESTORE_TERMINAL_STATES = ("restored", "superseded", "degraded")
 RESTORE_ACTOR = "daemon:assistant-restore"
+
+
+def _carry_restore_grant(conn: sqlite3.Connection, episode: dict[str, Any], request_id: str) -> str:
+    """Move the lifecycle-manager grant with an automatically restored seat.
+
+    Runs inside the bind transaction, after the binding moved. The grant moves
+    only when this episode is still the daemon's own automatic one, recorded
+    the grant on its dead seat when it was created, and that exact grant
+    (stream, generation, revision) is still current. Anything else leaves the
+    grant row untouched and the restore chat-only. Returns ``applied`` or
+    ``skipped:<reason>``.
+    """
+    if episode["trigger"] != "auto":
+        return "skipped:not_automatic"
+    captured = (episode.get("grant_stream_id"), episode.get("grant_generation"), episode.get("grant_revision"))
+    if (None in captured or captured[0] != episode["stream_id"]
+            or captured[1] != episode["generation"]):
+        return "skipped:no_grant"
+    stream_id, old_generation, old_revision = str(captured[0]), str(captured[1]), int(captured[2])
+    new_generation = str(episode["last_generation"])
+    base = dict(action="restore_continuity", actor_kind="daemon", actor_identity=RESTORE_ACTOR,
+                actor_generation=old_generation, target_stream_id=stream_id,
+                target_generation=new_generation, old_revision=old_revision,
+                prior_stream_id=stream_id, prior_generation=old_generation,
+                reason=f"automatic assistant restore episode {int(episode['episode_id'])}",
+                request_id=request_id)
+    grant = lifecycle_authority.current(conn)
+    if (grant["stream_id"], grant["session_generation"], grant["revision"]) != (
+            stream_id, old_generation, old_revision):
+        lifecycle_authority.audit(conn, **base, result="refused", refusal_code="grant_changed")
+        return "skipped:grant_changed"
+    # The restore never resumes a role-protected seat, so only `lead` qualifies.
+    code = lifecycle_authority.eligible(conn, stream_id, new_generation, "")
+    if code:
+        lifecycle_authority.audit(conn, **base, result="refused", refusal_code=code)
+        return f"skipped:{code}"
+    # The operator consent that designated this holder stays on the record.
+    consent = conn.execute(
+        "SELECT consent_id FROM v2_lifecycle_authority_audit WHERE result='applied' "
+        "AND new_revision=? AND target_stream_id=? AND target_generation=? ORDER BY id DESC LIMIT 1",
+        (old_revision, stream_id, old_generation),
+    ).fetchone()
+    moved = conn.execute(
+        "UPDATE v2_lifecycle_manager SET session_generation=?, revision=?, updated_at=? "
+        "WHERE id=1 AND stream_id=? AND session_generation=? AND revision=?",
+        (new_generation, old_revision + 1, time.time(), stream_id, old_generation, old_revision),
+    )
+    if moved.rowcount != 1:
+        lifecycle_authority.audit(conn, **base, result="refused", refusal_code="grant_changed")
+        return "skipped:grant_changed"
+    lifecycle_authority.audit(conn, **base, new_revision=old_revision + 1, result="applied",
+                              consent_id=consent[0] if consent else None)
+    return "applied"
 _STREAM_RE = re.compile(r"[a-z][a-z0-9_-]*:[A-Za-z0-9_.:-]+\Z")
 _GENERATION_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
@@ -606,14 +682,22 @@ class AssistantBindingStoreMixin:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 stamp = _stamp()
+                # Only the daemon's own automatic episode records the grant its
+                # dead seat holds; that record is what the bind may later carry.
+                grant = lifecycle_authority.current(conn)
+                held = (trigger == "auto" and grant["stream_id"] == stream_id
+                        and grant["session_generation"] == generation)
+                captured = ((stream_id, generation, int(grant["revision"])) if held
+                            else (None, None, None))
                 try:
                     cursor = conn.execute(
                         "INSERT OR IGNORE INTO v2_assistant_restore_episode"
                         "(name,stream_id,generation,expected_revision,claude_session_id,provider,"
-                        "model,effort,trigger,state,last_generation,next_attempt_at,created_at,updated_at) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)",
+                        "model,effort,trigger,state,last_generation,next_attempt_at,created_at,updated_at,"
+                        "grant_stream_id,grant_generation,grant_revision) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?)",
                         (name, stream_id, generation, int(expected_revision), claude_session_id,
-                         provider, model, effort, trigger, generation, stamp, stamp, stamp),
+                         provider, model, effort, trigger, generation, stamp, stamp, stamp, *captured),
                     )
                 except sqlite3.IntegrityError:
                     # Another non-terminal episode already holds this name.
@@ -624,7 +708,8 @@ class AssistantBindingStoreMixin:
                     return None
                 episode_id = int(cursor.lastrowid)
                 detail = {"stream_id": stream_id, "generation": generation,
-                          "expected_revision": int(expected_revision), "trigger": trigger}
+                          "expected_revision": int(expected_revision), "trigger": trigger,
+                          "grant_revision": captured[2]}
                 conn.execute(
                     "INSERT INTO v2_assistant_restore_audit"
                     "(episode_id,attempt_seq,event,outcome,detail_json,request_id,created_at) "
@@ -771,17 +856,19 @@ class AssistantBindingStoreMixin:
                     sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
                 def finish(state: str, reason: str | None, event: str, outcome: str,
-                           new: dict[str, Any] | None, receipt: dict[str, Any]) -> dict[str, Any]:
+                           new: dict[str, Any] | None, receipt: dict[str, Any],
+                           grant_carry: str | None = None) -> dict[str, Any]:
                     conn.execute(
-                        "UPDATE v2_assistant_restore_episode SET state=?,reason=?,updated_at=? "
-                        "WHERE episode_id=?", (state, reason, stamp, episode_id),
+                        "UPDATE v2_assistant_restore_episode SET state=?,reason=?,grant_carry=?,updated_at=? "
+                        "WHERE episode_id=?", (state, reason, grant_carry, stamp, episode_id),
                     )
                     conn.execute(
                         "INSERT INTO v2_assistant_restore_audit"
                         "(episode_id,attempt_seq,event,outcome,detail_json,request_id,created_at) "
                         "VALUES(?,?,?,?,?,NULL,?)",
                         (episode_id, int(episode["attempt_seq"]), event, outcome,
-                         json.dumps({"old_binding": old, "new_binding": new}), stamp),
+                         json.dumps({"old_binding": old, "new_binding": new,
+                                     **({"grant_carry": grant_carry} if grant_carry else {})}), stamp),
                     )
                     updated = dict(conn.execute(
                         "SELECT * FROM v2_assistant_restore_episode WHERE episode_id=?", (episode_id,),
@@ -837,8 +924,10 @@ class AssistantBindingStoreMixin:
                 receipt = {"type": "assistant.rebind.ok", "request_id": request_id,
                            "old_binding": old, "new_binding": new, "duplicate": False}
                 rebind_audit("ok", new, receipt)
+                grant_carry = _carry_restore_grant(conn, episode, request_id)
                 result = finish("bound", None, "bound", "ok", new,
-                                {"outcome": "ok", "duplicate": False, "receipt": receipt})
+                                {"outcome": "ok", "duplicate": False, "receipt": receipt},
+                                grant_carry=grant_carry)
                 conn.commit()
                 return result
             except BaseException:
