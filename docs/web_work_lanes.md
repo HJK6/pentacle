@@ -2,6 +2,10 @@
 
 The web/desktop renderer shows the daemon's first-class work lanes. The daemon owns lane identity, presented state (`active`, `paused`, `blocked`), count, order and tap target; the renderer only presents them. The wire contract and the shared fixture are in [work-lanes.md](../services/chat-stream-v2/docs/work-lanes.md) and `pentacle-chat-core/tests/fixtures/work-lanes-inventory.json`.
 
+## Status: the sidebar view is off
+
+The sidebar lanes view (the header lane count and the **Lanes (N)** section) is switched off by default, pending a rebuild. The renderer still ingests lane frames and the daemon, wire contract and lane-update cards are unchanged; nothing in the sidebar shows lanes, so the tap routes below are unreachable. `workLanesSidebarEnabled()` in `renderer/app.js` turns the view on only when `window.__PENTACLE_WORK_LANES_SIDEBAR__ === true`, which the tests set. The rest of this page describes the view when it is on.
+
 ## What the operator sees
 
 - **Header.** `#stats` leads with the open-lane count: `4 lanes | 6 sessions | 1 need answer | 2 working`. The lane number is the daemon's `counts.open` (active + paused + blocked), never a session count. Until a lane-aware daemon sends its first inventory, the line is the previous session-only line. `done` lanes are never counted or listed.
