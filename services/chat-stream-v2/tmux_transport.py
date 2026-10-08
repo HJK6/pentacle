@@ -182,6 +182,18 @@ def _stage_timeout(nbytes: int) -> float:
     return min(STAGE_TIMEOUT_CEILING_S, scaled)
 
 
+# The daemon's own assistant configuration. tmux takes its global environment
+# from the first client that starts the server and every pane inherits it, so
+# these must not travel with the daemon's local tmux calls.
+_ASSISTANT_CONFIG_PREFIX = "PENTACLE_ASSISTANT_"
+
+
+def _local_tmux_env() -> dict[str, str]:
+    """A copy of the daemon environment without its assistant configuration."""
+    return {key: value for key, value in os.environ.items()
+            if not key.startswith(_ASSISTANT_CONFIG_PREFIX)}
+
+
 class Tmux:
     """Every tmux call is an `exec` off the event loop — never a shell string,
     never a blocking subprocess (event-loop rule 1).
@@ -217,6 +229,8 @@ class Tmux:
                 *self._argv(args),
                 stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                # Remote calls run ssh, whose environment never reaches the peer's tmux.
+                env=_local_tmux_env() if self.ssh_target is None else None,
             )
             out, _ = await asyncio.wait_for(proc.communicate(stdin), timeout=timeout)
         except asyncio.TimeoutError as exc:
