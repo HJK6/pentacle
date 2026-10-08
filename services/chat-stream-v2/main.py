@@ -691,6 +691,8 @@ async def run(args: argparse.Namespace) -> int:
     )
     server.watch_wake = watch_wake
     server.handlers.update(watch_wake.wire_handlers())
+    from external_work import install as install_external_work
+    install_external_work(server, store, sessions, outbound, assistant_composite)
 
     async def reconcile_callbacks():
         # The alarm runs before tick so a late wake fired in this pass still alerts.

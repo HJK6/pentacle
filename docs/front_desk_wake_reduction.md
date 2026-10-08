@@ -8,6 +8,8 @@ rejected or revised lane rulings, failed spawn releases, routed external email,
 and the desk's timed wakes arrive immediately. Successful unchanged-scope spawn
 approvals produce no front-desk tell. Tree-idle and child context-advisory notices
 are dropped; their facts remain available through `agent-orch list` and `inspect`.
+The daemon's own [external-work reminder](../services/chat-stream-v2/docs/external-work.md)
+also arrives immediately; a wire client cannot mint one.
 
 Other inputs, including START/END, receipts, concurs and watched-child inactivity,
 are held in the existing durable outbound-notice store. The oldest held item's

@@ -57,6 +57,7 @@ from store_qa import QaStoreMixin
 from store_exchange import ExchangeStoreMixin
 
 from store_work_lanes import _WorkLanesStoreMixin, ensure_work_lane_schema
+from store_external_work import EXTERNAL_WORK_DDL, _ExternalWorkStoreMixin
 from store_routing import (
     ASSISTANT_COMPOSITE_LANES_DDL,
     ASSISTANT_COMPOSITE_OPERATIONS_DDL,
@@ -1372,7 +1373,7 @@ def _iso_epoch(value: object) -> float | None:
         return None
 
 
-class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
+class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000) -> None:
@@ -1619,6 +1620,8 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, QaStor
                     conn.execute("RELEASE assistant_operation_constraint")
                     raise
             ensure_work_lane_schema(conn)
+            for ddl in EXTERNAL_WORK_DDL:
+                conn.execute(ddl)
             conn.execute(REPORTS_DDL)
             conn.execute(REPORTS_INDEX_DDL)
             conn.execute(AWAITERS_DDL)

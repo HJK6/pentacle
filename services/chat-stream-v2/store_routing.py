@@ -2464,15 +2464,18 @@ class _RoutingStoreMixin:
         error: str,
         next_attempt_at: float,
         next_action: str,
+        count_attempt: bool = True,
     ) -> bool:
         def _op(conn: sqlite3.Connection) -> bool:
+            # A deferred claim (nothing sent) gives its attempt back.
             cur = conn.execute(
                 """UPDATE v2_outbound_notices
                    SET last_error=?, next_attempt_at=?, next_action=?,
-                       lease_owner=NULL, lease_until=NULL
+                       lease_owner=NULL, lease_until=NULL, attempts=MAX(attempts-?, 0)
                    WHERE notice_id=? AND lease_owner=?
                      AND delivered_at IS NULL AND terminal_at IS NULL""",
-                (error[:400], float(next_attempt_at), next_action[:400], notice_id, owner),
+                (error[:400], float(next_attempt_at), next_action[:400], 0 if count_attempt else 1,
+                 notice_id, owner),
             )
             conn.commit()
             return cur.rowcount == 1
