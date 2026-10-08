@@ -47,6 +47,8 @@ import store_lifecycle_authority as lifecycle_authority
 from store_assistant_binding import (
     ASSISTANT_BINDING_DDL, ASSISTANT_REBIND_AUDIT_DDL,
     ASSISTANT_REBIND_AUDIT_INDEX_DDL, ASSISTANT_HANDOFF_PROOF_DDL,
+    ASSISTANT_RESTORE_EPISODE_DDL, ASSISTANT_RESTORE_ACTIVE_INDEX_DDL,
+    ASSISTANT_RESTORE_AUDIT_DDL, ASSISTANT_RESTORE_AUDIT_REQUEST_INDEX_DDL,
     ASSISTANT_COMPOSITE_TELL_QUEUE_DDL, SCOPED_OWNERSHIP_DDL,
     AssistantBindingStoreMixin, _binding_conn, migrate_binding_to_named,
 )
@@ -1528,6 +1530,10 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _Exter
             conn.execute(ASSISTANT_REBIND_AUDIT_DDL)
             conn.execute(ASSISTANT_REBIND_AUDIT_INDEX_DDL)
             conn.execute(ASSISTANT_HANDOFF_PROOF_DDL)
+            conn.execute(ASSISTANT_RESTORE_EPISODE_DDL)
+            conn.execute(ASSISTANT_RESTORE_ACTIVE_INDEX_DDL)
+            conn.execute(ASSISTANT_RESTORE_AUDIT_DDL)
+            conn.execute(ASSISTANT_RESTORE_AUDIT_REQUEST_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_TELL_QUEUE_DDL)
             conn.execute(SCOPED_OWNERSHIP_DDL)
             conn.execute(RULING_REQUESTS_DDL)

@@ -253,6 +253,9 @@ def _spec_catalog(sessions: Sessions) -> object | None:
 
 
 async def run(args: argparse.Namespace) -> int:
+    # A malformed value fails startup before anything is opened.
+    from assistant_restore import parse_auto_restore_flag
+    auto_restore_enabled = parse_auto_restore_flag(os.environ)
     store = Store(args.db)
     lifecycle = DaemonLifecycle(store, host=args.local_host)
     tmux = Tmux(args.tmux_bin)
@@ -696,7 +699,10 @@ async def run(args: argparse.Namespace) -> int:
 
     async def reconcile_callbacks():
         # The alarm runs before tick so a late wake fired in this pass still alerts.
-        await run_reconcile_callbacks(event_push.check_pin_drift, watch_wake.missed_wake_alarm, watch_wake.tick)
+        callbacks = [event_push.check_pin_drift, watch_wake.missed_wake_alarm, watch_wake.tick]
+        if server.assistant_restore is not None:
+            callbacks.append(server.assistant_restore.tick)
+        await run_reconcile_callbacks(*callbacks)
 
     reconciler = SessionReconciler(
         sessions,
@@ -743,6 +749,40 @@ async def run(args: argparse.Namespace) -> int:
         )
         reconciler.on_protected_dead = daff_recovery.on_dead
         server.daff_recovery = daff_recovery
+
+    # Bound-seat restore for the primary direct-primary composite.  The owner
+    # always exists so an operator `assistant.restore` works; it creates
+    # episodes on its own only when PENTACLE_ASSISTANT_AUTO_RESTORE=1.
+    if assistant_composite.config.enabled:
+        import assistant_restore as _assistant_restore
+
+        async def _deliver_restore_notice(composite, text: str, tell_id: str) -> None:
+            from sessions import VerbError as _VerbError
+            try:
+                delivered = await server._deliver_composite_tell(
+                    composite, composite.config.stream_id, _assistant_restore.NOTICE_FROM,
+                    text, tell_id, "",
+                )
+            except _VerbError:
+                delivered = None
+            if delivered is None:
+                await store.enqueue_composite_tell(
+                    name=composite.config.name, tell_id=tell_id,
+                    from_stream_id=_assistant_restore.NOTICE_FROM, body=text, request_id="",
+                )
+
+        _restore_fault, _restore_ps = _assistant_restore.test_hooks(os.environ)
+        server.assistant_restore = _assistant_restore.AssistantRestore(
+            store=store, sessions=sessions, spawnctl=spawnctl, composite=assistant_composite,
+            local_host=args.local_host, auto_enabled=auto_restore_enabled,
+            inhibit_path=(
+                Path(args.db).with_name(_assistant_restore.INHIBIT_FILE_NAME)
+                if args.db != ":memory:" else None
+            ),
+            flush_composite_tells=server._flush_composite_tells,
+            deliver_notice=_deliver_restore_notice, broadcast=server.broadcast,
+            ps_runner=_restore_ps, fault=_restore_fault,
+        )
 
     usage_state_path = (
         Path(args.db).with_name("usage_state.json")

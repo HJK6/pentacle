@@ -136,6 +136,57 @@ CREATE TABLE IF NOT EXISTS v2_assistant_direct_handoff_proofs (
     PRIMARY KEY(successor_stream_id, successor_generation)
 )
 """
+ASSISTANT_RESTORE_EPISODE_DDL = """
+CREATE TABLE IF NOT EXISTS v2_assistant_restore_episode (
+    episode_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    stream_id TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    expected_revision INTEGER NOT NULL,
+    claude_session_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT,
+    effort TEXT,
+    trigger TEXT NOT NULL,
+    state TEXT NOT NULL,
+    reason TEXT,
+    attempt_seq INTEGER NOT NULL DEFAULT 0,
+    budget_epoch INTEGER NOT NULL DEFAULT 1,
+    budget_used INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    spawn_key TEXT,
+    attempt_generation TEXT,
+    attempt_started_at TEXT,
+    last_generation TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(name, stream_id, generation)
+)
+"""
+ASSISTANT_RESTORE_ACTIVE_INDEX_DDL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_assistant_restore_active "
+    "ON v2_assistant_restore_episode(name) "
+    "WHERE state IN ('pending','spawning','spawned','bound')"
+)
+ASSISTANT_RESTORE_AUDIT_DDL = """
+CREATE TABLE IF NOT EXISTS v2_assistant_restore_audit (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id INTEGER,
+    attempt_seq INTEGER NOT NULL DEFAULT 0,
+    event TEXT NOT NULL,
+    outcome TEXT,
+    detail_json TEXT,
+    request_id TEXT,
+    created_at TEXT NOT NULL
+)
+"""
+ASSISTANT_RESTORE_AUDIT_REQUEST_INDEX_DDL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_assistant_restore_audit_request "
+    "ON v2_assistant_restore_audit(request_id) WHERE request_id IS NOT NULL"
+)
+RESTORE_ACTIVE_STATES = ("pending", "spawning", "spawned", "bound")
+RESTORE_TERMINAL_STATES = ("restored", "superseded", "degraded")
+RESTORE_ACTOR = "daemon:assistant-restore"
 _STREAM_RE = re.compile(r"[a-z][a-z0-9_-]*:[A-Za-z0-9_.:-]+\Z")
 _GENERATION_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
@@ -465,6 +516,378 @@ class AssistantBindingStoreMixin:
                 )
                 conn.commit()
                 return {"stream_id": target_stream_id, "generation": generation, "revision": revision}
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
+    # -- daemon-owned restore of the bound seat (assistant_restore.py) --------
+    # Every episode transition and its audit row share one transaction, and
+    # every transition is a compare-and-set on (state, attempt_seq).
+
+    async def restore_active_episode(self, *, name: str) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT * FROM v2_assistant_restore_episode WHERE name=? "
+                "AND state IN ('pending','spawning','spawned','bound')", (name,),
+            ).fetchone()
+            return dict(row) if row else None
+        return await self.submit(_op)
+
+    async def restore_episode(self, *, episode_id: int) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT * FROM v2_assistant_restore_episode WHERE episode_id=?", (episode_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        return await self.submit(_op)
+
+    async def restore_episode_for_binding(
+        self, *, name: str, stream_id: str, generation: str,
+    ) -> dict[str, Any] | None:
+        """The episode about this binding: the one for its dead generation, or
+        the restored one whose resume produced it."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT * FROM v2_assistant_restore_episode WHERE name=? AND stream_id=? "
+                "AND (generation=? OR (state='restored' AND last_generation=?)) "
+                "ORDER BY episode_id DESC LIMIT 1", (name, stream_id, generation, generation),
+            ).fetchone()
+            return dict(row) if row else None
+        return await self.submit(_op)
+
+    async def restore_audit_rows(self, *, episode_id: int | None = None) -> list[dict[str, Any]]:
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            if episode_id is None:
+                rows = conn.execute("SELECT * FROM v2_assistant_restore_audit ORDER BY audit_id")
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM v2_assistant_restore_audit WHERE episode_id=? ORDER BY audit_id",
+                    (episode_id,),
+                )
+            return [dict(r) for r in rows.fetchall()]
+        return await self.submit(_op)
+
+    async def restore_request_receipt(self, *, request_id: str) -> dict[str, Any] | None:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT detail_json FROM v2_assistant_restore_audit WHERE request_id=?", (request_id,),
+            ).fetchone()
+            return json.loads(row["detail_json"] or "{}") if row else None
+        return await self.submit(_op)
+
+    async def restore_record_request(
+        self, *, request_id: str, episode_id: int | None, outcome: str, detail: dict[str, Any],
+    ) -> bool:
+        """Record an operator request that changed nothing; False on a replay."""
+        def _op(conn: sqlite3.Connection) -> bool:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                changed = conn.execute(
+                    "INSERT OR IGNORE INTO v2_assistant_restore_audit"
+                    "(episode_id,attempt_seq,event,outcome,detail_json,request_id,created_at) "
+                    "VALUES(?,0,'manual_request',?,?,?,?)",
+                    (episode_id, outcome, json.dumps(detail), request_id, _stamp()),
+                ).rowcount
+                conn.commit()
+                return bool(changed)
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
+    async def restore_create_episode(
+        self, *, name: str, stream_id: str, generation: str, expected_revision: int,
+        claude_session_id: str, provider: str, model: str, effort: str, trigger: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Insert one pending episode with its audit row; None when one exists."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                stamp = _stamp()
+                try:
+                    cursor = conn.execute(
+                        "INSERT OR IGNORE INTO v2_assistant_restore_episode"
+                        "(name,stream_id,generation,expected_revision,claude_session_id,provider,"
+                        "model,effort,trigger,state,last_generation,next_attempt_at,created_at,updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)",
+                        (name, stream_id, generation, int(expected_revision), claude_session_id,
+                         provider, model, effort, trigger, generation, stamp, stamp, stamp),
+                    )
+                except sqlite3.IntegrityError:
+                    # Another non-terminal episode already holds this name.
+                    conn.rollback()
+                    return None
+                if not cursor.rowcount:
+                    conn.rollback()
+                    return None
+                episode_id = int(cursor.lastrowid)
+                detail = {"stream_id": stream_id, "generation": generation,
+                          "expected_revision": int(expected_revision), "trigger": trigger}
+                conn.execute(
+                    "INSERT INTO v2_assistant_restore_audit"
+                    "(episode_id,attempt_seq,event,outcome,detail_json,request_id,created_at) "
+                    "VALUES(?,0,'episode_created',?,?,?,?)",
+                    (episode_id, trigger, json.dumps(detail), None, stamp),
+                )
+                if request_id:
+                    conn.execute(
+                        "INSERT INTO v2_assistant_restore_audit"
+                        "(episode_id,attempt_seq,event,outcome,detail_json,request_id,created_at) "
+                        "VALUES(?,0,'manual_request','restore',?,?,?)",
+                        (episode_id, json.dumps({"action": "restore", "episode_id": episode_id,
+                                                 "effect": "episode_created"}), request_id, stamp),
+                    )
+                row = conn.execute(
+                    "SELECT * FROM v2_assistant_restore_episode WHERE episode_id=?", (episode_id,),
+                ).fetchone()
+                conn.commit()
+                return dict(row)
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
+    async def restore_transition(
+        self, *, episode_id: int, expect_state: str, expect_attempt_seq: int,
+        fields: dict[str, Any], audits: list[tuple[str, str | None, dict[str, Any]]],
+        request_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Compare-and-set one episode transition with its audit rows.
+
+        Returns the updated episode, or None when another actor moved it (the
+        state or attempt sequence no longer match) and nothing was written.
+        """
+        allowed = {
+            "state", "reason", "attempt_seq", "budget_epoch", "budget_used", "next_attempt_at",
+            "spawn_key", "attempt_generation", "attempt_started_at", "last_generation", "trigger",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"restore_transition_fields_invalid: {sorted(unknown)}")
+
+        def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                stamp = _stamp()
+                columns = list(fields)
+                assignments = ",".join(f"{column}=?" for column in columns)
+                changed = conn.execute(
+                    f"UPDATE v2_assistant_restore_episode SET {assignments}"
+                    f"{',' if assignments else ''}updated_at=? "
+                    "WHERE episode_id=? AND state=? AND attempt_seq=?",
+                    (*[fields[c] for c in columns], stamp, episode_id, expect_state,
+                     int(expect_attempt_seq)),
+                ).rowcount
+                if not changed:
+                    conn.rollback()
+                    return None
+                row = dict(conn.execute(
+                    "SELECT * FROM v2_assistant_restore_episode WHERE episode_id=?", (episode_id,),
+                ).fetchone())
+                for index, (event, outcome, detail) in enumerate(audits):
+                    conn.execute(
+                        "INSERT INTO v2_assistant_restore_audit"
+                        "(episode_id,attempt_seq,event,outcome,detail_json,request_id,created_at) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        (episode_id, int(row["attempt_seq"]), event, outcome, json.dumps(detail),
+                         request_id if index == 0 else None, stamp),
+                    )
+                conn.commit()
+                return row
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
+    async def restore_note_uncertain(self, *, episode_id: int, attempt_seq: int) -> bool:
+        """Write the one `uncertain` outcome row an unresolved attempt gets."""
+        def _op(conn: sqlite3.Connection) -> bool:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                prior = conn.execute(
+                    "SELECT 1 FROM v2_assistant_restore_audit WHERE episode_id=? AND attempt_seq=? "
+                    "AND event='attempt_outcome' AND outcome='uncertain'", (episode_id, attempt_seq),
+                ).fetchone()
+                current = conn.execute(
+                    "SELECT state,attempt_seq FROM v2_assistant_restore_episode WHERE episode_id=?",
+                    (episode_id,),
+                ).fetchone()
+                if (prior is not None or current is None or current["state"] != "spawning"
+                        or int(current["attempt_seq"]) != int(attempt_seq)):
+                    conn.rollback()
+                    return False
+                conn.execute(
+                    "INSERT INTO v2_assistant_restore_audit"
+                    "(episode_id,attempt_seq,event,outcome,detail_json,request_id,created_at) "
+                    "VALUES(?,?,'attempt_outcome','uncertain','{}',NULL,?)",
+                    (episode_id, int(attempt_seq), _stamp()),
+                )
+                conn.commit()
+                return True
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
+    async def restore_assistant_binding(
+        self, *, episode_id: int, env_binding: dict[str, str],
+    ) -> dict[str, Any]:
+        """Point the binding at the seat this episode resumed, by compare-and-set.
+
+        One transaction decides and records the outcome: ``ok`` (binding moved
+        to the resumed generation at revision+1), ``duplicate`` (already bound
+        by this episode), ``superseded`` (the binding is no longer the one the
+        episode started from: an operator choice is never overwritten) or
+        ``holder_lost`` (the resumed seat is not live at its generation).
+        """
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                found = conn.execute(
+                    "SELECT * FROM v2_assistant_restore_episode WHERE episode_id=?", (episode_id,),
+                ).fetchone()
+                if found is None:
+                    raise ValueError("assistant_restore_episode_unknown")
+                episode = dict(found)
+                request_id = f"assistant-restore:{episode_id}"
+                if episode["state"] in {"bound", "restored"}:
+                    prior = conn.execute(
+                        "SELECT receipt_json FROM v2_assistant_rebind_audit "
+                        "WHERE request_id=? AND outcome='ok' ORDER BY audit_id LIMIT 1", (request_id,),
+                    ).fetchone()
+                    conn.commit()
+                    return {"outcome": "duplicate", "duplicate": True, "episode": episode,
+                            "receipt": json.loads(prior["receipt_json"]) if prior else {}}
+                if episode["state"] != "spawned":
+                    raise ValueError("assistant_restore_not_spawned")
+                name = episode["name"]
+                old = _binding_conn(conn, env_binding, name=name, include_target=False)
+                stamp = _stamp()
+                digest = hashlib.sha256(json.dumps(
+                    {"episode_id": episode_id, "target": episode["stream_id"],
+                     "generation": episode["last_generation"]},
+                    sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+                def finish(state: str, reason: str | None, event: str, outcome: str,
+                           new: dict[str, Any] | None, receipt: dict[str, Any]) -> dict[str, Any]:
+                    conn.execute(
+                        "UPDATE v2_assistant_restore_episode SET state=?,reason=?,updated_at=? "
+                        "WHERE episode_id=?", (state, reason, stamp, episode_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO v2_assistant_restore_audit"
+                        "(episode_id,attempt_seq,event,outcome,detail_json,request_id,created_at) "
+                        "VALUES(?,?,?,?,?,NULL,?)",
+                        (episode_id, int(episode["attempt_seq"]), event, outcome,
+                         json.dumps({"old_binding": old, "new_binding": new}), stamp),
+                    )
+                    updated = dict(conn.execute(
+                        "SELECT * FROM v2_assistant_restore_episode WHERE episode_id=?", (episode_id,),
+                    ).fetchone())
+                    return {**receipt, "episode": updated}
+
+                def rebind_audit(outcome: str, new: dict[str, Any] | None,
+                                 receipt: dict[str, Any]) -> None:
+                    conn.execute(
+                        "INSERT INTO v2_assistant_rebind_audit(request_id,payload_digest,actor_stream_id,"
+                        "actor_generation,old_binding_json,new_binding_json,outcome,receipt_json,created_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)",
+                        (request_id, digest, RESTORE_ACTOR, episode["generation"], json.dumps(old),
+                         json.dumps(new) if new is not None else None, outcome, json.dumps(receipt), stamp),
+                    )
+
+                moved = (
+                    old["stream_id"] != episode["stream_id"]
+                    or old["generation"] != episode["generation"]
+                    or int(old["revision"]) != int(episode["expected_revision"])
+                )
+                if moved:
+                    receipt = {"error_code": "assistant_restore_superseded"}
+                    rebind_audit("assistant_restore_superseded", None, receipt)
+                    result = finish("superseded", "binding_moved", "superseded", "binding_moved",
+                                    None, {"outcome": "superseded", "duplicate": False})
+                    conn.commit()
+                    return result
+                target = _seat_conn(conn, episode["stream_id"])
+                try:
+                    _live_seat(target, target=True)
+                    live = (
+                        target["session_generation"] == episode["last_generation"]
+                        and str(target["claude_session_id"] or "") == episode["claude_session_id"]
+                    )
+                except ValueError:
+                    live = False
+                if not live:
+                    conn.rollback()
+                    return {"outcome": "holder_lost", "duplicate": False, "episode": episode}
+                new = {"stream_id": episode["stream_id"], "generation": episode["last_generation"],
+                       "source": "durable", "revision": int(old["revision"]) + 1,
+                       "effective_provider": target["provider"],
+                       "effective_model": target["effective_model"],
+                       "effective_effort": target["effective_effort"]}
+                conn.execute(
+                    "INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) "
+                    "VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+                    "stream_id=excluded.stream_id,generation=excluded.generation,"
+                    "revision=excluded.revision,updated_at=excluded.updated_at",
+                    (name, new["stream_id"], new["generation"], new["revision"], stamp),
+                )
+                receipt = {"type": "assistant.rebind.ok", "request_id": request_id,
+                           "old_binding": old, "new_binding": new, "duplicate": False}
+                rebind_audit("ok", new, receipt)
+                result = finish("bound", None, "bound", "ok", new,
+                                {"outcome": "ok", "duplicate": False, "receipt": receipt})
+                conn.commit()
+                return result
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
+    async def restore_reset_budget(
+        self, *, episode_id: int, request_id: str, env_binding: dict[str, str],
+    ) -> dict[str, Any]:
+        """Operator retry of a degraded episode: a new budget epoch, same history."""
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                prior = conn.execute(
+                    "SELECT detail_json FROM v2_assistant_restore_audit WHERE request_id=?", (request_id,),
+                ).fetchone()
+                if prior is not None:
+                    conn.commit()
+                    return {"duplicate": True, "detail": json.loads(prior["detail_json"] or "{}")}
+                found = conn.execute(
+                    "SELECT * FROM v2_assistant_restore_episode WHERE episode_id=?", (episode_id,),
+                ).fetchone()
+                episode = dict(found) if found else None
+                binding = (_binding_conn(conn, env_binding, name=episode["name"], include_target=False)
+                           if episode else None)
+                if (episode is None or episode["state"] != "degraded"
+                        or binding["stream_id"] != episode["stream_id"]
+                        or binding["generation"] != episode["generation"]
+                        or int(binding["revision"]) != int(episode["expected_revision"])):
+                    conn.rollback()
+                    return {"duplicate": False, "error_code": "assistant_restore_not_degraded"}
+                stamp = _stamp()
+                epoch = int(episode["budget_epoch"]) + 1
+                conn.execute(
+                    "UPDATE v2_assistant_restore_episode SET budget_epoch=?,budget_used=0,"
+                    "trigger='manual',state='pending',reason=NULL,next_attempt_at=?,updated_at=? "
+                    "WHERE episode_id=? AND state='degraded'", (epoch, stamp, stamp, episode_id),
+                )
+                detail = {"action": "retry", "episode_id": episode_id, "effect": "budget_reset",
+                          "budget_epoch": epoch}
+                conn.execute(
+                    "INSERT INTO v2_assistant_restore_audit"
+                    "(episode_id,attempt_seq,event,outcome,detail_json,request_id,created_at) "
+                    "VALUES(?,?,'budget_reset','manual',?,?,?)",
+                    (episode_id, int(episode["attempt_seq"]), json.dumps(detail), request_id, stamp),
+                )
+                conn.commit()
+                return {"duplicate": False, "detail": detail}
             except BaseException:
                 conn.rollback()
                 raise

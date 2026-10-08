@@ -452,6 +452,8 @@ class Server:
         #: Durable row↔presence reconciler, attached by main after construction
         #: just like the ledger/notify subsystems.
         self.reconciler = reconciler
+        #: Owner of the primary composite's bound-seat restore (wired by main).
+        self.assistant_restore: Any = None
         #: Assigned by `main.py` after construction — the ledger needs
         #: `broadcast`, which only exists once the server does.
         self.ledger = ledger
@@ -670,6 +672,7 @@ class Server:
             "work_lanes.show": self._on_work_lanes_show,
             "work_lanes.adopt_preview": self._on_work_lanes_adopt_preview,
             "assistant.binding": self._on_assistant_binding,
+            "assistant.restore": self._on_assistant_restore,
             "assistant.rebind": self._on_assistant_rebind,
             "assistant.authority": self._on_assistant_authority,
             "assistant.ruling": self._on_assistant_ruling,
@@ -3542,9 +3545,30 @@ class Server:
         if composite is None or not (auth.get("operator_authenticated") or auth.get("token_verified")):
             raise VerbError("assistant_binding_unauthorized", "assistant.binding requires authenticated access")
         try:
-            return await composite.binding()
+            reply = await composite.binding()
         except ValueError as exc:
             raise VerbError(str(exc), str(exc)) from exc
+        restore = self.assistant_restore
+        if restore is not None and restore.composite is composite:
+            reply = {**reply, "restore": await restore.status()}
+        return reply
+
+    async def _on_assistant_restore(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Operator start or retry of the bound-seat restore (idempotent by request id)."""
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        restore = self.assistant_restore
+        if restore is None or not auth.get("operator_authenticated"):
+            raise VerbError("assistant_restore_unauthorized",
+                            "assistant.restore requires authenticated operator authority")
+        request_id = str(msg.get("request_id") or "").strip()
+        action = str(msg.get("action") or "").strip()
+        if not request_id or len(request_id) > 200 or action not in {"restore", "retry"}:
+            raise VerbError("bad_request", "assistant.restore needs request_id and action restore|retry")
+        result = await restore.manual(action, request_id)
+        if result.get("error_code"):
+            raise VerbError(result["error_code"], result["error_code"])
+        return {"type": "assistant.restore.ok", "request_id": request_id,
+                "duplicate": bool(result.get("duplicate")), "restore": result["restore"]}
 
     async def _on_assistant_rebind(self, msg: dict[str, Any]) -> dict[str, Any]:
         composite = self._composite_for_message(msg)

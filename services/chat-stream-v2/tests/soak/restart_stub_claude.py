@@ -9,7 +9,7 @@ transcript the daemon recorded for this seat (held open, as Claude does).
 
 Control is file based so the harness can drive each stage deterministically:
 
-  $RESTART_STUB_CONTROL/mode       normal | hold_ready | withhold_user
+  $RESTART_STUB_CONTROL/mode       normal | hold_ready | withhold_user | exit_at_launch | stall
   $RESTART_STUB_CONTROL/release    created by the harness to end a hold
   $RESTART_STUB_CONTROL/<session>.booting   written while holding readiness
   $RESTART_STUB_CONTROL/<session>.pasted    written when a submission is held
@@ -65,6 +65,14 @@ def main() -> int:
     except termios.error:
         pass
     mode = _mode()
+    if mode == "exit_at_launch":
+        # The provider process fails before it is ready (no login, CLI error).
+        sys.stderr.write("Claude stub: provider unavailable\n")
+        return 3
+    if mode == "stall":
+        # The provider starts but never reaches its ready composer.
+        while True:
+            time.sleep(3600)
     if mode == "hold_ready":
         (CONTROL / f"{SESSION}.booting").write_text(str(os.getpid()))
         sys.stdout.write("Claude stub booting...\n")
