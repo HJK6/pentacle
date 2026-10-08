@@ -130,3 +130,17 @@ test('renderer unchanged errors retain their existing reason fallback', async t 
   await flush();
   assert.equal(store.getState().optimisticSends[id].failure_reason, 'backend_busy');
 });
+
+for (const [reply, expected] of [
+  [{ ok: false, error_code: 'other_code', error: 'existing reason' }, 'existing reason'],
+  [{ ok: false, error_code: 'backend_busy' }, 'send_error'],
+]) test(`only voice_answers_invalid overrides the existing renderer error fallback (${expected})`, async t => {
+  const store = rendererStore(t);
+  const calls = [];
+  store.setSendBridge(async payload => { calls.push(payload); return reply; });
+  const id = store.sendTurn('fixture:assistant', 'Synthetic text');
+  await flush();
+  assert.equal(store.getState().optimisticSends[id].failure_reason, expected);
+  await flush();
+  assert.equal(calls.length, 1, 'error-code forwarding adds no retry');
+});

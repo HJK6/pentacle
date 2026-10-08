@@ -72,3 +72,19 @@ test('re-entering the active page keeps its visit; threshold timer ends once cov
   assert.equal(tracker.covered(1500).size, 1);
   tracker.enter(null, 1500); assert.equal(tracker.msUntilCovered(1600), null);
 });
+
+test('mobile Q1: cap earliest 20 first, then drop closed pages without backfilling; n remains 21', () => {
+  let now = 0;
+  const pages = Array.from({ length: 21 }, (_, i) => page(i));
+  const session = createSegments(() => now);
+  session.start(pages, pages[0].key);
+  for (const entry of pages.slice(1)) { now += 1500; session.enter(entry.key); }
+  now += 1500; session.finish();
+  assert.equal(session.covered().size, 20, 'mobile SegmentTracker caps before consulting the live deck');
+  const livePages = pages.slice(1); // The earliest covered question closes on the daemon.
+  const items = selectedSet(session, livePages, 'assistant:synthetic');
+  assert.equal(items.length, 19);
+  assert.deepEqual(items.map(item => item.question_id), Array.from({ length: 19 }, (_, i) => `q${i + 1}`));
+  assert.equal(items.some(item => item.question_id === 'q20'), false, 'the 21st visit must never backfill the removed first item');
+  assert.equal(session.n, 21, 'the full durable start count remains frozen');
+});
