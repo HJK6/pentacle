@@ -1,6 +1,7 @@
 'use strict';
 const { fixtureRequest } = require('./closed_chat_scenario');
 const { reportChecks } = require('./web_voice_scenario');
+const { reloadDashboardPage } = require('./dashboard_scenario');
 
 // Serialized unchanged into Chrome; unit tests supply geometry only because
 // jsdom has no layout. No product DOM or recording state is synthesized here.
@@ -98,6 +99,10 @@ function environmentChecks(o) {
   ];
 }
 
+// The cleanup reload invalidates the execution context it then polls. Reuse the
+// shared reload that retries only that navigation boundary and waits for the
+// fresh document, instead of a bare Page.reload followed by waitFor.
+const reloadAfterScenario = ({ session, cdp }) => reloadDashboardPage({ session, cdp });
 // Capture is Chrome's synthetic media device through the unmodified product
 // getUserMedia/MediaRecorder path. ASR alone is stubbed; sends and readbacks use
 // window.cc and the real host + daemon. Never run this against --profile.
@@ -233,9 +238,9 @@ async function webVoiceAnswers({ session, report, fixture, runtime, cdp }) {
     }
     // A reload removes only this scenario's synthetic UI state and any failed
     // optimistic row; all durable fixture questions/events remain daemon-owned.
-    try { await session.send('Page.reload'); await session.waitFor("document.readyState === 'complete' && typeof window.focusStreamId === 'function'"); }
+    try { await reloadAfterScenario({ session, cdp }); }
     catch (error) { errors.push(error); }
   }
   if (errors.length) throw new AggregateError(errors, errors.map(error => error.message).join('; '));
 }
-module.exports = { webVoiceAnswers, readQuestionVoiceDom, recordingChecks, pendingChecks, boundChecks, refusalChecks, plainChecks, cleanupChecks, environmentChecks };
+module.exports = { webVoiceAnswers, reloadAfterScenario, readQuestionVoiceDom, recordingChecks, pendingChecks, boundChecks, refusalChecks, plainChecks, cleanupChecks, environmentChecks };

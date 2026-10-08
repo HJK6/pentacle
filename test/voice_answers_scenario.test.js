@@ -87,6 +87,22 @@ test('M3 plain oracle counts a daemon row and its client-origin row as one turn'
   assert.equal(plainChecks(o)[0][1], false, 'a second wire identity is still a double send');
 });
 
+// CI run 37805337509: every assertion passed, then the cleanup reload evaluated
+// in the document being torn down and the scenario failed on the CDP error.
+test('M3 cleanup reload survives the navigation it causes and is the only reload', async () => {
+  const scenario = require('./e2e/lib/voice_answers_scenario');
+  let evaluations = 0; let reloads = 0;
+  const session = { send: async method => { assert.equal(method, 'Page.reload'); reloads++; }, eval: async expression => {
+    if (/=\s*true$/.test(expression)) return true;
+    if (++evaluations === 1) throw new Error('Inspected target navigated or closed (-32000)');
+    return true;
+  } };
+  await scenario.reloadAfterScenario({ session, cdp: { sleep: async () => {} } });
+  assert.equal(reloads, 1); assert.equal(evaluations, 2);
+  const source = require('node:fs').readFileSync(require.resolve('./e2e/lib/voice_answers_scenario'), 'utf8');
+  assert.equal(/session\.send\('Page\.reload'/.test(source), false, 'the scenario never reloads without the navigation-tolerant wait');
+});
+
 test('M3 browser and unit use the same DOM reader for selectors, state, badges and pending rows', () => {
   const dom = domFixture();
   try {
