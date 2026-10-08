@@ -35,6 +35,8 @@ const EXTERNAL_SCRIPTS = {
   'confirm_dialog.js': 'confirm_dialog.js',
   'dashboards/registry.js': 'dashboards-registry.js',
   'dashboards/demo.js': 'dashboards-demo.js',
+  'dashboards/catalog_loader.js': 'dashboards-catalog-loader.js',
+  'dashboards/report_board.js': 'dashboards-report-board.js',
   'dist/chat_core.bundle.js': 'chat_core.bundle.js',
   'dist/cosmic_tokens.bundle.js': 'cosmic_tokens.bundle.js',
   'dist/cosmic_components.bundle.js': 'cosmic_components.bundle.js',
@@ -51,6 +53,8 @@ function rendererResolvePlugin() {
   return {
     name: 'pentacle-renderer-resolve',
     setup(build) {
+      build.onResolve({ filter: /[\/]dashboards[\/](catalog_loader|report_board)$/ }, args => ({ path: args.path.endsWith('catalog_loader') ? 'DashboardCatalogLoader' : 'DashboardReportBoard', namespace: 'dashboard-global' }));
+      build.onLoad({ filter: /.*/, namespace: 'dashboard-global' }, args => ({ contents: `module.exports = window.${args.path};`, loader: 'js' }));
       build.onResolve({ filter: /(^|\/)config-loader$/ }, () => ({
         path: path.join(RENDERER, 'shims', 'config_loader.js'),
       }));
