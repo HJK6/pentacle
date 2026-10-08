@@ -123,6 +123,32 @@ everything else is `404`, with `cache-control: no-store`. A new version
 directory is served without a host restart, side by side with older ones.
 `catalogRoot` never reaches the renderer.
 
+**Host adapter context.** The shell mounts an adapter with
+`{ config, household, assistant, actions }`. Its registered `actions` metadata
+must come from the catalog loader's validated descriptor; adapter-authored
+claims are not authority. The mount-context seam reads that metadata, while
+catalog loading and validation remain the loader's responsibility. Missing or
+malformed metadata grants no actions.
+
+- `household` is `{ selectors, store }` only with the `household` capability,
+  otherwise `undefined`. The host configures the shared in-memory store once at
+  startup. Adapters use its read/mutation methods and never reconfigure it; no
+  raw command callback is exposed in the context.
+- `assistant` is provided only with `assistantState`. It is resolved once per
+  mount from the protected assistant session as `{ name, hostId, sigilMarkup }`,
+  or `null` when there is no such session. The callable
+  `sigilMarkup(label, size)` returns the host's assistant sigil HTML. Without
+  the capability, `assistant` is `undefined`.
+- `actions` always contains exactly the async `assetList(params)` and
+  `assetGet(params)` functions. An allowed call returns the existing bridge's
+  daemon reply and preserves rejection behavior. A disallowed call logs a
+  warning and resolves `{ ok: false, error: 'action_not_allowed' }` without
+  contacting the bridge.
+
+Mounting itself does not load household data; the shell's initial poll owns
+that read. The context seam does not load or register a private adapter by
+itself, and it does not replace catalog validation.
+
 **Release.** Install the new version directory, verify every file's sha256
 against its `catalog.json`, fetch one file through the route, then publish the
 catalog asset; publishing is the only pointer switch. Roll back by republishing

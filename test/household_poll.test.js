@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const householdSelectors = require('../renderer/household/selectors');
 const { createHouseholdStore } = require('../renderer/household/store');
 const { FakeHousehold, fakeClock, flush, rpcError } = require('./fixtures/household_support');
 
@@ -24,18 +25,18 @@ function setup(source = pollSource, shellSource = mountSource) {
   const mounts = [], unmounts = [], events = [];
   const config = { dashboards: { catalogSpecId: 'spec_example' } };
   const container = { innerHTML: 'Previous content' };
-  const adapter = { id: 'example-board', name: 'Example Board', pollInterval: 30000,
-    mount(node, ctx) { const refs = {}; mounts.push({ node, ctx, refs }); return refs; },
+  const adapter = { id: 'example-board', name: 'Example Board', actions: ['household'], pollInterval: 30000,
+    mount(node, ctx) { const refs = { store: ctx.household.store }; mounts.push({ node, ctx, refs }); return refs; },
     unmount(refs) { unmounts.push(refs); },
-    pollFn: () => store.refresh(), update() { updates++; } };
+    pollFn: refs => refs.store.refresh(), update() { updates++; } };
   const adapters = [adapter];
-  const state = { selectedDashboard: adapter.id, dashboardRefs: {}, dashboardPollToken: 0,
+  const state = { selectedDashboard: adapter.id, dashboardRefs: { store }, dashboardPollToken: 0,
     dashboardState: 'loading', dashboardLastData: null, dashboardError: null };
   const context = vm.createContext({ window: { DASHBOARDS: adapters,
     visibleDashboards: () => adapters,
     PentacleHarness: { emit(name, value) { events.push({ name, value }); } } },
     document: { getElementById(id) { assert.equal(id, 'dashboard-content'); return container; } },
-    CONFIG: config, state, setInterval, clearInterval,
+    CONFIG: config, householdSelectors, householdStore: store, state, setInterval, clearInterval,
     updateDashboardStatusBadge() {}, renderDashboardList() {} });
   vm.runInContext(`${shellSource}\n${source}`, context);
   return { clock, server, store, state, config, container, adapters, mounts, unmounts, events,
@@ -49,6 +50,8 @@ test('actual shell mount passes the config, clears content and owns the single i
   assert.equal(h.mounts.length, 1);
   assert.equal(h.mounts[0].node, h.container);
   assert.equal(h.mounts[0].ctx.config, h.config);
+  assert.equal(h.mounts[0].ctx.household.selectors, householdSelectors);
+  assert.equal(h.mounts[0].ctx.household.store, h.store);
   assert.equal(h.container.innerHTML, '');
   assert.equal(h.state.dashboardRefs, h.mounts[0].refs);
   assert.equal(h.server.reads().length, 1);
