@@ -519,6 +519,10 @@ def _is_plain_http_url(url: str) -> bool:
         and parts.username is None
         and parts.password is None
         and "@" not in parts.netloc
+        # Browsers read "\\" as "/" in http(s) URLs, so "http://a\\b/" opens host
+        # "a" while urlsplit sees "a\\b"; refuse it in the authority text, the
+        # same rule the web and mobile clients apply.
+        and "\\" not in url.split("/")[2]
     )
 
 

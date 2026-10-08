@@ -3271,6 +3271,71 @@
       "error": "hosted.url"
     },
     {
+      "name": "hosted backslash authority",
+      "catalog": {
+        "schema_version": 1,
+        "catalog_version": "0.1.0+aaaaaaa",
+        "package": {
+          "repo": "example/dashboards",
+          "commit": "1111111111111111111111111111111111111111"
+        },
+        "requires": {
+          "host_api": 1
+        },
+        "libs": [
+          {
+            "path": "web/example-lib.js",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ],
+        "boards": [
+          {
+            "id": "example-report",
+            "name": "Example Reports",
+            "description": "Synthetic report board",
+            "kind": "report",
+            "report": {
+              "spec_id": "example__dashboard_reports",
+              "asset_id_prefix": "example-report-",
+              "key_format": "[0-9]{8}T[0-9]{4}Z",
+              "rev_width": 2,
+              "producer_stream_id": "hostx:example-producer",
+              "writer_enforced": true,
+              "select": "latest",
+              "list": true,
+              "history_limit": 3,
+              "title_template": "Report {key} r{rev}"
+            }
+          },
+          {
+            "id": "example-board",
+            "name": "Example Board",
+            "kind": "web-adapter",
+            "web": {
+              "script": "web/example-board.js",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "css": "web/example-board.css",
+              "css_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            "actions": [
+              "assetList",
+              "assetGet"
+            ],
+            "poll_interval_ms": 15000
+          },
+          {
+            "id": "example-hosted",
+            "name": "Example Hosted",
+            "kind": "hosted-view",
+            "hosted": {
+              "url": "http://exa\\mple.test/"
+            }
+          }
+        ]
+      },
+      "error": "hosted.url"
+    },
+    {
       "name": "hosted bad port",
       "catalog": {
         "schema_version": 1,
