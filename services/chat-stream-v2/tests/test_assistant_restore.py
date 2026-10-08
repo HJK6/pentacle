@@ -236,6 +236,11 @@ def test_flag_rejects_other_values(value):
     (0, "not a date\n", "", "unknown"),
     (0, f"{STARTED}\n{STARTED}\n", "", "unknown"),
     (0, f"{STARTED}\n", "warning", "unknown"),
+    (0, "Thu Oct  8 09:00:00 2026\n", " \n", "unknown"),    # reused pid but whitespace on stderr
+    (0, "Thu Oct  8 09:00:00 2026\n", " ", "unknown"),
+    (0, "\nThu Oct  8 09:00:00 2026\n", "", "unknown"),     # blank line beside the start line
+    (0, "Thu Oct  8 09:00:00 2026\n\n", "", "unknown"),
+    (0, " \n", "", "unknown"),
 ])
 def test_classify_ps(rc, out, err, expected):
     assert ar.classify_ps(rc, out, err, STARTED) == expected
@@ -333,6 +338,17 @@ def test_intentional_close_is_ineligible(tmp_path, monkeypatch):
         status = await rig.restore.advance()
         assert (status["state"], status["reason"]) == ("ineligible", "intentional_close")
         assert await rig.episodes() == []
+    run(tmp_path, monkeypatch, body)
+
+
+def test_whitespace_close_kind_is_not_a_reconciler_close(tmp_path, monkeypatch):
+    async def body(rig):
+        await rig.start()
+        await rig.kill()                              # reconciler-closed row, restorable as is
+        await rig.store.update_session(LOCAL, "fd", close_kind=" ")
+        status = await rig.restore.advance()
+        assert (status["state"], status["reason"]) == ("ineligible", "intentional_close")
+        assert await rig.episodes() == [] and rig.spawnctl.sent == []
     run(tmp_path, monkeypatch, body)
 
 

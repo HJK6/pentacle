@@ -114,9 +114,9 @@ def classify_ps(rc: int, stdout: str, stderr: str, recorded_start: str) -> str:
     if rc == 1:
         # "No such pid" prints nothing at all; whitespace is still output.
         return "gone" if stdout == "" and stderr == "" else "unknown"
-    out, err = stdout.strip(), stderr.strip()
-    if rc == 0 and not err:
-        lines = [line for line in out.splitlines() if line.strip()]
+    if rc == 0 and stderr == "":
+        # Exactly one line; blank lines around it are not ignored.
+        lines = stdout.splitlines()
         if len(lines) != 1:
             return "unknown"
         try:
@@ -359,7 +359,7 @@ class AssistantRestore:
                 str(row.get("presumed_dead_at") or "").strip()
                 and str(row.get("dead_open_closed_at") or "").strip()
                 and row.get("dead_open_closed_at") == row.get("closed_at")
-                and not str(row.get("close_kind") or "").strip()
+                and row.get("close_kind") in (None, "")
             )
             own_rollback = bool(
                 episode is not None
