@@ -12,6 +12,8 @@ const { normalizeSidebarWidth, createSidebarResizer } = require('./sidebar_resiz
 const path = require('path');
 const chatUi = require('./chat_ui_state');
 const assetRender = require('./asset_render');
+const dashboardCatalog = require('./dashboards/catalog_loader');
+const dashboardReports = require('./dashboards/report_board');
 const { showToast } = require('./toast');
 const { decideUseChatClose } = require('./delete_session_gate');
 const { configuredAssistantRole, isConfiguredAssistant, isCompositeAssistant } = require('./assistant_role');
@@ -6597,6 +6599,50 @@ document.getElementById('modal-input').addEventListener('keydown', (e) => {
 // ── View Switcher (Chats / Dashboards) ───────────────────────
 
 require('./dashboards/modeler-3d');
+let catalogClient = null;
+let catalogViewGeneration = 0;
+let catalogResult = { status: 'unset', catalog: null };
+let catalogBoardErrors = [];
+
+async function enterDashboardView() {
+  const generation = ++catalogViewGeneration;
+  state.catalogLoading = true;
+  document.getElementById('dashboard-list').replaceChildren();
+  const container = document.getElementById('dashboard-content');
+  container.replaceChildren();
+  container.dataset.boardState = 'loading';
+  try {
+    await CFG_READY;
+    if (generation !== catalogViewGeneration || state.currentView !== 'dashboards') return;
+    catalogClient ||= dashboardCatalog.createLoader();
+    const result = await catalogClient.refresh(CONFIG.dashboards?.catalogSpecId);
+    if (generation !== catalogViewGeneration || state.currentView !== 'dashboards' || result.status === 'superseded') return;
+    stopDashboardPolling();
+    unmountCurrentDashboard();
+    const builtins = window.DASHBOARDS.filter(board => !board.catalog);
+    const merged = catalogClient.merge(result, builtins, { reportBoard: dashboardReports,
+      renderAsset: assetRender.renderAsset, hostedBoard: window.DASHBOARDS.find(board => board.id === 'modeler-3d' && !board.catalog) });
+    window.DASHBOARDS.splice(0, window.DASHBOARDS.length, ...merged.boards);
+    catalogResult = result; catalogBoardErrors = merged.errors;
+  } catch (error) {
+    if (generation !== catalogViewGeneration || state.currentView !== 'dashboards') return;
+    stopDashboardPolling(); unmountCurrentDashboard();
+    catalogResult = { status: 'unavailable', catalog: null, message: `Dashboard catalog unavailable: ${error.message || error}` };
+    window.DASHBOARDS.splice(0, window.DASHBOARDS.length, ...window.DASHBOARDS.filter(board => !board.catalog));
+  }
+  state.catalogLoading = false;
+  if (catalogResult.catalog) container.dataset.catalogVersion = catalogResult.catalog.catalog_version;
+  else delete container.dataset.catalogVersion;
+  const visible = window.visibleDashboards(CONFIG);
+  if (!visible.some(board => board.id === state.selectedDashboard)) state.selectedDashboard = visible[0]?.id || null;
+  renderDashboardList();
+  if (state.selectedDashboard) mountAndPoll(state.selectedDashboard);
+  else {
+    container.replaceChildren();
+    const empty = document.createElement('p'); empty.className = 'dashboards-empty'; empty.textContent = 'No dashboards configured'; container.appendChild(empty);
+    container.dataset.boardState = 'empty';
+  }
+}
 
 function switchView(view) {
   if (state.currentView === view) return;
@@ -6604,6 +6650,9 @@ function switchView(view) {
 
   // Cleanup current dashboard if leaving dashboards view
   if (state.currentView === 'dashboards') {
+    catalogViewGeneration++;
+    state.catalogLoading = false;
+    catalogClient?.cancel();
     stopDashboardPolling();
     unmountCurrentDashboard();
   }
@@ -6628,26 +6677,25 @@ function switchView(view) {
   } else {
     // Hide chat panels
     document.getElementById('panel-sessions').style.display = 'none';
-    const visible = window.visibleDashboards(CONFIG);
-    if (!visible.some(d => d.id === state.selectedDashboard)) {
-      state.selectedDashboard = visible[0]?.id || null;
+    if (CONFIG.dashboards?.catalogSpecId) {
+      void enterDashboardView();
+      return;
     }
+    const visible = window.visibleDashboards(CONFIG);
+    if (!visible.some(d => d.id === state.selectedDashboard)) state.selectedDashboard = visible[0]?.id || null;
     renderDashboardList();
-    if (state.selectedDashboard) {
-      mountAndPoll(state.selectedDashboard);
-    } else {
+    if (state.selectedDashboard) mountAndPoll(state.selectedDashboard);
+    else {
       const container = document.getElementById('dashboard-content');
       container.replaceChildren();
-      const empty = document.createElement('p');
-      empty.className = 'dashboards-empty';
-      empty.textContent = 'No dashboards configured';
-      container.appendChild(empty);
+      const empty = document.createElement('p'); empty.className = 'dashboards-empty'; empty.textContent = 'No dashboards configured'; container.appendChild(empty);
+      container.dataset.boardState = 'empty';
     }
   }
 }
 
 function selectDashboard(id) {
-  if (state.selectedDashboard === id || !window.visibleDashboards(CONFIG).some(d => d.id === id)) return;
+  if (state.catalogLoading || state.selectedDashboard === id || !window.visibleDashboards(CONFIG).some(d => d.id === id)) return;
   stopDashboardPolling();
   unmountCurrentDashboard();
   state.selectedDashboard = id;
@@ -6713,6 +6761,17 @@ function renderDashboardList() {
   const list = document.getElementById('dashboard-list');
   if (!list) return;
   list.replaceChildren();
+  if (catalogResult.message) {
+    const card = document.createElement('p'); card.dataset.testid = catalogResult.status === 'unavailable' ? 'dashboard-catalog-unavailable' : 'dashboard-catalog-error';
+    card.setAttribute('role', 'alert'); card.textContent = catalogResult.message; list.appendChild(card);
+  }
+  if (catalogResult.cached) {
+    const badge = document.createElement('p'); badge.dataset.testid = 'dashboard-catalog-cached';
+    badge.textContent = `catalog cached ${Math.floor(catalogResult.age / 1000)}s`; list.appendChild(badge);
+  }
+  for (const message of catalogBoardErrors) {
+    const card = document.createElement('p'); card.dataset.testid = 'dashboard-board-error'; card.textContent = message; list.appendChild(card);
+  }
   const visible = window.visibleDashboards(CONFIG);
   if (!visible.length) {
     const empty = document.createElement('p');
@@ -8267,6 +8326,9 @@ async function bindChatPopout() {
 }
 
 CFG_READY.then((cfg) => {
+  if (state.currentView === 'dashboards' && CONFIG.dashboards?.catalogSpecId) {
+    stopDashboardPolling(); unmountCurrentDashboard(); void enterDashboardView();
+  }
   // Pull the initial chat-stream snapshot regardless of chatUiEnabled — the
   // sidebar visibility filter needs state.chatStream.sessions populated
   // before the first renderSidebar tick. Without this, a renderer that loads
