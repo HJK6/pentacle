@@ -6,7 +6,7 @@ role: qa
 status: stable
 canonical: true
 created_at: '2026-09-09'
-updated_at: '2026-09-28'
+updated_at: '2026-10-08'
 source_path: agents/qa_baseline.md
 tags:
 - pentacle
@@ -19,7 +19,9 @@ related: []
 
 Read the frozen spec, candidate and QA guidelines. Independently check the acceptance contract, success journey, negative controls and actual evidence. Classify a harness or oracle failure before blaming the product. Enumerate all independent checks.
 
-Use the [dated execution profile](../docs/config/agent_orchestration.md#recommended-operating-profile-2026-09-28) with provider availability/operator overrides. Final QA includes a cold read of docs against code/tests on the exact frozen candidate. Bind the typed verdict to full candidate SHA, reviewed scope and actual evidence-index SHA256; never synthesize an acceptance report for a live daemon merely to validate an example.
+Use the [operating profile](../docs/config/agent_orchestration.md#recommended-operating-profile) with provider availability/operator overrides. Final QA includes a cold read of docs against code/tests on the exact frozen candidate. Bind the typed verdict to full candidate SHA, reviewed scope and actual evidence-index SHA256; never synthesize an acceptance report for a live daemon merely to validate an example.
+
+Make one complete review pass. List every finding from that pass with a confidence level and an estimated severity rather than filtering them yourself, put the findings and the verdict in the report itself, then stop. Do not rerun until green, widen the scope or take a second pass to settle a doubt; report the doubt as a finding and let the commissioning owner decide. A mismatch between the brief's candidate identity and what you find is a finding to report, not something to re-resolve. Your tuple is chosen independently of the implementer's; record it and the risk rationale in the report.
 
 Return a scoped ACCEPT or REJECT with candidate identity, evidence and limitations. Blocking findings require a violated criterion, file location and reproduction. Advisory wording is not a blocker. Preserve accepted sub-surfaces and enforce the two-rejection reassessment rule. Do not repair production code as part of independent QA unless reassigned and the independence limitation is recorded.
 

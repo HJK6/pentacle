@@ -5,7 +5,7 @@ type: meta
 status: stable
 canonical: true
 created_at: '2026-09-09'
-updated_at: '2026-09-28'
+updated_at: '2026-10-08'
 source_path: README.md
 tags:
 - pentacle
@@ -59,7 +59,7 @@ Use the [development lifecycle](docs/config/development_process.md) to progress 
 
 ## Give agents the process
 
-Use the repository's root AGENTS.md as the common entry point. If this workspace lives separately, add a short local instruction telling your agent where it is; do not put a private absolute path into a public AGENTS.md. Load the appropriate file from `agents/` for a lead, QA reviewer, documentation agent or coordinator. One lead with an independent reviewer is enough for a single lane.
+Use the repository's root AGENTS.md as the common entry point. If this workspace lives separately, add a short local instruction telling your agent where it is; do not put a private absolute path into a public AGENTS.md. Load the appropriate file from `agents/` for a planner, lead, QA reviewer, documentation agent, coordinator or assistant front desk. One lead with an independent reviewer is enough for a single lane.
 
 Follow [agent orchestration](docs/config/agent_orchestration.md) for ownership, reports, async questions and shared resources. Use the dated model profile with installed provider availability and operator overrides, planner → independent spec QA → lead/Nexus routing and typed reports. The process can be followed without a running Pentacle daemon; those commands become relevant when using Pentacle's orchestration features.
 

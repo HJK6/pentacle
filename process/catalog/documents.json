@@ -5,7 +5,7 @@
     "title": "Assistant front desk baseline",
     "type": "agent-rules",
     "canonical": true,
-    "updated_at": "2026-10-04",
+    "updated_at": "2026-10-08",
     "source_path": "agents/assistant_baseline.md",
     "tags": [
       "pentacle",
@@ -39,7 +39,7 @@
     "title": "Lead baseline",
     "type": "agent-rules",
     "canonical": true,
-    "updated_at": "2026-09-28",
+    "updated_at": "2026-10-08",
     "source_path": "agents/lead_baseline.md",
     "tags": [
       "pentacle",
@@ -56,7 +56,7 @@
     "title": "Coordinator baseline",
     "type": "agent-rules",
     "canonical": true,
-    "updated_at": "2026-09-28",
+    "updated_at": "2026-10-08",
     "source_path": "agents/nexus_baseline.md",
     "tags": [
       "pentacle",
@@ -68,12 +68,29 @@
     "role": "nexus"
   },
   {
+    "id": "agent_rules_planner_baseline",
+    "path": "agents/planner_baseline.md",
+    "title": "Planner baseline",
+    "type": "agent-rules",
+    "canonical": true,
+    "updated_at": "2026-10-08",
+    "source_path": "agents/planner_baseline.md",
+    "tags": [
+      "pentacle",
+      "process"
+    ],
+    "summary": "Planner baseline.",
+    "related": [],
+    "status": "stable",
+    "role": "planner"
+  },
+  {
     "id": "agent_rules_qa_baseline",
     "path": "agents/qa_baseline.md",
     "title": "QA baseline",
     "type": "agent-rules",
     "canonical": true,
-    "updated_at": "2026-09-28",
+    "updated_at": "2026-10-08",
     "source_path": "agents/qa_baseline.md",
     "tags": [
       "pentacle",
@@ -90,7 +107,7 @@
     "title": "Agent orchestration",
     "type": "config",
     "canonical": true,
-    "updated_at": "2026-09-28",
+    "updated_at": "2026-10-08",
     "source_path": "docs/config/agent_orchestration.md",
     "tags": [
       "pentacle",
@@ -106,7 +123,7 @@
     "title": "Development process",
     "type": "config",
     "canonical": true,
-    "updated_at": "2026-09-28",
+    "updated_at": "2026-10-08",
     "source_path": "docs/config/development_process.md",
     "tags": [
       "pentacle",
@@ -175,7 +192,7 @@
     "title": "Set up the full process",
     "type": "meta",
     "canonical": true,
-    "updated_at": "2026-09-28",
+    "updated_at": "2026-10-08",
     "source_path": "README.md",
     "tags": [
       "pentacle",
