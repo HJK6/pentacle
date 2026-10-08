@@ -1345,7 +1345,8 @@ class SpawnCtl:
         if record is None:
             raise VerbError("assistant_handoff_receipt_unavailable", "no stored outcome for this handoff")
         reply = await self._reply_from_replay(
-            host, str(msg.get("request_id") or ""), record["kind"], record["row"], key)
+            host, str(msg.get("request_id") or ""), record["kind"], record["row"], key,
+            dead_is_error=False)
         reply["do_not_respawn"] = True
         return reply
 
@@ -1553,13 +1554,40 @@ class SpawnCtl:
             "admitted_set_authoritative": True,
         }
 
+    async def _replayed_seat_dead_reason(
+        self, host: str, name: str, session: dict[str, Any] | None,
+    ) -> str | None:
+        """Why a replayed delivered seat is dead, or None when death is unproved.
+
+        Stored state only selects the candidates (a closed row, or an open row
+        observed `pane_dead`); it never proves death, because a close can record
+        intent (offline close) and a pane observation can be stale. Death is a
+        fresh `session_state` of `gone`; `alive` and `unreachable` are not."""
+        if session is None:
+            durable = await self.store.fetch_session(host, name)
+            if durable is None or str(durable.get("status") or "") == "open":
+                return None
+            reason = "closed"
+        elif session.get("pane_status") == "pane_dead":
+            reason = "pane_dead"
+        else:
+            return None
+        if await self._tmux_for(host).session_state(name) != "gone":
+            return None
+        return reason
+
     async def _reply_from_replay(
         self, host: str, request_id: str, kind: str, row: dict[str, Any],
-        idempotency_key: str,
+        idempotency_key: str, *, dead_is_error: bool = True,
     ) -> dict[str, Any]:
         """Build the truthful reply for a same-key spawn that the atomic claim
         resolved to an existing session — no second pane. Carries the AC9 admitted
-        enumeration. rpc_delivery_determinism lane."""
+        enumeration. rpc_delivery_determinism lane.
+
+        A delivered seat that a fresh probe proves gone is a typed
+        `replayed_stream_dead` error, so the caller passes a new key instead of
+        receiving a dead stream id as success. `dead_is_error=False` keeps the
+        plain replies for a retired handoff source reading back its receipt."""
         recorded_name = str(row.get("session_name") or "")
         recorded_request_id = str(row.get("request_id") or request_id)
         receipt = row.get("delivery_receipt")
@@ -1572,6 +1600,19 @@ class SpawnCtl:
                 # A terminal DELIVERED outcome with a still-live row is the clean
                 # replay: same spawn.ok, same stream id, no new pane.
                 session = self.sessions.get(f"{host}:{recorded_name}")
+                if dead_is_error:
+                    dead_reason = await self._replayed_seat_dead_reason(host, recorded_name, session)
+                    if dead_reason is not None:
+                        raise VerbError(
+                            "replayed_stream_dead",
+                            f"spawn for this idempotency_key was delivered to {host}:{recorded_name}, "
+                            f"which is dead ({dead_reason}); pass a new idempotency_key to start a fresh seat",
+                            replayed=True,
+                            dead_reason=dead_reason,
+                            stream_id=f"{host}:{recorded_name}",
+                            spawn_request_id=recorded_request_id,
+                            **admitted,
+                        )
                 if session is not None:
                     return {
                         "type": "spawn.ok", "ok": True,

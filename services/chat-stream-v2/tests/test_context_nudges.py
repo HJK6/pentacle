@@ -505,3 +505,8 @@ def test_codex_file_batch_ingestion_tracks_tokens_without_nudging(tmp_path, monk
             store.stop()
 
     asyncio.run(run())
+
+
+def test_haiku_5_5_window_is_its_own_not_the_deployment_default(monkeypatch):
+    monkeypatch.setenv('PENTACLE_CONTEXT_DEFAULT_WINDOW', '200000')
+    assert context_fields('claude', ContextReading(1, model='claude-haiku-5-5'))[1] == 1_000_000

@@ -1275,6 +1275,74 @@ def test_prepared_restart_is_retryable_but_claimed_restart_is_indeterminate(tmp_
         store.stop()
 
 
+def test_recover_keeps_fired_when_delivered_child_has_closed(tmp_path) -> None:
+    """Recovery reads the durable delivered outcome directly, so a child that
+    has since closed still leaves its schedule fired, and nothing is spawned."""
+    store, _sessions, _comms, spawn, surface = harness(tmp_path)
+    spawned: list[dict] = []
+
+    async def record_spawn(msg, _local_host):
+        spawned.append(msg)
+        raise AssertionError("recovery must not spawn")
+
+    spawn.spawn = record_spawn
+    try:
+        now = future_time(-1)
+        sid = "sched-recovered-closed-child"
+        operation_id = str(uuid.uuid4())
+        spawn_request_id = f"schedule-spawn:{sid}:1"
+        spawn_key = f"schedule:{sid}:1"
+        run(store.submit(lambda conn: (
+            conn.execute(
+                "INSERT INTO v2_schedules (schedule_id,request_id,owner_stream_id,owner_spec_ids_json,"
+                "owner_spec_provenance_json,target_host,requested_provider,requested_model,requested_effort,"
+                "resolved_provider,resolved_model,resolved_effort,fires_at_utc,state,generation,created_at,updated_at,objective) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'firing',1,?,?,'Exercise scheduled restart')",
+                (sid, str(uuid.uuid4()), "hosta:requester", '["%s"]' % SPEC,
+                 '[{"kind":"explicit","spec_id":"%s"}]' % SPEC,
+                 "hosta", "codex", "m", "high", "codex", "m", "high", now, now, now),
+            ),
+            conn.execute(
+                "INSERT INTO v2_schedule_dispatches "
+                "(schedule_id,generation,spawn_key,phase,spawn_request_id,prepared_at,claimed_at,transmitted_at) "
+                "VALUES (?,1,?,'dispatch_transmitted',?,?,?,?)",
+                (sid, spawn_key, spawn_request_id, now, now, now),
+            ),
+            conn.execute(
+                "INSERT INTO v2_operation_receipts "
+                "(receipt_id,request_id,phase,surface,verb,actor_kind,actor_id,canonical_payload_sha256,"
+                "target_id,measured_state_json,result_json,measured_at,retain_until) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (receipt_id(operation_id, "dispatch_claimed"), operation_id, "dispatch_claimed",
+                 "schedule", "schedule.run", "seat", "hosta:requester", "0" * 64,
+                 sid, "{}", "{}", now, future_time(60)),
+            ),
+            conn.commit(),
+        )))
+        child = run(store.open_session("hosta", "scheduled-child", pane_status="pane_alive"))
+        run(store.set_spawn_outcome(
+            "hosta", "scheduled-child", "delivered", request_id=spawn_request_id,
+            delivery_receipt={"state": "not_requested"}, idempotency_key=spawn_key,
+        ))
+        run(store.mark_closed(
+            "hosta", "scheduled-child", closed_at=future_time(-1), pane_status="pane_dead",
+            expected_generation=child["session_generation"], close_kind="session_close",
+            attribution=None, reason="finished",
+        ))
+        assert run(store.fetch_session("hosta", "scheduled-child"))["status"] == "closed"
+        run(surface.recover())
+        schedule = run(store.submit(lambda conn: dict(conn.execute(
+            "SELECT state FROM v2_schedules WHERE schedule_id=?", (sid,),
+        ).fetchone())))
+        dispatch = run(store.submit(lambda conn: dict(conn.execute(
+            "SELECT phase,child_stream_id FROM v2_schedule_dispatches WHERE schedule_id=?", (sid,),
+        ).fetchone())))
+        assert schedule["state"] == "fired"
+        assert dispatch == {"phase": "spawn_delivered", "child_stream_id": "hosta:scheduled-child"}
+        assert spawned == []
+    finally:
+        store.stop()
+
+
 @pytest.mark.parametrize("spawn_outcome_state", ["delivered", "indeterminate"])
 def test_post_outcome_restart_writes_terminal_receipt_and_replays(
     tmp_path, spawn_outcome_state,

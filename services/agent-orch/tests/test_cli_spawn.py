@@ -1163,7 +1163,7 @@ cli.spawn_once = fake_spawn_once
 args = SimpleNamespace(
     objective="Exercise subprocess spawn delivery",
     provider="codex",
-    model=None,
+    model="gpt-6-luna",
     effort=None,
     host=None,
     role=None,
@@ -1215,8 +1215,8 @@ def test_prompted_spawn_subprocess_preserves_raw_and_pipeline_outcomes(tmp_path:
     delivered = _run_prompted_spawn_contract_child(tmp_path, "delivered")
     delivered_json = json.loads(delivered.stdout)
     assert delivered.returncode == 0
-    # A successful spawn now emits exactly the pre-RPC `spawn key:` line on
-    # stderr (the retry/cancel handle) and nothing else.
+    # A successful spawn with an explicit model emits exactly the pre-RPC
+    # `spawn key:` line on stderr (the retry/cancel handle) and nothing else.
     stderr_lines = [ln for ln in delivered.stderr.splitlines() if ln.strip()]
     assert len(stderr_lines) == 1
     assert re.fullmatch(r"spawn key: [0-9a-f]{32}", stderr_lines[0]), stderr_lines
@@ -1635,3 +1635,89 @@ def test_resolve_self_close_matrix() -> None:
     assert resolve(_args(None), visibility="hidden", parent="   ", handoff=False) is None
     assert resolve(_args(True), visibility="hidden", parent="  ", handoff=False) is None
     assert resolve(_args(False), visibility="hidden", parent="  ", handoff=False) is None
+
+
+_NO_MODEL_WARNING = "agent-orch spawn: WARNING: no --model given"
+
+
+def _install_ordered_rpc_fakes(monkeypatch, tmp_path: Path, capsys, seen: dict) -> None:
+    """Fake both spawn RPCs and record what stderr held when the RPC was called."""
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))
+    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _config: "hostc:claude-leader")
+    monkeypatch.setattr(cli, "_handoff_source_row", lambda *_a, **_k: {
+        "stream_id": "hostc:claude-leader", "provider": "claude",
+        "effective_model": "claude-opus-4-8", "effective_effort": "high", "role": None,
+    })
+
+    async def fake_spawn_once(_config, payload, timeout):
+        seen["stderr_at_rpc"] = capsys.readouterr().err
+        return {"type": "spawn.ok", "session": {"stream_id": "hostc:child"}}
+
+    async def fake_schedule_once(_config, payload, timeout):
+        seen["stderr_at_rpc"] = capsys.readouterr().err
+        return {"type": "schedule.insert.ok", "schedule_id": "sch-1",
+                "fires_at_utc": payload["fires_at_utc"], "target_host": "hostc"}
+
+    monkeypatch.setattr(cli, "spawn_once", fake_spawn_once)
+    monkeypatch.setattr(cli, "schedule_once", fake_schedule_once)
+
+
+@pytest.mark.parametrize("schedule", [{}, {"at": "2099-01-01T00:00:00Z"}, {"delay": "10m"}], ids=["immediate", "at", "delay"])
+@pytest.mark.parametrize("model", [None, "claude-haiku-5-5"], ids=["no-model", "model"])
+def test_spawn_warns_once_before_the_rpc_only_when_the_model_is_implicit(
+    monkeypatch, tmp_path: Path, capsys, schedule, model,
+) -> None:
+    seen: dict = {}
+    _install_ordered_rpc_fakes(monkeypatch, tmp_path, capsys, seen)
+    args = _spawn_args(tmp_path)
+    args.provider, args.model = "claude", model
+    args.self_close_on_completion = None
+    args.allow_far_future = True
+    for key, value in schedule.items():
+        setattr(args, key, value)
+
+    assert cli.spawn(args) == 0
+    after = capsys.readouterr()
+
+    warnings = [line for line in seen["stderr_at_rpc"].splitlines() if _NO_MODEL_WARNING in line]
+    if model is None:
+        default = cli.resolve_spawn(provider="claude", host="hostc")
+        assert warnings == [
+            f"{_NO_MODEL_WARNING}; using the claude default {default['model']}/{default['effort']}. "
+            "Pass --model to choose a tier, or set a per-host default with host_overrides in "
+            "spawn_defaults.local.json."
+        ]
+    else:
+        assert warnings == []
+    assert _NO_MODEL_WARNING not in after.err  # nothing more after the RPC
+    json.loads(after.out)  # stdout stays one JSON document
+
+
+def test_handoff_without_model_does_not_warn(monkeypatch, tmp_path: Path, capsys) -> None:
+    seen: dict = {}
+    _install_ordered_rpc_fakes(monkeypatch, tmp_path, capsys, seen)
+    monkeypatch.setattr(cli, "_stored_handoff_request", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli, "_store_handoff_request", lambda *_a, **_k: None)
+    args = _spawn_args(tmp_path)
+    args.provider, args.model, args.handoff, args.parent = None, None, True, None
+    args.self_close_on_completion = None
+
+    assert cli.spawn(args) == 0
+    after = capsys.readouterr()
+
+    assert _NO_MODEL_WARNING not in seen["stderr_at_rpc"] + after.err
+    json.loads(after.out)
+
+
+def test_dead_seat_replay_error_tells_the_caller_to_pass_a_new_key(monkeypatch, tmp_path: Path, capsys) -> None:
+    _install_spawn_fakes(monkeypatch, tmp_path, response={
+        "type": "spawn.error", "error_code": "replayed_stream_dead",
+        "stream_id": "hostc:old-seat", "dead_reason": "closed", "replayed": True,
+    })
+    args = _spawn_args(tmp_path)
+    args.model = "gpt-6-luna"
+
+    assert cli.spawn(args) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["error_code"] == "replayed_stream_dead"
+    assert "hostc:old-seat" in captured.err and "--idempotency-key" in captured.err
