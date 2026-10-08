@@ -201,5 +201,205 @@
     "summary": "Set up the full process.",
     "related": [],
     "status": "stable"
+  },
+  {
+    "id": "spec_pentacle_th_h1_2026_10",
+    "path": "work/in_progress/pentacle__th-h1-bounded-root-suite/spec.md",
+    "title": "TH-H1 bounded root suite",
+    "type": "spec",
+    "canonical": false,
+    "updated_at": "2026-10-05",
+    "source_path": "work/in_progress/pentacle__th-h1-bounded-root-suite/spec.md",
+    "tags": [
+      "pentacle",
+      "test-harness"
+    ],
+    "summary": "Bounded attributable root-suite execution with owned cleanup and synthetic proofs.",
+    "related": [
+      "work_pentacle_th_h1_2026_10"
+    ],
+    "status": "in_progress",
+    "machine": "shared",
+    "owner": "dot"
+  },
+  {
+    "id": "spec_pentacle_th_h2_2026_10",
+    "path": "work/in_progress/pentacle__th-h2-portable-daemon-tests/spec.md",
+    "title": "TH-H2 portable daemon tests",
+    "type": "spec",
+    "canonical": false,
+    "updated_at": "2026-10-08",
+    "source_path": "work/in_progress/pentacle__th-h2-portable-daemon-tests/spec.md",
+    "tags": [
+      "pentacle",
+      "test-harness"
+    ],
+    "summary": "Test-only capability probes, dependency preflight, strict mode and fixture isolation for portable daemon tests.",
+    "related": [
+      "work_pentacle_th_h2_2026_10"
+    ],
+    "status": "in_progress",
+    "machine": "shared",
+    "owner": "dot"
+  },
+  {
+    "id": "spec_pentacle_th_h3_2026_10",
+    "path": "work/in_progress/pentacle__th-h3-runtime-directory/spec.md",
+    "title": "TH-H3 runtime directory",
+    "type": "spec",
+    "canonical": false,
+    "updated_at": "2026-10-08",
+    "source_path": "work/in_progress/pentacle__th-h3-runtime-directory/spec.md",
+    "tags": [
+      "pentacle",
+      "test-harness"
+    ],
+    "summary": "Runtime marker path resolution through a configurable runtime directory, preserving the default path and bytes.",
+    "related": [
+      "work_pentacle_th_h3_2026_10"
+    ],
+    "status": "in_progress",
+    "machine": "shared",
+    "owner": "dot"
+  },
+  {
+    "id": "spec_pentacle_th_h4_2026_10",
+    "path": "work/in_progress/pentacle__th-h4-ingress-replay/spec.md",
+    "title": "TH-H4 ingress replay",
+    "type": "spec",
+    "canonical": false,
+    "updated_at": "2026-10-08",
+    "source_path": "work/in_progress/pentacle__th-h4-ingress-replay/spec.md",
+    "tags": [
+      "pentacle",
+      "test-harness"
+    ],
+    "summary": "Test-only synthetic ingress replay corpus with real auth boundaries, exact counts and idempotent replay.",
+    "related": [
+      "work_pentacle_th_h4_2026_10"
+    ],
+    "status": "in_progress",
+    "machine": "shared",
+    "owner": "dot"
+  },
+  {
+    "id": "spec_pentacle_th_h5_2026_10",
+    "path": "work/in_progress/pentacle__th-h5-honest-ops-verdicts/spec.md",
+    "title": "TH-H5 honest ops verdicts",
+    "type": "spec",
+    "canonical": false,
+    "updated_at": "2026-10-08",
+    "source_path": "work/in_progress/pentacle__th-h5-honest-ops-verdicts/spec.md",
+    "tags": [
+      "pentacle",
+      "test-harness"
+    ],
+    "summary": "Promotion and deploy verdicts that retain every cell and reason, exercised through synthetic seams.",
+    "related": [
+      "work_pentacle_th_h5_2026_10"
+    ],
+    "status": "in_progress",
+    "machine": "shared",
+    "owner": "dot"
+  },
+  {
+    "id": "work_pentacle_th_h1_2026_10",
+    "path": "work/in_progress/pentacle__th-h1-bounded-root-suite/summary.md",
+    "title": "TH-H1 bounded root suite",
+    "type": "work",
+    "canonical": false,
+    "updated_at": "2026-10-05",
+    "source_path": "work/in_progress/pentacle__th-h1-bounded-root-suite/summary.md",
+    "tags": [
+      "pentacle",
+      "test-harness"
+    ],
+    "summary": "Bounded attributable root-suite execution with owned cleanup and synthetic proofs.",
+    "related": [
+      "spec_pentacle_th_h1_2026_10"
+    ],
+    "status": "in_progress",
+    "machine": "shared",
+    "owner": "dot"
+  },
+  {
+    "id": "work_pentacle_th_h2_2026_10",
+    "path": "work/in_progress/pentacle__th-h2-portable-daemon-tests/summary.md",
+    "title": "TH-H2 portable daemon tests",
+    "type": "work",
+    "canonical": false,
+    "updated_at": "2026-10-08",
+    "source_path": "work/in_progress/pentacle__th-h2-portable-daemon-tests/summary.md",
+    "tags": [
+      "pentacle",
+      "test-harness"
+    ],
+    "summary": "Test-only capability probes, dependency preflight, strict mode and fixture isolation for portable daemon tests.",
+    "related": [
+      "spec_pentacle_th_h2_2026_10"
+    ],
+    "status": "in_progress",
+    "machine": "shared",
+    "owner": "dot"
+  },
+  {
+    "id": "work_pentacle_th_h3_2026_10",
+    "path": "work/in_progress/pentacle__th-h3-runtime-directory/summary.md",
+    "title": "TH-H3 runtime directory",
+    "type": "work",
+    "canonical": false,
+    "updated_at": "2026-10-08",
+    "source_path": "work/in_progress/pentacle__th-h3-runtime-directory/summary.md",
+    "tags": [
+      "pentacle",
+      "test-harness"
+    ],
+    "summary": "Runtime marker path resolution through a configurable runtime directory, preserving the default path and bytes.",
+    "related": [
+      "spec_pentacle_th_h3_2026_10"
+    ],
+    "status": "in_progress",
+    "machine": "shared",
+    "owner": "dot"
+  },
+  {
+    "id": "work_pentacle_th_h4_2026_10",
+    "path": "work/in_progress/pentacle__th-h4-ingress-replay/summary.md",
+    "title": "TH-H4 ingress replay",
+    "type": "work",
+    "canonical": false,
+    "updated_at": "2026-10-08",
+    "source_path": "work/in_progress/pentacle__th-h4-ingress-replay/summary.md",
+    "tags": [
+      "pentacle",
+      "test-harness"
+    ],
+    "summary": "Test-only synthetic ingress replay corpus with real auth boundaries, exact counts and idempotent replay.",
+    "related": [
+      "spec_pentacle_th_h4_2026_10"
+    ],
+    "status": "in_progress",
+    "machine": "shared",
+    "owner": "dot"
+  },
+  {
+    "id": "work_pentacle_th_h5_2026_10",
+    "path": "work/in_progress/pentacle__th-h5-honest-ops-verdicts/summary.md",
+    "title": "TH-H5 honest ops verdicts",
+    "type": "work",
+    "canonical": false,
+    "updated_at": "2026-10-08",
+    "source_path": "work/in_progress/pentacle__th-h5-honest-ops-verdicts/summary.md",
+    "tags": [
+      "pentacle",
+      "test-harness"
+    ],
+    "summary": "Promotion and deploy verdicts that retain every cell and reason, exercised through synthetic seams.",
+    "related": [
+      "spec_pentacle_th_h5_2026_10"
+    ],
+    "status": "in_progress",
+    "machine": "shared",
+    "owner": "dot"
   }
 ]

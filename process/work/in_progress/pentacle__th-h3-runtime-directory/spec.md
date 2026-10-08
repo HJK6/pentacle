@@ -1,3 +1,20 @@
+---
+id: spec_pentacle_th_h3_2026_10
+title: TH-H3 runtime directory
+type: spec
+status: in_progress
+canonical: false
+created_at: '2026-10-05'
+updated_at: '2026-10-08'
+source_path: work/in_progress/pentacle__th-h3-runtime-directory/spec.md
+machine: shared
+owner: dot
+tags: [pentacle, test-harness]
+summary: Runtime marker path resolution through a configurable runtime directory, preserving the default path and bytes.
+related:
+- work_pentacle_th_h3_2026_10
+---
+
 # TH-H3 runtime directory
 Base: c56afde5eb4c49f6f021f9e67f5691221999a221. Branch: dot/th-h3-runtime-directory.
 TH-v1 rev 0.4 H3: narrowly change runtime marker path resolution, preserve default path and serialized bytes. PENTACLE_RUNTIME_DIR unset/empty keeps ~/.pentacle; nonempty paths use normal Node path semantics, including relative paths relative to current working directory.
