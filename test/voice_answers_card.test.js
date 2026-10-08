@@ -462,3 +462,21 @@ test('a newer departure at the idle-reset boundary supersedes the already schedu
   assert.equal(replaced, true); assert.deepEqual(actions, ['latest']);
   assert.ok(u.tracks.every(track => track.readyState === 'ended')); assert.equal(u.sent.length, 0);
 });
+
+test('actual app: leaving the slot while recording removes its question portal; re-attach shows one deck', async t => {
+  const h = await appFixture(t); const doc = h.dom.window.document; await h.start();
+  assert.equal(doc.querySelectorAll('.desktop-question-portal').length, 1);
+  vm.runInContext('detachSlot(0)', h.context); await flush();
+  doc.querySelector('[data-question-voice-discard]').click(); await flush(); await flush();
+  assert.equal(h.tracks[0].readyState, 'ended');
+  assert.equal(vm.runInContext('state.slots[0]', h.context), null);
+  assert.equal(doc.querySelectorAll('.desktop-question-portal').length, 0, 'the detached slot leaves no orphaned question portal');
+  assert.equal(vm.runInContext(`!!state.desktopQuestionOverlayOpen[${JSON.stringify(STREAM)}]`, h.context), false, 'overlay flag cleared');
+  mountRaceSlot(h.context);
+  vm.runInContext("state.slots[0].session_kind='assistant_composite'; state.chatStream.sessions[0].session_kind='assistant_composite'; renderSlotChat(0)", h.context);
+  doc.querySelector('.slot-chat-question-open').click(); await flush();
+  assert.equal(doc.querySelectorAll('.desktop-question-portal').length, 1);
+  assert.equal(doc.querySelectorAll('.desktop-question-dot').length, 3, 'three questions show three pager dots');
+  assert.equal(doc.querySelectorAll('.slot-chat-question-card').length, 1);
+  assert.equal(h.sendCalls.length, 0); assert.equal(h.notificationResolveCalls.length, 0);
+});

@@ -5492,6 +5492,15 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
 function detachSlot(slot, { force = false } = {}) {
   if (!force && state.slotChatRefs[slot]?.questionVoiceController?.requestLeave(() => detachSlot(slot))) return;
   closedChatSlots.forget(slot);
+  // A recording deck is nonmodal, so a slot can now be left with its deck open.
+  // The portal lives on document.body: remove the one owning this slot's question
+  // node, or it stays on screen and a re-attach stacks a second deck inside it.
+  const deckQuestionEl = state.slotChatRefs[slot]?.questionEl;
+  const deckStreamId = state.slotChatBoundStream[slot] || (state.slots[slot] ? chatSessionStateForSession(state.slots[slot])?.stream_id : null);
+  if (deckStreamId && deckQuestionEl?.closest('.desktop-question-portal')) {
+    closeDesktopQuestionPortal(deckStreamId, deckQuestionEl);
+    if (state.desktopQuestionOverlayOpen) delete state.desktopQuestionOverlayOpen[deckStreamId];
+  }
   const wasBot = state.botSlots[slot];
   const sessionName = state.slots[slot] && state.slots[slot].name;
 
