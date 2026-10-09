@@ -342,7 +342,7 @@ class Ledger:
     ) -> tuple[str | None, dict[str, Any] | None]:
         return await verify_ac_claim(ac_claim)
 
-    def _alert_claim_result(
+    async def _alert_claim_result(
         self,
         state: str | None,
         mismatch: dict[str, Any] | None,
@@ -353,8 +353,8 @@ class Ledger:
         if state not in {"mismatch", "unverifiable"}:
             return
         alerts = self.alerts or getattr(self.sessions, "alerts", None)
-        emit = getattr(alerts, "emit", None)
-        if callable(emit):
+        record = getattr(alerts, "record", None)
+        if callable(record):
             fields: dict[str, Any] = {
                 "report_id": report_id,
                 "from_stream_id": from_stream_id,
@@ -365,7 +365,7 @@ class Ledger:
                     "spec_sha": mismatch.get("spec_sha"),
                     "unverified_indices": mismatch.get("unverified_indices", []),
                 })
-            emit("close_claim_mismatch", **fields)
+            await record("close_claim_mismatch", **fields)
 
     # -- read-only delivery audit -----------------------------------------
 
@@ -838,7 +838,7 @@ class Ledger:
                     await apply_state(row)
                 except Exception:
                     log.exception("report roster projection failed after durable ingest")
-            self._alert_claim_result(
+            await self._alert_claim_result(
                 row.get("claim_verified"), row.get("ac_claim_mismatch"),
                 report_id=str(row.get("report_id") or report_id),
                 from_stream_id=str(row.get("from_stream_id") or from_stream_id),

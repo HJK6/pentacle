@@ -592,7 +592,11 @@ def test_remote_dead_pane_closes_after_two_passes() -> None:
         tmux = ZombieTmux((0, "v2-other\t99\n"))
         store, sessions, hosts, original = await _open_remote(tmux)
         alerts: list[tuple[str, dict]] = []
-        alert_sink = type("Alerts", (), {"emit": lambda _self, kind, **fields: alerts.append((kind, fields))})()
+        async def record(self, kind, **fields):
+            alerts.append((kind, fields))
+            return None
+
+        alert_sink = type("Alerts", (), {"emit": lambda _self, kind, **fields: alerts.append((kind, fields)), "record": record})()
         reconciler = SessionReconciler(
             sessions, hosts, presence=original.presence, alerts=alert_sink,
             config=ReconcileConfig(threshold_checks=2),

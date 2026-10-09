@@ -601,7 +601,7 @@ class SessionReconciler:
             and not row.get("parent_stream_id")
         )
         if self.alerts is not None and surface_allowed:
-            self.alerts.emit("reconciler_session_dead", **payload)
+            await self.alerts.record("reconciler_session_dead", **payload)
         if self.notify is not None and surface_allowed:
             try:
                 await self.notify.notification({

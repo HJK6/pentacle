@@ -308,6 +308,10 @@ class Sessions:
         if self.alerts is not None:
             self.alerts.emit(kind, **fields)
 
+    async def _record_alert(self, kind: str, **fields: Any) -> None:
+        if self.alerts is not None:
+            await self.alerts.record(kind, **fields)
+
     async def _live_children(self, parent_stream_id: str) -> list[dict[str, Any]]:
         """Read the direct open-child set from the central durable registry."""
         children = await self.store.children_of(parent_stream_id)
@@ -446,16 +450,17 @@ class Sessions:
         except Exception:  # noqa: BLE001 - close must fence ambiguous capture
             return stamp("transport_unknown")
 
-    def _reap_fenced(
+    async def _reap_fenced(
         self, host: str, session_name: str, row: dict[str, Any] | None,
     ) -> dict[str, Any]:
         stream_id = f"{host}:{session_name}"
         liveness = self._capture_liveness(stream_id, row) or "unknown"
-        self._alert(
+        await self._record_alert(
             "reap_fenced",
             host=host,
             session_name=session_name,
             stream_id=stream_id,
+            generation=(row or {}).get("session_generation"),
             capture_liveness=liveness,
             reason="capture_liveness_not_idle",
         )
@@ -1560,7 +1565,7 @@ class Sessions:
                     reason=f"reap_fenced: capture_liveness="
                            f"{self._capture_liveness(sid, row) or 'unknown'}",
                 )
-                return self._reap_fenced(host, session_name, row)
+                return await self._reap_fenced(host, session_name, row)
 
         # No pane at entry is not a process-tree readback. Keep the close
         # unknown so descendants cannot be silently lost behind `reaped, []`.
@@ -1570,8 +1575,9 @@ class Sessions:
             if state == "failed":
                 # No deliverable signal: the process may still run userspace, so
                 # the row must NOT be recorded closed. Honest `close.failed`.
-                self._alert("close_failed", host=host, session_name=session_name,
-                            pane_pid=pane_pid, reason="no_deliverable_signal")
+                await self._record_alert("close_failed", host=host, session_name=session_name,
+                                        stream_id=sid, generation=(row or {}).get("session_generation"),
+                                         pane_pid=pane_pid, reason="no_deliverable_signal")
                 return {"failed": True, "already_closed": False,
                         "reason": "pane_process_unkillable: no deliverable signal "
                                   "(no pane pid and tmux unresponsive)",
@@ -1580,8 +1586,9 @@ class Sessions:
                 # SIGKILLed but still visible = uninterruptible sleep. It can
                 # never run userspace again, so closing the row is fact, not a
                 # guess — but it is worth an operator's eyes (carcass pid).
-                self._alert("close_carcass", host=host, session_name=session_name,
-                            pane_pid=pane_pid)
+                await self._record_alert("close_carcass", host=host, session_name=session_name,
+                                         stream_id=sid, generation=(row or {}).get("session_generation"),
+                                         pane_pid=pane_pid)
 
         already = row is not None and str(row.get("status") or "") != "open"
         closed = await self._mark_closed_locked(
@@ -1909,9 +1916,10 @@ class Sessions:
             log.info("deferred_reap stream=%s generation=%s done=%s attempts=%s error=%s exhausted=%s",
                      sid, generation, done, updated["attempts"], error, updated["exhausted_at"])
             if updated["exhausted_at"]:
-                self._alert("deferred_reap_exhausted", subsystem="sessions",
-                            bug_ref="offline_host_operator_close_2026_09",
-                            stream_id=sid, host=host, attempts=updated["attempts"], last_error=error)
+                await self._record_alert("deferred_reap_exhausted", subsystem="sessions",
+                                         generation=(row or {}).get("session_generation"),
+                                         bug_ref="offline_host_operator_close_2026_09",
+                                         stream_id=sid, host=host, attempts=updated["attempts"], last_error=error)
 
     async def _close_remote(
         self,
@@ -1997,7 +2005,7 @@ class Sessions:
                     reason=f"reap_fenced: capture_liveness="
                            f"{self._capture_liveness(sid, row) or 'unknown'}",
                 )
-                return self._reap_fenced(host, session_name, row)
+                return await self._reap_fenced(host, session_name, row)
         # Fast path: one bounded probe fails an offline host in ~probe_timeout
         # rather than waiting out the per-call tmux timeout. `session_state`
         # below is still the correctness guard for a host that drops mid-close.
@@ -2049,8 +2057,9 @@ class Sessions:
                             # a kill-failure we cannot yet escalate remotely is an
                             # honest failure with the row LEFT OPEN, never a shrug —
                             # and never a false `close.ok`.
-                            self._alert("close_failed", host=host, session_name=session_name,
-                                        reason="pane_still_alive_after_kill")
+                            await self._record_alert("close_failed", host=host, session_name=session_name,
+                                                     stream_id=sid, generation=(row or {}).get("session_generation"),
+                                                     reason="pane_still_alive_after_kill")
                             return self._close_failed(row, "pane_still_alive_after_kill")
                         await asyncio.sleep(CLOSE_POLL_INTERVAL_S)
                     break

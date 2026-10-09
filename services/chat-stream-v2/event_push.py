@@ -936,14 +936,15 @@ class EventPush:
         pinned = await self._target_sha()
         if pinned == self.daemon_sha:
             return False
-        self._maybe_alert("pin_drift", "daemon", pinned_sha=pinned, daemon_sha=self.daemon_sha)
+        await self._maybe_alert("pin_drift", "daemon", pinned_sha=pinned, daemon_sha=self.daemon_sha)
         return True
 
-    def _maybe_alert(self, kind: str, host: str, **fields: object) -> None:
+    async def _maybe_alert(self, kind: str, host: str, **fields: object) -> None:
         now = time.time()
         key = (kind, host or "?")
         last = self._last_alert.get(key, 0.0)
         if now - last < STALE_ALERT_MIN_INTERVAL_S:
             return
         self._last_alert[key] = now
-        self.alerts.emit(kind, host=host, **fields)
+        if self.alerts is not None:
+            await self.alerts.record(kind, host=host, **fields)
