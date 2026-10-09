@@ -223,10 +223,20 @@ class SpecsSubsystem:
 
             observer = Observer()
             handler = Handler()
+            # Subscribe only to the same bounded depth as source discovery.
+            # Recursive watches would descend into each item's artifact tree.
+            work_root = self.memory_root / "work"
+            if not work_root.is_dir():
+                raise FileNotFoundError(str(work_root))
+            observer.schedule(handler, str(work_root), recursive=False)
             for directory in self._work_dirs():
-                if not directory.is_dir():
-                    raise FileNotFoundError(str(directory))
-                observer.schedule(handler, str(directory), recursive=True)
+                if not directory.is_dir() or directory.is_symlink():
+                    continue
+                observer.schedule(handler, str(directory), recursive=False)
+                for folder in directory.iterdir():
+                    if (folder.is_dir() and not folder.is_symlink() and not folder.name.startswith(("_", "."))
+                            and not _is_spec_sync_conflict(folder)):
+                        observer.schedule(handler, str(folder), recursive=False)
             observer.start()
             self._observer = observer
             self._invalidate_presentation_cache()
@@ -304,7 +314,11 @@ class SpecsSubsystem:
         # Accept any folder under work/ (including unknown ones) — the parser
         # surfaces unknowns with `status_unknown: true` rather than dropping
         # them silently.
-        return rel.parts[1] if len(rel.parts) >= 2 else None
+        if any(part.startswith(("_", ".")) for part in rel.parts) or len(rel.parts) > 3:
+            return None
+        if len(rel.parts) == 3 and rel.parts[2] not in ("spec.md", "summary.md"):
+            return None
+        return rel.parts[1] if len(rel.parts) >= 2 else "*" if rel.parts else None
 
     def _sync_conflict_count(self) -> int:
         if self.disabled:
