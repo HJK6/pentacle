@@ -225,9 +225,10 @@ there is no recovered fact. Completion never sets the lane to done, and leadless
 lanes participate in completion episodes.
 
 `LaneEpisodeSink` is a one-method async protocol: `emit(fact)` returns a durable
-reference or null when unavailable. The stable identity is family `work_lane.v1`,
-producer principal `daemon:work-lanes`, and episode ID, independent of the current
-front-desk generation. The stable fact carries lane ID, kind, opening timestamp
+reference or null when unavailable. The stored M1 fact carries the historical
+producer label `daemon:work-lanes`; the real-core binding below consistently uses
+`system:work-lanes`. Both are independent of the current front-desk generation.
+The stable fact carries lane ID, kind, opening timestamp
 and active condition; its code is `lane_completed` or `lane_stale`.
 
 1. One Store transaction persists the opening and its exact fact with null ref
@@ -244,9 +245,9 @@ attached to a newer episode. Restart and front-desk rebind therefore do not
 create a second line in an idempotent sink.
 
 M1 ships the computation, storage and sink interface, tested with a synthetic
-async idempotent recording sink. The daemon's default sink is absent, so openings
-remain pending. Binding the real digest-only alert family is a separately gated
-M2 dependency; M1 does not modify the shared alert core or claim digest delivery.
+async idempotent recording sink. In an M1-only installation the sink is absent
+and openings remain pending. M2 binds these same persisted episodes to the real
+digest-only alert family as described below.
 
 ### Increment-2 validation and rollback
 
@@ -266,3 +267,43 @@ pending opening facts and latched references must survive re-upgrade. Retain an
 owned DB preimage and source/configuration receipt before any fleet-authorized
 deployment. Real inventory, CLI and digest readback after deployment remains
 separate fleet acceptance.
+
+### Shared digest binding (M2)
+
+The daemon constructs `WorkLaneAlertSink` with its existing `Alerts(store)`
+instance and supplies it to `WorkLanesInventory`. The adapter awaits
+`alerts.error(ErrorFact(family="work_lane.v1", code="lane_completed" | "lane_stale",
+episode_id=..., condition="active"), principal="system:work-lanes")` outside
+every Store transaction. The returned notification ID is latched by the existing
+guarded episode write. No core file, schema, episode ID or clear/recur rule changes.
+
+The canonical core identity is family + `system:work-lanes` + episode ID for
+both newly opened episodes and previously pending M1 openings. The adapter does
+not rewrite historical `fact_json` or derive a producer from the current FD.
+Retries therefore reach the same notification even after restart or rebind.
+
+Inventory starts before alert-core setup during daemon boot. The adapter retains
+the `Alerts` object, so a pre-setup call returns null and keeps its opening pending.
+After `server.configure_error_alerts` attaches the real sink, main requests one
+existing coalesced refresh. Subsequent retries use the existing periodic drain;
+there is no additional timer, outbox or transport retry state.
+
+The shared core alone owns delivery policy and proof: lane facts are digest-only,
+use the neutral `Work update` line, and ignore error/voice mode switches. A clear
+does not invoke the sink or send a recovered line. A recurrence has a new episode
+ID and notification. A cleared pending opening still retains its delivery fact.
+Completion settles only after the core verifies digest delivery; creation,
+folding and the returned notification ID are not delivery proof.
+
+`test_work_lane_alert_sink.py` exercises the actual main composition expression,
+real `Alerts`/`ErrorAlerts`, notification storage, digest, outbox and proof path
+with disposable SQLite and a synthetic external provider. It covers both codes
+in off/record-only/on error modes, leadless completion, unavailable startup,
+legacy M1 pending facts, FD rebind, full store/core restart, the post-commit
+pre-latch crash gap, silent clear, recurrence and clear/recur during an awaited
+sink return. The existing lane-family control suite is also retained unchanged.
+
+Rollback of M2 to M1 removes only the real sink wiring; preserve episode rows,
+references, notification records and outbox proof. Previously handed facts remain
+owned by the shared core; null-ref openings wait for re-upgrade. Runtime activation
+and real FD readback remain separate fleet deployment acceptance.
