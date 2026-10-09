@@ -86,6 +86,68 @@ LIST_LIMIT_MAX = 200
 DAEMON_ACTOR = "daemon:reconciler"
 
 
+class WorkLaneMemberConflict(ValueError):
+    """Stable wire code with the conflicting product-lane identity kept separate."""
+    code = "work_lane_member_conflict"
+
+    def __init__(self, lane_id: str, spec_id: str):
+        self.lane_id, self.spec_id = lane_id, spec_id
+        super().__init__(f"{self.code}: {lane_id} ({spec_id})")
+
+
+def member_conflicts_conn(conn, composite_stream_id: str, members: list[str],
+                          target_lane_id: str | None = None, *, refuse: bool = False) -> list[dict[str, str]]:
+    """One deterministic check, reused inside the writer transaction and previews."""
+    wanted = set(members)
+    conflicts = []
+    if wanted:
+        for raw in conn.execute(
+                "SELECT lane_id,members_json FROM v2_assistant_composite_lanes "
+                "WHERE stream_id=? AND work_state IS NOT NULL AND work_state!='done' ORDER BY lane_id",
+                (composite_stream_id,)):
+            lane = dict(raw)
+            if lane["lane_id"] != target_lane_id:
+                conflicts.extend({"spec_id": identity, "lane_id": lane["lane_id"]}
+                                 for identity in sorted(wanted.intersection(member_ids(lane))))
+    if conflicts and refuse:
+        raise WorkLaneMemberConflict(conflicts[0]["lane_id"], conflicts[0]["spec_id"])
+    return conflicts
+
+
+def _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor):
+    """Guard valid membership-opening requests before CAS, without side effects.
+
+    Invalid payloads retain their existing CAS/validation ordering. Actor and
+    idempotency checks have already run; all reads and the later write share
+    BEGIN IMMEDIATE. Confirmation verification here never consumes a question.
+    """
+    members = None
+    try:
+        if operation == "set_members" and lane["work_state"] != "done":
+            if set(payload) - {"members", "no_spec_reason"} or "members" not in payload:
+                return
+            members, _ = validate_members(payload["members"], payload.get("no_spec_reason"))
+        elif operation == "set_state" and lane["work_state"] == "done" and payload.get("to") in OPEN_WORK_STATES:
+            if set(payload) - {"to", "blocker", "outcome", "resolution", "reason", "operator_confirmation"}:
+                return
+            _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")
+            if "operator_confirmation" in payload:
+                question = _verify_confirmation(payload.get("operator_confirmation") and confirmation,
+                    lane_id=lane["lane_id"], action="set_state:" + payload["to"], actor_stream_id=actor)
+                _consume_confirmation_conn(conn, question)
+            elif lane.get("owner_kind") == "operator":
+                _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_override_reason_required", required=True)
+            if payload["to"] == "active":
+                _require_qualifying_lead(lane, conn)
+            if payload["to"] == "blocked":
+                _text(payload.get("blocker"), UPDATE_TEXT_MAX, "work_lane_blocker_required", required=True)
+            members = member_ids(lane)
+    except ValueError:
+        return  # Let the unchanged operation validator report its original error.
+    if members is not None:
+        member_conflicts_conn(conn, lane["stream_id"], members, lane["lane_id"], refuse=True)
+
+
 def ensure_work_lane_schema(conn: sqlite3.Connection) -> None:
     """Additive migration only: nullable columns, a new table, partial indexes."""
     present = {row[1] for row in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")}
@@ -504,6 +566,12 @@ class _WorkLanesStoreMixin:
                                          env_binding: dict[str, str] | None) -> bool:
         return await self.submit(lambda conn: visible_chat_readable_conn(conn, stream_id, generation, env_binding))
 
+    async def work_lane_preview_conflicts(self, *, composite_stream_id: str,
+                                          candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return await self.submit(lambda conn: [dict(candidate, member_conflicts=member_conflicts_conn(
+            conn, composite_stream_id, candidate.get("members") or [], candidate.get("lane_id")))
+            for candidate in candidates])
+
     async def work_lane_adopt_preview(self, *, composite_stream_id: str,
                                       env_binding: dict[str, str] | None) -> list[dict[str, Any]]:
         def _op(conn):
@@ -601,6 +669,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
         lane = lane_row_conn(conn, lane_id)
         if lane is None or lane["stream_id"] != stream_id or lane.get("work_state") is None:
             raise ValueError("work_lane_not_found")
+        _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor)
         if expected != int(lane["version"]):
             raise ValueError("assistant_lane_version_conflict")
         prior_state = lane["work_state"]
@@ -828,6 +897,9 @@ def _adopt_conn(conn, *, stream_id, request_id, payload, actor, generation, env_
         existing = lane_row_conn(conn, str(target_id))
         if existing is None or existing["stream_id"] != stream_id or existing.get("work_state") is not None:
             raise ValueError("work_lane_adopt_target_invalid")
+        if state == "active":
+            _require_qualifying_lead({**existing, **columns}, conn)
+        member_conflicts_conn(conn, stream_id, members, existing["lane_id"], refuse=True)
         if summary:
             columns["summary"] = summary
         columns["version"] = int(existing["version"]) + 1
@@ -836,6 +908,9 @@ def _adopt_conn(conn, *, stream_id, request_id, payload, actor, generation, env_
                      (*columns.values(), existing["lane_id"]))
         lane_id = existing["lane_id"]
     else:
+        if state == "active":
+            _require_qualifying_lead(columns, conn)
+        member_conflicts_conn(conn, stream_id, members, refuse=True)
         lane_id = "wl-" + hashlib.sha256((stream_id + "\x00" + key).encode()).hexdigest()[:24]
         columns.update(lane_id=lane_id, stream_id=stream_id, phase="discussion", summary=summary,
                        version=1, created_at=stamp)
@@ -961,6 +1036,9 @@ def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dic
             "evidence": {"phase": lane["phase"], "admit_route": has_admit,
                          "bound_backend_kind": lane.get("bound_backend_kind")},
         })
+    for candidate in out:
+        candidate["member_conflicts"] = member_conflicts_conn(
+            conn, composite_stream_id, candidate["members"], candidate.get("lane_id"))
     return out
 
 

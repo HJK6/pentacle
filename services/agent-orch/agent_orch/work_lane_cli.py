@@ -256,9 +256,71 @@ def cmd_request_confirmation(args: argparse.Namespace) -> int:
     return _finish(response)
 
 
+def cmd_estimate_preview(args: argparse.Namespace) -> int:
+    """Read only an explicit synthetic/captured root and a complete stdin manifest."""
+    from _shared.specs_parser import WORK_SPEC_ID_RE
+    from _shared.specs_service import SpecsSubsystem
+    # Reuse the daemon's pure aggregate without importing Store/server or config.
+    service = Path(__file__).resolve().parents[2] / "chat-stream-v2"
+    if str(service) not in sys.path:
+        sys.path.insert(0, str(service))
+    from work_lane_progress import estimate_projection
+
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError("duplicate JSON key")
+            value[key] = item
+        return value
+
+    def invalid_constant(value):
+        raise ValueError("nonfinite JSON number")
+
+    try:
+        if not args.memory_root:
+            raise ValueError("memory root must be explicit and nonempty")
+        value = json.load(sys.stdin, object_pairs_hook=pairs, parse_constant=invalid_constant)
+        if (not isinstance(value, dict) or set(value) != {"schema", "lanes"}
+                or value["schema"] != "work_lane_estimate_manifest_v1" or not isinstance(value["lanes"], list)):
+            raise ValueError("invalid manifest schema")
+        seen = set()
+        for lane in value["lanes"]:
+            if not isinstance(lane, dict) or set(lane) != {"composite_stream_id", "lane_id", "state", "members_total", "members"}:
+                raise ValueError("invalid lane fields")
+            if any(not isinstance(lane[k], str) or not lane[k].strip() for k in ("composite_stream_id", "lane_id")):
+                raise ValueError("invalid lane identity")
+            if lane["state"] not in ("active", "paused", "blocked", "done"):
+                raise ValueError("invalid lane state")
+            count, members = lane["members_total"], lane["members"]
+            if (type(count) is not int or not 0 <= count <= 32 or not isinstance(members, list)
+                    or count != len(members) or any(not isinstance(m, str) or not WORK_SPEC_ID_RE.fullmatch(m) for m in members)
+                    or len(set(members)) != count):
+                raise ValueError("invalid lane membership/count")
+            key = lane["composite_stream_id"], lane["lane_id"]
+            if key in seen:
+                raise ValueError("duplicate lane identity")
+            seen.add(key)
+    except (ValueError, TypeError, OSError) as exc:
+        print(f"agent-orch work-lane estimate-preview: {exc}", file=sys.stderr)
+        return 2
+    scanner = SpecsSubsystem(memory_root=args.memory_root, session_summaries=lambda: [],
+                             changed_callback=lambda ids: None, debounce_s=0)
+    # Captured snapshots have no wall-clock quiet window. A fixed upper bound
+    # ignores age while preserving before/after signatures and conflict checks.
+    result = estimate_projection(value["lanes"], scanner.scan_work_observations(now=sys.float_info.max))
+    print(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False))
+    return 1 if result["errors"] else 0
+
+
 def add_parser(subparsers: Any) -> None:
     parser = subparsers.add_parser("work-lane", help="read and maintain first-class work lanes")
     sub = parser.add_subparsers(dest="work_lane_command", required=True)
+
+    p = sub.add_parser("estimate-preview", help="offline remaining-work projection; no daemon or writes")
+    p.add_argument("--memory-root", required=True)
+    p.add_argument("--lanes-json", required=True, choices=("-",), help="complete manifest on stdin")
+    p.set_defaults(func=cmd_estimate_preview)
 
     def common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--composite-stream-id", default=DEFAULT_COMPOSITE)

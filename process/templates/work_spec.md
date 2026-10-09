@@ -91,6 +91,11 @@ Drafted {{date}}. Scope: <single-user | multi-user>, <big-bang | phased>.
 - [ ] <spec-specific outcome 1>
 - [ ] <spec-specific outcome 2>
 
+## Estimate
+
+- remaining_work_h: <p25>–<p75> (median <m>) as_of <YYYY-MM-DD>
+- See [the shared work-lane estimate convention](../../services/chat-stream-v2/docs/work-lanes.md#remaining-work-estimates-a1).
+
 ## Risks
 
 - <Risk> — mitigation: <mitigation>

@@ -170,3 +170,51 @@ def test_watcher_ignores_its_own_file_reads(tmp_path, monkeypatch):
         service._on_fs_event(SimpleNamespace(event_type=kind, src_path=str(folder / "spec.md"), dest_path=None))
     assert service._pending_spec_ids == set()
     assert service._debounce_timer is None
+
+
+def test_exemption_and_date_are_material_last_good_facts():
+    initial = candidate(status="in_progress")
+    initial["facts"]["estimate_exempt"] = False
+    record, _ = advance(None, initial, 1000)
+    exempt = candidate(status="in_progress")
+    exempt["facts"]["estimate_exempt"] = True
+    exempt["source_hash"] = "exempt"
+    record, change = advance(record, exempt, 1001)
+    assert record["member"]["obs_rev"] == 2
+    assert change["prior"]["estimate_exempt"] is False and change["next"]["estimate_exempt"] is True
+    for quality in ("stale", "error"):
+        stale, change = advance(record, {"quality": quality}, 1002)
+        assert stale["member"]["estimate"] is None and stale["member"]["estimate_exempt"] is True
+        assert stale["member"]["obs_rev"] == 2 and change is None
+    same, change = advance(record, exempt, 1003)
+    assert same["member"]["obs_rev"] == 2 and change is None
+    numeric = candidate(status="in_progress")
+    numeric["facts"].update(estimate_exempt=False, estimate={"p25": 2, "p75": 4, "median": 3,
+                           "as_of": "2026-10-09", "provisional": False})
+    record, _ = advance(record, numeric, 1004)
+    numeric["facts"]["estimate"]["as_of"] = "2026-10-10"
+    record, change = advance(record, numeric, 1005)
+    assert record["member"]["obs_rev"] == 4 and change["next"]["estimate"]["as_of"] == "2026-10-10"
+
+
+def test_legacy_observation_defaults_nonexempt_without_spurious_revision():
+    record, _ = advance(None, candidate(), 1000)
+    assert record["member"]["estimate_exempt"] is False
+    candidate_now = candidate()
+    candidate_now["facts"]["estimate_exempt"] = False
+    record, change = advance(record, candidate_now, 1001)
+    assert record["member"]["obs_rev"] == 1 and change is None
+
+
+def test_explicit_scanner_never_resolves_environment_root(tmp_path, monkeypatch):
+    from _shared import specs_service
+    root = tmp_path / "chosen"
+    write_item(root)
+    def forbidden():
+        raise AssertionError("explicit root called environment resolution")
+    monkeypatch.setattr(specs_service, "_resolve_specs_memory_root", forbidden)
+    service = SpecsSubsystem(memory_root=root, session_summaries=lambda: [], changed_callback=lambda ids: None, debounce_s=0)
+    assert service.scan_work_observations()["candidates"][ID][0]["quality"] == "fresh"
+    (root / "work" / "statuses.json").write_text('{"statuses":[{"name":"../../escape","order":1}]}')
+    result = service.scan_work_observations()
+    assert not result["available"] and not result["candidates"]

@@ -4209,6 +4209,7 @@ class Server:
         return {"ok": bool(str(reply.get("type") or "").endswith(".ok")), "reply": reply}
 
     async def _on_assistant_operation(self, msg: dict[str, Any]) -> dict[str, Any]:
+        from store_work_lanes import WorkLaneMemberConflict
         composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if composite is None or not auth.get("token_verified"):
@@ -4217,6 +4218,8 @@ class Server:
             composite.ruling_hook = self.lane_rulings.request_composite
         try:
             return await composite.operation(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
+        except WorkLaneMemberConflict as exc:
+            raise VerbError(exc.code, str(exc)) from exc
         except ValueError as exc:
             raise VerbError(str(exc), str(exc)) from exc
 
@@ -4284,6 +4287,8 @@ class Server:
                 candidate["members"] = members.copy()
                 candidate["member_sources"] = [{"epic_id": msg["epic"], "source": "catalog"}]
                 candidate["no_spec_reason"] = None
+        candidates = await self.store.work_lane_preview_conflicts(
+            composite_stream_id=composite.config.stream_id, candidates=candidates)
         return {"type": "work_lanes.adopt_preview.ok", "candidates": candidates}
 
     async def _on_assistant_binding(self, msg: dict[str, Any]) -> dict[str, Any]:
