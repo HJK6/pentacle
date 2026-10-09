@@ -1639,7 +1639,7 @@ class _RoutingStoreMixin:
                             (requested_to, _routing_iso_now(), audit_lane_id),
                         )
                         if transition == "reopen":
-                            conn.execute("UPDATE v2_assistant_composite_lanes SET completion_report_id=NULL WHERE lane_id=?",
+                            conn.execute("UPDATE v2_assistant_composite_lanes SET completion_report_id=NULL,lead_reported_done=0 WHERE lane_id=?",
                                          (audit_lane_id,))
                         next_phase = requested_to
                     else:
@@ -1888,6 +1888,16 @@ class _RoutingStoreMixin:
                         _routing_iso_now(),
                     ),
                 )
+                # Cache the verified fact before a handoff can replace the
+                # binding, even if no inventory refresh has observed the report.
+                # A successor accepted via handoff authority does not substitute
+                # for an exact bound-generation report. Preserve the prior fact.
+                exact_lead = (row["bound_stream_id"], row["bound_generation"]) == (actor_stream_id, actor_generation)
+                prior_done = row["lead_reported_done"]
+                if prior_done is None and not row["completion_report_id"]:
+                    prior_done = 0  # The resolved route above proves correlation.
+                conn.execute("UPDATE v2_assistant_composite_lanes SET lead_reported_done=? WHERE lane_id=?",
+                             (1 if exact_lead else prior_done, lane_id))
                 # A submitted terminal report moves the lane only to
                 # ``completed``.  Its separately durable notice wakes the
                 # authority once to accept/reopen/close; it never claims that

@@ -17,6 +17,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from work_lane_progress import lane_progress
+from store_work_lane_episodes import LaneEpisodeSink
 
 LANE_FRAME_CAP = 64
 log = logging.getLogger(__name__)
@@ -70,7 +71,8 @@ def _lead(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str) -
     }
 
 
-def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str) -> dict[str, Any]:
+def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str,
+                 *, index_available: bool | None = None, all_members: bool = False) -> dict[str, Any]:
     stored = lane["work_state"]
     state, reason = stored, lane.get("work_state_reason")
     if stored == "active" and not lane.get("_qualifies"):
@@ -87,7 +89,7 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                          "kind": lane.get("_chat_kind") or "session",
                          "available": lane.get("_chat_available") or "unavailable"},
         "last_update": lane.get("_last_update"),
-        **lane_progress(lane),
+        **lane_progress(lane, now_iso=now_iso, index_available=index_available, all_members=all_members),
     }
 
 
@@ -100,9 +102,10 @@ def server_order(lanes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def project_lanes(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict[str, Any]],
-                  now_iso: str | None = None) -> list[dict[str, Any]]:
+                  now_iso: str | None = None, *, index_available: bool | None = None) -> list[dict[str, Any]]:
     now_iso = now_iso or _iso_now()
-    lanes = [project_lane(row, presence_by_stream.get(str(row.get("bound_stream_id") or "")), now_iso)
+    lanes = [project_lane(row, presence_by_stream.get(str(row.get("bound_stream_id") or "")), now_iso,
+                          index_available=index_available)
              for row in rows]
     return server_order(lanes)
 
@@ -110,7 +113,9 @@ def project_lanes(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict
 def build_frame(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict[str, Any]],
                 *, now_iso: str | None = None, cap: int = LANE_FRAME_CAP,
                 work_index: dict[str, Any] | None = None) -> dict[str, Any]:
-    lanes = [lane for lane in project_lanes(rows, presence_by_stream, now_iso) if lane["state"] != "done"]
+    lanes = [lane for lane in project_lanes(rows, presence_by_stream, now_iso,
+             index_available=bool(work_index["available"]) if work_index is not None else None)
+             if lane["state"] != "done"]
     counts = {"open": len(lanes), "active": 0, "paused": 0, "blocked": 0}
     for lane in lanes:
         counts[lane["state"]] += 1
@@ -138,11 +143,13 @@ class WorkLanesInventory:
 
     def __init__(self, store: Any, sessions: Any,
                  broadcast: Callable[[dict[str, Any]], Awaitable[None]], *, specs: Any = None,
-                 sweep_interval_s: float | None = None, settle_s: float | None = None) -> None:
+                 sweep_interval_s: float | None = None, settle_s: float | None = None,
+                 episode_sink: LaneEpisodeSink | None = None) -> None:
         self.store = store
         self.sessions = sessions
         self.broadcast = broadcast
         self.specs = specs
+        self.episode_sink = episode_sink
         self.sweep_interval_s = float(sweep_interval_s if sweep_interval_s is not None else
                                       os.environ.get("WORK_INDEX_SWEEP_S", "300"))
         self.settle_s = float(settle_s if settle_s is not None else os.environ.get("WORK_INDEX_SETTLE_S", "300"))
@@ -173,6 +180,7 @@ class WorkLanesInventory:
             try:
                 await self.reconcile_index()
                 await self.store.reconcile_work_lanes()
+                await self.store.reconcile_work_lane_episodes(self.episode_sink)
                 await self.emit_if_changed()
             except Exception:  # noqa: BLE001 - a lane refresh must not break session paths
                 log.exception("work lanes refresh failed")
