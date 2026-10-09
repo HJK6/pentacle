@@ -48,7 +48,8 @@ class ErrorFact:
             raise ValueError("invalid_error_fact")
 
 
-#: Alerts.emit kind -> mapper(fields) returning a fact, or None to stay log-only.
+#: Alerts kind -> pure mapper(fields) returning a fact, or None to stay log-only.
+#: Producers call `await alerts.record(kind, **fields)`; it commits before return.
 ADAPTERS: dict[str, Callable[[Mapping[str, object]], ErrorFact | None]] = {}
 
 

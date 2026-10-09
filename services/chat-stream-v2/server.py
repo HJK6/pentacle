@@ -466,6 +466,7 @@ class Server:
         #: upload state; the server tears down a closed connection's uploads
         #: through it (spec: the connection is an upload's one owning path).
         self.blobs: Any = None
+        self.error_alerts: Any = None
         #: Assigned by `main.py` after construction. Its fixed-order cache is
         #: projected into subscribed hello snapshots as `limits`.
         self.limits: Any = None
@@ -1504,6 +1505,7 @@ class Server:
             "token_verified": False,
             "operator_authenticated": operator_authenticated,
             "operator_principal": f"operator:{trust.credential_id}" if operator_authenticated else "",
+            "credential_id": trust.credential_id if operator_authenticated else "",
             "connection_client": self._client_identities.get(websocket),
             "transport": trust.transport if trust is not None else "legacy",
             "operator_trusted": bool(trust and trust.operator_trusted),
@@ -2550,6 +2552,9 @@ class Server:
             # target after a reconnect. Old daemons simply omit this field.
             "capabilities": {
                 "close_expected_generation": True,
+                **({"error_alerts_v1": True} if self.error_alerts is not None
+                   and self._operator_authenticated(websocket)
+                   and not (msg.get("_auth_context") or {}).get("token_verified") else {}),
                 **({"consent_enrollment_offer_v1": True, "consent_open_v1": True} if (
                     consent_ready and self._consent_expiry_task is not None and not self._consent_expiry_task.done()
                     and self._operator_authenticated(websocket)
@@ -2560,6 +2565,7 @@ class Server:
                 **({"assistant_composite_v1": True} if self._any_composite_enabled() else {}),
                 **({"work_lanes_v1": True} if self.work_lanes is not None else {}),
             },
+            "error_reporting_credential_id": (msg.get("_auth_context") or {}).get("credential_id") if self.error_alerts is not None and self._operator_authenticated(websocket) and not (msg.get("_auth_context") or {}).get("token_verified") else None,
             "sessions": snapshot_sessions,
             "notifications": (await self.notify.snapshot_notifications(
                 summary=(events_mode == "summary"),
@@ -3381,6 +3387,23 @@ class Server:
             transcriber = Transcriber(blob_store)
             self._transcriber = transcriber
         return transcriber
+
+    async def configure_error_alerts(self, queue):
+        from error_alerts import ErrorAlerts, VALIDATORS
+        self.error_alerts = ErrorAlerts(self, queue)
+        await self.error_alerts.start()
+        self.blobs.error_alerts = self.error_alerts
+        for verb in VALIDATORS:
+            self.handlers[verb] = self.error_alerts.request
+        for verb, adapter in (("transcribe_blob", self.error_alerts.transcribe), ("send", self.error_alerts.send)):
+            handler = self.handlers[verb]
+            async def wrapped(msg, adapter=adapter, handler=handler):
+                try:
+                    return await adapter(msg, handler)
+                except ValueError as exc:
+                    code = str(exc) if str(exc) in {"operator_required", "credential_revoked", "invalid_request", "operation_forbidden", "blob_forbidden", "origin_mismatch", "event_conflict"} else "invalid_request"
+                    raise VerbError(code, code) from None
+            self.handlers[verb] = wrapped
 
     async def _on_transcribe_blob(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Transcribe an uploaded audio blob on the managed mic backend.

@@ -1376,7 +1376,9 @@ def _iso_epoch(value: object) -> float | None:
         return None
 
 
-class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
+from store_voice_operations import VoiceOperationsStoreMixin, DDL as VOICE_OPERATIONS_DDL
+
+class Store(VoiceOperationsStoreMixin, store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000) -> None:
@@ -1480,6 +1482,7 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _Exter
             conn.execute("BEGIN")
             conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
             conn.execute(SESSIONS_DDL)
+            conn.execute(VOICE_OPERATIONS_DDL)
             for ddl in store_attachments.DDL:
                 conn.execute(ddl)
             for ddl in store_usage.DDL:
@@ -3625,7 +3628,7 @@ class Store(store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _Exter
                 conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?", (json.dumps(payload, separators=(",", ":")), tell_id))
             conn.execute(
                 "DELETE FROM v2_tell_deliveries WHERE NOT EXISTS (SELECT 1 FROM v2_child_exchange e WHERE e.kind='tell' AND e.ref_id=v2_tell_deliveries.tell_id) "
-                "AND NOT EXISTS (SELECT 1 FROM v2_outbound_notices n WHERE n.kind='notification_answer' AND n.tell_id=v2_tell_deliveries.tell_id) "
+                "AND NOT EXISTS (SELECT 1 FROM v2_outbound_notices n WHERE n.kind IN ('notification_answer','error_alert') AND n.tell_id=v2_tell_deliveries.tell_id) "
                 "AND tell_id NOT IN"
                 " (SELECT tell_id FROM v2_tell_deliveries ORDER BY created_at DESC LIMIT ?)",
                 (TELL_RETENTION,),

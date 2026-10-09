@@ -443,6 +443,8 @@ class Notify:
         records = await self._db.call("list_notifications", states=["open"], limit=limit)
         serialized: list[dict[str, Any]] = []
         for record in records:
+            if record.get('producer') == 'voice_operation.v1':
+                continue  # Structured error facts require the operator-only error API.
             if str(record.get('producer') or '').startswith('consent.'):
                 continue  # Consent authority is only the credential-projected Store.
             # Do not expose an open question whose asker is gone/replaced; the

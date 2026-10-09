@@ -1761,6 +1761,7 @@ class Comms:
         self, plan: SendPlan, *, request_id: str, receipt_id: str,
         qa_generation: str | None = None,
         assistant_generation: str | None = None,
+        voice_generation: str | None = None,
     ) -> dict[str, Any]:
         """Inject one accepted plan and append its known durable outcome."""
         target = str(plan.route["final_target"])
@@ -1769,11 +1770,19 @@ class Comms:
             row = await self.store.fetch_session(host, name)
             lifecycle = (
                 self.sessions._lifecycle_lock(host, name)
-                if qa_generation is not None or assistant_generation is not None
+                if qa_generation is not None or assistant_generation is not None or voice_generation is not None
                 or (row or {}).get("provider") == "claude" else nullcontext()
             )
             # Match bootstrap publishers: lifecycle before pane input, never the reverse.
             async with lifecycle, self._pane_input_lock(target):
+                if voice_generation is not None:
+                    current = await self.store.fetch_session(host, name) or {}
+                    if current.get("status") != "open" or current.get("session_generation") != voice_generation:
+                        raise VerbError(
+                            "voice_origin_generation_conflict",
+                            "Voice origin generation changed before delivery",
+                            phase="not_started",
+                        )
                 if qa_generation is not None:
                     current = await self.store.fetch_session(host, name) or {}
                     if current.get("status") != "open" or current.get("session_generation") != qa_generation:
@@ -2032,6 +2041,9 @@ class Comms:
             qa_generation=commission["generation"] if commission is not None else None,
             assistant_generation=(str(msg.get("_assistant_expected_generation") or "") or None)
             if msg.get("_assistant_composite_backend_dispatch") is True else None,
+            # ErrorAlerts introduces this only after authenticated operation
+            # ownership checks; Server strips all private wire fields.
+            voice_generation=msg.get("_voice_operation_generation"),
         )
 
     async def send_assistant_backend(self, msg: dict[str, Any]) -> dict[str, Any]:
