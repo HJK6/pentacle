@@ -1,5 +1,5 @@
 {
-  "schema": "work_lanes_inventory_v1",
+  "schema": "work_lanes_inventory_v2",
   "description": "Frozen wire contract for first-class work lanes (spec_pentacle__first_class_work_lanes_2026_10 D6/D7). Consumed by the daemon Python projection test and both chat-core TypeScript suites. Clients must not reorder lanes[] and must not compute counts from sessions.",
   "capability": "work_lanes_v1",
   "inventory_frame": {
@@ -958,5 +958,1204 @@
       "wedged_unknown",
       "transport_unknown"
     ]
-  }
+  },
+  "fixture_version": 2,
+  "progress_v2": [
+    {
+      "name": "active_progress",
+      "rows": [
+        {
+          "lane_id": "wl-000000000000000000000001",
+          "title": "Build model bridges",
+          "summary": "Assemble and inspect miniature spans.",
+          "work_state": "active",
+          "work_state_reason": "fd",
+          "version": 2,
+          "owner_kind": "operator",
+          "updated_at": "2026-01-02T00:00:00.000Z",
+          "first_admitted_at": "2026-01-02T00:00:00.000Z",
+          "bound_stream_id": "fixture-host:lead",
+          "bound_generation": "fixture-generation",
+          "_lead_row": {
+            "status": "open",
+            "visibility": "default"
+          },
+          "visible_chat_stream_id": "fixture-chat:assistant",
+          "_chat_kind": "composite",
+          "_chat_available": "open",
+          "_qualifies": true,
+          "_members": [
+            {
+              "spec_id": "spec_demo__item_1",
+              "title": "Model bridge 1",
+              "status": "in_progress",
+              "terminal": null,
+              "ac_checked": 1,
+              "ac_total": 2,
+              "estimate": {
+                "p25": 2,
+                "p75": 4,
+                "median": 3,
+                "provisional": true
+              },
+              "status_text": "Model prepared.",
+              "next_action_text": "Inspect the paper span.",
+              "source_changed_at": "2026-01-02T00:00:00.000Z",
+              "observation": {
+                "quality": "fresh",
+                "observed_at": "2026-01-02T00:00:00.000Z",
+                "error": null
+              },
+              "obs_rev": 1
+            },
+            {
+              "spec_id": "spec_demo__item_2",
+              "title": "Model bridge 2",
+              "status": "completed",
+              "terminal": "completed",
+              "ac_checked": 2,
+              "ac_total": 2,
+              "estimate": {
+                "p25": 2,
+                "p75": 4,
+                "median": 3,
+                "provisional": true
+              },
+              "status_text": "Model prepared.",
+              "next_action_text": "Inspect the paper span.",
+              "source_changed_at": "2026-01-02T00:00:00.000Z",
+              "observation": {
+                "quality": "fresh",
+                "observed_at": "2026-01-02T00:00:00.000Z",
+                "error": null
+              },
+              "obs_rev": 1
+            }
+          ],
+          "no_spec_reason": null,
+          "blocker": null
+        }
+      ],
+      "work_index": {
+        "available": true,
+        "root_configured": true,
+        "snapshot_at": "2026-01-02T00:00:00.000Z",
+        "last_sweep_at": "2026-01-02T00:00:00.000Z",
+        "error": null
+      },
+      "frame": {
+        "type": "work_lanes.inventory",
+        "lanes": [
+          {
+            "lane_id": "wl-000000000000000000000001",
+            "title": "Build model bridges",
+            "summary": "Assemble and inspect miniature spans.",
+            "state": "active",
+            "state_reason": "fd",
+            "blocker": null,
+            "owner_kind": "operator",
+            "version": 2,
+            "updated_at": "2026-01-02T00:00:00.000Z",
+            "first_admitted_at": "2026-01-02T00:00:00.000Z",
+            "done_at": null,
+            "lead": {
+              "stream_id": "fixture-host:lead",
+              "generation": "fixture-generation",
+              "qualifies": true,
+              "status": "open",
+              "visibility": "default",
+              "presence": {
+                "online": false,
+                "working": false,
+                "capture_liveness": "transport_unknown",
+                "last_activity": null
+              },
+              "status_card": {
+                "goal": null,
+                "active_step": null,
+                "update": null,
+                "eta_at": null,
+                "eta_set_at": null,
+                "updated_at": null
+              },
+              "eta_stale": false
+            },
+            "visible_chat": {
+              "stream_id": "fixture-chat:assistant",
+              "generation": null,
+              "kind": "composite",
+              "available": "open"
+            },
+            "last_update": null,
+            "members": [
+              {
+                "spec_id": "spec_demo__item_1",
+                "title": "Model bridge 1",
+                "status": "in_progress",
+                "terminal": null,
+                "ac_checked": 1,
+                "ac_total": 2,
+                "estimate": {
+                  "p25": 2,
+                  "p75": 4,
+                  "median": 3,
+                  "provisional": true
+                },
+                "status_text": "Model prepared.",
+                "next_action_text": "Inspect the paper span.",
+                "source_changed_at": "2026-01-02T00:00:00.000Z",
+                "observation": {
+                  "quality": "fresh",
+                  "observed_at": "2026-01-02T00:00:00.000Z",
+                  "error": null
+                },
+                "obs_rev": 1
+              },
+              {
+                "spec_id": "spec_demo__item_2",
+                "title": "Model bridge 2",
+                "status": "completed",
+                "terminal": "completed",
+                "ac_checked": 2,
+                "ac_total": 2,
+                "estimate": {
+                  "p25": 2,
+                  "p75": 4,
+                  "median": 3,
+                  "provisional": true
+                },
+                "status_text": "Model prepared.",
+                "next_action_text": "Inspect the paper span.",
+                "source_changed_at": "2026-01-02T00:00:00.000Z",
+                "observation": {
+                  "quality": "fresh",
+                  "observed_at": "2026-01-02T00:00:00.000Z",
+                  "error": null
+                },
+                "obs_rev": 1
+              }
+            ],
+            "members_total": 2,
+            "no_spec_reason": null,
+            "items_total": 2,
+            "items_completed": 1,
+            "items_dropped": 0,
+            "items_open": 1,
+            "items_unresolved": 0,
+            "ac_checked": 3,
+            "ac_total": 4,
+            "ac_members": 2,
+            "open_estimate_h": {
+              "p25": 2,
+              "p75": 4,
+              "median": 3
+            },
+            "open_estimated": 1,
+            "estimate_complete": true,
+            "freshness_at": "2026-01-02T00:00:00.000Z"
+          }
+        ],
+        "counts": {
+          "open": 1,
+          "active": 1,
+          "paused": 0,
+          "blocked": 0
+        },
+        "truncated": false,
+        "generated_at": "2026-01-02T00:00:00.000Z",
+        "work_index": {
+          "available": true,
+          "root_configured": true,
+          "snapshot_at": "2026-01-02T00:00:00.000Z",
+          "last_sweep_at": "2026-01-02T00:00:00.000Z",
+          "error": null
+        }
+      }
+    },
+    {
+      "name": "paused_leadless",
+      "rows": [
+        {
+          "lane_id": "wl-000000000000000000000002",
+          "title": "Build model bridges",
+          "summary": "Assemble and inspect miniature spans.",
+          "work_state": "paused",
+          "work_state_reason": "fd",
+          "version": 2,
+          "owner_kind": "operator",
+          "updated_at": "2026-01-02T00:00:00.000Z",
+          "first_admitted_at": "2026-01-02T00:00:00.000Z",
+          "bound_stream_id": null,
+          "bound_generation": null,
+          "_lead_row": null,
+          "visible_chat_stream_id": "fixture-chat:assistant",
+          "_chat_kind": "composite",
+          "_chat_available": "open",
+          "_qualifies": false,
+          "_members": [
+            {
+              "spec_id": "spec_demo__item_1",
+              "title": "Model bridge 1",
+              "status": "completed",
+              "terminal": "completed",
+              "ac_checked": 2,
+              "ac_total": 2,
+              "estimate": {
+                "p25": 2,
+                "p75": 4,
+                "median": 3,
+                "provisional": true
+              },
+              "status_text": "Model prepared.",
+              "next_action_text": "Inspect the paper span.",
+              "source_changed_at": "2026-01-02T00:00:00.000Z",
+              "observation": {
+                "quality": "fresh",
+                "observed_at": "2026-01-02T00:00:00.000Z",
+                "error": null
+              },
+              "obs_rev": 1
+            },
+            {
+              "spec_id": "spec_demo__item_2",
+              "title": "Model bridge 2",
+              "status": "deprecated",
+              "terminal": "deprecated",
+              "ac_checked": 1,
+              "ac_total": 2,
+              "estimate": {
+                "p25": 2,
+                "p75": 4,
+                "median": 3,
+                "provisional": true
+              },
+              "status_text": "Model prepared.",
+              "next_action_text": "Inspect the paper span.",
+              "source_changed_at": "2026-01-02T00:00:00.000Z",
+              "observation": {
+                "quality": "fresh",
+                "observed_at": "2026-01-02T00:00:00.000Z",
+                "error": null
+              },
+              "obs_rev": 1
+            },
+            {
+              "spec_id": "spec_demo__item_3",
+              "title": "Model bridge 3",
+              "status": "in_progress",
+              "terminal": null,
+              "ac_checked": 1,
+              "ac_total": 2,
+              "estimate": {
+                "p25": 2,
+                "p75": 4,
+                "median": 3,
+                "provisional": true
+              },
+              "status_text": "Model prepared.",
+              "next_action_text": "Inspect the paper span.",
+              "source_changed_at": "2026-01-02T00:00:00.000Z",
+              "observation": {
+                "quality": "fresh",
+                "observed_at": "2026-01-02T00:00:00.000Z",
+                "error": null
+              },
+              "obs_rev": 1
+            }
+          ],
+          "no_spec_reason": null,
+          "blocker": null
+        }
+      ],
+      "work_index": {
+        "available": true,
+        "root_configured": true,
+        "snapshot_at": "2026-01-02T00:00:00.000Z",
+        "last_sweep_at": "2026-01-02T00:00:00.000Z",
+        "error": null
+      },
+      "frame": {
+        "type": "work_lanes.inventory",
+        "lanes": [
+          {
+            "lane_id": "wl-000000000000000000000002",
+            "title": "Build model bridges",
+            "summary": "Assemble and inspect miniature spans.",
+            "state": "paused",
+            "state_reason": "fd",
+            "blocker": null,
+            "owner_kind": "operator",
+            "version": 2,
+            "updated_at": "2026-01-02T00:00:00.000Z",
+            "first_admitted_at": "2026-01-02T00:00:00.000Z",
+            "done_at": null,
+            "lead": null,
+            "visible_chat": {
+              "stream_id": "fixture-chat:assistant",
+              "generation": null,
+              "kind": "composite",
+              "available": "open"
+            },
+            "last_update": null,
+            "members": [
+              {
+                "spec_id": "spec_demo__item_1",
+                "title": "Model bridge 1",
+                "status": "completed",
+                "terminal": "completed",
+                "ac_checked": 2,
+                "ac_total": 2,
+                "estimate": {
+                  "p25": 2,
+                  "p75": 4,
+                  "median": 3,
+                  "provisional": true
+                },
+                "status_text": "Model prepared.",
+                "next_action_text": "Inspect the paper span.",
+                "source_changed_at": "2026-01-02T00:00:00.000Z",
+                "observation": {
+                  "quality": "fresh",
+                  "observed_at": "2026-01-02T00:00:00.000Z",
+                  "error": null
+                },
+                "obs_rev": 1
+              },
+              {
+                "spec_id": "spec_demo__item_2",
+                "title": "Model bridge 2",
+                "status": "deprecated",
+                "terminal": "deprecated",
+                "ac_checked": 1,
+                "ac_total": 2,
+                "estimate": {
+                  "p25": 2,
+                  "p75": 4,
+                  "median": 3,
+                  "provisional": true
+                },
+                "status_text": "Model prepared.",
+                "next_action_text": "Inspect the paper span.",
+                "source_changed_at": "2026-01-02T00:00:00.000Z",
+                "observation": {
+                  "quality": "fresh",
+                  "observed_at": "2026-01-02T00:00:00.000Z",
+                  "error": null
+                },
+                "obs_rev": 1
+              },
+              {
+                "spec_id": "spec_demo__item_3",
+                "title": "Model bridge 3",
+                "status": "in_progress",
+                "terminal": null,
+                "ac_checked": 1,
+                "ac_total": 2,
+                "estimate": {
+                  "p25": 2,
+                  "p75": 4,
+                  "median": 3,
+                  "provisional": true
+                },
+                "status_text": "Model prepared.",
+                "next_action_text": "Inspect the paper span.",
+                "source_changed_at": "2026-01-02T00:00:00.000Z",
+                "observation": {
+                  "quality": "fresh",
+                  "observed_at": "2026-01-02T00:00:00.000Z",
+                  "error": null
+                },
+                "obs_rev": 1
+              }
+            ],
+            "members_total": 3,
+            "no_spec_reason": null,
+            "items_total": 3,
+            "items_completed": 1,
+            "items_dropped": 1,
+            "items_open": 1,
+            "items_unresolved": 0,
+            "ac_checked": 4,
+            "ac_total": 6,
+            "ac_members": 3,
+            "open_estimate_h": {
+              "p25": 2,
+              "p75": 4,
+              "median": 3
+            },
+            "open_estimated": 1,
+            "estimate_complete": true,
+            "freshness_at": "2026-01-02T00:00:00.000Z"
+          }
+        ],
+        "counts": {
+          "open": 1,
+          "active": 0,
+          "paused": 1,
+          "blocked": 0
+        },
+        "truncated": false,
+        "generated_at": "2026-01-02T00:00:00.000Z",
+        "work_index": {
+          "available": true,
+          "root_configured": true,
+          "snapshot_at": "2026-01-02T00:00:00.000Z",
+          "last_sweep_at": "2026-01-02T00:00:00.000Z",
+          "error": null
+        }
+      }
+    },
+    {
+      "name": "blocked",
+      "rows": [
+        {
+          "lane_id": "wl-000000000000000000000003",
+          "title": "Build model bridges",
+          "summary": "Assemble and inspect miniature spans.",
+          "work_state": "blocked",
+          "work_state_reason": "fd",
+          "version": 2,
+          "owner_kind": "operator",
+          "updated_at": "2026-01-02T00:00:00.000Z",
+          "first_admitted_at": "2026-01-02T00:00:00.000Z",
+          "bound_stream_id": null,
+          "bound_generation": null,
+          "_lead_row": null,
+          "visible_chat_stream_id": "fixture-chat:assistant",
+          "_chat_kind": "composite",
+          "_chat_available": "open",
+          "_qualifies": false,
+          "_members": [
+            {
+              "spec_id": "spec_demo__item_1",
+              "title": "Model bridge 1",
+              "status": "in_progress",
+              "terminal": null,
+              "ac_checked": 1,
+              "ac_total": 2,
+              "estimate": {
+                "p25": 2,
+                "p75": 4,
+                "median": 3,
+                "provisional": true
+              },
+              "status_text": "Model prepared.",
+              "next_action_text": "Inspect the paper span.",
+              "source_changed_at": "2026-01-02T00:00:00.000Z",
+              "observation": {
+                "quality": "fresh",
+                "observed_at": "2026-01-02T00:00:00.000Z",
+                "error": null
+              },
+              "obs_rev": 1
+            }
+          ],
+          "no_spec_reason": null,
+          "blocker": "Materials needed."
+        }
+      ],
+      "work_index": {
+        "available": true,
+        "root_configured": true,
+        "snapshot_at": "2026-01-02T00:00:00.000Z",
+        "last_sweep_at": "2026-01-02T00:00:00.000Z",
+        "error": null
+      },
+      "frame": {
+        "type": "work_lanes.inventory",
+        "lanes": [
+          {
+            "lane_id": "wl-000000000000000000000003",
+            "title": "Build model bridges",
+            "summary": "Assemble and inspect miniature spans.",
+            "state": "blocked",
+            "state_reason": "fd",
+            "blocker": "Materials needed.",
+            "owner_kind": "operator",
+            "version": 2,
+            "updated_at": "2026-01-02T00:00:00.000Z",
+            "first_admitted_at": "2026-01-02T00:00:00.000Z",
+            "done_at": null,
+            "lead": null,
+            "visible_chat": {
+              "stream_id": "fixture-chat:assistant",
+              "generation": null,
+              "kind": "composite",
+              "available": "open"
+            },
+            "last_update": null,
+            "members": [
+              {
+                "spec_id": "spec_demo__item_1",
+                "title": "Model bridge 1",
+                "status": "in_progress",
+                "terminal": null,
+                "ac_checked": 1,
+                "ac_total": 2,
+                "estimate": {
+                  "p25": 2,
+                  "p75": 4,
+                  "median": 3,
+                  "provisional": true
+                },
+                "status_text": "Model prepared.",
+                "next_action_text": "Inspect the paper span.",
+                "source_changed_at": "2026-01-02T00:00:00.000Z",
+                "observation": {
+                  "quality": "fresh",
+                  "observed_at": "2026-01-02T00:00:00.000Z",
+                  "error": null
+                },
+                "obs_rev": 1
+              }
+            ],
+            "members_total": 1,
+            "no_spec_reason": null,
+            "items_total": 1,
+            "items_completed": 0,
+            "items_dropped": 0,
+            "items_open": 1,
+            "items_unresolved": 0,
+            "ac_checked": 1,
+            "ac_total": 2,
+            "ac_members": 1,
+            "open_estimate_h": {
+              "p25": 2,
+              "p75": 4,
+              "median": 3
+            },
+            "open_estimated": 1,
+            "estimate_complete": true,
+            "freshness_at": "2026-01-02T00:00:00.000Z"
+          }
+        ],
+        "counts": {
+          "open": 1,
+          "active": 0,
+          "paused": 0,
+          "blocked": 1
+        },
+        "truncated": false,
+        "generated_at": "2026-01-02T00:00:00.000Z",
+        "work_index": {
+          "available": true,
+          "root_configured": true,
+          "snapshot_at": "2026-01-02T00:00:00.000Z",
+          "last_sweep_at": "2026-01-02T00:00:00.000Z",
+          "error": null
+        }
+      }
+    },
+    {
+      "name": "missing_member",
+      "rows": [
+        {
+          "lane_id": "wl-000000000000000000000004",
+          "title": "Build model bridges",
+          "summary": "Assemble and inspect miniature spans.",
+          "work_state": "paused",
+          "work_state_reason": "fd",
+          "version": 2,
+          "owner_kind": "operator",
+          "updated_at": "2026-01-02T00:00:00.000Z",
+          "first_admitted_at": "2026-01-02T00:00:00.000Z",
+          "bound_stream_id": null,
+          "bound_generation": null,
+          "_lead_row": null,
+          "visible_chat_stream_id": "fixture-chat:assistant",
+          "_chat_kind": "composite",
+          "_chat_available": "open",
+          "_qualifies": false,
+          "_members": [
+            {
+              "spec_id": "spec_demo__item_1",
+              "title": null,
+              "status": "missing",
+              "terminal": null,
+              "ac_checked": null,
+              "ac_total": null,
+              "estimate": null,
+              "status_text": null,
+              "next_action_text": null,
+              "source_changed_at": null,
+              "observation": {
+                "quality": "missing",
+                "observed_at": null,
+                "error": null
+              },
+              "obs_rev": 1
+            }
+          ],
+          "no_spec_reason": null,
+          "blocker": null
+        }
+      ],
+      "work_index": {
+        "available": true,
+        "root_configured": true,
+        "snapshot_at": "2026-01-02T00:00:00.000Z",
+        "last_sweep_at": "2026-01-02T00:00:00.000Z",
+        "error": null
+      },
+      "frame": {
+        "type": "work_lanes.inventory",
+        "lanes": [
+          {
+            "lane_id": "wl-000000000000000000000004",
+            "title": "Build model bridges",
+            "summary": "Assemble and inspect miniature spans.",
+            "state": "paused",
+            "state_reason": "fd",
+            "blocker": null,
+            "owner_kind": "operator",
+            "version": 2,
+            "updated_at": "2026-01-02T00:00:00.000Z",
+            "first_admitted_at": "2026-01-02T00:00:00.000Z",
+            "done_at": null,
+            "lead": null,
+            "visible_chat": {
+              "stream_id": "fixture-chat:assistant",
+              "generation": null,
+              "kind": "composite",
+              "available": "open"
+            },
+            "last_update": null,
+            "members": [
+              {
+                "spec_id": "spec_demo__item_1",
+                "title": null,
+                "status": "missing",
+                "terminal": null,
+                "ac_checked": null,
+                "ac_total": null,
+                "estimate": null,
+                "status_text": null,
+                "next_action_text": null,
+                "source_changed_at": null,
+                "observation": {
+                  "quality": "missing",
+                  "observed_at": null,
+                  "error": null
+                },
+                "obs_rev": 1
+              }
+            ],
+            "members_total": 1,
+            "no_spec_reason": null,
+            "items_total": 1,
+            "items_completed": 0,
+            "items_dropped": 0,
+            "items_open": 0,
+            "items_unresolved": 1,
+            "ac_checked": null,
+            "ac_total": null,
+            "ac_members": 0,
+            "open_estimate_h": null,
+            "open_estimated": 0,
+            "estimate_complete": true,
+            "freshness_at": "2026-01-02T00:00:00.000Z"
+          }
+        ],
+        "counts": {
+          "open": 1,
+          "active": 0,
+          "paused": 1,
+          "blocked": 0
+        },
+        "truncated": false,
+        "generated_at": "2026-01-02T00:00:00.000Z",
+        "work_index": {
+          "available": true,
+          "root_configured": true,
+          "snapshot_at": "2026-01-02T00:00:00.000Z",
+          "last_sweep_at": "2026-01-02T00:00:00.000Z",
+          "error": null
+        }
+      }
+    },
+    {
+      "name": "ambiguous_member",
+      "rows": [
+        {
+          "lane_id": "wl-000000000000000000000005",
+          "title": "Build model bridges",
+          "summary": "Assemble and inspect miniature spans.",
+          "work_state": "paused",
+          "work_state_reason": "fd",
+          "version": 2,
+          "owner_kind": "operator",
+          "updated_at": "2026-01-02T00:00:00.000Z",
+          "first_admitted_at": "2026-01-02T00:00:00.000Z",
+          "bound_stream_id": null,
+          "bound_generation": null,
+          "_lead_row": null,
+          "visible_chat_stream_id": "fixture-chat:assistant",
+          "_chat_kind": "composite",
+          "_chat_available": "open",
+          "_qualifies": false,
+          "_members": [
+            {
+              "spec_id": "spec_demo__item_1",
+              "title": null,
+              "status": "ambiguous",
+              "terminal": null,
+              "ac_checked": null,
+              "ac_total": null,
+              "estimate": null,
+              "status_text": null,
+              "next_action_text": null,
+              "source_changed_at": null,
+              "observation": {
+                "quality": "ambiguous",
+                "observed_at": null,
+                "error": null
+              },
+              "obs_rev": 1
+            }
+          ],
+          "no_spec_reason": null,
+          "blocker": null
+        }
+      ],
+      "work_index": {
+        "available": true,
+        "root_configured": true,
+        "snapshot_at": "2026-01-02T00:00:00.000Z",
+        "last_sweep_at": "2026-01-02T00:00:00.000Z",
+        "error": null
+      },
+      "frame": {
+        "type": "work_lanes.inventory",
+        "lanes": [
+          {
+            "lane_id": "wl-000000000000000000000005",
+            "title": "Build model bridges",
+            "summary": "Assemble and inspect miniature spans.",
+            "state": "paused",
+            "state_reason": "fd",
+            "blocker": null,
+            "owner_kind": "operator",
+            "version": 2,
+            "updated_at": "2026-01-02T00:00:00.000Z",
+            "first_admitted_at": "2026-01-02T00:00:00.000Z",
+            "done_at": null,
+            "lead": null,
+            "visible_chat": {
+              "stream_id": "fixture-chat:assistant",
+              "generation": null,
+              "kind": "composite",
+              "available": "open"
+            },
+            "last_update": null,
+            "members": [
+              {
+                "spec_id": "spec_demo__item_1",
+                "title": null,
+                "status": "ambiguous",
+                "terminal": null,
+                "ac_checked": null,
+                "ac_total": null,
+                "estimate": null,
+                "status_text": null,
+                "next_action_text": null,
+                "source_changed_at": null,
+                "observation": {
+                  "quality": "ambiguous",
+                  "observed_at": null,
+                  "error": null
+                },
+                "obs_rev": 1
+              }
+            ],
+            "members_total": 1,
+            "no_spec_reason": null,
+            "items_total": 1,
+            "items_completed": 0,
+            "items_dropped": 0,
+            "items_open": 0,
+            "items_unresolved": 1,
+            "ac_checked": null,
+            "ac_total": null,
+            "ac_members": 0,
+            "open_estimate_h": null,
+            "open_estimated": 0,
+            "estimate_complete": true,
+            "freshness_at": "2026-01-02T00:00:00.000Z"
+          }
+        ],
+        "counts": {
+          "open": 1,
+          "active": 0,
+          "paused": 1,
+          "blocked": 0
+        },
+        "truncated": false,
+        "generated_at": "2026-01-02T00:00:00.000Z",
+        "work_index": {
+          "available": true,
+          "root_configured": true,
+          "snapshot_at": "2026-01-02T00:00:00.000Z",
+          "last_sweep_at": "2026-01-02T00:00:00.000Z",
+          "error": null
+        }
+      }
+    },
+    {
+      "name": "missing_estimate",
+      "rows": [
+        {
+          "lane_id": "wl-000000000000000000000006",
+          "title": "Build model bridges",
+          "summary": "Assemble and inspect miniature spans.",
+          "work_state": "paused",
+          "work_state_reason": "fd",
+          "version": 2,
+          "owner_kind": "operator",
+          "updated_at": "2026-01-02T00:00:00.000Z",
+          "first_admitted_at": "2026-01-02T00:00:00.000Z",
+          "bound_stream_id": null,
+          "bound_generation": null,
+          "_lead_row": null,
+          "visible_chat_stream_id": "fixture-chat:assistant",
+          "_chat_kind": "composite",
+          "_chat_available": "open",
+          "_qualifies": false,
+          "_members": [
+            {
+              "spec_id": "spec_demo__item_1",
+              "title": "Model bridge 1",
+              "status": "in_progress",
+              "terminal": null,
+              "ac_checked": 1,
+              "ac_total": 2,
+              "estimate": null,
+              "status_text": "Model prepared.",
+              "next_action_text": "Inspect the paper span.",
+              "source_changed_at": "2026-01-02T00:00:00.000Z",
+              "observation": {
+                "quality": "fresh",
+                "observed_at": "2026-01-02T00:00:00.000Z",
+                "error": null
+              },
+              "obs_rev": 1
+            }
+          ],
+          "no_spec_reason": null,
+          "blocker": null
+        }
+      ],
+      "work_index": {
+        "available": true,
+        "root_configured": true,
+        "snapshot_at": "2026-01-02T00:00:00.000Z",
+        "last_sweep_at": "2026-01-02T00:00:00.000Z",
+        "error": null
+      },
+      "frame": {
+        "type": "work_lanes.inventory",
+        "lanes": [
+          {
+            "lane_id": "wl-000000000000000000000006",
+            "title": "Build model bridges",
+            "summary": "Assemble and inspect miniature spans.",
+            "state": "paused",
+            "state_reason": "fd",
+            "blocker": null,
+            "owner_kind": "operator",
+            "version": 2,
+            "updated_at": "2026-01-02T00:00:00.000Z",
+            "first_admitted_at": "2026-01-02T00:00:00.000Z",
+            "done_at": null,
+            "lead": null,
+            "visible_chat": {
+              "stream_id": "fixture-chat:assistant",
+              "generation": null,
+              "kind": "composite",
+              "available": "open"
+            },
+            "last_update": null,
+            "members": [
+              {
+                "spec_id": "spec_demo__item_1",
+                "title": "Model bridge 1",
+                "status": "in_progress",
+                "terminal": null,
+                "ac_checked": 1,
+                "ac_total": 2,
+                "estimate": null,
+                "status_text": "Model prepared.",
+                "next_action_text": "Inspect the paper span.",
+                "source_changed_at": "2026-01-02T00:00:00.000Z",
+                "observation": {
+                  "quality": "fresh",
+                  "observed_at": "2026-01-02T00:00:00.000Z",
+                  "error": null
+                },
+                "obs_rev": 1
+              }
+            ],
+            "members_total": 1,
+            "no_spec_reason": null,
+            "items_total": 1,
+            "items_completed": 0,
+            "items_dropped": 0,
+            "items_open": 1,
+            "items_unresolved": 0,
+            "ac_checked": 1,
+            "ac_total": 2,
+            "ac_members": 1,
+            "open_estimate_h": null,
+            "open_estimated": 0,
+            "estimate_complete": false,
+            "freshness_at": "2026-01-02T00:00:00.000Z"
+          }
+        ],
+        "counts": {
+          "open": 1,
+          "active": 0,
+          "paused": 1,
+          "blocked": 0
+        },
+        "truncated": false,
+        "generated_at": "2026-01-02T00:00:00.000Z",
+        "work_index": {
+          "available": true,
+          "root_configured": true,
+          "snapshot_at": "2026-01-02T00:00:00.000Z",
+          "last_sweep_at": "2026-01-02T00:00:00.000Z",
+          "error": null
+        }
+      }
+    },
+    {
+      "name": "no_spec",
+      "rows": [
+        {
+          "lane_id": "wl-000000000000000000000007",
+          "title": "Build model bridges",
+          "summary": "Assemble and inspect miniature spans.",
+          "work_state": "paused",
+          "work_state_reason": "fd",
+          "version": 2,
+          "owner_kind": "operator",
+          "updated_at": "2026-01-02T00:00:00.000Z",
+          "first_admitted_at": "2026-01-02T00:00:00.000Z",
+          "bound_stream_id": null,
+          "bound_generation": null,
+          "_lead_row": null,
+          "visible_chat_stream_id": "fixture-chat:assistant",
+          "_chat_kind": "composite",
+          "_chat_available": "open",
+          "_qualifies": false,
+          "_members": [],
+          "no_spec_reason": "Exploratory conversation.",
+          "blocker": null
+        }
+      ],
+      "work_index": {
+        "available": true,
+        "root_configured": true,
+        "snapshot_at": "2026-01-02T00:00:00.000Z",
+        "last_sweep_at": "2026-01-02T00:00:00.000Z",
+        "error": null
+      },
+      "frame": {
+        "type": "work_lanes.inventory",
+        "lanes": [
+          {
+            "lane_id": "wl-000000000000000000000007",
+            "title": "Build model bridges",
+            "summary": "Assemble and inspect miniature spans.",
+            "state": "paused",
+            "state_reason": "fd",
+            "blocker": null,
+            "owner_kind": "operator",
+            "version": 2,
+            "updated_at": "2026-01-02T00:00:00.000Z",
+            "first_admitted_at": "2026-01-02T00:00:00.000Z",
+            "done_at": null,
+            "lead": null,
+            "visible_chat": {
+              "stream_id": "fixture-chat:assistant",
+              "generation": null,
+              "kind": "composite",
+              "available": "open"
+            },
+            "last_update": null,
+            "members": [],
+            "members_total": 0,
+            "no_spec_reason": "Exploratory conversation.",
+            "items_total": 0,
+            "items_completed": 0,
+            "items_dropped": 0,
+            "items_open": 0,
+            "items_unresolved": 0,
+            "ac_checked": null,
+            "ac_total": null,
+            "ac_members": 0,
+            "open_estimate_h": null,
+            "open_estimated": 0,
+            "estimate_complete": true,
+            "freshness_at": "2026-01-02T00:00:00.000Z"
+          }
+        ],
+        "counts": {
+          "open": 1,
+          "active": 0,
+          "paused": 1,
+          "blocked": 0
+        },
+        "truncated": false,
+        "generated_at": "2026-01-02T00:00:00.000Z",
+        "work_index": {
+          "available": true,
+          "root_configured": true,
+          "snapshot_at": "2026-01-02T00:00:00.000Z",
+          "last_sweep_at": "2026-01-02T00:00:00.000Z",
+          "error": null
+        }
+      }
+    },
+    {
+      "name": "index_unavailable",
+      "rows": [
+        {
+          "lane_id": "wl-000000000000000000000008",
+          "title": "Build model bridges",
+          "summary": "Assemble and inspect miniature spans.",
+          "work_state": "paused",
+          "work_state_reason": "fd",
+          "version": 2,
+          "owner_kind": "operator",
+          "updated_at": "2026-01-02T00:00:00.000Z",
+          "first_admitted_at": "2026-01-02T00:00:00.000Z",
+          "bound_stream_id": null,
+          "bound_generation": null,
+          "_lead_row": null,
+          "visible_chat_stream_id": "fixture-chat:assistant",
+          "_chat_kind": "composite",
+          "_chat_available": "open",
+          "_qualifies": false,
+          "_members": [
+            {
+              "spec_id": "spec_demo__item_1",
+              "title": "Model bridge 1",
+              "status": "in_progress",
+              "terminal": null,
+              "ac_checked": 1,
+              "ac_total": 2,
+              "estimate": {
+                "p25": 2,
+                "p75": 4,
+                "median": 3,
+                "provisional": true
+              },
+              "status_text": "Model prepared.",
+              "next_action_text": "Inspect the paper span.",
+              "source_changed_at": "2026-01-02T00:00:00.000Z",
+              "observation": {
+                "quality": "stale",
+                "observed_at": "2026-01-02T00:00:00.000Z",
+                "error": null
+              },
+              "obs_rev": 1
+            }
+          ],
+          "no_spec_reason": null,
+          "blocker": null
+        }
+      ],
+      "work_index": {
+        "available": false,
+        "root_configured": true,
+        "snapshot_at": "2026-01-02T00:00:00.000Z",
+        "last_sweep_at": "2026-01-02T00:00:00.000Z",
+        "error": "work_root_unavailable"
+      },
+      "frame": {
+        "type": "work_lanes.inventory",
+        "lanes": [
+          {
+            "lane_id": "wl-000000000000000000000008",
+            "title": "Build model bridges",
+            "summary": "Assemble and inspect miniature spans.",
+            "state": "paused",
+            "state_reason": "fd",
+            "blocker": null,
+            "owner_kind": "operator",
+            "version": 2,
+            "updated_at": "2026-01-02T00:00:00.000Z",
+            "first_admitted_at": "2026-01-02T00:00:00.000Z",
+            "done_at": null,
+            "lead": null,
+            "visible_chat": {
+              "stream_id": "fixture-chat:assistant",
+              "generation": null,
+              "kind": "composite",
+              "available": "open"
+            },
+            "last_update": null,
+            "members": [
+              {
+                "spec_id": "spec_demo__item_1",
+                "title": "Model bridge 1",
+                "status": "in_progress",
+                "terminal": null,
+                "ac_checked": 1,
+                "ac_total": 2,
+                "estimate": {
+                  "p25": 2,
+                  "p75": 4,
+                  "median": 3,
+                  "provisional": true
+                },
+                "status_text": "Model prepared.",
+                "next_action_text": "Inspect the paper span.",
+                "source_changed_at": "2026-01-02T00:00:00.000Z",
+                "observation": {
+                  "quality": "stale",
+                  "observed_at": "2026-01-02T00:00:00.000Z",
+                  "error": null
+                },
+                "obs_rev": 1
+              }
+            ],
+            "members_total": 1,
+            "no_spec_reason": null,
+            "items_total": 1,
+            "items_completed": 0,
+            "items_dropped": 0,
+            "items_open": 1,
+            "items_unresolved": 0,
+            "ac_checked": 1,
+            "ac_total": 2,
+            "ac_members": 1,
+            "open_estimate_h": {
+              "p25": 2,
+              "p75": 4,
+              "median": 3
+            },
+            "open_estimated": 1,
+            "estimate_complete": true,
+            "freshness_at": "2026-01-02T00:00:00.000Z"
+          }
+        ],
+        "counts": {
+          "open": 1,
+          "active": 0,
+          "paused": 1,
+          "blocked": 0
+        },
+        "truncated": false,
+        "generated_at": "2026-01-02T00:00:00.000Z",
+        "work_index": {
+          "available": false,
+          "root_configured": true,
+          "snapshot_at": "2026-01-02T00:00:00.000Z",
+          "last_sweep_at": "2026-01-02T00:00:00.000Z",
+          "error": "work_root_unavailable"
+        }
+      }
+    }
+  ]
 }

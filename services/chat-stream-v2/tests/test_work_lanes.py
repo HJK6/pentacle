@@ -57,7 +57,8 @@ class Env:
         if lead is None and state == "active":
             lead = await self.seat("lead-" + key.replace(":", "-"), role="lead", parent_stream_id=FD)
         payload = {"adoption_key": key, "title": "Lane " + key, "summary": "Goal line", "owner_kind": owner,
-                   "work_state": state, "visible_chat": chat or {"stream_id": ASSISTANT}, **extra}
+                   "work_state": state, "visible_chat": chat or {"stream_id": ASSISTANT},
+                   "no_spec_reason": None if extra.get("members") else "Synthetic test lane.", **extra}
         if lead:
             payload["lead"] = {"stream_id": lead[0], "generation": lead[1]}
         return await self.op("adopt", payload, request_id="adopt:" + key)
@@ -270,6 +271,7 @@ def test_each_update_kind_atomic_retry_restart_v12(kind):
             lead_payload = None
             return ("adopt", {"adoption_key": "stream:started", "title": "Started", "summary": "Goal",
                               "owner_kind": "operator", "work_state": "paused", "emit_started": True,
+                              "no_spec_reason": "Synthetic publication fixture.",
                               "visible_chat": {"stream_id": ASSISTANT}}, None, None, "adopt:stream:started")
         lid, version = ctx
         payload = {"lane_blocked": {"to": "blocked", "blocker": "Waiting on keys"},

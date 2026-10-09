@@ -9,10 +9,14 @@ emitter beside ``InventoryEmitter``.  Wire contract:
 from __future__ import annotations
 
 import asyncio
+import math
 import json
 import logging
+import os
 import time
 from typing import Any, Awaitable, Callable
+
+from work_lane_progress import lane_progress
 
 LANE_FRAME_CAP = 64
 log = logging.getLogger(__name__)
@@ -83,6 +87,7 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                          "kind": lane.get("_chat_kind") or "session",
                          "available": lane.get("_chat_available") or "unavailable"},
         "last_update": lane.get("_last_update"),
+        **lane_progress(lane),
     }
 
 
@@ -103,13 +108,16 @@ def project_lanes(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict
 
 
 def build_frame(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict[str, Any]],
-                *, now_iso: str | None = None, cap: int = LANE_FRAME_CAP) -> dict[str, Any]:
+                *, now_iso: str | None = None, cap: int = LANE_FRAME_CAP,
+                work_index: dict[str, Any] | None = None) -> dict[str, Any]:
     lanes = [lane for lane in project_lanes(rows, presence_by_stream, now_iso) if lane["state"] != "done"]
     counts = {"open": len(lanes), "active": 0, "paused": 0, "blocked": 0}
     for lane in lanes:
         counts[lane["state"]] += 1
     return {"type": "work_lanes.inventory", "lanes": lanes[:cap], "counts": counts,
-            "truncated": len(lanes) > cap, "generated_at": now_iso or _iso_now()}
+            "truncated": len(lanes) > cap, "generated_at": now_iso or _iso_now(),
+            "work_index": work_index or {"available": False, "root_configured": False,
+                                         "snapshot_at": None, "last_sweep_at": None, "error": "work_index_unavailable"}}
 
 
 def presence_index(open_sessions: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -129,10 +137,20 @@ class WorkLanesInventory:
     """Signature-deduped ``work_lanes.inventory`` emitter (sibling of ``InventoryEmitter``)."""
 
     def __init__(self, store: Any, sessions: Any,
-                 broadcast: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
+                 broadcast: Callable[[dict[str, Any]], Awaitable[None]], *, specs: Any = None,
+                 sweep_interval_s: float | None = None, settle_s: float | None = None) -> None:
         self.store = store
         self.sessions = sessions
         self.broadcast = broadcast
+        self.specs = specs
+        self.sweep_interval_s = float(sweep_interval_s if sweep_interval_s is not None else
+                                      os.environ.get("WORK_INDEX_SWEEP_S", "300"))
+        self.settle_s = float(settle_s if settle_s is not None else os.environ.get("WORK_INDEX_SETTLE_S", "300"))
+        if (not math.isfinite(self.sweep_interval_s) or not math.isfinite(self.settle_s)
+                or self.sweep_interval_s <= 0 or self.settle_s < 0):
+            raise ValueError("work_index_interval_invalid")
+        self._last_sweep = float("-inf")
+        self._index_dirty = specs is not None
         self._last_signature: str | None = None
         self._lock = asyncio.Lock()
         self._dirty = False
@@ -153,30 +171,61 @@ class WorkLanesInventory:
         while self._dirty:
             self._dirty = False
             try:
+                await self.reconcile_index()
                 await self.store.reconcile_work_lanes()
                 await self.emit_if_changed()
             except Exception:  # noqa: BLE001 - a lane refresh must not break session paths
                 log.exception("work lanes refresh failed")
 
+    async def reconcile_index(self, *, force_sweep: bool = False) -> None:
+        if self.specs is None:
+            return
+        sweep = force_sweep or time.monotonic() - self._last_sweep >= self.sweep_interval_s
+        if not sweep and not self._index_dirty:
+            return
+        self._index_dirty = False
+        scan = await asyncio.to_thread(self.specs.scan_work_observations)
+        await self.store.reconcile_work_observations(scan, settle_s=self.settle_s, sweep=sweep)
+        if sweep:
+            self._last_sweep = time.monotonic()
+
     def start(self, interval_s: float = 60.0) -> None:
-        async def loop() -> None:
+        if self._periodic is not None:
+            return
+        loop = asyncio.get_running_loop()
+        if self.specs is not None:
+            def changed(_ids):
+                def mark():
+                    self._index_dirty = True
+                    self.refresh()
+                loop.call_soon_threadsafe(mark)
+            self.specs.changed_callback = changed
+            self.specs.start()
+        async def periodic() -> None:
             while True:
-                await asyncio.sleep(interval_s)
+                await asyncio.sleep(min(interval_s, self.sweep_interval_s))
                 self.refresh()
         if self._periodic is None:
-            self._periodic = asyncio.create_task(loop())
+            self._periodic = asyncio.create_task(periodic())
+            self.refresh()
 
     async def stop(self) -> None:
-        for task in (self._periodic, self._task):
-            if task is not None and not task.done():
-                task.cancel()
+        if self.specs is not None:
+            await asyncio.to_thread(self.specs.stop)
+        tasks = [task for task in (self._periodic, self._task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._periodic = self._task = None
 
     async def current(self) -> dict[str, Any]:
         rows = await self.store.work_lane_rows()
-        return build_frame(rows, presence_index(self.sessions.list_open()))
+        return build_frame(rows, presence_index(self.sessions.list_open()),
+                           work_index=await self.store.work_index_status())
 
     async def list(self, *, include_done: bool = False, limit: int = 200,
-                   before_updated_at: str | None = None, before_lane_id: str | None = None) -> dict[str, Any]:
+                   before_updated_at: str | None = None, before_lane_id: str | None = None,
+                   members: bool = False) -> dict[str, Any]:
         """Page by the compound key (updated_at, lane_id) descending, so ties never drop lanes."""
         rows = await self.store.work_lane_rows(include_done=include_done)
         lanes = project_lanes(rows, presence_index(self.sessions.list_open()))
@@ -189,7 +238,8 @@ class WorkLanesInventory:
         last = page[-1] if page and len(lanes) > limit else None
         return {"type": "work_lanes.list.ok", "include_done": include_done, "lanes": server_order(page),
                 "next_before_updated_at": str(last.get("updated_at") or "") if last else None,
-                "next_before_lane_id": last["lane_id"] if last else None}
+                "next_before_lane_id": last["lane_id"] if last else None,
+                "work_index": await self.store.work_index_status()}
 
     async def emit_if_changed(self) -> bool:
         async with self._lock:

@@ -88,3 +88,21 @@ def test_request_confirmation_carries_typed_context(monkeypatch):
                                    "action": "set_state:done"}
     assert [o["value"] for o in envelope["options"]] == ["Confirm", "Not yet"]
     assert envelope["dedup_key"] == "work-lane-confirm:wl-1:set_state:done"
+
+
+def test_member_commands_and_preview_payload(monkeypatch, tmp_path):
+    sent = _wire(monkeypatch, {"type": "assistant.operation.ok"})
+    assert _run(["work-lane", "set-members", "wl-1", "--member", "spec_demo__one", "--member", "spec_demo__two",
+                 "--expected-version", "3", "--request-id", "members-1"]) == 0
+    assert sent[-1]["operation"] == "work_lane.set_members"
+    assert sent[-1]["payload"] == {"members": ["spec_demo__one", "spec_demo__two"], "no_spec_reason": None}
+    assert _run(["work-lane", "show", "wl-1", "--members", "--json"]) == 0
+    assert sent[-1]["members"] is True
+    assert _run(["work-lane", "adopt", "--preview", "--epic", "epic_demo"]) == 0
+    assert sent[-1]["epic"] == "epic_demo"
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([{"adoption_key": "stream:h:b", "members": ["spec_demo__one"],
+                                 "no_spec_reason": None, "evidence": "preview only"}]))
+    assert _run(["work-lane", "adopt", "--apply", str(plan)]) == 0
+    assert sent[-1]["payload"]["members"] == ["spec_demo__one"]
+    assert "evidence" not in sent[-1]["payload"]
