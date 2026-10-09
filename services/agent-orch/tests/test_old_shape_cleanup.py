@@ -17,10 +17,12 @@ def test_removed_send_delivery_shapes_do_not_reappear():
     # The alert contract uses the first token as a typed incident code. It is
     # not a transport delivery shape: the actual send/receipt code remains
     # covered by this ban. Keep the exception local to that accepted enum's
-    # definition, projection and regression; never exempt the other wording.
+    # definition, family registry, projection and regression; never exempt the
+    # other wording.
     alert_enum_files = {
         "docs/contracts/error-alerts-v1.d.ts",
         "docs/contracts/error-alerts-v1.schema.json",
+        "services/chat-stream-v2/error_adapters.py",
         "services/chat-stream-v2/error_alerts.py",
         "services/chat-stream-v2/tests/test_error_alerts.py",
     }
