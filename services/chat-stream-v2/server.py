@@ -35,7 +35,9 @@ import socket
 import ssl
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from pathlib import Path
@@ -81,6 +83,128 @@ UNSUPPORTED_FALLBACK_LABELS = frozenset({"<unknown>", "<missing>"})
 _TELEMETRY_LOG_SAFE_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/<>-"
 )
+
+
+# Connection diagnostics are projections, never authentication or queue policy.
+_CONN_BUCKETS = ("snapshot", "session.inventory", "work_lanes.inventory", "host.status",
+                 "working.state", "schedule.inventory", "hosts.stats", "limits.update",
+                 "chat.event", "pong", "other")
+_CONN_METRICS = ("broadcast_enqueued", "broadcast_sent", "broadcast_sent_bytes",
+                 "direct_sent", "direct_sent_bytes", "coalesced", "deduped")
+_CONN_CLIENTS = {"pentacle-mobile": "mobile", "pentacle-web": "web",
+                 "pentacle": "desktop", "agent-orch": "cli"}
+_CONN_METHODS = ("scoped_v2", "operator_v2", "system_token", "seat_token",
+                 "local_admin", "loopback", "none")
+_CONN_REASONS = frozenset({"absent", "malformed", "expired", "wrong-seat", "internal-error",
+                          "operator_auth_invalid", "authentication_required", "operator_auth_required",
+                          "system_producer_auth_required", "revoked", "tls_required"})
+_CONN_LOG_SAFE: ContextVar[bool] = ContextVar("accepted_connection_log_projection", default=False)
+_CONN_AUTH: ContextVar[Any] = ContextVar("connection_auth_diagnostic", default=None)
+
+
+def _conn_bucket(value: Any) -> str:
+    return value if isinstance(value, str) and value in _CONN_BUCKETS else "other"
+
+
+def _conn_size(value: Any) -> int:
+    return len(value) if isinstance(value, bytes) else len(value.encode("utf-8"))
+
+
+def _conn_ms(start: float, now: float) -> int:
+    return max(0, int((now - start) * 1000))
+
+
+def _conn_stream(value: Any) -> str | None:
+    return value if isinstance(value, str) and len(value) <= 128 and re.fullmatch(
+        r"[A-Za-z0-9._-]+:[A-Za-z0-9._-]+", value) else None
+
+
+def _conn_reason(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    if value == "":
+        return "empty"
+    if value == "keepalive ping timeout":
+        return "keepalive_ping_timeout"
+    if isinstance(value, str) and value in {"normal", "going_away", "slow_consumer",
+                                           "liveness_force_close", "focused_heartbeat_timeout"}:
+        return value
+    return "redacted"
+
+
+def _conn_safe(function):
+    """Diagnostics must never replace a product outcome (including logger failure)."""
+    @functools.wraps(function)
+    def guarded(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except Exception:
+            return None
+    return guarded
+
+
+@dataclass
+class _ConnectionDiagnostic:
+    started: float
+    transport: str
+    tls: bool
+    conn_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    client_kind: str = "unknown"
+    client_name: str = "unknown"
+    client_metadata_source: str = "unavailable"
+    app_build: str | None = None
+    stream_id: str | None = None
+    queue_max: int = 0
+    queue_peak: int = 0
+    queued: dict = field(default_factory=lambda: dict.fromkeys(_CONN_BUCKETS, 0))
+    traffic: dict = field(default_factory=lambda: {k: dict.fromkeys(_CONN_METRICS, 0) for k in _CONN_BUCKETS})
+    snapshot: dict | None = None
+    snapshot_at: float | None = None
+    rx_messages: int = 0
+    rx_bytes: int = 0
+    tx_messages: int = 0
+    tx_bytes: int = 0
+    last_rx: float | None = None
+    last_tx: float | None = None
+    last_ping: float | None = None
+    last_pong: float | None = None
+    send_lock_wait_max_ms: int = 0
+    send_call_max_ms: int = 0
+    auth_state: str = "never"
+    auth_states: dict = field(default_factory=dict)
+    auth_window: int = 0
+    auth_count: int = 0
+    auth_suppressed: int = 0
+    auth_suppressed_total: int = 0
+    events_mode: str = "unknown"
+    snapshot_requested: bool | None = None
+    work_lanes_v1: bool | None = None
+    episode: int = 0
+    high_since: float | None = None
+    high_emitted: bool = False
+    last_enter: float | None = None
+    pressure_suppressed: int = 0
+    pressure_suppressed_total: int = 0
+    force_emitted: bool = False
+    local_close: bool = False
+    writer_failed: bool = False
+    welcome_complete: bool = False
+    close_exception: Any = None
+    finalized: bool = False
+
+
+@dataclass
+class _AuthDiagnostic:
+    websocket: Any
+    stage: str
+    started: float
+    elapsed: float = 0.0
+    successes: dict = field(default_factory=dict)
+    failures: dict = field(default_factory=dict)
+    explicit: bool = False
+    finished: bool = False
+    owner: Any = field(default_factory=asyncio.current_task, repr=False)
+
 
 import report_producer
 
@@ -485,6 +609,7 @@ class Server:
         #: read-only and intentionally absent from unit-only Server instances.
         self.lifecycle: Any = None
         self._clients: set[Any] = set()
+        self._connection_diagnostics: dict[Any, _ConnectionDiagnostic] = {}
         #: Broadcasts stay bounded behind one writer per client. RPC replies
         #: write from their request task and use the shared send lock below.
         self._client_send_queues: dict[Any, asyncio.Queue] = {}
@@ -501,7 +626,6 @@ class Server:
         #: gone client). Durable receipt queryability is supplied separately by
         #: the append-only receipt log, never by this task registry.
         self._detached_send_tasks: set[asyncio.Task] = set()
-        self._client_queue_warned: set[Any] = set()
         self._client_identities: dict[Any, str] = {}
         self._consent_sent: dict[Any, dict[str, str]] = {}
         # Per-client hello.subscribe state drives projection of broadcasts and
@@ -874,10 +998,449 @@ class Server:
             return
         closing.result()  # a listener error propagates, as wait_for did
 
+    # -- bounded, privacy-safe connection observations --------------------
+
+    def _diag_transport(self, websocket: Any) -> str:
+        transport = getattr(websocket, "transport", None)
+        extra = getattr(transport, "get_extra_info", lambda _key: None)
+        sock = extra("socket")
+        if getattr(sock, "family", None) == socket.AF_UNIX:
+            return "unix"
+        peer = getattr(websocket, "remote_address", None)
+        if not isinstance(peer, (tuple, list)) or not peer or not isinstance(peer[0], str):
+            return "unknown"
+        try:
+            address = ipaddress.ip_address(peer[0])
+            if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+                address = address.ipv4_mapped
+        except (ValueError, TypeError):
+            return "unknown"
+        if address.is_loopback:
+            return "loopback"
+        local = getattr(websocket, "local_address", None) or extra("sockname")
+        binds = self.dot_tls_binds if websocket in self._tls_connections else self.binds
+        fleet_listener = isinstance(local, (tuple, list)) and bool(local) and (
+            local[0] in binds or "0.0.0.0" in binds or "::" in binds)
+        if fleet_listener and ((address.version == 4 and address in ipaddress.ip_network("100.64.0.0/10"))
+                               or (address.version == 6 and address in ipaddress.ip_network("fd7a:115c:a1e0::/48"))):
+            return "tailnet"
+        return "other"
+
+    @_conn_safe
+    def _diag_register(self, websocket: Any) -> None:
+        if websocket in self._connection_diagnostics:
+            return
+        queue = self._client_send_queues[websocket]
+        state = _ConnectionDiagnostic(_monotonic(), self._diag_transport(websocket),
+                                      websocket in self._tls_connections, queue_max=queue.maxsize)
+        self._connection_diagnostics[websocket] = state
+        queue._conn_diagnostic = state
+        self._emit_conn_diag(state, "connect", logging.INFO, queue_max=queue.maxsize)
+
+    @_conn_safe
+    def _emit_conn_diag(self, state: _ConnectionDiagnostic, event: str, level: int, **fields: Any) -> None:
+        if state.finalized:
+            return
+        now = _monotonic()
+        age = 0 if event == "connect" else _conn_ms(state.started, now)
+        payload = dict(schema=1, event=event, conn_id=state.conn_id, age_ms=age,
+                       transport=state.transport, tls=state.tls, client_kind=state.client_kind,
+                       client_name=state.client_name, client_metadata_source=state.client_metadata_source,
+                       app_build=state.app_build, stream_id=state.stream_id, **fields)
+        if event == "close":
+            payload["duration_ms"] = age
+        log.log(level, "conn_diag %s", json.dumps(payload, separators=(",", ":"), allow_nan=False))
+
+    def _diag_queue(self, state: _ConnectionDiagnostic, queue: Any = None) -> dict:
+        if queue is None and state.snapshot is not None:
+            return dict(state.snapshot)
+        return dict(queue_depth=sum(state.queued.values()), queue_max=state.queue_max,
+                    queue_peak=state.queue_peak, queued_by_type=dict(state.queued))
+
+    def _diag_counters(self, state: _ConnectionDiagnostic, now: float, queue: Any = None) -> dict:
+        result = self._diag_queue(state, queue)
+        result["traffic"] = {key: dict(value) for key, value in state.traffic.items()}
+        for name in ("last_rx", "last_tx", "last_ping", "last_pong"):
+            at = getattr(state, name)
+            result[name + "_age_ms"] = None if at is None else _conn_ms(at, now)
+        result.update(send_lock_wait_max_ms=state.send_lock_wait_max_ms,
+                      send_call_max_ms=state.send_call_max_ms)
+        return result
+
+    @_conn_safe
+    def _diag_snapshot(self, websocket: Any) -> None:
+        state = self._connection_diagnostics.get(websocket)
+        queue = self._client_send_queues.get(websocket)
+        if state is not None and queue is not None:
+            state.snapshot = self._diag_queue(state, queue)
+            state.snapshot_at = _monotonic()
+
+    @_conn_safe
+    def _diag_traffic(self, websocket: Any, frame_type: Any, metric: str) -> None:
+        state = self._connection_diagnostics.get(websocket)
+        if state is not None and not state.finalized:
+            state.traffic[_conn_bucket(frame_type)][metric] += 1
+
+    @_conn_safe
+    def _diag_enqueued(self, websocket: Any, queue: Any, frame_type: Any) -> None:
+        state = self._connection_diagnostics.get(websocket)
+        if state is None or state.finalized:
+            return
+        # Unit consumers can replace an empty queue; ownership follows the live queue.
+        queue._conn_diagnostic = state
+        state.queue_max = queue.maxsize
+        bucket = _conn_bucket(frame_type)
+        state.queued[bucket] += 1
+        state.traffic[bucket]["broadcast_enqueued"] += 1
+        state.queue_peak = max(state.queue_peak, queue.qsize())
+        self._diag_pressure(state, queue)
+
+    @_conn_safe
+    def _diag_removed(self, queue: Any, frame_type: Any, *, coalesced: bool = False) -> None:
+        state = getattr(queue, "_conn_diagnostic", None)
+        if state is not None and not state.finalized:
+            bucket = _conn_bucket(frame_type)
+            state.queued[bucket] = max(0, state.queued[bucket] - 1)
+            if coalesced:
+                state.traffic[bucket]["coalesced"] += 1
+
+    @_conn_safe
+    def _diag_pressure(self, state: _ConnectionDiagnostic, queue: Any) -> None:
+        if state.finalized:
+            return
+        now, depth = _monotonic(), queue.qsize()
+        if state.high_since is None and depth >= max(1, int(queue.maxsize * 0.80)):
+            state.episode += 1
+            state.high_since = now
+            state.high_emitted = state.last_enter is None or now - state.last_enter >= 60.0
+            if state.high_emitted:
+                state.last_enter = now
+                self._emit_conn_diag(state, "slow_consumer", logging.WARNING, phase="enter",
+                    episode=state.episode, episode_ms=0, pressure_episodes_suppressed=state.pressure_suppressed,
+                    **self._diag_counters(state, now, queue))
+                state.pressure_suppressed = 0
+            else:
+                state.pressure_suppressed += 1
+                state.pressure_suppressed_total += 1
+        elif state.high_since is not None and depth <= queue.maxsize // 2:
+            if state.high_emitted:
+                self._emit_conn_diag(state, "slow_consumer", logging.INFO, phase="recover",
+                    episode=state.episode, episode_ms=_conn_ms(state.high_since, now),
+                    pressure_episodes_suppressed=state.pressure_suppressed,
+                    **self._diag_counters(state, now, queue))
+            state.high_since = None
+            state.high_emitted = False
+
+    @_conn_safe
+    def _diag_force(self, websocket: Any, *, initiator: str, cause: str, cause_source: str,
+                    code: int, reason: str) -> None:
+        state = self._connection_diagnostics.get(websocket)
+        if state is not None and not state.finalized and not state.force_emitted:
+            state.force_emitted = True
+            self._emit_conn_diag(state, "force_close", logging.WARNING, initiator=initiator,
+                cause=cause, cause_source=cause_source, close_code=code, close_reason=reason,
+                **self._diag_counters(state, _monotonic(), self._client_send_queues.get(websocket)))
+
+    @_conn_safe
+    def _diag_rx(self, websocket: Any, raw: Any) -> None:
+        state = self._connection_diagnostics.get(websocket)
+        if state is None or state.finalized:
+            return
+        state.rx_messages += 1
+        state.rx_bytes += _conn_size(raw)
+        state.last_rx = _monotonic()
+        try:
+            msg = json.loads(raw)
+            if isinstance(msg, dict) and msg.get("type") == "ping":
+                state.last_ping = state.last_rx
+        except (ValueError, TypeError):
+            pass
+
+    @contextmanager
+    def _diag_wait(self, websocket: Any):
+        state = self._connection_diagnostics.get(websocket)
+        measurement = [_monotonic(), False] if state is not None else None
+        try:
+            yield measurement
+        finally:
+            if measurement is not None and not measurement[1]:
+                self._diag_acquired(websocket, measurement)
+
+    @_conn_safe
+    def _diag_acquired(self, websocket: Any, measurement: Any) -> None:
+        state = self._connection_diagnostics.get(websocket)
+        if state is not None and measurement is not None and not state.finalized:
+            state.send_lock_wait_max_ms = max(state.send_lock_wait_max_ms,
+                                              _conn_ms(measurement[0], _monotonic()))
+            measurement[1] = True
+
+    @contextmanager
+    def _diag_send(self, websocket: Any, payload: Any, frame_type: Any, *, broadcast: bool = False):
+        state = self._connection_diagnostics.get(websocket)
+        started = _monotonic() if state is not None else 0.0
+        succeeded = False
+        try:
+            yield
+            succeeded = True
+        finally:
+            self._diag_sent(state, started, payload, frame_type, broadcast, succeeded)
+
+    @_conn_safe
+    def _diag_sent(self, state: Any, started: float, payload: Any, frame_type: Any,
+                   broadcast: bool, succeeded: bool) -> None:
+        if state is None or state.finalized:
+            return
+        now = _monotonic()
+        state.send_call_max_ms = max(state.send_call_max_ms, _conn_ms(started, now))
+        if not succeeded:
+            return
+        size, bucket = _conn_size(payload), _conn_bucket(frame_type)
+        prefix = "broadcast" if broadcast else "direct"
+        state.traffic[bucket][prefix + "_sent"] += 1
+        state.traffic[bucket][prefix + "_sent_bytes"] += size
+        state.tx_messages += 1
+        state.tx_bytes += size
+        state.last_tx = now
+        if bucket == "pong":
+            state.last_pong = now
+
+    @staticmethod
+    def _diag_frame_type(frame: Any) -> str:
+        if isinstance(frame, _EncodedFrame):
+            return _conn_bucket(frame.frame_type)
+        if isinstance(frame, dict):
+            return _conn_bucket(frame.get("type"))
+        # Only already-encoded direct frames lack a top-level object here.
+        try:
+            decoded = json.loads(frame)
+            return _conn_bucket(decoded.get("type")) if isinstance(decoded, dict) else "other"
+        except (TypeError, ValueError):
+            return "other"
+
+    @_conn_safe
+    def _diag_hello_metadata(self, websocket: Any, msg: dict) -> None:
+        state = self._connection_diagnostics.get(websocket)
+        if state is None:
+            return
+        client = msg.get("client")
+        if state.client_metadata_source != "verified_credential":
+            state.client_name = client if isinstance(client, str) and client in _CONN_CLIENTS else "unknown"
+            state.client_kind = _CONN_CLIENTS.get(state.client_name, "unknown")
+            state.client_metadata_source = "hello_claim"
+        # Values and their hashes are only compared transiently, never retained.
+        secret_values = []
+        for key in ("token", "stream_token", "local_admin_token", "secret", "proof", "nonce", "credential_id"):
+            value = msg.get(key)
+            if isinstance(value, str):
+                secret_values.append(value)
+        auth = msg.get("auth_v2")
+        if isinstance(auth, dict):
+            secret_values.extend(value for key, value in auth.items()
+                                 if key in {"secret", "proof", "nonce", "credential_id"} and isinstance(value, str))
+        forbidden = set(secret_values)
+        forbidden.update(hashlib.sha256(value.encode("utf-8")).hexdigest() for value in secret_values)
+        state.app_build = None
+        for key in ("build_sha", "app_build", "build_number"):
+            value = msg.get(key)
+            pattern = r"[0-9a-f]{7,40}" if key == "build_sha" else r"(?:[0-9]{1,10}|[0-9]{1,10}\.[0-9]{1,10}\.[0-9]{1,10}(?:\+[0-9]{1,10})?)"
+            if isinstance(value, str) and value not in forbidden and re.fullmatch(pattern, value):
+                state.app_build = value
+                break
+
+    @_conn_safe
+    def _diag_auth_observe(self, websocket: Any, msg: dict, context: dict, elapsed: float) -> None:
+        state = self._connection_diagnostics.get(websocket)
+        if state is None or state.finalized:
+            return
+        current = _CONN_AUTH.get()
+        decision = current if (current is not None and current.websocket is websocket
+                               and not current.finished and current.owner is asyncio.current_task()) else _AuthDiagnostic(
+            websocket, "revalidation", _monotonic())
+        decision.elapsed += elapsed
+        decision.explicit |= self._token_auth_requested(msg) or "auth_v2" in msg
+        trust = self._connection_trust.get(websocket)
+        if context.get("scoped_principal"):
+            decision.successes["scoped_v2"] = _conn_stream(context.get("scope_stream"))
+        elif trust is not None and getattr(trust, "scope", None):
+            decision.failures["scoped_v2"] = "revoked"
+        if self._operator_authenticated(websocket):
+            decision.successes["operator_v2"] = None
+        if context.get("service_attempted"):
+            if context.get("service_authenticated"):
+                decision.successes["system_token"] = None
+            else:
+                decision.failures["system_token"] = "revoked" if "system_token" in state.auth_states and not self._token_auth_requested(msg) else "system_producer_auth_required"
+        if context.get("token_verified"):
+            decision.successes["seat_token"] = _conn_stream(context.get("stream_id"))
+        elif context.get("reason_code") and not context.get("service_attempted"):
+            reason = context["reason_code"]
+            decision.failures["seat_token"] = reason if reason in _CONN_REASONS else "internal-error"
+        if context.get("local_admin_verified"):
+            decision.successes["local_admin"] = None
+        if decision is not current:
+            self._diag_auth_finish(decision)
+
+    @_conn_safe
+    def _diag_auth_failure(self, websocket: Any, reason: str, method: str | None = None) -> None:
+        decision = _CONN_AUTH.get()
+        if (decision is None or decision.websocket is not websocket or decision.finished
+                or decision.owner is not asyncio.current_task()):
+            return
+        if reason == DOT_REQUIRES_TLS_CODE:
+            reason = "tls_required"
+        # Generic admission gates must not overwrite precise verification
+        # failures; a separately attempted credential remains observable.
+        if (method is not None and method not in decision.failures) or not decision.failures:
+            method = method or next((m for m in _CONN_METHODS if m in decision.successes), "none")
+            decision.failures[method] = reason if reason in _CONN_REASONS else "internal-error"
+
+    @_conn_safe
+    def _diag_admitted(self, websocket: Any, msg: dict, events_mode: str, snapshot_requested: bool) -> None:
+        state = self._connection_diagnostics.get(websocket)
+        decision = _CONN_AUTH.get()
+        if state is None or decision is None or decision.websocket is not websocket:
+            return
+        state.events_mode = events_mode
+        state.snapshot_requested = snapshot_requested
+        state.work_lanes_v1 = self._client_wants_work_lanes(msg)
+        if not decision.successes and not decision.failures and self._is_loopback_client(websocket):
+            decision.successes["loopback"] = None
+        self._diag_auth_finish(decision)
+
+    @_conn_safe
+    def _diag_auth_finish(self, decision: _AuthDiagnostic) -> None:
+        if decision.finished:
+            return
+        decision.finished = True
+        state = self._connection_diagnostics.get(decision.websocket)
+        if state is None or state.finalized:
+            return
+        now = _monotonic()
+        # One successful principal, selected by the fixed enforcement precedence.
+        method = next((m for m in _CONN_METHODS if m in decision.successes), None)
+        if method is not None:
+            # Method precedence does not erase an independently verified seat.
+            stream = decision.successes.get("scoped_v2") or decision.successes.get("seat_token")
+            if stream is not None:
+                state.stream_id = stream
+            trust = self._connection_trust.get(decision.websocket)
+            if method in {"operator_v2", "scoped_v2"} and trust is not None:
+                name = trust.client_kind
+                state.client_name = name if name in _CONN_CLIENTS else "unknown"
+                state.client_kind = _CONN_CLIENTS.get(state.client_name, "unknown")
+                state.client_metadata_source = "verified_credential"
+            elif method == "system_token":
+                state.client_kind, state.client_name = "service", "system-producer"
+                state.client_metadata_source = "verified_credential"
+                state.stream_id = None
+        decisions = [(m, r) for m, r in decision.failures.items()]
+        if method is not None and method not in decision.failures:
+            decisions.append((method, None))
+        for selected, reason in decisions:
+            signature = (reason, decision.successes.get(selected))
+            repeated = state.auth_states.get(selected) == signature
+            state.auth_states[selected] = signature
+            state.auth_state = "failed" if reason else "accepted"
+            if repeated and (reason is None or not decision.explicit):
+                continue
+            window = int(max(0.0, now - state.started) // 60.0)
+            if window != state.auth_window:
+                state.auth_window, state.auth_count = window, 0
+            if state.auth_count >= 5:
+                state.auth_suppressed += 1
+                state.auth_suppressed_total += 1
+                continue
+            state.auth_count += 1
+            fields = dict(auth_method=selected, auth_stage=decision.stage,
+                          auth_elapsed_ms=max(0, int(decision.elapsed * 1000)),
+                          auth_suppressed=state.auth_suppressed)
+            state.auth_suppressed = 0
+            if reason:
+                fields["reason"] = reason
+            else:
+                fields.update(events_mode=state.events_mode, snapshot_requested=state.snapshot_requested,
+                              work_lanes_v1=state.work_lanes_v1)
+            self._emit_conn_diag(state, "auth_fail" if reason else "auth_ok",
+                                 logging.WARNING if reason else logging.INFO, **fields)
+
+    @_conn_safe
+    def _diag_finalize(self, websocket: Any, termination: str, error: Any = None) -> None:
+        state = self._connection_diagnostics.get(websocket)
+        if state is None or state.finalized:
+            return
+        try:
+            protocol = getattr(websocket, "protocol", None)
+            evidence = error if isinstance(error, ConnectionClosed) else state.close_exception
+            received = getattr(protocol, "close_rcvd", None) or getattr(evidence, "rcvd", None)
+            sent = getattr(protocol, "close_sent", None) or getattr(evidence, "sent", None)
+            order = getattr(protocol, "close_rcvd_then_sent", None)
+            if order is None:
+                order = getattr(evidence, "rcvd_then_sent", None)
+            initiator = "peer" if order is True else "server" if order is False else "server" if state.local_close else "unknown"
+            def code(frame):
+                value = getattr(frame, "code", None)
+                return value if isinstance(value, int) and not isinstance(value, bool) else None
+            sent_code, received_code = code(sent), code(received)
+            sent_reason, received_reason = _conn_reason(getattr(sent, "reason", None)), _conn_reason(getattr(received, "reason", None))
+            chosen = sent if initiator == "server" and sent is not None else received if received is not None else sent
+            close_code, close_reason = code(chosen), _conn_reason(getattr(chosen, "reason", None))
+            if chosen is None:
+                terminal = getattr(websocket, "close_code", None)
+                close_code = terminal if isinstance(terminal, int) and not isinstance(terminal, bool) else None
+                close_reason = "unknown"
+            if received_code == 4000 and received_reason in {"liveness_force_close", "focused_heartbeat_timeout"}:
+                self._diag_force(websocket, initiator="peer", cause="liveness", cause_source="peer_close_frame", code=4000, reason=received_reason)
+            elif sent_code == 1011 and sent_reason == "keepalive_ping_timeout":
+                self._diag_force(websocket, initiator="server", cause="liveness", cause_source="protocol_close", code=1011, reason=sent_reason)
+            if termination == "transport_lost":
+                if received is not None and sent is not None:
+                    termination = "handshake"
+                elif state.writer_failed:
+                    termination = "writer_failed"
+            now = _monotonic()
+            queue = self._client_send_queues.get(websocket)
+            self._emit_conn_diag(state, "close", logging.INFO, initiator=initiator,
+                termination=termination, close_code=close_code, close_reason=close_reason,
+                close_sent_code=sent_code, close_received_code=received_code,
+                close_sent_reason=sent_reason, close_received_reason=received_reason,
+                auth_state=state.auth_state, rx_messages=state.rx_messages, rx_bytes=state.rx_bytes,
+                tx_messages=state.tx_messages, tx_bytes=state.tx_bytes,
+                queue_snapshot_age_ms=0 if queue is not None or state.snapshot_at is None else _conn_ms(state.snapshot_at, now),
+                auth_suppressed_total=state.auth_suppressed_total,
+                pressure_episodes_suppressed_total=state.pressure_suppressed_total,
+                **self._diag_counters(state, now, queue))
+        finally:
+            state.finalized = True
+            self._connection_diagnostics.pop(websocket, None)
+
     # -- connection --------------------------------------------------------
 
     async def _handle_client(self, websocket: Any) -> None:
+        safe_context = _CONN_LOG_SAFE.set(True)
         self._register_client(websocket)
+        termination = "welcome_failed"
+        error = None
+        try:
+            await self._handle_client_inner(websocket)
+            state = self._connection_diagnostics.get(websocket)
+            if state is not None and state.welcome_complete:
+                termination = "transport_lost"
+        except asyncio.CancelledError as exc:
+            termination, error = "handler_cancelled", exc
+            raise
+        except BaseException as exc:
+            state = self._connection_diagnostics.get(websocket)
+            termination = "handler_error" if state is not None and state.welcome_complete else "welcome_failed"
+            error = exc
+            raise
+        finally:
+            # Unregister is not a close receipt: writer/eviction can reach it first.
+            # This also releases maps after the old welcome-failure early return.
+            self._unregister_client(websocket)
+            self._diag_finalize(websocket, termination, error)
+            _CONN_LOG_SAFE.reset(safe_context)
+
+    async def _handle_client_inner(self, websocket: Any) -> None:
         # v1 parity: speak first. It uses the same send lock as RPC results, so
         # a client that sends hello without waiting still receives welcome first.
         nonce, expires_at = operator_auth.new_nonce()
@@ -886,10 +1449,14 @@ class Server:
             nonce=nonce, expires_at=expires_at, runtime_sha=self.runtime_sha,
         ))):
             return
+        state = self._connection_diagnostics.get(websocket)
+        if state is not None:
+            state.welcome_complete = True
         inflight: set[asyncio.Task] = set()
         hello_barrier: asyncio.Task | None = None
         try:
             async for raw in websocket:
+                self._diag_rx(websocket, raw)
                 # One task per request: a verb that parks (`await_report`) must
                 # not hold up the requests behind it. Replies correlate by
                 # `request_id`, so out-of-order completion is expected.
@@ -910,8 +1477,10 @@ class Server:
                 else:
                     inflight.add(task)
                     task.add_done_callback(inflight.discard)
-        except ConnectionClosed:
-            pass
+        except ConnectionClosed as exc:
+            state = self._connection_diagnostics.get(websocket)
+            if state is not None:
+                state.close_exception = exc
         finally:
             for task in inflight:
                 task.cancel()
@@ -984,12 +1553,7 @@ class Server:
         }:
             for frame in result:
                 if isinstance(frame, dict):
-                    notification = frame.get("notification") or {}
-                    question = frame.get("question") or {}
-                    log.info("answer response send request_id=%s nid=%s type=%s socket_send=%s",
-                             frame.get("request_id"), notification.get("notification_id")
-                             or question.get("notification_id") or request.get("notification_id"),
-                             frame.get("type"), "completed" if sent else "failed",
+                    log.info("answer response socket_send=%s", "completed" if sent else "failed",
                              extra={"subsystem": "server", "bug_ref": "notification_answer_disconnect_delivery_2026_09"})
 
     async def broadcast(self, frame: dict[str, Any]) -> None:
@@ -1051,6 +1615,7 @@ class Server:
                         and self._client_last_sent_digest.get(websocket, {}).get(key) == digest
                         and not self._has_different_pending_coalescible(
                             websocket, key, encoded)):
+                    self._diag_traffic(websocket, frame_type, "deduped")
                     continue
                 self._enqueue(websocket, frame_type, encoded)
 
@@ -1066,6 +1631,7 @@ class Server:
         if websocket not in self._client_send_queues:
             self._client_send_queues[websocket] = asyncio.Queue(maxsize=CLIENT_SEND_QUEUE_MAX)
         self._client_send_locks.setdefault(websocket, asyncio.Lock())
+        self._diag_register(websocket)
         task = self._client_writer_tasks.get(websocket)
         if task is not None and not task.done():
             return
@@ -1077,8 +1643,8 @@ class Server:
         self._host_stats_clients.add(websocket)
 
     def _unregister_client(self, websocket: Any) -> None:
+        self._diag_snapshot(websocket)
         self._clients.discard(websocket)
-        self._client_queue_warned.discard(websocket)
         self._client_identities.pop(websocket, None)
         self._consent_sent.pop(websocket, None)
         self._client_include_subagents.pop(websocket, None)
@@ -1112,6 +1678,10 @@ class Server:
                 if queue is None:
                     return
                 _frame_type, frame = await queue.get()
+                self._diag_removed(queue, _frame_type)
+                state = self._connection_diagnostics.get(websocket)
+                if state is not None:
+                    self._diag_pressure(state, queue)
                 lock = self._client_send_locks.get(websocket)
                 if lock is None:
                     return
@@ -1119,8 +1689,11 @@ class Server:
                 if coalescible:
                     self._client_inflight_coalescible[websocket] = (_frame_type, frame)
                 try:
-                    async with lock:
-                        await websocket.send(frame)
+                    with self._diag_wait(websocket) as measurement:
+                        async with lock:
+                            self._diag_acquired(websocket, measurement)
+                            with self._diag_send(websocket, frame, _frame_type, broadcast=True):
+                                await websocket.send(frame)
                     # Record the DELIVERED digest (not at enqueue): byte-identical
                     # coalescible frames are suppressed in broadcast() only once this
                     # exact state has actually reached the client, so a frame
@@ -1134,7 +1707,12 @@ class Server:
                         self._client_inflight_coalescible.pop(websocket, None)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - a broken socket kills its writer, not the daemon
+        except Exception as exc:  # noqa: BLE001 - a broken socket kills its writer, not the daemon
+            state = self._connection_diagnostics.get(websocket)
+            if state is not None:
+                state.writer_failed = True
+                if isinstance(exc, ConnectionClosed):
+                    state.close_exception = exc
             self._unregister_client(websocket)
 
     @staticmethod
@@ -1185,11 +1763,15 @@ class Server:
             if item[0] in COALESCIBLE_BROADCAST_FRAME_TYPES:
                 key = self._coalesce_frame_key(item[0], item[1])
                 if key in seen_keys:
+                    self._diag_removed(queue, item[0], coalesced=True)
                     continue
                 seen_keys.add(key)
             kept_reversed.append(item)
         for item in reversed(kept_reversed):
             queue.put_nowait(item)
+        state = getattr(queue, "_conn_diagnostic", None)
+        if state is not None:
+            self._diag_pressure(state, queue)
         return len(kept_reversed) < len(items)
 
     def _enqueue(self, websocket: Any, frame_type: str, frame: str) -> bool:
@@ -1215,11 +1797,9 @@ class Server:
                 # recoverable overload policy. Steady-state desktop pressure is
                 # removed upstream by the byte-identical dedupe (below), so this
                 # path is a rare true-overload backstop, never the normal case.
-                log.warning("slow_consumer overflow: dropping client=%s peer=%s (queue_max=%d)",
-                            self._client_identities.get(websocket, "unknown"),
-                            getattr(websocket, "remote_address", None), CLIENT_SEND_QUEUE_MAX)
                 self._drop_slow_consumer(websocket)
                 return False
+        self._diag_enqueued(websocket, queue, frame_type)
         depth = queue.qsize()
         warn_at = max(1, int(CLIENT_SEND_QUEUE_MAX * CLIENT_SEND_QUEUE_WARN_RATIO))
         if depth >= warn_at:
@@ -1235,14 +1815,14 @@ class Server:
             # frame.
             if frame_type in COALESCIBLE_BROADCAST_FRAME_TYPES:
                 self._evict_superseded_queue_frames(queue)
-            if websocket not in self._client_queue_warned:
-                self._client_queue_warned.add(websocket)
-                log.warning("slow_consumer queue depth=%d/%d client=%s peer=%s", depth,
-                            CLIENT_SEND_QUEUE_MAX, self._client_identities.get(websocket, "unknown"),
-                            getattr(websocket, "remote_address", None))
         return True
 
     def _drop_slow_consumer(self, websocket: Any) -> None:
+        state = self._connection_diagnostics.get(websocket)
+        if state is not None:
+            state.local_close = True
+        self._diag_force(websocket, initiator="server", cause="slow_consumer",
+                         cause_source="server_policy", code=1011, reason="slow_consumer")
         self._unregister_client(websocket)
         asyncio.create_task(self._close_ws(websocket, 1011, "slow_consumer"))
 
@@ -1263,32 +1843,39 @@ class Server:
         try:
             if interleave_history and hasattr(frames, "__aiter__"):
                 try:
-                    # Fetch/encode the next page outside the socket lock: a
-                    # paused backfill must not block readiness or pongs.
+                    # Fetch/encode outside the lock; history retains its fair yields.
                     async for frame in frames:
                         payload = frame.payload if isinstance(frame, _EncodedFrame) else _encode_frame(frame)
-                        async with lock:
-                            if websocket not in self._clients:
-                                return False
-                            await websocket.send(payload)
-                        # send() and a ready iterator need not suspend. Let the
-                        # broadcast writer join the fair lock queue each frame.
+                        with self._diag_wait(websocket) as measurement:
+                            async with lock:
+                                self._diag_acquired(websocket, measurement)
+                                if websocket not in self._clients:
+                                    return False
+                                with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
+                                    await websocket.send(payload)
                         await asyncio.sleep(0)
                 finally:
                     close = getattr(frames, "aclose", None)
                     if callable(close):
                         await close()
                 return True
-            async with lock:
-                if hasattr(frames, "__aiter__"):
-                    async for frame in frames:
-                        await websocket.send(
-                            frame.payload if isinstance(frame, _EncodedFrame) else _encode_frame(frame)
-                        )
-                else:
-                    for frame in ((frames,) if isinstance(frames, str) else frames):
-                        await websocket.send(frame if isinstance(frame, str) else _encode_frame(frame))
-        except ConnectionClosed:
+            with self._diag_wait(websocket) as measurement:
+                async with lock:
+                    self._diag_acquired(websocket, measurement)
+                    if hasattr(frames, "__aiter__"):
+                        async for frame in frames:
+                            payload = frame.payload if isinstance(frame, _EncodedFrame) else _encode_frame(frame)
+                            with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
+                                await websocket.send(payload)
+                    else:
+                        for frame in ((frames,) if isinstance(frames, str) else frames):
+                            payload = frame if isinstance(frame, str) else _encode_frame(frame)
+                            with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
+                                await websocket.send(payload)
+        except ConnectionClosed as exc:
+            state = self._connection_diagnostics.get(websocket)
+            if state is not None:
+                state.close_exception = exc
             self._unregister_client(websocket)
             return False
         return True
@@ -1297,6 +1884,25 @@ class Server:
     # -- dispatch ----------------------------------------------------------
 
     async def _dispatch(self, raw: Any, *, websocket: Any = None) -> list[dict[str, Any]]:
+        state = self._connection_diagnostics.get(websocket)
+        if state is None:
+            return await self._dispatch_inner(raw, websocket=websocket)
+        try:
+            msg = json.loads(raw)
+        except (TypeError, ValueError):
+            msg = None
+        is_hello = isinstance(msg, dict) and msg.get("type") == "hello"
+        if is_hello:
+            self._diag_hello_metadata(websocket, msg)
+        decision = _AuthDiagnostic(websocket, "hello" if is_hello else "request", _monotonic())
+        token = _CONN_AUTH.set(decision)
+        try:
+            return await self._dispatch_inner(raw, websocket=websocket)
+        finally:
+            self._diag_auth_finish(decision)
+            _CONN_AUTH.reset(token)
+
+    async def _dispatch_inner(self, raw: Any, *, websocket: Any = None) -> list[dict[str, Any]]:
         """Parse, route through the one table, correlate. Returns frames to send."""
         try:
             msg = json.loads(raw)
@@ -1336,11 +1942,13 @@ class Server:
             service_auth = dispatch_msg["_auth_context"]
             if service_auth.get("service_attempted"):
                 if not service_auth.get("service_authenticated"):
+                    self._diag_auth_failure(websocket, "system_producer_auth_required", "system_token")
                     return [self._auth_error_frame(
                         verb, request_id, "system_producer_auth_required"
                     )]
                 if verb == "hello":
                     if not self._valid_system_producer_hello(msg, service_auth["service_actor"]):
+                        self._diag_auth_failure(websocket, "system_producer_auth_required", "system_token")
                         return [self._auth_error_frame(
                             verb, request_id, "system_producer_auth_required"
                         )]
@@ -1378,6 +1986,7 @@ class Server:
                 ):
                     code = "operator_auth_required"
                 if code:
+                    self._diag_auth_failure(websocket, code)
                     denied = {"type": f"{verb}.error", "error_code": code}
                     if request_id is not None:
                         denied["request_id"] = request_id
@@ -1392,8 +2001,10 @@ class Server:
                 if not dot_auth.get("dot_principal"):
                     # Seat token revoked / no longer in the Dot set: refuse. The
                     # connection stays Dot-scoped for its remaining life.
+                    self._diag_auth_failure(websocket, "authentication_required")
                     return [self._auth_error_frame(verb, request_id, "authentication_required")]
                 if not dot_auth.get("transport_tls"):
+                    self._diag_auth_failure(websocket, "tls_required")
                     return [self._auth_error_frame(verb, request_id, DOT_REQUIRES_TLS_CODE)]
                 # v1: `list_sessions` (the read) is denied unless the read toggle
                 # is on; `self._dot_allowed_verbs` already excludes the read verbs
@@ -1407,10 +2018,14 @@ class Server:
             if websocket in self._client_scoped_connections:
                 scoped_auth = dispatch_msg["_auth_context"]
                 if not scoped_auth.get("scoped_principal"):
+                    self._diag_auth_failure(websocket, "authentication_required")
                     return [self._auth_error_frame(verb, request_id, "authentication_required")]
                 if verb not in SCOPED_ALLOWED_VERBS:
                     return [self._auth_error_frame(verb, request_id, SCOPE_DENIED_CODE)]
                 if verb == "fetch_blob":
+                    decision = _CONN_AUTH.get()
+                    if decision is not None and decision.websocket is websocket:
+                        self._diag_auth_finish(decision)
                     readable = await self._scoped_blob_readable(
                         str(scoped_auth.get("credential_id") or ""),
                         str(dispatch_msg.get("blob_sha") or ""),
@@ -1426,13 +2041,19 @@ class Server:
                 "upload_prompt_blob_init", "upload_prompt_blob_chunk",
             }:
                 dispatch_msg["_client_websocket"] = websocket
+        if verb != "hello":
+            # Publish completed authentication before business work can park;
+            # an older handler completion must never resurrect newer lost trust.
+            decision = _CONN_AUTH.get()
+            if decision is not None and decision.websocket is websocket:
+                self._diag_auth_finish(decision)
         try:
             reply = await handler(dispatch_msg)
         except (VerbError, StatusCardError) as exc:  # expected business failures
             reply = {"type": f"{verb}.error", "error_code": exc.code, "error": str(exc),
                      **getattr(exc, "extra", {})}
         except Exception as exc:  # noqa: BLE001 - one generic error boundary
-            log.exception("handler failed verb=%s", verb)
+            log.error("handler failed")
             reply = {"type": f"{verb}.error", "error_code": "internal_error", "error": str(exc)}
         # A streaming handler returns an async iterator; it sets `request_id` on
         # every frame itself (v1 echoes it on each blob frame), so it is passed
@@ -1506,6 +2127,13 @@ class Server:
         return None
 
     async def _auth_context(self, websocket: Any, msg: dict[str, Any]) -> dict[str, Any]:
+        started = _monotonic() if websocket in self._connection_diagnostics else None
+        context = await self._auth_context_inner(websocket, msg)
+        if started is not None:
+            self._diag_auth_observe(websocket, msg, context, _monotonic() - started)
+        return context
+
+    async def _auth_context_inner(self, websocket: Any, msg: dict[str, Any]) -> dict[str, Any]:
         """Return connection-bound stream auth and record a safe reason code."""
         trust = self._connection_trust.get(websocket)
         operator_authenticated = self._operator_authenticated(websocket)
@@ -1698,7 +2326,7 @@ class Server:
         else:
             self._client_authenticated_streams.pop(websocket, None)
             self._client_token_hashes.pop(websocket, None)
-            telemetry_stream_id = claim if ":" in claim else ""
+            telemetry_stream_id = ""
             self.token_telemetry.record_verification(
                 reason_code=reason_code or TOKEN_REASON_INTERNAL_ERROR,
                 stream_id=telemetry_stream_id,
@@ -1961,8 +2589,8 @@ class Server:
             self._unsupported_last_logged_at[telemetry_verb] = now
             log.warning(
                 "unsupported_in_v2 verb=%s caller=%s count=%d timestamp=%s",
-                telemetry_verb,
-                caller_name,
+                "unknown" if _CONN_LOG_SAFE.get() or _CONN_AUTH.get() is not None else telemetry_verb,
+                "unknown" if _CONN_LOG_SAFE.get() or _CONN_AUTH.get() is not None else caller_name,
                 record["count"],
                 timestamp,
             )
@@ -2387,6 +3015,7 @@ class Server:
                 credential_id, client_kind, challenge[0], operator_auth.encode_b64url(proof),
             )
         except operator_auth.OperatorAuthError:
+            self._diag_auth_failure(websocket, "operator_auth_invalid", "operator_v2")
             return "operator_auth_invalid"
         self._connection_trust[websocket] = trust
         return None
@@ -2445,6 +3074,23 @@ class Server:
         return [hello, snapshot]
 
     async def _on_hello(self, msg: dict[str, Any]) -> list[dict[str, Any]]:
+        websocket = msg.get("_client_websocket")
+        current = _CONN_AUTH.get()
+        if websocket not in self._connection_diagnostics or (
+                current is not None and current.websocket is websocket and not current.finished
+                and current.owner is asyncio.current_task()):
+            return await self._on_hello_inner(msg)
+        self._diag_hello_metadata(websocket, msg)
+        decision = _AuthDiagnostic(websocket, "hello", _monotonic())
+        decision.explicit = "auth_v2" in msg or self._token_auth_requested(msg)
+        token = _CONN_AUTH.set(decision)
+        try:
+            return await self._on_hello_inner(msg)
+        finally:
+            self._diag_auth_finish(decision)
+            _CONN_AUTH.reset(token)
+
+    async def _on_hello_inner(self, msg: dict[str, Any]) -> list[dict[str, Any]]:
         """Apply hello.subscribe before constructing the connection's frames."""
         subscribe = msg.get("subscribe") if isinstance(msg.get("subscribe"), dict) else {}
         try:
@@ -2466,7 +3112,11 @@ class Server:
         websocket = msg.get("_client_websocket")
         consent_ready = True
         if websocket is not None:
+            auth_started = _monotonic() if websocket in self._connection_diagnostics else None
             error_code = self._authenticate_operator_hello(websocket, msg)
+            decision = _CONN_AUTH.get()
+            if auth_started is not None and decision is not None and decision.websocket is websocket:
+                decision.elapsed += _monotonic() - auth_started
             if error_code:
                 return [{"type": "hello.error", "error_code": error_code}]
             # The dispatch-time `_auth_context` ran before `_authenticate_operator_hello`
@@ -2482,6 +3132,7 @@ class Server:
                 or (auth.get("service_authenticated") and not snapshot_requested
                     and str(subscribe.get("mode") or "").lower() == "rpc")
             ):
+                self._diag_auth_failure(websocket, "authentication_required")
                 return [{"type": "hello.error", "error_code": "authentication_required"}]
             self._client_include_subagents[websocket] = include_subagents
             self._client_opened_by_host_ids[websocket] = opened_by_host_ids
@@ -2489,6 +3140,7 @@ class Server:
             self._client_events_mode[websocket] = events_mode
             self._client_assistant_composite_v1[websocket] = self._client_wants_assistant_composite(msg)
             self._client_work_lanes_v1[websocket] = self._client_wants_work_lanes(msg)
+            self._diag_admitted(websocket, msg, events_mode, snapshot_requested)
             # v1 (parent ruling f4e6c3cf): a Dot connection's hello discloses no
             # fleet data, whatever it subscribed to. Return exactly
             # [hello, <empty snapshot>] — no fleet sessions/notifications/
