@@ -51,6 +51,7 @@ from logging_config import configure_logging
 from machine_stats import STATS_INTERVAL_S, sample_machine_stats
 from inventory import InventoryEmitter
 from work_lanes_projection import WorkLanesInventory
+from work_lane_alerts import WorkLaneAlertSink
 from mirror import Mirror, MirrorConfig
 from ingest import Ingest, IngestConfig
 from notify import DEFAULT_NOTIFICATIONS_DB, Notify, NotificationExpiry
@@ -528,7 +529,8 @@ async def run(args: argparse.Namespace) -> int:
         sessions, server.broadcast, min_interval_s=mcfg.inventory_min_interval_s,
     )
     sessions.set_inventory_emitter(inventory_emitter)
-    work_lanes = WorkLanesInventory(store, sessions, server.broadcast, specs=specs)
+    work_lanes = WorkLanesInventory(store, sessions, server.broadcast, specs=specs,
+                                   episode_sink=WorkLaneAlertSink(alerts))
     server.work_lanes = work_lanes
     _session_emit = inventory_emitter.emit_if_changed
 
@@ -892,6 +894,7 @@ async def run(args: argparse.Namespace) -> int:
         await server.lane_rulings.start()
     await lifted  # both are fast; ensure done before the background tasks below
     await server.configure_error_alerts(outbound, alerts)
+    work_lanes.refresh()  # Re-hand any opening persisted before the core was ready.
 
     # 3. Background tasks start last, each under the loop rules
     #    (cadence, per-pass cap, backoff, kill switch).
