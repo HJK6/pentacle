@@ -163,8 +163,9 @@ class SpecsSubsystem:
         self.disabled = False
         candidates, errors = {}, {}
         try:
-            for directory in self._work_dirs():
-                if not directory.is_dir() or directory.is_symlink() or directory.name.startswith(("_", ".")):
+            for directory in self._spawn_work_dirs():
+                if (directory.parent != root / "work" or not directory.is_dir() or directory.is_symlink()
+                        or directory.name.startswith(("_", "."))):
                     continue
                 for folder in directory.iterdir():
                     if (not folder.is_dir() or folder.is_symlink() or folder.name.startswith(("_", "."))
