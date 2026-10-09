@@ -49,6 +49,17 @@ def _lane_line(lane: dict[str, Any]) -> str:
             f"{lane.get('title')}\n    lead {lead_text}  chat {chat.get('stream_id')} ({chat.get('available')})")
 
 
+def _print_members(members):
+    for member in members:
+        ac = (f"{member['ac_checked']}/{member['ac_total']}" if member.get("ac_total") is not None else "unknown")
+        estimate = member.get("estimate")
+        hours = f"{estimate['p25']}–{estimate['p75']}h (median {estimate['median']})" if estimate else "unknown"
+        print(f"    {member['spec_id']}  {member.get('status')}  AC {ac}  estimate {hours}  "
+              f"[{(member.get('observation') or {}).get('quality', 'unknown')}]")
+        if member.get("next_action_text"):
+            print(f"      next: {member['next_action_text']}")
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     try:
         response = _call(args, {"type": "work_lanes.list", "include_done": bool(args.include_done),
@@ -63,6 +74,8 @@ def cmd_list(args: argparse.Namespace) -> int:
     print(f"{open_count} open lane(s)")
     for lane in lanes:
         print(_lane_line(lane))
+        if args.members:
+            _print_members(lane.get("members", []))
     return 0
 
 
@@ -81,14 +94,7 @@ def cmd_show(args: argparse.Namespace) -> int:
     print(f"    stored {stored.get('work_state')} ({stored.get('work_state_reason')})  "
           f"owner_kind={stored.get('owner_kind')}  version={stored.get('version')}")
     if args.members:
-        for member in response.get("members", lane.get("members", [])):
-            ac = (f"{member['ac_checked']}/{member['ac_total']}" if member.get("ac_total") is not None else "unknown")
-            estimate = member.get("estimate")
-            hours = f"{estimate['p25']}–{estimate['p75']}h (median {estimate['median']})" if estimate else "unknown"
-            print(f"    {member['spec_id']}  {member.get('status')}  AC {ac}  estimate {hours}  "
-                  f"[{(member.get('observation') or {}).get('quality', 'unknown')}]")
-            if member.get("next_action_text"):
-                print(f"      next: {member['next_action_text']}")
+        _print_members(response.get("members", lane.get("members", [])))
     for event in response.get("events") or []:
         update = f"  -> {event.get('update_kind')} {event.get('update_id')}" if event.get("update_kind") else ""
         print(f"    {event.get('created_at')}  {event.get('operation')}  "
@@ -179,6 +185,9 @@ def cmd_update(args: argparse.Namespace) -> int:
 def cmd_adopt(args: argparse.Namespace) -> int:
     if bool(args.preview) == bool(args.apply):
         print("agent-orch work-lane adopt: give exactly one of --preview or --apply <json-file>", file=sys.stderr)
+        return 2
+    if args.epic and not args.preview:
+        print("agent-orch work-lane adopt: --epic requires --preview", file=sys.stderr)
         return 2
     if args.preview:
         try:

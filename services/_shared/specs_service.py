@@ -263,6 +263,11 @@ class SpecsSubsystem:
                 self._attach_or_degrade()
 
     def _on_fs_event(self, event) -> None:
+        # Inotify also reports our own opens/reads; those must not trigger a
+        # new scan, or observation reads create an unbounded feedback loop.
+        event_type = getattr(event, "event_type", None)
+        if event_type is not None and event_type not in {"created", "modified", "deleted", "moved", "closed"}:
+            return
         if not self.push_enabled:
             return
         paths = [Path(str(getattr(event, "src_path", "") or ""))]

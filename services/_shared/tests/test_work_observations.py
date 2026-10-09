@@ -139,3 +139,14 @@ def test_epic_preview_expands_only_specs_once(tmp_path, monkeypatch):
     before = [(p.name, p.read_bytes()) for p in catalog.iterdir()]
     assert service.epic_spec_members("epic_demo") == [ID, "spec_demo__archived"]
     assert [(p.name, p.read_bytes()) for p in catalog.iterdir()] == before
+
+
+def test_watcher_ignores_its_own_file_reads(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    folder = write_item(tmp_path)
+    service = subsystem(tmp_path, monkeypatch)
+    service.push_enabled = True
+    for kind in ("opened", "closed_no_write", "accessed"):
+        service._on_fs_event(SimpleNamespace(event_type=kind, src_path=str(folder / "spec.md"), dest_path=None))
+    assert service._pending_spec_ids == set()
+    assert service._debounce_timer is None

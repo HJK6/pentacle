@@ -94,3 +94,41 @@ def test_index_revision_history_and_re_read_membership(tmp_path, monkeypatch):
         assert [m["spec_id"] for m in shown["members"]] == ["spec_demo__other"]
         assert len([e for e in shown["events"] if e["operation"] == "item_change"]) == 3
     run(body, str(tmp_path / "fixture.db"))
+
+
+def test_all_members_show_and_inline_inventory_keep_membership_order():
+    from sessions import Sessions
+    from server import Server
+    from work_lanes_projection import WorkLanesInventory
+    async def body(env):
+        ids = [f"spec_demo__item_{i}" for i in range(32)]
+        lane = (await env.adopt(state="paused", lead=False, owner="operator", members=ids))["lane"]
+        sessions = Sessions(env.store, tmux=None, local_host="fixture-root")
+        await sessions.refresh()
+        server = Server(store=env.store, sessions=sessions, local_host="fixture-root")
+        server.work_lanes = WorkLanesInventory(env.store, sessions, server.broadcast)
+        frame = await server.work_lanes.current()
+        assert frame["lanes"][0]["members_total"] == 32
+        assert [m["spec_id"] for m in frame["lanes"][0]["members"]] == ids[:8]
+        shown = await server._on_work_lanes_show({"lane_id": lane["lane_id"], "members": True,
+                                                 "_auth_context": {"operator_authenticated": True}})
+        assert [m["spec_id"] for m in shown["members"]] == ids
+        assert shown["projection"]["members"] == shown["members"]
+    run(body)
+
+
+def test_legacy_id_title_does_not_block_other_operations():
+    import pytest
+    async def body(env):
+        lane = (await env.adopt(state="paused", lead=False, owner="operator"))["lane"]
+        def legacy(conn):
+            conn.execute("UPDATE v2_assistant_composite_lanes SET title='Track spec_demo__legacy' WHERE lane_id=?", (lane["lane_id"],))
+            conn.commit()
+        await env.store.submit(legacy)
+        changed = await env.op("set_members", {"members": ["spec_demo__legacy"]}, lane=lane["lane_id"], version=1)
+        assert changed["lane"]["version"] == 2
+        with pytest.raises(ValueError, match="work_lane_title_invalid"):
+            await env.op("set_text", {"title": "Track spec_demo__legacy"}, lane=lane["lane_id"], version=2)
+        repaired = await env.op("set_text", {"title": "Legacy project"}, lane=lane["lane_id"], version=2)
+        assert repaired["lane"]["title"] == "Legacy project"
+    run(body)

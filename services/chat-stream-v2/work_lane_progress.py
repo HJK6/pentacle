@@ -32,4 +32,4 @@ def lane_progress(lane: dict[str, Any], *, all_members: bool = False) -> dict[st
     members = lane.get("_members") or []
     return {"members": members if all_members else members[:INLINE_MEMBERS], "members_total": len(members),
             "no_spec_reason": lane.get("no_spec_reason"),
-            **aggregate_members(members, lane.get("updated_at"))}
+            **aggregate_members(members, lane.get("_fd_updated_at", lane.get("updated_at")))}

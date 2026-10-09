@@ -39,9 +39,14 @@ def test_leadless_progress_changes_within_one_automatic_sweep(tmp_path, monkeypa
     folder = memory / "work" / "in_progress" / "demo__bridge"
     folder.mkdir(parents=True)
     spec = folder / "spec.md"
-    content = "---\nid: spec_demo__bridge\ntitle: Paper bridge\n---\n## Acceptance Criteria\n- [ ] Assemble.\n"
+    content = "---\nid: spec_demo__bridge\ntitle: Paper bridge\n---\n## Estimate\n- elapsed_delivery_h: 3–5 (median 4)\n- basis: none (provisional)\n## Acceptance Criteria\n- [ ] Assemble.\n"
     spec.write_text(content)
     (folder / "summary.md").write_text("**Next action** — Inspect the span.\n")
+    for status, identity in (("completed", "spec_demo__finished"), ("deprecated", "spec_demo__retired")):
+        other = memory / "work" / status / identity
+        other.mkdir(parents=True)
+        (other / "spec.md").write_text(content.replace("spec_demo__bridge", identity).replace("[ ]", "[x]"))
+        (other / "summary.md").write_text("**Status** — Retained outcome.\n")
     monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(memory))
 
     async def body(env):
@@ -58,6 +63,7 @@ def test_leadless_progress_changes_within_one_automatic_sweep(tmp_path, monkeypa
         try:
             port = await server.bind()
             bound = await cli_call(port, tmp_path, "set-members", lane["lane_id"], "--member", "spec_demo__bridge",
+                                   "--member", "spec_demo__finished", "--member", "spec_demo__retired",
                                    "--expected-version", str(lane["version"]), "--request-id", "socket-members",
                                    "--composite-stream-id", ASSISTANT)
             assert bound["lane"]["work_state"] == "paused"
@@ -65,15 +71,20 @@ def test_leadless_progress_changes_within_one_automatic_sweep(tmp_path, monkeypa
             await inv._task
             first = await cli_call(port, tmp_path, "show", lane["lane_id"], "--members", "--json")
             assert first["members"][0]["ac_checked"] == 0
+            assert [m["status"] for m in first["members"]] == ["in_progress", "completed", "deprecated"]
+            assert (first["projection"]["items_open"], first["projection"]["items_completed"],
+                    first["projection"]["items_dropped"]) == (1, 1, 1)
+            assert first["projection"]["open_estimate_h"] == {"p25": 3, "p75": 5, "median": 4}
             version = first["lane"]["version"]
+            prior_sweep = inv._last_sweep
             spec.write_text(content.replace("[ ]", "[x]"))
-            # Only read the resulting projection: no agent turn and no manual refresh.
+            # Wait for exactly the first automatic sweep after the write, then read once.
+            # No explicit refresh or agent action can make this observation converge.
             async with asyncio.timeout(3):
-                while True:
-                    await asyncio.sleep(0.05)
-                    shown = await cli_call(port, tmp_path, "show", lane["lane_id"], "--members", "--json")
-                    if shown["members"][0]["ac_checked"] == 1:
-                        break
+                while inv._last_sweep == prior_sweep:
+                    await asyncio.sleep(0.01)
+            shown = await cli_call(port, tmp_path, "show", lane["lane_id"], "--members", "--json")
+            assert shown["members"][0]["ac_checked"] == 1
             assert shown["projection"]["state"] == "paused" and shown["projection"]["lead"] is None
             assert shown["lane"]["version"] == version
             assert shown["members"][0]["next_action_text"] == "Inspect the span."

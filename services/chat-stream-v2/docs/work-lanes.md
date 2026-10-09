@@ -152,6 +152,14 @@ remain for a later upgrade. Never restore an old whole-database image over
 concurrent data. The FD retains an independent SQLite preimage and previous
 source/config/PID receipt before deployment.
 
+Forward migration runs through the existing Store schema initialization; no
+numbered migration or second database owner is introduced. Rehearse the
+read-only reverse plan with `python3 services/chat-stream-v2/tools/rollback_work_lane_progress.py
+--db /path/to/owned-copy.db`. In the approved stopped-daemon window, add
+`--apply --confirm-offline` against the current database after retaining its
+backup. Re-upgrade restores archived membership/item receipts and refuses a
+conflicting receipt rather than overwriting it.
+
 At release the FD refreshes the census, reviews the title/member/estimate
 manifest, applies CAS mutations and reads each open lane back. Source validation
 uses disposable synthetic memory and a file database. Production acceptance

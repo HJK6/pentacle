@@ -528,7 +528,7 @@ async def run(args: argparse.Namespace) -> int:
         sessions, server.broadcast, min_interval_s=mcfg.inventory_min_interval_s,
     )
     sessions.set_inventory_emitter(inventory_emitter)
-    work_lanes = WorkLanesInventory(store, sessions, server.broadcast)
+    work_lanes = WorkLanesInventory(store, sessions, server.broadcast, specs=specs)
     server.work_lanes = work_lanes
     _session_emit = inventory_emitter.emit_if_changed
 
@@ -537,7 +537,6 @@ async def run(args: argparse.Namespace) -> int:
         work_lanes.refresh()
         return changed
     inventory_emitter.emit_if_changed = _emit_sessions_and_lanes
-    work_lanes.start()
     server.lifecycle = lifecycle
     # The ledger announces `child_report_ready` on the server's broadcast, so it
     # is built after the server and attached back (design L13, both paths).
@@ -827,6 +826,8 @@ async def run(args: argparse.Namespace) -> int:
     #    Verbs arriving before their store is up park on a bounded readiness gate
     #    (never error); `hello`'s snapshot tolerates an unopened store.
     store.start()
+    await work_lanes.reconcile_index(force_sweep=True)
+    work_lanes.start()
     for _composite in assistant_composites.values():
         if _composite.config.enabled:
             await _composite.load_binding()
@@ -1025,6 +1026,8 @@ async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composite
     server.spawn_ready.clear()
     await budget.step("spawn-drain", spawnctl.drain_background_spawns(
         timeout_s=budget.remaining(SHUTDOWN_SPAWN_DRAIN_S)), cap=SHUTDOWN_SPAWN_DRAIN_S)
+    if getattr(server, "work_lanes", None) is not None:
+        await budget.step("work-index", server.work_lanes.stop(), cap=3.0)
     # Background tasks stop before the store does, so none is mid-submit when
     # the worker thread goes away.
     for task in tasks:

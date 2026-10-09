@@ -34,6 +34,7 @@ def test_preview_is_read_only_and_never_guesses_owner():
         entry = dict(by_key["stream:" + fd_lead[0]], owner_kind="fd")
         payload = {k: entry[k] for k in ("adoption_key", "title", "owner_kind", "work_state", "lead",
                                          "visible_chat")}
+        payload["no_spec_reason"] = "Synthetic adoption fixture."
         first = await env.op("adopt", payload, request_id="adopt:" + entry["adoption_key"])
         again = await env.op("adopt", payload, request_id="adopt:" + entry["adoption_key"])
         assert again["duplicate"] is True and again["lane"]["lane_id"] == first["lane"]["lane_id"]
@@ -85,6 +86,7 @@ def test_routing_lanes_from_one_request_get_distinct_adoption_keys():
             entry = dict(routing[lane_id], owner_kind="fd")
             payload = {k: entry[k] for k in ("adoption_key", "title", "summary", "owner_kind", "work_state",
                                              "visible_chat", "lane_id")}
+            payload["no_spec_reason"] = "Synthetic routing fixture."
             await env.op("adopt", payload, request_id="adopt:" + entry["adoption_key"])
         rows = await env.store.work_lane_rows()
         assert sorted(r["adoption_key"] for r in rows) == keys
