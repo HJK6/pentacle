@@ -1752,10 +1752,12 @@ class Notify:
         return _nullable_text(row.get("session_generation")) == stored
 
     async def work_lane_confirmation(self, question_id: str) -> dict | None:
-        """Facts of an answered work-lane confirmation question (spec D5), or None.
+        """Facts of an answered or notice-consumed lane confirmation (spec D5).
 
         The work-lane store verifies lane, action, producer, answer and the
-        persisted resolution ``actor_class``, and consumes the id once.
+        persisted resolution ``actor_class``, and consumes the id once. Notice
+        delivery consumption is separate from the lane store's single-use guard.
+        A selected option is the decision; accompanying text remains a comment.
         """
         question = await self._db.call("get_agent_question", question_id)
         if not question:
@@ -1779,7 +1781,7 @@ class Notify:
             chosen = selections[0]
         else:
             chosen = value
-        chosen = str(chosen) if chosen not in (None, "") and not answer.get("custom_text") else None
+        chosen = str(chosen) if chosen not in (None, "") else None
         resolution_class = resolution.get("actor_class") if isinstance(resolution, dict) else None
         return {
             "question_id": question_id,
@@ -1787,7 +1789,7 @@ class Notify:
             "work_lane_confirmation": ({"lane_id": context.get("lane_id"), "action": context.get("action")}
                                        if isinstance(context, dict)
                                        and context.get("schema") == "WorkLaneConfirmationV1" else None),
-            "answer": chosen if question.get("state") == "answered" else None,
+            "answer": chosen if question.get("state") in {"answered", "consumed"} else None,
             "actor_class": (resolution_class if resolution_class == answer.get("actor_class")
                             else "mismatch"),
         }

@@ -53,8 +53,9 @@ Updates arrive both live (as a `chat.event` broadcast) and through history (`req
 - Operator lanes (`owner_kind=operator`) need a confirmation for `set_state → done`, `set_owner → fd`, routing `lane.close` and routing `lane.decision` with `transition=cancel`. The confirmation is the id of a question that:
   - was asked with `agent-orch work-lane request-confirmation <lane> --action <set_state:done|set_owner:fd|lane.close|lane.decision:cancel>`, which stores `context = {schema: WorkLaneConfirmationV1, lane_id, action}`;
   - was produced by the FD seat;
-  - was answered `Confirm` by a direct operator (an agent-relayed answer does not count);
-  - has not been consumed before.
+  - was answered `Confirm` by a direct operator (an agent-relayed answer does not count); accompanying text is recorded as a comment and does not change the selected decision;
+  - is `answered` or `consumed` by answer-notice delivery;
+  - has not been used for a lane mutation before (the lane event store consumes it separately, once).
 
 ## CLI
 
