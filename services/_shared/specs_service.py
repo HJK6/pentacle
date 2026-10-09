@@ -156,6 +156,9 @@ class SpecsSubsystem:
 
     def scan_work_observations(self, *, now: float | None = None) -> dict:
         """One depth-capped scan; no catalog or artifact reads and no persistence."""
+        # A sweep also covers events missed on new/moved folders. Keep the
+        # existing specs/card readers current when that backstop fires.
+        self._invalidate_presentation_cache()
         now = time.time() if now is None else now
         root = self.memory_root
         if root is None or not root.is_dir() or not (root / "work").is_dir():

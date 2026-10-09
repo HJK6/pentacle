@@ -69,6 +69,19 @@ def test_malformed_neighbor_does_not_break_existing_specs_inventory(tmp_path):
         source.write_text(prior)
 
 
+def test_periodic_scan_refreshes_metadata_when_a_watch_event_is_missed(tmp_path):
+    folder = tmp_path / "work" / "in_progress" / "demo__new_folder"
+    _write_spec(folder, title="First title")
+    service = _make_subsystem(tmp_path)
+    # New/moved folders need sweep coverage even if no file watch was attached.
+    service.push_enabled = True
+    assert service.status_card_metadata("spec_demo__new_folder")["parsed"]["title"] == "First title"
+    path = folder / "spec.md"
+    path.write_text(path.read_text().replace("First title", "Changed title"))
+    service.scan_work_observations()
+    assert service.status_card_metadata("spec_demo__new_folder")["parsed"]["title"] == "Changed title"
+
+
 def test_load_statuses_fallback_when_missing(tmp_path):
     (tmp_path / "work").mkdir()
     s = _make_subsystem(tmp_path)

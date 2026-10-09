@@ -28,3 +28,14 @@ def test_id_like_titles_refused_on_title_writes(title):
 @pytest.mark.parametrize("title", ["Version 2 release", "Paper bridge", "specification review", "Plan v2-GHIJKLMN"])
 def test_narrow_title_matcher_accepts_normal_titles(title):
     assert validate_title(title) == title
+def test_fresh_service_imports_do_not_require_pytest_path_bootstrap():
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+    service = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    for module in ("work_lane_members", "store_work_index"):
+        subprocess.run([sys.executable, "-c", f"import {module}"], cwd=service,
+                       env=env, check=True, capture_output=True, timeout=10)

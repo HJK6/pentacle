@@ -2,7 +2,13 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 from typing import Any
+
+SERVICES_ROOT = str(Path(__file__).resolve().parents[1])
+if SERVICES_ROOT not in sys.path:
+    sys.path.insert(0, SERVICES_ROOT)
 
 from _shared.work_observations import advance_observation, timestamp, unresolved_member
 
