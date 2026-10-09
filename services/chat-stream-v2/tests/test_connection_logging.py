@@ -7,6 +7,7 @@ invokes an emitter as its subject or replaces an authentication decision.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from contextlib import asynccontextmanager
 import hashlib
 import json
@@ -1026,11 +1027,11 @@ def test_invalid_seat_attempt_remains_visible_when_verified_operator_survives(da
     pytest.param("/tmp/synthetic-private-peer.sock", None, ["127.0.0.1"], socket_module.AF_UNIX, "unix", id="unix-family-never-path"),
     pytest.param(("::ffff:127.0.0.1", 45123), None, ["127.0.0.1"], socket_module.AF_INET6, "loopback", id="mapped-ipv6-loopback"),
     pytest.param(("::1", 45123, 0, 0), None, ["::1"], socket_module.AF_INET6, "loopback", id="ipv6-loopback"),
-    pytest.param(("100.64.3.4", 45123), ("100.64.1.2", 7791), ["100.64.1.2"], socket_module.AF_INET, "tailnet", id="tailnet-ipv4-configured"),
-    pytest.param(("::ffff:100.64.3.4", 45123), ("100.64.1.2", 7791), ["100.64.1.2"], socket_module.AF_INET6, "tailnet", id="mapped-ipv6-tailnet"),
-    pytest.param(("fd7a:115c:a1e0::123", 45123, 0, 0), ("fd7a:115c:a1e0::456", 7791, 0, 0), ["fd7a:115c:a1e0::456"], socket_module.AF_INET6, "tailnet", id="tailnet-ipv6-configured"),
-    pytest.param(("100.64.3.4", 45123), ("192.0.2.22", 7791), ["127.0.0.1"], socket_module.AF_INET, "other", id="tailnet-peer-unconfigured-listener"),
-    pytest.param(("100.64.3.4", 45123), None, ["100.64.1.2"], socket_module.AF_INET, "other", id="tailnet-peer-no-listener-evidence"),
+    pytest.param(("192.0.2.4", 45123), ("192.0.2.2", 7791), ["192.0.2.2"], socket_module.AF_INET, "tailnet", id="tailnet-ipv4-configured"),
+    pytest.param(("::ffff:192.0.2.4", 45123), ("192.0.2.2", 7791), ["192.0.2.2"], socket_module.AF_INET6, "tailnet", id="mapped-ipv6-tailnet"),
+    pytest.param(("2001:db8::123", 45123, 0, 0), ("2001:db8::456", 7791, 0, 0), ["2001:db8::456"], socket_module.AF_INET6, "tailnet", id="tailnet-ipv6-configured"),
+    pytest.param(("192.0.2.4", 45123), ("192.0.2.22", 7791), ["127.0.0.1"], socket_module.AF_INET, "other", id="tailnet-peer-unconfigured-listener"),
+    pytest.param(("192.0.2.4", 45123), None, ["192.0.2.2"], socket_module.AF_INET, "other", id="tailnet-peer-no-listener-evidence"),
     pytest.param(("198.51.100.20", 45123), ("127.0.0.1", 7791), ["127.0.0.1"], socket_module.AF_INET, "other", id="other-valid-peer"),
     pytest.param(None, None, ["127.0.0.1"], None, "unknown", id="missing-peer"),
     pytest.param((), None, ["127.0.0.1"], None, "unknown", id="empty-peer"),
@@ -1040,6 +1041,7 @@ def test_invalid_seat_attempt_remains_visible_when_verified_operator_survives(da
 ])
 def test_actual_transport_classification_uses_socket_and_configured_listener_only(
         daemon, caplog, peer, local, binds, family, expected):
+    daemon._conn_diag_tailnet_networks = tuple(map(ipaddress.ip_network, ("192.0.2.0/24", "2001:db8::/32")))
     async def run():
         socket = ScriptedSocket()
         socket.remote_address = peer
@@ -1066,12 +1068,13 @@ def test_actual_transport_classification_uses_socket_and_configured_listener_onl
 
 @pytest.mark.parametrize("tls", [False, True])
 def test_tls_fact_is_owned_by_accept_handler_and_ignores_wire_claims(daemon, caplog, tls):
+    daemon._conn_diag_tailnet_networks = (ipaddress.ip_network("192.0.2.0/24"),)
     async def run():
-        socket = ScriptedSocket("100.64.3.4")
-        socket.local_address = ("100.64.1.2", 7791)
+        socket = ScriptedSocket("192.0.2.4")
+        socket.local_address = ("192.0.2.2", 7791)
         socket.request = SimpleNamespace(headers={"X-Forwarded-Proto": "https" if not tls else "http",
                                                   "X-Forwarded-For": "127.0.0.1"})
-        daemon.binds = daemon.dot_tls_binds = ["100.64.1.2"]
+        daemon.binds = daemon.dot_tls_binds = ["192.0.2.2"]
         async with connected(daemon, socket, tls=tls) as (socket, _, _):
             reply = await socket.rpc({"type": "hello", "tls": not tls, "transport": "loopback",
                 "client": "pentacle", "peer": "127.0.0.1", "subscribe": {"snapshot": False}})
@@ -1229,3 +1232,55 @@ def test_inherited_child_auth_context_cannot_hide_background_revalidation(daemon
             if children:
                 await asyncio.gather(*children, return_exceptions=True)
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("configured", [None, "", "   ", "invalid-only-entry"])
+def test_tailnet_networks_have_no_default(monkeypatch, caplog, configured):
+    if configured is None:
+        monkeypatch.delenv("PENTACLE_CONN_DIAG_TAILNET_NETWORKS", raising=False)
+    else:
+        monkeypatch.setenv("PENTACLE_CONN_DIAG_TAILNET_NETWORKS", configured)
+    server = Server(binds=["0.0.0.0", "::"])
+    for peer in ("192.0.2.4", "2001:db8::4"):
+        ws = ScriptedSocket(peer)
+        ws.local_address = ("192.0.2.2", 7791)
+        assert server._diag_transport(ws) == "other"
+    warnings = [r for r in caplog.records if r.name == LOGGER]
+    if configured == "invalid-only-entry":
+        assert len(warnings) == 1
+        assert warnings[0].getMessage() == "Connection diagnostic tailnet networks: skipped 1 invalid entries"
+        assert configured not in caplog.text
+    else:
+        assert not warnings
+
+
+def test_tailnet_networks_read_once_skip_invalid_without_logging_text(monkeypatch, caplog):
+    entries = ("private-invalid-entry", "192.0.2.0/99", "2001:db8::/129")
+    monkeypatch.setenv("PENTACLE_CONN_DIAG_TAILNET_NETWORKS",
+                       " 192.0.2.0/24, 198.51.100.0/24, 2001:db8::/32," + ",".join(entries))
+    caplog.set_level(logging.INFO)
+    server = Server(binds=["0.0.0.0", "::"])
+    monkeypatch.setenv("PENTACLE_CONN_DIAG_TAILNET_NETWORKS", "203.0.113.0/24")
+    assert tuple(map(str, server._conn_diag_tailnet_networks)) == (
+        "192.0.2.0/24", "198.51.100.0/24", "2001:db8::/32")
+    for peer, expected in (("192.0.2.0", "tailnet"), ("192.0.2.255", "tailnet"),
+                           ("192.0.1.255", "other"), ("192.0.3.0", "other"),
+                           ("198.51.100.4", "tailnet"), ("::ffff:192.0.2.4", "tailnet"),
+                           ("2001:db8::4", "tailnet"), ("2001:db9::", "other"),
+                           ("203.0.113.4", "other")):
+        ws = ScriptedSocket(peer)
+        ws.local_address = ("192.0.2.2", 7791)
+        assert server._diag_transport(ws) == expected
+    warnings = [r for r in caplog.records if r.name == LOGGER and r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == "Connection diagnostic tailnet networks: skipped 3 invalid entries"
+    assert all(entry not in caplog.text for entry in entries)
+    assert all(network not in caplog.text for network in ("192.0.2.0/24", "198.51.100.0/24", "2001:db8::/32"))
+
+
+def test_valid_tailnet_network_configuration_logs_nothing(monkeypatch, caplog):
+    monkeypatch.setenv("PENTACLE_CONN_DIAG_TAILNET_NETWORKS", "192.0.2.0/24,2001:db8::/32")
+    caplog.set_level(logging.INFO)
+    server = Server()
+    assert len(server._conn_diag_tailnet_networks) == 2
+    assert not [r for r in caplog.records if r.name == LOGGER]

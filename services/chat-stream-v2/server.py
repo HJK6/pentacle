@@ -559,6 +559,22 @@ class Server:
         self.binds = [b for b in (binds or []) if b] or [host]
         self.host = self.binds[0]
         self.port = port
+        # Diagnostic labels only; read once alongside the listener configuration.
+        networks = []
+        skipped = 0
+        for part in str(os.environ.get("PENTACLE_CONN_DIAG_TAILNET_NETWORKS") or "").split(","):
+            entry = part.strip()
+            if not entry:
+                continue
+            try:
+                if "/" not in entry:
+                    raise ValueError("CIDR required")
+                networks.append(ipaddress.ip_network(entry))
+            except ValueError:
+                skipped += 1
+        self._conn_diag_tailnet_networks = tuple(networks)
+        if skipped:
+            log.warning("Connection diagnostic tailnet networks: skipped %d invalid entries", skipped)
         self.store = store
         self.sessions = sessions
         self.spawnctl = spawnctl
@@ -1021,8 +1037,7 @@ class Server:
         binds = self.dot_tls_binds if websocket in self._tls_connections else self.binds
         fleet_listener = isinstance(local, (tuple, list)) and bool(local) and (
             local[0] in binds or "0.0.0.0" in binds or "::" in binds)
-        if fleet_listener and ((address.version == 4 and address in ipaddress.ip_network("100.64.0.0/10"))
-                               or (address.version == 6 and address in ipaddress.ip_network("fd7a:115c:a1e0::/48"))):
+        if fleet_listener and any(address in network for network in self._conn_diag_tailnet_networks):
             return "tailnet"
         return "other"
 
