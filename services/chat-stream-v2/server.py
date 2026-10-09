@@ -1553,8 +1553,20 @@ class Server:
         }:
             for frame in result:
                 if isinstance(frame, dict):
-                    log.info("answer response socket_send=%s", "completed" if sent else "failed",
-                             extra={"subsystem": "server", "bug_ref": "notification_answer_disconnect_delivery_2026_09"})
+                    if _CONN_LOG_SAFE.get() or websocket in self._connection_diagnostics:
+                        log.info("answer response socket_send=%s", "completed" if sent else "failed",
+                                 extra={"subsystem": "server", "bug_ref": "notification_answer_disconnect_delivery_2026_09"})
+                    else:
+                        # Preserve the standalone telemetry API; accepted sockets,
+                        # including detached work after finalization, use only the
+                        # fixed outcome above.
+                        notification = frame.get("notification") or {}
+                        question = frame.get("question") or {}
+                        log.info("answer response send request_id=%s nid=%s type=%s socket_send=%s",
+                                 frame.get("request_id"), notification.get("notification_id")
+                                 or question.get("notification_id") or request.get("notification_id"),
+                                 frame.get("type"), "completed" if sent else "failed",
+                                 extra={"subsystem": "server", "bug_ref": "notification_answer_disconnect_delivery_2026_09"})
 
     async def broadcast(self, frame: dict[str, Any]) -> None:
         """Project a top-level frame for each connected client before enqueue."""
@@ -1884,7 +1896,7 @@ class Server:
     # -- dispatch ----------------------------------------------------------
 
     async def _dispatch(self, raw: Any, *, websocket: Any = None) -> list[dict[str, Any]]:
-        state = self._connection_diagnostics.get(websocket)
+        state = getattr(self, "_connection_diagnostics", {}).get(websocket)
         if state is None:
             return await self._dispatch_inner(raw, websocket=websocket)
         try:
@@ -2126,15 +2138,14 @@ class Server:
             return TOKEN_REASON_MALFORMED
         return None
 
-    async def _auth_context(self, websocket: Any, msg: dict[str, Any]) -> dict[str, Any]:
-        started = _monotonic() if websocket in self._connection_diagnostics else None
-        context = await self._auth_context_inner(websocket, msg)
+    def _diag_auth_result(self, websocket: Any, msg: dict, context: dict, started: float | None) -> dict:
         if started is not None:
             self._diag_auth_observe(websocket, msg, context, _monotonic() - started)
         return context
 
-    async def _auth_context_inner(self, websocket: Any, msg: dict[str, Any]) -> dict[str, Any]:
+    async def _auth_context(self, websocket: Any, msg: dict[str, Any]) -> dict[str, Any]:
         """Return connection-bound stream auth and record a safe reason code."""
+        started = _monotonic() if websocket in self._connection_diagnostics else None
         trust = self._connection_trust.get(websocket)
         operator_authenticated = self._operator_authenticated(websocket)
         context: dict[str, Any] = {
@@ -2181,7 +2192,7 @@ class Server:
                 "scope_stream": "" if revoked else str(trust_scope.get("stream") or ""),
                 "credential_id": trust.credential_id,
             })
-            return context
+            return self._diag_auth_result(websocket, msg, context, started)
         bound_system_actor = self._client_system_producers.get(websocket)
         if bound_system_actor is not None:
             claim = str(msg.get("from_stream_id") or "").strip()
@@ -2206,7 +2217,7 @@ class Server:
                 "service_actor": bound_system_actor if not credentials_changed else "",
                 "reason_code": TOKEN_REASON_WRONG_SEAT if credentials_changed else TOKEN_REASON_VERIFIED,
             })
-            return context
+            return self._diag_auth_result(websocket, msg, context, started)
 
         cached_hash = self._client_token_hashes.get(websocket)
         claim = str(msg.get("from_stream_id") or "").strip()
@@ -2249,10 +2260,10 @@ class Server:
                 "service_actor": configured_id if authenticated else "",
                 "reason_code": TOKEN_REASON_VERIFIED if authenticated else TOKEN_REASON_WRONG_SEAT,
             })
-            return context
+            return self._diag_auth_result(websocket, msg, context, started)
 
         if not self._token_auth_requested(msg) and not cached_hash:
-            return context
+            return self._diag_auth_result(websocket, msg, context, started)
 
         token = msg.get("stream_token")
         claim = str(msg.get("from_stream_id") or msg.get("actor_stream_id") or "").strip()
@@ -2364,7 +2375,7 @@ class Server:
             context["operator_authenticated"] = True
             context["operator_principal"] = context["operator_principal"] or f"agent:{owner}"
             context["operator_authority_source"] = "stream_token"
-        return context
+        return self._diag_auth_result(websocket, msg, context, started)
 
     @staticmethod
     def _report_producer_id() -> str | None:
