@@ -118,3 +118,154 @@ def test_preview_titles_are_readable_within_bound():
         lead_title = {c["adoption_key"]: c for c in preview}["stream:" + sid]["title"]
         assert len(lead_title) <= TITLE_MAX and lead_title.endswith("…") and " " not in lead_title[-2:]
     run(body)
+
+
+@pytest.mark.parametrize("routing", [False, True])
+@pytest.mark.parametrize("state", ["active", "paused", "blocked"])
+def test_adopt_member_conflict_is_atomic(routing, state):
+    from test_work_lane_progress import A, a1_holder, a1_snapshot
+    async def body(env):
+        holder = await a1_holder(env, state)
+        payload = {"adoption_key": "request:collision", "title": "Collision candidate", "owner_kind": "operator",
+                   "work_state": "paused", "visible_chat": {"stream_id": ASSISTANT}, "members": [A], "emit_started": True}
+        if routing:
+            await _admit_routing_lane(env, "routing-candidate", "Candidate route", "routing-request")
+            payload["lane_id"] = "routing-candidate"
+        before = await a1_snapshot(env)
+        with pytest.raises(ValueError, match="work_lane_member_conflict") as error:
+            await env.op("adopt", payload)
+        assert holder["lane_id"] in str(error.value)
+        assert await a1_snapshot(env) == before
+    run(body)
+
+
+@pytest.mark.parametrize("epic_members", [None, [], ["spec_demo__clear"], ["spec_demo__shared"]])
+def test_final_preview_conflicts_after_epic_substitution(epic_members):
+    from types import SimpleNamespace
+    from server import Server
+    from sessions import Sessions
+    from work_lanes_projection import WorkLanesInventory
+    from test_work_lane_progress import A, a1_holder, a1_snapshot
+    async def body(env):
+        holder = await a1_holder(env)
+        # Provenance-qualified membership is hydrated by the real preview builder.
+        sid, _ = await env.seat("preview-lead", role="lead", parent_stream_id=FD)
+        await _admit_routing_lane(env, "preview-route", "Candidate", "preview-request")
+        sessions = Sessions(env.store, tmux=None, local_host="fixture-root")
+        await sessions.refresh()
+        server = Server(store=env.store, sessions=sessions, local_host="fixture-root")
+        server.assistant_composite = env.composite
+        server.work_lanes = WorkLanesInventory(env.store, sessions, server.broadcast,
+            specs=SimpleNamespace(epic_spec_members=lambda epic: epic_members))
+        # Real Store preview with ordinary (non-epic) candidate plus simulated prior flags;
+        # final handler must always recompute from final members, including empty epic lists.
+        original = env.store.work_lane_adopt_preview
+        async def preview(**kwargs):
+            values = await original(**kwargs)
+            for value in values:
+                value["members"] = [A] if epic_members != [A] else ["spec_demo__clear"]
+                value["member_conflicts"] = [{"spec_id": "spec_obsolete", "lane_id": "wl-obsolete"}]
+            return values
+        env.store.work_lane_adopt_preview = preview
+        before = await a1_snapshot(env)
+        result = await server._on_work_lanes_adopt_preview({"_auth_context": {"operator_authenticated": True},
+                                                          **({"epic": "epic_demo"} if epic_members is not None else {})})
+        expected = [{"spec_id": A, "lane_id": holder["lane_id"]}] if epic_members is None or epic_members == [A] else []
+        assert result["candidates"]
+        assert all(c["member_conflicts"] == expected for c in result["candidates"])
+        assert await a1_snapshot(env) == before
+    run(body)
+
+
+def test_store_preview_always_has_conflict_flags():
+    async def body(env):
+        await env.seat("preview-flags", role="lead", parent_stream_id=FD)
+        values = await env.store.work_lane_adopt_preview(composite_stream_id=ASSISTANT,
+                                                         env_binding=env.composite._env_binding())
+        assert values and all(c["member_conflicts"] == [] for c in values)
+    run(body)
+
+
+def test_typed_wire_error_and_unchanged_value_error_mapping():
+    from server import Server
+    from sessions import Sessions, VerbError
+    from test_work_lane_progress import A, a1_holder
+    async def body(env):
+        holder = await a1_holder(env)
+        target = (await env.adopt("stream:target", state="paused", owner="operator"))["lane"]
+        sessions = Sessions(env.store, tmux=None, local_host="fixture-root")
+        await sessions.refresh()
+        server = Server(store=env.store, sessions=sessions, local_host="fixture-root")
+        server.assistant_composite = env.composite
+        message = {"type": "assistant.operation", "request_id": "wire-conflict", "composite_stream_id": ASSISTANT,
+                   "dispatch_id": "none", "operation": "work_lane.set_members", "lane_id": target["lane_id"],
+                   "expected_lane_version": 1, "payload": {"members": [A]},
+                   "_auth_context": {"token_verified": True, "stream_id": FD, "session_generation": env.gen}}
+        with pytest.raises(VerbError) as error:
+            await server._on_assistant_operation(message)
+        assert error.value.code == "work_lane_member_conflict" and holder["lane_id"] in str(error.value)
+        message.update(request_id="wire-cas", expected_lane_version=0, payload={"members": ["spec_demo__new"]})
+        with pytest.raises(VerbError) as error:
+            await server._on_assistant_operation(message)
+        assert error.value.code == str(error.value) == "assistant_lane_version_conflict"
+    run(body)
+
+
+def test_routing_reopen_does_not_open_done_product_lane():
+    from test_work_lane_progress import A, a1_close
+    async def body(env):
+        lane = await a1_close(env, (await env.adopt("stream:history", state="paused", owner="operator", members=[A]))["lane"])
+        await env.adopt("stream:current", state="paused", owner="operator", members=[A])
+        def seed(conn):
+            conn.execute("UPDATE v2_assistant_composite_lanes SET phase='completed' WHERE lane_id=?", (lane["lane_id"],))
+            conn.commit()
+        await env.store.submit(seed)
+        await env.store.apply_assistant_composite_operation(stream_id=ASSISTANT, operation_id="routing-reopen",
+            operation="lane.decision", lane_id=lane["lane_id"], actor_stream_id=FD,
+            expected_lane_version=lane["version"], payload={"transition": "reopen", "decision_id": "decision-reopen",
+                "from_phase": "completed", "to_phase": "discussion", "operator_basis_message_ids": ["fixture-message"]})
+        actual = (await env.store.get_work_lane(lane["lane_id"]))["lane"]
+        assert actual["phase"] == "discussion" and actual["work_state"] == "done" and actual["members"] == [A]
+    run(body)
+
+
+def test_ordinary_provenance_preview_lists_sorted_conflicts_and_apply_rechecks():
+    from test_work_lane_progress import A, B, a1_snapshot
+    async def body(env):
+        holders = [(await env.adopt("stream:holder-" + str(i), state="paused", owner="operator", members=[identity]))["lane"]
+                   for i, identity in enumerate((A, B))]
+        bindings = [{"spec_id": identity, "provenance": "spawn_explicit", "granting_principal": "fixture-principal",
+                     "granted_at": "2026-10-09T00:00:00Z"} for identity in (A, B)]
+        sid, generation = await env.seat("ordinary-preview", role="lead", parent_stream_id=FD,
+            spec_ids=[A, B], spec_resolution="resolved", qualified_spec_ids=[A, B], spec_binding_provenance=bindings)
+        before = await a1_snapshot(env)
+        preview = await env.store.work_lane_adopt_preview(composite_stream_id=ASSISTANT, env_binding=env.composite._env_binding())
+        candidate = next(c for c in preview if c["adoption_key"] == "stream:" + sid)
+        expected = sorted([{"spec_id": identity, "lane_id": lane["lane_id"]} for identity, lane in zip((A, B), holders)],
+                          key=lambda entry: (entry["lane_id"], entry["spec_id"]))
+        assert candidate["members"] == [A, B] and candidate["member_sources"] == bindings
+        assert candidate["member_conflicts"] == expected
+        assert await a1_snapshot(env) == before
+        # A clear preview is advisory: a new holder inserted after preview must still refuse apply.
+        clear = dict(candidate, members=["spec_demo__later"])
+        await env.adopt("stream:later-holder", state="paused", owner="operator", members=clear["members"])
+        payload = {k: clear[k] for k in ("adoption_key", "title", "work_state", "lead", "visible_chat", "members")}
+        payload["owner_kind"] = "fd"
+        with pytest.raises(ValueError, match="work_lane_member_conflict"):
+            await env.op("adopt", payload)
+    run(body)
+
+
+def test_invalid_adopt_lead_and_members_do_not_become_conflict_errors():
+    from test_work_lane_progress import A, a1_holder
+    async def body(env):
+        await a1_holder(env)
+        payload = {"adoption_key": "request:invalid", "title": "Invalid candidate", "owner_kind": "operator",
+                   "work_state": "active", "visible_chat": {"stream_id": ASSISTANT}, "members": [A]}
+        with pytest.raises(ValueError, match="^work_lane_visible_lead_required$"):
+            await env.op("adopt", payload)
+        payload.update(work_state="paused", members=[A, A])
+        with pytest.raises(ValueError) as error:
+            await env.op("adopt", payload)
+        assert "work_lane_member_conflict" not in str(error.value)
+    run(body)

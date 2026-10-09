@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import math
+from datetime import date
 
 import yaml
 from pathlib import Path
@@ -160,15 +161,26 @@ def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
     checked = sum(mark.lower() == "x" or bool(re.search(r"\(waived:\s*[^)]+\)", body, re.I))
                   for mark, body in boxes)
     estimate_text = _section(spec, "Estimate") or ""
+    # Select the physical declaration BEFORE validation. Invalid latest values
+    # suppress history; elapsed_delivery_h remains an immutable delivery baseline.
+    declarations = re.findall(r"^[ \t]*(?:- )?remaining_work_h:[ \t]*(.*)$", estimate_text, re.M)
+    selected = declarations[-1].strip() if declarations else ""
+    estimate_exempt = bool(re.fullmatch(r"n/a[ \t]+—[ \t]+(?:umbrella|coordination)", selected))
     number = r"(?:[0-9]+(?:\.[0-9]+)?)"
-    match = re.search(rf"^\s*(?:- )?elapsed_delivery_h:\s*({number})\s*[–—-]\s*({number})"
-                      rf"\s*\(median\s+({number})\)", estimate_text, re.M)
+    match = re.fullmatch(rf"({number})[ \t]*[–—-][ \t]*({number})"
+                         rf"[ \t]*\(median[ \t]+({number})\)[ \t]+as_of[ \t]+"
+                         r"([0-9]{4}-[0-9]{2}-[0-9]{2})(?:[ \t]+(provisional))?", selected)
     estimate = None
     if match:
-        p25, p75, median = map(float, match.groups())
-        if all(math.isfinite(n) for n in (p25, p75, median)) and 0 < p25 <= median <= p75:
-            estimate = {"p25": p25, "p75": p75, "median": median,
-                        "provisional": bool(re.search(r"\bprovisional\b", estimate_text, re.I))}
+        p25, p75, median = map(float, match.groups()[:3])
+        try:
+            date.fromisoformat(match[4])
+        except ValueError:
+            pass
+        else:
+            if all(math.isfinite(n) for n in (p25, p75, median)) and 0 < p25 <= median <= p75:
+                estimate = {"p25": p25, "p75": p75, "median": median,
+                            "as_of": match[4], "provisional": match[5] is not None}
 
     def label(name):
         found = re.search(rf"^\*\*{re.escape(name)}\*\*[ \t]*[—–-][ \t]*(.+)$", summary, re.M)
@@ -178,7 +190,7 @@ def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
             "terminal": status if status in ("completed", "deprecated") else None,
             "ac_checked": checked if ac is not None else None,
             "ac_total": len(boxes) if ac is not None else None,
-            "estimate": estimate, "status_text": label("Status"), "next_action_text": label("Next action")}
+            "estimate": estimate, "estimate_exempt": estimate_exempt, "status_text": label("Status"), "next_action_text": label("Next action")}
 
 
 def _heading_text(path: Path, heading: str) -> str:

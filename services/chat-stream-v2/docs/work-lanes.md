@@ -82,13 +82,14 @@ Members resolve by declared YAML `id`, including after folder moves; the
 physical directory supplies status. The shared loader handles quoted and
 multiline YAML. Acceptance counts include only boxes in `## Acceptance Criteria`,
 ignore fenced examples and count `(waived: reason)` as checked. Estimates parse
-positive `elapsed_delivery_h: 2–4 (median 3)` ranges in `## Estimate`, retaining
-`provisional`. Missing fields are null. Summary `**Status** — ...` and
+remaining agent-work hours for open acceptance items from `remaining_work_h`
+in `## Estimate` (the exact A1 grammar is below). Missing fields are null. Summary `**Status** — ...` and
 `**Next action** — ...` text is limited to 280 characters. Public golden inputs
 are invented examples.
 
 Each member has `spec_id`, `title`, `status`, `terminal`, `ac_checked`, `ac_total`,
-`estimate {p25,p75,median,provisional}` or null, `status_text`, `next_action_text`,
+`estimate {p25,p75,median,as_of,provisional}` or null, `estimate_exempt` (default
+false for legacy or unresolved members), `status_text`, `next_action_text`,
 `source_changed_at`, `observation {quality,observed_at,error}` and `obs_rev`.
 `terminal` is `completed`, `deprecated` or null. Quality is `fresh`, `stale`,
 `error`, `missing` or `ambiguous`; it does not describe lane activity.
@@ -105,7 +106,10 @@ Lane additions are `members` (first 8, in membership order), `members_total`,
 partition. AC totals sum resolved members with AC data; `ac_members` exposes
 coverage and totals are null without coverage. Estimates sum only estimated
 open members, with null when none are estimated. `estimate_complete` means
-every open member has an estimate. `freshness_at` uses source changes and lane
+every non-exempt open member has an estimate. Umbrella/coordination members
+still count in `items_open`, but do not contribute to the estimate sum or
+`open_estimated` coverage. An all-exempt or no-open lane has a null estimate,
+zero estimated members and complete coverage. `freshness_at` uses source changes and lane
 operations, never sweep time. It is not a forecast.
 
 Inventory and list replies add `work_index {available,root_configured,
@@ -139,7 +143,7 @@ rows keep file-derived writes from incrementing the shared lifecycle version
 or overwriting concurrent membership. The transaction re-reads lane membership.
 
 `obs_rev` starts at 1 and advances only for material fresh changes in status,
-AC counts, estimate, status text or next action. Snapshots and holding lanes'
+AC counts, estimate (including its `as_of`), exemption, status text or next action. Snapshots and holding lanes'
 `item_change` events commit atomically. IDs are
 `item:<lane_id>:<spec_id>:<obs_rev>`; baseline observations emit nothing.
 A→B→A→B yields revisions 2, 3, 4; restart, stale reads and repeated sweeps emit
@@ -311,3 +315,155 @@ Rollback of M2 to M1 removes only the real sink wiring; preserve episode rows,
 references, notification records and outbox proof. Previously handed facts remain
 owned by the shared core; null-ref openings wait for re-upgrade. Runtime activation
 and real FD readback remain separate fleet deployment acceptance.
+
+
+## Remaining-work estimates (A1)
+
+The consumed estimate is remaining **agent work hours for open acceptance
+items**, not calendar delivery, machine time or waiting. Under `## Estimate`:
+
+```text
+- estimated_at: 2020-01-01
+- elapsed_delivery_h: 5–9 (median 7)
+- remaining_work_h: 2–4 (median 3) as_of 2026-10-09 provisional
+```
+
+The elapsed line remains the immutable delivery baseline; it is recognized but
+never supplies a lane estimate, provisional flag or date. A remaining numeric
+line requires positive finite integer/decimal numbers with
+`0 < p25 <= median <= p75`, a hyphen/en dash/em dash range separator and a real
+zero-padded `YYYY-MM-DD` calendar date. `estimate.as_of` is that line's date;
+`estimated_at` is never substituted. Optional `provisional` is line-local.
+
+The **last physical remaining declaration** outside fences wins, even when
+invalid. Append a new declaration to re-estimate; leave earlier declarations
+as history. A malformed range, invalid/missing date, empty or skeleton last
+line yields `estimate: null, estimate_exempt: false`, without reviving an older
+numeric value or exemption. Provisional text in a basis, elapsed line, earlier
+remaining line or another section cannot affect the selected declaration.
+
+`remaining_work_h: n/a — umbrella` and `remaining_work_h: n/a — coordination`
+select `estimate: null, estimate_exempt: true`. Numeric and exemption
+redeclarations supersede each other in either direction. Exemption-only
+changes advance the observation revision and item-change history exactly once;
+last-good stale/error observations retain their stored exemption and date.
+
+### Single open product lane per composite
+
+A canonical spec can belong to at most one non-done product lane in a composite.
+Active, paused and blocked all reserve membership, including unknown spec IDs.
+Another composite, the target itself, done history and routing-only rows do not
+conflict. Done lanes may retain or replace historical membership; clear/replace
+it or close the conflicting lane before reopening.
+
+Adoption, open-lane `set_members` and every done-to-active/paused/blocked
+`set_state` use the same conflict helper in the existing `BEGIN IMMEDIATE`
+transaction. Actor/generation validation and request replay/digest checks precede
+it; for valid requests it precedes version CAS. Refusal leaves rows, versions,
+events, publications and confirmation consumption unchanged. The wire code is
+exactly `work_lane_member_conflict`; the message names the conflicting lane.
+Other errors retain their prior code/message mapping. Routing `lane.decision`
+`reopen` changes phase only and never opens a done product lane.
+
+Every adoption preview candidate adds `member_conflicts: [{spec_id,lane_id}]`,
+ordered by lane ID then spec ID, or an empty array. Flags are recomputed after
+any epic substitution, including an empty final list. They describe current
+inventory, grant no apply authority and may become outdated: apply rechecks
+atomically. CLI JSON retains the flags; `adopt --apply` strips this display-only
+metadata, just as it strips provenance/evidence.
+
+### Read-only offline estimate preview
+
+From a checkout with the normal Python dependencies installed:
+
+```sh
+export PYTHONPATH="$PWD/services:$PWD/services/agent-orch"
+python -B -m agent_orch.cli work-lane estimate-preview \
+  --memory-root "$FIXTURE_ROOT" --lanes-json - < "$FIXTURE_MANIFEST"
+```
+
+Both options are required; `--lanes-json` accepts only `-` (stdin). Python `-B`
+suppresses interpreter bytecode writes. The command starts no Store, database,
+socket or watcher and loads no daemon/user configuration. It does not write
+files. It reuses the shared bounded observation scanner/parser and the daemon's
+`aggregate_members`, with no last-good snapshot. Explicit roots never fall back
+to environment roots. The scanner reads only status configuration and
+`work/<configured-status>/<folder>/{spec.md,summary.md}`; absent status config
+uses the standard status list. Malformed config, escaping status names and
+symlinked root/ancestor, work, status, config, item or source paths are refused.
+Artifact/hidden/conflict directories and deeper trees are excluded. Coherent
+source signatures and sync-conflict detection reject unsettled input.
+
+Input has exactly these required keys:
+
+```json
+{"schema":"work_lane_estimate_manifest_v1","lanes":[{"composite_stream_id":"example:assistant","lane_id":"wl-demo","state":"paused","members_total":3,"members":["spec_demo__bridge","spec_demo__deck","spec_demo__umbrella"]}]}
+```
+
+`lanes` is the complete product inventory, including done history, never routing
+rows. Composite/lane IDs are nonempty strings; state is active/paused/blocked/done.
+`members_total` is an integer 0–32 matching the ordered list of unique canonical
+spec IDs. Lane identity is unique within a composite. Empty inventories and
+memberless lanes are valid. Extra/missing keys, duplicate JSON keys, nonfinite
+JSON numbers, malformed JSON, duplicate identities and count mismatches fail.
+There are no inline-member or page caps in the output; inventory completeness
+remains the capturing operator's responsibility.
+
+For separate open specs with remaining lines `2–4 (median 3) as_of 2026-10-09`,
+`1–3 (median 2) as_of 2026-10-09 provisional` and `n/a — umbrella`, respectively,
+stdout is exactly this JSON plus a newline:
+
+```json
+{"errors":[],"lanes":[{"composite_stream_id":"example:assistant","estimate_complete":true,"lane_id":"wl-demo","members":[{"estimate":{"as_of":"2026-10-09","median":3.0,"p25":2.0,"p75":4.0,"provisional":false},"estimate_exempt":false,"spec_id":"spec_demo__bridge","status":"in_progress"},{"estimate":{"as_of":"2026-10-09","median":2.0,"p25":1.0,"p75":3.0,"provisional":true},"estimate_exempt":false,"spec_id":"spec_demo__deck","status":"in_progress"},{"estimate":null,"estimate_exempt":true,"spec_id":"spec_demo__umbrella","status":"in_progress"}],"members_total":3,"open_estimate_h":{"median":5.0,"p25":3.0,"p75":7.0},"open_estimated":2,"state":"paused"}],"schema":"work_lane_estimate_projection_v1"}
+```
+
+Output object keys are sorted; lanes sort by `(composite_stream_id,lane_id)`;
+members keep manifest order. No clock-dependent fields are emitted. Error
+entries have only `{spec_id: string|null, code: string}`, sorted and deduplicated,
+with no paths or source text. Missing/ambiguous/unsettled members retain their
+place with null estimates and false exemption. Unavailable roots, malformed
+source/config, duplicate declared IDs, source read errors and open-membership
+conflicts fail closed. Nonfinite aggregate sums also fail with finite JSON.
+An invalid remaining declaration in an otherwise coherent spec is normal null
+estimate output, not a command error.
+
+Exit 0 means a valid manifest and fully coherent projection with `errors: []`.
+Exit 1 emits the projection and source/membership errors on stdout; the result
+must not pass a parity gate. Exit 2 reports invalid arguments/manifest on stderr
+with no projection. A valid result cannot detect omitted lanes: capture all
+pages and every lane's full members before constructing the manifest.
+
+### Fleet-owned data-first activation and rollback
+
+This source change adds no daemon switch or schema migration. Before merge, the
+fleet appends remaining declarations to currently estimated members with the
+current numeric values, real as-of dates and the old parser's provisional flags;
+immutable elapsed baselines stay untouched. Convention/template changes and all
+real data edits belong to the fleet.
+
+Gate 1 compares the candidate parser **and aggregate**, and pinned old parser
+`68329b316ea3945c551e7d560b71266875410164`, on the same settled snapshot against
+live full-member reads. Every product lane/member identity and count, member
+p25/p75/median and nullness, and aggregate numeric/null values must match exactly.
+Capture list pages through both cursors and use full-member show for every lane;
+default inventory/inline caps are incomplete. A1 as-of/provisional/exemption/
+completeness metadata is tested separately, as is non-exempt `open_estimated`
+coverage. Any error, omission or mismatch blocks merge.
+
+Bind proof to candidate commit, membership manifest and each member's Estimate
+section SHA-256. Immediately before the **first deployment containing A1**,
+repeat gate 1 on fresh settled inputs or prove that tuple unchanged. Freeze all
+member Estimate sections and membership through comparison, restart and live
+numeric/null readback. A moved input aborts activation; a merge-time check alone
+cannot authorize a later restart. Only after live parity passes may the fleet
+restore the four corrected immutable baselines and remove the fabricated fifth
+baseline, retaining audit notes outside parsed lines and proving unchanged live
+projection plus the old parser's intended baseline denominators/no-estimate.
+
+Rollback requires a separately authorized and reviewed **field-scoped reverse
+migration** of elapsed lines across all current projected members and serving
+roots, preserving unrelated edits/history. Prove the old parser matches captured
+current new-parser numbers/nullness, apply and read back Estimate hashes and
+complete membership, then hold the same freeze through old-code restart and
+live readback. Never restore whole-file preimages. If old code cannot represent
+an exemption/null case, stop for the owner; source rollback alone is unsafe.

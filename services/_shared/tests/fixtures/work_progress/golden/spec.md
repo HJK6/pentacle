@@ -13,6 +13,8 @@ Build an invented miniature bridge.
 ## Estimate
 - basis: none (provisional)
 - elapsed_delivery_h: 2–6 (median 4)
+- estimated_at: 2020-01-01
+- remaining_work_h: 2–6 (median 4) as_of 2026-10-09 provisional
 
 ## Acceptance Criteria
 ### Construction

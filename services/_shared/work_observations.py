@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .specs_parser import WORK_SPEC_ID_RE, load_frontmatter, parse_work_facts
 
-MATERIAL_FIELDS = ("status", "ac_checked", "ac_total", "estimate", "status_text", "next_action_text")
+MATERIAL_FIELDS = ("status", "ac_checked", "ac_total", "estimate", "estimate_exempt", "status_text", "next_action_text")
 
 
 class WorkFilesUnsettled(ValueError):
@@ -62,7 +62,7 @@ def read_work_candidate(folder: Path, status: str, *, now: float, quiet_s: float
 
 def unresolved_member(spec_id: str, quality: str = "missing", error: str | None = None) -> dict:
     return {"spec_id": spec_id, "title": None, "status": quality if quality in ("missing", "ambiguous") else "missing",
-            "terminal": None, "ac_checked": None, "ac_total": None, "estimate": None,
+            "terminal": None, "ac_checked": None, "ac_total": None, "estimate": None, "estimate_exempt": False,
             "status_text": None, "next_action_text": None, "source_changed_at": None,
             "observation": {"quality": quality, "observed_at": None, "error": error}, "obs_rev": 1}
 
@@ -78,12 +78,15 @@ def advance_observation(spec_id: str, previous: dict | None, candidate: dict, *,
         "member": unresolved_member(spec_id), "last_good": None, "source_hash": None,
         "path": None, "incident": None, "bad_since": None, "bad_sweeps": 0,
     }
+    record["member"].setdefault("estimate_exempt", False)
     old = record.get("last_good")
+    if old is not None:
+        old.setdefault("estimate_exempt", False)
     quality = candidate["quality"]
     error = candidate.get("error")
     change = None
     if quality == "fresh":
-        facts = candidate["facts"]
+        facts = {"estimate_exempt": False, **candidate["facts"]}
         material = old is not None and any(old.get(k) != facts.get(k) for k in MATERIAL_FIELDS)
         rev = record["member"]["obs_rev"] + int(material)
         source_changed = (timestamp(now) if record.get("source_hash") != candidate["source_hash"]
@@ -91,7 +94,7 @@ def advance_observation(spec_id: str, previous: dict | None, candidate: dict, *,
         member = {"spec_id": spec_id, **facts, "source_changed_at": source_changed,
                   "observation": {"quality": "fresh", "observed_at": timestamp(now), "error": None}, "obs_rev": rev}
         if material:
-            fields = ("status", "ac_checked", "ac_total", "estimate")
+            fields = ("status", "ac_checked", "ac_total", "estimate", "estimate_exempt")
             change = {"spec_id": spec_id, "obs_rev": rev,
                       "prior": {k: old.get(k) for k in fields}, "next": {k: facts.get(k) for k in fields},
                       "source_changed_at": source_changed}

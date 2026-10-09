@@ -15,7 +15,7 @@ from work_lanes_projection import WorkLanesInventory
 from _shared.specs_service import SpecsSubsystem
 
 
-async def cli_call(port, tmp_path, *args):
+async def cli_call(port, tmp_path, *args, expected_status=0):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
            "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "agent-orch"),
            "AGENT_ORCH_WS_URL": f"ws://127.0.0.1:{port}", "AGENT_ORCH_TOKEN": "",
@@ -30,7 +30,7 @@ async def cli_call(port, tmp_path, *args):
         proc.kill()
         await proc.wait()
         raise
-    assert proc.returncode == 0, (proc.returncode, stdout.decode(), stderr.decode())
+    assert proc.returncode == expected_status, (proc.returncode, stdout.decode(), stderr.decode())
     return json.loads(stdout)
 
 
@@ -39,7 +39,7 @@ def test_leadless_progress_changes_within_one_automatic_sweep(tmp_path, monkeypa
     folder = memory / "work" / "in_progress" / "demo__bridge"
     folder.mkdir(parents=True)
     spec = folder / "spec.md"
-    content = "---\nid: spec_demo__bridge\ntitle: Paper bridge\n---\n## Estimate\n- elapsed_delivery_h: 3–5 (median 4)\n- basis: none (provisional)\n## Acceptance Criteria\n- [ ] Assemble.\n"
+    content = "---\nid: spec_demo__bridge\ntitle: Paper bridge\n---\n## Estimate\n- elapsed_delivery_h: 3–5 (median 4)\n- remaining_work_h: 3–5 (median 4) as_of 2026-10-09 provisional\n- basis: none (provisional)\n## Acceptance Criteria\n- [ ] Assemble.\n"
     spec.write_text(content)
     (folder / "summary.md").write_text("**Next action** — Inspect the span.\n")
     for status, identity in (("completed", "spec_demo__finished"), ("deprecated", "spec_demo__retired")):
@@ -70,6 +70,9 @@ def test_leadless_progress_changes_within_one_automatic_sweep(tmp_path, monkeypa
             inv.start()
             await inv._task
             first = await cli_call(port, tmp_path, "show", lane["lane_id"], "--members", "--json")
+            assert first["members"][0]["estimate"]["as_of"] == "2026-10-09"
+            assert first["members"][0]["estimate"]["provisional"] is True
+            assert first["members"][0]["estimate_exempt"] is False
             assert first["members"][0]["ac_checked"] == 0
             assert [m["status"] for m in first["members"]] == ["in_progress", "completed", "deprecated"]
             assert (first["projection"]["items_open"], first["projection"]["items_completed"],
@@ -98,6 +101,35 @@ def test_leadless_progress_changes_within_one_automatic_sweep(tmp_path, monkeypa
             assert shown["updates"] == []
         finally:
             await inv.stop()
+            await server.close()
+            assert server._ws_server is None
+    run(body, str(tmp_path / "fixture.db"))
+
+
+def test_real_cli_conflict_has_exact_code_and_lane_id(tmp_path):
+    from test_work_lane_progress import A, a1_holder, a1_snapshot
+    async def body(env):
+        token_hash = hashlib.sha256(b"fixture-lane-token").hexdigest()
+        assert await env.store.grant_stream_token("fixture-root", "visible", token_hash, STREAM_TOKEN_HASH_VERSION) == "ok"
+        holder = await a1_holder(env)
+        target = (await env.adopt("stream:socket-target", state="paused", owner="operator"))["lane"]
+        sessions = Sessions(env.store, tmux=None, local_host="fixture-root")
+        await sessions.refresh()
+        server = Server(port=0, store=env.store, sessions=sessions, local_host="fixture-root")
+        server.assistant_composite = env.composite
+        try:
+            port = await server.bind()
+            before = await env.store.get_work_lane(target["lane_id"])
+            reply = await cli_call(port, tmp_path, "set-members", target["lane_id"], "--member", A,
+                "--expected-version", "0", "--request-id", "socket-conflict", "--composite-stream-id", ASSISTANT,
+                expected_status=1)
+            assert reply["error_code"] == "work_lane_member_conflict" and holder["lane_id"] in reply["error"]
+            assert await env.store.get_work_lane(target["lane_id"]) == before
+            reply = await cli_call(port, tmp_path, "set-members", target["lane_id"], "--member", "spec_demo__new",
+                "--expected-version", "0", "--request-id", "socket-stale", "--composite-stream-id", ASSISTANT,
+                expected_status=1)
+            assert reply["error_code"] == reply["error"] == "assistant_lane_version_conflict"
+        finally:
             await server.close()
             assert server._ws_server is None
     run(body, str(tmp_path / "fixture.db"))

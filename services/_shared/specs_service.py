@@ -6,6 +6,8 @@ import re
 import json
 import threading
 import time
+import stat
+from contextlib import contextmanager
 import yaml
 from collections import defaultdict
 from pathlib import Path
@@ -32,6 +34,58 @@ SPEC_DOCUMENT_PREFIXES = ("spec_", "work_")
 SOURCE_READ_ERRORS = (OSError, ValueError, UnicodeError, yaml.YAMLError)
 
 
+@contextmanager
+def _bounded_directory(path: Path):
+    """Open a directory chain without following even an ancestor symlink."""
+    if ".." in path.parts:
+        raise ValueError("work_path_invalid")
+    absolute = path.absolute()
+    fd = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in absolute.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        yield fd
+    finally:
+        os.close(fd)
+
+
+class _BoundedSource:
+    """Path-shaped source reader for the existing coherent two-file reader."""
+    def __init__(self, fd: int, name: str):
+        self.fd, self.name = fd, name
+
+    def stat(self):
+        return os.stat(self.name, dir_fd=self.fd, follow_symlinks=False)
+
+    def is_symlink(self):
+        return stat.S_ISLNK(self.stat().st_mode)
+
+    def read_text(self, *, encoding="utf-8"):
+        fd = os.open(self.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("work_source_not_regular")
+            with os.fdopen(fd, "r", encoding=encoding, closefd=False) as source:
+                return source.read()
+        finally:
+            os.close(fd)
+
+
+class _BoundedFolder:
+    def __init__(self, path: Path, fd: int):
+        self.path, self.fd = path, fd
+
+    def __str__(self):
+        return str(self.path)
+
+    def __truediv__(self, name: str):
+        if name not in ("spec.md", "summary.md"):
+            raise ValueError("work_source_invalid")
+        return _BoundedSource(self.fd, name)
+
+
 class _TimerLike(Protocol):
     daemon: bool
 
@@ -53,19 +107,22 @@ class SpecsSubsystem:
         *,
         session_summaries: Callable[[], list[dict[str, Any]]],
         changed_callback: Callable[[list[str]], None],
+        memory_root: str | Path | None = None,
         retry_interval_s: float = 60.0,
         debounce_s: float = 0.5,
         monotonic: Callable[[], float] = time.monotonic,
         timer_factory: Callable[[float, Callable[..., None], tuple[Any, ...]], _TimerLike] = threading.Timer,
     ) -> None:
-        self.memory_root, self.memory_root_source = _resolve_specs_memory_root()
+        self._explicit_root = memory_root is not None
+        self.memory_root, self.memory_root_source = ((Path(memory_root), "explicit") if self._explicit_root
+                                                      else _resolve_specs_memory_root())
         self.session_summaries = session_summaries
         self.changed_callback = changed_callback
         self.retry_interval_s = retry_interval_s
         self.debounce_s = debounce_s
         self._monotonic = monotonic
         self._timer_factory = timer_factory
-        self.disabled = self.memory_root is None or not self.memory_root.is_dir()
+        self.disabled = self.memory_root is None or (not self._explicit_root and not self.memory_root.is_dir())
         # Cache statuses and reload only when the local file changes. `_statuses_mtime` of
         # -1 forces an initial load; subsequent calls reload only when mtime
         # changes. Missing/invalid file → DEFAULT_STATUSES fallback inside
@@ -118,6 +175,31 @@ class SpecsSubsystem:
         """
         if self.memory_root is None:
             return self._statuses, self._status_order
+        if self._explicit_root:
+            # An absent config uses the same documented defaults; malformed or
+            # escaping config is an error offline, never an environment fallback.
+            with _bounded_directory(self.memory_root / "work") as fd:
+                try:
+                    source = _BoundedSource(fd, "statuses.json")
+                    before = source.stat()
+                    payload = json.loads(source.read_text())
+                    after = source.stat()
+                    if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                            after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                        raise WorkFilesUnsettled("work_files_unsettled")
+                except FileNotFoundError:
+                    return self._statuses, self._status_order
+            if not isinstance(payload, dict) or not isinstance(payload.get("statuses"), list):
+                raise ValueError("work_statuses_invalid")
+            statuses = payload["statuses"]
+            if any(not isinstance(item, dict) or not isinstance(item.get("name"), str)
+                   or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", item["name"])
+                   or isinstance(item.get("order"), bool) or not isinstance(item.get("order"), int)
+                   for item in statuses):
+                raise ValueError("work_statuses_invalid")
+            if len({s["name"] for s in statuses}) != len(statuses):
+                raise ValueError("work_statuses_invalid")
+            return statuses, {s["name"]: s["order"] for s in statuses}
         statuses_path = self.memory_root / "work" / "statuses.json"
         try:
             mtime = statuses_path.stat().st_mtime
@@ -161,6 +243,13 @@ class SpecsSubsystem:
         self._invalidate_presentation_cache()
         now = time.time() if now is None else now
         root = self.memory_root
+        if self._explicit_root:
+            try:
+                with _bounded_directory(root / "work"):
+                    pass
+            except (OSError, ValueError):
+                return {"available": False, "root_configured": True, "error": "work_root_unavailable",
+                        "candidates": {}, "errors": {}, "scanned_at": now}
         if root is None or not root.is_dir() or not (root / "work").is_dir():
             self.disabled = True
             return {"available": False, "root_configured": root is not None,
@@ -169,17 +258,30 @@ class SpecsSubsystem:
         candidates, errors = {}, {}
         try:
             for directory in self._spawn_work_dirs():
+                if self._explicit_root and directory.is_symlink():
+                    errors[str(directory)] = {"quality": "error", "error": "work_source_symlink"}
+                    continue
                 if (directory.parent != root / "work" or not directory.is_dir() or directory.is_symlink()
                         or directory.name.startswith(("_", "."))):
                     continue
                 for folder in directory.iterdir():
+                    if self._explicit_root and (folder.name.startswith(("_", ".")) or _is_spec_sync_conflict(folder)):
+                        continue
+                    if self._explicit_root and folder.is_symlink():
+                        errors[str(folder)] = {"quality": "error", "error": "work_source_symlink"}
+                        continue
                     if (not folder.is_dir() or folder.is_symlink() or folder.name.startswith(("_", "."))
                             or _is_spec_sync_conflict(folder)):
                         continue
                     try:
                         conflicts = any(_is_spec_sync_conflict(p.name) and p.name.startswith(("spec.", "summary."))
                                         for p in folder.iterdir())
-                        candidate = read_work_candidate(folder, directory.name, now=now, quiet_s=self.debounce_s)
+                        if self._explicit_root:
+                            with _bounded_directory(folder) as fd:
+                                candidate = read_work_candidate(_BoundedFolder(folder, fd), directory.name,
+                                                                now=now, quiet_s=self.debounce_s)
+                        else:
+                            candidate = read_work_candidate(folder, directory.name, now=now, quiet_s=self.debounce_s)
                         if conflicts:
                             candidate.update(quality="stale", error="work_sync_conflict")
                         candidates.setdefault(candidate["spec_id"], []).append(candidate)
@@ -195,7 +297,9 @@ class SpecsSubsystem:
                         if not isinstance(exc, yaml.YAMLError):
                             raise
                         errors[str(folder)] = {"quality": "error", "error": "work_yaml_invalid"}
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            if not self._explicit_root and not isinstance(exc, OSError):
+                raise
             return {"available": False, "root_configured": True,
                     "error": "work_scan_error:" + type(exc).__name__, "candidates": {}, "errors": {}, "scanned_at": now}
         return {"available": True, "root_configured": True, "error": None,

@@ -128,3 +128,72 @@ def test_r6_json_passthrough_and_unchanged_human_text(monkeypatch, capsys, compl
     _wire(monkeypatch, reply)
     _run(["work-lane", "show", "wl-1", "--members", "--json"])
     assert json.loads(capsys.readouterr().out) == reply
+
+
+def test_preview_conflicts_retained_and_display_metadata_stripped(monkeypatch, tmp_path, capsys):
+    conflicts = [{"spec_id": "spec_demo__bridge", "lane_id": "wl-existing"}]
+    candidate = {"adoption_key": "request:preview", "members": ["spec_demo__bridge"], "member_conflicts": conflicts,
+                 "member_sources": [{"epic_id": "epic_demo"}], "evidence": {"role": "lead"}}
+    _wire(monkeypatch, {"type": "work_lanes.adopt_preview.ok", "candidates": [candidate]})
+    assert _run(["work-lane", "adopt", "--preview"]) == 0
+    assert json.loads(capsys.readouterr().out)["candidates"][0]["member_conflicts"] == conflicts
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([candidate]))
+    sent = _wire(monkeypatch, {"type": "assistant.operation.ok"})
+    assert _run(["work-lane", "adopt", "--apply", str(plan)]) == 0
+    assert sent[0]["payload"] == {"adoption_key": "request:preview", "members": ["spec_demo__bridge"]}
+
+
+def test_offline_dispatch_forbids_config_store_socket_watcher_and_writes(tmp_path, monkeypatch, capsys):
+    import builtins
+    import hashlib
+    import io
+    import os
+    import socket
+    import sqlite3
+    from _shared.specs_service import SpecsSubsystem
+    from agent_orch import config, work_lane_cli
+    root = tmp_path / "root"
+    folder = root / "work" / "in_progress" / "demo__bridge"
+    folder.mkdir(parents=True)
+    (folder / "spec.md").write_text("---\nid: spec_demo__bridge\n---\n## Estimate\n- remaining_work_h: 2–4 (median 3) as_of 2026-10-09\n")
+    (folder / "summary.md").write_text("Synthetic summary\n")
+    before = {str(p): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    source = __import__('pathlib').Path(work_lane_cli.__file__)
+    source_before = source.read_bytes()
+    value = {"schema": "work_lane_estimate_manifest_v1", "lanes": [{"composite_stream_id": "example:assistant",
+        "lane_id": "wl-test", "state": "paused", "members_total": 1, "members": ["spec_demo__bridge"]}]}
+    def forbidden(*args, **kwargs):
+        raise AssertionError("offline path attempted configuration, database, socket or watcher I/O")
+    monkeypatch.setattr(cli, "load_config", forbidden)
+    monkeypatch.setattr(config, "load_config", forbidden)
+    monkeypatch.setattr(work_lane_cli, "_call", forbidden)
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    monkeypatch.setattr(socket, "socket", forbidden)
+    monkeypatch.setattr(SpecsSubsystem, "start", forbidden)
+    monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(tmp_path / "trap-environment-root"))
+    monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps(value)))
+    real_open, real_os_open = io.open, os.open
+    def readonly(file, mode="r", *args, **kwargs):
+        assert not any(c in mode for c in "wax+")
+        return real_open(file, mode, *args, **kwargs)
+    def readonly_fd(file, flags, *args, **kwargs):
+        assert not flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)
+        return real_os_open(file, flags, *args, **kwargs)
+    with monkeypatch.context() as guards:
+        guards.setattr(io, "open", readonly)
+        guards.setattr(builtins, "open", readonly)
+        guards.setattr(os, "open", readonly_fd)
+        assert cli.main(["work-lane", "estimate-preview", "--memory-root", str(root), "--lanes-json", "-"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["errors"] == [] and result["lanes"][0]["open_estimate_h"] == {"p25": 2, "p75": 4, "median": 3}
+    assert {str(p): p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+    assert source.read_bytes() == source_before
+
+
+@pytest.mark.parametrize("args", [[], ["--lanes-json", "-"], ["--memory-root", "/synthetic"],
+                                  ["--memory-root", "/synthetic", "--lanes-json", "manifest.json"]])
+def test_offline_requires_explicit_root_and_literal_stdin(args):
+    with pytest.raises(SystemExit) as result:
+        _run(["work-lane", "estimate-preview", *args])
+    assert result.value.code == 2
