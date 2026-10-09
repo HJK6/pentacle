@@ -70,7 +70,8 @@ def _lead(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str) -
     }
 
 
-def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str) -> dict[str, Any]:
+def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str,
+                 *, index_available: bool | None = None) -> dict[str, Any]:
     stored = lane["work_state"]
     state, reason = stored, lane.get("work_state_reason")
     if stored == "active" and not lane.get("_qualifies"):
@@ -87,7 +88,7 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                          "kind": lane.get("_chat_kind") or "session",
                          "available": lane.get("_chat_available") or "unavailable"},
         "last_update": lane.get("_last_update"),
-        **lane_progress(lane),
+        **lane_progress(lane, now_iso=now_iso, index_available=index_available),
     }
 
 
@@ -100,9 +101,10 @@ def server_order(lanes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def project_lanes(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict[str, Any]],
-                  now_iso: str | None = None) -> list[dict[str, Any]]:
+                  now_iso: str | None = None, *, index_available: bool | None = None) -> list[dict[str, Any]]:
     now_iso = now_iso or _iso_now()
-    lanes = [project_lane(row, presence_by_stream.get(str(row.get("bound_stream_id") or "")), now_iso)
+    lanes = [project_lane(row, presence_by_stream.get(str(row.get("bound_stream_id") or "")), now_iso,
+                          index_available=index_available)
              for row in rows]
     return server_order(lanes)
 
@@ -110,7 +112,9 @@ def project_lanes(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict
 def build_frame(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict[str, Any]],
                 *, now_iso: str | None = None, cap: int = LANE_FRAME_CAP,
                 work_index: dict[str, Any] | None = None) -> dict[str, Any]:
-    lanes = [lane for lane in project_lanes(rows, presence_by_stream, now_iso) if lane["state"] != "done"]
+    lanes = [lane for lane in project_lanes(rows, presence_by_stream, now_iso,
+             index_available=bool(work_index["available"]) if work_index is not None else None)
+             if lane["state"] != "done"]
     counts = {"open": len(lanes), "active": 0, "paused": 0, "blocked": 0}
     for lane in lanes:
         counts[lane["state"]] += 1

@@ -18,7 +18,7 @@ import uuid
 from typing import Any, Callable
 
 from work_lane_members import validate_members, validate_title
-from store_work_index import ensure_work_index_schema, member_ids, members_conn
+from store_work_index import ensure_work_index_schema, member_ids, members_conn, _state_conn
 from work_lane_migration import upgrade_events
 from assistant_policy import AssistantPolicy
 from store_routing import _assistant_actor_conn, _record_publication_conn
@@ -398,11 +398,13 @@ class _WorkLanesStoreMixin:
     async def work_lane_rows(self, *, include_done: bool = False) -> list[dict[str, Any]]:
         def _op(conn):
             states = WORK_STATES if include_done else OPEN_WORK_STATES
+            index_available = bool(_state_conn(conn)["available"])
             marks = ",".join("?" for _ in states)
             lanes = [dict(r) for r in conn.execute(
                 f"SELECT * FROM v2_assistant_composite_lanes WHERE work_state IN ({marks})", states)]
             for lane in lanes:
                 lane["_members"] = members_conn(conn, lane)
+                lane["_work_index_available"] = index_available
                 marks = ",".join("?" for _ in PRODUCT_OPERATIONS)
                 fd_stamp = conn.execute(
                     f"SELECT MAX(created_at) FROM v2_work_lane_events WHERE lane_id=? AND operation IN ({marks})",

@@ -50,12 +50,14 @@ def test_v2_golden_cells_and_deferred_keys():
     assert fixture["capability"] == "work_lanes_v1" and fixture["fixture_version"] == 2
     assert {cell["name"] for cell in fixture["progress_v2"]} == {
         "active_progress", "paused_leadless", "blocked", "missing_member", "ambiguous_member",
-        "missing_estimate", "no_spec", "index_unavailable"}
+        "missing_estimate", "no_spec", "index_unavailable", "stale_observation_completed",
+        "completion_pending", "stale_lane"}
     for cell in fixture["progress_v2"]:
         actual = build_frame(cell["rows"], {}, now_iso=cell["frame"]["generated_at"], work_index=cell["work_index"])
         assert actual == cell["frame"]
         for lane in actual["lanes"]:
-            assert not {"completion_pending", "lead_reported_done", "stale", "remaining_s", "eta_at"} & lane.keys()
+            assert {"completion_pending", "lead_reported_done", "stale"} <= lane.keys()
+            assert not {"remaining_s", "eta_at"} & lane.keys()
 
 
 def test_increment1_never_infers_completion_from_prose_or_generic_reports():
