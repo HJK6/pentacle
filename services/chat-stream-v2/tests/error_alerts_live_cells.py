@@ -89,39 +89,7 @@ async def rebind_follows_generation(h):
         require(not await h.store.get_tell_delivery(old[0]["tell_id"]), "R01 old notice already attempted")
         old_pastes = len(h.provider.pastes)
         origin = await second.start(h.store, h.sessions)
-        # Explicit HARNESS ADMISSION, not reconciler proof: no reconciler runs
-        # here. Bind each pane to its own socket/session, registered pid,
-        # generation and provider identity, and a live process, then record
-        # the liveness the daemon reconciler would observe.
-        admission = []
-        for name, provider in (("v2-test", h.provider), ("v2-next", second)):
-            before = await h.store.fetch_session("fixture", name)
-            pid = await provider.pane_pid(name)  # tmux -L <owned socket> for this session
-            record = await process_record(pid) if pid else None
-            require(
-                before and pid and record
-                and str(before.get("pane_pid")) == str(pid)
-                and before.get("session_generation") == provider.native_id
-                and before.get("provider") == "codex"
-                and str(provider.pid) == str(pid),
-                "R01 harness admission: owned pane identity mismatch: " + name,
-            )
-            os.kill(int(pid), 0)  # raises if the process is gone
-            await h.store.update_session("fixture", name, pane_status="pane_alive")
-            after = await h.store.fetch_session("fixture", name)
-            admission.append({
-                "session": name, "tmux_socket": provider.socket, "pane_pid": pid,
-                "process_start": record.get("start_id"), "generation": provider.native_id,
-                "pane_status_before": before.get("pane_status"),
-                "pane_status_after": after.get("pane_status"),
-            })
-        binding = await h.composite.binding()
-        await h.store.rebind_assistant(
-            env_binding={"stream_id": binding["stream_id"], "generation": binding["generation"]},
-            actor_stream_id=binding["stream_id"], actor_generation=binding["generation"],
-            target_stream_id="fixture:v2-next", target_generation=origin["session_generation"],
-            request_id="r01-rebind", expected_revision=binding["revision"])
-        await h.composite.load_binding()
+        admission = await admit_and_rebind(h, second, origin, "r01-rebind")
         h.resume_pump()
 
         async def landed():
@@ -145,6 +113,104 @@ async def rebind_follows_generation(h):
                 "new_notice_id": new[0]["notice_id"], "new_generation": origin["session_generation"],
                 "new_provider_identity": getattr(second, "identity", None)}
     finally:
+        if second.started:
+            await second.run("kill-session", "-t", second.name)
+
+
+# Fixture-declared metadata for the deterministic actor. It is NOT evidence that
+# any Astra/Codex model ran; production derives it from the routing observer.
+FIXTURE_DECLARED_TUPLE = {"effective_model": "gpt-6-astra", "effective_effort": "high"}
+
+
+async def admit_and_rebind(h, second, origin, request_id):
+    """HARNESS ADMISSION (no reconciler/observer runs here), then a real rebind.
+
+    Binds each owned pane to its own tmux socket/session, registered pid,
+    generation and provider identity and a live process; records pane_alive
+    and, for the target, the fixture-declared tuple. Production guards are
+    unchanged: Store.rebind_assistant still checks every precondition.
+    """
+    admission = []
+    for name, provider in (("v2-test", h.provider), ("v2-next", second)):
+        before = await h.store.fetch_session("fixture", name)
+        pid = await provider.pane_pid(name)  # tmux -L <owned socket> for this session
+        record = await process_record(pid) if pid else None
+        require(
+            before and pid and record
+            and str(before.get("pane_pid")) == str(pid)
+            and before.get("session_generation") == provider.native_id
+            and before.get("provider") == "codex"
+            and str(provider.pid) == str(pid),
+            "harness admission: owned pane identity mismatch: " + name,
+        )
+        os.kill(int(pid), 0)  # raises if the process is gone
+        fields = {"pane_status": "pane_alive"}
+        if name == "v2-next":
+            fields.update(FIXTURE_DECLARED_TUPLE)
+        await h.store.update_session("fixture", name, **fields)
+        after = await h.store.fetch_session("fixture", name)
+        admission.append({
+            "session": name, "tmux_socket": provider.socket, "pane_pid": pid,
+            "process_start": record.get("start_id"), "generation": provider.native_id,
+            "pane_status_before": before.get("pane_status"),
+            "pane_status_after": after.get("pane_status"),
+            "tuple_before": [before.get("effective_model"), before.get("effective_effort")],
+            "tuple_after": [after.get("effective_model"), after.get("effective_effort")],
+            "tuple_source": "fixture_declared" if name == "v2-next" else "unchanged",
+            "liveness_source": "harness_admission_not_reconciler",
+        })
+    binding = await h.composite.binding()
+    receipt = await h.store.rebind_assistant(
+        env_binding={"stream_id": binding["stream_id"], "generation": binding["generation"]},
+        actor_stream_id=binding["stream_id"], actor_generation=binding["generation"],
+        target_stream_id="fixture:v2-next", target_generation=origin["session_generation"],
+        request_id=request_id, expected_revision=binding["revision"])
+    await h.composite.load_binding()
+    return {"panes": admission, "rebind_new_binding": receipt.get("new_binding")}
+
+
+async def qualify_second_target(h):
+    """Q01: disposable proof that a second owned pane receives a real Comms
+    submission and its ingested USER event proves delivery (B4/B5).
+
+    The marker is a synthetic typed fact registered only in this process; no
+    model ran. Uses the same error_alert delivery path R01 relies on.
+    """
+    import uuid
+    import error_adapters
+    from error_adapters import ErrorFact
+
+    await h.pause_pump()
+    second = OwnedProvider(h.root, name="v2-next", socket=h.provider.socket)
+    family = "qualification_marker.v1"
+    error_adapters.FAMILY_CODES[family] = frozenset({"marker"})
+    try:
+        origin = await second.start(h.store, h.sessions)
+        admission = await admit_and_rebind(h, second, origin, "q01-rebind")
+        before_old = len(h.provider.pastes)
+        episode = uuid.uuid4().hex
+        nid = await h.server.error_alerts.emit(ErrorFact(family, "marker", episode))
+        require(nid, "Q01 marker fact not recorded")
+        h.resume_pump()
+
+        async def proved():
+            rows = [r for r in await h.server.error_alerts.notice_rows() if nid in r["body"]]
+            return rows and h.server.error_alerts.proof_at(rows[0])
+
+        require(await _until(proved, 30), "Q01: no proved submission to second pane")
+        rows = [r for r in await h.server.error_alerts.notice_rows() if nid in r["body"]]
+        meta = json.loads(rows[0]["metadata"])
+        require(len(rows) == 1 and rows[0]["recipient_stream_id"] == "fixture:v2-next"
+                and meta["root_generation"] == origin["session_generation"], "Q01 target binding")
+        require(len(second.pastes) == 1 and nid in second.pastes[0], "Q01 second-pane submission count")
+        require(len(h.provider.pastes) == before_old, "Q01 old pane received the marker")
+        return {"classification": "PASS", "marker": "synthetic typed fact; deterministic actor; no model run",
+                "notification_id": nid, "notice_id": rows[0]["notice_id"],
+                "proof_at": h.server.error_alerts.proof_at(rows[0]),
+                "target_generation": origin["session_generation"], "admission": admission,
+                "second_provider_identity": getattr(second, "identity", None)}
+    finally:
+        error_adapters.FAMILY_CODES.pop(family, None)
         if second.started:
             await second.run("kill-session", "-t", second.name)
 

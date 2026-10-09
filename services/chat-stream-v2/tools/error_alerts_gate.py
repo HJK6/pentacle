@@ -54,6 +54,11 @@ def main():
         action="store_true",
         help="With --isolated-only: run only H3 (R01); composes with prior H2 evidence",
     )
+    p.add_argument(
+        "--qualify-then-h3",
+        action="store_true",
+        help="With --isolated-only: Q01 second-target qualifier in its own fixture, then fresh H3 R01 only if Q01 passed and its harness stopped",
+    )
     a = p.parse_args()
     root = a.product_root.resolve()
     service = root / "services/chat-stream-v2"
@@ -148,6 +153,26 @@ async def isolated_only(a, tmp, result):
     async def strict_frames(h2):
         return {"classification": "EVIDENCE", "strict_frames": await negative_reports(h2)}
 
+    if a.qualify_then_h3:
+        from error_alerts_live_cells import qualify_second_target
+
+        result["required_cells"] = ["Q01", "R01"]
+        result["composes_with"] = "prior H1 D01/D02 and H2 A01/A02/I01 evidence at the same product identity"
+        try:
+            result["cells"].update(await isolated("q1", tmp, a.out, [("Q01", qualify_second_target)]))
+            if result["cells"].get("Q01", {}).get("classification") == "PASS":
+                result["cells"].update(await isolated("h3", tmp, a.out, [
+                    ("R01", rebind_follows_generation)]))
+        except Exception as exc:
+            result["classification"] = (
+                "PRODUCT_FAIL" if type(exc).__name__ == "ProductPredicateFailure" else "HARNESS_ERROR"
+            )
+            result["exception"] = type(exc).__name__
+            result["traceback"] = traceback.format_exc()
+        result["passed"] = all(
+            result["cells"].get(c, {}).get("classification") == "PASS" for c in ("Q01", "R01")
+        )
+        return result
     required = ("R01",) if a.h3_only else ("A01", "I01", "R01")
     result["required_cells"] = list(required)
     result["composes_with"] = (
