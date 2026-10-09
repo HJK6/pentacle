@@ -10,10 +10,11 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import time
 
 from error_alerts_fixture import require
-from error_alerts_transport import OwnedProvider
+from error_alerts_transport import OwnedProvider, process_record
 from transcribe import Transcriber
 from cosmo_e2e.harness import StubTranscriberPoster
 
@@ -88,6 +89,32 @@ async def rebind_follows_generation(h):
         require(not await h.store.get_tell_delivery(old[0]["tell_id"]), "R01 old notice already attempted")
         old_pastes = len(h.provider.pastes)
         origin = await second.start(h.store, h.sessions)
+        # Explicit HARNESS ADMISSION, not reconciler proof: no reconciler runs
+        # here. Bind each pane to its own socket/session, registered pid,
+        # generation and provider identity, and a live process, then record
+        # the liveness the daemon reconciler would observe.
+        admission = []
+        for name, provider in (("v2-test", h.provider), ("v2-next", second)):
+            before = await h.store.fetch_session("fixture", name)
+            pid = await provider.pane_pid(name)  # tmux -L <owned socket> for this session
+            record = await process_record(pid) if pid else None
+            require(
+                before and pid and record
+                and str(before.get("pane_pid")) == str(pid)
+                and before.get("session_generation") == provider.native_id
+                and before.get("provider") == "codex"
+                and str(provider.pid) == str(pid),
+                "R01 harness admission: owned pane identity mismatch: " + name,
+            )
+            os.kill(int(pid), 0)  # raises if the process is gone
+            await h.store.update_session("fixture", name, pane_status="pane_alive")
+            after = await h.store.fetch_session("fixture", name)
+            admission.append({
+                "session": name, "tmux_socket": provider.socket, "pane_pid": pid,
+                "process_start": record.get("start_id"), "generation": provider.native_id,
+                "pane_status_before": before.get("pane_status"),
+                "pane_status_after": after.get("pane_status"),
+            })
         binding = await h.composite.binding()
         await h.store.rebind_assistant(
             env_binding={"stream_id": binding["stream_id"], "generation": binding["generation"]},
@@ -112,7 +139,9 @@ async def rebind_follows_generation(h):
         meta = json.loads(new[0]["metadata"])
         require(meta["root_generation"] == origin["session_generation"]
                 and meta["predecessor_notice_id"] == prior["notice_id"], "R01 successor linkage")
-        return {"classification": "PASS", "operation_id": oid, "old_notice_id": prior["notice_id"],
+        return {"classification": "PASS", "harness_admission": admission, "operation_id": oid,
+                "old_notice_id": prior["notice_id"], "old_terminal_reason": prior["terminal_reason"],
+                "new_target_submissions": len(second.pastes), "old_target_submissions_after": len(h.provider.pastes) - old_pastes,
                 "new_notice_id": new[0]["notice_id"], "new_generation": origin["session_generation"],
                 "new_provider_identity": getattr(second, "identity", None)}
     finally:

@@ -49,6 +49,11 @@ def main():
         action="store_true",
         help="Candidate H2 (A01/A02/I01) and H3 (R01) only; composes with prior H1 evidence",
     )
+    p.add_argument(
+        "--h3-only",
+        action="store_true",
+        help="With --isolated-only: run only H3 (R01); composes with prior H2 evidence",
+    )
     a = p.parse_args()
     root = a.product_root.resolve()
     service = root / "services/chat-stream-v2"
@@ -143,13 +148,17 @@ async def isolated_only(a, tmp, result):
     async def strict_frames(h2):
         return {"classification": "EVIDENCE", "strict_frames": await negative_reports(h2)}
 
-    required = ("A01", "I01", "R01")
+    required = ("R01",) if a.h3_only else ("A01", "I01", "R01")
     result["required_cells"] = list(required)
-    result["composes_with"] = "prior H1 D01/D02 evidence at the same product identity"
+    result["composes_with"] = (
+        "prior H1 D01/D02" + (" and H2 A01/A02/I01" if a.h3_only else "")
+        + " evidence at the same product identity"
+    )
     try:
-        result["cells"].update(await isolated("h2", tmp, a.out, [
-            ("A01", authentication), ("A02", strict_frames),
-            ("I01", installed_transcribe_failure)]))
+        if not a.h3_only:
+            result["cells"].update(await isolated("h2", tmp, a.out, [
+                ("A01", authentication), ("A02", strict_frames),
+                ("I01", installed_transcribe_failure)]))
         result["cells"].update(await isolated("h3", tmp, a.out, [
             ("R01", rebind_follows_generation)]))
     except Exception as exc:
