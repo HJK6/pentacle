@@ -634,3 +634,444 @@ def test_reload_wait_is_bounded_and_a_stuck_job_still_reports_the_bootstrap_fail
             "com.pentacle.chat-streamd-v2", launchd.runner, sleep=launchd.sleep, monotonic=launchd.monotonic,
         )
     assert launchd.now <= deploy_mod.RELOAD_UNLOAD_WAIT_S + 1.0, launchd.now
+
+
+# U2 fixtures deliberately expand C/Q/F/T, without importing the U1 emitter.
+_U2_CONN_A = "62aca9ea43c14f7b8caf864618eb361b"
+_U2_CONN_B = "0a6d459052154a8696f765576d015fdf"
+_U2_BUCKETS = (
+    "snapshot", "session.inventory", "work_lanes.inventory", "host.status",
+    "working.state", "schedule.inventory", "hosts.stats", "limits.update",
+    "chat.event", "pong", "other",
+)
+
+
+def _u2_record(event="close", *, conn_id=_U2_CONN_A, **updates):
+    record = dict(
+        schema=1, event=event, conn_id=conn_id, age_ms=0 if event == "connect" else 20,
+        transport="loopback", tls=False, client_kind="unknown", client_name="unknown",
+        client_metadata_source="unavailable", app_build=None, stream_id=None,
+    )
+    if event == "connect":
+        record.update(queue_max=256)
+    elif event in ("auth_ok", "auth_fail"):
+        record.update(auth_method="none", auth_stage="hello", auth_elapsed_ms=10, auth_suppressed=0)
+        if event == "auth_ok":
+            record.update(events_mode="unknown", snapshot_requested=None, work_lanes_v1=None)
+        else:
+            record.update(reason="absent")
+    else:
+        record.update(
+            queue_depth=0, queue_max=256, queue_peak=0,
+            queued_by_type={bucket: 0 for bucket in _U2_BUCKETS},
+            traffic={bucket: dict(broadcast_enqueued=0, broadcast_sent=0,
+                                 broadcast_sent_bytes=0, direct_sent=0, direct_sent_bytes=0,
+                                 coalesced=0, deduped=0) for bucket in _U2_BUCKETS},
+            last_rx_age_ms=None, last_tx_age_ms=None, last_ping_age_ms=None,
+            last_pong_age_ms=None, send_lock_wait_max_ms=0, send_call_max_ms=0,
+        )
+        if event == "slow_consumer":
+            record.update(phase="enter", episode=1, episode_ms=0, pressure_episodes_suppressed=0)
+        elif event == "force_close":
+            record.update(initiator="server", cause="slow_consumer", cause_source="server_policy",
+                          close_code=1011, close_reason="slow_consumer")
+        elif event == "close":
+            record.update(
+                initiator="peer", termination="handshake", close_code=1000, close_reason="normal",
+                close_sent_code=1000, close_received_code=1000,
+                close_sent_reason="normal", close_received_reason="normal", duration_ms=20,
+                auth_state="never", rx_messages=0, rx_bytes=0, tx_messages=0, tx_bytes=0,
+                queue_snapshot_age_ms=0, auth_suppressed_total=0, pressure_episodes_suppressed_total=0,
+            )
+    record.update(updates)
+    if event == "close":
+        record["duration_ms"] = record["age_ms"]
+    return record
+
+
+def _u2_line(event="close", **updates):
+    return "2026-10-09T20:00:00.000Z INFO chat_streamd_v2.server conn_diag " + json.dumps(
+        _u2_record(event, **updates), separators=(",", ":"), allow_nan=False,
+    )
+
+
+def _u2_scan(*lines):
+    return deploy_mod.classify_slow_consumer_log("\n".join([deploy_mod.V2_BOOT_LINE, *lines]))
+
+
+def _u2_peer_close(reason="redacted", **updates):
+    fields = dict(close_code=4000, close_received_code=4000, close_sent_code=4000,
+                  close_reason=reason, close_received_reason=reason, close_sent_reason=reason)
+    fields.update(updates)
+    return _u2_line(**fields)
+
+
+def _u2_liveness(reason="liveness_force_close", **updates):
+    fields = dict(initiator="peer", cause="liveness", cause_source="peer_close_frame",
+                  close_code=4000, close_reason=reason)
+    fields.update(updates)
+    return _u2_line("force_close", **fields)
+
+
+def _u2_log_paths(tmp_path, monkeypatch):
+    stdout, stderr = tmp_path / "daemon.out.log", tmp_path / "daemon.err.log"
+    monkeypatch.setattr(deploy_mod, "_launchd_plist", lambda _label: {
+        "StandardOutPath": str(stdout), "StandardErrorPath": str(stderr),
+    })
+    monkeypatch.setattr(deploy_mod, "_launchd_environment", lambda _label: {})
+    return stdout, stderr
+
+
+@pytest.mark.parametrize("event", ["connect", "auth_ok", "auth_fail", "slow_consumer", "force_close", "close"])
+def test_u2_six_supported_events(event):
+    scan = _u2_scan(_u2_line(event))
+    assert scan["unparsed_conn_diag"] == 0
+    assert scan["peer_4000_other"] == 0
+    assert scan["queue_depth_warnings"] == (event == "slow_consumer")
+    assert scan["overflow_drops"] == (event == "force_close")
+    assert [row["kind"] for row in scan["failures"]] == (["overflow"] if event == "force_close" else [])
+
+
+@pytest.mark.parametrize("payload", [
+    "", "   ", "{", '{"close":1011,"text":"slow_consumer overflow 4000"',
+    "not json close 1011 4000 slow_consumer overflow", "[]", "null", '"close 1011"',
+])
+def test_u2_malformed_never_falls_back_to_legacy(payload):
+    scan = _u2_scan("WARNING conn_diag " + payload)
+    assert scan["outcome"] == deploy_mod.SLOW_CONSUMER_PASSED
+    assert scan["failures"] == []
+    assert scan["unparsed_conn_diag"] == 1
+    assert scan["queue_depth_warnings"] == scan["overflow_drops"] == scan["peer_4000_other"] == 0
+
+
+@pytest.mark.parametrize("updates", [{"schema": 2}, {"schema": "1"}, {"schema": True}, {"event": "future_close"}])
+def test_u2_unsupported_diagnostic_is_not_legacy(updates):
+    record = _u2_record("force_close")
+    record.update(updates)
+    scan = _u2_scan("INFO conn_diag " + json.dumps(record))
+    assert scan["outcome"] == deploy_mod.SLOW_CONSUMER_PASSED
+    assert scan["failures"] == []
+    assert scan["overflow_drops"] == 0
+
+
+@pytest.mark.parametrize("field", ["close_code", "close_sent_code", "close_received_code"])
+def test_u2_each_1011_code_field_is_a_failure(field):
+    line = _u2_line(**{field: 1011})
+    scan = _u2_scan(line)
+    assert scan["failures"] == [{"kind": "1011_close", "client": _U2_CONN_A,
+                                  "transport": "loopback", "line": line}]
+    assert scan["outcome"] == deploy_mod.SLOW_CONSUMER_FAILED
+    assert scan["overflow_drops"] == 0
+
+
+@pytest.mark.parametrize("reason", ["liveness_force_close", "focused_heartbeat_timeout"])
+def test_u2_peer_liveness_is_a_failure(reason):
+    line = _u2_liveness(reason)
+    scan = _u2_scan(line)
+    assert scan["failures"] == [{"kind": "peer_liveness", "client": _U2_CONN_A,
+                                  "transport": "loopback", "line": line}]
+    assert scan["outcome"] == deploy_mod.SLOW_CONSUMER_FAILED
+
+
+@pytest.mark.parametrize("code", [1000, 1001, 1006])
+def test_u2_ordinary_closes_are_not_failures(code):
+    scan = _u2_scan(_u2_line(close_code=code, close_received_code=None, close_sent_code=None))
+    assert scan["failures"] == []
+    assert scan["outcome"] == deploy_mod.SLOW_CONSUMER_PASSED
+    assert scan["peer_4000_other"] == 0
+
+
+def test_u2_server_keepalive_needs_terminal_1011():
+    force = _u2_line("force_close", cause="liveness", cause_source="protocol_close",
+                     close_reason="keepalive_ping_timeout")
+    alone = _u2_scan(force)
+    assert alone["failures"] == []
+    assert alone["outcome"] == deploy_mod.SLOW_CONSUMER_PASSED
+    close = _u2_line(initiator="server", close_sent_code=1011,
+                     close_sent_reason="keepalive_ping_timeout")
+    scan = _u2_scan(force, close)
+    assert scan["failures"] == [{"kind": "1011_close", "client": _U2_CONN_A,
+                                  "transport": "loopback", "line": close}]
+    assert scan["overflow_drops"] == 0
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)])
+@pytest.mark.parametrize("include_overflow", [False, True])
+def test_u2_precedence_and_duplicate_records_are_order_independent(order, include_overflow):
+    # Deliberately colliding valid records prove precedence under replay/reordering.
+    rows = [_u2_line(close_code=1011), _u2_liveness(), _u2_line("force_close")]
+    selected = [rows[index] for index in order if include_overflow or index != 2]
+    scan = _u2_scan(*selected, *selected, _u2_peer_close())
+    expected = "overflow" if include_overflow else "peer_liveness"
+    assert scan["failures"] == [{"kind": expected, "client": _U2_CONN_A,
+                                  "transport": "loopback", "line": rows[2 if include_overflow else 1]}]
+    assert scan["overflow_drops"] == int(include_overflow)
+    assert scan["peer_4000_other"] == 0
+
+
+def test_u2_distinct_connections_do_not_merge():
+    scan = _u2_scan(_u2_line("force_close"), _u2_line(close_code=1011),
+                    _u2_line(close_received_code=1011, conn_id=_U2_CONN_B))
+    assert [(row["kind"], row["client"]) for row in scan["failures"]] == [
+        ("overflow", _U2_CONN_A), ("1011_close", _U2_CONN_B),
+    ]
+    assert scan["overflow_drops"] == 1
+
+
+@pytest.mark.parametrize("reason", ["redacted", "unknown", "empty", "normal", "going_away", "slow_consumer", "keepalive_ping_timeout"])
+def test_u2_other_peer_4000_is_telemetry(reason):
+    scan = _u2_scan(_u2_peer_close(reason))
+    assert scan["outcome"] == deploy_mod.SLOW_CONSUMER_PASSED
+    assert scan["failures"] == []
+    assert scan["peer_4000_other"] == 1
+    assert scan["overflow_drops"] == 0
+
+
+@pytest.mark.parametrize("reason", ["liveness_force_close", "focused_heartbeat_timeout"])
+def test_u2_recognized_close_alone_is_not_other_telemetry(reason):
+    scan = _u2_scan(_u2_peer_close(reason))
+    assert scan["failures"] == []
+    assert scan["peer_4000_other"] == 0
+
+
+@pytest.mark.parametrize("initiator", ["server", "unknown"])
+def test_u2_non_peer_4000_is_not_peer_telemetry(initiator):
+    scan = _u2_scan(_u2_peer_close(initiator=initiator))
+    assert scan["failures"] == []
+    assert scan["peer_4000_other"] == 0
+
+
+def test_u2_pressure_counts_enters_only():
+    scan = _u2_scan(_u2_line("slow_consumer"), _u2_line("slow_consumer", phase="recover"),
+                    _u2_line("slow_consumer", episode=2),
+                    _u2_line("slow_consumer", phase="recover", episode=2))
+    assert scan["queue_depth_warnings"] == 2
+    assert scan["failures"] == []
+    assert scan["overflow_drops"] == 0
+
+
+@pytest.mark.parametrize("updates", [
+    {"conn_id": "10119ea543c14f7b8caf864618eb361b"},
+    {"conn_id": "40009ea543c14f7b8caf864618eb361b"},
+    {"age_ms": 1011}, {"age_ms": 4000},
+])
+@pytest.mark.parametrize("event", ["close", "auth_ok", "auth_fail", "slow_consumer"])
+def test_u2_incidental_numbers_do_not_fail(event, updates):
+    if event == "slow_consumer":
+        updates = {**updates, "phase": "recover"}
+    scan = _u2_scan(_u2_line(event, **updates))
+    assert scan["outcome"] == deploy_mod.SLOW_CONSUMER_PASSED
+    assert scan["failures"] == []
+    assert scan["peer_4000_other"] == scan["unparsed_conn_diag"] == 0
+
+
+def test_u2_failure_keeps_raw_line_and_transport():
+    record = _u2_record("force_close")
+    raw = "  INFO conn_diag " + json.dumps(record) + "  "
+    scan = _u2_scan(raw)
+    assert scan["failures"] == [{"kind": "overflow", "client": _U2_CONN_A,
+                                  "transport": "loopback", "line": raw}]
+
+
+def test_u2_legacy_unknown_identity_and_branch_precedence():
+    lines = ["slow_consumer overflow close 1011 4000", "slow_consumer close 1011 websocket 4000",
+             "websocket closed 4000 client=legacy,", "slow_consumer queue depth=9 client=legacy"]
+    scan = _u2_scan(*lines, lines[0])
+    assert scan["failures"] == [
+        {"kind": "overflow", "client": "unknown", "line": lines[0]},
+        {"kind": "1011_close", "client": "unknown", "line": lines[1]},
+        {"kind": "4000_close", "client": "legacy", "line": lines[2]},
+        {"kind": "overflow", "client": "unknown", "line": lines[0]},
+    ]
+    assert scan["queue_depth_warnings"] == 1
+    assert scan["overflow_drops"] == 2
+
+
+def test_u2_mixed_formats_keep_independent_rules():
+    legacy = "slow_consumer overflow client=old-daemon 1011"
+    structured = _u2_line("force_close")
+    scan = _u2_scan(legacy, structured, _u2_line(close_code=1011), _u2_peer_close(conn_id=_U2_CONN_B))
+    assert [(row["kind"], row["client"]) for row in scan["failures"]] == [
+        ("overflow", "old-daemon"), ("overflow", _U2_CONN_A),
+    ]
+    assert scan["overflow_drops"] == 2
+    assert scan["peer_4000_other"] == 1
+
+
+@pytest.mark.parametrize("boot_line", [deploy_mod.V2_BOOT_LINE, "custom boot"])
+def test_u2_missing_marker_selects_empty_window(boot_line):
+    scan = deploy_mod.classify_slow_consumer_log(
+        "\n".join(["websocket close 1011", _u2_line("force_close"), "conn_diag {"]), boot_line=boot_line,
+    )
+    assert scan == {"class": "slow_consumer", "outcome": deploy_mod.SLOW_CONSUMER_PASSED,
+                    "boot_marker_seen": False, "queue_depth_warnings": 0, "overflow_drops": 0,
+                    "peer_4000_other": 0, "unparsed_conn_diag": 0, "failures": []}
+
+
+def test_u2_explicit_no_marker_scans_whole_text():
+    scan = deploy_mod.classify_slow_consumer_log(
+        "\n".join(["websocket close 4000 client=legacy", _u2_peer_close(), "conn_diag {"]), boot_line=None,
+    )
+    assert scan["boot_marker_seen"] is True
+    assert [row["kind"] for row in scan["failures"]] == ["4000_close"]
+    assert scan["peer_4000_other"] == scan["unparsed_conn_diag"] == 1
+
+
+def test_u2_first_marker_preserves_window_and_ignores_preboot():
+    scan = deploy_mod.classify_slow_consumer_log("\n".join([
+        "websocket close 1011", _u2_line("force_close"), "conn_diag {",
+        deploy_mod.V2_BOOT_LINE, _u2_peer_close(), deploy_mod.V2_BOOT_LINE,
+        "slow_consumer queue depth=1", _u2_line("slow_consumer"),
+    ]))
+    assert scan["boot_marker_seen"] is True
+    assert scan["failures"] == []
+    assert scan["peer_4000_other"] == 1
+    assert scan["unparsed_conn_diag"] == 0
+    assert scan["queue_depth_warnings"] == 2
+
+
+@pytest.mark.parametrize("logs", ["none", "missing", "empty"])
+def test_u2_scan_empty_defaults(tmp_path, monkeypatch, logs):
+    stdout, stderr = _u2_log_paths(tmp_path, monkeypatch)
+    if logs == "none":
+        monkeypatch.setattr(deploy_mod, "_launchd_plist", lambda _: {})
+    elif logs == "empty":
+        stdout.touch()
+        stderr.touch()
+    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0)
+    assert scan == {"class": "slow_consumer", "outcome": deploy_mod.SLOW_CONSUMER_PASSED,
+                    "boot_marker_seen": False, "queue_depth_warnings": 0, "overflow_drops": 0,
+                    "peer_4000_other": 0, "unparsed_conn_diag": 0, "failures": [],
+                    "log_paths": [] if logs == "none" else [str(stdout), str(stderr)]}
+
+
+@pytest.mark.parametrize("marker", [False, True])
+def test_u2_scan_handoff_offsets_and_telemetry(tmp_path, monkeypatch, marker):
+    stdout, stderr = _u2_log_paths(tmp_path, monkeypatch)
+    old = "\n".join([deploy_mod.V2_BOOT_LINE, "slow_consumer overflow client=old", _u2_line("force_close"), ""])
+    stdout.write_text(old)
+    stderr.write_text(old)
+    offsets = deploy_mod._capture_log_offsets((stdout, stderr))
+    with stdout.open("a") as stream:
+        stream.write((deploy_mod.V2_BOOT_LINE if marker else "no boot yet") + "\n")
+        stream.write(_u2_peer_close(conn_id=_U2_CONN_B) + "\nconn_diag {\n")
+    with stderr.open("a") as stream:
+        stream.write("websocket close 4000 client=legacy\n" + _u2_peer_close() + "\nconn_diag {\n")
+    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, offsets)
+    assert scan["boot_marker_seen"] is marker
+    assert [row["kind"] for row in scan["failures"]] == (["4000_close"] if marker else [])
+    assert scan["peer_4000_other"] == scan["unparsed_conn_diag"] == (2 if marker else 0)
+    assert scan["overflow_drops"] == 0
+    assert scan["log_paths"] == [str(stdout), str(stderr)]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("force_kind", ["overflow", "peer_liveness"])
+def test_u2_scan_deduplicates_across_sinks(tmp_path, monkeypatch, reverse, force_kind):
+    stdout, stderr = _u2_log_paths(tmp_path, monkeypatch)
+    force = _u2_line("force_close") if force_kind == "overflow" else _u2_liveness()
+    first = [force, _u2_liveness()]
+    second = [_u2_line(close_received_code=1011), _u2_peer_close(), _u2_line("slow_consumer")]
+    if reverse:
+        first, second = second, first
+    stdout.write_text("\n".join([deploy_mod.V2_BOOT_LINE, *first, "conn_diag {"]))
+    stderr.write_text("\n".join(second))
+    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0)
+    assert scan["failures"] == [{"kind": force_kind, "client": _U2_CONN_A,
+                                  "transport": "loopback", "line": force}]
+    assert scan["overflow_drops"] == int(force_kind == "overflow")
+    assert scan["peer_4000_other"] == 0
+    assert scan["unparsed_conn_diag"] == scan["queue_depth_warnings"] == 1
+
+
+def test_u2_each_sink_keeps_its_own_first_marker_selection(tmp_path, monkeypatch):
+    stdout, stderr = _u2_log_paths(tmp_path, monkeypatch)
+    stdout.write_text("\n".join([_u2_line("force_close"), deploy_mod.V2_BOOT_LINE, _u2_peer_close()]))
+    stderr.write_text("\n".join(["slow_consumer overflow", "conn_diag {", deploy_mod.V2_BOOT_LINE,
+                                "slow_consumer queue depth=1", _u2_line("slow_consumer")]))
+    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0)
+    assert scan["failures"] == []
+    assert scan["peer_4000_other"] == 1
+    assert scan["queue_depth_warnings"] == 2
+    assert scan["unparsed_conn_diag"] == 0
+
+
+@pytest.mark.parametrize("fleet_state,expected_exit", [
+    ("passed", 0), ("partial", 10), ("untested", 9), ("failed", 6),
+])
+@pytest.mark.parametrize("with_failure", [False, True])
+def test_u2_real_scan_stamp_stdout_preserves_fleet_verdicts(
+    tmp_path, monkeypatch, capsys, fleet_state, expected_exit, with_failure,
+):
+    # Do not use _apply: its legacy scan/write stubs would erase this boundary.
+    from .test_deploy_fleet_verdict import _rows, _partial_payload
+
+    stdout, stderr = _u2_log_paths(tmp_path, monkeypatch)
+    old = "\n".join([deploy_mod.V2_BOOT_LINE, "slow_consumer overflow client=historical", ""])
+    stdout.write_text(old)
+    stderr.write_text(old)
+    offsets = deploy_mod._capture_log_offsets((stdout, stderr))
+    with stdout.open("a") as stream:
+        stream.write(deploy_mod.V2_BOOT_LINE + "\n")
+        stream.write(_u2_peer_close() + "\n")
+    with stderr.open("a") as stream:
+        stream.write('WARNING conn_diag {"close":1011,"text":"slow_consumer overflow 4000"\n')
+        if with_failure:
+            stream.write(_u2_line("force_close", conn_id=_U2_CONN_B) + "\n")
+            stream.write(_u2_line(conn_id=_U2_CONN_B, close_sent_code=1011) + "\n")
+
+    machines = tmp_path / "synthetic-machines.json"
+    machines.write_text(json.dumps([
+        {"name": "primary", "ssh_target": None},
+        {"name": "satellite", "ssh_target": "satellite.example.com"},
+    ]))
+    monkeypatch.setattr(deploy_mod, "_launchd_environment", lambda _: {
+        "PENTACLE_MACHINES_FILE": str(machines),
+    })
+    schedules = []
+    monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda *_: schedules.append(True))
+    if fleet_state == "passed":
+        payload = {"ok": True, "status": "PASS", "cells": _rows("primary") + _rows("satellite"),
+                   "failures": [], "untested": []}
+        rc = 0
+    else:
+        payload = _partial_payload()
+        rc = 2
+        if fleet_state == "untested":
+            for row in payload["untested"]:
+                row["reason"] = "quota_exhausted"
+        elif fleet_state == "failed":
+            payload["failures"] = [{"host": "satellite", "provider": "codex", "prompt_mode": "promptless",
+                                    "class": "failure", "reason": "event", "detail": "fixture failure"}]
+            rc = 1
+    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (rc, json.dumps(payload), "")})
+    release = tmp_path / "release"
+    release.mkdir()
+    stamp = {"sha": TARGET_SHA}
+    deploy_mod._apply_post_activation(
+        V2_SERVICE, release, TARGET_SHA, stamp,
+        prior_log_size=offsets, prior_pid=111, reload_launchd=False, runner=runner,
+        verify_boot=_boot_observed,
+        verify_runtime=lambda *_: (True, {"sha": TARGET_SHA, "pid": 999}),
+    )
+    assert "post_activation_error" not in stamp
+    persisted = json.loads(deploy_mod._stamp_path(release, V2_SERVICE).read_text())
+    assert persisted == stamp
+    assert stamp["fleet_smoke"]["outcome"] == fleet_state
+    assert schedules == ([True] if fleet_state == "passed" else [])
+    scan = persisted["slow_consumer"]
+    assert scan["peer_4000_other"] == scan["unparsed_conn_diag"] == 1
+    assert scan["overflow_drops"] == int(with_failure)
+    assert scan["queue_depth_warnings"] == 0
+    assert scan["boot_marker_seen"] is True
+    assert [row["kind"] for row in scan["failures"]] == (["overflow"] if with_failure else [])
+    assert scan["outcome"] == (deploy_mod.SLOW_CONSUMER_FAILED if with_failure else deploy_mod.SLOW_CONSUMER_PASSED)
+    assert scan["log_paths"] == [str(stdout), str(stderr)]
+    code, output, error = _run_main(monkeypatch, capsys, stamp=stamp)
+    assert json.loads(output) == persisted
+    assert code == (deploy_mod.EXIT_SLOW_CONSUMER_FAILED if with_failure else expected_exit)
+    if with_failure:
+        assert code == 8
+        assert _U2_CONN_B in error
+    assert len([call for call in runner.calls if "kickstart" in call]) == 1
+    assert len([call for call in runner.calls if any("spawn_fleet_smoke.py" in part for part in call)]) == 1

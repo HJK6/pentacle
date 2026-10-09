@@ -854,28 +854,81 @@ SLOW_CONSUMER_FAILED = "failed"
 _CLIENT_LOG_RE = re.compile(r"\bclient=([^\s,()]+)")
 
 
+def _slow_consumer_log_window(log_text: str, boot_line: str | None) -> tuple[str, bool]:
+    if boot_line is None:
+        return log_text, True
+    marker_index = log_text.find(boot_line)
+    return (log_text[marker_index:], True) if marker_index >= 0 else ("", False)
+
+
 def classify_slow_consumer_log(
     log_text: str,
     *,
     boot_line: str | None = V2_BOOT_LINE,
 ) -> dict[str, object]:
-    """Classify slow-consumer evidence after the current boot marker.
+    """Classify the selected window, retaining legacy per-line behavior.
 
-    Queue-depth warnings are telemetry only. Overflow drops and the two close-code
-    forms are failures, with the client identity retained for deploy diagnostics.
+    Structured failures select one record per connection, independent of order.
+    Queue pressure, other peer 4000 closes and unparseable diagnostics are telemetry.
     """
-    boot_marker_seen = boot_line is None
-    if boot_line is None:
-        window = log_text
-    else:
-        marker_index = log_text.find(boot_line)
-        boot_marker_seen = marker_index >= 0
-        window = log_text[marker_index:] if marker_index >= 0 else ""
-
+    window, boot_marker_seen = _slow_consumer_log_window(log_text, boot_line)
     queue_depth_warnings = 0
+    unparsed_conn_diag = 0
     failures: list[dict[str, str]] = []
+    connection_failures: dict[str, int] = {}
+    peer_4000_connections: list[str] = []
+    priority = {"1011_close": 1, "peer_liveness": 2, "overflow": 3}
     for raw_line in window.splitlines():
         line = raw_line.strip()
+        if "conn_diag " in raw_line:
+            try:
+                record = json.loads(raw_line.split("conn_diag ", 1)[1])
+            except (ValueError, RecursionError):
+                unparsed_conn_diag += 1
+                continue
+            if not isinstance(record, dict):
+                unparsed_conn_diag += 1
+                continue
+            # Unsupported diagnostic versions/events never fall through to the
+            # plaintext substring rules, even if their contents look like failures.
+            if type(record.get("schema")) is not int or record["schema"] != 1 or record.get("event") not in (
+                "connect", "auth_ok", "auth_fail", "slow_consumer", "force_close", "close",
+            ):
+                continue
+            conn_id = record.get("conn_id")
+            if not isinstance(conn_id, str):
+                unparsed_conn_diag += 1
+                continue
+            event = record["event"]
+            if event == "slow_consumer" and record.get("phase") == "enter":
+                queue_depth_warnings += 1
+            kind: str | None = None
+            if event == "force_close":
+                if record.get("initiator") == "server" and record.get("cause") == "slow_consumer":
+                    kind = "overflow"
+                elif record.get("initiator") == "peer" and record.get("cause") == "liveness":
+                    kind = "peer_liveness"
+            elif event == "close":
+                if any(record.get(field) == 1011 for field in (
+                    "close_code", "close_sent_code", "close_received_code",
+                )):
+                    kind = "1011_close"
+                if (record.get("initiator") == "peer" and record.get("close_code") == 4000
+                        and record.get("close_reason") not in (
+                            "liveness_force_close", "focused_heartbeat_timeout",
+                        )):
+                    peer_4000_connections.append(conn_id)
+            if kind is not None:
+                row = {"kind": kind, "client": conn_id, "line": raw_line}
+                if "transport" in record:
+                    row["transport"] = record["transport"]
+                previous = connection_failures.get(conn_id)
+                if previous is None:
+                    connection_failures[conn_id] = len(failures)
+                    failures.append(row)
+                elif priority[kind] > priority[failures[previous]["kind"]]:
+                    failures[previous] = row
+            continue
         lowered = line.lower()
         if "slow_consumer queue depth=" in lowered:
             queue_depth_warnings += 1
@@ -898,6 +951,13 @@ def classify_slow_consumer_log(
                 "line": line,
             })
 
+    # Defer terminal-close telemetry until all force-close evidence is known,
+    # including a force_close encountered later or in another selected sink.
+    forced_connections = {
+        conn_id for conn_id, index in connection_failures.items()
+        if failures[index]["kind"] in ("overflow", "peer_liveness")
+    }
+    peer_4000_other = sum(conn_id not in forced_connections for conn_id in peer_4000_connections)
     overflow_drops = sum(row["kind"] == "overflow" for row in failures)
     return {
         "class": "slow_consumer",
@@ -905,6 +965,8 @@ def classify_slow_consumer_log(
         "boot_marker_seen": boot_marker_seen,
         "queue_depth_warnings": queue_depth_warnings,
         "overflow_drops": overflow_drops,
+        "peer_4000_other": peer_4000_other,
+        "unparsed_conn_diag": unparsed_conn_diag,
         "failures": failures,
     }
 
@@ -1016,27 +1078,23 @@ def _scan_slow_consumer_window(
             appended.append((path, text))
 
     boot_marker_seen = any(V2_BOOT_LINE in text for _path, text in appended)
-    scans: list[dict[str, object]] = []
+    windows: list[str] = []
     for _path, text in appended:
         # The daemon's boot line is stdout while logging warnings are stderr. The
         # pre-restart offset excludes old records; stderr has no boot line of its
         # own, so once stdout establishes the window, scan its appended text too.
-        scan = classify_slow_consumer_log(
+        window, _seen = _slow_consumer_log_window(
             text,
-            boot_line=V2_BOOT_LINE if V2_BOOT_LINE in text else (None if boot_marker_seen else V2_BOOT_LINE),
+            V2_BOOT_LINE if V2_BOOT_LINE in text else (None if boot_marker_seen else V2_BOOT_LINE),
         )
-        scans.append(scan)
+        windows.append(window)
 
-    failures = [row for scan in scans for row in scan["failures"]]
-    queue_depth_warnings = sum(int(scan["queue_depth_warnings"]) for scan in scans)
-    overflow_drops = sum(int(scan["overflow_drops"]) for scan in scans)
+    # Select each sink's window first; classify them together so a connection's
+    # force_close and terminal close cannot count twice across stdout/stderr.
+    scan = classify_slow_consumer_log("\n".join(windows), boot_line=None)
     return {
-        "class": "slow_consumer",
-        "outcome": SLOW_CONSUMER_FAILED if failures else SLOW_CONSUMER_PASSED,
+        **scan,
         "boot_marker_seen": boot_marker_seen,
-        "queue_depth_warnings": queue_depth_warnings,
-        "overflow_drops": overflow_drops,
-        "failures": failures,
         "log_paths": [str(path) for path in paths],
     }
 

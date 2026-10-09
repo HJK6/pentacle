@@ -78,8 +78,8 @@ def test_event_overflow_never_counts_replies(caplog) -> None:
 
     caplog.set_level("WARNING", logger=server.log.name)
     asyncio.run(run())
-    assert "client=example-service" in caplog.text
-    assert "peer=('127.0.0.1', 9911)" in caplog.text
+    assert "example-service" not in caplog.text
+    assert "('127.0.0.1', 9911)" not in caplog.text
 
 
 def test_streamed_reply_chunks_stay_contiguous_under_broadcast() -> None:
