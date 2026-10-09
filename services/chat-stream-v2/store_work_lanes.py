@@ -561,6 +561,14 @@ def _require_qualifying_lead(lane: dict[str, Any], conn) -> None:
         raise ValueError("work_lane_visible_lead_required")
 
 
+def _override_audit(actor: str, generation: str, action: str, prior: str, nxt: str,
+                    reason: str) -> dict[str, Any]:
+    """Typed audit on the existing mutation event; no schema or extra replay key."""
+    return {"schema": "WorkLaneOverrideV1", "actor_stream_id": actor,
+            "actor_generation": generation, "action": action, "from": prior, "to": nxt,
+            "reason": reason}
+
+
 def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, payload, actor, generation,
                 binding_name, env_binding, confirmation, digest, fault) -> dict[str, Any]:
     from store_assistant_binding import _binding_conn
@@ -609,13 +617,18 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if to == prior_state:
                 raise ValueError("work_lane_state_unchanged")
             reason = _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")
-            # D5: a supplied confirmation must name exactly this lane and action;
-            # an operator lane's done always needs one.
-            if "operator_confirmation" in payload or (to == "done" and lane.get("owner_kind") == "operator"):
+            # Explicit confirmations retain their exact binding and single-use checks.
+            # The verified bound FD can instead override operator ownership with a reason.
+            if "operator_confirmation" in payload:
                 consumed = _verify_confirmation(payload.get("operator_confirmation") and confirmation,
                                                 lane_id=lane["lane_id"], action="set_state:" + to,
                                                 actor_stream_id=actor)
                 _consume_confirmation_conn(conn, consumed)
+            elif lane.get("owner_kind") == "operator":
+                reason = _text(payload.get("reason"), UPDATE_TEXT_MAX,
+                               "work_lane_override_reason_required", required=True)
+                event_payload = dict(payload, override=_override_audit(
+                    actor, generation, "set_state:" + to, prior_state, to, reason))
             changes["work_state"] = to
             changes["work_state_reason"] = "reopened" if prior_state == "done" else "fd"
             if to == "active":
@@ -631,7 +644,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                 outcome = _text(payload.get("outcome"), UPDATE_TEXT_MAX, "work_lane_outcome_required",
                                 required=True)
                 changes["done_at"] = stamp
-                if lane.get("owner_kind") == "operator":
+                if lane.get("owner_kind") == "operator" and consumed is not None:
                     changes["work_state_reason"] = "operator_confirmed"
                 update = ("lane_completed", "transition", outcome)
             elif prior_state == "blocked" and to in ("active", "paused"):
@@ -639,7 +652,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                 update = ("lane_unblocked", "transition",
                           resolution or f"Blocker cleared: {lane.get('blocker') or ''}"[:UPDATE_TEXT_MAX])
             if prior_state == "blocked":
-                event_payload = dict(payload, cleared_blocker=lane.get("blocker"))
+                event_payload = dict(event_payload, cleared_blocker=lane.get("blocker"))
             if prior_state == "done":
                 update = None  # D6: reopen emits no update, whatever the reopened state
             del reason  # recorded on the event row only, never published
@@ -692,17 +705,22 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                              (stamp, lane["lane_id"]))
             event_payload = {"members": members, "no_spec_reason": reason}
         elif operation == "set_owner":
-            if set(payload) - {"to", "operator_confirmation"} or payload.get("to") not in OWNER_KINDS:
+            if set(payload) - {"to", "reason", "operator_confirmation"} or payload.get("to") not in OWNER_KINDS:
                 raise ValueError("work_lane_payload_invalid")
             to = payload["to"]
             if to == lane.get("owner_kind"):
                 raise ValueError("work_lane_owner_unchanged")
             changes["owner_kind"] = to
-            if to == "fd" or "operator_confirmation" in payload:
+            if "operator_confirmation" in payload:
                 consumed = _verify_confirmation(payload.get("operator_confirmation") and confirmation,
                                                 lane_id=lane["lane_id"], action="set_owner:" + to,
                                                 actor_stream_id=actor)
                 _consume_confirmation_conn(conn, consumed)
+            elif to == "fd":
+                reason = _text(payload.get("reason"), UPDATE_TEXT_MAX,
+                               "work_lane_override_reason_required", required=True)
+                event_payload = dict(payload, override=_override_audit(
+                    actor, generation, "set_owner:" + to, lane["owner_kind"], to, reason))
             if to == "fd":
                 update = ("major_decision", "decision",
                           f"Handed to FD: {lane.get('title') or lane['lane_id']}"[:UPDATE_TEXT_MAX])
