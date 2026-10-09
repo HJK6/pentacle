@@ -61,25 +61,16 @@ def test_v2_golden_cells_and_deferred_keys():
 
 
 def test_increment1_never_infers_completion_from_prose_or_generic_reports():
-    """N1 cells retained for increment 2's generation/correlation tests.
-
-    Future expected values: standalone generic done -> null; stale generation
-    -> prior false; predecessor report after handoff -> prior true; correlated
-    current-generation done -> true. Increment 1 emits none of these R6 keys.
-    """
-    from work_lanes_projection import project_lane
+    """Retain all four Q3 cells, now backed by actual routing/report rows."""
+    from test_work_lanes import run
+    from test_work_lane_completion import retained_q3_case
     cases = [
-        ("discussion", "g1", "g1", False, None),
-        ("execution", "g2", "g1", False, False),
-        ("execution", "g2", "g1", True, True),
-        ("execution", "g2", "g2", False, True),
+        (False, False, False, None),
+        (True, True, False, False),
+        (True, True, True, True),
+        (True, False, False, True),
     ]
-    for phase, current_generation, report_generation, prior, eventual in cases:
-        row = {"lane_id": "wl-demo", "work_state": "paused", "version": 2,
-               "phase": phase, "bound_stream_id": "fixture:lead", "bound_generation": current_generation,
-               "_lead_row": {"status": "closed", "status_card": {"update": "All done; ready to close."},
-                             "_agent_report_status": "done", "report_generation": report_generation},
-               "_prior_lead_reported_done": prior, "_members": []}
-        projected = project_lane(row, None, "2026-01-01T00:00:00.000Z")
-        assert projected["state"] == "paused"
-        assert not {"completion_pending", "lead_reported_done", "stale"} & projected.keys()
+    for correlated, stale, prior, expected in cases:
+        async def body(env):
+            await retained_q3_case(env, correlated=correlated, stale=stale, prior=prior, expected=expected)
+        run(body)

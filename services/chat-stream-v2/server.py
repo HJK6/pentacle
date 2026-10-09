@@ -3528,14 +3528,13 @@ class Server:
         if shown is None:
             raise VerbError("work_lane_not_found", "no first-class lane with that id")
         from work_lanes_projection import project_lane, presence_index, _iso_now
-        from work_lane_progress import lane_progress
         rows = await self.store.work_lane_rows(include_done=True)
         row = next((row for row in rows if row["lane_id"] == lane_id), None)
         projected = None
         if row is not None:
             row.update(shown["lane"], _members=shown["members"])
             presence = presence_index(self.sessions.list_open()).get(str(row.get("bound_stream_id") or ""))
-            projected = {**project_lane(row, presence, _iso_now()), **lane_progress(row, all_members=True)}
+            projected = project_lane(row, presence, _iso_now(), all_members=True)
         return {"type": "work_lanes.show.ok", "lane": shown["lane"], "projection": projected,
                 "events": shown["events"], "updates": shown["updates"], "members": shown["members"],
                 "work_index": await self.store.work_index_status()}
