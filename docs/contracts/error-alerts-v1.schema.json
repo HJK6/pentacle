@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "error-alerts-v1",
+  "title": "Error Alerts v1 wire contract",
+  "$defs": {
+    "voice_operation": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "origin_stream_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "origin_generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "operation_kind": {
+          "enum": [
+            "voice_chat",
+            "voice_answer"
+          ]
+        },
+        "client_build": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "version",
+        "operation_id",
+        "origin_stream_id",
+        "origin_generation",
+        "operation_kind",
+        "client_build"
+      ],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "error_code": {
+          "enum": [
+            "operator_required",
+            "credential_revoked",
+            "invalid_request",
+            "event_conflict",
+            "stale_sequence",
+            "origin_mismatch",
+            "operation_forbidden",
+            "blob_forbidden",
+            "rate_limited",
+            "persistence_failed",
+            "unavailable"
+          ]
+        },
+        "retry_after": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "error_code"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "requests": {
+    "error.report": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "error.report"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "version": {
+          "const": 1
+        },
+        "event_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "stage": {
+          "enum": [
+            "upload",
+            "transcribe",
+            "send"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "failed",
+            "recovered",
+            "cancelled",
+            "unconfirmed"
+          ]
+        },
+        "code": {
+          "enum": [
+            "upload_read_failed",
+            "upload_transport_failed",
+            "upload_milestone_missing",
+            "transcribe_transport_failed",
+            "transcribe_failed",
+            "transcribe_milestone_missing",
+            "send_transport_failed",
+            "send_unconfirmed",
+            "operation_cancelled",
+            "recovered",
+            "report_gap",
+            "no_speech",
+            "too_long",
+            "unsupported",
+            "permission_declined"
+          ]
+        },
+        "retry_state": {
+          "enum": [
+            "exhausted",
+            "pending",
+            "none"
+          ]
+        },
+        "send_request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "client_build": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "voice_operation": {
+          "$ref": "#/$defs/voice_operation"
+        },
+        "dropped_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "version",
+        "event_id",
+        "operation_id",
+        "sequence",
+        "stage",
+        "outcome",
+        "code",
+        "retry_state",
+        "client_build"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

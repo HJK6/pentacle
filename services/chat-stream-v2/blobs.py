@@ -63,9 +63,10 @@ class _Upload:
     sha, and the running total (the per-purpose gate is a running check, not just an
     init hint - a client can lie about `size_hint_bytes`)."""
 
-    __slots__ = ("fd", "tmp_path", "hasher", "size", "owner", "purpose", "filename", "identity", "max_bytes")
+    __slots__ = ("fd", "tmp_path", "hasher", "size", "owner", "purpose", "filename", "identity", "max_bytes", "voice_operation")
 
     def __init__(self, fd: int, tmp_path: str, owner: Any = None, *, purpose=None, filename=None, identity=None, max_bytes=TOTAL_MAX_BYTES) -> None:
+        self.voice_operation = None
         self.fd = fd
         self.tmp_path = tmp_path
         self.hasher = hashlib.sha256()
@@ -102,6 +103,7 @@ class BlobStore:
         #: connection closes, `abort_connection` tears its uploads down. No
         #: reaper, no deadline timer: the socket close IS the bound.
         self._by_conn: dict[Any, set[str]] = {}
+        self.error_alerts = None
         #: Set once the store dirs exist; a blob verb in the boot window parks on
         #: it rather than writing under a missing root.
         self._ready = asyncio.Event()
@@ -147,6 +149,16 @@ class BlobStore:
         rid = str(msg.get("request_id") or "")
         owner = msg.get("_client_websocket")
         purpose = msg.get("purpose")
+        voice_operation = None
+        if "voice_operation" in msg:
+            if self.error_alerts is None or purpose not in (None, "generic"):
+                return flavor.error(rid, "invalid_request")
+            try:
+                voice_operation = await self.error_alerts.register_upload(msg)
+            except ValueError as exc:
+                return flavor.error(rid, str(exc))
+            except Exception:
+                return flavor.error(rid, "persistence_failed")
         filename = identity = None
         max_bytes = TOTAL_MAX_BYTES
         if purpose == CHAT_ATTACHMENT_PURPOSE:
@@ -185,6 +197,10 @@ class BlobStore:
             # upload (client resent init) discards the prior partial first so its
             # open fd + temp file cannot leak and a client retry is trivial.
             prior = self._uploads.get(rid)
+            if prior is not None and prior.voice_operation is not None and (
+                prior.owner is not owner or prior.voice_operation != voice_operation
+            ):
+                return flavor.error(rid, "upload_blob_forbidden")
             if prior is not None and prior.purpose == CHAT_ATTACHMENT_PURPOSE and (
                 prior.owner is not owner or prior.identity != identity
             ):
@@ -199,6 +215,7 @@ class BlobStore:
                 self._locks.pop(rid, None)  # no live upload owns this rid now
                 return flavor.error(rid, flavor.code_disk_full)
             self._uploads[rid] = _Upload(fd, tmp_path, owner, purpose=purpose, filename=filename, identity=identity, max_bytes=max_bytes)
+            self._uploads[rid].voice_operation = voice_operation
             self._by_conn.setdefault(owner, set()).add(rid)
         return {"type": flavor.init_ok, "request_id": rid}
 
@@ -211,6 +228,13 @@ class BlobStore:
             up = self._uploads.get(rid)
             if up is None:
                 return flavor.error(rid, flavor.code_unknown)
+            if up.voice_operation is not None:
+                try:
+                    principal = await self.error_alerts.principal(msg)
+                except ValueError:
+                    return flavor.error(rid, "upload_blob_forbidden")
+                if up.owner is not msg.get("_client_websocket") or principal != up.voice_operation[0]:
+                    return flavor.error(rid, "upload_blob_forbidden")
             if up.purpose == CHAT_ATTACHMENT_PURPOSE:
                 try:
                     current_identity = verified_uploader(msg.get("_auth_context"))
@@ -246,7 +270,16 @@ class BlobStore:
                 # Joined for the same reason: fsync/close/replace must finish
                 # before a cancelled task releases the lock.
                 managed_receipt = None
-                if up.purpose == CHAT_ATTACHMENT_PURPOSE:
+                if up.voice_operation is not None:
+                    # Join bytes+milestone even if the final reply connection closes.
+                    task = asyncio.create_task(self._finish_voice(up))
+                    try:
+                        sha = await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        with contextlib.suppress(BaseException):
+                            await task
+                        raise
+                elif up.purpose == CHAT_ATTACHMENT_PURPOSE:
                     managed_receipt = await self._finish_managed(rid, up)
                     sha = managed_receipt["blob_sha"]
                 elif self.attachment_store is not None:
@@ -273,6 +306,12 @@ class BlobStore:
             return {"type": flavor.upload_ok, "request_id": rid,
                     flavor.sha_field: sha, "size_bytes": size,
                     **(managed_receipt or {})}
+
+    async def _finish_voice(self, up):
+        sha = await self.attachment_store.complete_unmanaged_upload(
+            root=self._root, sha=up.hasher.hexdigest(), materialize=partial(self._finish, up))
+        await self.error_alerts.store.voice_milestone(*up.voice_operation, 'upload_committed', blob_sha=sha)
+        return sha
 
     async def _finish_managed(self, rid: str, up: _Upload) -> dict:
         metadata = await self._run_joined(self._managed_metadata, up)

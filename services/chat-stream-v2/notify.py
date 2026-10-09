@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
+from error_adapters import FAMILY_CODES
 import asyncio
 import functools
 import json
@@ -443,6 +444,8 @@ class Notify:
         records = await self._db.call("list_notifications", states=["open"], limit=limit)
         serialized: list[dict[str, Any]] = []
         for record in records:
+            if record.get('producer') in FAMILY_CODES:
+                continue  # Typed error facts reach the front desk only through the outbox.
             if str(record.get('producer') or '').startswith('consent.'):
                 continue  # Consent authority is only the credential-projected Store.
             # Do not expose an open question whose asker is gone/replaced; the

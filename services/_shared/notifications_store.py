@@ -49,6 +49,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .notification_errors import ErrorNotificationMixin, init_schema as init_error_schema
+
 
 DEFAULT_DB_PATH = Path.home() / ".local/share/pentacle-stream/notifications.db"
 DB_PATH_ENV = "PENTACLE_STREAM_NOTIFICATIONS_DB"
@@ -748,7 +750,7 @@ def _notification_resolution_payload(
     return payload
 
 
-class NotificationStore:
+class NotificationStore(ErrorNotificationMixin):
     """SQLite-backed durable notification store.
 
     Thread-safe via a single ``threading.Lock`` around the connection. The
@@ -847,6 +849,7 @@ class NotificationStore:
             }.items():
                 if column not in columns:
                     self._conn.execute(ddl)
+            init_error_schema(self._conn)
             # Partial unique index: at most one OPEN notification per
             # (producer, dedup_key). Resolved rows are exempt so a new dedup
             # row can be created after the open one is resolved.
@@ -2650,7 +2653,7 @@ class NotificationStore:
     # Retention
     # ------------------------------------------------------------------
 
-    def prune_resolved(self, now: str | None = None) -> int:
+    def prune_resolved(self, now: str | None = None, *, settled_error_ids: set[str] | None = None) -> int:
         """Bound the size/age of terminal rows. Non-terminal rows are never pruned.
 
         Among terminal rows, delete:
@@ -2673,7 +2676,7 @@ class NotificationStore:
             # successive prunes.
             terminal_placeholders = ", ".join("?" for _ in TERMINAL_STATES)
             rows = self._conn.execute(
-                "SELECT notification_id, resolved_at FROM notifications "
+                "SELECT notification_id, resolved_at, error_context FROM notifications "
                 f"WHERE state IN ({terminal_placeholders}) "
                 "ORDER BY (resolved_at IS NULL), resolved_at DESC, notification_id DESC",
                 tuple(TERMINAL_STATES),
@@ -2682,6 +2685,9 @@ class NotificationStore:
             to_delete: set[str] = set()
             for index, row in enumerate(rows):
                 nid = row["notification_id"]
+                # Fail closed without a fresh cross-store delivery readback.
+                if row["error_context"] and nid not in (settled_error_ids or set()):
+                    continue
                 # Keep-N: anything past the most recent resolved_keep is pruned.
                 if index >= self.resolved_keep:
                     to_delete.add(nid)

@@ -45,6 +45,7 @@ NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT = "assistant_lane_ruling_result"
 ASSISTANT_AUTHORITY_REQUEST_TOKEN = object()
 
 _NON_URGENT_KINDS = frozenset({
+    "error_alert",
     NOTICE_KIND_REPORT,
     NOTICE_KIND_RECONCILER,
     NOTICE_KIND_SPAWN_FAILURE,
@@ -171,6 +172,7 @@ class OutboundNoticeQueue:
         self.owner = owner or f"outbound:{os.getpid()}:{uuid.uuid4().hex}"
         self.front_desk_digest = None
         self.external_work = None
+        self.error_alerts = None
         self._guards: dict[str, Guard] = {}
         self._terminal_callbacks: dict[str, TerminalCallback] = {}
         self._delivered_callbacks: dict[str, Callable[[dict[str, Any]], Awaitable[None]]] = {}
@@ -258,6 +260,11 @@ class OutboundNoticeQueue:
         force: bool = False,
     ) -> int:
         """Claim due notices atomically and process one bounded batch."""
+        if self.error_alerts is not None:
+            try:
+                await self.error_alerts.reconcile()
+            except Exception:
+                log.warning("subsystem=error_alerts bug_ref=error_alerts_v1 action=reconcile_failed")
         if self.front_desk_digest is not None:
             await self.front_desk_digest.tick()
         if self.external_work is not None:
@@ -339,6 +346,9 @@ class OutboundNoticeQueue:
             if metadata.get('front_desk_digest'):
                 from front_desk_digest import DIGEST_TOKEN
                 message['_front_desk_digest_token'] = DIGEST_TOKEN
+            if kind == "error_alert":
+                # Reuse the existing generation-fenced, pre-input proof path.
+                message["_notification_answer_generation"] = metadata["root_generation"]
             if kind == NOTICE_KIND_NOTIFICATION_ANSWER:
                 import json
                 metadata = row.get("metadata") or "{}"

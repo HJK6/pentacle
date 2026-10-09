@@ -180,6 +180,9 @@ class FrontDeskDigest:
                     "SELECT * FROM v2_outbound_notices WHERE kind=? AND recipient_stream_id=? "
                     "AND delivered_at IS NULL AND terminal_at IS NULL ORDER BY created_at,notice_id",
                     (HELD_KIND, target))]
+                typed = [row for row in pending if json.loads(row.get('metadata') or '{}').get('error_alert_v1')]
+                pending = [row for row in pending if row not in typed]
+                self._fold_errors(conn, typed, target, generation, now, deadline_s)
                 if not pending:
                     return
                 oldest = datetime.fromisoformat(pending[0]['created_at'].replace('Z', '+00:00')).timestamp()
@@ -194,6 +197,53 @@ class FrontDeskDigest:
                     recipient_stream_id=target, body=body,
                     metadata={'root_generation': generation, 'front_desk_digest': True})
                 for row in pending:
-                    conn.execute("UPDATE v2_outbound_notices SET terminal_at=?,terminal_reason='folded_into_digest' WHERE notice_id=?",
-                                 (iso_now(), row['notice_id']))
+                    meta = json.loads(row.get('metadata') or '{}')
+                    meta['folded_into_notice_id'] = nid
+                    conn.execute("UPDATE v2_outbound_notices SET terminal_at=?,terminal_reason='folded_into_digest',metadata=? WHERE notice_id=?",
+                                 (iso_now(), json.dumps(meta, sort_keys=True), row['notice_id']))
         await self.store.submit(op)
+
+    def _fold_errors(self, conn, rows, target, generation, now, deadline_s):
+        """Bound typed members separately; commit digest and member links together."""
+        from datetime import datetime
+        if not rows:
+            return
+        oldest = datetime.fromisoformat(rows[0]['created_at'].replace('Z', '+00:00')).timestamp()
+        if self.enabled() and now < oldest + deadline_s:
+            return
+        batches = []
+        batch = []
+        batch_key = None
+        size = len('Error alert digest. Awareness only; review=#error-alerts\n'.encode())
+        for row in rows:
+            member = json.loads(row['metadata'])
+            key = (member['intent_kind'], bool(member.get('awareness')), member.get('policy_mode'))
+            line = row['body'] + '\n'
+            length = len(line.encode())
+            if batch and (key != batch_key or len(batch) >= 100 or size + length > 16128):
+                batches.append(batch)
+                batch = []
+                size = len('Error alert digest. Awareness only; review=#error-alerts\n'.encode())
+            if size + length > 16128:
+                raise ValueError('error_digest_member_oversize')
+            batch.append(row)
+            batch_key = key
+            size += length
+        if batch:
+            batches.append(batch)
+        for batch in batches:
+            ids = [r['notice_id'] for r in batch]
+            nid = 'error-digest:' + hashlib.sha256(('\0'.join(ids) + '\0' + target + '\0' + generation).encode()).hexdigest()
+            body = 'Error alert digest. Awareness only; review=#error-alerts\n' + '\n'.join(r['body'] for r in batch)
+            metas = [json.loads(r['metadata']) for r in batch]
+            meta = {'error_alert_v1': True, 'typed_digest': True, 'front_desk_digest': True,
+                    'root_generation': generation, 'member_notice_ids': ids,
+                    'members': list(dict.fromkeys(m['notification_id'] for m in metas)),
+                    'intent_kind': metas[0]['intent_kind'], 'awareness': bool(metas[0].get('awareness')),
+                    'policy_mode': metas[0].get('policy_mode')}
+            _insert_outbound_notice_conn(conn, notice_id=nid, tell_id=nid, kind='error_alert', dedupe_key=nid,
+                recipient_stream_id=target, body=body, metadata=meta)
+            for row, member in zip(batch, metas):
+                member['folded_into_notice_id'] = nid
+                conn.execute("UPDATE v2_outbound_notices SET terminal_at=?,terminal_reason='folded_into_digest',metadata=? WHERE notice_id=?",
+                    (iso_now(), json.dumps(member,sort_keys=True), row['notice_id']))
