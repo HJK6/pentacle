@@ -44,6 +44,11 @@ def main():
         action="store_true",
         help="Bounded diagnostic; never a complete candidate gate",
     )
+    p.add_argument(
+        "--isolated-only",
+        action="store_true",
+        help="Candidate H2 (A01/A02/I01) and H3 (R01) only; composes with prior H1 evidence",
+    )
     a = p.parse_args()
     root = a.product_root.resolve()
     service = root / "services/chat-stream-v2"
@@ -126,6 +131,39 @@ async def read_only_projection(h):
     return out
 
 
+async def isolated_only(a, tmp, result):
+    """Same H2/H3 cells and assertions as the full candidate run, nothing else."""
+    from error_alerts_security_scenario import authentication, negative_reports
+    from error_alerts_live_cells import (
+        installed_transcribe_failure,
+        isolated,
+        rebind_follows_generation,
+    )
+
+    async def strict_frames(h2):
+        return {"classification": "EVIDENCE", "strict_frames": await negative_reports(h2)}
+
+    required = ("A01", "I01", "R01")
+    result["required_cells"] = list(required)
+    result["composes_with"] = "prior H1 D01/D02 evidence at the same product identity"
+    try:
+        result["cells"].update(await isolated("h2", tmp, a.out, [
+            ("A01", authentication), ("A02", strict_frames),
+            ("I01", installed_transcribe_failure)]))
+        result["cells"].update(await isolated("h3", tmp, a.out, [
+            ("R01", rebind_follows_generation)]))
+    except Exception as exc:
+        result["classification"] = (
+            "PRODUCT_FAIL" if type(exc).__name__ == "ProductPredicateFailure" else "HARNESS_ERROR"
+        )
+        result["exception"] = type(exc).__name__
+        result["traceback"] = traceback.format_exc()
+    result["passed"] = all(
+        result["cells"].get(c, {}).get("classification") == "PASS" for c in required
+    )
+    return result
+
+
 async def run(a, root, tmp):
     from error_alerts_fixture import ErrorAlertsHarness
     import server, store
@@ -157,6 +195,10 @@ async def run(a, root, tmp):
     }
     # The final RED/GREEN pair uses byte-identical production transport;
     # only the imported product root changes.
+    if a.isolated_only:
+        if a.mode != "candidate":
+            raise SystemExit("--isolated-only requires --mode candidate")
+        return await isolated_only(a, tmp, result)
     h = ErrorAlertsHarness(tmp, real_transport=True)
     try:
         await h.start()
