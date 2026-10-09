@@ -5,7 +5,7 @@
     "title": "Assistant front desk baseline",
     "type": "agent-rules",
     "canonical": true,
-    "updated_at": "2026-10-08",
+    "updated_at": "2026-10-09",
     "source_path": "agents/assistant_baseline.md",
     "tags": [
       "pentacle",
