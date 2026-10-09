@@ -260,3 +260,20 @@ def test_unhashable_fact_fields_raise_value_error():
     for fields in (([], "probe_failed", "e"), ("voice_operation.v1", {}, "e")):
         with pytest.raises(ValueError):
             ErrorFact(*fields)
+
+
+@pytest.mark.asyncio
+async def test_bookkeeping_failure_never_blocks_ordinary_send(subject, monkeypatch):
+    s = subject
+    seen = []
+
+    async def handler(msg):
+        seen.append(msg)
+        return {"action_committed": True, "submission_confirmed": True}
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(s.store, "fetch_session", broken)
+    assert (await s.service.send(send_msg(s), handler))["submission_confirmed"] is True
+    assert len(seen) == 1 and await s.store.voice_list() == []

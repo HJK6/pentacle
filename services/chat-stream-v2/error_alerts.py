@@ -374,6 +374,26 @@ class ErrorAlerts:
         await self._quiet(m(principal, oid, "transcribe_result"))
         return result
 
+    async def _implicit_send_register(self, msg, target, rid):
+        # Operator check first; every lookup is best-effort bookkeeping.
+        try:
+            principal = await self.principal(msg)
+        except ValueError:
+            return None
+        try:
+            host, _, name = target.partition(":")
+            session = await self.store.fetch_session(host, name) if name else None
+        except Exception:
+            log.warning("subsystem=error_alerts bug_ref=error_alerts_v1 action=implicit_record_failed")
+            return None
+        key = (principal, "implicit_send", "send", target, str(msg.get("msg_id") or rid))
+        oid = str(uuid.uuid5(uuid.NAMESPACE_URL, "\0".join(key)))
+        generation = str((session or {}).get("session_generation") or "")
+        if not await self._quiet(self.store.voice_register_implicit(
+            principal, oid, "implicit_send", target, generation)):
+            return None
+        return principal, oid
+
     async def _send_implicit(self, msg, handler):
         rid = str(msg.get("request_id") or "")
         target = str(msg.get("stream_id") or msg.get("to_stream_id") or "") or str(
@@ -381,13 +401,7 @@ class ErrorAlerts:
         ) + ":" + str(msg.get("session_name") or "")
         found = None
         if isinstance((msg.get("meta") or {}).get("voice"), dict) and rid:
-            host, _, name = target.partition(":")
-            session = await self.store.fetch_session(host, name) if name else None
-            found = await self._implicit(
-                msg, "implicit_send", target,
-                str((session or {}).get("session_generation") or ""),
-                "send", target, str(msg.get("msg_id") or rid),
-            )
+            found = await self._implicit_send_register(msg, target, rid)
         if not found:
             return await handler(msg)
         principal, oid = found
