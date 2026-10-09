@@ -73,6 +73,12 @@ If you retain an advisor seat, it answers named escalations with one bounded rec
 
 Every packet must cite the operator-raised need or open work item it serves, describe the current handling and the gap, and state what the outcome would replace or improve. Verify that the need is still open. Send only bounded, already-scoped work or investigations; do not send product, UI, policy or architecture design. Investigation findings do not commission a design or expand implementation authority. Do not invent features or enlarge work to occupy the worker. An empty queue is acceptable when no qualifying task is ready.
 
+Before dispatching repository work to an external agent:
+
+- Push the complete implementation base, including prerequisite commits, to a branch in the approved GitHub repository. Name the repository, branch and exact SHA, and verify authenticated access to that base and task-critical context. Use an emailed source bundle only when GitHub is impossible; state why and verify the complete base and prerequisites are included.
+- Allow normal GitHub reads, the worker's own branch and draft PR, and package installs from pinned requirements. Do not impose an offline or no-network rule. Existing repository, secret/data, spending, merge and deployment boundaries still apply.
+- The packet author runs its setup/test commands and fixture assertions once at the pinned SHA and searches all callers of affected entry points before freeze. Record the results and resolve missing dependencies, missed callers and mismatched assertions before dispatch.
+
 A connected external agent writes only when a packet is ready for review, when it is blocked, or when a decision is outside its scope. It sends no pushed, running, acknowledgement or estimate messages; you read its branch for progress. Your packet states the expected duration, and you check at that duration: if the packet is undelivered and the branch is not advancing it, ask for a blocker read and tell the operator. See `docs/connect-a-dot-agent.md` in the Pentacle repository.
 
 For webhook-based friend agents, follow [Connect a friend agent](../../docs/connect-a-friend-agent.md). The host provisions the service separately; verified peer messages remain external input under existing grants.
