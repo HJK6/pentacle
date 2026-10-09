@@ -88,6 +88,8 @@ SYSTEM_PRODUCER_STREAM_TOKEN_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN"
 SYSTEM_PRODUCER_STREAM_TOKEN_FILE_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE"
 SYSTEM_PRODUCER_STREAM_ID_ENV = "PENTACLE_SYSTEM_PRODUCER_STREAM_ID"
 FIXED_SYSTEM_PRODUCER_STREAM_ID = "altum-bot-cd"
+BOT_MESSAGING_PRODUCER_STREAM_ID = "bot-messaging-desk"
+BOT_MESSAGING_STREAM_TOKEN_FILE_ENV = "PENTACLE_BOT_MESSAGING_STREAM_TOKEN_FILE"
 WMI_BACKUP_PRODUCER_STREAM_ID = "amaterasu:wmi-pg-dailybackup"
 WMI_BACKUP_STREAM_TOKEN_FILE_ENV = "PENTACLE_WMI_BACKUP_STREAM_TOKEN_FILE"
 WMI_BACKUP_NOTIFICATION_DESTINATION = "pentacle-updates"
@@ -97,6 +99,11 @@ REPORT_PRODUCER_PUBLISH_FIELDS = frozenset({
     "type", "request_id", "from_stream_id", "stream_id", "stream_token", "producer",
     "title", "content_type", "body", "tags", "asset_id", "spec_id",
 })
+BOT_MESSAGING_DEDUP_RE = re.compile(
+    r"^bot-messaging\|(registration|delivery)\|"
+    r"(callback_rejected|callback_timeout|callback_unreachable|challenge_mismatch|aws_error|handoff_failed|unknown)\|"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$"
+)
 WMI_BACKUP_DEDUP_RE = re.compile(
     r"^wmi-backup\|[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\|([0-9]{4}-[0-9]{2}-[0-9]{2})$"
 )
@@ -1308,11 +1315,13 @@ class Server:
                 self._client_identities[websocket] = client
         handler = self.handlers.get(verb)
         report_actor = self._report_producer_id()
-        # The bound report producer gets its typed verb refusal below, even for
-        # a verb this daemon does not implement.
-        if handler is None and (
-            websocket is None or report_actor is None
-            or self._client_system_producers.get(websocket) != report_actor
+        # Restricted report and bot producers get their typed verb refusal
+        # below, even for a verb this daemon does not implement.
+        if handler is None and not (
+            websocket is not None
+            and (self._client_system_producers.get(websocket) == BOT_MESSAGING_PRODUCER_STREAM_ID
+                 or (report_actor is not None
+                     and self._client_system_producers.get(websocket) == report_actor))
         ):
             return [self._unsupported(verb, request_id, caller=caller)]
         # Never let a wire client provide internal authorization fields. The
@@ -1738,7 +1747,10 @@ class Server:
     def _file_token_sources() -> dict[str, str | None]:
         """Fixed principals whose credential is a user-owned 0600 token file,
         re-read on every RPC (removal/rotation revokes bound sockets too)."""
-        sources = {WMI_BACKUP_PRODUCER_STREAM_ID: os.environ.get(WMI_BACKUP_STREAM_TOKEN_FILE_ENV)}
+        sources = {
+            WMI_BACKUP_PRODUCER_STREAM_ID: os.environ.get(WMI_BACKUP_STREAM_TOKEN_FILE_ENV),
+            BOT_MESSAGING_PRODUCER_STREAM_ID: os.environ.get(BOT_MESSAGING_STREAM_TOKEN_FILE_ENV),
+        }
         producer = report_producer.load()
         if producer is not None:
             sources[producer.stream_id] = producer.token_file
@@ -1832,6 +1844,7 @@ class Server:
         self, msg: dict[str, Any], actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID
     ) -> bool:
         wmi = actor == WMI_BACKUP_PRODUCER_STREAM_ID
+        bot = actor == BOT_MESSAGING_PRODUCER_STREAM_ID
         fields = SYSTEM_NOTIFICATION_CREATE_FIELDS | {"destination"} if wmi else SYSTEM_NOTIFICATION_CREATE_FIELDS
         if not set(msg).issubset(fields):
             return False
@@ -1860,6 +1873,13 @@ class Server:
             or msg.get("severity") not in {"warning", "critical"}
         ):
             return False
+        if bot:
+            return (
+                msg["title"] == "Bot messaging failure"
+                and "body" not in msg
+                and msg["severity"] == "critical"
+                and BOT_MESSAGING_DEDUP_RE.fullmatch(msg["dedup_key"]) is not None
+            )
         pattern = WMI_BACKUP_DEDUP_RE if wmi else SYSTEM_NOTIFICATION_DEDUP_RE
         match = pattern.fullmatch(msg["dedup_key"])
         if match is None:
@@ -4020,7 +4040,7 @@ class Server:
         claim_mismatch: dict[str, Any] | None = None
         if isinstance(msg.get("ac_claim"), dict) and self.ledger is not None:
             claim_verified, claim_mismatch = await self.ledger.verify_ac_claim(msg["ac_claim"])
-            self.ledger._alert_claim_result(
+            await self.ledger._alert_claim_result(
                 claim_verified, claim_mismatch,
                 report_id=str(msg.get("report_id") or f"close:{target_stream_id}"),
                 from_stream_id=target_stream_id,

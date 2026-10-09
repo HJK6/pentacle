@@ -25,6 +25,10 @@ class RecordingAlerts:
     def emit(self, kind: str, **fields: object) -> None:
         self.emitted.append((kind, fields))
 
+    async def record(self, kind: str, **fields: object) -> None:
+        self.emitted.append((kind, fields))
+        return None
+
 
 class LadderTmux:
     def __init__(self, *, pid: str = "", dies_on_graceful: bool = False) -> None:

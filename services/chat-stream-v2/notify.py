@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
-from error_adapters import FAMILY_CODES
+from error_adapters import FAMILY_CODES, adapt
 import asyncio
 import functools
 import json
@@ -308,8 +308,10 @@ class Notify:
         outbound: Any = None,
         assistant_binding: Any = None,
         assistant_stream_id: str = "",
+        alerts: Any = None,
     ) -> None:
         self._db = _StoreThread(db_path)
+        self.alerts = alerts
         self._comms = comms
         self._broadcast = broadcast
         self._sessions = sessions
@@ -1440,6 +1442,8 @@ class Notify:
             return self._notif_error(request_id, "notification_store_error", message=str(exc))
 
     async def _notif_create(self, msg: dict, request_id: str) -> dict:
+        from server import WMI_BACKUP_PRODUCER_STREAM_ID
+
         if str(msg.get('producer') or '').startswith('consent.'):
             return self._notif_error(request_id, 'notification_invalid', message='consent producers are reserved')
         # v2 removes investigation routing (spec constraint 3): a warning/critical
@@ -1457,9 +1461,29 @@ class Notify:
             refuse_privileged_dedup_refresh=bool(
                 (msg.get("_auth_context") or {}).get("service_authenticated")
                 and (msg.get("_auth_context") or {}).get("service_actor")
-                in {FIXED_SYSTEM_PRODUCER_STREAM_ID, "amaterasu:wmi-pg-dailybackup"}
+                in {FIXED_SYSTEM_PRODUCER_STREAM_ID, WMI_BACKUP_PRODUCER_STREAM_ID, "bot-messaging-desk"}
             ),
         )
+        auth = msg.get("_auth_context") or {}
+        actor = auth.get("service_actor") if auth.get("service_authenticated") else None
+        kind = {
+            FIXED_SYSTEM_PRODUCER_STREAM_ID: "system_deploy_failed",
+            WMI_BACKUP_PRODUCER_STREAM_ID: "system_backup_failed",
+            "bot-messaging-desk": "bot_messaging_failed",
+        }.get(actor)
+        if kind is not None:
+            fields = {"severity": msg.get("severity"), "dedup_key": msg.get("dedup_key")}
+            if kind == "bot_messaging_failed":
+                parts = str(msg.get("dedup_key") or "").split("|")
+                fields = dict(zip(("subsystem", "step", "status_class", "operation_id"), parts))
+            fact = adapt(kind, fields)
+            if fact is not None:
+                try:
+                    nid = None if self.alerts is None else await self.alerts.error(fact, principal=f"system:{actor}")
+                    if nid is None:
+                        log.warning("subsystem=error_adapters actor=%s action=sink_unavailable", actor)
+                except Exception:
+                    log.warning("subsystem=error_adapters actor=%s action=sink_failed", actor)
         client_record = await self._serialize(record)
         if self._broadcast is not None:
             await self._broadcast({"type": "notification", "notification": client_record})

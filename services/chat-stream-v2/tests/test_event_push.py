@@ -36,6 +36,10 @@ class _Alerts:
     def emit(self, kind: str, **fields: object) -> None:
         self.emitted.append((kind, dict(fields)))
 
+    async def record(self, kind: str, **fields: object) -> None:
+        self.emitted.append((kind, dict(fields)))
+        return None
+
 
 class _RoutingObserver:
     def __init__(self) -> None:
