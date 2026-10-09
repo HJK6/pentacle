@@ -264,12 +264,24 @@ async def run(a, root, tmp):
                 result["cells"]["D02"] = await restart_boundaries(h)
                 result["cells"]["A01"] = await authentication(h)
                 result["cells"]["A02"] = {
-                    "classification": "INCOMPLETE",
+                    "classification": "EVIDENCE",
                     "strict_frames": await negative_reports(h),
                 }
-            # Until all frozen cells are implemented, fail explicitly rather than claim a reduced acceptance gate.
-            # Narrowed delivery-core gate (amendment v4 §6): rebind runs as R01.
-            result["unimplemented_cells"] = ["R01"]
+                from error_alerts_live_cells import (
+                    installed_transcribe_failure,
+                    rebind_follows_generation,
+                )
+
+                result["cells"]["I01"] = await installed_transcribe_failure(h)
+                result["cells"]["R01"] = await rebind_follows_generation(h)
+            # Narrowed delivery-core gate (amendment v4 §6). Every required
+            # cell must PASS; a reduced run (--only-d01) never passes.
+            required = ("D01", "D02", "A01", "I01", "R01")
+            result["required_cells"] = list(required)
+            result["passed"] = not a.only_d01 and all(
+                result["cells"].get(c, {}).get("classification") == "PASS"
+                for c in required
+            )
     except Exception as exc:
         result["classification"] = (
             "PRODUCT_FAIL"

@@ -15,14 +15,15 @@ from tmux_transport import Tmux
 
 
 class OwnedProvider(Tmux):
-    def __init__(self, root):
+    def __init__(self, root, *, name="v2-test", socket=None):
         binary = shutil.which("tmux")
         if not binary:
             raise RuntimeError("owned provider requires tmux")
         super().__init__(binary)
         self.root = Path(root)
-        self.socket = "pentacle-error-alerts-" + uuid.uuid4().hex
-        self.name = "v2-test"
+        # A second session may share the owned server (rebind cell).
+        self.socket = socket or "pentacle-error-alerts-" + uuid.uuid4().hex
+        self.name = name
         self.native_id = str(uuid.uuid4())
         self.pid = None
         self.started = False
@@ -34,7 +35,11 @@ class OwnedProvider(Tmux):
     def pastes(self):
         path = self.root / "provider-input.jsonl"
         return (
-            [json.loads(line)["text"] for line in path.read_text().splitlines()]
+            [
+                row["text"]
+                for row in map(json.loads, path.read_text().splitlines())
+                if row.get("session", "v2-test") == self.name
+            ]
             if path.exists()
             else []
         )
@@ -49,6 +54,8 @@ class OwnedProvider(Tmux):
                 str(self.root),
                 "--native-id",
                 self.native_id,
+                "--label",
+                self.name,
             ]
         )
         rc, _ = await self.run(
@@ -76,6 +83,8 @@ class OwnedProvider(Tmux):
             str(self.root),
             "--native-id",
             self.native_id,
+            "--label",
+            self.name,
         ]
         if (
             not actual

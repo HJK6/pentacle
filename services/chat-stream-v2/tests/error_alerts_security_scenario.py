@@ -310,7 +310,7 @@ async def authentication(h):
         )
     return {
         "classification": "PASS",
-        "scope": "actual loopback auth_v2 and seven management/report verbs",
+        "scope": "actual loopback auth_v2 and the error.report verb",
         "cases": cells,
         "limitations": [
             "No external TLS/network endpoint claimed; Dot denied at actual plain-transport boundary"
