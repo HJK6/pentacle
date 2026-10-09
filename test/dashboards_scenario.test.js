@@ -103,6 +103,111 @@ test('dashboard oracle rejects a profile URL that never reached the renderer bri
   assert.equal(configChecks(fixtureUrl, fixtureUrl)[0][1], true);
 });
 
+for (const scenarioName of ['web-dashboards-revamp', 'dashboard_catalog']) {
+  for (const initialState of [undefined, 'loading', 'unknown', 'final', 'no files']) {
+    test(`${scenarioName} snapshots only settled file labels: ${initialState ?? 'not hydrated'}`, async t => {
+      const fixture = { streamId: 'local:dashboard-files', transcript: [{ text: 'fixture transcript' }] };
+      const states = ['ready', 'unavailable', 'failed'];
+      const labels = ['12 bytes · Download', 'File expired or unavailable', 'Download failed · click filename to retry'];
+      const dom = new JSDOM(`<!doctype html><div id="header-fixture"><button data-mode="chat"></button></div>
+        <div class="grid"><div class="slot-chat-shell">
+          <div class="slot-chat-list" data-stream-id="${fixture.streamId}">fixture transcript</div>
+          <textarea class="slot-chat-compose-input">previous draft</textarea></div></div>
+        <div class="slot-chat-list" data-stream-id="other"><a class="slot-chat-file-download">Other pending file</a></div>
+        <section id="panel-dashboards"><div id="dashboard-list"></div></section><main id="dashboard-content"></main>`,
+      { runScripts: 'outside-only' });
+      t.after(() => dom.window.close());
+      const { window } = dom;
+      const list = window.document.querySelector(`[data-stream-id="${fixture.streamId}"]`);
+      const files = initialState === 'no files' ? [] : states.map((state, index) => {
+        const attachment = window.document.createElement('span');
+        attachment.innerHTML = '<a class="slot-chat-file-download">File</a><span class="slot-chat-file-status"></span>';
+        list.append(attachment);
+        const file = attachment.firstChild;
+        if (initialState !== undefined) file.dataset.fileState = initialState === 'final' ? state : initialState;
+        attachment.lastChild.textContent = initialState === 'final' ? labels[index] : 'Loading file';
+        return file;
+      });
+      let configured = false; let hideStatic = false; let snapshot; let fileChecks = 0;
+      const waits = []; const pendingStates = []; const stopAfterSnapshot = new Error('snapshot captured');
+      window.focusStreamId = () => {};
+      window.DASHBOARDS = [{ id: 'shared-demo' }, { id: 'modeler-3d' }];
+      window.__dashboardCatalogGate = { lists: [] };
+      window.cc = {
+        getChatStreamState: async () => ({ connected: true, sessions: [{ stream_id: fixture.streamId }] }),
+        promptList: async () => ({ questions: [{ state: 'answered', answer: 'fixture answer' }] }),
+        getConfig: async () => ({ dashboards: configured ? { catalogSpecId: 'fixture-catalog' } : {} }),
+      };
+      const session = {
+        async send(method, params) {
+          if (method === 'Page.addScriptToEvaluateOnNewDocument') {
+            hideStatic = params.source.endsWith('(true)');
+            return { identifier: 'fixture-script' };
+          }
+          if (method === 'Page.reload') delete window.__dashboardReloadMarker;
+          return {};
+        },
+        async eval(expression) {
+          const value = await window.eval(expression);
+          const before = window.__dashboardChatBefore || window.__catalogChatBefore;
+          if (before && !snapshot) {
+            snapshot = { transcript: before.transcript, states: files.map(file => file.dataset.fileState) };
+            throw stopAfterSnapshot;
+          }
+          return value;
+        },
+        async waitFor(expression, options) {
+          assert.equal(options, undefined, 'snapshot readiness keeps the default wait timeout');
+          waits.push(expression);
+          for (;;) {
+            const ready = await window.eval(expression);
+            if (ready === true) return;
+            if (expression.includes('slot-chat-v3-answer-entry')) {
+              list.insertAdjacentHTML('beforeend', '<div class="slot-chat-v3-answer-entry">fixture answer</div>');
+              continue;
+            }
+            // Progress one real DOM label only after the condition observed it
+            // pending. No timer, arbitrary eval response or snapshot interception
+            // can supply a passing readiness result.
+            const index = files.findIndex(file => !states.includes(file.dataset.fileState));
+            assert.ok(index >= 0, `unexpected unsatisfied wait: ${expression}`);
+            pendingStates.push(files.map(file => file.dataset.fileState));
+            fileChecks++;
+            files[index].dataset.fileState = states[index];
+            files[index].nextSibling.textContent = labels[index];
+          }
+        },
+        async click(selector) {
+          assert.equal(selector, '#view-dashboards', 'only catalog prerequisites precede the snapshot');
+          // Minimal catalog prerequisites, unrelated to the transcript oracle.
+          window.document.getElementById('dashboard-list').innerHTML = hideStatic ? ''
+            : '<button data-dashboard-id="shared-demo"></button><button data-dashboard-id="modeler-3d"></button>';
+          const content = window.document.getElementById('dashboard-content');
+          content.dataset.boardState = hideStatic ? 'empty' : 'ready';
+          content.textContent = hideStatic ? 'No dashboards configured' : '';
+        },
+      };
+      const ctx = { session, fixture, modelerFixtureUrl: fixtureUrl, configureModeler: async () => {},
+        cdp: { sleep: async () => { throw new Error('reload should already be ready'); } },
+        report: { ok: (name, pass) => assert.equal(pass, true, name) },
+        catalog: { fixture: { specId: 'fixture-catalog', versions: [{ version: 'v1' }, { version: 'v2' }] },
+          publish() {}, seedReports() {}, remove() {}, configure: async value => { configured = value; } } };
+      const scenario = SCENARIOS.find(([name]) => name === scenarioName)[1];
+      await assert.rejects(() => scenario(ctx), error => error === stopAfterSnapshot);
+      assert.deepEqual(snapshot.states, files.length ? states : [], 'snapshot must wait for every file to reach a final state');
+      assert.equal(snapshot.transcript, list.textContent, 'snapshot keeps the whole settled transcript text');
+      assert.ok(snapshot.transcript.includes('fixture answer'), 'answered entries settle before file labels');
+      for (const label of files.length ? labels : []) assert.ok(snapshot.transcript.includes(label), label);
+      assert.equal(fileChecks, initialState === 'final' || !files.length ? 0 : 3);
+      if (fileChecks) assert.deepEqual(pendingStates[0], [initialState, initialState, initialState]);
+      const connected = waits.findIndex(expression => expression.includes('getChatStreamState'));
+      const transcript = waits.findIndex(expression => expression.includes('textContent.includes'));
+      const answered = waits.findIndex(expression => expression.includes('slot-chat-v3-answer-entry'));
+      assert.ok(connected < transcript && transcript < answered, 'existing readiness waits retain their order');
+    });
+  }
+}
+
 const TRANSIENT_RELOAD_ERRORS = ['Execution context was destroyed. (-32000)', 'Cannot find context with specified id (-32000)', 'Inspected target navigated or closed (-32000)'];
 for (const message of TRANSIENT_RELOAD_ERRORS) {
   test(`dashboard reload retries a transient context rollover: ${message}`, async () => {

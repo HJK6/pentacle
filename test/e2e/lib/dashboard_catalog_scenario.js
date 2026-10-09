@@ -6,7 +6,7 @@
 // no catalog/report reply, adapter registration, or browser SRI result is faked.
 const crypto = require('node:crypto');
 const { reportChecks } = require('./web_voice_scenario');
-const { reloadDashboardPage, readDashboardObservation, viewerChecks, chatChecks } = require('./dashboard_scenario');
+const { reloadDashboardPage, readDashboardObservation, viewerChecks, chatChecks, waitForDashboardChatFiles } = require('./dashboard_scenario');
 
 const pageFetch = (url) => `fetch(${JSON.stringify(url)}, { cache: 'no-store' })
   .then(async (r) => ({ status: r.status, text: r.status === 200 ? await r.text() : '' }))`;
@@ -94,6 +94,7 @@ async function prepareCatalogChat(ctx) {
   const answered = await session.eval(`window.cc.promptList({ producer_stream_id: ${JSON.stringify(fixture.streamId)}, open: false })
     .then(reply => (reply?.questions || []).filter(q => q && q.state !== 'open' && q.answer).length)`);
   await session.waitFor(`document.querySelectorAll('.slot-chat-list[data-stream-id="${fixture.streamId}"] .slot-chat-v3-answer-entry').length >= ${Number(answered) || 0}`);
+  await waitForDashboardChatFiles(session, fixture.streamId);
   await session.eval(`(() => {
     const list = document.querySelector('.slot-chat-list[data-stream-id="${fixture.streamId}"]');
     const input = list.closest('.slot-chat-shell').querySelector('.slot-chat-compose-input');

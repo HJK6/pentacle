@@ -52,6 +52,16 @@ function chatChecks(observation) {
     ['returning to Chats hides dashboards and removes its iframe', observation.chatsVisible && observation.dashboardsHidden && observation.frames === 0, observation],
   ];
 }
+async function waitForDashboardChatFiles(session, streamId) {
+  const selector = `.slot-chat-list[data-stream-id=${JSON.stringify(streamId)}]`;
+  // File labels hydrate after the transcript renders. Even a missing state is
+  // still pending, so snapshot only after every label reaches a final state.
+  await session.waitFor(`(() => {
+    const list = document.querySelector(${JSON.stringify(selector)});
+    return !!list && Array.from(list.querySelectorAll('.slot-chat-file-download'))
+      .every(file => ['ready', 'unavailable', 'failed'].includes(file.dataset.fileState));
+  })()`);
+}
 // Navigation can invalidate a CDP execution context between otherwise healthy
 // evaluations, including a navigation from the previous scenario that is still
 // settling when this one arms its marker. Retry only that lifecycle boundary,
@@ -103,6 +113,7 @@ async function webDashboardsRevamp(ctx) {
     const answered = await session.eval(`window.cc.promptList({ producer_stream_id: ${JSON.stringify(fixture.streamId)}, open: false })
       .then((reply) => (reply?.questions || []).filter((q) => q && q.state !== 'open' && q.answer).length)`);
     await session.waitFor(`document.querySelectorAll('.slot-chat-list[data-stream-id="${fixture.streamId}"] .slot-chat-v3-answer-entry').length >= ${Number(answered) || 0}`);
+    await waitForDashboardChatFiles(session, fixture.streamId);
     await session.eval(`(() => {
       const list = document.querySelector('.slot-chat-list[data-stream-id="${fixture.streamId}"]');
       const input = list.closest('.slot-chat-shell').querySelector('.slot-chat-compose-input');
@@ -158,4 +169,4 @@ async function webDashboardsRevamp(ctx) {
     await reloadDashboardPage(ctx);
   }
 }
-module.exports = { readDashboardObservation, listChecks, viewerChecks, configChecks, chatChecks, reloadDashboardPage, webDashboardsRevamp };
+module.exports = { readDashboardObservation, listChecks, viewerChecks, configChecks, chatChecks, waitForDashboardChatFiles, reloadDashboardPage, webDashboardsRevamp };
