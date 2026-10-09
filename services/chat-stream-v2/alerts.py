@@ -27,13 +27,14 @@ class Alerts:
         log.warning("ALERT %s %s", kind, fields)
 
     async def record(self, kind: str, **fields: object) -> str | None:
-        """Log, then durably record the fact its fixed adapter maps, if any.
+        """Durably record the fact a kind's fixed adapter maps; one ALERT log.
 
         Async producers replace `emit` with `await record` to make a typed
-        fact; a mapping error is a caller bug and raises.
+        fact. The log carries only the kind and the typed fact, never the raw
+        fields. A mapping error is a caller bug and raises.
         """
-        self.emit(kind, **fields)
         fact = adapt(kind, fields)
+        log.warning("ALERT %s %s", kind, fact)
         return None if fact is None else await self.error(fact)
 
     async def error(self, fact: ErrorFact, *, principal: str | None = None) -> str | None:

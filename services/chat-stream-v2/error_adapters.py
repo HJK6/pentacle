@@ -39,7 +39,8 @@ class ErrorFact:
 
     def __post_init__(self) -> None:
         if (
-            self.code not in FAMILY_CODES.get(self.family, ())
+            not all(isinstance(v, str) for v in (self.family, self.code, self.condition))
+            or self.code not in FAMILY_CODES.get(self.family, ())
             or not isinstance(self.episode_id, str)
             or not _EPISODE.fullmatch(self.episode_id)
             or self.condition not in CONDITIONS
