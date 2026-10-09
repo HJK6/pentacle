@@ -10,7 +10,7 @@ const { publicChatRendererContracts } = require('./public_chat_renderer_contract
 const { micPanelAnswerWindow } = require('./mic_panel_scenario');
 const { webVoice } = require('./web_voice_scenario');
 const { chatFileDelivery } = require('./chat_file_delivery_scenario');
-const { webDashboardsRevamp } = require('./dashboard_scenario');
+const { webDashboardsRevamp, reloadDashboardPage } = require('./dashboard_scenario');
 const { dashboardCatalog } = require('./dashboard_catalog_scenario');
 const { webWorkLanes } = require('./work_lanes_scenario');
 
@@ -291,7 +291,7 @@ async function slotSurvivesCcReconnect(ctx) {
         window.WebSocket.prototype = N.prototype;
         window.WebSocket.CONNECTING=N.CONNECTING; window.WebSocket.OPEN=N.OPEN; window.WebSocket.CLOSING=N.CLOSING; window.WebSocket.CLOSED=N.CLOSED;
       })();` });
-    await session.send('Page.reload', {});
+    await reloadDashboardPage(ctx);
     await waitForValue(session, cdp, 'typeof window.focusStreamId === "function" && !!document.getElementById("session-list")',
       (v) => v === true, { timeoutMs, label: 'app ready after reload' });
     await waitForValue(session, cdp, 'window.cc.getChatStreamState().then((s)=>s.connected===true)', (v) => v === true,
@@ -407,7 +407,7 @@ async function slotSurvivesCcReconnect(ctx) {
     runtime.freezeTmux = null;
     let cleanupOk = true;
     try {
-      await session.send('Page.reload', {});
+      await reloadDashboardPage(ctx);
       await waitForValue(session, cdp, '!!(window.cc && window.HOST)', (v) => v === true, { timeoutMs, label: 'app ready after cleanup reload' });
       await waitForValue(session, cdp, 'window.cc.getChatStreamState().then((s)=>s.connected===true)', (v) => v === true, { timeoutMs, label: 'reconnected after cleanup reload' });
     } catch (e) { cleanupOk = false; report.note('cleanup reload failed: ' + (e && e.message)); }

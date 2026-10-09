@@ -1,5 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
+const { reloadDashboardPage } = require('./dashboard_scenario');
 
 const geometry = `(() => {
   const grid = document.querySelector('.grid');
@@ -48,13 +49,12 @@ async function doubleTap(session, touch=false, row=0) {
   if(!valid)throw Object.assign(Error('double-tap injection did not meet gesture timing contract: '+JSON.stringify(events)),{classification:'HARNESS_ERROR'});
 }
 
-async function reload(session) {
-  await session.eval('window.__splitOldDocument=true');
-  await session.send('Page.reload');
-  await session.waitFor("!window.__splitOldDocument && document.readyState==='complete' && document.querySelectorAll('.grid-col-resizer[aria-valuenow]').length===2");
+async function reload(session, cdp, timeoutMs) {
+  await reloadDashboardPage({ session, cdp, timeoutMs });
+  await session.waitFor("document.readyState==='complete' && document.querySelectorAll('.grid-col-resizer[aria-valuenow]').length===2");
   await settle(session);
 }
-async function runGridSplit({session,report}) {
+async function runGridSplit({session,report,cdp,timeoutMs}) {
   await session.waitFor("document.readyState==='complete' && document.querySelectorAll('.grid-col-resizer[aria-valuenow]').length===2");
   const before=await session.eval(geometry);
   report.ok('two row-scoped accessible dividers are rendered',before.handles.length===2&&before.handles.every((h,i)=>h.width>=10&&Math.abs(h.height-before.cells[i*2].height)<2),before);
@@ -62,7 +62,7 @@ async function runGridSplit({session,report}) {
   report.ok('top30/70 leaves bottom50/50 and rows/sidebar unchanged',Math.abs(top.cells[0].width/(top.grid.width-top.gap)-.3)<.005&&Math.abs(top.cells[2].width-before.cells[2].width)<2&&top.cells.every((c,i)=>c.y===before.cells[i].y&&c.height===before.cells[i].height)&&top.sidebar.width===before.sidebar.width,top);
   const both=await drag(session,.65,1);
   report.ok('bottom65/35 leaves top30/70 unchanged',Math.abs(both.cells[2].width/(both.grid.width-both.gap)-.65)<.005&&Math.abs(both.cells[0].width-top.cells[0].width)<2,both);
-  await reload(session);
+  await reload(session, cdp, timeoutMs);
   const restored=await session.eval(geometry);
   report.ok('both row preferences survive true reload',Math.abs(restored.saved-.3)<.005&&Math.abs(restored.savedBottom-.65)<.005&&restored.cells.every((c,i)=>Math.abs(c.width-both.cells[i].width)<2),restored);
   await doubleTap(session);
@@ -75,11 +75,11 @@ async function runGridSplit({session,report}) {
 
   // Migrate a real old settings record; a true reload must not rewrite it.
   await session.eval(`localStorage.setItem('pentacle.settings.v1',JSON.stringify({appearance:{gridColSplit:.61,theme:'dark',density:'comfortable',keep:'unchanged'},features:{inputBar:true}}))`);
-  await reload(session);
+  await reload(session, cdp, timeoutMs);
   const migrated=await session.eval(geometry);
   report.ok('legacy preference initializes both without eager persistence',migrated.saved===.61&&migrated.savedBottom===.61&&migrated.appearance.gridColSplitTop===undefined&&migrated.appearance.gridColSplitBottom===undefined&&migrated.cells.filter((_,i)=>i%2===0).every(c=>Math.abs(c.width/(migrated.grid.width-migrated.gap)-.61)<.005),migrated);
   await drag(session,.3);
-  await reload(session);
+  await reload(session, cdp, timeoutMs);
   const partial=await session.eval(geometry);
   report.ok('one saved row leaves sibling legacy fallback and unrelated preferences intact',Math.abs(partial.saved-.3)<.005&&partial.savedBottom===.61&&partial.appearance.keep==='unchanged'&&partial.appearance.gridColSplit===.61,partial);
   for(const row of [0,1]) {

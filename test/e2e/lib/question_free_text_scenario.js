@@ -1,9 +1,10 @@
 'use strict';
+const { reloadDashboardPage } = require('./dashboard_scenario');
 const { fixtureRequest } = require('./closed_chat_scenario');
 
 // Exercise the complete renderer adapter and durable resolution using only the
 // gate's isolated producer. Live asking-seat delivery is qualified separately.
-async function questionFreeText({ session, report, fixture, runtime, cdp }) {
+async function questionFreeText({ session, report, fixture, runtime, cdp, timeoutMs }) {
   if (!fixture || !runtime.fixtureTokens) {
     report.note('no isolated question producer: free-text scenario excluded');
     return;
@@ -55,9 +56,7 @@ async function questionFreeText({ session, report, fixture, runtime, cdp }) {
     report.ok(`${mode} durable answer resolved once to its producer`, status.question?.state === 'answered' && status.question?.producer_stream_id === fixture.streamId,
       { state:status.question?.state, answer:status.question?.answer, producer:status.question?.producer_stream_id });
     await session.waitFor(`!document.querySelector(${JSON.stringify(card)})`);
-    await session.eval('window.__questionOldDocument = true');
-    await session.send('Page.reload');
-    await session.waitFor("!window.__questionOldDocument && document.readyState==='complete' && typeof window.focusStreamId==='function'");
+    await reloadDashboardPage({ session, cdp, timeoutMs });
     // The reloaded page loads its session list asynchronously; focusStreamId
     // returns false (and does nothing) until the fixture session is known.
     await session.waitFor(`window.focusStreamId(${JSON.stringify(fixture.streamId)}) === true`);
