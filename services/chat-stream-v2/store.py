@@ -60,6 +60,7 @@ from store_qa import QaStoreMixin
 from store_exchange import ExchangeStoreMixin
 
 from store_work_lanes import _WorkLanesStoreMixin, ensure_work_lane_schema
+from store_work_index import WorkIndexStoreMixin
 from store_external_work import EXTERNAL_WORK_DDL, _ExternalWorkStoreMixin
 from store_routing import (
     ASSISTANT_COMPOSITE_LANES_DDL,
@@ -1378,7 +1379,7 @@ def _iso_epoch(value: object) -> float | None:
 
 from store_voice_operations import VoiceOperationsStoreMixin, DDL as VOICE_OPERATIONS_DDL
 
-class Store(VoiceOperationsStoreMixin, store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
+class Store(VoiceOperationsStoreMixin, WorkIndexStoreMixin, store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000) -> None:

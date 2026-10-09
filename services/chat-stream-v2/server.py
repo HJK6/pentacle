@@ -3553,10 +3553,18 @@ class Server:
         shown = await self.store.get_work_lane(lane_id) if lane_id else None
         if shown is None:
             raise VerbError("work_lane_not_found", "no first-class lane with that id")
-        listed = await self.work_lanes.list(include_done=True)
-        projected = next((lane for lane in listed["lanes"] if lane["lane_id"] == lane_id), None)
+        from work_lanes_projection import project_lane, presence_index, _iso_now
+        from work_lane_progress import lane_progress
+        rows = await self.store.work_lane_rows(include_done=True)
+        row = next((row for row in rows if row["lane_id"] == lane_id), None)
+        projected = None
+        if row is not None:
+            row.update(shown["lane"], _members=shown["members"])
+            presence = presence_index(self.sessions.list_open()).get(str(row.get("bound_stream_id") or ""))
+            projected = {**project_lane(row, presence, _iso_now()), **lane_progress(row, all_members=True)}
         return {"type": "work_lanes.show.ok", "lane": shown["lane"], "projection": projected,
-                "events": shown["events"], "updates": shown["updates"]}
+                "events": shown["events"], "updates": shown["updates"], "members": shown["members"],
+                "work_index": await self.store.work_index_status()}
 
     async def _on_work_lanes_adopt_preview(self, msg: dict[str, Any]) -> dict[str, Any]:
         self._work_lanes_reader(msg)
@@ -3565,6 +3573,20 @@ class Server:
             raise VerbError("assistant_composite_unavailable", "no assistant composite")
         candidates = await self.store.work_lane_adopt_preview(
             composite_stream_id=composite.config.stream_id, env_binding=composite._env_binding())
+        if msg.get("epic") is not None:
+            if not isinstance(msg["epic"], str) or not msg["epic"].strip():
+                raise VerbError("work_lane_epic_invalid", "epic must be an id")
+            specs = self.work_lanes.specs
+            if specs is None:
+                raise VerbError("work_index_unavailable", "work index is unavailable")
+            try:
+                members = await asyncio.to_thread(specs.epic_spec_members, msg["epic"])
+            except ValueError as exc:
+                raise VerbError(str(exc), str(exc)) from None
+            for candidate in candidates:
+                candidate["members"] = members.copy()
+                candidate["member_sources"] = [{"epic_id": msg["epic"], "source": "catalog"}]
+                candidate["no_spec_reason"] = None
         return {"type": "work_lanes.adopt_preview.ok", "candidates": candidates}
 
     async def _on_assistant_binding(self, msg: dict[str, Any]) -> dict[str, Any]:

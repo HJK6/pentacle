@@ -17,6 +17,9 @@ import time
 import uuid
 from typing import Any, Callable
 
+from work_lane_members import validate_members, validate_title
+from store_work_index import ensure_work_index_schema, member_ids, members_conn
+from work_lane_migration import upgrade_events
 from assistant_policy import AssistantPolicy
 from store_routing import _assistant_actor_conn, _record_publication_conn
 
@@ -32,6 +35,8 @@ WORK_LANE_COLUMNS = (
     ("first_admitted_at", "TEXT"),
     ("done_at", "TEXT"),
     ("last_update_id", "TEXT"),
+    ("members_json", "TEXT"),
+    ("no_spec_reason", "TEXT"),
 )
 WORK_LANE_EVENTS_DDL = """
 CREATE TABLE IF NOT EXISTS v2_work_lane_events (
@@ -39,7 +44,7 @@ CREATE TABLE IF NOT EXISTS v2_work_lane_events (
     lane_id TEXT NOT NULL,
     stream_id TEXT NOT NULL,
     operation TEXT NOT NULL CHECK(operation IN
-        ('adopt','set_state','set_lead','set_chat','set_text','set_owner','update','lead_lost','lead_handoff')),
+        ('adopt','set_state','set_lead','set_chat','set_text','set_owner','update','lead_lost','lead_handoff','set_members','item_change')),
     source_id TEXT NOT NULL,
     actor_stream_id TEXT,
     actor_generation TEXT,
@@ -68,7 +73,7 @@ WORK_LANE_INDEX_DDL = (
 WORK_STATES = ("active", "paused", "blocked", "done")
 OPEN_WORK_STATES = ("active", "paused", "blocked")
 OWNER_KINDS = ("operator", "fd")
-PRODUCT_OPERATIONS = ("adopt", "set_state", "set_lead", "set_chat", "set_text", "set_owner", "update")
+PRODUCT_OPERATIONS = ("adopt", "set_state", "set_lead", "set_chat", "set_text", "set_owner", "update", "set_members")
 UPDATE_KINDS = ("major_decision", "lane_started", "lane_completed", "lane_blocked", "lane_unblocked", "milestone")
 GUARDED_ACTIONS = ("set_state:done", "set_owner:fd", "lane.close", "lane.decision:cancel")
 TITLE_MAX = 120
@@ -85,7 +90,8 @@ def ensure_work_lane_schema(conn: sqlite3.Connection) -> None:
     for column, ddl in WORK_LANE_COLUMNS:
         if column not in present:
             conn.execute(f"ALTER TABLE v2_assistant_composite_lanes ADD COLUMN {column} {ddl}")
-    conn.execute(WORK_LANE_EVENTS_DDL)
+    upgrade_events(conn, WORK_LANE_EVENTS_DDL)
+    ensure_work_index_schema(conn)
     for ddl in WORK_LANE_INDEX_DDL:
         conn.execute(ddl)
 
@@ -287,7 +293,11 @@ def _consume_confirmation_conn(conn, question_id: str) -> None:
 
 def lane_row_conn(conn, lane_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM v2_assistant_composite_lanes WHERE lane_id=?", (lane_id,)).fetchone()
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    lane = dict(row)
+    lane["members"] = member_ids(lane)
+    return lane
 
 
 def _event_out(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -382,7 +392,7 @@ class _WorkLanesStoreMixin:
             updates = [{"update_id": e["update_id"], "kind": e["update_kind"],
                         "event_id": e["publication_event_id"], "ts": e["created_at"],
                         "source_id": e["source_id"]} for e in events if e.get("update_kind")]
-            return {"lane": lane, "events": events, "updates": updates}
+            return {"lane": lane, "events": events, "updates": updates, "members": members_conn(conn, lane)}
         return await self.submit(_op)
 
     async def work_lane_rows(self, *, include_done: bool = False) -> list[dict[str, Any]]:
@@ -392,6 +402,12 @@ class _WorkLanesStoreMixin:
             lanes = [dict(r) for r in conn.execute(
                 f"SELECT * FROM v2_assistant_composite_lanes WHERE work_state IN ({marks})", states)]
             for lane in lanes:
+                lane["_members"] = members_conn(conn, lane)
+                marks = ",".join("?" for _ in PRODUCT_OPERATIONS)
+                fd_stamp = conn.execute(
+                    f"SELECT MAX(created_at) FROM v2_work_lane_events WHERE lane_id=? AND operation IN ({marks})",
+                    (lane["lane_id"], *PRODUCT_OPERATIONS)).fetchone()[0]
+                lane["_fd_updated_at"] = fd_stamp or lane.get("first_admitted_at")
                 lead = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
                 lane["_lead_row"] = lead
                 lane["_qualifies"] = work_lane_lead_qualifies(lane, lead)
@@ -649,9 +665,17 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if not payload or set(payload) - {"title", "summary"}:
                 raise ValueError("work_lane_payload_invalid")
             if "title" in payload:
-                changes["title"] = _text(payload["title"], TITLE_MAX, "work_lane_title_invalid", required=True)
+                changes["title"] = validate_title(_text(payload["title"], TITLE_MAX, "work_lane_title_invalid", required=True))
             if "summary" in payload:
                 changes["summary"] = _text(payload["summary"], SUMMARY_MAX, "work_lane_payload_invalid") or ""
+        elif operation == "set_members":
+            if set(payload) - {"members", "no_spec_reason"} or "members" not in payload:
+                raise ValueError("work_lane_payload_invalid")
+            members, reason = validate_members(payload["members"], payload.get("no_spec_reason"))
+            if members == member_ids(lane) and reason == lane.get("no_spec_reason"):
+                raise ValueError("work_lane_members_unchanged")
+            changes.update(members_json=_canonical(members), no_spec_reason=reason)
+            event_payload = {"members": members, "no_spec_reason": reason}
         elif operation == "set_owner":
             if set(payload) - {"to", "operator_confirmation"} or payload.get("to") not in OWNER_KINDS:
                 raise ValueError("work_lane_payload_invalid")
@@ -719,7 +743,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
 
 def _adopt_conn(conn, *, stream_id, request_id, payload, actor, generation, env_binding, stamp):
     allowed = {"adoption_key", "title", "summary", "owner_kind", "work_state", "blocker", "lead",
-               "visible_chat", "lane_id", "emit_started", "evidence"}
+               "visible_chat", "lane_id", "emit_started", "evidence", "members", "no_spec_reason"}
     if set(payload) - allowed:
         raise ValueError("work_lane_payload_invalid")
     key = _text(payload.get("adoption_key"), 300, "work_lane_adoption_key_invalid", required=True)
@@ -727,7 +751,7 @@ def _adopt_conn(conn, *, stream_id, request_id, payload, actor, generation, env_
         raise ValueError("work_lane_adoption_key_invalid")
     if conn.execute("SELECT 1 FROM v2_assistant_composite_lanes WHERE adoption_key=?", (key,)).fetchone():
         raise ValueError("work_lane_adoption_key_exists")
-    title = _text(payload.get("title"), TITLE_MAX, "work_lane_title_invalid", required=True)
+    title = validate_title(_text(payload.get("title"), TITLE_MAX, "work_lane_title_invalid", required=True))
     summary = _text(payload.get("summary"), SUMMARY_MAX, "work_lane_payload_invalid") or ""
     owner = payload.get("owner_kind")
     if owner is None:
@@ -759,10 +783,12 @@ def _adopt_conn(conn, *, stream_id, request_id, payload, actor, generation, env_
     emit = payload.get("emit_started", False)
     if not isinstance(emit, bool):
         raise ValueError("work_lane_payload_invalid")
+    members, reason = validate_members(payload.get("members", []), payload.get("no_spec_reason"))
     target_id = payload.get("lane_id")
     columns = {"work_state": state, "work_state_reason": "fd", "blocker": blocker, "owner_kind": owner,
                "title": title, "visible_chat_stream_id": chat, "visible_chat_generation": chat_gen,
-               "adoption_key": key, "first_admitted_at": stamp, "updated_at": stamp}
+               "adoption_key": key, "first_admitted_at": stamp, "updated_at": stamp,
+               "members_json": _canonical(members), "no_spec_reason": reason}
     if bound[0] is not None or target_id is None:
         columns.update(bound_stream_id=bound[0], bound_generation=bound[1], bound_backend_kind=bound[2])
     if target_id is not None:
@@ -822,6 +848,7 @@ def _fd_lineage_conn(conn, stream_id: str, payload: dict[str, Any], env_binding)
 
 
 def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dict[str, Any]]:
+    from store_specs import _hydrate_spec_row
     bindings = _binding_streams_conn(conn, env_binding)
     adopted_streams = {r[0] for r in conn.execute(
         "SELECT adoption_key FROM v2_assistant_composite_lanes WHERE adoption_key IS NOT NULL")}
@@ -830,14 +857,14 @@ def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dic
             "SELECT s.*, g.generation AS session_generation FROM sessions s "
             "LEFT JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
             "WHERE s.status='open' ORDER BY s.created_at, s.host, s.session_name"):
-        row = dict(raw)
+        row = _hydrate_spec_row(dict(raw))
         sid = f"{row['host']}:{row['session_name']}"
         row["stream_id"] = sid
         if (row.get("visibility") or "default") not in ("default", "visible") or _is_composite(row) \
                 or _protected(row) or sid in bindings:
             continue
         try:
-            spec_ids = json.loads(row.get("spec_ids") or "[]")
+            spec_ids = row.get("spec_ids") or []
         except ValueError:
             spec_ids = []
         if not (row.get("role") in ("lead", "nexus") or (not row.get("parent_stream_id") and spec_ids)):
@@ -847,7 +874,7 @@ def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dic
             continue
         lane = {"bound_stream_id": sid, "bound_generation": row.get("session_generation")}
         try:
-            provenance = json.loads(row.get("spec_binding_provenance") or "[]")
+            provenance = row.get("spec_binding_provenance") or []
         except ValueError:
             provenance = []
         out.append({
@@ -855,6 +882,9 @@ def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dic
             "lead": {"stream_id": sid, "generation": row.get("session_generation")},
             "visible_chat": {"stream_id": sid, "generation": row.get("session_generation")},
             "owner_kind": None,
+            "members": row.get("qualified_spec_ids") or [],
+            "member_sources": provenance,
+            "no_spec_reason": None,
             "work_state": "active" if work_lane_lead_qualifies(lane, row) else "paused",
             "evidence": {
                 "parent_stream_id": row.get("parent_stream_id"), "role": row.get("role"),
@@ -871,6 +901,7 @@ def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dic
             (composite_stream_id,)):
         lane = dict(raw)
         lead_row = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
+        qualified = _hydrate_spec_row(lead_row) if lead_row else {}
         admit = conn.execute(
             "SELECT payload_json FROM v2_assistant_composite_operations WHERE lane_id=? AND operation='lane.admit' "
             "ORDER BY created_at LIMIT 1", (lane["lane_id"],)).fetchone()
@@ -891,6 +922,9 @@ def _adopt_preview_conn(conn, composite_stream_id: str, env_binding) -> list[dic
             "visible_chat": {"stream_id": composite_stream_id},
             "owner_kind": None,
             "work_state": "active" if work_lane_lead_qualifies(lane, lead_row) else "paused",
+            "members": qualified.get("qualified_spec_ids") or [],
+            "member_sources": qualified.get("spec_binding_provenance") or [],
+            "no_spec_reason": None,
             "evidence": {"phase": lane["phase"], "admit_route": has_admit,
                          "bound_backend_kind": lane.get("bound_backend_kind")},
         })

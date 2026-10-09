@@ -59,3 +59,111 @@ Updates arrive both live (as a `chat.event` broadcast) and through history (`req
 ## CLI
 
 `agent-orch work-lane list [--include-done] [--json]`, `show <lane_id> [--json]`, `adopt --preview | --apply <json-file>`, and the FD-only commands `set-state | set-lead | set-chat | set-text | set-owner | update <lane_id> --expected-version N --request-id <stable id>`, plus `request-confirmation`. Retry with the same `--request-id`: a replay returns `duplicate:true` and has no second effect. `adopt --apply` uses `request_id = "adopt:" + adoption_key`, and each entry must carry an explicit `owner_kind`. `owner_kind: fd` needs FD lineage evidence; when lineage is unclear, adopt the lane as `operator`. Preview keys are `stream:<stream_id>` for open seats and `request:<request_message_id>:<lane_id>` for routing lanes (one operator request may admit several lanes, so the lane id keeps each key unique). Preview titles are derived within the 120-char bound: the whole subject when it fits, else its first sentence, else a word-boundary cut with an ellipsis; the full subject stays in `summary`.
+
+## File-derived work (increment 1)
+
+The `work_lanes_v1` capability carries additive member facts; the shared golden
+fixture has version 2. Existing keys, lane order, counts, authentication,
+lead-loss rules and status cards keep their prior behavior. A paused lane with
+no lead reads the same work facts as an active lane.
+
+The daemon reuses the shared specs subsystem and its watcher/debounce.
+`PENTACLE_MEMORY_ROOT` names the root containing `work/<status>/<item>/spec.md`
+and `summary.md`. A bounded sweep reads those files at that depth, excluding
+artifact directories, conflict copies and symlinks. `WORK_INDEX_SWEEP_S`
+defaults to 300 seconds. The existing inventory loop owns the sweep; there is
+no new service, database file, catalog publisher or agent duty.
+
+Members resolve by declared YAML `id`, including after folder moves; the
+physical directory supplies status. The shared loader handles quoted and
+multiline YAML. Acceptance counts include only boxes in `## Acceptance Criteria`,
+ignore fenced examples and count `(waived: reason)` as checked. Estimates parse
+positive `elapsed_delivery_h: 2–4 (median 3)` ranges in `## Estimate`, retaining
+`provisional`. Missing fields are null. Summary `**Status** — ...` and
+`**Next action** — ...` text is limited to 280 characters. Public golden inputs
+are invented examples.
+
+Each member has `spec_id`, `title`, `status`, `terminal`, `ac_checked`, `ac_total`,
+`estimate {p25,p75,median,provisional}` or null, `status_text`, `next_action_text`,
+`source_changed_at`, `observation {quality,observed_at,error}` and `obs_rev`.
+`terminal` is `completed`, `deprecated` or null. Quality is `fresh`, `stale`,
+`error`, `missing` or `ambiguous`; it does not describe lane activity.
+Transient loss or split writes retain last-good facts as stale. Malformed YAML
+or read errors retain them as error. Missing files and duplicates converge
+after `WORK_INDEX_SETTLE_S` (default 300 seconds) and at least two periodic
+sweeps; callbacks cannot accelerate the sweep count. Coherent reads restore
+fresh facts. Root loss retains the durable snapshot with index availability false.
+
+Lane additions are `members` (first 8, in membership order), `members_total`,
+`no_spec_reason`, `items_total`, `items_completed`, `items_dropped`, `items_open`,
+`items_unresolved`, `ac_checked`, `ac_total`, `ac_members`, `open_estimate_h`,
+`open_estimated`, `estimate_complete` and `freshness_at`. Item counts form a
+partition. AC totals sum resolved members with AC data; `ac_members` exposes
+coverage and totals are null without coverage. Estimates sum only estimated
+open members, with null when none are estimated. `estimate_complete` means
+every open member has an estimate. `freshness_at` uses source changes and lane
+operations, never sweep time. It is not a forecast.
+
+Inventory and list replies add `work_index {available,root_configured,
+snapshot_at,last_sweep_at,error}`. `show --members` returns all members (at most
+32) beside existing events and updates, in that same shape and order without
+a cursor. Increment 1 omits `completion_pending`, `lead_reported_done` and
+`stale`; these arrive together with their semantics and delivery in increment 2.
+No completion is inferred from report prose.
+
+### Membership and persistence
+
+Use `work-lane set-members <lane> --member spec_demo__bridge [--member ...]
+--expected-version N --request-id ID` for ordered full replacement. Only the
+authenticated current FD binding can write it. IDs are canonical, unique
+`spec_...` values; 1–32 members are allowed. Empty membership requires
+`--no-spec-reason` (at most 280 characters). Unknown IDs appear missing.
+New adoption supplies members or a reason; legacy lanes retain their lifecycle
+behavior. `adopt --preview --epic <id>` expands catalog members once, filters
+to specs and deduplicates. The FD edits and confirms the list. Qualified lead
+spec suggestions appear only in preview with provenance. Preview writes nothing.
+
+Membership retains request-keyed receipts, digest conflicts and replay-before-CAS.
+An identical new request is refused as `work_lane_members_unchanged`; an exact
+retry of the original request replays. Title writes reject the narrow identifier
+pattern in `work_lane_members.py`; unrelated writes on legacy titles are allowed.
+
+Last-good observations and quality/settle state live in the existing Store's
+`v2_work_item_observations` table. `v2_work_index_state` holds one metadata row.
+Both use the same SQLite file and single writer as lanes. Separate observation
+rows keep file-derived writes from incrementing the shared lifecycle version
+or overwriting concurrent membership. The transaction re-reads lane membership.
+
+`obs_rev` starts at 1 and advances only for material fresh changes in status,
+AC counts, estimate, status text or next action. Snapshots and holding lanes'
+`item_change` events commit atomically. IDs are
+`item:<lane_id>:<spec_id>:<obs_rev>`; baseline observations emit nothing.
+A→B→A→B yields revisions 2, 3, 4; restart, stale reads and repeated sweeps emit
+nothing. Item changes remain lane history and never publish chat updates.
+
+### Release preparation and rollback
+
+Migration extends the event CHECK with `set_members` and `item_change`,
+preserving rows, request receipts, indexes and publication references. The
+rollback tool runs against the current owned database in a stopped-daemon
+window: archive the two new event kinds, then restore the previous CHECK while
+preserving all other current rows and indexes. Additive member/snapshot data
+remain for a later upgrade. Never restore an old whole-database image over
+concurrent data. The FD retains an independent SQLite preimage and previous
+source/config/PID receipt before deployment.
+
+Forward migration runs through the existing Store schema initialization; no
+numbered migration or second database owner is introduced. Rehearse the
+read-only reverse plan with `python3 services/chat-stream-v2/tools/rollback_work_lane_progress.py
+--db /path/to/owned-copy.db`. In the approved stopped-daemon window, add
+`--apply --confirm-offline` against the current database after retaining its
+backup. Re-upgrade restores archived membership/item receipts and refuses a
+conflicting receipt rather than overwriting it.
+
+At release the FD refreshes the census, reviews the title/member/estimate
+manifest, applies CAS mutations and reads each open lane back. Source validation
+uses disposable synthetic memory and a file database. Production acceptance
+separately binds the candidate/live PID to configured roots and proves a paused
+leadless lane changes within one sweep using an owned temporary item, then
+cleans it up. Never use a real item's checkbox as a fixture. A source or fixture
+pass does not establish deployment.

@@ -6,6 +6,7 @@ import re
 import json
 import threading
 import time
+import yaml
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -20,12 +21,15 @@ from .specs_parser import (
     declared_spec_id,
     has_declared_spec_id,
 )
+from .work_observations import WorkFilesUnsettled, read_work_candidate
+
 
 
 log = logging.getLogger(__name__)
 
 SPEC_ID_RE = re.compile(r"^[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$")
 SPEC_DOCUMENT_PREFIXES = ("spec_", "work_")
+SOURCE_READ_ERRORS = (OSError, ValueError, UnicodeError, yaml.YAMLError)
 
 
 class _TimerLike(Protocol):
@@ -95,8 +99,6 @@ class SpecsSubsystem:
         return "disabled" if self.disabled else self.subsystem_state
 
     def start(self) -> None:
-        if self.disabled:
-            return
         self._attach_or_degrade()
         threading.Thread(target=self._retry_loop, daemon=True).start()
 
@@ -148,9 +150,56 @@ class SpecsSubsystem:
         on_disk = []
         if work_root.is_dir():
             for child in work_root.iterdir():
-                if child.is_dir() and child.name not in seen and not child.name.startswith("."):
+                if child.is_dir() and child.name not in seen and not child.name.startswith((".", "_")) and not child.is_symlink():
                     on_disk.append(child)
         return known + on_disk
+
+    def scan_work_observations(self, *, now: float | None = None) -> dict:
+        """One depth-capped scan; no catalog or artifact reads and no persistence."""
+        # A sweep also covers events missed on new/moved folders. Keep the
+        # existing specs/card readers current when that backstop fires.
+        self._invalidate_presentation_cache()
+        now = time.time() if now is None else now
+        root = self.memory_root
+        if root is None or not root.is_dir() or not (root / "work").is_dir():
+            self.disabled = True
+            return {"available": False, "root_configured": root is not None,
+                    "error": "work_root_unavailable", "candidates": {}, "errors": {}, "scanned_at": now}
+        self.disabled = False
+        candidates, errors = {}, {}
+        try:
+            for directory in self._spawn_work_dirs():
+                if (directory.parent != root / "work" or not directory.is_dir() or directory.is_symlink()
+                        or directory.name.startswith(("_", "."))):
+                    continue
+                for folder in directory.iterdir():
+                    if (not folder.is_dir() or folder.is_symlink() or folder.name.startswith(("_", "."))
+                            or _is_spec_sync_conflict(folder)):
+                        continue
+                    try:
+                        conflicts = any(_is_spec_sync_conflict(p.name) and p.name.startswith(("spec.", "summary."))
+                                        for p in folder.iterdir())
+                        candidate = read_work_candidate(folder, directory.name, now=now, quiet_s=self.debounce_s)
+                        if conflicts:
+                            candidate.update(quality="stale", error="work_sync_conflict")
+                        candidates.setdefault(candidate["spec_id"], []).append(candidate)
+                    except FileNotFoundError:
+                        errors[str(folder)] = {"quality": "missing", "error": "work_file_missing"}
+                    except WorkFilesUnsettled:
+                        errors[str(folder)] = {"quality": "stale", "error": "work_files_unsettled"}
+                    except (OSError, ValueError, UnicodeError) as exc:
+                        errors[str(folder)] = {"quality": "error", "error": "work_read_error:" + type(exc).__name__}
+                    except Exception as exc:
+                        # YAML errors carry source text; never expose it on the wire.
+                        import yaml
+                        if not isinstance(exc, yaml.YAMLError):
+                            raise
+                        errors[str(folder)] = {"quality": "error", "error": "work_yaml_invalid"}
+        except OSError as exc:
+            return {"available": False, "root_configured": True,
+                    "error": "work_scan_error:" + type(exc).__name__, "candidates": {}, "errors": {}, "scanned_at": now}
+        return {"available": True, "root_configured": True, "error": None,
+                "candidates": candidates, "errors": errors, "scanned_at": now}
 
     def _spawn_work_dirs(self) -> list[Path]:
         """Configured status buckets used by authoritative spawn resolution.
@@ -182,10 +231,20 @@ class SpecsSubsystem:
 
             observer = Observer()
             handler = Handler()
+            # Subscribe only to the same bounded depth as source discovery.
+            # Recursive watches would descend into each item's artifact tree.
+            work_root = self.memory_root / "work"
+            if not work_root.is_dir():
+                raise FileNotFoundError(str(work_root))
+            observer.schedule(handler, str(work_root), recursive=False)
             for directory in self._work_dirs():
-                if not directory.is_dir():
-                    raise FileNotFoundError(str(directory))
-                observer.schedule(handler, str(directory), recursive=True)
+                if not directory.is_dir() or directory.is_symlink():
+                    continue
+                observer.schedule(handler, str(directory), recursive=False)
+                for folder in directory.iterdir():
+                    if (folder.is_dir() and not folder.is_symlink() and not folder.name.startswith(("_", "."))
+                            and not _is_spec_sync_conflict(folder)):
+                        observer.schedule(handler, str(folder), recursive=False)
             observer.start()
             self._observer = observer
             self._invalidate_presentation_cache()
@@ -206,10 +265,16 @@ class SpecsSubsystem:
 
     def _retry_loop(self) -> None:
         while not self._stop.wait(self.retry_interval_s):
+            self.disabled = self.memory_root is None or not self.memory_root.is_dir()
             if not self.push_enabled:
                 self._attach_or_degrade()
 
     def _on_fs_event(self, event) -> None:
+        # Inotify also reports our own opens/reads; those must not trigger a
+        # new scan, or observation reads create an unbounded feedback loop.
+        event_type = getattr(event, "event_type", None)
+        if event_type is not None and event_type not in {"created", "modified", "deleted", "moved", "closed"}:
+            return
         if not self.push_enabled:
             return
         paths = [Path(str(getattr(event, "src_path", "") or ""))]
@@ -262,7 +327,11 @@ class SpecsSubsystem:
         # Accept any folder under work/ (including unknown ones) — the parser
         # surfaces unknowns with `status_unknown: true` rather than dropping
         # them silently.
-        return rel.parts[1] if len(rel.parts) >= 2 else None
+        if any(part.startswith(("_", ".")) for part in rel.parts) or len(rel.parts) > 3:
+            return None
+        if len(rel.parts) == 3 and rel.parts[2] not in ("spec.md", "summary.md"):
+            return None
+        return rel.parts[1] if len(rel.parts) >= 2 else "*" if rel.parts else None
 
     def _sync_conflict_count(self) -> int:
         if self.disabled:
@@ -281,13 +350,19 @@ class SpecsSubsystem:
             if status_dir.is_dir():
                 for child in status_dir.iterdir():
                     if child.is_dir() and not _is_spec_sync_conflict(child):
-                        declared_id = declared_spec_id(child)
+                        try:
+                            declared_id = declared_spec_id(child)
+                            has_id = has_declared_spec_id(child)
+                        except SOURCE_READ_ERRORS:
+                            # An unrelated malformed/transient file cannot take
+                            # down the existing specs inventory or resolver.
+                            continue
                         aliases = set(self._spec_id_aliases(declared_id))
                         if self._folder_name_is_declared_alias(child.name, declared_id):
                             aliases.add(child.name)
                         for alias in aliases:
                             folders[alias].append((status_name, child))
-                        if has_declared_spec_id(child):
+                        if has_id:
                             self._declared_id_owners.setdefault(declared_id, []).append((status_name, child))
                             declared_paths[declared_id].add(child)
         self._declared_id_collisions = {
@@ -600,6 +675,24 @@ class SpecsSubsystem:
             return True
         return False
 
+    def epic_spec_members(self, epic_id: str) -> list[str]:
+        """One read-only preview expansion from the catalog; never a live binding."""
+        if self.memory_root is None or not self.memory_root.is_dir():
+            raise ValueError("work_index_unavailable")
+        epics = self._read_json(self.memory_root / "catalog" / "epics.json")
+        epic = next((row for row in epics if isinstance(row, dict) and row.get("id") == epic_id), None) \
+            if isinstance(epics, list) else None
+        if epic is None:
+            raise ValueError("work_lane_epic_not_found")
+        known = set()
+        for name in ("documents.json", "archive.json"):
+            documents = self._read_json(self.memory_root / "catalog" / name)
+            if isinstance(documents, list):
+                known.update(row["id"] for row in documents if isinstance(row, dict)
+                             and row.get("type") == "spec" and isinstance(row.get("id"), str))
+        return list(dict.fromkeys(value for value in epic.get("members", [])
+                                  if isinstance(value, str) and value in known))
+
     def _load_epics(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         raw = self._read_json(self.memory_root / "catalog" / "epics.json")
         if not isinstance(raw, list):
@@ -669,7 +762,10 @@ class SpecsSubsystem:
         for spec_id, matches in sorted(folders.items()):
             lifecycle, folder = self._canonical(matches)
             if folder not in seen_folders:
-                rows.append(self._parse_folder(lifecycle, folder))
+                try:
+                    rows.append(self._parse_folder(lifecycle, folder))
+                except SOURCE_READ_ERRORS:
+                    rows.append(self._synthetic(folder.name, "parse_error"))
                 seen_folders.add(folder)
             if len(matches) > 1 and spec_id not in seen_collisions:
                 rows.append(self._synthetic(spec_id, "multiple_matches"))
