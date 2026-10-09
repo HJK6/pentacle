@@ -1,4 +1,5 @@
 'use strict';
+const { reloadDashboardPage } = require('./dashboard_scenario');
 const fixtureContract = require('../../../pentacle-chat-core/tests/fixtures/work-lanes-inventory.json');
 
 // Web "work lanes" scenario (spec_pentacle__first_class_work_lanes_2026_10, M4).
@@ -30,9 +31,8 @@ async function webWorkLanes(ctx) {
     })();` });
   // Reload and wait for the NEW document: the old one answers readiness probes until it unloads.
   const reloadFresh = async () => {
-    await session.eval('window.__staleDocument = true, true');
-    await session.send('Page.reload', {});
-    await waitForValue(session, cdp, 'window.__staleDocument === undefined && !!window.cc && typeof window.focusStreamId === "function" && !!document.getElementById("session-list")',
+    await reloadDashboardPage(ctx);
+    await waitForValue(session, cdp, '!!window.cc && typeof window.focusStreamId === "function" && !!document.getElementById("session-list")',
       (v) => v === true, { timeoutMs, label: 'fresh document' });
   };
   const reload = async () => {

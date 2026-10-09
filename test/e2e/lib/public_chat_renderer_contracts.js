@@ -1,4 +1,5 @@
 'use strict';
+const { reloadDashboardPage } = require('./dashboard_scenario');
 
 // Fresh renderer-only frames and fake bridges through the real composer.
 // These checks make no provider, transport or steering-ledger delivery claim.
@@ -8,7 +9,7 @@ async function publicChatRendererContracts(ctx) {
   const { waitForValue } = require('./web_scenarios');
   const stream = JSON.stringify(fixture.streamId);
   const reload = async () => {
-    await session.send('Page.reload');
+    await reloadDashboardPage(ctx);
     await waitForValue(session, cdp, '!!(window.PentacleChatStore && window.PentacleChatView && window.cc)', Boolean,
       { timeoutMs, label: 'fresh renderer store after reload' });
   };
