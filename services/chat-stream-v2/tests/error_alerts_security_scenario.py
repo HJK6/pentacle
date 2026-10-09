@@ -269,9 +269,13 @@ async def authentication(h):
     descriptor = os.open(service_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(descriptor, "w") as handle:
         handle.write(service_token)
-    key = "PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE"
-    previous = os.environ.get(key)
-    os.environ[key] = str(service_file)
+    # The fixed producer authenticates only with its configured id and token.
+    saved = {
+        k: os.environ.get(k)
+        for k in ("PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE", "PENTACLE_SYSTEM_PRODUCER_STREAM_ID")
+    }
+    os.environ["PENTACLE_SYSTEM_PRODUCER_STREAM_TOKEN_FILE"] = str(service_file)
+    os.environ["PENTACLE_SYSTEM_PRODUCER_STREAM_ID"] = "altum-bot-cd"
     try:
         async with peer(h) as (socket, _, _):
             await socket.send(
@@ -285,15 +289,17 @@ async def authentication(h):
                 )
             )
             hello = json.loads(await asyncio.wait_for(socket.recv(), 5))
+            # An RPC-mode fixed producer is admitted with a `ready` frame.
             assert (
-                hello.get("type") == "hello"
+                hello.get("type") == "ready"
             ), "fixture service credential did not authenticate"
             cells.append(await denied(h, socket, {}, "fixed-system-producer"))
     finally:
-        if previous is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = previous
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     # Operator registry credentials have revocation, not an invented expiry
     # field. Exercise the actual expiring auth_v2 challenge on its real clock.
