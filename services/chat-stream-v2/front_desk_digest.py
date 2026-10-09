@@ -217,7 +217,7 @@ class FrontDeskDigest:
         size = len('Error alert digest. Awareness only; review=#error-alerts\n'.encode())
         for row in rows:
             member = json.loads(row['metadata'])
-            key = (member['intent_kind'], bool(member.get('awareness')), member.get('policy_mode'))
+            key = (member.get('family') == 'work_lane.v1', member['intent_kind'], bool(member.get('awareness')), member.get('policy_mode'))
             line = row['body'] + '\n'
             length = len(line.encode())
             if batch and (key != batch_key or len(batch) >= 100 or size + length > 16128):
@@ -234,13 +234,16 @@ class FrontDeskDigest:
         for batch in batches:
             ids = [r['notice_id'] for r in batch]
             nid = 'error-digest:' + hashlib.sha256(('\0'.join(ids) + '\0' + target + '\0' + generation).encode()).hexdigest()
-            body = 'Error alert digest. Awareness only; review=#error-alerts\n' + '\n'.join(r['body'] for r in batch)
+            lane = json.loads(batch[0]['metadata']).get('family') == 'work_lane.v1'
+            header = 'Work update digest. Awareness only.\n' if lane else 'Error alert digest. Awareness only; review=#error-alerts\n'
+            body = header + '\n'.join(r['body'] for r in batch)
             metas = [json.loads(r['metadata']) for r in batch]
             meta = {'error_alert_v1': True, 'typed_digest': True, 'front_desk_digest': True,
                     'root_generation': generation, 'member_notice_ids': ids,
                     'members': list(dict.fromkeys(m['notification_id'] for m in metas)),
                     'intent_kind': metas[0]['intent_kind'], 'awareness': bool(metas[0].get('awareness')),
-                    'policy_mode': metas[0].get('policy_mode')}
+                    'policy_mode': metas[0].get('policy_mode'),
+                    'family': 'work_lane.v1' if lane else None}
             _insert_outbound_notice_conn(conn, notice_id=nid, tell_id=nid, kind='error_alert', dedupe_key=nid,
                 recipient_stream_id=target, body=body, metadata=meta)
             for row, member in zip(batch, metas):

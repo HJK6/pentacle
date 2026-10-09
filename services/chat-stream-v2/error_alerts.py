@@ -49,6 +49,7 @@ EXPECTED_CODES = {
 #: Fixed delivery policy; excess immediates fold into the digest by rate limit.
 POLICY = {"effective_delivery_mode": "immediate"}
 VOICE = "voice_operation.v1"
+WORK_LANE = "work_lane.v1"
 _PRINCIPAL = re.compile(r"(daemon|system):[A-Za-z0-9._:@-]{1,160}")
 DELIVERY_FIELDS = (
     "state", "notice_id", "tell_id", "recipient_stream_id", "recipient_generation",
@@ -200,6 +201,11 @@ class ErrorAlerts:
         async with self._facts_lock:
             prior = await self.notify._db.call("error_get", nid)
             ctx = prior and prior["error_context"]
+            if fact.family == WORK_LANE:
+                # Lane-owned clears are silent; retain the durable opening fact.
+                # Replayed two-step sink calls return the canonical ref unchanged.
+                if prior or fact.condition != "active":
+                    return nid if prior else None
             if not ctx and fact.condition in ("recovered", "cancelled"):
                 return None
             if ctx and ctx["condition"] in ("recovered", "cancelled"):
@@ -222,7 +228,7 @@ class ErrorAlerts:
                     "stage": fact.stage,
                     "cutover_at": self.cutover_at,
                 },
-                title="Error alert needs review",
+                title="Work update" if fact.family == WORK_LANE else "Error alert needs review",
                 now=iso(),
             )
         return row["notification_id"]
@@ -603,7 +609,8 @@ class ErrorAlerts:
     async def _reconcile_fact(self, row, now):
         ctx = row["error_context"]
         nid = row["notification_id"]
-        policy = POLICY
+        lane = ctx["family"] == WORK_LANE
+        policy = {"effective_delivery_mode": "digest"} if lane else POLICY
         notices = {r["notice_id"]: r for r in await self.notice_rows()}
         # A crash can commit enqueue before the cross-store link/watermark.
         # Recover those immutable rows before applying cancellation or policy.
@@ -665,7 +672,7 @@ class ErrorAlerts:
             return
         if ctx["code"] == "report_gap":
             return
-        if self.mode() != "on" or policy["effective_delivery_mode"] == "muted":
+        if (not lane and self.mode() != "on") or policy["effective_delivery_mode"] == "muted":
             if ctx["desired_notice_revision"] == ctx["enqueued_notice_revision"]:
                 await self.notify._db.call("error_patch", nid, {"disposition": "muted"})
             return
@@ -681,6 +688,7 @@ class ErrorAlerts:
         )
         need_recovery = (
             recovering
+            and not lane
             and attempted
             and (not intent or intent.get("kind") != "recovery")
         )
@@ -767,7 +775,7 @@ class ErrorAlerts:
                 ).encode()
             ).hexdigest()
         )
-        prefix = (
+        prefix = "Work update" if ctx["family"] == WORK_LANE else (
             "BLOCKER"
             if intent["kind"] == "initial" and not awareness
             else "Error alert update"
@@ -873,7 +881,8 @@ class ErrorAlerts:
     async def guard(self, row):
         m = metadata(row)
         composite = self.composite
-        if self.mode() != "on":
+        lane = m.get("family") == WORK_LANE
+        if not lane and self.mode() != "on":
             return NoticeDecision.defer("delivery_disabled")
         if not composite or not composite.enabled:
             return NoticeDecision.defer("waiting_for_fd")
@@ -898,7 +907,7 @@ class ErrorAlerts:
         # a claim that the old input did not occur.
         if await self.store.get_tell_delivery(row["tell_id"]):
             return None
-        policy = POLICY
+        policy = {"effective_delivery_mode": "digest"} if lane else POLICY
         if policy["effective_delivery_mode"] == "muted":
             return NoticeDecision.terminal("suppressed_policy")
         if (
@@ -1079,21 +1088,28 @@ class ErrorAlerts:
         settled = set()
         for fact in await self.notify._db.call("error_rows"):
             ctx = fact.get("error_context")
-            if not ctx or ctx["condition"] not in ("recovered", "cancelled"):
+            if not ctx:
+                continue
+            lane = ctx["family"] == WORK_LANE
+            if not lane and ctx["condition"] not in ("recovered", "cancelled"):
+                continue
+            if lane and not ctx["notice_ids"]:
                 continue
             if ctx["desired_notice_revision"] > ctx["enqueued_notice_revision"]:
                 continue
             if all(
                 self.delivery(notices.get(n), notices)["state"]
-                in (
-                    "delivered",
-                    "failed",
-                    "suppressed_recovered",
-                    "suppressed_cancelled",
-                )
+                in (("delivered",) if lane else (
+                    "delivered", "failed", "suppressed_recovered", "suppressed_cancelled",
+                ))
                 for n in ctx["notice_ids"]
             ):
                 settled.add(fact["notification_id"])
+                if lane and fact["state"] == "open":
+                    await self.notify._db.call(
+                        "resolve_notification", fact["notification_id"],
+                        action_kind="resolved", by="system", now=iso(now),
+                    )
         await self.notify._db.call(
             "prune_resolved", now=iso(now), settled_error_ids=settled
         )
