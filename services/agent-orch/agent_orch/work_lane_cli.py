@@ -52,7 +52,7 @@ def _lane_line(lane: dict[str, Any]) -> str:
 def cmd_list(args: argparse.Namespace) -> int:
     try:
         response = _call(args, {"type": "work_lanes.list", "include_done": bool(args.include_done),
-                                "limit": args.limit})
+                                "limit": args.limit, **({"members": True} if args.members else {})})
     except Exception as exc:  # noqa: BLE001
         print(f"agent-orch work-lane list: {exc}", file=sys.stderr)
         return 1
@@ -68,7 +68,8 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_show(args: argparse.Namespace) -> int:
     try:
-        response = _call(args, {"type": "work_lanes.show", "lane_id": args.lane_id})
+        response = _call(args, {"type": "work_lanes.show", "lane_id": args.lane_id,
+                                **({"members": True} if args.members else {})})
     except Exception as exc:  # noqa: BLE001
         print(f"agent-orch work-lane show: {exc}", file=sys.stderr)
         return 1
@@ -79,6 +80,15 @@ def cmd_show(args: argparse.Namespace) -> int:
     print(_lane_line(lane) if lane else stored.get("lane_id"))
     print(f"    stored {stored.get('work_state')} ({stored.get('work_state_reason')})  "
           f"owner_kind={stored.get('owner_kind')}  version={stored.get('version')}")
+    if args.members:
+        for member in response.get("members", lane.get("members", [])):
+            ac = (f"{member['ac_checked']}/{member['ac_total']}" if member.get("ac_total") is not None else "unknown")
+            estimate = member.get("estimate")
+            hours = f"{estimate['p25']}–{estimate['p75']}h (median {estimate['median']})" if estimate else "unknown"
+            print(f"    {member['spec_id']}  {member.get('status')}  AC {ac}  estimate {hours}  "
+                  f"[{(member.get('observation') or {}).get('quality', 'unknown')}]")
+            if member.get("next_action_text"):
+                print(f"      next: {member['next_action_text']}")
     for event in response.get("events") or []:
         update = f"  -> {event.get('update_kind')} {event.get('update_id')}" if event.get("update_kind") else ""
         print(f"    {event.get('created_at')}  {event.get('operation')}  "
@@ -150,6 +160,11 @@ def cmd_set_text(args: argparse.Namespace) -> int:
     return _operation(args, "set_text", payload)
 
 
+def cmd_set_members(args: argparse.Namespace) -> int:
+    members = args.member or []
+    return _operation(args, "set_members", {"members": members, "no_spec_reason": args.no_spec_reason})
+
+
 def cmd_set_owner(args: argparse.Namespace) -> int:
     return _operation(args, "set_owner", _confirmation(args, {"to": args.to}))
 
@@ -168,7 +183,8 @@ def cmd_adopt(args: argparse.Namespace) -> int:
     if args.preview:
         try:
             return _finish(_call(args, {"type": "work_lanes.adopt_preview",
-                                        "composite_stream_id": args.composite_stream_id}))
+                                        "composite_stream_id": args.composite_stream_id,
+                                        **({"epic": args.epic} if args.epic else {})}))
         except Exception as exc:  # noqa: BLE001
             print(f"agent-orch work-lane adopt: {exc}", file=sys.stderr)
             return 1
@@ -183,7 +199,7 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         print("agent-orch work-lane adopt: --apply file must be a list (or {candidates:[...]})", file=sys.stderr)
         return 2
     allowed = {"adoption_key", "title", "summary", "owner_kind", "work_state", "blocker", "lead",
-               "visible_chat", "lane_id", "emit_started"}
+               "visible_chat", "lane_id", "emit_started", "members", "no_spec_reason"}
     failures = 0
     for entry in entries:
         if not isinstance(entry, dict):
@@ -248,18 +264,21 @@ def add_parser(subparsers: Any) -> None:
     p.add_argument("--include-done", action="store_true")
     p.add_argument("--limit", type=int, default=200)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--members", action="store_true", help="include member work facts")
     common(p)
     p.set_defaults(func=cmd_list)
 
     p = sub.add_parser("show", help="one lane with its events and updates")
     p.add_argument("lane_id")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--members", action="store_true", help="include member work facts")
     common(p)
     p.set_defaults(func=cmd_show)
 
     p = sub.add_parser("adopt", help="preview adoption candidates or apply an FD-edited list")
     p.add_argument("--preview", action="store_true")
     p.add_argument("--apply", metavar="JSON_FILE")
+    p.add_argument("--epic", help="expand this epic once in the preview")
     common(p)
     p.set_defaults(func=cmd_adopt)
 
@@ -289,6 +308,11 @@ def add_parser(subparsers: Any) -> None:
     p.add_argument("--title")
     p.add_argument("--summary")
     p.set_defaults(func=cmd_set_text)
+
+    p = mutator("set-members", "FD: replace ordered lane membership")
+    p.add_argument("--member", action="append", help="canonical spec id; repeat in membership order")
+    p.add_argument("--no-spec-reason", help="required when the member list is empty")
+    p.set_defaults(func=cmd_set_members)
 
     p = mutator("set-owner", "FD: owner kind (operator->fd needs a confirmation)")
     p.add_argument("--to", required=True, choices=("fd", "operator"))

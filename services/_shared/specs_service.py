@@ -20,6 +20,8 @@ from .specs_parser import (
     declared_spec_id,
     has_declared_spec_id,
 )
+from .work_observations import read_work_candidate
+
 
 
 log = logging.getLogger(__name__)
@@ -95,8 +97,6 @@ class SpecsSubsystem:
         return "disabled" if self.disabled else self.subsystem_state
 
     def start(self) -> None:
-        if self.disabled:
-            return
         self._attach_or_degrade()
         threading.Thread(target=self._retry_loop, daemon=True).start()
 
@@ -148,9 +148,50 @@ class SpecsSubsystem:
         on_disk = []
         if work_root.is_dir():
             for child in work_root.iterdir():
-                if child.is_dir() and child.name not in seen and not child.name.startswith("."):
+                if child.is_dir() and child.name not in seen and not child.name.startswith((".", "_")) and not child.is_symlink():
                     on_disk.append(child)
         return known + on_disk
+
+    def scan_work_observations(self, *, now: float | None = None) -> dict:
+        """One depth-capped scan; no catalog or artifact reads and no persistence."""
+        now = time.time() if now is None else now
+        root = self.memory_root
+        if root is None or not root.is_dir() or not (root / "work").is_dir():
+            self.disabled = True
+            return {"available": False, "root_configured": root is not None,
+                    "error": "work_root_unavailable", "candidates": {}, "errors": {}, "scanned_at": now}
+        self.disabled = False
+        candidates, errors = {}, {}
+        try:
+            for directory in self._work_dirs():
+                if not directory.is_dir() or directory.is_symlink() or directory.name.startswith(("_", ".")):
+                    continue
+                for folder in directory.iterdir():
+                    if (not folder.is_dir() or folder.is_symlink() or folder.name.startswith(("_", "."))
+                            or _is_spec_sync_conflict(folder)):
+                        continue
+                    try:
+                        conflicts = any(_is_spec_sync_conflict(p.name) and p.name.startswith(("spec.", "summary."))
+                                        for p in folder.iterdir())
+                        candidate = read_work_candidate(folder, directory.name, now=now, quiet_s=self.debounce_s)
+                        if conflicts:
+                            candidate.update(quality="stale", error="work_sync_conflict")
+                        candidates.setdefault(candidate["spec_id"], []).append(candidate)
+                    except FileNotFoundError:
+                        errors[str(folder)] = {"quality": "missing", "error": "work_file_missing"}
+                    except (OSError, ValueError, UnicodeError) as exc:
+                        errors[str(folder)] = {"quality": "error", "error": "work_read_error:" + type(exc).__name__}
+                    except Exception as exc:
+                        # YAML errors carry source text; never expose it on the wire.
+                        import yaml
+                        if not isinstance(exc, yaml.YAMLError):
+                            raise
+                        errors[str(folder)] = {"quality": "error", "error": "work_yaml_invalid"}
+        except OSError as exc:
+            return {"available": False, "root_configured": True,
+                    "error": "work_scan_error:" + type(exc).__name__, "candidates": {}, "errors": {}, "scanned_at": now}
+        return {"available": True, "root_configured": True, "error": None,
+                "candidates": candidates, "errors": errors, "scanned_at": now}
 
     def _spawn_work_dirs(self) -> list[Path]:
         """Configured status buckets used by authoritative spawn resolution.
@@ -206,6 +247,7 @@ class SpecsSubsystem:
 
     def _retry_loop(self) -> None:
         while not self._stop.wait(self.retry_interval_s):
+            self.disabled = self.memory_root is None or not self.memory_root.is_dir()
             if not self.push_enabled:
                 self._attach_or_degrade()
 
@@ -599,6 +641,24 @@ class SpecsSubsystem:
         if member_id.startswith("work_") and member_id[len("work_"):].startswith(spec_id):
             return True
         return False
+
+    def epic_spec_members(self, epic_id: str) -> list[str]:
+        """One read-only preview expansion from the catalog; never a live binding."""
+        if self.memory_root is None or not self.memory_root.is_dir():
+            raise ValueError("work_index_unavailable")
+        epics = self._read_json(self.memory_root / "catalog" / "epics.json")
+        epic = next((row for row in epics if isinstance(row, dict) and row.get("id") == epic_id), None) \
+            if isinstance(epics, list) else None
+        if epic is None:
+            raise ValueError("work_lane_epic_not_found")
+        known = set()
+        for name in ("documents.json", "archive.json"):
+            documents = self._read_json(self.memory_root / "catalog" / name)
+            if isinstance(documents, list):
+                known.update(row["id"] for row in documents if isinstance(row, dict)
+                             and row.get("type") == "spec" and isinstance(row.get("id"), str))
+        return list(dict.fromkeys(value for value in epic.get("members", [])
+                                  if isinstance(value, str) and value in known))
 
     def _load_epics(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         raw = self._read_json(self.memory_root / "catalog" / "epics.json")

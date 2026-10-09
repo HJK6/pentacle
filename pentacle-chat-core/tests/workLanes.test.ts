@@ -131,3 +131,12 @@ test('transcript rows for lane_update carry laneUpdate; legacy text stays the su
   const blocked = rows.find((r) => r.laneUpdate?.kind === 'lane_blocked')!;
   assert.equal(blocked.text, 'Waiting for operator deploy window');
 });
+
+test('v1 consumer accepts additive member facts with unchanged state, order and counts', () => {
+  for (const cell of fixture.progress_v2) {
+    const inv = applyWorkLanesFrame(emptyWorkLanesInventory(), cell.frame);
+    assert.deepEqual(inv.counts, cell.frame.counts, cell.name);
+    assert.deepEqual(selectWorkLanes(inv).map((lane) => [lane.lane_id, lane.state]),
+      cell.frame.lanes.map((lane: {lane_id: string; state: string}) => [lane.lane_id, lane.state]), cell.name);
+  }
+});

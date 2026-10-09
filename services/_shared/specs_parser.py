@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+import math
+
+import yaml
 from pathlib import Path
 
 DEFAULT_STATUSES = [
@@ -104,29 +107,83 @@ def parse_statuses_json(memory_root: str | Path):
     return statuses, order
 
 
-def _frontmatter(path: Path) -> dict:
-    if not path.exists():
+def load_frontmatter(text: str) -> dict:
+    """Shared YAML loader; BaseLoader keeps dates and ids as wire-safe strings."""
+    if not text.startswith("---\n") and not text.startswith("---\r\n"):
         return {}
-    text = path.read_text(encoding="utf-8")
-    if not text.startswith("---"):
+    match = re.match(r"\A---[^\S\n]*\n(.*?)^---[^\S\n]*(?:\n|$)", text, re.M | re.S)
+    if not match:
+        raise ValueError("work_frontmatter_unterminated")
+    result = yaml.load(match.group(1), Loader=yaml.BaseLoader)
+    if result is None:
         return {}
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return {}
-    result = {}
-    for line in parts[1].splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        result[key.strip()] = value.strip().strip('"')
+    if not isinstance(result, dict):
+        raise ValueError("work_frontmatter_not_mapping")
     return result
+
+
+def _frontmatter(path: Path) -> dict:
+    return load_frontmatter(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _without_fences(text: str) -> str:
+    lines, fence, width = [], None, 0
+    for line in text.splitlines():
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            if marker and marker[1][0] == fence and len(marker[1]) >= width and not marker[2].strip():
+                fence = None
+            continue
+        if marker:
+            fence, width = marker[1][0], len(marker[1])
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _section(text: str, heading: str) -> str | None:
+    match = re.search(rf"^## {re.escape(heading)}[ \t]*\n(.*?)(?=^#(?:#)? |\Z)",
+                      text + "\n", re.M | re.S)
+    return match[1] if match else None
+
+
+def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
+    """Parse file-owned lane facts without inferring completion or estimates."""
+    fm = load_frontmatter(spec_text)
+    load_frontmatter(summary_text)  # Both documents must parse coherently.
+    spec = _without_fences(spec_text)
+    summary = _without_fences(summary_text)
+    ac = _section(spec, "Acceptance Criteria")
+    boxes = re.findall(r"^\s*[-*+] \[([ xX])\][ \t]*(.*)$", ac or "", re.M)
+    checked = sum(mark.lower() == "x" or bool(re.search(r"\(waived:\s*[^)]+\)", body, re.I))
+                  for mark, body in boxes)
+    estimate_text = _section(spec, "Estimate") or ""
+    number = r"(?:[0-9]+(?:\.[0-9]+)?)"
+    match = re.search(rf"^\s*(?:- )?elapsed_delivery_h:\s*({number})\s*[–—-]\s*({number})"
+                      rf"\s*\(median\s+({number})\)", estimate_text, re.M)
+    estimate = None
+    if match:
+        p25, p75, median = map(float, match.groups())
+        if all(math.isfinite(n) for n in (p25, p75, median)) and 0 < p25 <= median <= p75:
+            estimate = {"p25": p25, "p75": p75, "median": median,
+                        "provisional": bool(re.search(r"\bprovisional\b", estimate_text, re.I))}
+
+    def label(name):
+        found = re.search(rf"^\*\*{re.escape(name)}\*\*[ \t]*[—–-][ \t]*(.+)$", summary, re.M)
+        return found[1].strip()[:280] if found else None
+
+    return {"title": fm.get("title"), "status": status,
+            "terminal": status if status in ("completed", "deprecated") else None,
+            "ac_checked": checked if ac is not None else None,
+            "ac_total": len(boxes) if ac is not None else None,
+            "estimate": estimate, "status_text": label("Status"), "next_action_text": label("Next action")}
 
 
 def _heading_text(path: Path, heading: str) -> str:
     if not path.exists():
         return ""
     text = path.read_text(encoding="utf-8")
-    match = re.search(rf"^## {re.escape(heading)}\s*\n+(.*?)(?=^## |\Z)", text, re.M | re.S)
+    match = re.search(rf"^## {re.escape(heading)}\s*\n+(.*?)(?=^#(?:#)? |\Z)", text, re.M | re.S)
     return match.group(1).strip() if match else ""
 
 
@@ -184,4 +241,8 @@ def parse_work_folder(folder: str | Path, lifecycle: str, statuses: list[dict]):
         "terminal_state_drift": frontmatter_drift and folder_terminal != front_terminal,
         "path": str(folder),
         "progress": dict(SYNTHETIC_SPEC_PROGRESS),
+        **{key: value for key, value in parse_work_facts(
+            (folder / "spec.md").read_text(encoding="utf-8") if (folder / "spec.md").exists() else "",
+            (folder / "summary.md").read_text(encoding="utf-8") if (folder / "summary.md").exists() else "",
+            status).items() if key != "title"},
     }

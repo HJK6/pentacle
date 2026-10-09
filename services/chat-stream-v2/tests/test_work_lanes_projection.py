@@ -74,8 +74,12 @@ def test_projection_matches_frozen_fixture_v10():
         shuffled = list(rows)
         random.Random(seed).shuffle(shuffled)
         frame = build_frame([r for r in shuffled if r["work_state"] != "done"], presence, now_iso=now)
-        assert frame == fixture["inventory_frame"]
-        assert frame == fixture["hello_field"]["work_lanes"]
+        # Additive facts must preserve every shipped v1 field and ordering.
+        legacy = {key: frame[key] for key in fixture["inventory_frame"]}
+        legacy["lanes"] = [{key: lane[key] for key in old}
+                           for lane, old in zip(frame["lanes"], fixture["inventory_frame"]["lanes"])]
+        assert legacy == fixture["inventory_frame"]
+        assert legacy == fixture["hello_field"]["work_lanes"]
     assert [l["lane_id"] for l in fixture["inventory_frame"]["lanes"]] == fixture["expected"]["order"]
     assert fixture["inventory_frame"]["counts"]["open"] == fixture["expected"]["header_count"]
     listed = project_lanes(rows, presence, now)
