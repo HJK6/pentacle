@@ -106,7 +106,9 @@ def main():
 
 async def read_only_projection(h):
     """The FD query: typed facts and their linked outbox delivery, read-only."""
-    service = h.server.error_alerts
+    service = getattr(h.server, "error_alerts", None)
+    if service is None:
+        return []  # baseline product: no typed facts or projection exist
     notices = {r["notice_id"]: r for r in await service.notice_rows()}
     out = []
     for fact in await h.notify._db.call("error_rows"):
