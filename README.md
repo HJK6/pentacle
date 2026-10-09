@@ -29,6 +29,8 @@ For a phone, see [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile).
 
 To connect a ChatGPT "Dot" agent to your own fleet for large assignments, see
 [Connect a ChatGPT Dot agent](docs/connect-a-dot-agent.md).
+For an external assistant using a host-provisioned message service, see
+[Connect a friend agent](docs/connect-a-friend-agent.md).
 
 ## Which repositories do I need?
 
