@@ -75,6 +75,26 @@ def test_split_write_and_conflict_keep_quality_stale(tmp_path, monkeypatch):
     assert service.scan_work_observations()["candidates"][ID][0]["quality"] == "stale"
 
 
+def test_permission_error_and_inflight_yaml_write_are_distinguished(tmp_path, monkeypatch):
+    folder = write_item(tmp_path)
+    service = subsystem(tmp_path, monkeypatch)
+    read_text = Path.read_text
+    def deny(path, *args, **kwargs):
+        if path == folder / "summary.md":
+            raise PermissionError("synthetic permission failure")
+        return read_text(path, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", deny)
+        result = service.scan_work_observations()
+        assert result["errors"][str(folder)]["quality"] == "error"
+    (folder / "spec.md").write_text("---\nid: [in flight\n")
+    service.debounce_s = 30
+    result = service.scan_work_observations()
+    assert result["errors"][str(folder)]["quality"] == "stale"
+    service.debounce_s = 0
+    assert service.scan_work_observations()["errors"][str(folder)]["quality"] == "error"
+
+
 def candidate(checked=0, status="completed"):
     return {"quality": "fresh", "path": "work/completed/demo__bridge", "source_hash": str((checked, status)),
             "facts": {"title": "Bridge", "status": status, "terminal": status if status == "completed" else None,

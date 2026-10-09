@@ -8,12 +8,17 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import yaml
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .specs_parser import WORK_SPEC_ID_RE, load_frontmatter, parse_work_facts
 
 MATERIAL_FIELDS = ("status", "ac_checked", "ac_total", "estimate", "status_text", "next_action_text")
+
+
+class WorkFilesUnsettled(ValueError):
+    """A source changed during the read or has not reached the quiet window."""
 
 
 def timestamp(epoch: float) -> str:
@@ -33,12 +38,20 @@ def read_work_candidate(folder: Path, status: str, *, now: float, quiet_s: float
     before = [_signature(p) for p in paths]
     texts = [p.read_text(encoding="utf-8") for p in paths]
     after = [_signature(p) for p in paths]
-    fm = load_frontmatter(texts[0])
+    unsettled = (before != after or any(now - p.stat().st_mtime < quiet_s for p in paths)
+                 or not all(text.strip() for text in texts))
+    try:
+        fm = load_frontmatter(texts[0])
+    except (ValueError, yaml.YAMLError):
+        if unsettled:
+            raise WorkFilesUnsettled("work_files_unsettled") from None
+        raise
     identity = fm.get("id")
     if not isinstance(identity, str) or not WORK_SPEC_ID_RE.fullmatch(identity):
+        if unsettled:
+            raise WorkFilesUnsettled("work_files_unsettled")
         raise ValueError("work_declared_id_invalid")
-    if (before != after or any(now - p.stat().st_mtime < quiet_s for p in paths)
-            or not all(text.strip() for text in texts)):
+    if unsettled:
         return {"spec_id": identity, "quality": "stale", "error": "work_files_unsettled", "path": str(folder)}
     facts = parse_work_facts(*texts, status)
     facts["title"] = facts["title"] if isinstance(facts["title"], str) else None

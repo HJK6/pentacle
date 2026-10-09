@@ -6,6 +6,7 @@ import re
 import json
 import threading
 import time
+import yaml
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -20,7 +21,7 @@ from .specs_parser import (
     declared_spec_id,
     has_declared_spec_id,
 )
-from .work_observations import read_work_candidate
+from .work_observations import WorkFilesUnsettled, read_work_candidate
 
 
 
@@ -28,6 +29,7 @@ log = logging.getLogger(__name__)
 
 SPEC_ID_RE = re.compile(r"^[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$")
 SPEC_DOCUMENT_PREFIXES = ("spec_", "work_")
+SOURCE_READ_ERRORS = (OSError, ValueError, UnicodeError, yaml.YAMLError)
 
 
 class _TimerLike(Protocol):
@@ -180,6 +182,8 @@ class SpecsSubsystem:
                         candidates.setdefault(candidate["spec_id"], []).append(candidate)
                     except FileNotFoundError:
                         errors[str(folder)] = {"quality": "missing", "error": "work_file_missing"}
+                    except WorkFilesUnsettled:
+                        errors[str(folder)] = {"quality": "stale", "error": "work_files_unsettled"}
                     except (OSError, ValueError, UnicodeError) as exc:
                         errors[str(folder)] = {"quality": "error", "error": "work_read_error:" + type(exc).__name__}
                     except Exception as exc:
@@ -343,13 +347,19 @@ class SpecsSubsystem:
             if status_dir.is_dir():
                 for child in status_dir.iterdir():
                     if child.is_dir() and not _is_spec_sync_conflict(child):
-                        declared_id = declared_spec_id(child)
+                        try:
+                            declared_id = declared_spec_id(child)
+                            has_id = has_declared_spec_id(child)
+                        except SOURCE_READ_ERRORS:
+                            # An unrelated malformed/transient file cannot take
+                            # down the existing specs inventory or resolver.
+                            continue
                         aliases = set(self._spec_id_aliases(declared_id))
                         if self._folder_name_is_declared_alias(child.name, declared_id):
                             aliases.add(child.name)
                         for alias in aliases:
                             folders[alias].append((status_name, child))
-                        if has_declared_spec_id(child):
+                        if has_id:
                             self._declared_id_owners.setdefault(declared_id, []).append((status_name, child))
                             declared_paths[declared_id].add(child)
         self._declared_id_collisions = {
@@ -749,7 +759,10 @@ class SpecsSubsystem:
         for spec_id, matches in sorted(folders.items()):
             lifecycle, folder = self._canonical(matches)
             if folder not in seen_folders:
-                rows.append(self._parse_folder(lifecycle, folder))
+                try:
+                    rows.append(self._parse_folder(lifecycle, folder))
+                except SOURCE_READ_ERRORS:
+                    rows.append(self._synthetic(folder.name, "parse_error"))
                 seen_folders.add(folder)
             if len(matches) > 1 and spec_id not in seen_collisions:
                 rows.append(self._synthetic(spec_id, "multiple_matches"))

@@ -53,6 +53,22 @@ def _write_statuses(memory_root: Path, statuses):
     )
 
 
+def test_malformed_neighbor_does_not_break_existing_specs_inventory(tmp_path):
+    good = tmp_path / "work" / "in_progress" / "demo__good"
+    broken = tmp_path / "work" / "in_progress" / "demo__broken"
+    _write_spec(good)
+    _write_spec(broken)
+    service = _make_subsystem(tmp_path)
+    for filename in ("spec.md", "summary.md"):
+        source = broken / filename
+        prior = source.read_text()
+        source.write_text("---\nid: [unfinished\n---\n")
+        listed = service.list_specs()["specs"]
+        assert any(row["spec_id"] == "demo__good" for row in listed)
+        assert service.get_spec("spec_demo__good")["parsed"]["title"] == "T"
+        source.write_text(prior)
+
+
 def test_load_statuses_fallback_when_missing(tmp_path):
     (tmp_path / "work").mkdir()
     s = _make_subsystem(tmp_path)

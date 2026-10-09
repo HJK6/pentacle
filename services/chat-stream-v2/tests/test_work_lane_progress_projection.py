@@ -1,6 +1,15 @@
 from work_lane_progress import aggregate_members, lane_progress
 
 
+def test_reconciliation_intervals_remain_finite_and_bounded():
+    import pytest
+    from work_lanes_projection import WorkLanesInventory
+    for config in ({"sweep_interval_s": float("nan")}, {"sweep_interval_s": float("inf")},
+                   {"sweep_interval_s": 0}, {"settle_s": float("inf")}, {"settle_s": -1}):
+        with pytest.raises(ValueError, match="work_index_interval_invalid"):
+            WorkLanesInventory(None, None, None, **config)
+
+
 def member(status, checked=None, total=None, estimate=None, quality="fresh"):
     return {"status": status, "ac_checked": checked, "ac_total": total, "estimate": estimate,
             "source_changed_at": "2026-01-02T00:00:00.000Z", "observation": {"quality": quality}}
