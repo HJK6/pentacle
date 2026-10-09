@@ -264,18 +264,22 @@ async def run(a, root, tmp):
                 )
 
                 result["cells"]["D02"] = await restart_boundaries(h)
-                result["cells"]["A01"] = await authentication(h)
-                result["cells"]["A02"] = {
-                    "classification": "EVIDENCE",
-                    "strict_frames": await negative_reports(h),
-                }
                 from error_alerts_live_cells import (
                     installed_transcribe_failure,
+                    isolated,
                     rebind_follows_generation,
                 )
 
-                result["cells"]["I01"] = await installed_transcribe_failure(h)
-                result["cells"]["R01"] = await rebind_follows_generation(h)
+                async def strict_frames(h2):
+                    return {"classification": "EVIDENCE", "strict_frames": await negative_reports(h2)}
+
+                # H2/H3: fresh isolated fixtures so no cell's rate-limit history
+                # holds or folds another's (limits and clocks unchanged).
+                result["cells"].update(await isolated("h2", tmp, a.out, [
+                    ("A01", authentication), ("A02", strict_frames),
+                    ("I01", installed_transcribe_failure)]))
+                result["cells"].update(await isolated("h3", tmp, a.out, [
+                    ("R01", rebind_follows_generation)]))
             # Narrowed delivery-core gate (amendment v4 §6). Every required
             # cell must PASS; a reduced run (--only-d01) never passes.
             required = ("D01", "D02", "A01", "I01", "R01")

@@ -118,3 +118,44 @@ async def rebind_follows_generation(h):
     finally:
         if second.started:
             await second.run("kill-session", "-t", second.name)
+
+
+async def isolated(name, tmp, out, cells):
+    """Run cells in a fresh harness: own root, DBs, tmux socket, port, provider.
+
+    Retains raw evidence under out/<name> before stopping; never shares
+    rate-limit history with other cells.
+    """
+    import shutil
+    from error_alerts_fixture import ErrorAlertsHarness
+
+    root = tmp / name
+    target = out / name
+    target.mkdir(parents=True, exist_ok=True)
+    h = ErrorAlertsHarness(root, real_transport=True)
+    results = {}
+    try:
+        await h.start()
+        (target / "runtime.json").write_text(json.dumps({
+            "owner_pid": __import__("os").getpid(), "host": "127.0.0.1", "port": h.port,
+            "fixture_root": str(root), "provider_pid": h.provider.pid,
+            "tmux_socket": h.provider.socket, "disposable": True}, indent=2) + "\n")
+        for cell, fn in cells:
+            results[cell] = await fn(h)
+    finally:
+        try:
+            for source in [root / "provider-input.jsonl", *root.glob(".codex/sessions/*.jsonl")]:
+                if source.exists():
+                    shutil.copyfile(source, target / ("provider-input.jsonl" if source.name == "provider-input.jsonl" else "provider-user-" + source.name))
+            if h.store and getattr(h.server, "error_alerts", None):
+                trace = {"notices": await h.server.error_alerts.notice_rows(),
+                         "facts": await h.notify._db.call("error_rows")}
+                for sid in ("fixture:v2-test", "fixture:v2-next"):
+                    trace[sid] = await h.store.list_tell_deliveries(sid, limit=100)
+                (target / "proof-trace.json").write_text(json.dumps(trace, indent=2, default=str) + "\n")
+        finally:
+            await h.stop()
+            for pattern in ("sessions.db*", "notifications.db*"):
+                for source in root.glob(pattern):
+                    shutil.copyfile(source, target / source.name)
+    return results

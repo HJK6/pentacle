@@ -156,8 +156,8 @@ async def authentication(h):
                 "event_id": str(uuid.uuid4()),
                 "sequence": 1,
                 "stage": "upload",
-                "outcome": "cancelled",
-                "code": "operation_cancelled",
+                "outcome": "failed",
+                "code": "upload_read_failed",
                 "retry_state": "none",
                 "client_build": "auth-fixture",
                 "voice_operation": {
@@ -171,6 +171,24 @@ async def authentication(h):
             },
         )
         require(read.get("type") == "error.report.ok", "A01 actual operator denied")
+        # Recover inside the grace so this auth probe never becomes a delivery.
+        quiet = await reply(
+            socket,
+            {
+                "type": "error.report",
+                "request_id": str(uuid.uuid4()),
+                "version": 1,
+                "operation_id": oid,
+                "event_id": str(uuid.uuid4()),
+                "sequence": 2,
+                "stage": "upload",
+                "outcome": "recovered",
+                "code": "recovered",
+                "retry_state": "none",
+                "client_build": "auth-fixture",
+            },
+        )
+        require(quiet.get("type") == "error.report.ok", "A01 operator recovery denied")
     async with peer(h) as (socket, _, _):
         cells.append(
             await denied(

@@ -6,6 +6,7 @@ only the provider counterpart is scripted.
 
 import asyncio
 import time
+import uuid
 
 import pytest
 
@@ -277,3 +278,90 @@ async def test_bookkeeping_failure_never_blocks_ordinary_send(subject, monkeypat
     monkeypatch.setattr(s.store, "fetch_session", broken)
     assert (await s.service.send(send_msg(s), handler))["submission_confirmed"] is True
     assert len(seen) == 1 and await s.store.voice_list() == []
+
+
+async def upload_op(s, ago=61):
+    from store_voice_operations import iso as iso_at
+    intent = {**s.intent, "operation_id": str(uuid.uuid4())}
+    await s.store.voice_register(s.principal, intent, upload_request_id="u-" + intent["operation_id"])
+    await s.store.voice_milestone(s.principal, intent["operation_id"], "upload_committed",
+                                  blob_sha=uuid.uuid4().hex * 2, now=iso_at(time.time() - ago))
+    return intent["operation_id"]
+
+
+async def rebind_to(s, name):
+    new = await s.server.sessions.open("fixture", name, provider="codex", visibility="visible")
+    revision = (await s.server.assistant_composite.binding()).get("revision") or 0
+
+    def bind(conn):
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) VALUES(?,?,?,?,'2026-10-09T00:00:00Z')",
+                (s.server.assistant_composite.config.name, "fixture:" + name, new["session_generation"], revision + 1),
+            )
+
+    await s.store.submit(bind)
+    await s.server.assistant_composite.load_binding()
+    return new
+
+
+def live(rows):
+    return [r for r in rows if not r["terminal_at"] and not r["delivered_at"]]
+
+
+@pytest.mark.asyncio
+async def test_unattempted_rebind_successor_keeps_immediate_admission(subject):
+    s = subject
+    await upload_op(s)
+    await s.service.reconcile()
+    (old,) = await s.service.notice_rows()
+    assert old["kind"] == "error_alert"
+    await rebind_to(s, "v2-next")
+    await s.service.reconcile()
+    rows = await s.service.notice_rows()
+    (successor,) = [r for r in rows if r["recipient_stream_id"] == "fixture:v2-next"]
+    assert successor["kind"] == "error_alert"
+    assert next(r for r in rows if r["notice_id"] == old["notice_id"])["terminal_reason"] == "superseded_binding"
+
+
+@pytest.mark.asyncio
+async def test_attempted_same_fingerprint_still_consumes_budget(subject):
+    s = subject
+    await upload_op(s)
+    await s.queue.drain_once()
+    assert len(s.provider.pastes) == 1
+    await upload_op(s)
+    await s.service.reconcile()
+    kinds = sorted(r["kind"] for r in await s.service.notice_rows())
+    assert kinds == ["error_alert", "front_desk_held"]  # second same-fingerprint alert folds
+
+
+@pytest.mark.asyncio
+async def test_unrelated_fingerprints_share_the_total_budget(subject, monkeypatch):
+    s = subject
+    monkeypatch.setitem(error_adapters.FAMILY_CODES, "probe.v1", frozenset({"c1", "c2", "c3", "c4"}))
+    for code in ("c1", "c2", "c3", "c4"):
+        await s.service.emit(ErrorFact("probe.v1", code, "e-" + code))
+        await s.service.reconcile()
+    kinds = sorted(r["kind"] for r in await s.service.notice_rows())
+    assert kinds == ["error_alert"] * 3 + ["front_desk_held"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_rebind_before_attempt_never_duplicates(subject):
+    s = subject
+    await upload_op(s)
+    await s.service.reconcile()
+    await rebind_to(s, "v2-next")
+    await s.service.reconcile()
+    await rebind_to(s, "v2-third")
+    await s.service.reconcile()
+    await s.service.reconcile()
+    rows = await s.service.notice_rows()
+    pending = live(rows)
+    assert len(pending) == 1 and pending[0]["recipient_stream_id"] == "fixture:v2-third"
+    assert pending[0]["kind"] == "error_alert"
+    assert sum(r["terminal_reason"] == "superseded_binding" for r in rows) == 2
+    await s.queue.drain_once()
+    await s.queue.drain_once()
+    assert len(s.provider.pastes) == 1

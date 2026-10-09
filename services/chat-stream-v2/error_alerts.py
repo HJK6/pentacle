@@ -821,11 +821,13 @@ class ErrorAlerts:
                     return dict(existing)  # immutable bytes win after recovery/crash
                 meta = spec["metadata"]
                 since = iso(now - 900)
+                # A superseded never-submitted predecessor was not an immediate
+                # notice; its target-bound successor inherits its admission.
                 recent = [
                     json.loads(r[0])
                     for r in conn.execute(
-                        "SELECT metadata FROM v2_outbound_notices WHERE kind='error_alert' AND created_at>? AND json_extract(metadata,'$.error_alert_v1')=1 AND json_extract(metadata,'$.intent_kind')='initial' AND json_extract(metadata,'$.typed_digest') IS NULL",
-                        (since,),
+                        "SELECT metadata FROM v2_outbound_notices WHERE kind='error_alert' AND created_at>? AND json_extract(metadata,'$.error_alert_v1')=1 AND json_extract(metadata,'$.intent_kind')='initial' AND json_extract(metadata,'$.typed_digest') IS NULL AND notice_id!=? AND COALESCE(terminal_reason,'')!='superseded_binding'",
+                        (since, predecessor or ""),
                     )
                 ]
                 if (
