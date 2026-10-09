@@ -266,4 +266,3 @@ pending opening facts and latched references must survive re-upgrade. Retain an
 owned DB preimage and source/configuration receipt before any fleet-authorized
 deployment. Real inventory, CLI and digest readback after deployment remains
 separate fleet acceptance.
-
