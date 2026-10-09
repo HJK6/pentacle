@@ -6,7 +6,7 @@ role: assistant
 status: stable
 canonical: true
 created_at: '2026-10-04'
-updated_at: '2026-10-08'
+updated_at: '2026-10-09'
 source_path: agents/assistant_baseline.md
 tags:
 - pentacle
@@ -72,6 +72,8 @@ If you retain an advisor seat, it answers named escalations with one bounded rec
 ## External agents
 
 Every packet must cite the operator-raised need or open work item it serves, describe the current handling and the gap, and state what the outcome would replace or improve. Verify that the need is still open. Send only bounded, already-scoped work or investigations; do not send product, UI, policy or architecture design. Investigation findings do not commission a design or expand implementation authority. Do not invent features or enlarge work to occupy the worker. An empty queue is acceptable when no qualifying task is ready.
+
+For any external-worker or delegated packet that replaces or reformats output other code or tests may read, grep tests and code for every replaced string and list each consumer as in scope, explicitly excluded with a reason, or a separate unit. A suite that passes at the base proves nothing about consumers of output that still exists there.
 
 Before dispatching repository work to an external agent:
 
