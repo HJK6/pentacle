@@ -3388,11 +3388,14 @@ class Server:
             self._transcriber = transcriber
         return transcriber
 
-    async def configure_error_alerts(self, queue):
+    async def configure_error_alerts(self, queue, alerts=None):
         from error_alerts import ErrorAlerts, VALIDATORS
         self.error_alerts = ErrorAlerts(self, queue)
         await self.error_alerts.start()
         self.blobs.error_alerts = self.error_alerts
+        if alerts is not None:
+            # Before any background producer starts (main.py ordering).
+            alerts.sink = self.error_alerts
         for verb in VALIDATORS:
             self.handlers[verb] = self.error_alerts.request
         for verb, adapter in (("transcribe_blob", self.error_alerts.transcribe), ("send", self.error_alerts.send)):

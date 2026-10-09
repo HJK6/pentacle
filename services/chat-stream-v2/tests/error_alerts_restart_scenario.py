@@ -8,7 +8,7 @@ import hashlib
 import time
 import uuid
 
-from error_alerts_timer_scenario import require
+from error_alerts_fixture import require
 
 
 class InjectedPersistenceBoundary(RuntimeError):

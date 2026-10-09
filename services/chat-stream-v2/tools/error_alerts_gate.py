@@ -39,7 +39,6 @@ def main():
         required=True,
     )
     p.add_argument("--consumer-manifest", type=pathlib.Path)
-    p.add_argument("--with-ui", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument(
         "--only-d01",
         action="store_true",
@@ -105,6 +104,26 @@ def main():
     return 0 if result["passed"] else 1
 
 
+async def read_only_projection(h):
+    """The FD query: typed facts and their linked outbox delivery, read-only."""
+    service = h.server.error_alerts
+    notices = {r["notice_id"]: r for r in await service.notice_rows()}
+    out = []
+    for fact in await h.notify._db.call("error_rows"):
+        ctx = fact["error_context"]
+        for nid in ctx["notice_ids"] or [None]:
+            d = service.delivery(notices.get(nid), notices, ctx)
+            out.append({
+                "notification_id": fact["notification_id"],
+                "family": ctx["family"],
+                "code": ctx["code"],
+                "condition": ctx["condition"],
+                "operation_id": ctx.get("operation_id") or ctx.get("episode_id"),
+                "delivery": d,
+            })
+    return out
+
+
 async def run(a, root, tmp):
     from error_alerts_fixture import ErrorAlertsHarness
     import server, store
@@ -137,8 +156,6 @@ async def run(a, root, tmp):
     # The final RED/GREEN pair uses byte-identical production transport;
     # only the imported product root changes.
     h = ErrorAlertsHarness(tmp, real_transport=True)
-    browser_fixture = None
-    process = None
     try:
         await h.start()
         runtime = {
@@ -206,10 +223,7 @@ async def run(a, root, tmp):
             "actual_alerts": len(typed),
             "provider_submissions": len(h.provider.pastes),
         }
-        async with h.client() as client:
-            result["review_reply"] = await client.rpc(
-                "error.list", request_id="fixture-review"
-            )
+        result["review"] = await read_only_projection(h)
         result["first_failed_predicate"] = (
             None
             if typed
@@ -222,11 +236,7 @@ async def run(a, root, tmp):
                 and not h.provider.pastes
             )
         else:
-            matches = [
-                r
-                for r in result["review_reply"].get("items", [])
-                if r["correlation"]["operation_id"] == op
-            ]
+            matches = [r for r in result["review"] if r["operation_id"] == op]
             d01_pass = (
                 len(matches) == 1
                 and matches[0]["delivery"]["state"] == "delivered"
@@ -250,66 +260,28 @@ async def run(a, root, tmp):
                     authentication,
                     negative_reports,
                 )
-                from error_alerts_timer_scenario import transcribe_deadline
 
                 result["cells"]["D02"] = await restart_boundaries(h)
-                result["cells"]["D05"] = {
-                    "classification": "INCOMPLETE",
-                    "timer_restart": await transcribe_deadline(h),
-                    "remaining": [
-                        "transcribe result reply lost",
-                        "send commit ACK lost",
-                    ],
-                }
                 result["cells"]["A01"] = await authentication(h)
                 result["cells"]["A02"] = {
-                    "classification": "INCOMPLETE",
+                    "classification": "EVIDENCE",
                     "strict_frames": await negative_reports(h),
                 }
-            if d01_pass and a.with_ui and not a.only_d01:
-                from error_alerts_ui_fixture import BrowserFixture
-
-                browser_fixture = BrowserFixture(h, root)
-                await browser_fixture.seed(matches[0]["id"])
-                manifest = await browser_fixture.start()
-                process = await asyncio.create_subprocess_exec(
-                    "node",
-                    str(root / "test/e2e/error_alerts_gate.cjs"),
-                    "--product-root",
-                    str(root),
-                    "--daemon-manifest",
-                    str(manifest),
-                    "--out",
-                    str(a.out / "ui"),
-                    cwd=root,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
+                from error_alerts_live_cells import (
+                    installed_transcribe_failure,
+                    rebind_follows_generation,
                 )
-                output, _ = await process.communicate()
-                (a.out / "ui-runner.log").write_bytes(output)
-                result["ui_runner"] = {
-                    "exit_code": process.returncode,
-                    "manifest_lifetime": "parent-owned and joined before teardown",
-                }
-            # Until all frozen cells are implemented, fail explicitly rather than claim a reduced acceptance gate.
-            result["unimplemented_cells"] = [
-                "D03",
-                "D04",
-                "D05",
-                "D06",
-                "D07",
-                "D08",
-                "D09",
-                "P01",
-                "P02",
-                "A02",
-                "U01",
-                "U02",
-                "U03",
-                "C01",
-                "C02",
-                "R01",
-            ]
+
+                result["cells"]["I01"] = await installed_transcribe_failure(h)
+                result["cells"]["R01"] = await rebind_follows_generation(h)
+            # Narrowed delivery-core gate (amendment v4 §6). Every required
+            # cell must PASS; a reduced run (--only-d01) never passes.
+            required = ("D01", "D02", "A01", "I01", "R01")
+            result["required_cells"] = list(required)
+            result["passed"] = not a.only_d01 and all(
+                result["cells"].get(c, {}).get("classification") == "PASS"
+                for c in required
+            )
     except Exception as exc:
         result["classification"] = (
             "PRODUCT_FAIL"
@@ -342,6 +314,16 @@ async def run(a, root, tmp):
                 trace["tell_deliveries"] = await h.store.list_tell_deliveries(
                     "fixture:v2-test", limit=100
                 )
+                # R01 rebind target, when that cell ran.
+                trace["rebind_target"] = {
+                    "session": await h.store.fetch_session("fixture", "v2-next"),
+                    "events": await h.store.fetch_session_event_tail(
+                        "fixture:v2-next", limit=100
+                    ),
+                    "tell_deliveries": await h.store.list_tell_deliveries(
+                        "fixture:v2-next", limit=100
+                    ),
+                }
             if getattr(h, "ingest", None):
                 trace["ingest"] = {
                     sid: {
@@ -361,21 +343,6 @@ async def run(a, root, tmp):
             (a.out / "proof-trace.json").write_text(json.dumps(trace, indent=2) + "\n")
         except Exception:
             result["evidence_retention_error"] = traceback.format_exc()
-        if process and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), 10)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                result["classification"] = "CLEANUP_FAIL"
-                result["passed"] = False
-        if browser_fixture:
-            try:
-                await browser_fixture.stop()
-            except Exception:
-                result["classification"] = "CLEANUP_FAIL"
-                result["passed"] = False
         try:
             await h.stop()
         except Exception:

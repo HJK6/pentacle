@@ -15,6 +15,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--native-id", required=True)
+    parser.add_argument("--label", default="v2-test")
     args = parser.parse_args()
     root = args.root.resolve(strict=True)
     transcript = root / ".codex" / "sessions" / (args.native_id + ".jsonl")
@@ -52,7 +53,8 @@ def main():
                     stamp = datetime.now(timezone.utc).isoformat()
                     identity = str(uuid.uuid4())
                     received.write(
-                        json.dumps({"id": identity, "at": stamp, "text": text}) + "\n"
+                        json.dumps({"id": identity, "at": stamp, "text": text, "session": args.label})
+                        + "\n"
                     )
                     events.write(
                         json.dumps(

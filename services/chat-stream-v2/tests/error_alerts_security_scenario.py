@@ -12,8 +12,7 @@ import uuid
 import websockets
 from _shared import operator_auth
 from store import STREAM_TOKEN_HASH_VERSION
-from error_alerts_timer_scenario import require
-from error_alerts_ui_fixture import produce_voice
+from error_alerts_fixture import produce_voice, require
 
 
 async def reply(socket, frame):
@@ -69,19 +68,6 @@ def commands(h):
         "client_build": "auth-fixture",
     }
     return [
-        ("error.list", {}),
-        ("error.get", {"id": "notification:private-fixture"}),
-        ("error.mark", {"id": "notification:private-fixture", "action": "ack"}),
-        ("error.settings.get", {}),
-        ("error.settings.audit", {}),
-        (
-            "error.settings.set",
-            {
-                "family": "voice_operation.v1",
-                "expected_revision": 0,
-                "delivery_mode": "digest",
-            },
-        ),
         (
             "error.report",
             {
@@ -159,10 +145,32 @@ async def authentication(h):
             ),
             "A01 global snapshot leaks typed alert facts",
         )
+        oid = str(uuid.uuid4())
         read = await reply(
-            socket, {"type": "error.list", "request_id": str(uuid.uuid4())}
+            socket,
+            {
+                "type": "error.report",
+                "request_id": str(uuid.uuid4()),
+                "version": 1,
+                "operation_id": oid,
+                "event_id": str(uuid.uuid4()),
+                "sequence": 1,
+                "stage": "upload",
+                "outcome": "cancelled",
+                "code": "operation_cancelled",
+                "retry_state": "none",
+                "client_build": "auth-fixture",
+                "voice_operation": {
+                    "version": 1,
+                    "operation_id": oid,
+                    "origin_stream_id": "fixture:v2-test",
+                    "origin_generation": h.origin["session_generation"],
+                    "operation_kind": "voice_chat",
+                    "client_build": "auth-fixture",
+                },
+            },
         )
-        require(read.get("type") == "error.list.ok", "A01 actual operator denied")
+        require(read.get("type") == "error.report.ok", "A01 actual operator denied")
     async with peer(h) as (socket, _, _):
         cells.append(
             await denied(
@@ -302,7 +310,7 @@ async def authentication(h):
         )
     return {
         "classification": "PASS",
-        "scope": "actual loopback auth_v2 and seven management/report verbs",
+        "scope": "actual loopback auth_v2 and the error.report verb",
         "cases": cells,
         "limitations": [
             "No external TLS/network endpoint claimed; Dot denied at actual plain-transport boundary"

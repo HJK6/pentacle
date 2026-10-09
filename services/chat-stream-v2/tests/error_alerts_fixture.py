@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 import asyncio
+import base64
+import uuid
 import os
 from pathlib import Path
 from _shared import operator_auth
@@ -21,6 +23,47 @@ from cosmo_e2e.harness import (
     StubTranscriberPoster,
 )
 from notification_answer_fixture import Provider
+
+
+class ProductPredicateFailure(AssertionError):
+    pass
+
+
+def require(predicate, message):
+    if not predicate:
+        raise ProductPredicateFailure(message)
+
+
+async def produce_voice(h, *, operation_id=None, operation_kind="voice_chat"):
+    """Tagged voice upload through the real authenticated wire; no transcribe."""
+    operation_id = operation_id or str(uuid.uuid4())
+    intent = {
+        "version": 1,
+        "operation_id": operation_id,
+        "origin_stream_id": "fixture:v2-test",
+        "origin_generation": h.origin["session_generation"],
+        "operation_kind": operation_kind,
+        "client_build": "fixture",
+    }
+    rid = "fixture-upload-" + uuid.uuid4().hex
+    async with h.client() as client:
+        reply = await client.rpc(
+            "upload_blob_init", request_id=rid, voice_operation=intent, purpose="generic"
+        )
+        assert reply["type"] == "upload_blob.init.ok"
+        reply = await client.rpc(
+            "upload_blob_chunk",
+            request_id=rid,
+            final=True,
+            data_b64=base64.b64encode(b"disposable-voice").decode(),
+        )
+        assert reply["type"] == "upload_blob.ok"
+    operation = await h.store.voice_get("operator:" + h.credential_id, operation_id)
+    return {
+        "operation_id": operation_id,
+        "upload_committed_at": operation["data"]["upload_committed"],
+        "alert_due_after_s": 65,
+    }
 
 
 class ErrorAlertsHarness:
@@ -136,7 +179,11 @@ class ErrorAlertsHarness:
         self.server.operator_credential_registry = registry
         # Candidate uses the same production composition helper as main.
         if hasattr(self.server, "configure_error_alerts"):
-            await self.server.configure_error_alerts(self.queue)
+            from alerts import Alerts
+
+            # Same order as main.py: the sink exists before any producer runs.
+            self.alerts = Alerts(self.store)
+            await self.server.configure_error_alerts(self.queue, self.alerts)
         self.port = await self.server.bind()
         self.url = f"ws://127.0.0.1:{self.port}"
         if self.real_transport:
