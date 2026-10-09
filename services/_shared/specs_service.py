@@ -36,17 +36,38 @@ SOURCE_READ_ERRORS = (OSError, ValueError, UnicodeError, yaml.YAMLError)
 
 @contextmanager
 def _bounded_directory(path: Path):
-    """Open a directory chain without following even an ancestor symlink."""
+    """Open and recheck a directory chain without following ancestor symlinks."""
     if ".." in path.parts:
         raise ValueError("work_path_invalid")
     absolute = path.absolute()
-    fd = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in absolute.parts[1:]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+
+    def open_chain():
+        fd = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for part in absolute.parts[1:]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            return fd
+        except BaseException:
             os.close(fd)
-            fd = child
+            raise
+
+    fd = open_chain()
+    before = os.fstat(fd)
+    try:
         yield fd
+        try:
+            current = open_chain()
+        except OSError as exc:
+            raise WorkFilesUnsettled("work_files_unsettled") from exc
+        try:
+            after = os.fstat(current)
+            if (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns):
+                raise WorkFilesUnsettled("work_files_unsettled")
+        finally:
+            os.close(current)
     finally:
         os.close(fd)
 
@@ -250,7 +271,7 @@ class SpecsSubsystem:
             except (OSError, ValueError):
                 return {"available": False, "root_configured": True, "error": "work_root_unavailable",
                         "candidates": {}, "errors": {}, "scanned_at": now}
-        if root is None or not root.is_dir() or not (root / "work").is_dir():
+        if not self._explicit_root and (root is None or not root.is_dir() or not (root / "work").is_dir()):
             self.disabled = True
             return {"available": False, "root_configured": root is not None,
                     "error": "work_root_unavailable", "candidates": {}, "errors": {}, "scanned_at": now}
@@ -258,29 +279,42 @@ class SpecsSubsystem:
         candidates, errors = {}, {}
         try:
             for directory in self._spawn_work_dirs():
-                if self._explicit_root and directory.is_symlink():
-                    errors[str(directory)] = {"quality": "error", "error": "work_source_symlink"}
-                    continue
-                if (directory.parent != root / "work" or not directory.is_dir() or directory.is_symlink()
-                        or directory.name.startswith(("_", "."))):
-                    continue
-                for folder in directory.iterdir():
-                    if self._explicit_root and (folder.name.startswith(("_", ".")) or _is_spec_sync_conflict(folder)):
+                if self._explicit_root:
+                    try:
+                        with _bounded_directory(directory) as fd:
+                            # Enumeration is a read too: never follow a swapped
+                            # status path or a symlink while classifying entries.
+                            folders = []
+                            for name in os.listdir(fd):
+                                if name.startswith(("_", ".")) or _is_spec_sync_conflict(name):
+                                    continue
+                                try:
+                                    mode = os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode
+                                except FileNotFoundError as exc:
+                                    raise WorkFilesUnsettled("work_files_unsettled") from exc
+                                if stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+                                    folders.append(directory / name)
+                    except FileNotFoundError:
+                        continue  # An absent configured bucket is ordinary.
+                else:
+                    if (directory.parent != root / "work" or not directory.is_dir() or directory.is_symlink()
+                            or directory.name.startswith(("_", "."))):
                         continue
-                    if self._explicit_root and folder.is_symlink():
-                        errors[str(folder)] = {"quality": "error", "error": "work_source_symlink"}
-                        continue
-                    if (not folder.is_dir() or folder.is_symlink() or folder.name.startswith(("_", "."))
-                            or _is_spec_sync_conflict(folder)):
+                    folders = directory.iterdir()
+                for folder in folders:
+                    if not self._explicit_root and (not folder.is_dir() or folder.is_symlink()
+                            or folder.name.startswith(("_", ".")) or _is_spec_sync_conflict(folder)):
                         continue
                     try:
-                        conflicts = any(_is_spec_sync_conflict(p.name) and p.name.startswith(("spec.", "summary."))
-                                        for p in folder.iterdir())
                         if self._explicit_root:
                             with _bounded_directory(folder) as fd:
+                                conflicts = any(_is_spec_sync_conflict(name) and name.startswith(("spec.", "summary."))
+                                                for name in os.listdir(fd))
                                 candidate = read_work_candidate(_BoundedFolder(folder, fd), directory.name,
                                                                 now=now, quiet_s=self.debounce_s)
                         else:
+                            conflicts = any(_is_spec_sync_conflict(p.name) and p.name.startswith(("spec.", "summary."))
+                                            for p in folder.iterdir())
                             candidate = read_work_candidate(folder, directory.name, now=now, quiet_s=self.debounce_s)
                         if conflicts:
                             candidate.update(quality="stale", error="work_sync_conflict")

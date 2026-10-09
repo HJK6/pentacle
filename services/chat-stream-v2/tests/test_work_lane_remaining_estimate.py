@@ -339,3 +339,43 @@ def test_offline_output_is_independent_of_clock_and_source_mtimes(tmp_path):
     after = offline(tmp_path, manifest("spec_demo__bridge"))
     assert before.returncode == after.returncode == 0
     assert before.stdout == after.stdout
+
+
+@pytest.mark.parametrize("swap", ["status", "item"])
+def test_offline_directory_swap_never_enumerates_outside(tmp_path, monkeypatch, swap):
+    from _shared.specs_service import SpecsSubsystem
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    item = write_spec(root, "spec_demo__bridge", NUMERIC)
+    outside.mkdir()
+    (outside / "outside-directory-entry").mkdir()
+    target = item.parent if swap == "status" else item
+    identity = (target.stat().st_dev, target.stat().st_ino)
+    moved = tmp_path / "held-original"
+    triggered, observed = [], []
+    real_iterdir, real_listdir = Path.iterdir, os.listdir
+    def replace():
+        if not triggered:
+            target.rename(moved)
+            target.symlink_to(outside, target_is_directory=True)
+            triggered.append(True)
+    def path_entries(path):
+        if path == target:
+            replace()
+            entries = list(real_iterdir(path))
+            observed.extend(p.name for p in entries)
+            return iter(entries)
+        return real_iterdir(path)
+    def fd_entries(fd):
+        if isinstance(fd, int) and (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == identity:
+            replace()
+            entries = real_listdir(fd)
+            observed.extend(entries)
+            return entries
+        return real_listdir(fd)
+    monkeypatch.setattr(Path, "iterdir", path_entries)
+    monkeypatch.setattr(os, "listdir", fd_entries)
+    scanner = SpecsSubsystem(memory_root=root, session_summaries=lambda: [], changed_callback=lambda ids: None, debounce_s=0)
+    result = scanner.scan_work_observations()
+    assert triggered, "the directory-swap injection must execute"
+    assert "outside-directory-entry" not in observed, "outside directory data was read"
+    assert not result["available"] or result["errors"]
