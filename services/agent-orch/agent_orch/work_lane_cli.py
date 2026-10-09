@@ -172,7 +172,10 @@ def cmd_set_members(args: argparse.Namespace) -> int:
 
 
 def cmd_set_owner(args: argparse.Namespace) -> int:
-    return _operation(args, "set_owner", _confirmation(args, {"to": args.to}))
+    payload: dict[str, Any] = {"to": args.to}
+    if args.reason:
+        payload["reason"] = args.reason
+    return _operation(args, "set_owner", _confirmation(args, payload))
 
 
 def cmd_update(args: argparse.Namespace) -> int:
@@ -296,7 +299,7 @@ def add_parser(subparsers: Any) -> None:
     p.add_argument("--blocker")
     p.add_argument("--outcome")
     p.add_argument("--resolution")
-    p.add_argument("--reason")
+    p.add_argument("--reason", help="required for a bound-FD override of an operator-owned lane")
     p.add_argument("--confirmation-question-id")
     p.set_defaults(func=cmd_set_state)
 
@@ -323,8 +326,9 @@ def add_parser(subparsers: Any) -> None:
     p.add_argument("--no-spec-reason", help="required when the member list is empty")
     p.set_defaults(func=cmd_set_members)
 
-    p = mutator("set-owner", "FD: owner kind (operator->fd needs a confirmation)")
+    p = mutator("set-owner", "FD: owner kind (operator->fd needs a reason or confirmation)")
     p.add_argument("--to", required=True, choices=("fd", "operator"))
+    p.add_argument("--reason", help="required for a bound-FD override to fd")
     p.add_argument("--confirmation-question-id")
     p.set_defaults(func=cmd_set_owner)
 

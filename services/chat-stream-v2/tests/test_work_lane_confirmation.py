@@ -128,7 +128,7 @@ async def _journey(tmp_path, *, delivered, comment, refusal=None, transport="pro
                 # Wrong action is checked before single-use. Reopen, then repeat the same action.
                 assert rc != 0 and reused["error"] == "work_lane_operator_confirmation_mismatch", reused
                 rc, reopened = await cli("set-state", lane["lane_id"], "--to", "paused", "--expected-version",
-                                         str(result["lane"]["version"]), "--request-id", "reopen",
+                                         str(result["lane"]["version"]), "--request-id", "reopen", "--reason", "Reopen for confirmation reuse check",
                                          "--composite-stream-id", ASSISTANT)
                 assert rc == 0, reopened
                 args[args.index("--expected-version") + 1] = str(reopened["lane"]["version"])

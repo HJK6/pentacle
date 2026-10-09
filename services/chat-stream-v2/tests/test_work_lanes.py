@@ -168,12 +168,12 @@ def test_lead_eligibility_v5():
                              lane=lid, version=1)
             assert code(e) == "work_lane_lead_ineligible"
         with pytest.raises(ValueError) as e:
-            await env.op("set_state", {"to": "active"}, lane=lid, version=1)
+            await env.op("set_state", {"to": "active", "reason": "Resume managed work"}, lane=lid, version=1)
         assert code(e) == "work_lane_visible_lead_required"
         lead = await env.seat("real-lead", role="lead", parent_stream_id=FD)
         r = await env.op("set_lead", {"lead": {"stream_id": lead[0], "generation": lead[1]}}, lane=lid, version=1)
         assert r["lane"]["work_state"] == "paused"  # binding never resumes
-        r = await env.op("set_state", {"to": "active"}, lane=lid, version=2)
+        r = await env.op("set_state", {"to": "active", "reason": "Resume managed work"}, lane=lid, version=2)
         assert r["lane"]["work_state"] == "active"
     run(body)
 
@@ -341,7 +341,7 @@ def test_emit_started_once_and_owner_kind_v13():
         lid = (await env.adopt(key="stream:op", owner="operator", lead=lead))["lane"]["lane_id"]
         with pytest.raises(ValueError) as e:
             await env.op("set_state", {"to": "done", "outcome": "x"}, lane=lid, version=1)
-        assert code(e) == "work_lane_operator_confirmation_required"
+        assert code(e) == "work_lane_override_reason_required"
         bad = [
             env.confirm("q-other-lane", "wl-other", "set_state:done"),
             env.confirm("q-other-action", lid, "set_owner:fd"),
@@ -359,7 +359,7 @@ def test_emit_started_once_and_owner_kind_v13():
         r = await env.op("set_state", {"to": "done", "outcome": "x", "operator_confirmation": good},
                          lane=lid, version=1)
         assert r["lane"]["work_state"] == "done" and r["event"]["consumed_question_id"] == "q-good"
-        r = await env.op("set_state", {"to": "paused"}, lane=lid, version=2)
+        r = await env.op("set_state", {"to": "paused", "reason": "Reopen managed work"}, lane=lid, version=2)
         with pytest.raises(ValueError) as e:
             await env.op("set_state", {"to": "done", "outcome": "y", "operator_confirmation": good},
                          lane=lid, version=3)
@@ -367,7 +367,7 @@ def test_emit_started_once_and_owner_kind_v13():
         # owner handoff operator -> fd
         with pytest.raises(ValueError) as e:
             await env.op("set_owner", {"to": "fd"}, lane=lid, version=3)
-        assert code(e) == "work_lane_operator_confirmation_required"
+        assert code(e) == "work_lane_override_reason_required"
         wrong = env.confirm("q-owner-wrong", lid, "set_state:done")
         with pytest.raises(ValueError) as e:
             await env.op("set_owner", {"to": "fd", "operator_confirmation": wrong}, lane=lid, version=3)
