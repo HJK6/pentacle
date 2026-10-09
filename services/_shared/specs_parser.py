@@ -89,6 +89,8 @@ DEFAULT_STATUSES = [
     },
 ]
 
+WORK_SPEC_ID_RE = re.compile(r"^spec_[A-Za-z0-9_-]+$")
+
 SYNTHETIC_SPEC_PROGRESS = {"total": 0, "done": 0, "percent": 0}
 
 

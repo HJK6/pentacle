@@ -1,7 +1,7 @@
 """Validation shared by FD lane adoption and membership replacement."""
 import re
 
-SPEC_ID_RE = re.compile(r"^spec_[a-z0-9_]+$")
+from _shared.specs_parser import WORK_SPEC_ID_RE as SPEC_ID_RE
 TITLE_ID_RE = re.compile(r"(^|\W)(v2-[0-9a-f]{8}|spec_[a-z0-9_]+|wl-[0-9a-f]{24}|assistant-lane-[0-9a-f]+)")
 
 

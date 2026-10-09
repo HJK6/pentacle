@@ -8,14 +8,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .specs_parser import is_sync_conflict, load_frontmatter, parse_work_facts
+from .specs_parser import WORK_SPEC_ID_RE, load_frontmatter, parse_work_facts
 
 MATERIAL_FIELDS = ("status", "ac_checked", "ac_total", "estimate", "status_text", "next_action_text")
-SPEC_ID = re.compile(r"^spec_[a-z0-9_]+$")
 
 
 def timestamp(epoch: float) -> str:
@@ -37,7 +35,7 @@ def read_work_candidate(folder: Path, status: str, *, now: float, quiet_s: float
     after = [_signature(p) for p in paths]
     fm = load_frontmatter(texts[0])
     identity = fm.get("id")
-    if not isinstance(identity, str) or not SPEC_ID.fullmatch(identity):
+    if not isinstance(identity, str) or not WORK_SPEC_ID_RE.fullmatch(identity):
         raise ValueError("work_declared_id_invalid")
     if (before != after or any(now - p.stat().st_mtime < quiet_s for p in paths)
             or not all(text.strip() for text in texts)):

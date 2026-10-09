@@ -14,6 +14,7 @@ def test_order_bounds_unique_and_empty_reason():
         validate_members([], None)
     with pytest.raises(ValueError, match="work_lane_no_spec_reason_invalid"):
         validate_members([], "x" * 281)
+    assert validate_members(["spec_demo-kit__bridge"], None)[0] == ["spec_demo-kit__bridge"]
     assert len(validate_members([f"spec_demo__item_{i}" for i in range(32)], None)[0]) == 32
 
 
