@@ -75,6 +75,12 @@ def test_leadless_progress_changes_within_one_automatic_sweep(tmp_path, monkeypa
             assert (first["projection"]["items_open"], first["projection"]["items_completed"],
                     first["projection"]["items_dropped"]) == (1, 1, 1)
             assert first["projection"]["open_estimate_h"] == {"p25": 3, "p75": 5, "median": 4}
+            assert first["projection"]["completion_pending"] is False
+            assert first["projection"]["lead_reported_done"] is None
+            assert first["projection"]["stale"] is False
+            listed = await cli_call(port, tmp_path, "list", "--json")
+            for key in ("completion_pending", "lead_reported_done", "stale"):
+                assert listed["lanes"][0][key] is first["projection"][key]
             version = first["lane"]["version"]
             prior_sweep = inv._last_sweep
             spec.write_text(content.replace("[ ]", "[x]"))

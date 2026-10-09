@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 from work_lane_members import validate_members, validate_title
 from store_work_index import ensure_work_index_schema, member_ids, members_conn, _state_conn
+from store_work_lane_episodes import ensure_work_lane_episodes_schema, lead_reported_done_conn
 from work_lane_migration import upgrade_events
 from assistant_policy import AssistantPolicy
 from store_routing import _assistant_actor_conn, _record_publication_conn
@@ -37,6 +38,7 @@ WORK_LANE_COLUMNS = (
     ("last_update_id", "TEXT"),
     ("members_json", "TEXT"),
     ("no_spec_reason", "TEXT"),
+    ("lead_reported_done", "INTEGER CHECK(lead_reported_done IN (0,1))"),
 )
 WORK_LANE_EVENTS_DDL = """
 CREATE TABLE IF NOT EXISTS v2_work_lane_events (
@@ -92,6 +94,7 @@ def ensure_work_lane_schema(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE v2_assistant_composite_lanes ADD COLUMN {column} {ddl}")
     upgrade_events(conn, WORK_LANE_EVENTS_DDL)
     ensure_work_index_schema(conn)
+    ensure_work_lane_episodes_schema(conn)
     for ddl in WORK_LANE_INDEX_DDL:
         conn.execute(ddl)
 
@@ -345,6 +348,34 @@ def record_routing_confirmation_conn(conn, *, lane_id: str, stream_id: str, oper
     )
 
 
+def work_lane_rows_conn(conn, *, include_done: bool = False) -> list[dict[str, Any]]:
+    states = WORK_STATES if include_done else OPEN_WORK_STATES
+    index_available = bool(_state_conn(conn)["available"])
+    marks = ",".join("?" for _ in states)
+    lanes = [dict(r) for r in conn.execute(
+        f"SELECT * FROM v2_assistant_composite_lanes WHERE work_state IN ({marks})", states)]
+    for lane in lanes:
+        lane["_members"] = members_conn(conn, lane)
+        lane["_work_index_available"] = index_available
+        marks = ",".join("?" for _ in PRODUCT_OPERATIONS)
+        fd_stamp = conn.execute(
+            f"SELECT MAX(created_at) FROM v2_work_lane_events WHERE lane_id=? AND operation IN ({marks})",
+            (lane["lane_id"], *PRODUCT_OPERATIONS)).fetchone()[0]
+        lane["_fd_updated_at"] = fd_stamp or lane.get("first_admitted_at")
+        lead = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
+        lane["_lead_row"] = lead
+        lane["_qualifies"] = work_lane_lead_qualifies(lane, lead)
+        lane["_lead_reported_done"] = lead_reported_done_conn(conn, lane)
+        lane["_chat_kind"], lane["_chat_available"] = _chat_available(conn, lane)
+        last = conn.execute(
+            "SELECT update_id,update_kind,publication_event_id,created_at FROM v2_work_lane_events "
+            "WHERE lane_id=? AND update_id IS NOT NULL ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (lane["lane_id"],)).fetchone()
+        lane["_last_update"] = ({"update_id": last[0], "kind": last[1], "event_id": last[2], "ts": last[3]}
+                                if last else None)
+    return lanes
+
+
 class _WorkLanesStoreMixin:
     """Store methods for first-class work lanes (mixed into ``Store``)."""
 
@@ -396,32 +427,7 @@ class _WorkLanesStoreMixin:
         return await self.submit(_op)
 
     async def work_lane_rows(self, *, include_done: bool = False) -> list[dict[str, Any]]:
-        def _op(conn):
-            states = WORK_STATES if include_done else OPEN_WORK_STATES
-            index_available = bool(_state_conn(conn)["available"])
-            marks = ",".join("?" for _ in states)
-            lanes = [dict(r) for r in conn.execute(
-                f"SELECT * FROM v2_assistant_composite_lanes WHERE work_state IN ({marks})", states)]
-            for lane in lanes:
-                lane["_members"] = members_conn(conn, lane)
-                lane["_work_index_available"] = index_available
-                marks = ",".join("?" for _ in PRODUCT_OPERATIONS)
-                fd_stamp = conn.execute(
-                    f"SELECT MAX(created_at) FROM v2_work_lane_events WHERE lane_id=? AND operation IN ({marks})",
-                    (lane["lane_id"], *PRODUCT_OPERATIONS)).fetchone()[0]
-                lane["_fd_updated_at"] = fd_stamp or lane.get("first_admitted_at")
-                lead = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
-                lane["_lead_row"] = lead
-                lane["_qualifies"] = work_lane_lead_qualifies(lane, lead)
-                lane["_chat_kind"], lane["_chat_available"] = _chat_available(conn, lane)
-                last = conn.execute(
-                    "SELECT update_id,update_kind,publication_event_id,created_at FROM v2_work_lane_events "
-                    "WHERE lane_id=? AND update_id IS NOT NULL ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                    (lane["lane_id"],)).fetchone()
-                lane["_last_update"] = ({"update_id": last[0], "kind": last[1], "event_id": last[2], "ts": last[3]}
-                                        if last else None)
-            return lanes
-        return await self.submit(_op)
+        return await self.submit(lambda conn: work_lane_rows_conn(conn, include_done=include_done))
 
     async def reconcile_work_lanes(self) -> list[dict[str, Any]]:
         """Daemon-side lead-loss reconciliation: stored ``active`` without a visible lead -> ``paused``."""
@@ -677,6 +683,13 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if members == member_ids(lane) and reason == lane.get("no_spec_reason"):
                 raise ValueError("work_lane_members_unchanged")
             changes.update(members_json=_canonical(members), no_spec_reason=reason)
+            if members != member_ids(lane):
+                # Membership is a new completion condition even if both sets
+                # are terminal. Clear atomically with the committed replacement;
+                # request replay/unchanged refusal returns before this point.
+                conn.execute("UPDATE v2_work_lane_episodes SET cleared_at=? "
+                             "WHERE lane_id=? AND kind='completed' AND cleared_at IS NULL",
+                             (stamp, lane["lane_id"]))
             event_payload = {"members": members, "no_spec_reason": reason}
         elif operation == "set_owner":
             if set(payload) - {"to", "operator_confirmation"} or payload.get("to") not in OWNER_KINDS:

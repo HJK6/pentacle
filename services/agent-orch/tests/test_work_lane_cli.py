@@ -106,3 +106,25 @@ def test_member_commands_and_preview_payload(monkeypatch, tmp_path):
     assert _run(["work-lane", "adopt", "--apply", str(plan)]) == 0
     assert sent[-1]["payload"]["members"] == ["spec_demo__one"]
     assert "evidence" not in sent[-1]["payload"]
+
+
+@pytest.mark.parametrize("completion,reported,stale", [(True, False, False), (None, None, True), (False, True, False)])
+def test_r6_json_passthrough_and_unchanged_human_text(monkeypatch, capsys, completion, reported, stale):
+    lane = {"lane_id": "wl-1", "version": 2, "state": "paused", "state_reason": "lead_lost",
+            "owner_kind": "fd", "title": "T", "lead": None,
+            "visible_chat": {"stream_id": "fixture:chat", "available": "open"}}
+    _wire(monkeypatch, {"type": "work_lanes.list.ok", "lanes": [lane]})
+    _run(["work-lane", "list"])
+    prior = capsys.readouterr().out
+    enriched = dict(lane, completion_pending=completion, lead_reported_done=reported, stale=stale)
+    reply = {"type": "work_lanes.list.ok", "lanes": [enriched]}
+    _wire(monkeypatch, reply)
+    _run(["work-lane", "list"])
+    assert capsys.readouterr().out == prior
+    _run(["work-lane", "list", "--json"])
+    assert json.loads(capsys.readouterr().out) == reply
+    reply = {"type": "work_lanes.show.ok", "lane": {"lane_id": "wl-1"}, "projection": enriched,
+             "events": [], "updates": []}
+    _wire(monkeypatch, reply)
+    _run(["work-lane", "show", "wl-1", "--members", "--json"])
+    assert json.loads(capsys.readouterr().out) == reply

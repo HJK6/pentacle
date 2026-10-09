@@ -167,3 +167,103 @@ separately binds the candidate/live PID to configured roots and proves a paused
 leadless lane changes within one sweep using an owned temporary item, then
 cleans it up. Never use a real item's checkbox as a fixture. A source or fixture
 pass does not establish deployment.
+
+## Completion and stale facts (increment 2, M1)
+
+Inventory, `hello`/`list_sessions`, list and `show --members` now add three keys
+through the same lane-progress computation. Capability `work_lanes_v1`, fixture
+version 2, existing fields, member caps, lane ordering and human CLI text are
+unchanged. JSON list/show passes through the keys. The fixture retains its eight
+existing `progress_v2` cells and appends `stale_observation_completed`,
+`completion_pending` and `stale_lane`; older consumers can ignore the additions.
+
+- `completion_pending` is true only for a non-done lane with at least one member,
+  no unresolved members, every member freshly observed and terminal, and at
+  least one completed member. It is null when the index is unavailable or a
+  member is stale/error, otherwise false. A done lane always reports false.
+  Deprecated-only, empty and settled missing/ambiguous sets do not imply completion.
+- `lead_reported_done` is independent of member completion. A resolved dispatch
+  related to this lane by its route or admission receipt establishes routing
+  correlation. Without correlation the value is null; with correlation but no
+  terminal-report pointer it is false. An exact correlated terminal report from
+  the currently bound lead generation makes it true. The accepted report
+  transaction persists that fact before a handoff can occur. Stale generations
+  and handoffs retain the persisted prior value. Routing decision reopen clears
+  the pointer and persists false; historical report replay cannot restore it.
+  Generic reports, status-card text and a shared lead do not establish completion.
+- `stale` is a boolean. Only presented active lanes can be stale. Their
+  `freshness_at` must be strictly older than `WORK_LANE_STALE_H` hours (default
+  24; configured values must be finite and positive). Sweep time, derived writes
+  and lead-loss reconciliation do not renew freshness. Paused, blocked, done and
+  active-but-unqualified lanes are not stale.
+
+### Lane-owned episodes and async sink
+
+The existing coalesced inventory drain evaluates episodes after index and
+lead-loss reconciliation. Session-inventory emits, lane writes and the existing
+periodic pass still call the synchronous, non-blocking `refresh()` method. No
+new loop, wake cadence, transport engine or agent duty is introduced.
+
+`v2_work_lane_episodes` is additive and stores each lane/kind episode with
+`episode_id = <lane_id>:<completed|stale>:<n>`, sequence starting at 1, `opened_at`,
+`cleared_at`, `emitted_ref` and an immutable serialized opening fact. A unique
+partial index permits at most one open episode per lane and kind. Episode and
+correlation maintenance never changes the lane's lifecycle version or timestamps;
+no event kinds or event CHECK constraints change.
+
+For unchanged membership, completion true opens, null holds without opening or
+clearing, and false clears. An actual committed membership replacement clears
+the old completion episode silently in the same transaction as `set_members`,
+even when the new set is true or unknown. The next drain opens sequence n+1 only
+when the new set is true. Unchanged-request refusal and duplicate request replay
+do not clear or emit. Evaluation re-reads members inside the serialized Store
+transaction, so a captured old set cannot reopen an episode after replacement.
+
+Leaving presented active or renewing freshness clears stale. Re-entering active
+already beyond the threshold opens n+1 immediately. All clears are silent;
+there is no recovered fact. Completion never sets the lane to done, and leadless
+lanes participate in completion episodes.
+
+`LaneEpisodeSink` is a one-method async protocol: `emit(fact)` returns a durable
+reference or null when unavailable. The stable identity is family `work_lane.v1`,
+producer principal `daemon:work-lanes`, and episode ID, independent of the current
+front-desk generation. The stable fact carries lane ID, kind, opening timestamp
+and active condition; its code is `lane_completed` or `lane_stale`.
+
+1. One Store transaction persists the opening and its exact fact with null ref
+2. The drain awaits the sink outside every Store transaction, including when the
+   sink itself uses the same writer
+3. A separate guarded write latches a returned reference to that exact episode
+
+A missing sink, null return, exception or uncertain outcome leaves the fact
+pending. The next existing drain re-hands the identical identity and payload;
+the sink must commit idempotently and return the same reference. There is no
+timer, backoff or transport retry state in lane code. A clear or recurrence
+during the await retains the original pending opening; its reference cannot be
+attached to a newer episode. Restart and front-desk rebind therefore do not
+create a second line in an idempotent sink.
+
+M1 ships the computation, storage and sink interface, tested with a synthetic
+async idempotent recording sink. The daemon's default sink is absent, so openings
+remain pending. Binding the real digest-only alert family is a separately gated
+M2 dependency; M1 does not modify the shared alert core or claim digest delivery.
+
+### Increment-2 validation and rollback
+
+`test_work_lane_episodes.py` covers tri-state predicates, membership precedence,
+concurrent/replayed drains, restart, pending openings, commit-then-raise, crashes
+on both sides of the sink handoff, same-writer deadlock, silent clears and
+recurrence. `test_work_lane_completion.py` and the retained four Q3 cells cover
+report correlation, atomic report/handoff, routing reopen and old-report replay.
+The socket/CLI and shared v1 fixture tests verify additive wire compatibility.
+All source acceptance uses synthetic observations and disposable SQLite.
+
+Store initialization adds the nullable `lead_reported_done` lane column and
+episode table/index idempotently. A source rollback to increment 1 may leave
+these additive structures intact; it ignores them and does not emit episodes.
+Do not drop the episode rows or restore an older whole database: stable IDs,
+pending opening facts and latched references must survive re-upgrade. Retain an
+owned DB preimage and source/configuration receipt before any fleet-authorized
+deployment. Real inventory, CLI and digest readback after deployment remains
+separate fleet acceptance.
+
