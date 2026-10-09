@@ -10,6 +10,7 @@ import pytest_asyncio
 from _shared.notifications_store import NotificationStore
 from _shared import operator_auth
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
+import error_alerts
 from error_alerts import ErrorAlerts, evaluate
 from server import Server
 from store_voice_operations import iso
@@ -75,6 +76,19 @@ async def subject(tmp_path, monkeypatch):
             server=server,
             provider=provider,
         )
+
+
+async def received(s):
+    """The FD read-only query: typed facts whose linked notice has bound proof."""
+    notices = {r["notice_id"]: r for r in await s.service.notice_rows()}
+    out = []
+    for fact in await s.notify._db.call("error_rows"):
+        ctx = fact["error_context"]
+        for nid in ctx["notice_ids"]:
+            d = s.service.delivery(notices.get(nid), notices, ctx)
+            if d["state"] == "delivered":
+                out.append(d)
+    return out
 
 
 async def upload(s, ago=61):
@@ -161,7 +175,7 @@ async def test_auth_denies_seat_elevation_scopes_and_revocation(subject):
     ):
         r = await s.service.request(
             {
-                "type": "error.list",
+                "type": "error.report",
                 "request_id": "r",
                 "_auth_context": {**s.auth, **flags},
             }
@@ -170,32 +184,9 @@ async def test_auth_denies_seat_elevation_scopes_and_revocation(subject):
     # Revocation is checked from registry on every call, not cached hello trust.
     s.server.operator_credential_registry.revoke(s.auth["credential_id"])
     r = await s.service.request(
-        {"type": "error.list", "request_id": "r", "_auth_context": s.auth}
+        {"type": "error.report", "request_id": "r", "_auth_context": s.auth}
     )
     assert r["error_code"] == "credential_revoked"
-
-
-@pytest.mark.asyncio
-async def test_settings_cas_audit_and_mute_overlay(subject):
-    s = subject
-    request = {
-        "type": "error.settings.set",
-        "request_id": "r",
-        "family": "voice_operation.v1",
-        "expected_revision": 0,
-        "delivery_mode": "digest",
-        "mute_for_s": 900,
-        "_auth_context": s.auth,
-    }
-    result = await s.service.request(request)
-    assert result["setting"]["delivery_mode"] == "digest"
-    assert result["setting"]["effective_delivery_mode"] == "muted"
-    stale = await s.service.request(request)
-    assert stale["error_code"] == "revision_conflict"
-    settings = await s.notify._db.call("error_settings", now="2099-01-01T00:00:00Z")
-    assert settings[0]["effective_delivery_mode"] == "digest"
-    items, _ = await s.notify._db.call("error_settings_audit")
-    assert len(items) == 1
 
 
 @pytest.mark.asyncio
@@ -225,12 +216,7 @@ async def test_cross_principal_origin_and_blob_ownership(subject):
 @pytest.mark.asyncio
 async def test_digest_fold_is_not_receipt_and_retention_protects(subject, monkeypatch):
     s = subject
-    await s.notify._db.call(
-        "error_settings_set",
-        actor=s.principal,
-        expected_revision=0,
-        delivery_mode="digest",
-    )
+    monkeypatch.setitem(error_alerts.POLICY, "effective_delivery_mode", "digest")
     await upload(s)
     await s.service.reconcile()
     rows = await s.service.notice_rows()
@@ -256,41 +242,9 @@ async def test_digest_fold_is_not_receipt_and_retention_protects(subject, monkey
 
 
 @pytest.mark.asyncio
-async def test_legacy_cursor_and_question_exclusion(subject):
+async def test_cancel_before_attempt_suppresses_held_member(subject, monkeypatch):
     s = subject
-    for i in range(251):
-        await s.notify._db.call(
-            "create_notification",
-            producer="legacy",
-            title="Retained warning",
-            severity="warning",
-            notification_id=f"n-{i:03}",
-            now="2026-01-01T00:00:00Z",
-        )
-    await s.notify._db.call(
-        "create_notification", producer="legacy", title="Information", severity="info"
-    )
-    ids = []
-    msg = {"type": "error.list", "request_id": "r", "_auth_context": s.auth}
-    while True:
-        result = await s.service.request(msg)
-        assert result["type"] == "error.list.ok", result
-        ids.extend(i["id"] for i in result["items"])
-        if not result["next_cursor"]:
-            break
-        msg["cursor"] = result["next_cursor"]
-    assert len(ids) == len(set(ids)) == 251
-
-
-@pytest.mark.asyncio
-async def test_cancel_before_attempt_suppresses_held_member(subject):
-    s = subject
-    await s.notify._db.call(
-        "error_settings_set",
-        actor=s.principal,
-        expected_revision=0,
-        delivery_mode="digest",
-    )
+    monkeypatch.setitem(error_alerts.POLICY, "effective_delivery_mode", "digest")
     await upload(s)
     await s.service.reconcile()
     await report(s, outcome="cancelled", code="operation_cancelled")
@@ -300,52 +254,9 @@ async def test_cancel_before_attempt_suppresses_held_member(subject):
 
 
 @pytest.mark.asyncio
-async def test_unmute_does_not_replay_recovered_but_releases_active(subject):
-    s = subject
-    await s.notify._db.call(
-        "error_settings_set",
-        actor=s.principal,
-        expected_revision=0,
-        delivery_mode="muted",
-    )
-    await upload(s)
-    await s.service.reconcile()
-    assert not await s.service.notice_rows()
-    await s.notify._db.call(
-        "error_settings_set",
-        actor=s.principal,
-        expected_revision=1,
-        delivery_mode="immediate",
-    )
-    await s.service.reconcile()
-    assert len(await s.service.notice_rows()) == 1
-    await report(s, outcome="recovered", code="recovered")
-    await s.service.reconcile()
-    await s.notify._db.call(
-        "error_settings_set",
-        actor=s.principal,
-        expected_revision=2,
-        delivery_mode="muted",
-    )
-    await s.notify._db.call(
-        "error_settings_set",
-        actor=s.principal,
-        expected_revision=3,
-        delivery_mode="immediate",
-    )
-    await s.service.reconcile()
-    assert len(await s.service.notice_rows()) == 1
-
-
-@pytest.mark.asyncio
 async def test_rebind_held_and_folded_before_attempt(subject, monkeypatch):
     s = subject
-    await s.notify._db.call(
-        "error_settings_set",
-        actor=s.principal,
-        expected_revision=0,
-        delivery_mode="digest",
-    )
+    monkeypatch.setitem(error_alerts.POLICY, "effective_delivery_mode", "digest")
     await upload(s)
     await s.service.reconcile()
     monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_ENABLED", "0")
@@ -386,10 +297,10 @@ async def test_rebind_held_and_folded_before_attempt(subject, monkeypatch):
         == "superseded_binding"
     )
     fact = (await s.notify._db.call("error_rows"))[0]
-    detail = await s.service.detail(
-        "notification:" + fact["notification_id"], {"_auth_context": s.auth}
-    )
-    assert detail["alert"]["delivery"]["recipient_stream_id"] == "fixture:v2-next"
+    notices = {r["notice_id"]: r for r in rows}
+    ctx = fact["error_context"]
+    deliveries = [s.service.delivery(notices.get(n), notices, ctx) for n in ctx["notice_ids"]]
+    assert deliveries[-1]["recipient_stream_id"] == "fixture:v2-next"
 
 
 @pytest.mark.asyncio
@@ -414,44 +325,11 @@ async def test_real_comms_generation_proof_is_required_for_received(subject):
     rows = await s.service.notice_rows()
     assert len(rows) == 1
     assert len(s.provider.pastes) == 1
-    projected = await s.service.list({"filter": "received", "_auth_context": s.auth})
-    assert len(projected["items"]) == 1
-    assert (
-        projected["items"][0]["delivery"]["recipient_generation"]
-        == s.intent["origin_generation"]
-    )
-    assert projected["items"][0]["delivery"]["proof_at"]
+    (projected,) = await received(s)
+    assert projected["recipient_generation"] == s.intent["origin_generation"]
+    assert projected["proof_at"]
     await s.queue.drain_once()
     assert len(s.provider.pastes) == 1
-
-
-@pytest.mark.asyncio
-async def test_legacy_delivered_timestamp_without_user_generation_proof_is_unknown(
-    subject,
-):
-    s = subject
-    await s.store.enqueue_outbound_notice(
-        notice_id="native-fixture",
-        kind="reconciler",
-        dedupe_key="native-fixture",
-        recipient_stream_id="fixture:v2-test",
-        tell_id="native-fixture",
-        body="Safe fixed template",
-        metadata={"class": "row_open_session_dead"},
-    )
-
-    def mark(conn):
-        with conn:
-            conn.execute(
-                "UPDATE v2_outbound_notices SET delivered_at='2026-10-09T00:00:00Z' WHERE notice_id='native-fixture'"
-            )
-
-    await s.store.submit(mark)
-    result = await s.service.list({"_auth_context": s.auth})
-    assert result["items"][0]["delivery"]["state"] == "legacy_unknown"
-    assert not (await s.service.list({"filter": "received", "_auth_context": s.auth}))[
-        "items"
-    ]
 
 
 @pytest.mark.asyncio
@@ -495,12 +373,7 @@ async def test_explicit_send_retry_keeps_both_server_receipt_identities(subject)
 @pytest.mark.asyncio
 async def test_cancelled_member_cannot_escape_inside_mixed_digest(subject, monkeypatch):
     s = subject
-    await s.notify._db.call(
-        "error_settings_set",
-        actor=s.principal,
-        expected_revision=0,
-        delivery_mode="digest",
-    )
+    monkeypatch.setitem(error_alerts.POLICY, "effective_delivery_mode", "digest")
     await upload(s)
     first = s.intent
     s.intent = {**first, "operation_id": str(uuid.uuid4())}
@@ -529,26 +402,6 @@ async def test_cancelled_member_cannot_escape_inside_mixed_digest(subject, monke
 
 
 @pytest.mark.asyncio
-async def test_attempt_history_does_not_call_unproved_timestamp_proof(subject):
-    s = subject
-    await upload(s)
-    await s.service.reconcile()
-
-    def mark(conn):
-        with conn:
-            conn.execute(
-                "UPDATE v2_outbound_notices SET delivered_at='2026-10-09T00:00:00Z'"
-            )
-
-    await s.store.submit(mark)
-    fact = (await s.notify._db.call("error_rows"))[0]
-    detail = await s.service.detail(
-        "notification:" + fact["notification_id"], {"_auth_context": s.auth}
-    )
-    assert detail["attempts"][0]["proof_at"] is None
-
-
-@pytest.mark.asyncio
 async def test_retained_alert_keeps_proof_beyond_generic_tell_limit(
     subject, monkeypatch
 ):
@@ -562,14 +415,7 @@ async def test_retained_alert_keeps_proof_beyond_generic_tell_limit(
             "unrelated-" + str(i), {"reply": {}, "delivery": {}}
         )
     assert await s.store.get_tell_delivery(notice["tell_id"]) is not None
-    assert (
-        len(
-            (await s.service.list({"filter": "received", "_auth_context": s.auth}))[
-                "items"
-            ]
-        )
-        == 1
-    )
+    assert len(await received(s)) == 1
 
 
 @pytest.mark.asyncio
@@ -610,35 +456,11 @@ async def test_recovery_after_enqueue_before_watermark_repairs_link(subject):
 
 
 @pytest.mark.asyncio
-async def test_policy_change_before_attempt_requeues_under_saved_policy(subject):
-    s = subject
-    await upload(s)
-    await s.service.reconcile()
-    await s.notify._db.call(
-        "error_settings_set",
-        actor=s.principal,
-        expected_revision=0,
-        delivery_mode="digest",
-    )
-    await s.queue.drain_once()
-    assert not s.provider.pastes
-    await s.service.reconcile()
-    rows = await s.service.notice_rows()
-    assert any(r["terminal_reason"] == "suppressed_policy" for r in rows)
-    assert any(r["kind"] == "front_desk_held" and not r["terminal_at"] for r in rows)
-
-
-@pytest.mark.asyncio
 async def test_mixed_digest_rebuild_submits_only_still_active_member(
     subject, monkeypatch
 ):
     s = subject
-    await s.notify._db.call(
-        "error_settings_set",
-        actor=s.principal,
-        expected_revision=0,
-        delivery_mode="digest",
-    )
+    monkeypatch.setitem(error_alerts.POLICY, "effective_delivery_mode", "digest")
     await upload(s)
     first = s.intent
     s.intent = {**first, "operation_id": str(uuid.uuid4())}
@@ -676,12 +498,7 @@ async def test_recovery_summary_survives_batch_with_active_alert(subject, monkey
     await s.queue.drain_once()
     assert len(s.provider.pastes) == 1
     await report(s, outcome="recovered", code="recovered")
-    await s.notify._db.call(
-        "error_settings_set",
-        actor=s.principal,
-        expected_revision=0,
-        delivery_mode="digest",
-    )
+    monkeypatch.setitem(error_alerts.POLICY, "effective_delivery_mode", "digest")
     s.intent = {**first, "operation_id": str(uuid.uuid4())}
     await s.store.voice_register(
         s.principal, s.intent, upload_request_id="second-upload"
@@ -702,72 +519,6 @@ async def test_recovery_summary_survives_batch_with_active_alert(subject, monkey
     assert "condition=recovered" in updates
     assert s.intent["operation_id"] in updates
     assert "BLOCKER voice_operation.v1 recovered" not in updates
-
-
-@pytest.mark.asyncio
-async def test_product_responses_match_frozen_panel_schema(subject):
-    from error_alerts import SCHEMA
-    from jsonschema import Draft202012Validator, FormatChecker
-
-    s = subject
-    await upload(s)
-    await s.queue.drain_once()
-    fact = (await s.notify._db.call("error_rows"))[0]
-    identity = "notification:" + fact["notification_id"]
-    requests = [
-        ("error.list", {}),
-        ("error.get", {"id": identity}),
-        ("error.mark", {"id": identity, "action": "seen"}),
-        ("error.settings.get", {}),
-        (
-            "error.settings.set",
-            {
-                "family": "voice_operation.v1",
-                "expected_revision": 0,
-                "delivery_mode": "digest",
-            },
-        ),
-        ("error.settings.audit", {}),
-    ]
-    for verb, fields in requests:
-        response = await s.service.request(
-            {"type": verb, "request_id": verb, "_auth_context": s.auth, **fields}
-        )
-        Draft202012Validator(
-            {**SCHEMA["responses"][verb], "$defs": SCHEMA["$defs"]},
-            format_checker=FormatChecker(),
-        ).validate(response)
-
-
-@pytest.mark.asyncio
-async def test_existing_notification_native_pair_is_one_read_only_projection(subject):
-    s = subject
-    await s.notify._db.call(
-        "create_notification",
-        producer="session_reconciler",
-        notification_id="legacy-pair",
-        dedup_key="episode-one",
-        severity="warning",
-        title="Retained warning",
-    )
-    await s.store.enqueue_outbound_notice(
-        notice_id="native-pair",
-        kind="reconciler",
-        dedupe_key="native-pair",
-        tell_id="native-pair",
-        recipient_stream_id="fixture:v2-test",
-        body="Fixed safe fixture",
-        episode_id="episode-one",
-        metadata={"class": "row_open_session_dead"},
-    )
-    result = await s.service.list({"_auth_context": s.auth})
-    assert len(result["items"]) == 1
-    assert result["items"][0]["source"] == {"type": "notification", "id": "legacy-pair"}
-    assert result["items"][0]["delivery"]["notice_id"] == "native-pair"
-    assert result["items"][0]["read_only"] is True
-    assert (await s.notify._db.call("error_get", "legacy-pair"))[
-        "error_context"
-    ] is None
 
 
 @pytest.mark.asyncio
@@ -833,45 +584,3 @@ async def test_restricted_hello_stays_available_without_alert_capability(
     assert "error_reporting_credential_id" not in snapshot
     assert snapshot["notifications"] == []
 
-
-@pytest.mark.asyncio
-async def test_retained_native_notice_survives_recorded_primary_rebind(subject):
-    s = subject
-    await s.store.update_session("fixture", "v2-test", pane_status="pane_alive")
-    old = await s.server.assistant_composite.binding()
-    for notice_id, target, generation in (
-        ("old-primary-wake", old["stream_id"], old["generation"]),
-        ("unrelated-wake", "fixture:other", "unrelated-generation"),
-    ):
-        await s.store.enqueue_outbound_notice(
-            notice_id=notice_id,
-            kind="wake_missed",
-            dedupe_key=notice_id,
-            tell_id=notice_id,
-            recipient_stream_id=target,
-            body="Retained fixture wake",
-            metadata={"owner_generation": generation},
-        )
-    new = await s.server.sessions.open(
-        "fixture",
-        "v2-next",
-        provider="codex",
-        visibility="visible",
-        effective_model="gpt-6-astra",
-        effective_effort="high",
-        pane_status="pane_alive",
-    )
-    await s.store.rebind_assistant(
-        env_binding={"stream_id": old["stream_id"], "generation": old["generation"]},
-        actor_stream_id=old["stream_id"],
-        actor_generation=old["generation"],
-        target_stream_id="fixture:v2-next",
-        target_generation=new["session_generation"],
-        request_id="retained-native-rebind",
-        expected_revision=old["revision"],
-    )
-    await s.server.assistant_composite.load_binding()
-    result = await s.service.list({"_auth_context": s.auth})
-    assert [r["id"] for r in result["items"]] == ["outbox:old-primary-wake"]
-    assert result["items"][0]["read_only"] is True
-    assert await s.notify._db.call("error_rows") == []

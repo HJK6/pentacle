@@ -163,6 +163,7 @@ class VoiceOperationsStoreMixin:
             "transcribe_failed",
             "send_committed",
             "send_proved",
+            "send_failed",
         ):
             raise ValueError("invalid_request")
         now = now or iso()
@@ -315,6 +316,31 @@ class VoiceOperationsStoreMixin:
                 }
 
         return await self.submit(op)
+
+    async def voice_register_implicit(
+        self, principal, operation_id, kind, origin_stream_id, origin_generation
+    ):
+        """Register daemon-observed installed-client voice; no client intent.
+
+        The origin is recorded for receipt reconcile only; it never fences or
+        retargets the ordinary verb.
+        """
+        now = iso()
+
+        def op(conn):
+            with conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO voice_operations(principal,operation_id,origin_stream_id,origin_generation,operation_kind,client_build,created_at,updated_at) VALUES(?,?,?,?,?,'installed-untagged',?,?)",
+                    (principal, operation_id, origin_stream_id, origin_generation, kind, now, now),
+                )
+                row = conn.execute(
+                    "SELECT operation_kind FROM voice_operations WHERE principal=? AND operation_id=?",
+                    (principal, operation_id),
+                ).fetchone()
+                if row["operation_kind"] != kind:
+                    raise ValueError("origin_mismatch")
+
+        await self.submit(op)
 
     async def voice_bind_send(self, principal, operation_id, request_id):
         def op(conn):

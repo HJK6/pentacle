@@ -8,9 +8,7 @@ import uuid
 import pytest
 import pytest_asyncio
 import websockets
-from jsonschema import Draft202012Validator, FormatChecker
 
-from error_alerts import SCHEMA
 from error_alerts_fixture import ErrorAlertsHarness
 
 
@@ -97,33 +95,17 @@ async def test_wire_report_durable_ack_and_strict_negative_frames(wire):
 
 
 @pytest.mark.asyncio
-async def test_wire_operator_schema_settings_and_mid_connection_revocation(wire):
+async def test_wire_management_verbs_absent_and_mid_connection_revocation(wire):
     h = wire
     async with h.client() as client:
-        for verb in ("error.list", "error.settings.get", "error.settings.audit"):
+        for verb in (
+            "error.list", "error.get", "error.mark",
+            "error.settings.get", "error.settings.set", "error.settings.audit",
+        ):
             reply = await client.rpc(verb, request_id=verb)
-            Draft202012Validator(
-                {**SCHEMA["responses"][verb], "$defs": SCHEMA["$defs"]},
-                format_checker=FormatChecker(),
-            ).validate(reply)
-        updated = await client.rpc(
-            "error.settings.set",
-            request_id="set",
-            family="voice_operation.v1",
-            expected_revision=0,
-            delivery_mode="digest",
-        )
-        assert updated["setting"]["revision"] == 1
-        stale = await client.rpc(
-            "error.settings.set",
-            request_id="stale",
-            family="voice_operation.v1",
-            expected_revision=0,
-            delivery_mode="muted",
-        )
-        assert stale["error_code"] == "revision_conflict"
+            assert not str(reply.get("type")).endswith(".ok"), reply
         h.server.operator_credential_registry.revoke(h.credential_id)
-        assert (await client.rpc("error.list", request_id="revoked"))[
+        assert (await client.rpc("error.report", request_id="revoked"))[
             "error_code"
         ] == "credential_revoked"
 
@@ -135,7 +117,7 @@ async def test_wire_anonymous_loopback_cannot_forge_operator_context(wire):
         await client.send(
             json.dumps(
                 {
-                    "type": "error.list",
+                    "type": "error.report",
                     "request_id": "forged",
                     "_auth_context": {
                         "operator_authenticated": True,
@@ -155,7 +137,7 @@ async def test_wire_anonymous_loopback_cannot_forge_operator_context(wire):
             "hello_required",
             "authentication_required",
         )
-        assert "items" not in reply
+        assert not str(reply.get("type")).endswith(".ok")
 
 
 @pytest.mark.asyncio

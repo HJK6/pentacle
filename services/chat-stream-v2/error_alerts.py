@@ -1,4 +1,4 @@
-"""Typed voice facts and operator projection over the existing notice outbox.
+"""Typed error facts delivered through the existing notice outbox.
 
 One coordinator runs inside the existing five-second outbox pass. No content,
 second delivery queue, independent retry loop, or client-controlled destination.
@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import base64
 from contextlib import asynccontextmanager
+import re
+import uuid
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -16,7 +18,7 @@ import os
 from pathlib import Path
 import time
 from jsonschema import Draft202012Validator, FormatChecker
-from _shared.notification_errors import FAMILIES
+from error_adapters import ErrorFact
 from outbound_notices import NoticeDecision
 from store_routing import _insert_outbound_notice_conn
 from store_voice_operations import iso
@@ -37,12 +39,6 @@ VALIDATORS = {
 INTENT_VALIDATOR = Draft202012Validator(
     SCHEMA["$defs"]["voice_operation"], format_checker=FormatChecker()
 )
-LIMITS = dict(
-    zip(
-        SCHEMA["$defs"]["limits"]["properties"],
-        [60, 150, 60, 60, 1, 3, 200, 30, 100, 16384, "Current front desk binding"],
-    )
-)
 EXPECTED_CODES = {
     "no_speech",
     "too_long",
@@ -50,12 +46,14 @@ EXPECTED_CODES = {
     "permission_declined",
     "operation_cancelled",
 }
-INCOMPLETE = [
-    "old_clients_uninstrumented",
-    "log_only_events_unavailable",
-    "offline_unreported_events_unavailable",
-    "retained_history_only",
-]
+#: Fixed delivery policy; excess immediates fold into the digest by rate limit.
+POLICY = {"effective_delivery_mode": "immediate"}
+VOICE = "voice_operation.v1"
+_PRINCIPAL = re.compile(r"(daemon|system):[A-Za-z0-9._:@-]{1,160}")
+DELIVERY_FIELDS = (
+    "state", "notice_id", "tell_id", "recipient_stream_id", "recipient_generation",
+    "proof_at", "folded_into_notice_id", "predecessor_notice_id", "next_action",
+)
 
 
 def metadata(row):
@@ -73,12 +71,40 @@ def epoch(value):
 
 def fingerprint(ctx):
     return hashlib.sha256(
-        "\0".join((ctx["principal"], ctx["family"], ctx["stage"], ctx["code"])).encode()
+        "\0".join((ctx["principal"], ctx["family"], ctx.get("stage") or "", ctx["code"])).encode()
     ).hexdigest()
+
+
+def evaluate_implicit(operation, now):
+    """Installed-client operations: only failures the daemon actually observed."""
+    d = operation["data"]
+    if operation["operation_kind"] == "implicit_send":
+        if d.get("send_proved"):
+            return "recovered", "recovered", "send"
+        if d.get("send_committed"):
+            if now >= epoch(d["send_committed"]) + 60:
+                return "unknown", "send_unconfirmed", "send"
+            return "unknown", None, "send"
+        if d.get("send_failed") and now >= epoch(d["send_failed"]) + 60:
+            return "active", "send_transport_failed", "send"
+        return "unknown", None, "send"
+    if d.get("transcribe_result"):
+        return "recovered", "recovered", "transcribe"
+    if d.get("transcribe_failed_code") in EXPECTED_CODES:
+        return "cancelled", d["transcribe_failed_code"], "transcribe"
+    if d.get("transcribe_failed"):
+        if now >= epoch(d["transcribe_failed"]) + 60:
+            return "active", "transcribe_failed", "transcribe"
+        return "unknown", None, "transcribe"
+    if d.get("transcribe_started") and now >= epoch(d["transcribe_started"]) + 150:
+        return "unknown", "transcribe_milestone_missing", "transcribe"
+    return "unknown", None, "transcribe"
 
 
 def evaluate(operation, now):
     """Project evidence, never turn a missing milestone into definite failure."""
+    if operation["operation_kind"].startswith("implicit_"):
+        return evaluate_implicit(operation, now)
     d = operation["data"]
     e = d.get("client_event") or {}
     condition = "unknown"
@@ -162,6 +188,58 @@ class ErrorAlerts:
     async def start(self):
         self.cutover_at = await self.notify._db.call("error_cutover")
 
+    async def emit(self, fact, *, principal=None):
+        """Record one typed fact from error_adapters; delivery follows reconcile."""
+        principal = principal or "daemon:" + str(self.server.local_host)
+        if not isinstance(fact, ErrorFact) or not (
+            isinstance(principal, str) and _PRINCIPAL.fullmatch(principal)
+        ) or fact.family == VOICE:
+            raise ValueError("invalid_error_fact")
+        key = ":".join((fact.family, principal, fact.episode_id))
+        nid = str(uuid.uuid5(uuid.NAMESPACE_URL, "error-alert:" + key))
+        async with self._facts_lock:
+            prior = await self.notify._db.call("error_get", nid)
+            ctx = prior and prior["error_context"]
+            if not ctx and fact.condition in ("recovered", "cancelled"):
+                return None
+            if ctx and ctx["condition"] in ("recovered", "cancelled"):
+                # A closed episode never reopens; a recurrence is a new episode_id.
+                log.warning(
+                    "subsystem=error_alerts family=%s action=episode_closed", fact.family
+                )
+                return nid
+            row = await self.notify._db.call(
+                "error_upsert",
+                error_key=key,
+                context={
+                    "version": 1,
+                    "family": fact.family,
+                    "principal": principal,
+                    "episode_id": fact.episode_id,
+                    "operation_revision": (ctx["operation_revision"] if ctx else 0) + 1,
+                    "condition": fact.condition,
+                    "code": fact.code,
+                    "stage": fact.stage,
+                    "cutover_at": self.cutover_at,
+                },
+                title="Error alert needs review",
+                now=iso(),
+            )
+        return row["notification_id"]
+
+    async def _current(self, ctx, now):
+        """Fresh condition/code immediately before enqueue or submission."""
+        if ctx["family"] == VOICE:
+            operation = await self.store.voice_get(ctx["principal"], ctx["operation_id"])
+            condition, code, _ = evaluate(operation, now)
+            return condition, code
+        key = ":".join((ctx["family"], ctx["principal"], ctx["episode_id"]))
+        fact = await self.notify._db.call(
+            "error_get", str(uuid.uuid5(uuid.NAMESPACE_URL, "error-alert:" + key))
+        )
+        current = fact["error_context"] if fact else ctx
+        return current["condition"], current["code"]
+
     async def principal(self, msg):
         a = msg.get("_auth_context") or {}
         cid = a.get("credential_id")
@@ -217,51 +295,8 @@ class ErrorAlerts:
                     raise ValueError("invalid_request")
                 async with self._facts_lock:
                     result = await self.store.voice_report(principal, msg)
-            elif verb == "error.list":
-                result = await self.list(msg)
-            elif verb == "error.get":
-                result = {"detail": await self.detail(msg["id"], msg)}
-            elif verb == "error.mark":
-                if not msg["id"].startswith("notification:"):
-                    raise ValueError("read_only")
-                await self.notify._db.call(
-                    "error_patch",
-                    msg["id"].split(":", 1)[1],
-                    {msg["action"] + "_at": iso()},
-                )
-                result = {"alert": (await self.detail(msg["id"], msg))["alert"]}
-            elif verb == "error.settings.get":
-                result = {
-                    "settings": await self.notify._db.call("error_settings"),
-                    "limits": LIMITS,
-                    "coverage": await self.coverage(),
-                }
-            elif verb == "error.settings.set":
-                async with self._facts_lock:
-                    result = {
-                        "setting": await self.notify._db.call(
-                            "error_settings_set",
-                            actor=principal,
-                            expected_revision=msg["expected_revision"],
-                            delivery_mode=msg.get("delivery_mode"),
-                            mute_for_s=msg.get("mute_for_s"),
-                            restore_defaults=msg.get("restore_defaults", False),
-                        )
-                    }
             else:
-                cursor = msg.get("cursor")
-                before = None
-                if cursor:
-                    try:
-                        before = int(cursor)
-                    except (ValueError, TypeError):
-                        raise ValueError("invalid_cursor") from None
-                    if before < 1:
-                        raise ValueError("invalid_cursor")
-                items, next_cursor = await self.notify._db.call(
-                    "error_settings_audit", before=before, limit=msg.get("limit", 20)
-                )
-                result = {"items": items, "next_cursor": next_cursor}
+                raise ValueError("invalid_request")
             return {"type": verb + ".ok", "request_id": rid, **result}
         except ValueError as exc:
             code = str(exc)
@@ -270,10 +305,6 @@ class ErrorAlerts:
             result = {"type": verb + ".error", "request_id": rid, "error_code": code}
             if code == "rate_limited":
                 result["retry_after"] = 60
-            if code == "revision_conflict":
-                result["current_revision"] = (
-                    await self.notify._db.call("error_settings")
-                )[0]["revision"]
             return result
         except Exception:
             # Never echo exception strings or caller fields through this surface.
@@ -296,9 +327,94 @@ class ErrorAlerts:
         )
         return principal, intent["operation_id"]
 
+    async def _implicit(self, msg, kind, origin, generation, *parts):
+        """Register an installed-client voice operation, or None. Never blocks."""
+        try:
+            principal = await self.principal(msg)
+        except ValueError:
+            return None  # agents, scoped and anonymous callers are never voice
+        oid = str(uuid.uuid5(uuid.NAMESPACE_URL, "\0".join((principal, kind, *parts))))
+        if not await self._quiet(
+            self.store.voice_register_implicit(principal, oid, kind, origin, generation)
+        ):
+            return None
+        return principal, oid
+
+    async def _quiet(self, coro):
+        # Alert bookkeeping never changes or blocks the ordinary verb.
+        try:
+            await coro
+            return True
+        except Exception:
+            log.warning("subsystem=error_alerts bug_ref=error_alerts_v1 action=implicit_record_failed")
+            return False
+
+    async def _transcribe_implicit(self, msg, handler):
+        mime = msg.get("mime")
+        rid = str(msg.get("request_id") or "")
+        found = (
+            isinstance(mime, str) and mime.startswith("audio/") and rid
+            and await self._implicit(msg, "implicit_transcribe", "", "", "transcribe", rid)
+        )
+        if not found:
+            return await handler(msg)
+        principal, oid = found
+        m = self.store.voice_milestone
+        await self._quiet(m(principal, oid, "transcribe_started", request_id=rid))
+        try:
+            result = await handler(msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            code = getattr(exc, "code", "transcribe_failed")
+            code = "unsupported" if code == "mime_unsupported" else code
+            code = code if code in EXPECTED_CODES else "transcribe_failed"
+            await self._quiet(m(principal, oid, "transcribe_failed", code=code))
+            raise
+        await self._quiet(m(principal, oid, "transcribe_result"))
+        return result
+
+    async def _send_implicit(self, msg, handler):
+        rid = str(msg.get("request_id") or "")
+        target = str(msg.get("stream_id") or msg.get("to_stream_id") or "") or str(
+            msg.get("host") or self.server.local_host
+        ) + ":" + str(msg.get("session_name") or "")
+        found = None
+        if isinstance((msg.get("meta") or {}).get("voice"), dict) and rid:
+            host, _, name = target.partition(":")
+            session = await self.store.fetch_session(host, name) if name else None
+            found = await self._implicit(
+                msg, "implicit_send", target,
+                str((session or {}).get("session_generation") or ""),
+                "send", target, str(msg.get("msg_id") or rid),
+            )
+        if not found:
+            return await handler(msg)
+        principal, oid = found
+        m = self.store.voice_milestone
+        bound = await self._quiet(self.store.voice_bind_send(principal, oid, rid))
+        try:
+            result = await handler(msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if bound:
+                await self._quiet(m(principal, oid, "send_failed", request_id=rid))
+            raise
+        if bound:
+            committed = (
+                result.get("action_committed")
+                or result.get("submission_confirmed")
+                or result.get("delivery") in ("landed", "persisted", "accepted")
+            )
+            await self._quiet(m(principal, oid, "send_committed" if committed else "send_failed", request_id=rid))
+            if result.get("submission_confirmed") is True:
+                await self._quiet(m(principal, oid, "send_proved", request_id=rid))
+        return result
+
     async def transcribe(self, msg, handler):
         if "voice_operation" not in msg:
-            return await handler(msg)
+            return await self._transcribe_implicit(msg, handler)
         principal = await self.principal(msg)
         intent = msg["voice_operation"]
         if list(INTENT_VALIDATOR.iter_errors(intent)):
@@ -337,7 +453,7 @@ class ErrorAlerts:
     async def send(self, msg, handler):
         oid = msg.get("operation_id")
         if not oid:
-            return await handler(msg)
+            return await self._send_implicit(msg, handler)
         principal = await self.principal(msg)
         op = await self.store.voice_get(principal, oid)
         target = str(msg.get("stream_id") or msg.get("to_stream_id") or "") or str(
@@ -375,25 +491,6 @@ class ErrorAlerts:
                 )
             ]
         )
-
-    async def coverage(self):
-        operations = await self.store.voice_list()
-        latest = max((r["updated_at"] for r in operations), default=None)
-        return {
-            "cutover_at": self.cutover_at,
-            "families": [
-                {
-                    "family": f,
-                    "last_accepted_at": latest if f == FAMILIES[0] else None,
-                    "status": "available" if f == FAMILIES[0] else "source_managed",
-                }
-                for f in FAMILIES
-            ],
-            "incomplete_reasons": INCOMPLETE,
-            "report_gap_count": sum(
-                r["data"].get("report_gap_count", 0) for r in operations
-            ),
-        }
 
     async def reconcile(self, now=None):
         now = time.time() if now is None else now
@@ -443,6 +540,9 @@ class ErrorAlerts:
                 operation["principal"], operation["operation_id"], operation["revision"]
             )
             await self._reconcile_fact(row, now)
+        for row in await self.notify._db.call("error_rows"):
+            if row["error_context"]["family"] != VOICE:
+                await self._reconcile_fact(row, now)
         await self._rebind_pending(now)
         await self._prune(now)
 
@@ -489,7 +589,7 @@ class ErrorAlerts:
     async def _reconcile_fact(self, row, now):
         ctx = row["error_context"]
         nid = row["notification_id"]
-        policy = (await self.notify._db.call("error_settings", now=iso(now)))[0]
+        policy = POLICY
         notices = {r["notice_id"]: r for r in await self.notice_rows()}
         # A crash can commit enqueue before the cross-store link/watermark.
         # Recover those immutable rows before applying cancellation or policy.
@@ -607,10 +707,7 @@ class ErrorAlerts:
                 if not binding.get("stream_id") or not binding.get("generation"):
                     return
                 async with self._facts_lock:
-                    current = await self.store.voice_get(
-                        ctx["principal"], ctx["operation_id"]
-                    )
-                    condition, code, _ = evaluate(current, now)
+                    condition, code = await self._current(ctx, now)
                     if (
                         condition in ("recovered", "cancelled")
                         and intent["kind"] != "recovery"
@@ -661,17 +758,19 @@ class ErrorAlerts:
             if intent["kind"] == "initial" and not awareness
             else "Error alert update"
         )
+        episode = ctx.get("operation_id") or ctx["episode_id"]
         text = (
-            f"{prefix} voice_operation.v1 {intent['code']} alert={nid} operation={ctx['operation_id']} "
+            f"{prefix} {ctx['family']} {intent['code']} alert={nid} episode={episode} "
             f"condition={intent['condition']} milestone={intent['stage']} first={intent['first_at']} latest={intent['latest_at']} count={intent['count']} "
             + ("prior_submission=unconfirmed " if awareness else "")
-            + "review=#error-alerts Awareness only; no voice replay or repair requested."
+            + "Awareness only; no replay or repair requested."
         )
         meta = {
             "error_alert_v1": True,
             "notification_id": nid,
             "principal": ctx["principal"],
-            "operation_id": ctx["operation_id"],
+            "family": ctx["family"],
+            "episode_id": episode,
             "revision": revision,
             "root_generation": binding["generation"],
             "fingerprint": intent["fingerprint"],
@@ -783,7 +882,7 @@ class ErrorAlerts:
         # a claim that the old input did not occur.
         if await self.store.get_tell_delivery(row["tell_id"]):
             return None
-        policy = (await self.notify._db.call("error_settings"))[0]
+        policy = POLICY
         if policy["effective_delivery_mode"] == "muted":
             return NoticeDecision.terminal("suppressed_policy")
         if (
@@ -799,11 +898,7 @@ class ErrorAlerts:
             fact = await self.notify._db.call("error_get", nid)
             if not fact:
                 continue
-            ctx = fact["error_context"]
-            operation = await self.store.voice_get(
-                ctx["principal"], ctx["operation_id"]
-            )
-            condition, code, _ = evaluate(operation, time.time())
+            condition, code = await self._current(fact["error_context"], time.time())
             if code is None:
                 return NoticeDecision.defer("recovery_grace")
             if (
@@ -989,7 +1084,7 @@ class ErrorAlerts:
         retained = {
             (r["error_context"]["principal"], r["error_context"]["operation_id"])
             for r in await self.notify._db.call("error_rows")
-            if r.get("error_context")
+            if r["error_context"]["family"] == VOICE
         }
         await self.store.voice_prune(retained, now)
 
@@ -1017,7 +1112,7 @@ class ErrorAlerts:
         return None
 
     def delivery(self, row, notices, ctx=None):
-        result = dict.fromkeys(SCHEMA["$defs"]["delivery"]["properties"])
+        result = dict.fromkeys(DELIVERY_FIELDS)
         result["state"] = "legacy_unknown"
 
         def terminal_state(reason):
@@ -1105,419 +1200,3 @@ class ErrorAlerts:
                 else "muted"
             )
         return result
-
-    async def _retained_primary_bindings(self, binding):
-        """Follow only the unambiguous recorded ancestry of the current primary.
-
-        The older audit has no assistant-name column. Never collect unrelated
-        assistants' historical targets, or infer a link across a missing audit.
-        This read-only association is not a producer or a completeness claim.
-        """
-
-        def identity(value):
-            return (
-                value.get("stream_id"),
-                value.get("generation"),
-                value.get("revision"),
-            )
-
-        cursor = identity(binding)
-        pairs = {(cursor[0], cursor[1])} if cursor[0] and cursor[1] else set()
-        audits = await self.store.submit(
-            lambda conn: [
-                dict(row)
-                for row in conn.execute(
-                    "SELECT old_binding_json,new_binding_json FROM v2_assistant_rebind_audit WHERE outcome='ok'"
-                )
-            ]
-        )
-        edges = []
-        for audit in audits:
-            try:
-                old, new = json.loads(audit["old_binding_json"]), json.loads(
-                    audit["new_binding_json"]
-                )
-                if isinstance(old, dict) and isinstance(new, dict):
-                    edges.append((identity(old), identity(new)))
-            except (TypeError, ValueError):
-                continue
-        while type(cursor[2]) is int and cursor[2] > 0:
-            predecessors = {
-                old for old, new in edges if new == cursor and old[2] == cursor[2] - 1
-            }
-            if len(predecessors) != 1:
-                break
-            cursor = predecessors.pop()
-            if cursor[0] and cursor[1]:
-                pairs.add((cursor[0], cursor[1]))
-        return pairs
-
-    async def _items(self, msg):
-        errors = []
-        rows = []
-        notices = {}
-        try:
-            rows = await self.notify._db.call("error_rows")
-        except Exception:
-            errors.append("notifications_unavailable")
-        try:
-            notices = {r["notice_id"]: r for r in await self.notice_rows()}
-        except Exception:
-            errors.append("delivery_unavailable")
-        if len(errors) == 2:
-            raise ValueError("unavailable")
-        setting = (await self.notify._db.call("error_settings"))[0]
-        binding = await self.composite.binding() if self.composite else {}
-        known_bindings = await self._retained_primary_bindings(binding)
-        known_streams = {stream for stream, _ in known_bindings}
-        native = [
-            r
-            for r in notices.values()
-            if r["recipient_stream_id"] in known_streams
-            and (
-                not metadata(r).get("owner_generation")
-                or (r["recipient_stream_id"], metadata(r)["owner_generation"])
-                in known_bindings
-            )
-            and (
-                r["kind"] == "wake_missed"
-                or (
-                    r["kind"] == "reconciler"
-                    and metadata(r).get("class")
-                    in (
-                        "row_open_session_dead",
-                        "row_open_host_unreachable",
-                        "row_closed_tree_alive",
-                    )
-                )
-            )
-        ]
-        associated_native = set()
-        items = []
-        for row in rows:
-            ctx = row.get("error_context")
-            source = {"type": "notification", "id": row["notification_id"]}
-            family = "legacy_notification"
-            if ctx:
-                family = "voice_operation.v1"
-            elif row["producer"] == "session_reconciler":
-                family = "session_lifecycle"
-            elif "integrity" in row["producer"]:
-                family = "integrity"
-            elif row["producer"] in ("altum-bot-cd", "wmi-backup"):
-                family = "system_notification"
-            linked = [
-                notices[n] for n in (ctx or {}).get("notice_ids", []) if n in notices
-            ]
-            if not ctx:
-                linked = [
-                    r
-                    for r in native
-                    if metadata(r).get("notification_id") == row["notification_id"]
-                    or (
-                        row.get("dedup_key") and r.get("episode_id") == row["dedup_key"]
-                    )
-                ]
-                associated_native.update(r["notice_id"] for r in linked)
-            # Prefer the first proved receipt; subsequent awareness is not a
-            # replay that overwrites the original recipient/proof.
-            primary = [r for r in linked if not metadata(r).get("awareness")]
-            selected = next(
-                (
-                    r
-                    for r in primary
-                    if self.delivery(r, notices)["state"] == "delivered"
-                ),
-                primary[-1] if primary else None,
-            )
-            policy = (
-                {
-                    k: setting[k]
-                    for k in ("delivery_mode", "effective_delivery_mode", "mute_until")
-                }
-                if ctx
-                else {
-                    "delivery_mode": "source_managed",
-                    "effective_delivery_mode": "source_managed",
-                    "mute_until": None,
-                }
-            )
-            policy["source_managed"] = not bool(ctx)
-            items.append(
-                {
-                    "id": "notification:" + row["notification_id"],
-                    "source": source,
-                    "family": family,
-                    "code": ctx["code"] if ctx else "retained_warning",
-                    "title": row["title"],
-                    "first_at": row.get("first_fired_at") or row["created_at"],
-                    "latest_at": row.get("last_fired_at") or row["updated_at"],
-                    "count": row.get("firing_count") or 1,
-                    "condition": ctx["condition"] if ctx else "unknown",
-                    "attention": {
-                        "seen_at": (ctx or {}).get("seen_at"),
-                        "ack_at": (ctx or {}).get("ack_at"),
-                        "legacy_state": row["state"],
-                    },
-                    "delivery": self.delivery(selected, notices, ctx),
-                    "policy": policy,
-                    "correlation": {
-                        k: (ctx or {}).get(k)
-                        for k in (
-                            "operation_id",
-                            "origin_stream_id",
-                            "origin_generation",
-                        )
-                    },
-                    "read_only": not bool(ctx),
-                    "overdue": bool(
-                        ctx
-                        and ctx["condition"] not in ("recovered", "cancelled")
-                        and epoch(row["created_at"]) < time.time() - 30 * 86400
-                    ),
-                }
-            )
-        # Existing notices are source projections only. No error_context backfill.
-        for row in native:
-            m = metadata(row)
-            if row["notice_id"] in associated_native:
-                continue
-            items.append(
-                {
-                    "id": "outbox:" + row["notice_id"],
-                    "source": {"type": "outbox", "id": row["notice_id"]},
-                    "family": "native_notice",
-                    "code": row["kind"],
-                    "title": "Retained " + row["kind"].replace("_", " "),
-                    "first_at": row["created_at"],
-                    "latest_at": row["created_at"],
-                    "count": 1,
-                    "condition": "unknown",
-                    "attention": {
-                        "seen_at": None,
-                        "ack_at": None,
-                        "legacy_state": None,
-                    },
-                    "delivery": self.delivery(row, notices),
-                    "policy": {
-                        "delivery_mode": "source_managed",
-                        "effective_delivery_mode": "source_managed",
-                        "mute_until": None,
-                        "source_managed": True,
-                    },
-                    "correlation": dict.fromkeys(
-                        ("operation_id", "origin_stream_id", "origin_generation")
-                    ),
-                    "read_only": True,
-                    "overdue": False,
-                }
-            )
-        try:
-            consent = await self.server._consent_notifications_for_msg(msg)
-            for row in consent:
-                if row.get("severity") not in ("warning", "critical"):
-                    continue
-                nid = row.get("notification_id") or row.get("id")
-                created = row.get("created_at") or self.cutover_at
-                items.append(
-                    {
-                        "id": "consent:" + nid,
-                        "source": {"type": "consent", "id": nid},
-                        "family": "consent_security",
-                        "code": "retained_security",
-                        "title": row.get("title", "Security review"),
-                        "first_at": created,
-                        "latest_at": row.get("updated_at") or created,
-                        "count": 1,
-                        "condition": "unknown",
-                        "attention": {
-                            "seen_at": None,
-                            "ack_at": None,
-                            "legacy_state": row.get("state"),
-                        },
-                        "delivery": self.delivery(None, notices),
-                        "policy": {
-                            "delivery_mode": "source_managed",
-                            "effective_delivery_mode": "source_managed",
-                            "mute_until": None,
-                            "source_managed": True,
-                        },
-                        "correlation": dict.fromkeys(
-                            ("operation_id", "origin_stream_id", "origin_generation")
-                        ),
-                        "read_only": True,
-                        "overdue": False,
-                    }
-                )
-        except Exception:
-            errors.append("consent_unavailable")
-        return items, notices, errors
-
-    async def list(self, msg):
-        items, _, errors = await self._items(msg)
-        f = msg.get("filter", "all")
-        if f == "received":
-            items = [i for i in items if i["delivery"]["state"] == "delivered"]
-        elif f == "failed":
-            items = [i for i in items if i["delivery"]["state"] == "failed"]
-        elif f == "muted":
-            items = [
-                i for i in items if i["policy"]["effective_delivery_mode"] == "muted"
-            ]
-        elif f == "pending":
-            items = [
-                i
-                for i in items
-                if i["delivery"]["state"]
-                in (
-                    "waiting_for_fd",
-                    "queued",
-                    "held_for_digest",
-                    "folded",
-                    "retrying",
-                    "unconfirmed",
-                )
-            ]
-        for key in ("family", "condition"):
-            if msg.get(key):
-                items = [i for i in items if i[key] == msg[key]]
-        if msg.get("id"):
-            items = [
-                i
-                for i in items
-                if msg["id"]
-                in (i["id"], i["source"]["id"], i["correlation"]["operation_id"])
-            ]
-        items.sort(key=lambda i: (i["latest_at"], i["id"]), reverse=True)
-        filters = {k: msg.get(k) for k in ("filter", "family", "condition", "id")}
-        signature = hashlib.sha256(
-            json.dumps(filters, sort_keys=True).encode()
-        ).hexdigest()[:16]
-        if msg.get("cursor"):
-            try:
-                cursor = json.loads(base64.urlsafe_b64decode(msg["cursor"]))
-                if (
-                    set(cursor) != {"after", "filter"}
-                    or cursor["filter"] != signature
-                    or not isinstance(cursor["after"], list)
-                    or len(cursor["after"]) != 2
-                ):
-                    raise ValueError()
-                items = [
-                    i
-                    for i in items
-                    if (i["latest_at"], i["id"]) < tuple(cursor["after"])
-                ]
-            except Exception:
-                raise ValueError("invalid_cursor") from None
-        limit = msg.get("limit", 50)
-        page = items[:limit]
-        next_cursor = None
-        if len(items) > limit:
-            next_cursor = base64.urlsafe_b64encode(
-                json.dumps(
-                    {
-                        "after": [page[-1]["latest_at"], page[-1]["id"]],
-                        "filter": signature,
-                    }
-                ).encode()
-            ).decode()
-        return {
-            "items": page,
-            "next_cursor": next_cursor,
-            "coverage": await self.coverage(),
-            "partial": bool(errors),
-            "errors": errors,
-        }
-
-    async def detail(self, identity, msg):
-        items, notices, errors = await self._items(msg)
-        item = next((i for i in items if i["id"] == identity), None)
-        if item is None:
-            raise ValueError("unavailable" if errors else "not_found")
-        milestones = []
-        attempts = []
-        if item["family"] == "voice_operation.v1":
-            row = await self.notify._db.call("error_get", item["source"]["id"])
-            ctx = row["error_context"]
-            operation = await self.store.voice_get(
-                ctx["principal"], ctx["operation_id"]
-            )
-            for stage in (
-                "upload_committed",
-                "transcribe_started",
-                "transcribe_result",
-                "transcribe_failed",
-                "send_committed",
-                "send_proved",
-            ):
-                if operation["data"].get(stage):
-                    milestones.append(
-                        {
-                            "stage": stage,
-                            "at": operation["data"][stage],
-                            "evidence": "server",
-                            "code": operation["data"].get(stage + "_code"),
-                        }
-                    )
-            e = operation["data"].get("client_event")
-            if e:
-                milestones.append(
-                    {
-                        "stage": e["stage"],
-                        "at": e["at"],
-                        "evidence": "client",
-                        "code": e["code"],
-                    }
-                )
-            ids = list(ctx["notice_ids"])
-            for nid in list(ids):
-                linked = (
-                    metadata(notices[nid]).get("folded_into_notice_id")
-                    if nid in notices
-                    else None
-                )
-                if linked and linked not in ids:
-                    ids.append(linked)
-            for r in notices.values():
-                if metadata(r).get("notification_id") == row["notification_id"] or row[
-                    "notification_id"
-                ] in metadata(r).get("members", []):
-                    if r["notice_id"] not in ids:
-                        ids.append(r["notice_id"])
-            for nid in ids:
-                r = notices.get(nid)
-                if not r:
-                    continue
-                m = metadata(r)
-                attempts.append(
-                    {
-                        "notice_id": nid,
-                        "tell_id": r["tell_id"],
-                        "recipient_stream_id": r["recipient_stream_id"],
-                        "recipient_generation": m.get("root_generation"),
-                        "attempts": r["attempts"],
-                        "created_at": r["created_at"],
-                        "last_attempt_at": None,
-                        "proof_at": self.proof_at(r),
-                        "terminal_at": r["terminal_at"],
-                        "reason_code": (
-                            "transport_failed"
-                            if r.get("terminal_reason")
-                            else "proof_pending" if r.get("last_error") else None
-                        ),
-                        "folded_into_notice_id": m.get("folded_into_notice_id"),
-                        "predecessor_notice_id": m.get("predecessor_notice_id"),
-                    }
-                )
-        return {
-            "alert": item,
-            "milestones": milestones,
-            "attempts": attempts,
-            "recovery_evidence": [
-                m
-                for m in milestones
-                if m["stage"] == "send_proved"
-                or m["code"] in ("recovered", "operation_cancelled")
-            ],
-        }

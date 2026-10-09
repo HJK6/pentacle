@@ -889,7 +889,7 @@ async def run(args: argparse.Namespace) -> int:
     if assistant_config.enabled and server.lane_rulings is not None:
         await server.lane_rulings.start()
     await lifted  # both are fast; ensure done before the background tasks below
-    await server.configure_error_alerts(outbound)
+    await server.configure_error_alerts(outbound, alerts)
 
     # 3. Background tasks start last, each under the loop rules
     #    (cadence, per-pass cap, backoff, kill switch).
