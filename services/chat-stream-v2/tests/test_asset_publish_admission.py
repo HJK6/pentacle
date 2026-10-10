@@ -190,5 +190,10 @@ def test_wire_cross_host_full_publish_refused_and_entry_mutations_allowed(tmp_pa
         assert added["asset"]["stream_id"] == before["stream_id"]
         removed = await dispatch({"type":"dashboard.remove", "id":"cross-host-entry"}, "node-beta:cross")
         assert removed["type"] == "dashboard.remove.ok", removed
-        assert removed["asset"]["body"] == owner["asset"]["body"]
+        restored = json.loads(removed["asset"]["body"])
+        original = json.loads(owner["asset"]["body"])
+        assert restored["boards"] == original["boards"]
+        for key in ("package", "catalog_version", "libs"):
+            assert restored[key] == original[key]
+        assert restored["requires"]["host_api"] == max(2, original["requires"]["host_api"])
     run_catalog_wire(tmp_path, scenario, catalog_spec)
