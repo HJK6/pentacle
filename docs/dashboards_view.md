@@ -26,7 +26,7 @@ web host and reload its page, after profile changes.
 | Key | Effect |
 | --- | --- |
 | `features.dashboards` | Enables the Dashboards switcher |
-| `dashboards.catalogSpecId` | Locates the catalog; set `pentacle__dashboard_catalog` for the hosted-record commands |
+| `dashboards.catalogSpecId` | Locates the catalog; match the daemon's configured hosted-record command target |
 | `dashboards.catalogRoot` | Web-host directory of immutable adapter versions; never sent to the renderer |
 
 The profile locates the catalog; `dashboards.hidden`, `dashboards.showRetired`
@@ -120,10 +120,16 @@ unsupported web adapters remain unsupported.
 
 Personal boards arrive as the `dashboard-catalog` asset and, for trusted web
 adapters, immutable files installed on the web host. The sole catalog used by
-hosted-record commands is `(spec_id=pentacle__dashboard_catalog,
-asset_id=dashboard-catalog)`. Configure each client's catalog locator to that
-spec. Other configured spec IDs are still readable, but the commands do not
-modify them.
+hosted-record commands has `asset_id=dashboard-catalog`. The daemon startup
+option `--dashboard-catalog-spec-id` selects its spec ID and defaults to
+`pentacle__dashboard_catalog`, preserving existing behavior when unset. For
+example, `--dashboard-catalog-spec-id example__dashboard_catalog` selects a
+different catalog. The option reaches the asset handler through the daemon's
+existing startup wiring; a command's supplied spec ID cannot override it.
+Configure each client's `dashboards.catalogSpecId` to the same spec. Other spec
+IDs remain readable, but the commands edit only the configured target. Direct
+catalog publication/deletion retains the internal fleet-seat restriction at
+every spec ID, including the configured target.
 
 Entering Dashboards fetches and validates the whole catalog. Re-entering fetches
 again; selecting a board does not refetch, and there is no catalog polling loop.

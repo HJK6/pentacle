@@ -322,20 +322,21 @@ class FleetSeats:
                 "session_generation": "g", "role": "worker", "spec_ids": []}
 
 
-def hosted_run(tmp_path, monkeypatch, scenario, *, configured=True):
+def hosted_run(tmp_path, monkeypatch, scenario, *, configured=True, catalog_spec_id=None):
     for key, value in [("TAILNET_SUFFIX", POLICY["tailnetSuffix"]), ("PENTACLE_ORIGIN", POLICY["pentacleOrigin"])]:
         env = "PENTACLE_HOSTED_DASHBOARD_" + key
         if configured: monkeypatch.setenv(env, value)
         else: monkeypatch.delenv(env, raising=False)
     async def main():
-        assets = Assets(str(tmp_path / "hosted.db"), sessions=FleetSeats(), fleet_hosts={"node-alpha", "node-beta"})
+        assets = Assets(str(tmp_path / "hosted.db"), sessions=FleetSeats(), fleet_hosts={"node-alpha", "node-beta"},
+                        **({"catalog_spec_id": catalog_spec_id} if catalog_spec_id is not None else {}))
         await assets.start()
         try:
             # Seed the real canonical row via the public handler.
             catalog = json.loads(json.dumps(CATALOG_CASES["valid"][-1]["catalog"]))
             catalog["boards"] = [b for b in catalog["boards"] if b["kind"] != "hosted-view"]
             reply = await assets.asset({"type":"asset.publish", "stream_id":"node-alpha:seat",
-                "asset_id":"dashboard-catalog", "spec_id":"pentacle__dashboard_catalog",
+                "asset_id":"dashboard-catalog", "spec_id":catalog_spec_id or "pentacle__dashboard_catalog",
                 "content_type":"dashboard-catalog", "title":"Dashboards", "body":json.dumps(catalog),
                 "_auth_context": INTERNAL})
             assert reply["type"] == "asset.publish.ok", reply
@@ -502,3 +503,73 @@ def test_wire_forgery_refused_and_verified_token_commands_work(tmp_path,monkeypa
     monkeypatch.setenv("PENTACLE_HOSTED_DASHBOARD_TAILNET_SUFFIX",POLICY["tailnetSuffix"])
     monkeypatch.setenv("PENTACLE_HOSTED_DASHBOARD_PENTACLE_ORIGIN",POLICY["pentacleOrigin"])
     asyncio.run(main())
+
+
+@pytest.mark.parametrize("catalog_spec_id", [None, "pentacle__dashboard_catalog_v2"])
+def test_dashboard_commands_target_default_or_configured_catalog(tmp_path, monkeypatch, catalog_spec_id):
+    selected = catalog_spec_id or "pentacle__dashboard_catalog"
+    other = "pentacle__dashboard_catalog_v2" if catalog_spec_id is None else "pentacle__dashboard_catalog"
+
+    async def scenario(assets, catalog):
+        # Keep another catalog at a distinct owner anchor; commands must not edit it.
+        other_auth = dict(INTERNAL, stream_id="node-beta:seat")
+        published = await assets.asset({"type": "asset.publish", "stream_id": "node-beta:seat",
+            "asset_id": "dashboard-catalog", "spec_id": other, "content_type": "dashboard-catalog",
+            "title": "Other catalog", "body": json.dumps(catalog), "_auth_context": other_auth})
+        assert published["type"] == "asset.publish.ok", published
+        before = published["asset"]["body"]
+        added = await assets.dashboard(mutation(spec_id=other))
+        assert added["type"] == "dashboard.add.ok", added
+        assert added["asset"]["spec_id"] == selected
+        assert any(b["id"] == "hosted-example" for b in json.loads(added["asset"]["body"])["boards"])
+        removed = await assets.dashboard(mutation("remove", spec_id=other))
+        assert removed["type"] == "dashboard.remove.ok", removed
+        assert removed["asset"]["spec_id"] == selected
+        assert removed["removed"] is True
+        assert json.loads(removed["asset"]["body"])["boards"] == catalog["boards"]
+        records = await assets._call("find_assets_by_id", asset_id="dashboard-catalog")
+        assert next(r for r in records if r["spec_id"] == other)["body"] == before
+    hosted_run(tmp_path, monkeypatch, scenario, catalog_spec_id=catalog_spec_id)
+
+
+@pytest.mark.parametrize("auth", [
+    {}, {"operator_authenticated": True}, dict(INTERNAL, stream_id="foreign:seat"),
+    dict(INTERNAL, dot_principal=True), dict(INTERNAL, scoped_principal=True),
+    dict(INTERNAL, service_authenticated=True), dict(INTERNAL, session_generation="stale"),
+])
+def test_configured_catalog_direct_writes_and_deletes_refuse_non_internal(tmp_path, monkeypatch, auth):
+    async def scenario(assets, catalog):
+        for content_type, body in [("dashboard-catalog", json.dumps(catalog)), ("report", _report_body("spoof"))]:
+            reply = await assets.asset({"type": "asset.publish", "stream_id": "node-alpha:seat",
+                "asset_id": "dashboard-catalog", "spec_id": "pentacle__dashboard_catalog_v2",
+                "content_type": content_type, "title": "Denied", "body": body, "_auth_context": auth})
+            assert reply["error_code"] == "asset_unauthorized", reply
+        reply = await assets.asset({"type": "asset.delete", "asset_id": "dashboard-catalog",
+            "stream_id": "node-alpha:seat", "_auth_context": auth})
+        assert reply["error_code"] == "asset_unauthorized", reply
+    hosted_run(tmp_path, monkeypatch, scenario, catalog_spec_id="pentacle__dashboard_catalog_v2")
+
+
+def test_daemon_catalog_target_configuration_defaults_and_override():
+    from main import parse_args
+    assert parse_args([]).dashboard_catalog_spec_id == "pentacle__dashboard_catalog"
+    assert parse_args(["--dashboard-catalog-spec-id", "pentacle__dashboard_catalog_v2"]).dashboard_catalog_spec_id == "pentacle__dashboard_catalog_v2"
+
+
+def test_configured_catalog_reserved_target_refuses_first_non_catalog_write(tmp_path):
+    async def run():
+        assets = Assets(str(tmp_path / "configured-empty.db"), sessions=FleetSeats(),
+            fleet_hosts={"node-alpha", "node-beta"}, catalog_spec_id="pentacle__dashboard_catalog_v2")
+        await assets.start()
+        try:
+            # No existing catalog row can supply the content-type guard here.
+            for spec_id in ("pentacle__dashboard_catalog", "pentacle__dashboard_catalog_v2"):
+                reply = await assets.asset({"type": "asset.publish", "stream_id": "node-alpha:seat",
+                    "asset_id": "dashboard-catalog", "spec_id": spec_id, "content_type": "report",
+                    "title": "Spoof", "body": _report_body("spoof"),
+                    "_auth_context": {"operator_authenticated": True}})
+                assert reply["error_code"] == "asset_unauthorized", reply
+            assert await assets._call("find_assets_by_id", asset_id="dashboard-catalog") == []
+        finally:
+            await assets.stop()
+    asyncio.run(run())
