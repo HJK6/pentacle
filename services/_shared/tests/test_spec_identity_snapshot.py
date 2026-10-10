@@ -129,3 +129,20 @@ def test_async_capture_coalesces_and_bounds_waiters_without_worker_queue(tmp_pat
         assert sum(isinstance(item, asyncio.CancelledError) for item in results) == 1
         assert len(calls) == 1
     asyncio.run(run())
+
+
+def test_environment_root_status_config_preserved_mtime_matches_cold_oracle(tmp_path, monkeypatch):
+    import json
+    document(tmp_path,status='allowed')
+    config=tmp_path/'work/statuses.json'
+    config.write_text(json.dumps({'statuses':[{'name':'allowed','order':1}]}))
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path.resolve()))
+    def configured():
+        return SpecsSubsystem(session_summaries=lambda:[],changed_callback=lambda ids:None)
+    subject=configured()
+    assert subject.canonical_spec_identity('spec_fixture__one')=='spec_fixture__one'
+    stamp=config.stat()
+    config.write_text(json.dumps({'statuses':[{'name':'removed','order':1}]}))
+    os.utime(config,ns=(stamp.st_atime_ns,stamp.st_mtime_ns))
+    assert subject.canonical_spec_identity('spec_fixture__one') is None
+    assert subject.canonical_spec_identities(['spec_fixture__one'])==configured().canonical_spec_identities(['spec_fixture__one'])

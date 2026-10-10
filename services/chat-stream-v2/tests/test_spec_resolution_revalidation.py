@@ -327,3 +327,24 @@ async def test_two_binding_mutations_refuse_without_commission():
     finally:
         for item in release: item.set()
         store.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_callback_entry_before_sql_begin_rolls_back_report():
+    store,sessions,server,ledger,frames=await _state()
+    entered,release=threading.Event(),threading.Event()
+    blocked=[]
+    def trace(sql):
+        if sql=='BEGIN IMMEDIATE' and not blocked:
+            blocked.append(True); entered.set(); assert release.wait(5)
+    try:
+        await store.submit(lambda conn:conn.set_trace_callback(trace))
+        task=asyncio.create_task(ledger.report(_report('cancelled-inside-callback',READY)))
+        assert await asyncio.to_thread(entered.wait,3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError): await task
+        release.set()
+        assert await store.submit(lambda conn:conn.execute("SELECT count(*) FROM v2_reports WHERE report_id='cancelled-inside-callback'").fetchone()[0])==0
+        assert not any(frame.get('report_id')=='cancelled-inside-callback' for frame in frames)
+    finally:
+        release.set(); await store.submit(lambda conn:conn.set_trace_callback(None));store.stop()

@@ -37,6 +37,40 @@ class SpecInputsUnavailable(ValueError):
     pass
 
 
+class _SpecCommitConnection:
+    """Operation-local abandonment guard, including nested context commits."""
+    def __init__(self, conn, check):
+        self._conn, self._check = conn, check
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, *args, **kwargs):
+        self._check()
+        return self._conn.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        self._check()
+        return self._conn.executemany(*args, **kwargs)
+
+    def commit(self):
+        self._check()
+        return self._conn.commit()
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        if kind is None:
+            try:
+                self._check()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        return self._conn.__exit__(kind, value, traceback)
+
+
 class _SpecLookup:
     def __init__(self, values):
         self.values = dict(values)
@@ -250,10 +284,16 @@ class QaStoreMixin:
         """Do not execute an abandoned queued binding/report/QA write."""
         caller = asyncio.current_task()
         abandoned = threading.Event()
-        def checked(conn):
+        def check():
             if abandoned.is_set() or (caller is not None and caller.cancelling()):
                 raise asyncio.CancelledError()
-            return callback(conn)
+        def checked(conn):
+            check()
+            try:
+                return callback(_SpecCommitConnection(conn, check))
+            except BaseException:
+                conn.rollback()
+                raise
         try:
             return await self.submit(checked)
         except asyncio.CancelledError:

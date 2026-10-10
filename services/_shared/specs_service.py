@@ -228,13 +228,12 @@ class SpecsSubsystem:
         self._monotonic = monotonic
         self._timer_factory = timer_factory
         self.disabled = self.memory_root is None or (not self._explicit_root and not self.memory_root.is_dir())
-        # Cache statuses and reload only when the local file changes. `_statuses_mtime` of
-        # -1 forces an initial load; subsequent calls reload only when mtime
-        # changes. Missing/invalid file → DEFAULT_STATUSES fallback inside
+        # Cache statuses using the full identity-bearing file fingerprint.
+        # Preserved mtime cannot conceal a permission, inode or contents change. Missing/invalid file → DEFAULT_STATUSES fallback inside
         # parse_statuses_json with a logged warning.
         self._statuses: list[dict[str, Any]] = list(DEFAULT_STATUSES)
         self._status_order: dict[str, int] = {s["name"]: s["order"] for s in DEFAULT_STATUSES}
-        self._statuses_mtime: float = -1.0
+        self._statuses_fingerprint = object()
         self._statuses_lock = threading.Lock()
         self.subsystem_state = "disabled" if self.disabled else "polling"
         self.push_enabled = False
@@ -276,7 +275,7 @@ class SpecsSubsystem:
         self._stop_observer()
 
     def _load_statuses(self) -> tuple[list[dict[str, Any]], dict[str, int]]:
-        """Return (statuses_list, name_to_order). Reloads on mtime change.
+        """Return (statuses_list, name_to_order). Reload on identity metadata change.
 
         Thread-safe; multiple list_specs callers can race the reload but the
         worst case is one extra parse — the result is the same.
@@ -309,16 +308,15 @@ class SpecsSubsystem:
                 raise ValueError("work_statuses_invalid")
             return statuses, {s["name"]: s["order"] for s in statuses}
         statuses_path = self.memory_root / "work" / "statuses.json"
-        try:
-            mtime = statuses_path.stat().st_mtime
-        except FileNotFoundError:
-            mtime = -1.0
         with self._statuses_lock:
-            if mtime != self._statuses_mtime:
+            fingerprint = self._identity_fingerprint(statuses_path)
+            if fingerprint != self._statuses_fingerprint:
                 statuses, order = parse_statuses_json(self.memory_root)
+                if fingerprint != self._identity_fingerprint(statuses_path):
+                    raise SpecResolutionUnavailable("spec_statuses_changed")
                 self._statuses = statuses
                 self._status_order = order
-                self._statuses_mtime = mtime
+                self._statuses_fingerprint = fingerprint
             return self._statuses, self._status_order
 
     def _status_names(self) -> set[str]:
