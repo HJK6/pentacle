@@ -1,8 +1,7 @@
 # Daily retrospective review
 
 The launchd producer runs at 05:00 America/Chicago. It freezes eligible terminal
-and explicitly tagged active retros, commissions one Codex GPT-6 Sol/medium draft and one GPT-6 Astra/high
-finalization, then sends a retained REPORT notice to the current assistant binding.
+and explicitly tagged active retros, commissions one Codex GPT-6 Sol/medium final packet, then sends a retained REPORT notice to the current assistant binding.
 assistant reviews immediately, records dispositions, and uses normal work records for
 decisions and observed outcomes. Quiet ordinary days produce no operator chat message;
 material results and the due weekly account use supported visible delivery.
@@ -10,7 +9,7 @@ Historical backfill is a separate bounded, explicitly approved scope.
 
 The producer reuses `tools/live_window` operator authentication, as the scheduled
 fleet-smoke tool does. Its allowlist permits only owned spawn/await/close and
-current-binding reads plus exact retained REPORT send/receipt operations. Both
+current-binding reads plus exact retained REPORT send/receipt operations. The daily producer and historical
 workers self-close on terminal reports; cleanup passes their recorded generations.
 Each report wait uses calls of at most 900 seconds within one 3,600-second
 deadline. A bounded RPC timeout waits again for the same owned report; it never
@@ -36,6 +35,16 @@ Local JSON configuration (absolute paths; keep credentials outside source):
   "primary_composite": "bart:assistant"
 }
 ```
+
+`producers` defaults to `["sol"]`; only that exact list is valid for new daily
+execution. New collection manifests record the list, but retained manifests lacking
+it stay byte-identical and usable. Historical collection and execution remain
+separate and keep their Sol/Astra/final-Astra stages. Current configuration never
+changes old final selection: a retained final `astra.json` remains authoritative.
+An already-admitted legacy Astra with proven generation may only finish awaiting
+and close; an unadmitted intent cannot create a new or replacement Astra producer.
+New daily packets omit `astra_changes` and `acceptance_audit`, while raw reports and
+old retained packets stay intact. Replay and generation-fenced cleanup remain.
 
 `state_root` must be outside memory. Preserve it across upgrades and rollback.
 Collection manifests commit before their rebuildable enrollment index. Older
@@ -162,8 +171,9 @@ delivery key carries the failure `seq`, so each failure gets exactly one notice.
 newer failure supersedes an older notice that never landed, and a recorded review
 supersedes a pending notice. The next scheduled or `--on-demand` pass flushes the
 pending notice once (receipt-reconciled, never resent), then resumes the retained
-stage. There is no timer or retry loop: while the daemon stays down past the
-reconnect window, the next attempt is the next pass.
+stage. Apart from the single connection-refused notice retry described under
+failed runs, there is no timer or retry loop: while the daemon stays down past
+the reconnect window, the next attempt is the next pass.
 
 RunAtLoad catches missed executions after 05:00. Before 05:00 a timer invocation
 does nothing; authorized activation uses `--on-demand`. Install only when
@@ -173,7 +183,7 @@ Use a durable service interpreter or the release's own virtual environment;
 record its resolved path, executable hash and dependency versions. Scratch output
 or temporary virtual environments must not appear in the production plist.
 
-assistant reads the retained `astra.json`, verifies evidence and chooses one disposition
+assistant reads the retained `sol.json` for new daily runs, verifies evidence and chooses one disposition
 per candidate. A review result file contains `packet_hash` and `dispositions`, each
 with `id`, `disposition` and `reason`. Allowed dispositions: resolved, duplicate,
 no_change, investigate, authorized, propose, defer. Action/investigation/defer also
@@ -187,6 +197,33 @@ New daily packets use `schema_version: 2`. Each candidate has
 `outcome_evidence` with `receipt`, aware `observed_at` and observed `measure`.
 `duplicate` requires `existing_work_evidence` with `work_id`, `owner` and
 `acceptance_receipt`. Legacy receipts and historical packets remain immutable.
+
+Daily candidates have collector-computed `candidate_key` and content `version`.
+`work_ids` is an optional list of exact targets (default `[]`); no target is inferred
+from prose, citations or paths. Exactly one distinct target yields `work:<ID>`.
+Otherwise the key is `evidence:` plus the first 16 SHA-256 hex characters of sorted,
+unique identity citations joined by newlines. `identity_citations` accepts structured
+`{store, record_id}` entries: whitespace is stripped, only store is lowercased, and
+record-ID case remains material. Omission maps original citations to work or primary
+source identities; explicit `[]` means no identity citations. With neither target
+nor identity evidence, the key is `unkeyed:<version>`, counted in `coverage.unkeyed`.
+Original-source coverage remains required even for unkeyed candidates.
+
+Only equal single-target work candidates merge. Originals are sorted by ID; the
+lowest ID represents the group. Distinct text fields are joined with two newlines,
+with non-string text values rendered as canonical JSON; typed originals remain in
+`merged_candidates`. Source and evidence citations are unioned. The canonical JSON
+content hash includes normalized fields and merged originals, but excludes daily ID
+and generated key/version/alias metadata. Raw worker reports stay intact. Equal
+evidence keys do not merge. Keys never replace daily IDs or historical finding and
+proposal identities. Historical execution retains its original packet/hash contract.
+
+New normalized review rows derive `candidate_key` and `version` from the exact
+retained candidate. For action-linked work, the existing input `version` still validates
+the durable proposal; its stored projection is `proposal_version`. Replaying either
+the original input or stored projection binds that same proposal and final packet.
+Old keyless packets/receipts are not backfilled: weekly read projections label them
+`legacy_unknown`, distinct from new unkeyed coverage.
 
 ```sh
 python services/chat-stream-v2/tools/daily_retro.py record-review --config C --run-id YYYY-MM-DD --result REVIEW_JSON_FILE
@@ -202,6 +239,28 @@ The helper locks `state_root/locks/<work_id>.lock`, outside shared memory, and
 checks the `spec.md` byte preimage before each update so concurrent edits survive.
 Approval remains authorization until an observed success or honest blocker is
 recorded there through the normal delivery process.
+
+`self_assignment_exclusions` is an optional list of exact, case-sensitive work IDs
+(default `[]`). Supply the actual exclusion list in private configuration. Malformed
+lists or IDs refuse configuration loading. Explicit authorization of an excluded,
+completed or deprecated item refuses with `refused: use resolved or duplicate`;
+a missing work ID refuses with `unknown_work_id`. Eligibility is checked inside
+the work lock on every authorization, including replay, before prompt reconciliation
+or writes. Actor, existing authority, containment and version checks still apply.
+
+A new authorization records collector-owned `baseline_status` from its physical
+work folder in both the proposal and immutable decision receipt. Caller metadata
+and frontmatter cannot override it. It is excluded from proposal-version hashing.
+Replay of the same authorization/version preserves that observation, including
+legacy absence; old receipts are never backfilled. A changed version captures its
+own current folder. Non-authorized transitions clear the active proposal baseline;
+re-authorizing an already-receipted version reuses its immutable observation.
+This is a folder observation, not proof of delivery, progress or causation.
+A failed compare-and-swap preserves the concurrent spec and writes no new proposal
+or decision receipt, ask, send or spawn. Existing cancellation of a live stale-version
+question precedes persistence and may stand after a failed save. A retry observes
+that cancellation without repeating it, then records the decision normally. Guard
+refusals occur before all prompt reconciliation, including cancellation.
 
 New defers and proposals linked by schema-2 review also carry `schema_version: 2`
 and explicit acceptance/checkpoint fields:
@@ -265,6 +324,28 @@ When an outcome receipt measures a DOT milestone, use
 sample count and total; absent values remain unknown, including unmeasured days.
 Only observed outcome receipts within the named week count as that week's
 verified/shipped results. Older retained unresolved work remains visible.
+Authorized current proposals also report their physical-folder observation against
+their own current-version `baseline_status`: missing work is `not_found`; missing,
+invalid or unknown baseline is `legacy_unknown`; deprecated is `observed_dropped`;
+completed is `observed_completed`; blocked or an earlier active folder is
+`observed_regressed`; a later folder is `observed_progressed`; otherwise it is
+`observed_unchanged`. The order is backlog, analysis, ready_for_dev, in_progress,
+needs_qa, completed. Leaving blocked for an active folder is progressed; an active
+folder after a terminal baseline is regressed. Legacy baseline absence precedes
+terminal labels. Missing work remains visible through its decision receipt. Under the missing-work
+exception, a disappeared receipt-linked record reports `not_found` even if its
+historical disposition was defer. It carries no inferred current state, version or
+baseline and contributes nothing to current-authority counts. Receipt fields are
+nested historical evidence only: immutable receipt creation times cannot reconstruct
+later replay order.
+
+These labels never increment verified/shipped counts, meet a checkpoint, or prove
+causation. Independently validated `outcome_evidence` alone establishes those
+observations; an authorized row can carry both kinds of evidence. Non-authorized
+rows that still exist without valid explicit evidence report `legacy_unknown`, replacing the former
+outcome literal `unverified`; ownership coverage and its counts are unchanged.
+Weekly reads and folder moves never rewrite earlier published receipts.
+
 Outcome accounting deduplicates exact receipt references from retained resolved
 review rows and current normal-work proposals. Prior proposal versions without
 retained outcome receipts remain unknown. Inspect retained receipts without
@@ -310,12 +391,11 @@ explicit non-7791 endpoint/credentials, and WORKER_C with existing worker transp
 python services/chat-stream-v2/tools/daily_retro.py rehearse --config TEST_C --workers-config WORKER_C --evidence-dir E
 ```
 
-This reads originals through real Sol/Astra reports. A declared fixture mutation
-omits the serious shortlist entry and inserts a small evidence gap in the repeated
-case; the original report and every disposition remain retained. Astra must recover
-the serious insight, group the repeated issue, correct the gap and retain substantial
-uncertainty. Delivery and assistant helper review stay on the isolated Codex/provider
-counterpart. It is distinct from real production first-run delivery and review.
+This reads originals through one real Sol report. The same six fixtures require
+the serious insight, grouped repeated issue, correct evidence and substantial
+uncertainty. There is no second producer or injected analyst/finalizer challenge.
+Delivery and assistant helper review stay on the isolated Codex/provider counterpart.
+It is distinct from real production first-run delivery and review.
 
 Release staging requires a fresh immutable SHA directory:
 
@@ -473,3 +553,64 @@ Publish the weekly gap headline with new-this-week and actionable current first.
 Keep the retained initial terminal-format baseline on one labelled line; never
 combine it into a summed daily-gap headline. Unknown and stale inventory labels
 remain visible.
+
+### Per-run producer usage
+
+The portable `usage_spec_id` default is null. Set one valid work ID before new
+ daily producer admission; absence refuses with `usage_spec_id required`. Each
+new producer payload records that configured `spec_id`. An unresolved retained
+admission intent with an absent or different tag is refused without changing its
+payload or replay key. Already-admitted legacy workers can still await and close
+without the key. History execution retains its existing admission contract.
+Rehearsal propagates the explicitly configured worker usage identity.
+
+Cost reads the existing `agent-orch usage rollup --spec <usage_spec_id> --json`
+without date bounds and selects the unique matching spec's `codex.by_stream`
+rows. Only recorded producer stream IDs, including retries and owned legacy
+stages, are included once. `producer_cost` contains sorted `streams`, `dollars`
+and `state`: `measured` requires every stream's valid row with completeness 1;
+`partial` sums usable rows when any coverage is missing or incomplete; `unknown`
+has null dollars, never inferred zero. Duplicate rows or invalid/negative/nonfinite
+dollars are unavailable; invalid completeness remains incomplete. Explicit zero
+cost is retained as measured or partial. CLI/read/envelope failure is unknown.
+The scheduled job resolves `agent-orch` from its own `PATH`; launchd's default
+`PATH` usually lacks it, so set the job's `PATH` to include the CLI or every
+run's cost stays `unknown`.
+
+New run summaries retain producer cost and separate
+`fd_cost: {unknown_reason: shared_fd_seat}`. The shared ruling seat is excluded.
+Weekly projections refresh late usage rows using retained producer identities
+without rewriting prior per-run or weekly receipts, including pre-activation
+receipts lacking cost fields. These are recorded costs, not a time-window or
+aggregate estimate.
+
+### Failed runs and failure-notice recovery
+
+Weekly `runs_total` counts each ISO-date run in the seven local dates with a
+retained regular `collection.json`. History directories and orphan date
+folders are excluded and named in coverage. A run contributes once to
+`runs_failed` if it has any regular `failure*.json` file, including retained
+failure-delivery or notice-error files, or any packet delivery attempt whose
+`confirmed` is literally false. Missing/null confirmation is unknown; false
+history remains failure evidence after a later landed delivery. Existing
+collection/review denominators and missing-run accounting remain separate.
+
+A failure notice gets one additional attempt after 60 seconds only for
+`ConnectionRefusedError` or `OSError` with `ECONNREFUSED` during the notice's
+assistant binding, send or receipt reconciliation. A refused binding records
+null target/generation/request IDs and the retry binds afresh; no identity is
+invented. Local persistence errors never retry. No worker admission, authentication, arbitrary reset,
+pending response or programming error receives this retry. The not-before time
+and consumed budget survive interruption; later recovery uses the retained
+intent without resetting a special two-attempt loop. Proven target, generation,
+request ID and body remain fixed, and receipt reconciliation precedes sending.
+A landed receipt prevents another send.
+
+`failure-delivery.json` remains the legacy notice/pending authority. Its
+`notice_attempts` evidence is mirrored into a separate same-named list in
+`delivery.json`, preserving every packet field and packet attempt. Each notice
+event records the failure sequence, request/generation identity, timestamp,
+confirmation, retry index 0 or 1, and structured error or landed receipt. The
+failed initial event is persisted before waiting. Interrupted projection writes
+are repaired from the authority, including already-landed notices. No retained
+notice is migrated to a new queue.

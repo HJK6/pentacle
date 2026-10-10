@@ -395,7 +395,7 @@ def test_real_worker_rehearsal(daily_retro_surface, monkeypatch, tmp_path):
 
             async def assistant_counterpart(plan):
                 assert plan.display_text.startswith("REPORT daily-retro ready"), plan.display_text
-                roots = list((s.settings.state_root / "runs").glob("*/astra.json"))
+                roots = list((s.settings.state_root / "runs").glob("*/sol.json"))
                 assert len(roots) == 1
                 final = retro.read(roots[0])
                 result = {"packet_hash": final["packet_hash"], "dispositions": [
@@ -422,7 +422,7 @@ def test_real_worker_rehearsal(daily_retro_surface, monkeypatch, tmp_path):
             assert len(s.delivered) == 1 and not await s.store.fetch_session_event_tail(CHAT, limit=20)
             assert not await s.notify._db.call("list_agent_questions")
             stages = [retro.read(p) for p in (s.settings.state_root / "runs").glob("*/*.json") if p.name in {"sol.json", "astra.json"}]
-            assert len(stages) == 2 and all(stage["closed"] for stage in stages)
+            assert len(stages) == 1 and all(stage["closed"] for stage in stages)
             evidence.mkdir(parents=True, exist_ok=True)
             # Preserve exact sources/reports/state outside shared memory, not just
             # ephemeral pytest paths mentioned by the compact receipt.
@@ -431,7 +431,7 @@ def test_real_worker_rehearsal(daily_retro_surface, monkeypatch, tmp_path):
             shutil.copytree(s.settings.memory_root, evidence / "fixture-memory")
             retro.atomic(evidence / "fixture-receipt.json", {"fixtures_sha256": hashlib.sha256(fixtures_path.read_bytes()).hexdigest(),
                                                             "tool_sha256": hashlib.sha256(tool.read_bytes()).hexdigest(),
-                                                            "sources": len(fixtures["retros"]), "workers": len(stages), "cleanup_closed": 2,
+                                                            "sources": len(fixtures["retros"]), "workers": len(stages), "cleanup_closed": 1,
                                                             "assistant_visibility": "hidden",
                                                             "synthetic_production_questions": 0, "composite_messages": 0})
     asyncio.run(run())
