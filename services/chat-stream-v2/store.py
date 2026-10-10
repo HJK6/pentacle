@@ -5427,8 +5427,14 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 return None
 
             # Legacy events without a valid client request key can only use the
-            # prior text-digest projection, preserving compatibility.
-            rows = conn.execute(
+            # prior text-digest projection, preserving compatibility. Digest the
+            # event once and let SQLite pick the newest current receipt with that
+            # digest; per-row digesting re-normalized the event text once for
+            # every receipt on the stream.
+            digest = _send_wire_digest(text)
+            if not digest:
+                return None
+            row = conn.execute(
                 """SELECT r.rowid AS receipt_rowid, r.*
                    FROM v2_send_receipts AS r
                    JOIN (
@@ -5437,14 +5443,14 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                        WHERE to_stream_id=?
                        GROUP BY request_id
                    ) AS current ON current.receipt_rowid=r.rowid
-                   ORDER BY r.rowid DESC""",
-                (stream_id,),
-            ).fetchall()
-            for row in rows:
-                if str(row["wire_digest"] or "") and str(row["wire_digest"]) == _send_wire_digest(text):
-                    return _project_send_receipt_row(
-                        conn, row, include_attachments=True, include_display_text=True,
-                    )
+                   WHERE r.wire_digest=?
+                   ORDER BY r.rowid DESC LIMIT 1""",
+                (stream_id, digest),
+            ).fetchone()
+            if row is not None:
+                return _project_send_receipt_row(
+                    conn, row, include_attachments=True, include_display_text=True,
+                )
             return None
 
         receipt = await self.submit(_op)

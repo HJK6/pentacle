@@ -59,11 +59,18 @@ class LaneEpisodeSink(Protocol):
 
 def lead_reported_done_conn(conn, lane: dict) -> bool | None:
     """Only persisted, resolved routing evidence can establish a report fact."""
-    from store_routing import _assistant_route_lane_conn
-    routes = [r for r in conn.execute(
-        "SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND routing_state='resolved'",
-        (lane["stream_id"],)) if _assistant_route_lane_conn(conn, lane["stream_id"], r, lane["lane_id"])]
-    if not routes:
+    # Same predicate as store_routing._assistant_route_lane_conn (route_json
+    # names the lane, or a lane.admit receipt binds its dispatch), evaluated in
+    # one query instead of decoding every resolved route of the stream per lane.
+    route_dispatch_ids = {r["dispatch_id"] for r in conn.execute(
+        "SELECT r.dispatch_id FROM v2_assistant_composite_routes AS r "
+        "WHERE r.stream_id=? AND r.routing_state='resolved' AND ("
+        "json_extract(COALESCE(NULLIF(r.route_json,''),'{}'),'$.lane_id')=? "
+        "OR EXISTS (SELECT 1 FROM v2_assistant_composite_operations AS o "
+        "WHERE o.stream_id=r.stream_id AND o.dispatch_id=r.dispatch_id "
+        "AND o.lane_id=? AND o.operation='lane.admit'))",
+        (lane["stream_id"], lane["lane_id"], lane["lane_id"]))}
+    if not route_dispatch_ids:
         return None
     prior = lane.get("lead_reported_done")
     prior = None if prior is None else bool(prior)
@@ -74,7 +81,7 @@ def lead_reported_done_conn(conn, lane: dict) -> bool | None:
                           "WHERE report_id=? AND stream_id=? AND lane_id=?",
                           (pointer, lane["stream_id"], lane["lane_id"])).fetchone()
     lead = lane.get("_lead_row")
-    if (report is not None and report["dispatch_id"] in {r["dispatch_id"] for r in routes}
+    if (report is not None and report["dispatch_id"] in route_dispatch_ids
             and (report["actor_stream_id"], report["actor_generation"]) ==
                 (lane.get("bound_stream_id"), lane.get("bound_generation"))
             and lead is not None and lead.get("session_generation") == lane.get("bound_generation")):
