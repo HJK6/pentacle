@@ -112,6 +112,22 @@ async def test_changed_actor_cannot_authorize_old_capture(field, value):
 
 
 @pytest.mark.asyncio
+async def test_existing_reviewer_binds_generation_current_before_admission():
+    store = Store(':memory:'); store.start()
+    store.set_spec_identity_resolver(lambda value: value, lambda ids: {value: value for value in ids})
+    try:
+        row = await owner(store)
+        reviewer = await store.open_session('fixture', 'qa', spec_id=SPEC)
+        args = admission(row, existing_reviewer=True)
+        args['generation'] = 'stale-caller-read'
+        result = await store.qa_admit(**args)
+        assert result['generation'] == reviewer['session_generation']
+        assert await count(store, 'v2_qa_commissions') == 1
+    finally:
+        store.stop()
+
+
+@pytest.mark.asyncio
 async def test_existing_reviewer_generation_is_pinned_across_retry():
     store = Store(':memory:'); store.start()
     entered, release = threading.Event(), threading.Event()

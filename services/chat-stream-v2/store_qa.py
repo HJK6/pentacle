@@ -379,6 +379,14 @@ class QaStoreMixin:
         spec, surface, cycle = _scope(scope)
         if type(msg_id) is not int or msg_id < 0:
             raise QaError("qa_invalid_request", "msg_id must be a nonnegative integer")
+        if existing_reviewer:
+            # A caller may have read this seat before admission began. Bind the
+            # current open generation once, then retain it across every await
+            # and retry; a later reopen must never inherit this commission.
+            target = await self.submit(lambda conn: _session(conn, reviewer))
+            if not target or target.get("status") != "open":
+                raise QaError("qa_reviewer_unavailable", "QA reviewer is not open")
+            generation = target.get("session_generation")
         def op(conn, *, transaction=True, validate_only=False):
             if transaction:
                 conn.execute("BEGIN IMMEDIATE")
