@@ -742,15 +742,25 @@ def test_actual_stalled_send_pressure_recovery_and_coalescing(tmp_path, caplog, 
                     assert peer.paused and not server._client_writer_tasks[peer].done()
                     assert queue.qsize() == (1 if compressible else 204)
                     events = [r for r in _records(caplog) if r["event"] == "slow_consumer"]
-                    assert [r["phase"] for r in events] == (["enter", "recover"] if compressible else ["enter"])
-                    assert events[0]["queue_depth"] == events[0]["queue_peak"] == 204
-                    assert events[0]["queue_max"] == 256
-                    assert events[0]["episode"] == 1
-                    # The removed in-flight frame is not in Q and is not sent
-                    # until the real websockets send/drain call completes.
-                    bucket = "session.inventory" if compressible else "chat.event"
-                    assert events[0]["queued_by_type"][bucket] == 204
-                    assert events[0]["traffic"][bucket]["broadcast_sent"] == 0
+                    if compressible:
+                        assert events == []
+                        assert server._connection_diagnostics[peer].queued["session.inventory"] <= 1
+                        assert sum(server._connection_diagnostics[peer].queued.values()) == queue.qsize() == 1
+                        assert server._connection_diagnostics[peer].traffic["session.inventory"]["broadcast_enqueued"] == 205
+                        assert server._connection_diagnostics[peer].traffic["session.inventory"]["broadcast_sent"] == 0
+                        assert server._connection_diagnostics[peer].traffic["session.inventory"]["coalesced"] == 203
+                        assert server._client_inflight_coalescible[peer][0] == "session.inventory"
+                        assert json.loads(server._client_inflight_coalescible[peer][1])["fixture_revision"] == 0
+                    else:
+                        assert [r["phase"] for r in events] == (["enter", "recover"] if compressible else ["enter"])
+                        assert events[0]["queue_depth"] == events[0]["queue_peak"] == 204
+                        assert events[0]["queue_max"] == 256
+                        assert events[0]["episode"] == 1
+                        # The removed in-flight frame is not in Q and is not sent
+                        # until the real websockets send/drain call completes.
+                        bucket = "session.inventory" if compressible else "chat.event"
+                        assert events[0]["queued_by_type"][bucket] == 204
+                        assert events[0]["traffic"][bucket]["broadcast_sent"] == 0
                     await asyncio.sleep(0.02)
                 finally:
                     if peer.paused:
@@ -763,15 +773,21 @@ def test_actual_stalled_send_pressure_recovery_and_coalescing(tmp_path, caplog, 
                 assert (await wire.rpc("ping"))["type"] == "pong"
             records, closed = _lifecycle(caplog)
             pressure = [r for r in records if r["event"] == "slow_consumer"]
-            assert [r["phase"] for r in pressure] == ["enter", "recover"]
-            assert pressure[1]["queue_depth"] <= 128 and pressure[1]["episode"] == 1
+            if compressible:
+                assert pressure == []
+            else:
+                assert [r["phase"] for r in pressure] == ["enter", "recover"]
+                assert pressure[1]["queue_depth"] <= 128 and pressure[1]["episode"] == 1
             assert not [r for r in records if r["event"] == "force_close"]
             bucket = "session.inventory" if compressible else "chat.event"
             assert closed["traffic"][bucket]["broadcast_enqueued"] == 205
             assert closed["traffic"][bucket]["broadcast_sent"] == (2 if compressible else 205)
             assert closed["traffic"][bucket]["coalesced"] == (203 if compressible else 0)
             assert closed["send_call_max_ms"] >= 15
-            assert closed["queue_peak"] == 204 and closed["queue_depth"] == 0
+            if compressible:
+                assert closed["queue_peak"] == 1 and closed["queue_depth"] == 0
+            else:
+                assert closed["queue_peak"] == 204 and closed["queue_depth"] == 0
     asyncio.run(run())
 
 

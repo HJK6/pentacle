@@ -100,6 +100,15 @@ Run tests in a harness-owned tmux session on an explicit `tmux -L <test-socket>`
 
 Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the real desktop smoke. Fixtures must use invented content and valid public wire identifiers.
 
+Broadcast queues replace pending `session.inventory` and `hosts.stats` snapshots,
+and `working.state` snapshots for the same stream, at every enqueue. The newest
+state stays at its arrival position after intervening events; an in-flight send
+is never replaced. Other existing state families retain warning/overflow
+compaction. Chat events and all non-coalescible frames (including
+`work_lanes.inventory`) preserve their exact bytes and order. An incompressible
+full queue still disconnects with 1011/`slow_consumer`, signaling the client to
+reconnect and refetch.
+
 ### Scheduled spawn fleet smoke
 
 Synthetic warning and failure cards are published only in a harness-owned

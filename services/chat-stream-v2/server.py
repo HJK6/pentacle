@@ -338,6 +338,9 @@ COALESCIBLE_BROADCAST_FRAME_TYPES = frozenset({
     # A complete replacement: a slow client only needs the newest limits frame.
     "limits.update",
 })
+EARLY_COALESCIBLE_BROADCAST_FRAME_TYPES = frozenset({
+    "session.inventory", "working.state", "hosts.stats",
+})
 #: Bounded backfill clamp (lifted): a client can never pull more than this many
 #: recent events in one `request_stream_events`. Env-overridable like v1.
 RECENT_LIMIT = int(os.environ.get("PENTACLE_RECENT_LIMIT", "500"))
@@ -1779,8 +1782,8 @@ class Server:
                 return True
         return False
 
-    def _evict_superseded_queue_frames(self, queue: asyncio.Queue) -> bool:
-        """Coalesce replaceable state without dropping events."""
+    def _evict_superseded_queue_frames(self, queue: asyncio.Queue, *, target_key: tuple | None = None) -> bool:
+        """Coalesce all stale state, or remove only an arriving frame's key."""
         items = [queue.get_nowait() for _ in range(queue.qsize())]
         for _ in items:
             queue.task_done()
@@ -1789,15 +1792,18 @@ class Server:
         for item in reversed(items):
             if item[0] in COALESCIBLE_BROADCAST_FRAME_TYPES:
                 key = self._coalesce_frame_key(item[0], item[1])
-                if key in seen_keys:
+                if key == target_key or (target_key is None and key in seen_keys):
                     self._diag_removed(queue, item[0], coalesced=True)
                     continue
-                seen_keys.add(key)
+                if target_key is None:
+                    seen_keys.add(key)
             kept_reversed.append(item)
         for item in reversed(kept_reversed):
             queue.put_nowait(item)
         state = getattr(queue, "_conn_diagnostic", None)
-        if state is not None:
+        # Targeted replacement and its following put are one synchronous
+        # enqueue; report pressure at the final depth, not this temporary gap.
+        if state is not None and target_key is None:
             self._diag_pressure(state, queue)
         return len(kept_reversed) < len(items)
 
@@ -1807,6 +1813,11 @@ class Server:
         queue = self._client_send_queues.get(websocket)
         if queue is None:
             return False
+        if frame_type in EARLY_COALESCIBLE_BROADCAST_FRAME_TYPES:
+            # Remove pending predecessors before putting the newest state at
+            # its arrival position. The writer's in-flight frame is untouched.
+            self._evict_superseded_queue_frames(
+                queue, target_key=self._coalesce_frame_key(frame_type, frame))
         try:
             queue.put_nowait((frame_type, frame))
         except asyncio.QueueFull:
