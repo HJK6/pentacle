@@ -294,7 +294,6 @@ class Assets:
                 raise InvalidAsset("catalog content type cannot be replaced")
             if fields["spec_id"] and target.get("spec_id") != fields["spec_id"]:
                 raise InvalidAsset("catalog publish conflicts with an existing asset under a different spec")
-        targets = records
         catalog_target = (fields["content_type"] == "dashboard-catalog"
             or (fields["spec_id"] in {DEFAULT_DASHBOARD_CATALOG_SPEC_ID, self._catalog_spec_id}
                 and fields["asset_id"] == "dashboard-catalog")

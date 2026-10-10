@@ -159,7 +159,9 @@ may mutate hosted records, including records served by another fleet host.
 Anonymous, operator-only, report-producer, external and scoped client principals
 are refused; a claimed host string does not establish identity. The same rule
 applies to direct catalog publication and deletion, including attempts to change
-its content type. This does not widen trusted executable-adapter publication
+its content type. Replacing a complete existing catalog also requires the
+caller to own its row or have its catalog spec attached; a cross-host publisher
+attaches that spec before publication. This does not widen trusted executable-adapter publication
 authority. Hosted-record commands cannot upload or authorize adapter code.
 
 See [Dashboard commands](../services/agent-orch/README.md#dashboard-commands) for
