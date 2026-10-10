@@ -716,6 +716,88 @@ def validate_packet(packet, manifest):
                 "note": "Supplemental references retained as evidence labels; they do not expand original coverage."})
     if manifest.get("schema_version") == 2:
         packet["schema_version"] = 2
+    return normalize_daily_candidates(packet, selected) if daily_manifest(manifest) else packet
+
+
+CANDIDATE_METADATA = {"id", "candidate_key", "version", "finding_key", "finding_version", "aliases", "prior_reviews", "candidate_version"}
+CANDIDATE_TEXT = ("problem", "consequence", "action", "benefit", "effort", "risk", "uncertainty", "decision")
+
+
+def daily_manifest(manifest):
+    return not (manifest.get("phase", "").startswith("history") or manifest.get("consolidation")
+                or manifest["run_id"].startswith("history-"))
+
+
+def candidate_version(candidate):
+    return digest({key: value for key, value in candidate.items() if key not in CANDIDATE_METADATA})
+
+
+def normalize_daily_candidates(packet, selected):
+    """Collector-owned identity is separate from daily labels and content hashes."""
+    normalized = []
+    for candidate in packet["candidates"]:
+        targets = candidate.get("work_ids", [])
+        if not isinstance(targets, list) or any(not valid_work_id(value) for value in targets):
+            raise ValueError("work_ids must be a list of valid work IDs")
+        candidate["work_ids"] = sorted(set(targets))
+        refs = candidate.get("identity_citations", [
+            {"store": "primary" if selected[ref].get("intake") == "primary" else "work", "record_id": ref}
+            for ref in candidate["citations"]])
+        if not isinstance(refs, list) or any(not isinstance(ref, dict) or
+                any(not isinstance(ref.get(key), str) or not ref[key].strip() for key in ("store", "record_id"))
+                for ref in refs):
+            raise ValueError("identity_citations must contain store and record_id strings")
+        pairs = sorted({(ref["store"].strip().lower(), ref["record_id"].strip()) for ref in refs})
+        candidate["identity_citations"] = [{"store": store, "record_id": identity} for store, identity in pairs]
+        candidate["citations"] = sorted(set(candidate["citations"]))
+        for key in ("candidate_key", "version", "candidate_version", "aliases", "prior_reviews"):
+            candidate.pop(key, None)
+        if "merged_candidates" in candidate:
+            candidate["merged_candidates"] = [{k: v for k, v in member.items() if k not in CANDIDATE_METADATA - {"id"}}
+                                               for member in candidate["merged_candidates"]]
+        candidate["version"] = candidate_version(candidate)
+        candidate["candidate_key"] = (
+            "work:" + candidate["work_ids"][0] if len(candidate["work_ids"]) == 1 else
+            "evidence:" + hashlib.sha256("\n".join(sorted({f"{store}:{identity}" for store, identity in pairs})).encode()).hexdigest()[:16]
+            if pairs else "unkeyed:" + candidate["version"])
+        normalized.append(candidate)
+    groups = {}
+    for candidate in normalized:
+        if candidate["candidate_key"].startswith("work:"):
+            groups.setdefault(candidate["candidate_key"], []).append(candidate)
+    merged, seen_work = [], set()
+    for candidate in normalized:
+        key = candidate["candidate_key"]
+        if key in seen_work:
+            continue
+        if key.startswith("work:"):
+            seen_work.add(key)
+        members = groups.get(key, [candidate])
+        if len(members) == 1:
+            if candidate not in merged:
+                merged.append(candidate)
+            continue
+        # Only validated top-level findings establish the member set; a worker's
+        # supplied merge metadata cannot erase an original or its source coverage.
+        originals = [dict(member) for member in members]
+        originals.sort(key=lambda member: member["id"])
+        originals = [{k: v for k, v in member.items() if k not in CANDIDATE_METADATA - {"id"}}
+                     for member in originals]
+        combined = dict(originals[0])
+        for field in CANDIDATE_TEXT:
+            values = list(dict.fromkeys(value if isinstance(value, str) else encoded(value).decode()
+                                       for value in (member[field] for member in originals)))
+            combined[field] = "\n\n".join(values)
+        for field in ("citations", "evidence_citations"):
+            combined[field] = sorted({ref for member in originals for ref in member.get(field, [])})
+        pairs = sorted({(ref["store"], ref["record_id"]) for member in originals for ref in member["identity_citations"]})
+        combined["identity_citations"] = [{"store": store, "record_id": identity} for store, identity in pairs]
+        combined["merged_candidates"] = originals
+        combined["version"] = candidate_version(combined)
+        combined["candidate_key"] = candidate["candidate_key"]
+        merged.append(combined)
+    packet["candidates"] = sorted(merged, key=lambda candidate: candidate["id"])
+    packet.setdefault("coverage", {})["unkeyed"] = sum(c["candidate_key"].startswith("unkeyed:") for c in packet["candidates"])
     return packet
 
 
@@ -957,6 +1039,7 @@ For every alias_id return exactly one keep/drop selection with reason and curren
 Return agent-orch report --msg-id 0 --status done --report-id {report_id} --result JSON (ReportPayloadV1 summary/findings/next_action/extras). extras.daily_retro={{run_id:"{manifest['run_id']}",input_digest:"{digest(manifest['consolidation']['catalogue'])}",selections:[{{alias_id,disposition:"keep"|"drop",reason,bart_attention,candidate(optional override)}}]}}. No omitted/invented aliases. Prior checkpoint actions are historical custody, never a new commission. Preserve recurrence/changed evidence and genuine uncertainty.
 """
     history_duty = ""
+    identity_duty = (" Each daily candidate may add work_ids as a list of exact target work IDs, and identity_citations as structured {store,record_id} records. Do not infer targets from free text. Omitted identity citations derive from original source IDs; an explicit empty list means no identity citation. The collector computes candidate_key/version and merges findings with one equal target; do not invent keys or hashes." if daily_manifest(manifest) else "")
     if manifest.get("schema_version") == 2:
         history_duty = """\nContinuous intake: each candidate MUST include recommendation_kind=no_change|resolved|duplicate|future_work|immediate_work|investigate. No_change means evidence establishes no change is needed; future work is future_work even if an unassigned backlog exists. Verify accepting owner receipt, checkable dated/named-event checkpoint and success measure. Challenge missing acceptance, overdue triggers and recurrence using existing work; never scan free-text keywords to infer dispositions. Primary Bart metadata is independent evidence from the same bounded window. Read every observed failure/unexplained-stall entry and state next action at the first applicable digest. Report overflow, missing provenance and unknown correlation explicitly; a report, terminal badge or PID never proves operator publication. No provider/tool logs. Preserve live-tool, evidenced-wait and retained-planner distinctions. Old Retro text never establishes today's health.\n"""
     if manifest.get("cumulative_context"):
@@ -968,7 +1051,7 @@ Each candidate adds finding_key (stable lowercase issue label <=120 chars) and b
 Read immutable input JSON {input_path}; memory root {settings.memory_root}. Look up only relevant normal work records and bounded recent packets under {settings.state_root}/runs for recurrence/prior decisions. Respect existing standing grants.{history_duty}
 READ ONLY: no edits, questions, publication, new lanes or feedback pass. No authority to execute improvements. Your terminal report self-closes this generation; producer owns only fenced cleanup.
 Return one durable report: agent-orch report --msg-id 0 --status done --report-id {report_id} --result JSON. ReportPayloadV1 summary/findings/next_action/extras; extras.daily_retro is the packet object.
-Packet: run_id; dispositions [{{id,fingerprint,reason}}] EXACTLY once for each original, including no-action; candidates unique prioritized [{{id,problem,consequence,citations:[source IDs],prior_occurrences,existing,action,benefit,effort,risk,uncertainty,owner,decision}}]. decision describes exact needed grant/recommended option/meaningful alternatives, or existing authorization/no decision. Candidates.citations contain ONLY IDs from collection.sources; put verification labels, file paths and related-work references in evidence_sources/evidence_citations or existing, never in original citations. Each recommendation needs at least one collected original ID. Existing fields name authoritative fixes/rules/work and current state. No-new sources is an explicit successful empty packet; coverage gaps never imply all-clear. Preserve prior materially changed recommendations/actions needing attention. Keep front concise, no silent source truncation.
+Packet: run_id; dispositions [{{id,fingerprint,reason}}] EXACTLY once for each original, including no-action; candidates unique prioritized [{{id,problem,consequence,citations:[source IDs],prior_occurrences,existing,action,benefit,effort,risk,uncertainty,owner,decision}}]. decision describes exact needed grant/recommended option/meaningful alternatives, or existing authorization/no decision. Candidates.citations contain ONLY IDs from collection.sources; put verification labels, file paths and related-work references in evidence_sources/evidence_citations or existing, never in original citations. Each recommendation needs at least one collected original ID. Existing fields name authoritative fixes/rules/work and current state.{identity_duty} No-new sources is an explicit successful empty packet; coverage gaps never imply all-clear. Preserve prior materially changed recommendations/actions needing attention. Keep front concise, no silent source truncation.
 """
 
 
@@ -1104,6 +1187,7 @@ def weekly_summary(settings, end_day):
         "completion_to_publication_seconds": {"observed": 0, "values": []},
         "dot_blocked_time": "unknown unless measured in owning milestone receipts",
         "dot_rework": "unknown unless measured in owning milestone receipts",
+        "candidate_identities": [], "coverage": {"unkeyed": 0},
         "current_work": [], "current_work_counts": {"defer": 0, "propose": 0, "authorized": 0, "investigate": 0},
         "verified_outcomes": 0, "shipped_observed": 0, "unverified_ownership": 0, "oldest_unresolved": None,
         "dot_measurements": {"sample_receipts": [], "blocked_seconds": [], "correction_rounds": [], "avoidable_stops": []}}
@@ -1168,6 +1252,11 @@ def weekly_summary(settings, end_day):
         final, review = read(root / "astra.json"), read(root / "review.json")
         if final:
             result["candidates_observed"] += len(final["packet"]["candidates"])
+            for candidate in final["packet"]["candidates"]:
+                key = candidate.get("candidate_key", "legacy_unknown")
+                result["candidate_identities"].append({"run_id": day, "id": candidate["id"],
+                    "candidate_key": key, "version": candidate.get("version", "legacy_unknown")})
+                result["coverage"]["unkeyed"] += int(key.startswith("unkeyed:"))
         if not review:
             result["unreviewed_runs"].append(day)
             continue
@@ -1946,6 +2035,7 @@ class Pipeline:
             candidates = set(candidate_map)
             if len(rows) != len(candidates) or {r.get("id") for r in rows} != candidates:
                 raise ValueError("one assistant disposition per recommendation required")
+            proposal_bindings = {}
             for row in rows:
                 if row.get("disposition") not in DISPOSITIONS or not row.get("reason"):
                     raise ValueError("explicit assistant disposition/reason required")
@@ -1967,12 +2057,30 @@ class Pipeline:
                     path = work_path(self.settings, row.get("work_id"))
                     records = proposals(path.read_text())
                     proposal = records.get(row.get("proposal_id"))
-                    if not proposal or proposal.get("version") != row.get("version") or not proposal.get("citations"):
+                    candidate = candidate_map[row["id"]]
+                    projected = (not run_id.startswith("history-") and "candidate_key" in candidate
+                                 and row.get("version") == candidate.get("version")
+                                 and "proposal_version" in row)
+                    bound_version = row.get("proposal_version") if projected else row.get("version")
+                    if not proposal or proposal.get("version") != bound_version or not proposal.get("citations"):
                         raise ValueError("action needs durable proposal/version/citations in normal work")
+                    proposal_bindings[row["id"]] = bound_version
                     if schema2:
                         validate_proposal(proposal, require_v2=True)
                         if proposal_version(proposal) != proposal["version"] or row["disposition"] != proposal.get("disposition"):
                             raise ValueError("disposition must match exact current schema2 proposal")
+            # Keep the existing proposal-binding input, but expose the exact
+            # normalized candidate's content identity on new daily review rows.
+            result = json.loads(json.dumps(result))
+            for row in result["dispositions"]:
+                candidate = candidate_map[row["id"]]
+                if not run_id.startswith("history-") and "candidate_key" in candidate:
+                    if row["id"] in proposal_bindings:
+                        row["proposal_version"] = proposal_bindings[row["id"]]
+                    else:
+                        row.pop("proposal_version", None)
+                    row.update(candidate_key=candidate["candidate_key"], version=candidate["version"])
+                    row.pop("candidate_version", None)
             old = read(root / "review.json")
             if old:
                 if old["result"] != result:

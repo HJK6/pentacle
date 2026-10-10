@@ -188,6 +188,33 @@ New daily packets use `schema_version: 2`. Each candidate has
 `duplicate` requires `existing_work_evidence` with `work_id`, `owner` and
 `acceptance_receipt`. Legacy receipts and historical packets remain immutable.
 
+Daily candidates have collector-computed `candidate_key` and content `version`.
+`work_ids` is an optional list of exact targets (default `[]`); no target is inferred
+from prose, citations or paths. Exactly one distinct target yields `work:<ID>`.
+Otherwise the key is `evidence:` plus the first 16 SHA-256 hex characters of sorted,
+unique identity citations joined by newlines. `identity_citations` accepts structured
+`{store, record_id}` entries: whitespace is stripped, only store is lowercased, and
+record-ID case remains material. Omission maps original citations to work or primary
+source identities; explicit `[]` means no identity citations. With neither target
+nor identity evidence, the key is `unkeyed:<version>`, counted in `coverage.unkeyed`.
+Original-source coverage remains required even for unkeyed candidates.
+
+Only equal single-target work candidates merge. Originals are sorted by ID; the
+lowest ID represents the group. Distinct text fields are joined with two newlines,
+with non-string text values rendered as canonical JSON; typed originals remain in
+`merged_candidates`. Source and evidence citations are unioned. The canonical JSON
+content hash includes normalized fields and merged originals, but excludes daily ID
+and generated key/version/alias metadata. Raw worker reports stay intact. Equal
+evidence keys do not merge. Keys never replace daily IDs or historical finding and
+proposal identities. Historical execution retains its original packet/hash contract.
+
+New normalized review rows derive `candidate_key` and `version` from the exact
+retained candidate. For action-linked work, the existing input `version` still validates
+the durable proposal; its stored projection is `proposal_version`. Replaying either
+the original input or stored projection binds that same proposal and final packet.
+Old keyless packets/receipts are not backfilled: weekly read projections label them
+`legacy_unknown`, distinct from new unkeyed coverage.
+
 ```sh
 python services/chat-stream-v2/tools/daily_retro.py record-review --config C --run-id YYYY-MM-DD --result REVIEW_JSON_FILE
 python services/chat-stream-v2/tools/daily_retro.py decision --config C --work-id spec_existing_item --proposal PROPOSAL_JSON_FILE

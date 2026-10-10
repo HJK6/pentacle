@@ -2242,3 +2242,233 @@ def authorized_guard_stale_cas_control(config, monkeypatch):
         assert not rpc.prompt_calls and rpc.questions[qid]["state"] == "open"
         assert not rpc.sent and not rpc.spawns and decision_bytes(config) == receipts
         assert (path.read_bytes() if path.exists() else None) == before
+
+
+def identity_packet(*candidates, intake=None):
+    manifest = {"run_id": "2026-10-13", "schema_version": 2, "sources": [
+        {"id": "spec_original", "fingerprint": "original", **({"intake": intake} if intake else {})},
+        {"id": "spec_second", "fingerprint": "second"}]}
+    default = {k: "fixture" for k in ("problem", "consequence", "prior_occurrences", "existing",
+        "action", "benefit", "effort", "risk", "uncertainty", "owner", "decision")}
+    return {"run_id": manifest["run_id"], "dispositions": [
+        {"id": s["id"], "fingerprint": s["fingerprint"], "reason": "Original covered."} for s in manifest["sources"]],
+        "candidates": [{**default, "id": "one", "citations": ["spec_original"],
+            "recommendation_kind": "immediate_work", **c} for c in (candidates or ({},))]}, manifest
+
+
+def test_candidate_key_field_mapping():
+    for targets, expected in ((["spec_target"], "work:spec_target"),
+            (["spec_target", "spec_target"], "work:spec_target"), ([], "evidence:"),
+            (["spec_z", "spec_a"], "evidence:")):
+        packet, manifest = identity_packet({"work_ids": targets, "existing": "spec_fake",
+            "owner": "spec_fake", "action": "work/spec_fake", "candidate_key": "work:forged", "version": "forged"})
+        candidate = retro.validate_packet(packet, manifest)["candidates"][0]
+        assert candidate["candidate_key"].startswith(expected)
+        assert candidate["work_ids"] == sorted(set(targets)) and candidate["version"] != "forged"
+    for bad in (None, "spec_target", True, {}, [None], [""], [" spec_target"], ["../target"]):
+        packet, manifest = identity_packet({"work_ids": bad})
+        with pytest.raises(ValueError, match="work_ids"):
+            retro.validate_packet(packet, manifest)
+    packet, manifest = identity_packet()
+    assert retro.validate_packet(packet, manifest)["candidates"][0]["work_ids"] == []
+
+
+def test_candidate_key_citation_mapping():
+    refs = [{"store": " PRIMARY ", "record_id": " AbC "}, {"store": "work", "record_id": "second"}]
+    packet, manifest = identity_packet({"identity_citations": refs + refs})
+    normalized = retro.validate_packet(packet, manifest)["candidates"][0]
+    expected = "evidence:" + retro.hashlib.sha256(b"primary:AbC\nwork:second").hexdigest()[:16]
+    assert normalized["candidate_key"] == expected
+    reordered, _ = identity_packet({"identity_citations": refs[::-1]})
+    assert retro.validate_packet(reordered, manifest)["candidates"][0]["candidate_key"] == expected
+    changed, _ = identity_packet({"identity_citations": [{"store": "primary", "record_id": "abc"}]})
+    assert retro.validate_packet(changed, manifest)["candidates"][0]["candidate_key"] != expected
+    for intake, prefix in ((None, "work"), ("primary", "primary")):
+        packet, manifest = identity_packet(intake=intake)
+        c = retro.validate_packet(packet, manifest)["candidates"][0]
+        assert c["identity_citations"] == [{"store": prefix, "record_id": "spec_original"}]
+    for bad in (None, {}, "work:id", ["work:id"], [{"store": " ", "record_id": "id"}],
+                [{"store": "work", "record_id": None}], [{"record_id": "id"}]):
+        packet, manifest = identity_packet({"identity_citations": bad})
+        with pytest.raises(ValueError, match="identity_citations"):
+            retro.validate_packet(packet, manifest)
+    packet, manifest = identity_packet({"identity_citations": [], "evidence_citations": ["fixture/path"]})
+    normalized = retro.validate_packet(packet, manifest)
+    c = normalized["candidates"][0]
+    assert c["candidate_key"] == "unkeyed:" + c["version"] and normalized["coverage"]["unkeyed"] == 1
+    packet["candidates"][0]["citations"] = ["spec_invented"]
+    with pytest.raises(ValueError, match="fabricated"):
+        retro.validate_packet(packet, manifest)
+
+
+def test_candidate_key_merge_version():
+    a = {"id": "b", "work_ids": ["spec_target"], "citations": ["spec_second"],
+         "problem": "Second", "effort": {"days": 2}, "evidence_citations": ["proof-b"], "owner": "second owner"}
+    b = {"id": "a", "work_ids": ["spec_target"], "citations": ["spec_original"],
+         "problem": "First", "effort": 1, "evidence_citations": ["proof-a"], "owner": "first owner"}
+    packet, manifest = identity_packet(a, b)
+    raw = retro.encoded(packet)
+    normalized = retro.validate_packet(packet, manifest)
+    assert retro.encoded(packet) == raw
+    c, = normalized["candidates"]
+    assert c["id"] == "a" and c["candidate_key"] == "work:spec_target"
+    assert c["citations"] == ["spec_original", "spec_second"] and c["evidence_citations"] == ["proof-a", "proof-b"]
+    assert c["problem"] == "First\n\nSecond" and c["effort"] == '1\n\n{"days":2}'
+    assert c["owner"] == "first owner" and [m["id"] for m in c["merged_candidates"]] == ["a", "b"]
+    assert c["merged_candidates"][1]["effort"] == {"days": 2}
+    assert all("candidate_key" not in m and "version" not in m for m in c["merged_candidates"])
+    reverse, _ = identity_packet(b, a)
+    assert retro.validate_packet(reverse, manifest) == normalized
+    assert retro.validate_packet(normalized, manifest) == normalized
+    expected = retro.digest({k: v for k, v in c.items() if k not in {
+        "id", "candidate_key", "version", "finding_key", "finding_version", "aliases", "prior_reviews"}})
+    assert c["version"] == expected
+
+
+def test_candidate_key_identity_vs_hash(config, monkeypatch):
+    packet, manifest = identity_packet({"id": "a"}, {"id": "b", "problem": "Renamed topic"})
+    normalized = retro.validate_packet(packet, manifest)
+    a, b = normalized["candidates"]
+    assert a["candidate_key"] == b["candidate_key"] and a["version"] != b["version"]
+    packet2, manifest2 = identity_packet({"id": "next-day", "problem": "Renamed topic"})
+    packet2["run_id"] = manifest2["run_id"] = "2026-10-14"
+    assert retro.validate_packet(packet2, manifest2)["candidates"][0]["candidate_key"] == a["candidate_key"]
+    path = source(config.memory_root, "target", status="in_progress")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    authorized = asyncio.run(pipeline.decision("spec_target", proposal2("authorized")))
+    manifest["collected_at"] = "2026-09-28T10:00:00Z"
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "collection.json", manifest)
+    retro.atomic(root / "astra.json", {"packet": normalized, "packet_hash": retro.digest(normalized)})
+    rows = [{"id": c["id"], "disposition": "authorized", "reason": "Within fixture grant.",
+        "work_id": "spec_target", "proposal_id": authorized["id"], "version": authorized["version"],
+        "candidate_key": "forged", "candidate_version": "forged"} for c in (a, b)]
+    bad = {"packet_hash": "wrong", "dispositions": rows}
+    with pytest.raises(ValueError, match="exact final packet hash"):
+        asyncio.run(pipeline.record_review(manifest["run_id"], bad))
+    bad = {"packet_hash": retro.digest(normalized), "dispositions": [{**r, "version": "forged"} for r in rows]}
+    with pytest.raises(ValueError, match="durable proposal"):
+        asyncio.run(pipeline.record_review(manifest["run_id"], bad))
+    result = {"packet_hash": retro.digest(normalized), "dispositions": rows}
+    receipt = asyncio.run(pipeline.record_review(manifest["run_id"], result))
+    for row, c in zip(receipt["result"]["dispositions"], (a, b)):
+        assert row["candidate_key"] == c["candidate_key"] and row["version"] == c["version"]
+        assert row["proposal_version"] == authorized["version"] and "candidate_version" not in row
+    stale = {"packet_hash": retro.digest(normalized), "dispositions": [
+        {**row, "proposal_version": "stale"} for row in receipt["result"]["dispositions"]]}
+    with pytest.raises(ValueError, match="durable proposal"):
+        asyncio.run(pipeline.record_review(manifest["run_id"], stale))
+    assert asyncio.run(pipeline.record_review(manifest["run_id"], receipt["result"])) == receipt
+    before = (root / "review.json").read_bytes()
+    assert asyncio.run(pipeline.record_review(manifest["run_id"], result)) == receipt
+    assert (root / "review.json").read_bytes() == before and path.exists()
+
+
+def test_candidate_key_legacy_bytes(config):
+    packet, manifest = identity_packet()
+    manifest["collected_at"] = "2026-10-13T10:00:00Z"
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "collection.json", manifest)
+    retro.atomic(root / "astra.json", {"packet": packet, "packet_hash": retro.digest(packet)})
+    retro.atomic(root / "review.json", {"reviewed_at": "2026-10-13T10:00:00Z", "result": {
+        "packet_hash": retro.digest(packet), "dispositions": [{"id": "one", "disposition": "no_change", "reason": "Legacy."}]}})
+    before = {p: p.read_bytes() for p in root.glob("*.json")}
+    summary = retro.weekly_summary(config, manifest["run_id"])
+    assert summary["candidate_identities"][0]["candidate_key"] == "legacy_unknown"
+    assert summary["coverage"]["unkeyed"] == 0
+    assert {p: p.read_bytes() for p in before} == before
+
+
+def test_candidate_key_history_hash_preservation():
+    # Golden hash computed on pinned predecessor before daily identity changes.
+    manifest = {"run_id": "history-0123456789abcdef-0001", "phase": "history",
+        "sources": [{"id": "spec_original", "fingerprint": "fixture-fingerprint"}]}
+    candidate = {k: "fixture" for k in ("id", "problem", "consequence", "prior_occurrences", "existing",
+        "action", "benefit", "effort", "risk", "uncertainty", "owner", "decision")}
+    candidate.update(id="legacy", citations=["spec_original"], finding_key="fixture-issue",
+        bart_attention={"reasons": ["uncertain"], "rationale": "Fixture relevance uncertain."})
+    packet = {"run_id": manifest["run_id"], "dispositions": [{"id": "spec_original",
+        "fingerprint": "fixture-fingerprint", "reason": "Fixture original reviewed."}], "candidates": [candidate]}
+    before = retro.encoded(packet)
+    normalized = retro.validate_history_packet(packet, manifest)
+    assert retro.digest(normalized) == "13d7e0d58d8e5ada3d1e359d75e03c49b2fcd8fe39509a4f0ff2e6b6b254aa91"
+    assert normalized["candidates"][0]["finding_version"] == "371d2cf03e18fdb13f7e49420a12391666c572a9043bdbabec3c80bbf8cfff3d"
+    assert "candidate_key" not in normalized["candidates"][0] and retro.encoded(packet) == before
+
+
+def test_candidate_key_worker_raw_report(config):
+    source(config.memory_root, "one")
+    manifest = retro.collect(config, at())
+    class CandidateTransport(Transport):
+        async def await_report_once(self, config, stream, msg_id, **kwargs):
+            response = await super().await_report_once(config, stream, msg_id, **kwargs)
+            candidate = identity_packet({"work_ids": ["spec_target"], "candidate_key": "forged", "version": "forged"})[0]["candidates"][0]
+            candidate["citations"] = ["spec_one"]
+            response["report"]["extras"]["daily_retro"]["candidates"] = [candidate]
+            return response
+    pipeline = retro.Pipeline(config, CandidateTransport())
+    stage = asyncio.run(pipeline.worker(manifest, "sol"))
+    assert stage["report"]["extras"]["daily_retro"]["candidates"][0]["candidate_key"] == "forged"
+    assert stage["packet"]["candidates"][0]["candidate_key"] == "work:spec_target"
+    assert stage["packet_hash"] == retro.digest(stage["packet"])
+    asyncio.run(pipeline.cleanup(manifest))
+    assert len(pipeline.rpc.closed) == 1
+
+
+def test_candidate_key_worker_merge_metadata_cannot_drop_originals():
+    packet, manifest = identity_packet({"id": "a", "work_ids": ["spec_target"], "merged_candidates": []},
+        {"id": "b", "work_ids": ["spec_target"], "citations": ["spec_second"]})
+    candidate, = retro.validate_packet(packet, manifest)["candidates"]
+    assert candidate["id"] == "a" and candidate["citations"] == ["spec_original", "spec_second"]
+    assert [c["id"] for c in candidate["merged_candidates"]] == ["a", "b"]
+
+
+def test_candidate_key_sorts_normalized_strings():
+    packet, manifest = identity_packet({"identity_citations": [
+        {"store": "a", "record_id": "x"}, {"store": "a-", "record_id": "y"}]})
+    candidate, = retro.validate_packet(packet, manifest)["candidates"]
+    assert candidate["candidate_key"] == "evidence:7b93fc4a357b7e21"
+
+
+@pytest.mark.parametrize("normalized", [False, True])
+def test_candidate_key_proposal_alias_cannot_bypass_binding(config, monkeypatch, normalized):
+    source(config.memory_root, "target", status="in_progress")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    authorized = asyncio.run(pipeline.decision("spec_target", proposal2("authorized")))
+    packet, manifest = identity_packet()
+    if normalized:
+        packet = retro.validate_packet(packet, manifest)
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "collection.json", {**manifest, "collected_at": "2026-09-28T10:00:00Z"})
+    retro.atomic(root / "astra.json", {"packet": packet, "packet_hash": retro.digest(packet)})
+    result = {"packet_hash": retro.digest(packet), "dispositions": [{"id": "one", "disposition": "authorized",
+        "reason": "Fixture scope", "work_id": "spec_target", "proposal_id": authorized["id"],
+        "version": "WRONG-HISTORICAL-PROPOSAL-VERSION", "proposal_version": authorized["version"]}]}
+    with pytest.raises(ValueError, match="durable proposal"):
+        asyncio.run(pipeline.record_review(manifest["run_id"], result))
+    assert not (root / "review.json").exists()
+
+
+@pytest.mark.parametrize("disposition", ["no_change", "resolved", "duplicate"])
+def test_candidate_key_non_action_links(config, monkeypatch, disposition):
+    source(config.memory_root, "target", status="in_progress")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    packet, manifest = identity_packet({"recommendation_kind": "no_change" if disposition == "no_change" else "immediate_work"})
+    packet = retro.validate_packet(packet, manifest)
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "collection.json", {**manifest, "collected_at": "2026-09-28T10:00:00Z"})
+    retro.atomic(root / "astra.json", {"packet": packet, "packet_hash": retro.digest(packet)})
+    row = {"id": "one", "disposition": disposition, "reason": "Fixture observation.", "work_id": "spec_target",
+        "proposal_id": "historical-reference", "version": "untrusted", "proposal_version": "untrusted"}
+    if disposition == "resolved":
+        row["outcome_evidence"] = {"receipt": "fixture-output", "observed_at": "2026-09-28T10:00:00Z", "measure": "Observed fixture output."}
+    if disposition == "duplicate":
+        row["existing_work_evidence"] = {"work_id": "spec_target", "owner": "fixture-owner", "acceptance_receipt": "fixture-acceptance"}
+    pipeline = retro.Pipeline(config, Transport())
+    result = {"packet_hash": retro.digest(packet), "dispositions": [row]}
+    receipt = asyncio.run(pipeline.record_review(manifest["run_id"], result))
+    projected, = receipt["result"]["dispositions"]
+    assert projected["version"] == packet["candidates"][0]["version"] and "proposal_version" not in projected
+    assert asyncio.run(pipeline.record_review(manifest["run_id"], result)) == receipt
