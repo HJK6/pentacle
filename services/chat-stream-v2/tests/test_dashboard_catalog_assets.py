@@ -312,11 +312,11 @@ def test_prefix_range_matches_startswith(tmp_path, prefix):
 
 # Hosted dashboard registration: real store, internal seat principals, synthetic policy.
 POLICY = CATALOG_CASES["hosted_policy"]
-INTERNAL = {"token_verified": True, "stream_id": "hosta:seat", "session_generation": "g"}
+INTERNAL = {"token_verified": True, "stream_id": "node-alpha:seat", "session_generation": "g"}
 
 class FleetSeats:
     def get(self, sid):
-        if sid not in {"hosta:seat", "hostb:seat", "foreign:seat"}:
+        if sid not in {"node-alpha:seat", "node-beta:seat", "foreign:seat"}:
             return None
         return {"stream_id": sid, "host": sid.split(":")[0], "status": "open",
                 "session_generation": "g", "role": "worker", "spec_ids": []}
@@ -328,13 +328,13 @@ def hosted_run(tmp_path, monkeypatch, scenario, *, configured=True):
         if configured: monkeypatch.setenv(env, value)
         else: monkeypatch.delenv(env, raising=False)
     async def main():
-        assets = Assets(str(tmp_path / "hosted.db"), sessions=FleetSeats(), fleet_hosts={"hosta", "hostb"})
+        assets = Assets(str(tmp_path / "hosted.db"), sessions=FleetSeats(), fleet_hosts={"node-alpha", "node-beta"})
         await assets.start()
         try:
             # Seed the real canonical row via the public handler.
             catalog = json.loads(json.dumps(CATALOG_CASES["valid"][-1]["catalog"]))
             catalog["boards"] = [b for b in catalog["boards"] if b["kind"] != "hosted-view"]
-            reply = await assets.asset({"type":"asset.publish", "stream_id":"hosta:seat",
+            reply = await assets.asset({"type":"asset.publish", "stream_id":"node-alpha:seat",
                 "asset_id":"dashboard-catalog", "spec_id":"pentacle__dashboard_catalog",
                 "content_type":"dashboard-catalog", "title":"Dashboards", "body":json.dumps(catalog),
                 "_auth_context": INTERNAL})
@@ -358,7 +358,7 @@ def test_hosted_cross_host_replacement_removal_and_package_preservation(tmp_path
         assert body["boards"][1]["visible"] is False
         for key in ("package", "catalog_version", "libs"):
             assert body[key] == catalog[key]
-        foreign_host = dict(INTERNAL, stream_id="hostb:seat")
+        foreign_host = dict(INTERNAL, stream_id="node-beta:seat")
         replaced = await assets.dashboard(mutation(auth=foreign_host, title="Replaced", url="https://other.example.ts.net/new/"))
         assert replaced["replaced"] is True
         body = json.loads(replaced["asset"]["body"])
@@ -383,23 +383,23 @@ def test_simultaneous_record_edits_are_serialized(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("auth", [
-    {}, {"operator_authenticated":True}, {"token_verified":False,"stream_id":"hosta:seat"},
+    {}, {"operator_authenticated":True}, {"token_verified":False,"stream_id":"node-alpha:seat"},
     dict(INTERNAL, stream_id="foreign:seat"), dict(INTERNAL, dot_principal=True),
     dict(INTERNAL, scoped_principal=True), dict(INTERNAL, service_authenticated=True),
-    dict(INTERNAL, stream_id="hosta:missing"), dict(INTERNAL, session_generation="stale"),
+    dict(INTERNAL, stream_id="node-alpha:missing"), dict(INTERNAL, session_generation="stale"),
 ])
 def test_catalog_commands_and_direct_writes_deletes_share_principal_rule(tmp_path, monkeypatch, auth):
     async def scenario(assets, catalog):
         for verb in ("add", "remove"):
-            reply = await assets.dashboard(mutation(verb, auth=auth, host="hosta", from_stream_id="hosta:seat"))
+            reply = await assets.dashboard(mutation(verb, auth=auth, host="node-alpha", from_stream_id="node-alpha:seat"))
             assert reply["error_code"] == "dashboard_unauthorized", reply
         for content_type, body in [("dashboard-catalog",json.dumps(catalog)), ("report",_report_body("spoof"))]:
-            reply = await assets.asset({"type":"asset.publish", "stream_id":"hosta:seat", "host":"hosta",
-                "from_stream_id":"hosta:seat", "spec_id":"pentacle__dashboard_catalog", "asset_id":"dashboard-catalog",
+            reply = await assets.asset({"type":"asset.publish", "stream_id":"node-alpha:seat", "host":"node-alpha",
+                "from_stream_id":"node-alpha:seat", "spec_id":"pentacle__dashboard_catalog", "asset_id":"dashboard-catalog",
                 "content_type":content_type,"title":"spoof", "body":body,"_auth_context":auth})
             assert reply["error_code"] == "asset_unauthorized", reply
         reply = await assets.asset({"type":"asset.delete","asset_id":"dashboard-catalog",
-            "stream_id":"hosta:seat", "_auth_context":auth})
+            "stream_id":"node-alpha:seat", "_auth_context":auth})
         assert reply["error_code"] == "asset_unauthorized", reply
     hosted_run(tmp_path, monkeypatch, scenario)
 
@@ -410,7 +410,7 @@ def test_url_policy_on_commands_and_complete_publication(tmp_path, monkeypatch, 
         reply = await assets.dashboard(mutation(url=case["url"]))
         assert (reply["type"] == "dashboard.add.ok") == case["allowed"], reply
         catalog["boards"].append({"id":"hosted-url", "name":"Hosted", "kind":"hosted-view", "hosted":{"url":case["url"]}})
-        reply = await assets.asset({"type":"asset.publish","stream_id":"hosta:seat","asset_id":"dashboard-catalog",
+        reply = await assets.asset({"type":"asset.publish","stream_id":"node-alpha:seat","asset_id":"dashboard-catalog",
             "spec_id":"pentacle__dashboard_catalog", "content_type":"dashboard-catalog", "title":"Catalog",
             "body":json.dumps(catalog),"_auth_context":INTERNAL})
         assert (reply["type"] == "asset.publish.ok") == case["allowed"], reply
@@ -438,7 +438,7 @@ def test_nonhosted_collisions_and_invalid_order_leave_catalog_intact(tmp_path, m
 def test_authenticated_hello_snapshot_carries_host_owned_policy(tmp_path, monkeypatch):
     from server import Server
     async def main():
-        server = Server(local_host="hosta")
+        server = Server(local_host="node-alpha")
         frames = await server._on_hello({"type":"hello", "hostedDashboardPolicy":{"tailnetSuffix":"evil.ts.net"}})
         for kind in ("hello", "snapshot"):
             assert next(f for f in frames if f["type"] == kind)["hostedDashboardPolicy"] == POLICY
@@ -455,19 +455,19 @@ def test_missing_invalid_policy_hello_has_explicit_null(monkeypatch,suffix,origi
     for key,val in [("TAILNET_SUFFIX",suffix),("PENTACLE_ORIGIN",origin)]:
         if val is None: monkeypatch.delenv("PENTACLE_HOSTED_DASHBOARD_"+key,raising=False)
         else: monkeypatch.setenv("PENTACLE_HOSTED_DASHBOARD_"+key,val)
-    frames=asyncio.run(Server(local_host="hosta")._on_hello({"type":"hello"}))
+    frames=asyncio.run(Server(local_host="node-alpha")._on_hello({"type":"hello"}))
     assert next(f for f in frames if f["type"]=="snapshot")["hostedDashboardPolicy"] is None
 
 
 def test_verified_cross_host_direct_catalog_publish_delete(tmp_path,monkeypatch):
     async def scenario(assets,catalog):
-        auth=dict(INTERNAL,stream_id="hostb:seat")
-        reply=await assets.asset({"type":"asset.publish","stream_id":"hosta:seat","content_type":"dashboard-catalog",
+        auth=dict(INTERNAL,stream_id="node-beta:seat")
+        reply=await assets.asset({"type":"asset.publish","stream_id":"node-alpha:seat","content_type":"dashboard-catalog",
             "spec_id":"pentacle__dashboard_catalog","asset_id":"dashboard-catalog", "title":"Catalog",
             "body":json.dumps(catalog),"_auth_context":auth})
         assert reply["type"]=="asset.publish.ok",reply
-        assert reply["asset"]["stream_id"]=="hosta:seat"
-        deleted=await assets.asset({"type":"asset.delete","stream_id":"hosta:seat","asset_id":"dashboard-catalog","_auth_context":auth})
+        assert reply["asset"]["stream_id"]=="node-alpha:seat"
+        deleted=await assets.asset({"type":"asset.delete","stream_id":"node-alpha:seat","asset_id":"dashboard-catalog","_auth_context":auth})
         assert deleted["type"]=="asset.delete.ok",deleted
     hosted_run(tmp_path,monkeypatch,scenario)
 
@@ -481,21 +481,21 @@ def test_wire_forgery_refused_and_verified_token_commands_work(tmp_path,monkeypa
         remote_address=("127.0.0.1",12345)
     async def main():
         store=Store(str(tmp_path/"sessions.db"));store.start()
-        sessions=Sessions(store,local_host="hosta")
-        await sessions.open("hosta","seat",provider="codex",pane_status="pane_alive")
-        await store.grant_stream_token("hosta","seat",hashlib.sha256(b"synthetic-dashboard-seat").hexdigest(),STREAM_TOKEN_HASH_VERSION)
-        assets=Assets(str(tmp_path/"assets.db"),sessions=sessions,fleet_hosts={"hosta","hostb"})
+        sessions=Sessions(store,local_host="node-alpha")
+        await sessions.open("node-alpha","seat",provider="codex",pane_status="pane_alive")
+        await store.grant_stream_token("node-alpha","seat",hashlib.sha256(b"synthetic-dashboard-seat").hexdigest(),STREAM_TOKEN_HASH_VERSION)
+        assets=Assets(str(tmp_path/"assets.db"),sessions=sessions,fleet_hosts={"node-alpha","node-beta"})
         await assets.start()
-        server=Server(store=store,sessions=sessions,local_host="hosta")
+        server=Server(store=store,sessions=sessions,local_host="node-alpha")
         server.handlers.update(assets.wire_handlers())
         try:
             wire=mutation(); wire["_auth_context"]=INTERNAL
             assert (await server._dispatch(json.dumps(wire),websocket=Peer()))[0]["error_code"]=="dashboard_unauthorized"
             peer=Peer()
-            wire.update(from_stream_id="hosta:seat",stream_token="synthetic-dashboard-seat")
+            wire.update(from_stream_id="node-alpha:seat",stream_token="synthetic-dashboard-seat")
             # A verified principal passes admission and reaches the missing-catalog condition.
             assert (await server._dispatch(json.dumps(wire),websocket=peer))[0]["error_code"]=="dashboard_catalog_missing"
-            wire["from_stream_id"]="hostb:seat"
+            wire["from_stream_id"]="node-beta:seat"
             assert (await server._dispatch(json.dumps(wire),websocket=Peer()))[0]["error_code"]=="dashboard_unauthorized"
         finally:
             await assets.stop();store.stop()
