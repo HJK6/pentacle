@@ -1960,7 +1960,10 @@ class Pipeline:
                 notice_rpc, persisting = False, False
                 try:
                     if not attempt:
+                        # Binding is the notice path's first RPC; a down daemon refuses here.
+                        notice_rpc = True
                         binding = await self.binding()
+                        notice_rpc = False
                         target, generation = binding["stream_id"], binding["session_generation"]
                         key = "daily-retro-" + digest([self.settings.namespace, manifest["run_id"], target, generation, True, seq])[:32]
                         host, session = target.split(":", 1)

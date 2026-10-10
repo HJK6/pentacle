@@ -592,9 +592,10 @@ history remains failure evidence after a later landed delivery. Existing
 collection/review denominators and missing-run accounting remain separate.
 
 A failure notice gets one additional attempt after 60 seconds only for
-`ConnectionRefusedError` or `OSError` with `ECONNREFUSED` during send or receipt
-reconciliation. Binding failure keeps nullable target/generation/request IDs
-and has no special retry. No worker admission, authentication, arbitrary reset,
+`ConnectionRefusedError` or `OSError` with `ECONNREFUSED` during the notice's
+assistant binding, send or receipt reconciliation. A refused binding records
+null target/generation/request IDs and the retry binds afresh; no identity is
+invented. Local persistence errors never retry. No worker admission, authentication, arbitrary reset,
 pending response or programming error receives this retry. The not-before time
 and consumed budget survive interruption; later recovery uses the retained
 intent without resetting a special two-attempt loop. Proven target, generation,

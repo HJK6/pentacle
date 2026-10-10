@@ -1628,8 +1628,18 @@ class DaemonDown(Transport):
         return await super().send_receipt_once(config, target, key)
 
 
-def test_unrecoverable_outage_persists_failure_then_flushes_notice_once(config):
+def instant_notice_retry(monkeypatch):
+    """A refused notice binding waits 60 s once; record the wait instead of sleeping."""
+    sleeps = []
+    async def sleep(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr(retro.asyncio, "sleep", sleep)
+    return sleeps
+
+
+def test_unrecoverable_outage_persists_failure_then_flushes_notice_once(config, monkeypatch):
     """C4b: primary error survives cleanup, notice queued before any RPC, flushed once."""
+    sleeps = instant_notice_retry(monkeypatch)
     source(config.memory_root, "one", body="No lessons.")
     rpc = DaemonDown()
     seed_legacy_owned_producers(config, rpc)
@@ -1643,6 +1653,7 @@ def test_unrecoverable_outage_persists_failure_then_flushes_notice_once(config):
     assert failure["notice"] == "pending"
     assert "cleanup_error" in failure and "notice_error" in failure
     assert retro.read(root / "failure-delivery.json")["pending"]["seq"] == 1
+    assert len(sleeps) == 1 and 59 < sleeps[0] <= 60  # one refused-binding notice retry, then terminal
     rpc.down = False
     rpc.await_report_once = Transport.await_report_once.__get__(rpc)
     assert asyncio.run(pipeline.run(at()))["delivered"] == ["2026-09-28"]
@@ -1690,8 +1701,9 @@ def test_interrupt_queues_notice_truthfully_without_rpc(config):
     assert retro.read(root / "failure-delivery.json")["pending"]["stage"] == "sol"
 
 
-def test_newer_failure_supersedes_unlanded_notice_and_keeps_history(config):
+def test_newer_failure_supersedes_unlanded_notice_and_keeps_history(config, monkeypatch):
     """Finding (a): one notice per failure; the latest is marked, earlier kept."""
+    instant_notice_retry(monkeypatch)
     source(config.memory_root, "one")
     rpc = DaemonDown()
     seed_legacy_owned_producers(config, rpc)
@@ -1710,6 +1722,7 @@ def test_newer_failure_supersedes_unlanded_notice_and_keeps_history(config):
 
 def test_recorded_review_supersedes_pending_notice(config, monkeypatch):
     """Finding (d): a later-reviewed run never leaves a stale pending notice."""
+    instant_notice_retry(monkeypatch)
     source(config.memory_root, "one")
     rpc = DaemonDown()
     seed_legacy_owned_producers(config, rpc)
@@ -3021,7 +3034,7 @@ def test_run_failed_denominator(config):
     assert {r["run_id"] for r in summary["coverage"]["excluded_runs"]} == {"2026-10-18", "history-fixture"}
 
 
-@pytest.mark.parametrize("where", ["reconcile", "send"])
+@pytest.mark.parametrize("where", ["binding", "reconcile", "send"])
 @pytest.mark.parametrize("oserror", [False, True])
 def test_run_failed_retry_clock(config, monkeypatch, where, oserror):
     clock = [0.0]; calls = []; sleeps = []; payloads = []
@@ -3151,25 +3164,15 @@ def test_run_failed_packet_pending_then_landed_retains_false(config):
     assert retro.weekly_summary(config, "2026-10-18")["runs_failed"] == 1
 
 
-def test_run_failed_binding_refusal_and_pending_are_not_retried(config, monkeypatch):
+def test_run_failed_pending_is_not_retried(config, monkeypatch):
     async def forbidden(delay):
-        raise AssertionError("only notice send/reconciliation refusal retries")
+        raise AssertionError("only notice connection refusal retries")
     monkeypatch.setattr(retro.asyncio, "sleep", forbidden)
-    class BindingDown(Transport):
-        down = True
+    class Pending(Transport):
         pending = True
-        async def assistant_once(self, *args):
-            if self.down:
-                raise ConnectionRefusedError("binding down")
-            return await super().assistant_once(*args)
         async def send_once(self, config, payload):
             return {"state": "pending"} if self.pending else await super().send_once(config, payload)
-    rpc = BindingDown(); manifest, root, pipeline = notice_fixture(config, rpc)
-    with pytest.raises(ConnectionRefusedError):
-        asyncio.run(pipeline.deliver(manifest, failure=True))
-    first = retro.read(root / "delivery.json")["notice_attempts"][0]
-    assert first["confirmed"] is False and all(first[k] is None for k in ("target", "generation", "request_id"))
-    rpc.down = False
+    rpc = Pending(); manifest, root, pipeline = notice_fixture(config, rpc)
     with pytest.raises(RuntimeError, match="delivery pending"):
         asyncio.run(pipeline.deliver(manifest, failure=True))
     rpc.pending = False
