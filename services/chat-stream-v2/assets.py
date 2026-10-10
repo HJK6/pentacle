@@ -44,7 +44,10 @@ if str(SERVICES_ROOT) not in sys.path:
 from _shared.asset_schema import (
     AssetBodyTooLarge, AssetValidationError, normalize_tags, validate_asset_payload,
 )
-from _shared.assets_store import AssetNotFound, AssetStore, AssetStoreError, InvalidAsset, asset_metadata
+from _shared.assets_store import (
+    AssetNotFound, AssetStore, AssetStoreError, InvalidAsset, asset_metadata,
+    normalize_asset_identity,
+)
 
 import report_producer
 
@@ -144,10 +147,9 @@ class Assets:
         # fixed synthetic anchor: the host and session of its stream id.
         producer = report_producer.load()
         principal = producer is not None and service_actor == producer.stream_id
+        host, name = self._resolve(msg)
         if principal:
             host, name = producer.anchor
-        else:
-            host, name = self._resolve(msg)
         stream_id = f"{host}:{name}"
         fields = dict(
             host=host, session_name=name, stream_id=stream_id,
@@ -161,14 +163,14 @@ class Assets:
         )
         # Check and write in ONE call on the store's single worker thread, so no
         # other publish can interleave between the ownership check and the write.
-        record, unchanged = await self._run(self._publish_checked, producer, principal, fields)
+        record, unchanged = await self._run(self._publish_checked, producer, principal, fields, auth)
         if unchanged:
             return {"type": "asset.publish.ok", "request_id": request_id,
                     "asset": record, "unchanged": True}
         await self._broadcast_update(record)
         return {"type": "asset.publish.ok", "request_id": request_id, "asset": record}
 
-    def _publish_checked(self, producer: Any, principal: bool, fields: dict) -> tuple[dict, bool]:
+    def _publish_checked(self, producer: Any, principal: bool, fields: dict, auth: dict) -> tuple[dict, bool]:
         """Runs on the store worker thread. A report producer's asset id is
         immutable: an identical stored form is a no-op, anything else is refused,
         and no other caller may claim its producer id or write one of its ids
@@ -176,10 +178,26 @@ class Assets:
         publish onto the existing row and keeps its producer)."""
         if self._store is None:
             raise AssetStoreError("asset store not started")
-        same_spec = [
-            record for record in self._store.find_assets_by_id(fields["asset_id"])
-            if fields["spec_id"] and record.get("spec_id") == fields["spec_id"]
-        ] if fields["asset_id"] else []
+        records = self._store.find_assets_by_id(fields["asset_id"]) if fields["asset_id"] else []
+        same_spec = [r for r in records if fields["spec_id"] and r.get("spec_id") == fields["spec_id"]]
+        # Resolve the row the store will update: spec+id first, then the
+        # physical owner anchor. Keep admission and write on the same worker.
+        target = same_spec[0] if same_spec else next((r for r in records
+            if r["host"] == fields["host"] and r["session_name"] == fields["session_name"]), None)
+        if target is not None and target["content_type"] == "dashboard-catalog":
+            # Apply the existing by-ID row authority to the resolved catalog.
+            # Wire identity and requested spec tags are never authority.
+            owner = self._stream_session_key(_nullable_text(auth.get("stream_id")) or "")
+            allowed = auth.get("operator_authenticated") is True or (
+                auth.get("token_verified") is True and owner is not None and (
+                    self._record_in_session(target, owner)
+                    or target.get("spec_id") in self._session_spec_ids(owner)))
+            if not allowed:
+                raise ValueError("asset_unauthorized")
+            if fields["content_type"] != "dashboard-catalog":
+                raise InvalidAsset("catalog content type cannot be replaced")
+            if fields["spec_id"] and target.get("spec_id") != fields["spec_id"]:
+                raise InvalidAsset("catalog publish conflicts with an existing asset under a different spec")
         if principal and same_spec:
             existing = same_spec[0]
             try:
@@ -449,13 +467,21 @@ class Assets:
         )
 
     def _resolve(self, msg: dict) -> tuple[str, str]:
-        sid = _nullable_text(msg.get("stream_id")) or _nullable_text(msg.get("from_stream_id"))
+        # Reject aliases before any lookup/write can observe a different key
+        # from the store. Check raw selectors before the wire helpers strip them.
+        for field in ("stream_id", "from_stream_id", "host", "session_name", "spec_id", "asset_id", "asset_id_arg"):
+            value = msg.get(field)
+            if value is not None and value != normalize_asset_identity(value):
+                raise InvalidAsset(f"{field} must be canonical")
+        sid = msg.get("stream_id") or msg.get("from_stream_id")
         if sid:
             host, _, name = sid.partition(":")
         else:
-            host, name = str(msg.get("host") or "").strip(), str(msg.get("session_name") or "").strip()
+            host, name = msg.get("host") or "", msg.get("session_name") or ""
         if not host or not name:
             raise InvalidAsset("stream_id (or host + session_name) is required")
+        if host != normalize_asset_identity(host) or name != normalize_asset_identity(name):
+            raise InvalidAsset("host and session_name must be canonical")
         return host, name
 
     def _session_key_from_msg(self, msg: dict) -> dict | None:

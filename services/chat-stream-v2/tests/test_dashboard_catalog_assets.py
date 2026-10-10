@@ -59,6 +59,8 @@ async def _publish(assets: Assets, stream_id: str, asset_id: str, *, content_typ
            "body": body if body is not None else _report_body(asset_id), "spec_id": spec_id}
     if producer is not None:
         msg["producer"] = producer
+    if content_type == "dashboard-catalog":
+        msg["_auth_context"] = OPERATOR
     reply = await assets.asset(msg)
     assert reply["type"] == "asset.publish.ok", reply
     return reply["asset"]

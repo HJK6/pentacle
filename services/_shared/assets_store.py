@@ -79,6 +79,11 @@ class InvalidAsset(AssetStoreError):
     """Raised for invalid asset metadata."""
 
 
+def normalize_asset_identity(value: object) -> str:
+    """The stored text form of an asset identity component."""
+    return str(value or "").strip()
+
+
 def _default_path() -> str:
     return os.environ.get(DB_PATH_ENV) or str(DEFAULT_DB_PATH)
 
@@ -269,12 +274,12 @@ class AssetStore:
         asset_id: str | None = None,
         now: str | None = None,
     ) -> dict:
-        host = str(host or "").strip()
-        session_name = str(session_name or "").strip()
-        stream_id = str(stream_id or "").strip()
+        host = normalize_asset_identity(host)
+        session_name = normalize_asset_identity(session_name)
+        stream_id = normalize_asset_identity(stream_id)
         title = str(title or "").strip()
         producer = str(producer or stream_id or "asset.publish").strip()
-        spec_id = str(spec_id or "").strip() or None
+        spec_id = normalize_asset_identity(spec_id) or None
         if not host:
             raise InvalidAsset("host must be non-empty")
         if not session_name:
@@ -286,7 +291,7 @@ class AssetStore:
         content_type = normalize_content_type(content_type)
         body = validate_asset_payload(content_type, body)
         normalized_tags = normalize_tags(tags)
-        aid = str(asset_id or uuid.uuid4()).strip()
+        aid = normalize_asset_identity(asset_id or uuid.uuid4())
         if not aid:
             raise InvalidAsset("asset_id must be non-empty")
         ts = now or _iso_now()
