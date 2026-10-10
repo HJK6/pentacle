@@ -47,7 +47,7 @@ def _run(tmp_path, scenario):
             def __init__(self):
                 self.specs = {}
             def attach(self, sid, spec_id):
-                self.specs.setdefault(sid, []).append(spec_id)
+                self.specs.setdefault(sid, []).append("spec_" + spec_id)
             def get(self, sid):
                 return {"host": "fixturehost", "status": "open", "role": "worker",
                         "spec_ids": self.specs.get(sid, [])} if sid.startswith("fixturehost:") else None
@@ -174,8 +174,8 @@ def test_spec_scoped_list_then_get_with_listed_stream_id(tmp_path, content_type)
     assert json.loads(got["asset"]["body"]) == json.loads(body)
 
 
-def test_catalog_republish_from_another_seat_keeps_owner_anchor(tmp_path):
-    """Release N+1 / rollback republish from a different operator seat updates
+def test_catalog_owner_republish_keeps_owner_anchor(tmp_path):
+    """Release N+1 / rollback republish from the owner seat updates
     the same row; the listed stream_id still targets it."""
     catalog = CATALOG_CASES["valid"][0]["catalog"]
     next_catalog = dict(catalog, catalog_version="0.1.1+bbbbbbb")
@@ -183,8 +183,7 @@ def test_catalog_republish_from_another_seat_keeps_owner_anchor(tmp_path):
     async def scenario(assets):
         await _publish(assets, "fixturehost:seat1", "dashboard-catalog", content_type="dashboard-catalog",
                        body=json.dumps(catalog), spec_id=CATALOG_SPEC_ID)
-        assets._sessions.attach("fixturehost:seat2", CATALOG_SPEC_ID)
-        await _publish(assets, "fixturehost:seat2", "dashboard-catalog", content_type="dashboard-catalog",
+        await _publish(assets, "fixturehost:seat1", "dashboard-catalog", content_type="dashboard-catalog",
                        body=json.dumps(next_catalog), spec_id=CATALOG_SPEC_ID)
         listed = await assets.asset({"type": "asset.list", "request_id": "l",
                                      "spec_id": CATALOG_SPEC_ID})
@@ -330,7 +329,7 @@ class FleetSeats:
         self.specs = {}
 
     def attach(self, sid, spec_id):
-        self.specs.setdefault(sid, []).append(spec_id)
+        self.specs.setdefault(sid, []).append("spec_" + spec_id)
 
     def get(self, sid):
         if sid not in {"node-alpha:seat", "node-beta:seat", "foreign:seat"}:
@@ -478,7 +477,7 @@ def test_missing_invalid_policy_hello_has_explicit_null(monkeypatch,suffix,origi
 
 
 @pytest.mark.parametrize("catalog_spec_id", ["pentacle__dashboard_catalog", "pentacle__dashboard_catalog_v2"])
-def test_verified_cross_host_direct_catalog_publish_delete(tmp_path,monkeypatch,catalog_spec_id):
+def test_cross_host_full_publish_refused_and_owner_publish_delete(tmp_path,monkeypatch,catalog_spec_id):
     async def scenario(assets,catalog):
         auth=dict(INTERNAL,stream_id="node-beta:seat")
         before = await assets._call("find_assets_by_id", asset_id="dashboard-catalog")
@@ -488,6 +487,12 @@ def test_verified_cross_host_direct_catalog_publish_delete(tmp_path,monkeypatch,
         assert denied["error_code"] == "asset_unauthorized", denied
         assert await assets._call("find_assets_by_id", asset_id="dashboard-catalog") == before
         assets._sessions.attach("node-beta:seat", catalog_spec_id)
+        attached = await assets.asset({"type":"asset.publish", "stream_id":"node-alpha:seat",
+            "content_type":"dashboard-catalog", "spec_id":catalog_spec_id,
+            "asset_id":"dashboard-catalog", "title":"Denied", "body":json.dumps(catalog), "_auth_context":auth})
+        assert attached["error_code"] == "asset_unauthorized", attached
+        assert await assets._call("find_assets_by_id", asset_id="dashboard-catalog") == before
+        auth = INTERNAL
         reply=await assets.asset({"type":"asset.publish","stream_id":"node-alpha:seat","content_type":"dashboard-catalog",
             "spec_id":catalog_spec_id,"asset_id":"dashboard-catalog", "title":"Catalog",
             "body":json.dumps(catalog),"_auth_context":auth})

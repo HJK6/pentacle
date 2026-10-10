@@ -316,9 +316,9 @@ host may add, replace or remove records, including another fleet host's record.
 Anonymous, operator-only, report-producer, external and scoped clients are
 refused. A wire host claim supplies no identity. Direct catalog asset writes and
 deletes have the same restriction, including content-type replacement attempts.
-Replacing a complete existing catalog also requires row ownership or the catalog
-spec attached to the publishing seat. Cross-host publishers attach the spec with
-`agent-orch spec attach <stream_id> <catalog_spec_id>` before publication.
+Replacing a complete existing catalog also requires the publishing seat to own
+its row. Cross-host seats use add/remove for entry changes; attaching the catalog
+spec does not authorize full publication.
 Existing trusted executable-adapter publication authority is unchanged; record
 commands cannot upload or authorize adapter code.
 
