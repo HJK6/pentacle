@@ -171,8 +171,9 @@ delivery key carries the failure `seq`, so each failure gets exactly one notice.
 newer failure supersedes an older notice that never landed, and a recorded review
 supersedes a pending notice. The next scheduled or `--on-demand` pass flushes the
 pending notice once (receipt-reconciled, never resent), then resumes the retained
-stage. There is no timer or retry loop: while the daemon stays down past the
-reconnect window, the next attempt is the next pass.
+stage. Apart from the single connection-refused notice retry described under
+failed runs, there is no timer or retry loop: while the daemon stays down past
+the reconnect window, the next attempt is the next pass.
 
 RunAtLoad catches missed executions after 05:00. Before 05:00 a timer invocation
 does nothing; authorized activation uses `--on-demand`. Install only when
@@ -572,6 +573,9 @@ and `state`: `measured` requires every stream's valid row with completeness 1;
 has null dollars, never inferred zero. Duplicate rows or invalid/negative/nonfinite
 dollars are unavailable; invalid completeness remains incomplete. Explicit zero
 cost is retained as measured or partial. CLI/read/envelope failure is unknown.
+The scheduled job resolves `agent-orch` from its own `PATH`; launchd's default
+`PATH` usually lacks it, so set the job's `PATH` to include the CLI or every
+run's cost stays `unknown`.
 
 New run summaries retain producer cost and separate
 `fd_cost: {unknown_reason: shared_fd_seat}`. The shared ruling seat is excluded.
