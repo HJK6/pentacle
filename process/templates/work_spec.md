@@ -94,7 +94,7 @@ Drafted {{date}}. Scope: <single-user | multi-user>, <big-bang | phased>.
 ## Estimate
 
 - remaining_work_h: <p25>–<p75> (median <m>) as_of <YYYY-MM-DD>
-- See [the shared work-lane estimate convention](../../services/chat-stream-v2/docs/work-lanes.md#remaining-work-estimates-a1).
+- See [the shared work-lane estimate convention](https://github.com/HJK6/pentacle/blob/main/services/chat-stream-v2/docs/work-lanes.md#remaining-work-estimates-a1).
 
 ## Risks
 
