@@ -584,3 +584,114 @@ async def test_restricted_hello_stays_available_without_alert_capability(
     assert "error_reporting_credential_id" not in snapshot
     assert snapshot["notifications"] == []
 
+
+
+@pytest.mark.parametrize("protocol", [None, 2])
+@pytest.mark.parametrize("stage", ["upload", "transcribe"])
+def test_v2_only_suppresses_offline_absent_next_stage(protocol, stage):
+    data = {"upload_committed": iso(100)}
+    if protocol is not None:
+        data["upload_protocol"] = protocol
+    if stage == "transcribe":
+        data.update(transcribe_started=iso(101), transcribe_result=iso(102))
+    operation = {"operation_kind": "voice_chat", "data": data}
+    actual = evaluate(operation, 1000000)
+    expected_code = None if protocol == 2 else (
+        "upload_milestone_missing" if stage == "upload" else "send_unconfirmed")
+    assert actual[1] == expected_code
+
+
+@pytest.mark.parametrize("evidence,code", [
+    ({"transcribe_started": iso(101)}, "transcribe_milestone_missing"),
+    ({"transcribe_failed": iso(101), "transcribe_failed_code": "transcribe_failed"}, "transcribe_failed"),
+    ({"send_committed": iso(101)}, "send_unconfirmed"),
+    ({"transcribe_result": iso(101), "server_send_request_ids": ["attempt-1"]}, "send_unconfirmed"),
+    ({"transcribe_result": iso(101), "server_send_request_id": "attempt-legacy"}, "send_unconfirmed"),
+    ({"client_event": {"outcome": "failed", "code": "upload_transport_failed", "stage": "upload",
+                       "retry_state": "exhausted", "at": iso(102)}}, "upload_transport_failed"),
+    ({"client_event": {"outcome": "cancelled", "code": "operation_cancelled", "stage": "upload"}}, "operation_cancelled"),
+    ({"client_event": {"outcome": "recovered", "code": "recovered", "stage": "send"}}, "recovered"),
+])
+def test_v2_offline_suppression_preserves_real_failure_and_explicit_precedence(evidence, code):
+    op = {"operation_kind": "voice_chat", "data": {
+        "upload_protocol": 2, "upload_committed": iso(100), **evidence}}
+    assert evaluate(op, 1000000)[1] == code
+
+
+@pytest.mark.asyncio
+async def test_v2_operation_binds_stable_upload_identity_and_durable_server_flag(subject):
+    s = subject
+    upload_id = str(uuid.uuid4())
+    first = {"protocol": 2, "request_id": "rpc-first", "upload_id": upload_id,
+             "voice_operation": s.intent, "_auth_context": s.auth}
+    await s.service.register_upload(first)
+    await s.service.register_upload({**first, "request_id": "rpc-resume"})
+    row = await s.store.voice_get(s.principal, s.intent["operation_id"])
+    assert row["data"]["upload_request_id"] == upload_id
+    assert row["data"]["upload_protocol"] == 2
+    revision = row["revision"]
+    await s.service.register_upload({**first, "request_id": "rpc-again"})
+    assert (await s.store.voice_get(s.principal, s.intent["operation_id"]))["revision"] == revision
+    with pytest.raises(ValueError, match="event_conflict"):
+        await s.service.register_upload({**first, "upload_id": str(uuid.uuid4())})
+    with pytest.raises(ValueError, match="event_conflict"):
+        await s.service.register_upload({**first, "protocol": 1, "request_id": upload_id})
+    with pytest.raises(ValueError, match="origin_mismatch"):
+        await s.service.register_upload({**first, "voice_operation": {**s.intent, "client_build": "changed"}})
+
+
+@pytest.mark.asyncio
+async def test_v2_upload_identity_is_principal_scoped(subject):
+    s = subject
+    upload_id = str(uuid.uuid4())
+    cid, _ = s.server.operator_credential_registry.issue("pentacle-mobile", label="second-synthetic")
+    second_auth = {**s.auth, "credential_id": cid}
+    for auth in (s.auth, second_auth):
+        await s.service.register_upload({"protocol": 2, "request_id": "rpc-" + auth["credential_id"],
+            "upload_id": upload_id, "voice_operation": s.intent, "_auth_context": auth})
+    assert len(await s.store.voice_list()) == 2
+
+
+@pytest.mark.asyncio
+async def test_v1_registration_cannot_set_upload_protocol_from_wire(subject):
+    s = subject
+    await s.service.register_upload({"request_id": "legacy", "voice_operation": s.intent,
+        "upload_protocol": 2, "_auth_context": s.auth})
+    row = await s.store.voice_get(s.principal, s.intent["operation_id"])
+    assert "upload_protocol" not in row["data"]
+    assert row["data"]["upload_request_id"] == "legacy"
+    response = await report(s, upload_protocol=2)
+    assert response["error_code"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_offline_capture_before_init_has_no_server_operation(subject):
+    assert await subject.store.voice_list() == []
+    await subject.service.reconcile(now=1000000)
+    assert await subject.notify._db.call("error_rows") == []
+
+
+@pytest.mark.asyncio
+async def test_v2_transcribe_preserves_immutable_client_build(subject):
+    s = subject
+    await s.service.register_upload({"protocol": 2, "request_id": "first-rpc",
+        "upload_id": str(uuid.uuid4()), "voice_operation": s.intent, "_auth_context": s.auth})
+    await s.store.voice_milestone(s.principal, s.intent["operation_id"],
+                                 "upload_committed", blob_sha="a" * 64)
+    called = []
+    async def asr(msg):
+        called.append(msg)
+        return {"text": "synthetic"}
+    with pytest.raises(ValueError, match="origin_mismatch"):
+        await s.service.transcribe({"voice_operation": {**s.intent, "client_build": "other"},
+            "request_id": "transcribe-" + s.intent["operation_id"], "blob_sha": "a" * 64,
+            "mime": "audio/mp4", "_auth_context": s.auth}, asr)
+    assert called == []
+
+
+def test_v2_success_after_retry_preserves_result_precedence_over_old_failure():
+    op = {"operation_kind": "voice_chat", "data": {
+        "upload_protocol": 2, "upload_committed": iso(100), "transcribe_started": iso(101),
+        "transcribe_failed": iso(102), "transcribe_failed_code": "transcribe_failed",
+        "transcribe_result": iso(103)}}
+    assert evaluate(op, 1000000) == ("unknown", None, "send")

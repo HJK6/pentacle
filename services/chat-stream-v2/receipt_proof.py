@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -20,6 +21,26 @@ IDENTITY_FIELDS = ("to_stream_id", "request_id", "receipt_id", "wire_digest", "d
 
 
 def verified_original_generation(value, target, request_id):
+    if type(value) is dict and "protocol" in value:
+        if set(value) != {"protocol", "logical_id", "target", "generation", "sequence"}:
+            return None
+        logical, committed, generation, sequence = (value[k] for k in
+            ("logical_id", "target", "generation", "sequence"))
+        if (value["protocol"] != "voice-v1" or
+                type(logical) is not str or not re.fullmatch(
+                    r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", logical) or
+                type(committed) is not str or not 1 <= len(committed) <= 160 or committed != target or
+                type(generation) is not str or not 1 <= len(generation) <= 128 or
+                type(sequence) is not int or not 1 <= sequence <= 1000):
+            return None
+        try:
+            packed = json.dumps([logical, committed, generation, sequence],
+                                ensure_ascii=False, separators=(",", ":"))
+            expected = "voice-send-" + hashlib.sha256(packed.encode("utf-8")).hexdigest()[:40]
+            return generation if hmac.compare_digest(expected, request_id) else None
+        except (ValueError, TypeError, UnicodeError):
+            return None
+    # Preserve the original relay-only four-field derivation unchanged.
     if type(value) is not dict or set(value) != {"logical_id", "target", "generation", "sequence"}:
         return None
     logical, committed, generation, sequence = (value[k] for k in

@@ -27,6 +27,8 @@ forget); completion is a `final: true` chunk, never a separate commit verb.
 
 Size gates (v1 constants, preserved): generic total <= 64 MiB, per-chunk <= 1 MiB.
 Managed chat attachments add a 25 MiB per-purpose cap and server provenance.
+Opt-in protocol=2 voice uploads use voice_uploads.py for durable 64 KiB ACKs;
+their principal-bound lifetime is independent of v1 connection ownership.
 """
 
 from __future__ import annotations
@@ -42,6 +44,8 @@ import uuid
 from functools import partial
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
+
+from voice_uploads import VoiceUploadStore
 
 from chat_attachment_types import (
     AttachmentError, ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_PURPOSE, sanitized_filename,
@@ -104,6 +108,7 @@ class BlobStore:
         #: reaper, no deadline timer: the socket close IS the bound.
         self._by_conn: dict[Any, set[str]] = {}
         self.error_alerts = None
+        self.voice_uploads = VoiceUploadStore(self)
         #: Set once the store dirs exist; a blob verb in the boot window parks on
         #: it rather than writing under a missing root.
         self._ready = asyncio.Event()
@@ -114,6 +119,7 @@ class BlobStore:
         """Create the store dirs and wipe stale temp uploads (v1 cleans `.tmp`
         on boot). Off-loop; called after the port binds."""
         await self._run(self._prepare_dirs)
+        await self.voice_uploads.start()
         self._ready.set()
 
     async def _await_ready(self) -> None:
@@ -146,6 +152,10 @@ class BlobStore:
 
     async def _on_init(self, msg: dict[str, Any], flavor: "_Flavor") -> dict[str, Any]:
         await self._await_ready()
+        if msg.get("protocol") == 2:
+            if flavor is not Promptless:
+                return flavor.error(str(msg.get("request_id") or ""), "invalid_request")
+            return await self.voice_uploads.handle(msg, init=True)
         rid = str(msg.get("request_id") or "")
         owner = msg.get("_client_websocket")
         purpose = msg.get("purpose")
@@ -220,6 +230,11 @@ class BlobStore:
         return {"type": flavor.init_ok, "request_id": rid}
 
     async def _on_chunk(self, msg: dict[str, Any], flavor: "_Flavor") -> dict[str, Any]:
+        if msg.get("protocol") == 2:
+            await self._await_ready()
+            if flavor is not Promptless:
+                return flavor.error(str(msg.get("request_id") or ""), "invalid_request")
+            return await self.voice_uploads.handle(msg, init=False)
         rid = str(msg.get("request_id") or "")
         lock = self._locks.get(rid)
         if lock is None:  # no init seen (or already finished/aborted)
@@ -382,6 +397,45 @@ class BlobStore:
         finally:
             os.close(directory)
 
+    def _materialize_verified(self, source: Path, sha: str, size: int) -> str:
+        """Canonical voice materialization under Store's shared digest lock.
+
+        The source may be absent only after a crash following the prior move.
+        Canonical bytes are rehashed in either case; a filename is never proof.
+        """
+        from voice_uploads import UploadError
+        dest = self._path_for(sha)
+        if source.exists():
+            source_sha, source_size, _ = self._file_identity(source)
+            if (source_sha, source_size) != (sha, size):
+                raise UploadError("digest_mismatch")
+        if dest.exists():
+            existing_sha, existing_size, _ = self._file_identity(dest)
+            if (existing_sha, existing_size) != (sha, size):
+                raise UploadError("digest_mismatch")
+            # A legacy producer may have materialized this digest without a
+            # directory fsync. Establish v2 durability even on dedup/recovery.
+            with dest.open("rb") as complete:
+                os.fsync(complete.fileno())
+            self.voice_uploads._sync_dir(dest.parent)
+            self.voice_uploads._sync_dir(self._root)
+            if source.exists():
+                source.unlink()
+                self.voice_uploads._sync_dir(source.parent)
+            return sha
+        if not source.exists():
+            raise UploadError("upload_conflict")
+        if not dest.parent.exists():
+            dest.parent.mkdir(mode=0o700)
+            self.voice_uploads._sync_dir(self._root)
+        os.replace(source, dest)
+        os.chmod(dest, 0o600)
+        with dest.open("rb") as complete:
+            os.fsync(complete.fileno())
+        self.voice_uploads._sync_dir(dest.parent)
+        self.voice_uploads._sync_dir(source.parent)
+        return sha
+
     async def _abort(self, rid: str) -> None:
         """Discard an upload's state. The caller must already hold the per-upload
         lock (chunk-error paths, `_on_init` reset, `_abort_locked`)."""
@@ -416,7 +470,9 @@ class BlobStore:
 
         The connection that sent `upload_blob_init` owns its uploads; when it
         closes there is no terminal reply to send (the socket is gone), so each
-        partial upload — fd, temp file, and per-upload state — is discarded.
+        partial v1 upload — fd, temp file, and per-upload state — is discarded.
+        Protocol-2 voice uploads have no connection-owned files in these maps;
+        their joined writes/checkpoints survive disconnect for authenticated resume.
         Any later chunk for the same request_id then meets the existing
         `upload_blob_unknown_request_id` reply, which the client acts on. Each
         teardown takes the per-upload lock so it serializes with any chunk task
@@ -580,13 +636,26 @@ class BlobStore:
         landing bytes in whatever reuses the fd. Shield the future and JOIN it
         before re-raising, so the lock is held until the write actually finishes.
         """
-        fut = asyncio.ensure_future(BlobStore._run(fn, *a))
-        try:
-            return await asyncio.shield(fut)
-        except asyncio.CancelledError:
+        return await BlobStore._join_task(asyncio.ensure_future(BlobStore._run(fn, *a)))
+
+    @staticmethod
+    async def _join_task(fut: asyncio.Future) -> Any:
+        """Keep ownership through repeated cancellation, including shutdown."""
+        cancelled = False
+        while not fut.done():
+            try:
+                await asyncio.shield(fut)
+            except asyncio.CancelledError:
+                cancelled = True
+            except BaseException:
+                if not cancelled:
+                    raise
+                break
+        if cancelled:
             with contextlib.suppress(BaseException):
-                await fut  # let the in-flight disk op finish before we unwind
-            raise
+                fut.result()  # retrieve a worker failure without hiding cancellation
+            raise asyncio.CancelledError
+        return fut.result()
 
 
 class _Flavor:
