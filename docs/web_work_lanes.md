@@ -2,6 +2,12 @@
 
 The web/desktop renderer shows the daemon's first-class work lanes. The daemon owns lane identity, presented state (`active`, `paused`, `blocked`), count, order and tap target; the renderer only presents them. The wire contract and the shared fixture are in [work-lanes.md](../services/chat-stream-v2/docs/work-lanes.md) and `pentacle-chat-core/tests/fixtures/work-lanes-inventory.json`.
 
+## Lane organization
+
+Keep one lane per product area. A product area is a durable user-facing capability that groups related work, such as lanes UI or dashboards; a new seat, spec, ask, release or presentation variant does not by itself define a new area. Create a lane only for a new product area, after checking the existing lanes.
+
+For work in an existing area, add the spec as a member of that area's lane, or track the seat under the area lane when there is no spec to add. Apply this rule at lane creation and adoption.
+
 ## Status: the sidebar view is off
 
 The sidebar lanes view (the header lane count and the **Lanes (N)** section) is switched off by default, pending a rebuild. The renderer still ingests lane frames and the daemon, wire contract and lane-update cards are unchanged; nothing in the sidebar shows lanes, so the tap routes below are unreachable. `workLanesSidebarEnabled()` in `renderer/app.js` turns the view on only when `window.__PENTACLE_WORK_LANES_SIDEBAR__ === true`, which the tests set. The rest of this page describes the view when it is on.
