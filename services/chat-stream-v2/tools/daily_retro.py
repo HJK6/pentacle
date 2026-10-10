@@ -1312,6 +1312,12 @@ def weekly_summary(settings, end_day):
         "current_work": [], "current_work_counts": {"defer": 0, "propose": 0, "authorized": 0, "investigate": 0},
         "verified_outcomes": 0, "shipped_observed": 0, "unverified_ownership": 0, "oldest_unresolved": None,
         "dot_measurements": {"sample_receipts": [], "blocked_seconds": [], "correction_rounds": [], "avoidable_stops": []}}
+    result["runs_total"], result["runs_failed"] = 0, 0
+    result["coverage"]["excluded_runs"] = []
+    for root in sorted((settings.state_root / "runs").glob("*")):
+        if root.is_dir() and (root.name.startswith("history-") or (root.name in days and not (root / "collection.json").is_file())):
+            result["coverage"]["excluded_runs"].append({"run_id": root.name,
+                "reason": "history" if root.name.startswith("history-") else "orphan without collection"})
     result["producer_costs"] = []
     rollup = read_usage_rollup(settings)
     outcome_receipts = set()
@@ -1341,11 +1347,16 @@ def weekly_summary(settings, end_day):
     linked = {}
     for day in days:
         root = settings.state_root / "runs" / day
-        collection = read(root / "collection.json")
+        collection = read(root / "collection.json") if (root / "collection.json").is_file() else None
         if not collection:
             result["missing_runs"].append(day)
             continue
         result["runs_collected"] += 1
+        result["runs_total"] += 1
+        delivery = read(root / "delivery.json", {})
+        failed = any(path.is_file() for path in root.glob("failure*.json")) or any(
+            isinstance(attempt, dict) and attempt.get("confirmed") is False for attempt in delivery.get("attempts", []))
+        result["runs_failed"] += int(failed)
         result["producer_costs"].append({"run_id": day, "producer_cost": producer_cost(settings, day, rollup),
                                          "fd_cost": {"unknown_reason": "shared_fd_seat"}})
         result["sources_selected"] += len(collection["sources"])
@@ -1895,15 +1906,96 @@ class Pipeline:
         if failure:
             self.normalize_retained_failure_state(manifest)
         record = read(path, {"attempts": []})
+
+        def project_notice_attempts():
+            if failure and isinstance(record.get("notice_attempts"), list):
+                projection_path = root / "delivery.json"
+                projection = read(projection_path, {"attempts": []})
+                if projection.get("notice_attempts") != record["notice_attempts"]:
+                    projection["notice_attempts"] = record["notice_attempts"]
+                    atomic(projection_path, projection)
+
+        project_notice_attempts()  # Heal interruption after the authority write.
+
         if (root / "review.json").exists():
             return record
         pending = record.get("pending") if failure else None
         if failure and not pending:
             return record
+        if failure:
+            # Legacy notice state remains authoritative. A proven intent belongs
+            # to one failure, even if the current assistant binding later moves.
+            seq = pending.get("seq")
+            matches = [a for a in record["attempts"] if a.get("seq") == seq]
+            attempt = next((a for a in matches if a.get("confirmed")), matches[-1] if matches else None)
+            if attempt and attempt.get("confirmed"):
+                self._notice_landed(manifest, record, path, seq)
+                return record
+            budgets = record.setdefault("notice_retries", {})
+            budget = budgets.get(str(seq))
+
+            def notice_event(index, *, error=None, receipt=None, confirmed=False):
+                event = {"seq": seq, "request_id": attempt.get("request_id") if attempt else None,
+                         "target": attempt.get("target") if attempt else None,
+                         "generation": attempt.get("generation") if attempt else None,
+                         "at": now_iso(), "confirmed": confirmed, "retry_index": index}
+                if error is not None:
+                    event["error"] = structured_error(error, root)
+                if receipt is not None:
+                    event["receipt"] = {k: receipt[k] for k in ("type", "delivery", "state", "request_id") if k in receipt}
+                record.setdefault("notice_attempts", []).append(event)
+                atomic(path, record)
+                project_notice_attempts()
+
+            while True:
+                index = 1 if budget else 0
+                if budget and not budget.get("consumed"):
+                    remaining = max(0.0, (aware(budget["not_before"]) - aware(now_iso())).total_seconds())
+                    if remaining:
+                        await asyncio.sleep(remaining)
+                    # Persist consumption before any retry RPC, including binding.
+                    budget["consumed"] = True
+                    atomic(path, record)
+                notice_rpc = False
+                try:
+                    if not attempt:
+                        binding = await self.binding()
+                        target, generation = binding["stream_id"], binding["session_generation"]
+                        key = "daily-retro-" + digest([self.settings.namespace, manifest["run_id"], target, generation, True, seq])[:32]
+                        host, session = target.split(":", 1)
+                        attempt = {"target": target, "generation": generation, "request_id": key, "seq": seq,
+                                   "body_format": FAILURE_BODY_FORMAT,
+                                   "payload": {"host": host, "session_name": session, "request_id": key, "optimistic_id": key,
+                                               "text": self._failure_body(manifest, pending.get("stage"), pending["failure"], root)}}
+                        record["attempts"].append(attempt)
+                        atomic(path, record)
+                    notice_rpc = True
+                    receipts = await self.rpc.send_receipt_once(self.config, attempt["target"], attempt["request_id"])
+                    if receipts.get("type") != "send.receipt.get.ok":
+                        raise RuntimeError("delivery reconciliation unavailable")
+                    landed = next((r for r in receipts.get("receipts", []) if r.get("delivery") == "landed" or r.get("state") == "landed"), None)
+                    response = landed or await self.rpc.send_once(self.config, dict(attempt["payload"]))
+                    attempt.update(receipt=response, confirmed=response.get("delivery") == "landed" or response.get("state") == "landed", at=now_iso())
+                    attempt["collection_to_delivery_seconds"] = (aware(attempt["at"]) - aware(manifest["collected_at"])).total_seconds()
+                    if not attempt["confirmed"]:
+                        raise RuntimeError("delivery pending; exact target/body/key retained")
+                    notice_event(index, receipt=response, confirmed=True)
+                    self._notice_landed(manifest, record, path, seq)
+                    return record
+                except Exception as exc:
+                    refused = isinstance(exc, ConnectionRefusedError) or (isinstance(exc, OSError) and exc.errno == errno.ECONNREFUSED)
+                    retry = refused and notice_rpc and budget is None
+                    if retry:
+                        budget = {"not_before": (aware(now_iso()) + timedelta(seconds=60)).isoformat(), "consumed": False}
+                        budgets[str(seq)] = budget
+                    notice_event(index, error=exc)
+                    if not retry:
+                        raise
+        # Packet delivery keeps its generation-specific binding contract.
         binding = await self.binding()
         target, generation = binding["stream_id"], binding["session_generation"]
         seq = pending.get("seq") if pending else None
-        attempt = next((a for a in record["attempts"] if a["target"] == target and a["generation"] == generation
+        attempt = next((a for a in reversed(record["attempts"]) if a["target"] == target and a["generation"] == generation
                         and a.get("seq") == seq), None)
         if attempt and attempt.get("confirmed"):
             if pending:
@@ -1937,6 +2029,12 @@ class Pipeline:
                        **({"seq": seq, "body_format": FAILURE_BODY_FORMAT} if pending else {}),
                        "payload": {"host": host, "session_name": session, "text": body,
                                    "request_id": key, "optimistic_id": key}}
+            record["attempts"].append(attempt)
+            atomic(path, record)
+        if attempt.get("confirmed") is False:
+            # Retained negative evidence survives later success; newest exact
+            # intent remains the reconciliation authority for this generation.
+            attempt = {k: v for k, v in attempt.items() if k not in {"confirmed", "receipt", "at", "collection_to_delivery_seconds"}}
             record["attempts"].append(attempt)
             atomic(path, record)
         receipts = await self.rpc.send_receipt_once(self.config, target, attempt["request_id"])

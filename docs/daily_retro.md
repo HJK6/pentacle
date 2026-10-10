@@ -579,3 +579,33 @@ Weekly projections refresh late usage rows using retained producer identities
 without rewriting prior per-run or weekly receipts, including pre-activation
 receipts lacking cost fields. These are recorded costs, not a time-window or
 aggregate estimate.
+
+### Failed runs and failure-notice recovery
+
+Weekly `runs_total` counts each ISO-date run in the seven local dates with a
+retained regular `collection.json`. History directories and orphan date
+folders are excluded and named in coverage. A run contributes once to
+`runs_failed` if it has any regular `failure*.json` file, including retained
+failure-delivery or notice-error files, or any packet delivery attempt whose
+`confirmed` is literally false. Missing/null confirmation is unknown; false
+history remains failure evidence after a later landed delivery. Existing
+collection/review denominators and missing-run accounting remain separate.
+
+A failure notice gets one additional attempt after 60 seconds only for
+`ConnectionRefusedError` or `OSError` with `ECONNREFUSED` during send or receipt
+reconciliation. Binding failure keeps nullable target/generation/request IDs
+and has no special retry. No worker admission, authentication, arbitrary reset,
+pending response or programming error receives this retry. The not-before time
+and consumed budget survive interruption; later recovery uses the retained
+intent without resetting a special two-attempt loop. Proven target, generation,
+request ID and body remain fixed, and receipt reconciliation precedes sending.
+A landed receipt prevents another send.
+
+`failure-delivery.json` remains the legacy notice/pending authority. Its
+`notice_attempts` evidence is mirrored into a separate same-named list in
+`delivery.json`, preserving every packet field and packet attempt. Each notice
+event records the failure sequence, request/generation identity, timestamp,
+confirmation, retry index 0 or 1, and structured error or landed receipt. The
+failed initial event is persisted before waiting. Interrupted projection writes
+are repaired from the authority, including already-landed notices. No retained
+notice is migrated to a new queue.

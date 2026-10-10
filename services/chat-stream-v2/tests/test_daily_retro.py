@@ -2985,3 +2985,770 @@ def test_producer_cost_rehearsal_configured_identity(config, monkeypatch):
     workers = replace(config, memory_root=config.memory_root.parent / "worker-memory", usage_spec_id="spec_fixture_usage")
     asyncio.run(retro.rehearse(replace(config, usage_spec_id=None), workers, config.state_root.parent / "evidence"))
     assert seen == ["spec_fixture_usage"]
+
+
+def notice_fixture(config, rpc):
+    manifest = retro.collect(config, at("2026-10-13T10:00:00+00:00"))
+    root = config.state_root / "runs" / manifest["run_id"]
+    pipeline = retro.Pipeline(config, rpc)
+    failure = retro.structured_error(RuntimeError("synthetic worker failure"))
+    seq = retro.record_failure(root, manifest["run_id"], stage="sol", error=failure, notice="pending")
+    pipeline.queue_failure_notice(manifest, seq=seq, stage="sol", failure=failure)
+    return manifest, root, pipeline
+
+
+def test_run_failed_denominator(config):
+    for day in range(12, 19):
+        root = config.state_root / "runs" / f"2026-10-{day}"
+        if day != 18:
+            retro.atomic(root / "collection.json", {"run_id": root.name, "sources": []})
+        else:
+            root.mkdir(parents=True)
+    roots = config.state_root / "runs"
+    retro.atomic(roots / "2026-10-12/failure-notice-error.json", {})
+    retro.atomic(roots / "2026-10-13/delivery.json", {"attempts": [{"confirmed": False}, {"confirmed": True}]})
+    retro.atomic(roots / "2026-10-14/failure-delivery.json", {})
+    retro.atomic(roots / "2026-10-14/delivery.json", {"attempts": [{"confirmed": False}]})
+    retro.atomic(roots / "2026-10-15/delivery.json", {"attempts": [{}, {"confirmed": None}, {"confirmed": 0}]})
+    (roots / "2026-10-16/failure-directory.json").mkdir()
+    retro.atomic(roots / "2026-10-18/failure.json", {})
+    retro.atomic(roots / "history-fixture/collection.json", {"run_id": "history-fixture", "sources": []})
+    retro.atomic(roots / "history-fixture/failure.json", {})
+    summary = retro.weekly_summary(config, "2026-10-18")
+    assert summary["runs_total"] == summary["runs_collected"] == 6
+    assert summary["runs_failed"] == 3 and summary["runs_reviewed"] == 0
+    assert summary["missing_runs"] == ["2026-10-18"]
+    assert {r["run_id"] for r in summary["coverage"]["excluded_runs"]} == {"2026-10-18", "history-fixture"}
+
+
+@pytest.mark.parametrize("where", ["reconcile", "send"])
+@pytest.mark.parametrize("oserror", [False, True])
+def test_run_failed_retry_clock(config, monkeypatch, where, oserror):
+    clock = [0.0]; calls = []; sleeps = []; payloads = []
+    monkeypatch.setattr(retro, "now_iso", lambda: f"2026-10-13T10:{int(clock[0] // 60):02}:{int(clock[0] % 60):02}+00:00")
+    class Refused(Transport):
+        def refuse(self, stage):
+            if stage != where:
+                return
+            calls.append(clock[0])
+            if len(calls) == 1:
+                raise (OSError(retro.errno.ECONNREFUSED, "fixture") if oserror else ConnectionRefusedError("fixture"))
+        async def assistant_once(self, *args):
+            self.refuse("binding")
+            return await super().assistant_once(*args)
+        async def send_receipt_once(self, *args):
+            self.refuse("reconcile")
+            return await super().send_receipt_once(*args)
+        async def send_once(self, *args):
+            payloads.append(dict(args[1]))
+            self.refuse("send")
+            return await super().send_once(*args)
+    rpc = Refused(); manifest, root, pipeline = notice_fixture(config, rpc)
+    packet = {"attempts": [{"request_id": "packet-key", "confirmed": True}], "packet_field": "preserved"}
+    retro.atomic(root / "delivery.json", packet)
+    async def sleep(delay):
+        sleeps.append(delay)
+        authority = retro.read(root / "failure-delivery.json")
+        projected = retro.read(root / "delivery.json")
+        assert authority["notice_attempts"] == projected["notice_attempts"]
+        assert projected["attempts"] == packet["attempts"] and projected["packet_field"] == "preserved"
+        initial = projected["notice_attempts"][-1]
+        assert initial["confirmed"] is False and initial["retry_index"] == 0
+        assert initial["error"]["reason"] == "transport_loss"
+        if where == "binding":
+            assert initial["target"] is None and initial["generation"] is None and initial["request_id"] is None
+        clock[0] = 59
+        assert calls == [0]
+        rpc.binding = {"stream_id": "fixture:replacement", "session_generation": "g2"}
+        clock[0] += delay - 59
+    monkeypatch.setattr(retro.asyncio, "sleep", sleep)
+    result = asyncio.run(pipeline.deliver(manifest, failure=True))
+    assert sleeps == [60] and calls == [0, 60]
+    assert result["pending"] is None and len(rpc.sent) == 1
+    events = retro.read(root / "delivery.json")["notice_attempts"]
+    assert [e["retry_index"] for e in events] == [0, 1] and [e["confirmed"] for e in events] == [False, True]
+    assert "receipt" in events[1]
+    if where != "binding":
+        assert events[0]["target"] == events[1]["target"] == "fixture:reviewer"
+        assert events[0]["request_id"] == events[1]["request_id"]
+        assert events[0]["generation"] == events[1]["generation"] == "g1"
+    assert len(payloads) == (2 if where == "send" else 1)
+    assert all(payload == payloads[0] for payload in payloads)
+    assert events == retro.read(root / "failure-delivery.json")["notice_attempts"]
+
+
+def test_run_failed_notice_receipt(config, monkeypatch):
+    monkeypatch.setattr(retro, "now_iso", lambda: "2026-10-13T10:00:00+00:00")
+    sleeps = []
+    sends = []
+    async def sleep(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr(retro.asyncio, "sleep", sleep)
+    class LandThenRefuse(Transport):
+        async def send_once(self, conf, payload):
+            sends.append(dict(payload))
+            await super().send_once(conf, payload)
+            raise ConnectionRefusedError("reply lost")
+    rpc = LandThenRefuse(); manifest, root, pipeline = notice_fixture(config, rpc)
+    asyncio.run(pipeline.deliver(manifest, failure=True))
+    assert sleeps == [60] and len(rpc.sent) == len(sends) == 1
+    before = (root / "failure-delivery.json").read_bytes()
+    asyncio.run(retro.Pipeline(config, rpc).deliver(manifest, failure=True))
+    assert (root / "failure-delivery.json").read_bytes() == before and sleeps == [60]
+    assert [row["confirmed"] for row in retro.read(root / "delivery.json")["notice_attempts"]] == [False, True]
+
+
+def test_run_failed_retry_exhaustion(config, monkeypatch):
+    monkeypatch.setattr(retro, "now_iso", lambda: "2026-10-13T10:00:00+00:00")
+    calls = []; sleeps = []
+    async def sleep(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr(retro.asyncio, "sleep", sleep)
+    class AlwaysDown(Transport):
+        async def send_receipt_once(self, *args):
+            calls.append(args[1:])
+            raise ConnectionRefusedError("fixture")
+    rpc = AlwaysDown(); manifest, root, pipeline = notice_fixture(config, rpc)
+    for invocation in range(2):
+        with pytest.raises(ConnectionRefusedError):
+            asyncio.run(retro.Pipeline(config, rpc).deliver(manifest, failure=True))
+        assert len(calls) == invocation + 2 and sleeps == [60]
+    assert not rpc.sent and len({call for call in calls}) == 1
+    events = retro.read(root / "delivery.json")["notice_attempts"]
+    assert [r["retry_index"] for r in events] == [0, 1, 1]
+
+
+@pytest.mark.parametrize("error", [RuntimeError("programming"), PermissionError("auth"), ConnectionResetError("reset"), OSError(5, "io")])
+def test_run_failed_no_broader_retry(config, monkeypatch, error):
+    async def forbidden(delay):
+        raise AssertionError("unrelated error must not retry")
+    monkeypatch.setattr(retro.asyncio, "sleep", forbidden)
+    class Failed(Transport):
+        async def send_receipt_once(self, *args):
+            raise error
+    manifest, root, pipeline = notice_fixture(config, Failed())
+    with pytest.raises(type(error), match=re.escape(str(error))):
+        asyncio.run(pipeline.deliver(manifest, failure=True))
+    assert len(retro.read(root / "delivery.json")["notice_attempts"]) == 1
+
+
+def test_run_failed_packet_pending_then_landed_retains_false(config):
+    manifest = retro.collect(config, at("2026-10-13T10:00:00+00:00"))
+    class Pending(Transport):
+        pending = True
+        async def send_once(self, conf, payload):
+            return {"state": "pending"} if self.pending else await super().send_once(conf, payload)
+    rpc = Pending(); pipeline = retro.Pipeline(config, rpc)
+    final = {"packet_hash": "fixture-hash", "report": {"report_id": "fixture-report"}}
+    with pytest.raises(RuntimeError, match="delivery pending"):
+        asyncio.run(pipeline.deliver(manifest, final))
+    rpc.pending = False
+    asyncio.run(pipeline.deliver(manifest, final))
+    asyncio.run(pipeline.deliver(manifest, final))
+    root = config.state_root / "runs" / manifest["run_id"]
+    assert [a["confirmed"] for a in retro.read(root / "delivery.json")["attempts"]] == [False, True]
+    assert len(rpc.sent) == 1 and not list(root.glob("failure*.json"))
+    assert retro.weekly_summary(config, "2026-10-18")["runs_failed"] == 1
+
+
+def test_run_failed_binding_refusal_and_pending_are_not_retried(config, monkeypatch):
+    async def forbidden(delay):
+        raise AssertionError("only notice send/reconciliation refusal retries")
+    monkeypatch.setattr(retro.asyncio, "sleep", forbidden)
+    class BindingDown(Transport):
+        down = True
+        pending = True
+        async def assistant_once(self, *args):
+            if self.down:
+                raise ConnectionRefusedError("binding down")
+            return await super().assistant_once(*args)
+        async def send_once(self, config, payload):
+            return {"state": "pending"} if self.pending else await super().send_once(config, payload)
+    rpc = BindingDown(); manifest, root, pipeline = notice_fixture(config, rpc)
+    with pytest.raises(ConnectionRefusedError):
+        asyncio.run(pipeline.deliver(manifest, failure=True))
+    first = retro.read(root / "delivery.json")["notice_attempts"][0]
+    assert first["confirmed"] is False and all(first[k] is None for k in ("target", "generation", "request_id"))
+    rpc.down = False
+    with pytest.raises(RuntimeError, match="delivery pending"):
+        asyncio.run(pipeline.deliver(manifest, failure=True))
+    rpc.pending = False
+    asyncio.run(pipeline.deliver(manifest, failure=True))
+    assert len(rpc.sent) == 1 and not retro.read(root / "failure-delivery.json")["notice_retries"]
+
+
+def test_run_failed_interrupted_wait_and_consumed_budget(config, monkeypatch):
+    clock = [0]; calls = []; sleeps = []
+    monkeypatch.setattr(retro, "now_iso", lambda: f"2026-10-13T10:{clock[0] // 60:02}:{clock[0] % 60:02}+00:00")
+    class Interrupted(BaseException):
+        pass
+    class Refused(Transport):
+        async def send_receipt_once(self, *args):
+            calls.append(clock[0])
+            if len(calls) == 1:
+                raise ConnectionRefusedError("refused")
+            if len(calls) == 2:
+                authority = retro.read(root / "failure-delivery.json")
+                assert authority["notice_retries"]["1"]["consumed"] is True
+                raise Interrupted()
+            return await super().send_receipt_once(*args)
+    rpc = Refused(); manifest, root, pipeline = notice_fixture(config, rpc)
+    async def first_sleep(delay):
+        sleeps.append(delay); clock[0] = 20
+        raise Interrupted()
+    monkeypatch.setattr(retro.asyncio, "sleep", first_sleep)
+    with pytest.raises(Interrupted):
+        asyncio.run(pipeline.deliver(manifest, failure=True))
+    assert calls == [0] and retro.read(root / "failure-delivery.json")["notice_retries"]["1"]["consumed"] is False
+    async def resumed_sleep(delay):
+        sleeps.append(delay)
+        assert delay == 40 and calls == [0]
+        clock[0] = 59
+        assert calls == [0]
+        clock[0] = 60
+    monkeypatch.setattr(retro.asyncio, "sleep", resumed_sleep)
+    with pytest.raises(Interrupted):
+        asyncio.run(retro.Pipeline(config, rpc).deliver(manifest, failure=True))
+    assert calls == [0, 60] and sleeps == [60, 40]
+    async def no_reset(delay):
+        raise AssertionError("consumed budget must not reset after RPC interruption")
+    monkeypatch.setattr(retro.asyncio, "sleep", no_reset)
+    asyncio.run(retro.Pipeline(config, rpc).deliver(manifest, failure=True))
+    assert calls == [0, 60, 60] and len(rpc.sent) == 1
+
+
+@pytest.mark.parametrize("already_landed", [False, True])
+def test_run_failed_projection_recovers_authority(config, monkeypatch, already_landed):
+    rpc = Transport(); manifest, root, pipeline = notice_fixture(config, rpc)
+    original = retro.atomic
+    class Interrupted(BaseException):
+        pass
+    def interrupted(path, value):
+        if path == root / "delivery.json":
+            raise Interrupted()
+        return original(path, value)
+    monkeypatch.setattr(retro, "atomic", interrupted)
+    with pytest.raises(Interrupted):
+        asyncio.run(pipeline.deliver(manifest, failure=True))
+    authority = retro.read(root / "failure-delivery.json")
+    assert authority["notice_attempts"][-1]["confirmed"] and len(rpc.sent) == 1
+    if already_landed:
+        authority["pending"] = None
+        original(root / "failure-delivery.json", authority)
+    original(root / "delivery.json", {"attempts": [{"confirmed": False, "request_id": "packet"}], "packet_receipt": "retained"})
+    monkeypatch.setattr(retro, "atomic", original)
+    asyncio.run(retro.Pipeline(config, rpc).deliver(manifest, failure=True))
+    projection = retro.read(root / "delivery.json")
+    assert projection["notice_attempts"] == authority["notice_attempts"]
+    assert projection["attempts"] == [{"confirmed": False, "request_id": "packet"}] and projection["packet_receipt"] == "retained"
+    assert len(rpc.sent) == 1
+
+
+def _combined_settings(config, owned):
+    owned.mkdir()
+    memory, state, token = owned / "memory", owned / "state", owned / "token"
+    for status in ("completed", "deprecated"):
+        (memory / "work" / status).mkdir(parents=True)
+    token.write_text("fixture")
+    return replace(config, memory_root=memory, state_root=state, token_path=token,
+                   config_path=owned / "fixture-config.json", usage_spec_id="spec_fixture_usage",
+                   self_assignment_exclusions=["spec_fixture_umbrella"], producers=["sol"])
+
+
+def _combined_clock(monkeypatch, stamp="2026-10-13T10:00:00+00:00"):
+    class Clock(datetime):
+        current = datetime.fromisoformat(stamp)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current.astimezone(tz) if tz else cls.current.replace(tzinfo=None)
+
+        @classmethod
+        def set(cls, value):
+            cls.current = datetime.fromisoformat(value)
+
+    monkeypatch.setattr(retro, "datetime", Clock)
+    monkeypatch.setattr(retro, "now_iso", lambda: Clock.current.isoformat())
+    return Clock
+
+
+def _combined_bytes(root):
+    return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*.json") if p.is_file()}
+
+
+class CombinedPacketTransport(Transport):
+    async def await_report_once(self, conf, stream, msg_id, **kwargs):
+        response = await super().await_report_once(conf, stream, msg_id, **kwargs)
+        packet = response["report"]["extras"]["daily_retro"]
+        if packet["run_id"] in {"2026-10-13", "2026-10-14"}:
+            template, _ = identity_packet()
+            candidate = template["candidates"][0]
+            candidate.update(
+                id="original-topic" if packet["run_id"].endswith("13") else "renamed-topic",
+                problem="Original wording" if packet["run_id"].endswith("13") else "Renamed wording",
+                work_ids=["spec_same"], citations=[r["id"] for r in packet["dispositions"]])
+            assert candidate["citations"], "Combined journey requires a nonempty real collection"
+            packet["candidates"] = [candidate]
+        # Collector strips these from new daily packets but retains the raw report.
+        packet.update(astra_changes=["synthetic obsolete field"], acceptance_audit={"fixture": True})
+        return response
+
+
+def _combined_cost_cells(settings, owned):
+    """The five exact packet cells, including retained attempt stream IDs."""
+    rollup = {"codex": {"by_stream": [
+        {"stream_id": "fixture:s1", "dollars": 4, "completeness": 1.0},
+        {"stream_id": "fixture:s2", "dollars": 2, "completeness": 0.6},
+        {"stream_id": "fixture:s4", "dollars": 0, "completeness": None},
+        {"stream_id": "fixture:shared-fd", "dollars": 999, "completeness": 1.0},
+        {"stream_id": "fixture:other-run", "dollars": 500, "completeness": 1.0}]}}
+    cells = [(["fixture:s1"], "measured", 4),
+             (["fixture:s1", "fixture:s2"], "partial", 6),
+             (["fixture:s1", "fixture:s3"], "partial", 4),
+             (["fixture:s3"], "unknown", None),
+             (["fixture:s4"], "partial", 0)]
+    for index, (streams, state, dollars) in enumerate(cells):
+        case = replace(settings, state_root=owned / "cost-cells" / str(index))
+        manifest = retro.collect(case, at("2026-10-13T10:00:00+00:00"))
+        root = case.state_root / "runs" / manifest["run_id"]
+        retro.atomic(root / "sol.json", {"stream_id": streams[0],
+            "admission": {"stream_id": streams[0], "session": {"stream_id": streams[0]}}})
+        retro.atomic(root / "sol-attempts.json", [{"stream_id": s} for s in streams[1:]])
+        expected = {"state": state, "dollars": dollars, "streams": sorted(streams)}
+        assert retro.producer_cost(case, manifest["run_id"], rollup) == expected
+        # The caller has installed a synthetic read_usage_rollup. Give this cell
+        # its exact fixture envelope so persistence is tested as well as helpers.
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(retro, "read_usage_rollup", lambda _settings, value=rollup: value)
+            retro.retain_weekly_summary(case, manifest["run_id"])
+            retained = retro.read(root / "summary.json")
+            assert retained["producer_cost"] == expected
+            assert retained["fd_cost"] == {"unknown_reason": "shared_fd_seat"}
+            before = _combined_bytes(case.state_root)
+            weekly = retro.weekly_summary(case, manifest["run_id"])
+            row, = weekly["producer_costs"]
+            assert row["producer_cost"] == expected
+            assert row["fd_cost"] == {"unknown_reason": "shared_fd_seat"}
+            assert _combined_bytes(case.state_root) == before
+
+
+@pytest.mark.parametrize("catchup", [False, True])
+def test_combined_retained_week(config, monkeypatch, tmp_path, catchup):
+    """RG1-RG6: real helpers, synthetic producer, retained Sunday/Monday review."""
+    import shutil
+
+    owned = tmp_path / ("combined-monday" if catchup else "combined-sunday")
+    settings = _combined_settings(config, owned)
+    clock = _combined_clock(monkeypatch)
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    rpc = CombinedPacketTransport()
+    pipeline = retro.Pipeline(settings, rpc)
+
+    def fake_rollup(_settings):
+        # Exact admitted IDs only; unrelated FD and run rows must never enter costs.
+        return {"codex": {"by_stream": [
+            *[{"stream_id": "fixture:" + key, "dollars": 1, "completeness": 1.0}
+              for key in rpc.spawns],
+            {"stream_id": "fixture:shared-fd", "dollars": 999, "completeness": 1.0},
+            {"stream_id": "fixture:unrelated", "dollars": 500, "completeness": 1.0}]}}
+
+    monkeypatch.setattr(retro, "read_usage_rollup", fake_rollup)
+    try:
+        evidence = source(settings.memory_root, "evidence", day="2026-10-12")
+        excluded = source(settings.memory_root, "fixture_umbrella", status="in_progress")
+        terminal = source(settings.memory_root, "terminal", status="completed", day="2026-10-12")
+        protected = {p: p.read_bytes() for p in (evidence, excluded, terminal)}
+        for work_id, refusal in (("spec_fixture_umbrella", "^refused: use resolved or duplicate$"),
+                                 ("spec_terminal", "^refused: use resolved or duplicate$"),
+                                 ("spec_missing", "^unknown_work_id$")):
+            before = decision_bytes(settings)
+            with pytest.raises(ValueError, match=refusal):
+                asyncio.run(pipeline.decision(work_id, proposal2("authorized")))
+            assert decision_bytes(settings) == before
+            assert all(p.read_bytes() == value for p, value in protected.items())
+            assert not rpc.questions and not rpc.sent and not rpc.spawns
+
+        paths, records = {}, {}
+        for name in ("done", "dropped", "blocked", "same", "missing", "progressed", "earlier"):
+            status = "analysis" if name == "progressed" else "in_progress"
+            paths[name] = source(settings.memory_root, name, status=status, day="2026-10-12")
+            payload = {**proposal2("authorized"), "id": name, "citations": ["spec_evidence"],
+                       "baseline_status": "completed"}  # forged metadata must be ignored
+            records[name] = asyncio.run(pipeline.decision("spec_" + name, payload))
+            assert records[name]["baseline_status"] == status
+        assert not rpc.questions and not rpc.sent and not rpc.spawns
+        original_decisions = decision_bytes(settings)
+        assert original_decisions
+        assert any(json.loads(value).get("baseline_status") == "in_progress"
+                   for value in original_decisions.values())
+
+        reviewed = []
+        for day in ("2026-10-13", "2026-10-14"):
+            clock.set(day + "T10:00:00+00:00")
+            if day.endswith("14"):
+                evidence.write_text(evidence.read_text().replace("Lesson.", "Renamed lesson; same target."))
+            manifest = retro.collect(settings, at(day + "T10:00:00+00:00"))
+            root = settings.state_root / "runs" / day
+            collection_bytes = (root / "collection.json").read_bytes()
+            assert manifest["producers"] == ["sol"]
+            assert asyncio.run(pipeline.run_manifest(manifest))
+            assert (root / "collection.json").read_bytes() == collection_bytes
+            final = retro.read(root / "sol.json")
+            candidate, = final["packet"]["candidates"]
+            assert final["closed"] and not (root / "astra.json").exists()
+            assert not list(root.glob("astra-input-*"))
+            assert not {"astra_changes", "acceptance_audit"} & final["packet"].keys()
+            assert final["report"]["extras"]["daily_retro"]["astra_changes"]
+            result = {"packet_hash": final["packet_hash"], "dispositions": [{
+                "id": candidate["id"], "disposition": "authorized", "reason": "Synthetic standing grant.",
+                "work_id": "spec_same", "proposal_id": "same", "version": records["same"]["version"]}]}
+            receipt = asyncio.run(pipeline.record_review(day, result))
+            row, = receipt["result"]["dispositions"]
+            assert row["candidate_key"] == "work:spec_same"
+            assert row["proposal_version"] == records["same"]["version"]
+            reviewed.append((candidate, receipt))
+            summary = retro.read(root / "summary.json")
+            assert summary["producer_cost"] == {"state": "measured", "dollars": 1,
+                                                  "streams": [final["stream_id"]]}
+        assert reviewed[0][0]["id"] != reviewed[1][0]["id"]
+        assert reviewed[0][0]["candidate_key"] == reviewed[1][0]["candidate_key"]
+        assert reviewed[0][0]["version"] != reviewed[1][0]["version"]
+        assert len(rpc.spawns) == len(rpc.closed) == 2
+        assert all(p["model"] == "gpt-6.1-sol" for p in rpc.spawns.values())
+
+        for name, status in (("done", "completed"), ("dropped", "deprecated"), ("blocked", "blocked"),
+                             ("progressed", "needs_qa"), ("earlier", "analysis")):
+            paths[name] = move_fixture(paths[name], status)
+        paths["missing"].unlink()
+        observed_fixture(settings, "legacy", None, "completed")
+        observed_fixture(settings, "legacy_blocked", None, "blocked")
+        observed_fixture(settings, "missing_legacy", None, None)
+        observed_fixture(settings, "terminal_baseline", "completed", "analysis")
+        observed_fixture(settings, "unblocked", "blocked", "in_progress")
+        assert all(decision_bytes(settings)[key] == value for key, value in original_decisions.items())
+        expectations = {"done": "observed_completed", "dropped": "observed_dropped",
+            "blocked": "observed_regressed", "same": "observed_unchanged", "missing": "not_found",
+            "legacy": "legacy_unknown", "progressed": "observed_progressed", "earlier": "observed_regressed",
+            "legacy_blocked": "legacy_unknown", "missing_legacy": "not_found",
+            "terminal_baseline": "observed_regressed", "unblocked": "observed_progressed"}
+
+        for day in ("2026-10-15", "2026-10-16", "2026-10-17"):
+            clock.set(day + "T10:00:00+00:00")
+            retro.collect(settings, at(day + "T10:00:00+00:00"))
+        runs = settings.state_root / "runs"
+        retro.atomic(runs / "2026-10-15/failure.json", {"fixture": "failure-only"})
+        retro.atomic(runs / "2026-10-16/delivery.json", {"attempts": [
+            {"confirmed": False}, {"confirmed": True}]})  # later success cannot erase history
+        retro.atomic(runs / "2026-10-17/failure-notice-error.json", {"fixture": "overlap"})
+        retro.atomic(runs / "2026-10-17/failure-delivery.json", {"attempts": [], "pending": {"seq": 1}})
+        retro.atomic(runs / "2026-10-17/delivery.json", {"attempts": [{"confirmed": False}]})
+        retro.atomic(runs / "2026-10-12/failure.json", {"fixture": "orphan excluded"})
+        retro.atomic(runs / "history-fixture/collection.json", {"run_id": "history-fixture", "phase": "history", "baseline": {}, "sources": []})
+        retro.atomic(runs / "history-fixture/failure.json", {"fixture": "history excluded"})
+
+        close_day = "2026-10-19" if catchup else "2026-10-18"
+        clock.set(close_day + "T10:00:00+00:00")
+        manifest = retro.collect(settings, at(close_day + "T10:00:00+00:00"))
+        assert asyncio.run(pipeline.run_manifest(manifest))
+        final = retro.read(runs / close_day / "sol.json")
+        result = {"packet_hash": final["packet_hash"], "dispositions": []}
+        receipt = asyncio.run(pipeline.record_review(close_day, result))
+        summary = receipt["weekly_summary"]["summary"]
+        assert receipt["weekly_summary"]["due"] is True
+        assert summary["window"] == {"start": "2026-10-12", "end": "2026-10-18"}
+        assert {r["proposal_id"]: r["outcome"] for r in summary["current_work"]} == expectations
+        assert summary["verified_outcomes"] == summary["shipped_observed"] == 0
+        assert all(r.get("checkpoint_state") != "met by observed outcome" for r in summary["current_work"])
+        assert summary["runs_failed"] == 3
+        coverage_text = json.dumps(summary["coverage"])
+        assert "2026-10-12" in coverage_text and "history-fixture" in coverage_text
+        assert summary["runs_total"] == summary["runs_collected"] == (5 if catchup else 6)
+        assert summary["runs_reviewed"] == (2 if catchup else 3)
+        assert set(summary["missing_runs"]) == ({"2026-10-12", "2026-10-18"} if catchup else {"2026-10-12"})
+        assert summary["candidates_reviewed"] == 2
+        assert all(row["producer_cost"]["dollars"] != 999 for row in summary["producer_costs"])
+        assert all(row["fd_cost"] == {"unknown_reason": "shared_fd_seat"} for row in summary["producer_costs"])
+        if catchup:
+            assert not (runs / "2026-10-18/collection.json").exists()
+        # Tuesday's review also legitimately created W41. Only W42 is this target.
+        target_week = settings.state_root / "weekly/2026-W42.json"
+        assert Path(receipt["weekly_summary"]["path"]) == target_week
+        assert retro.read(target_week)["generated_by_run"] == close_day
+        before = _combined_bytes(settings.state_root)
+        assert asyncio.run(pipeline.record_review(close_day, result)) == receipt
+        assert retro.weekly_summary(settings, "2026-10-18")["runs_failed"] == 3
+        assert _combined_bytes(settings.state_root) == before
+        assert [p for p in (settings.state_root / "weekly").glob("2026-W42.json")] == [target_week]
+        assert not rpc.questions and len(rpc.spawns) == len(rpc.closed) == 3
+        assert len(rpc.sent) == 3
+        _combined_cost_cells(settings, owned)
+    finally:
+        shutil.rmtree(owned)
+        assert not owned.exists()
+
+
+def test_combined_legacy_october_packets(config, monkeypatch, tmp_path):
+    """Synthetic October 6-9 packets remain byte-identical through new readers."""
+    import shutil
+
+    owned = tmp_path / "combined-legacy"
+    settings = _combined_settings(config, owned)
+    clock = _combined_clock(monkeypatch, "2026-10-20T10:00:00+00:00")
+    monkeypatch.setattr(retro, "read_usage_rollup", lambda _settings: {"codex": {"by_stream": []}})
+    try:
+        roots, manifests = [], []
+        for number in range(6, 10):
+            day = f"2026-10-{number:02}"
+            clock.set(day + "T10:00:00+00:00")
+            source(settings.memory_root, f"old_{number}", day=f"2026-10-{number - 1:02}")
+            manifest = retro.collect(settings, at(day + "T10:00:00+00:00"))
+            root = settings.state_root / "runs" / day
+            # A retained pre-activation collection has no new producer selector.
+            manifest.pop("producers", None)
+            retro.atomic(root / "collection.json", manifest)
+            template, _ = identity_packet()
+            candidate = {**template["candidates"][0], "id": f"legacy-{number}",
+                         "citations": [row["id"] for row in manifest["sources"]],
+                         "recommendation_kind": "no_change"}
+            packet = {"run_id": day, "candidates": [candidate], "dispositions": [],
+                      "astra_changes": ["retained legacy"], "acceptance_audit": {"legacy": True}}
+            if number > 6:
+                packet["schema_version"] = 2
+            final = {"packet": packet, "packet_hash": retro.digest(packet),
+                     "report": {"report_id": "legacy-fixture-" + str(number)}}
+            retro.atomic(root / "astra.json", final)
+            retro.atomic(root / "review.json", {"reviewed_at": day + "T10:00:00+00:00", "result": {
+                "packet_hash": final["packet_hash"], "dispositions": [{"id": candidate["id"],
+                    "disposition": "no_change", "reason": "Retained synthetic legacy review."}]}})
+            roots.append(root)
+            manifests.append(manifest)
+        before = _combined_bytes(settings.state_root)
+        summary = retro.weekly_summary(settings, "2026-10-11")
+        assert summary["runs_collected"] == summary["runs_reviewed"] == 4
+        assert {c["candidate_key"] for c in summary["candidate_identities"]} == {"legacy_unknown"}
+        assert all(retro.retained_final(root)["packet"]["astra_changes"] == ["retained legacy"] for root in roots)
+        assert _combined_bytes(settings.state_root) == before
+        # Same frozen collection can feed one new Sol worker without migration
+        # or a second-producer admission; the stored legacy final stays selected.
+        assert retro.collect(settings, at("2026-10-06T10:00:00+00:00")) == manifests[0]
+        rpc = Transport()
+        pipeline = retro.Pipeline(settings, rpc)
+        sol = asyncio.run(pipeline.worker(manifests[0], "sol"))
+        asyncio.run(pipeline.cleanup(manifests[0]))
+        assert sol["packet"] and len(rpc.spawns) == len(rpc.closed) == 1
+        assert not rpc.sent and not rpc.questions
+        assert not list(roots[0].glob("astra-input-*"))
+        assert not {"astra_changes", "acceptance_audit"} & sol["packet"].keys()
+        assert retro.retained_final_path(roots[0]).name == "astra.json"
+        assert all((settings.state_root / path).read_bytes() == data for path, data in before.items())
+    finally:
+        shutil.rmtree(owned)
+        assert not owned.exists()
+
+
+def test_combined_notice_retry_in_packet_run(config, monkeypatch, tmp_path):
+    """A real synthetic run fails its worker; only its notice gets the 60s retry."""
+    import shutil
+
+    owned = tmp_path / "combined-retry"
+    settings = _combined_settings(config, owned)
+    clock = _combined_clock(monkeypatch)
+    monotonic_clock = [0.0]
+    monkeypatch.setattr(retro, "monotonic", lambda: monotonic_clock[0])
+    monkeypatch.setattr(retro, "read_usage_rollup", lambda _settings: {"codex": {"by_stream": []}})
+    try:
+        source(settings.memory_root, "failure_evidence", day="2026-10-12")
+        manifest = retro.collect(settings, at("2026-10-13T10:00:00+00:00"))
+        root = settings.state_root / "runs" / manifest["run_id"]
+        # Existing packet delivery data must be preserved by notice projection.
+        packet_record = {"attempts": [{"confirmed": True, "fixture": "packet-only"}], "fixture": "keep"}
+        retro.atomic(root / "delivery.json", packet_record)
+
+        class RefusedNotice(Transport):
+            def __init__(self):
+                super().__init__()
+                self.notice_calls = []
+                self.reconciliations = []
+
+            async def await_report_once(self, conf, stream, msg_id, **kwargs):
+                return {"type": "await_report.ok", "ok": False, "result_kind": "report", "status": "error",
+                        "reason": "synthetic producer failure", "report": {"status": "error"}}
+
+            async def send_receipt_once(self, conf, target, key):
+                self.reconciliations.append((monotonic_clock[0], target, key))
+                return await super().send_receipt_once(conf, target, key)
+
+            async def send_once(self, conf, payload):
+                self.notice_calls.append((monotonic_clock[0], dict(payload)))
+                if len(self.notice_calls) == 1:
+                    raise ConnectionRefusedError(111, "synthetic refusal")
+                return await super().send_once(conf, payload)
+
+        rpc = RefusedNotice()
+        pipeline = retro.Pipeline(settings, rpc)
+        original_sleep = asyncio.sleep
+
+        async def run():
+            sleeping, release = asyncio.Event(), asyncio.Event()
+            delays = []
+
+            async def fake_sleep(delay):
+                delays.append(delay)
+                assert delay == 60
+                # This executes before the retry can occur.
+                projected = retro.read(root / "delivery.json")
+                first, = projected["notice_attempts"]
+                assert first["confirmed"] is False and first["retry_index"] == 0
+                assert first["error"] == retro.structured_error(ConnectionRefusedError(111, "synthetic refusal"))
+                sleeping.set()
+                await release.wait()
+
+            monkeypatch.setattr(retro.asyncio, "sleep", fake_sleep)
+            task = asyncio.create_task(pipeline.run_manifest(manifest))
+            waiter = asyncio.create_task(sleeping.wait())
+            try:
+                done, _ = await asyncio.wait((task, waiter), timeout=2, return_when=asyncio.FIRST_COMPLETED)
+                assert waiter in done and sleeping.is_set(), "Notice refusal did not reach durable 60s retry"
+                monotonic_clock[0] = 59
+                clock.set("2026-10-13T10:00:59+00:00")
+                await original_sleep(0)
+                assert len(rpc.notice_calls) == 1 and not task.done()
+                # Prove a changed binding cannot redirect a known retry intent.
+                rpc.binding["session_generation"] = "replacement-generation"
+                monotonic_clock[0] = 60
+                clock.set("2026-10-13T10:01:00+00:00")
+                release.set()
+                with pytest.raises(RuntimeError, match="sol confirmed failed"):
+                    await task
+                assert delays == [60]
+            finally:
+                if not waiter.done():
+                    waiter.cancel()
+                    try:
+                        await waiter
+                    except asyncio.CancelledError:
+                        pass
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                elif not task.cancelled():
+                    task.exception()  # Retrieve failures even when a pre-retry assertion fired
+
+        asyncio.run(run())
+        assert [stamp for stamp, _ in rpc.notice_calls] == [0, 60]
+        assert rpc.notice_calls[0][1] == rpc.notice_calls[1][1]
+        assert len(rpc.reconciliations) == 2
+        assert rpc.reconciliations[0][1:] == rpc.reconciliations[1][1:]
+        record = retro.read(root / "delivery.json")
+        assert {key: record[key] for key in packet_record} == packet_record
+        initial, retry = record["notice_attempts"]
+        assert [initial["retry_index"], retry["retry_index"]] == [0, 1]
+        assert initial["confirmed"] is False and retry["confirmed"] is True
+        assert initial["generation"] == retry["generation"] == "g1"
+        assert retry["receipt"]["delivery"] == "landed"
+        assert retro.read(root / "failure-delivery.json")["pending"] is None
+        assert retro.read(root / "failure.json")["notice"] == "delivered"
+        assert len(rpc.sent) == len(rpc.spawns) == len(rpc.closed) == 1
+        assert retro.weekly_summary(settings, "2026-10-18")["runs_failed"] == 1
+    finally:
+        shutil.rmtree(owned)
+        assert not owned.exists()
+
+
+def test_combined_release_archive_collect(config, tmp_path):
+    """Archive exact documented paths at one immutable candidate; collect outside checkout."""
+    import hashlib
+    import io
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import tarfile
+
+    repo = Path(retro.__file__).resolve().parents[3]
+    owned = tmp_path / "combined-release"
+    settings = _combined_settings(config, owned)
+    release, outside, harness = owned / "release", owned / "outside", owned / "harness"
+    paths = (
+        "services/chat-stream-v2/tools/daily_retro.py",
+        "services/chat-stream-v2/message_envelopes.py",
+        "services/chat-stream-v2/provider_wrappers.py",
+        "services/chat-stream-v2/tools/live_window", "services/_shared/operator_auth.py",
+        "services/agent-orch/agent_orch",
+        "services/chat-stream-v2/deploy/com.pentacle.daily-retro.plist",
+        "docs/daily_retro.md",
+    )
+    try:
+        assert sys.version_info[:2] == (3, 13), "Use the packet's pinned Python 3.13 interpreter"
+        requested = os.environ.get("RETRO_TEST_ARCHIVE_CANDIDATE", "HEAD")
+        candidate = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", requested + "^{commit}"],
+                                   capture_output=True, text=True, check=True).stdout.strip()
+        assert re.fullmatch(r"[0-9a-f]{40}", candidate)
+        committed = subprocess.run(["git", "-C", str(repo), "show", candidate + ":" + paths[0]],
+                                   capture_output=True, check=True).stdout
+        assert committed == Path(retro.__file__).read_bytes(), "Commit the candidate before its archive proof"
+        documentation = subprocess.run(["git", "-C", str(repo), "show", candidate + ":docs/daily_retro.md"],
+                                       capture_output=True, text=True, check=True).stdout
+        command = re.search(r'git -C "\$RETRO_CHECKOUT" archive "\$RETRO_CANDIDATE" \\\n(.*?) \| tar -x -C "\$RETRO_RELEASE"',
+                            documentation, re.S)
+        assert command, "Documented release command is missing or materially changed"
+        documented_paths = tuple(command[1].replace("\\", " ").split())
+        assert documented_paths == paths
+        archive = subprocess.run(["git", "-C", str(repo), "archive", candidate, *paths],
+                                 capture_output=True, check=True).stdout
+        archive_sha256 = hashlib.sha256(archive).hexdigest()
+        release.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+            tar.extractall(release, filter="data")
+        tracked = subprocess.run(["git", "-C", str(repo), "ls-tree", "-r", "--name-only", candidate, "--", *paths],
+                                 capture_output=True, text=True, check=True).stdout.splitlines()
+        assert set(tracked) == {str(p.relative_to(release)) for p in release.rglob("*") if p.is_file()}
+        for name in tracked:
+            expected = subprocess.run(["git", "-C", str(repo), "show", candidate + ":" + name],
+                                      capture_output=True, check=True).stdout
+            assert (release / name).read_bytes() == expected
+        outside.mkdir()
+        harness.mkdir()
+        assert repo not in outside.resolve().parents
+        # A subprocess-level synthetic network boundary; source imports come only
+        # from the archive, not checkout PYTHONPATH or installed default configs.
+        (harness / "sitecustomize.py").write_text(
+            "import socket\n"
+            "def denied(*args, **kwargs):\n"
+            "    raise AssertionError('synthetic collect must not call RPC')\n"
+            "socket.create_connection = denied\n"
+            "socket.socket.connect = denied\n")
+        source(settings.memory_root, "release", day="2026-10-12")
+        retro.atomic(settings.config_path, {
+            "timezone": "America/Chicago", "memory_root": str(settings.memory_root),
+            "state_root": str(settings.state_root), "ws_url": "ws://127.0.0.1:12345",
+            "token_path": str(settings.token_path), "host": "fixture", "isolated": True,
+            "producers": ["sol"], "usage_spec_id": "spec_fixture_usage",
+            "self_assignment_exclusions": ["spec_fixture_umbrella"]})
+        env = {key: value for key, value in os.environ.items()
+               if key not in {"PYTHONPATH", "PYTHONHOME"} and not key.startswith("PENTACLE_")}
+        env.update(PYTHONPATH=str(harness), PYTHONDONTWRITEBYTECODE="1", PENTACLE_HOST_ID="fixture")
+        command = [sys.executable, str(release / paths[0]), "collect", "--config", str(settings.config_path),
+                   "--now", "2026-10-13T10:00:00+00:00"]
+        process = subprocess.run(command, cwd=outside, env=env, capture_output=True, text=True, timeout=30)
+        assert process.returncode == 0, process.stderr
+        manifest = json.loads(process.stdout)
+        assert manifest["run_id"] == "2026-10-13" and manifest["producers"] == ["sol"]
+        assert {row["id"] for row in manifest["sources"]} == {"spec_release"}
+        collection = settings.state_root / "runs/2026-10-13/collection.json"
+        before = collection.read_bytes()
+        replay = subprocess.run(command, cwd=outside, env=env, capture_output=True, text=True, timeout=30)
+        assert replay.returncode == 0 and json.loads(replay.stdout) == manifest
+        assert collection.read_bytes() == before
+        assert not list((settings.state_root / "runs").glob("*/sol.json"))
+        assert not list((settings.state_root / "runs").glob("*/astra.json"))
+        assert not list((settings.state_root / "runs").glob("*/delivery.json"))
+        # Return logs may retain these synthetic identities externally; do not
+        # create a new public evidence file or alter the release path list.
+        assert archive_sha256 and hashlib.sha256((release / paths[0]).read_bytes()).digest() == hashlib.sha256(committed).digest()
+    finally:
+        shutil.rmtree(owned)
+        assert not owned.exists() and not release.exists() and not outside.exists()
