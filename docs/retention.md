@@ -75,7 +75,10 @@ committed values are never reused, including after highest/all-row removal,
 archival, restart and recovery. Signed-64-bit exhaustion fails safely.
 
 A genuinely fresh hot database records permission to bootstrap its empty pair;
-this pending state survives a session-only restart. Once initialized, a missing
+a provisioned zero-byte file or auxiliary-only database is fresh too. Freshness
+is determined before startup migrations from absence of core Store/history
+schema, never from empty current history tables. This pending state survives a
+session-only restart. Once initialized, a missing
 archive is an outage and is never recreated. Migrating an existing hot database
 requires a readable archive and seeds from the maximum identity in both files.
 If an installation demonstrably never had an archive, its operator must establish
@@ -105,7 +108,9 @@ historical knowledge fails closed.
 
 `daily_retro` combines receipt history before cutoff, latest-row, scope and budget
 selection, including older `--now` windows and archive-only recipient sessions.
-An unavailable or incompatible archive produces an explicit coverage gap. Managed
+Every receipt union validates the archive pair and schema, including while the
+hot pair is pending bootstrap. An unavailable, mismatched or incompatible archive
+produces an explicit coverage gap. Managed
 attachment GC retains archive-owned bytes, fails closed on unknown archive state,
 and never treats retention ownership as fetch authorization.
 

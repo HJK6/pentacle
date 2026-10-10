@@ -1501,9 +1501,16 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             # ATTACH for configured retention archives. Memory stores stay local.
             from pathlib import Path
             database = self._path if self._path in (':memory:', '') else Path(self._path).absolute().as_uri()
-            fresh_history = self._path in (':memory:', '') or not Path(self._path).exists()
             conn = sqlite3.connect(database, uri=True, factory=HistoryConnection)
             conn.row_factory = sqlite3.Row
+            # A provisioned empty file or auxiliary-only database is still a
+            # fresh Store. Existing core/history schema, even with zero rows,
+            # must never be mistaken for proof that its archive never existed.
+            fresh_history = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name IN "
+                "('sessions','session_event_tail','v2_send_receipts',"
+                "'v2_assistant_composite_routes','v2_send_receipt_sequence') LIMIT 1"
+            ).fetchone() is None
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("BEGIN")

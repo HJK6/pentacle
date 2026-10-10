@@ -411,13 +411,17 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
         sequence_exists = conn.execute("SELECT 1 FROM sqlite_master WHERE name='v2_send_receipt_sequence'").fetchone()
         sequence = conn.execute("SELECT * FROM v2_send_receipt_sequence WHERE singleton=1").fetchone() if sequence_exists else None
         try:
-            if sequence and sequence["archive_ready"]:
-                if archive is None:
-                    raise RetentionError("required receipt archive unavailable")
-                _archive_schema(conn, archive, initialize=False, pair_id=sequence["pair_id"])
-            if archive and archive.execute("SELECT 1 FROM sqlite_master WHERE name='v2_send_receipts'").fetchone():
+            archived_receipts = bool(archive and archive.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='v2_send_receipts'").fetchone())
+            if sequence and sequence["archive_ready"] and archive is None:
+                raise RetentionError("required receipt archive unavailable")
+            if archive and (archived_receipts or sequence and sequence["archive_ready"]):
                 if not sequence:
                     raise RetentionError("unpaired receipt archive")
+                # Pending bootstrap is not permission to adopt a sibling
+                # Store's history. Validate identity/schema before every UNION.
+                _archive_schema(conn, archive, initialize=False, pair_id=sequence["pair_id"])
+            if archived_receipts:
                 attached = {r[1] for r in conn.execute("PRAGMA database_list")}
                 if "retro_archive" not in attached:
                     conn.execute("ATTACH DATABASE ? AS retro_archive", (settings.primary_archive.resolve().as_uri() + "?mode=ro",))

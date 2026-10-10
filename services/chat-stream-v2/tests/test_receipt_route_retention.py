@@ -788,3 +788,68 @@ def test_route_final_publication_settlement_age(tmp_path,seconds,moved):
             assert await store.find_assistant_composite_route_by_dispatch('dispatch')
         finally:store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('preimage',['absent','zero_byte','auxiliary_only'])
+def test_fresh_bootstrap_uses_preexisting_store_schema_not_filename(tmp_path,preimage):
+    db=tmp_path/'hot.db'
+    if preimage=='zero_byte':db.touch()
+    if preimage=='auxiliary_only':
+        with sqlite3.connect(db) as c:c.execute('CREATE TABLE auxiliary_fixture(value TEXT)')
+    async def run():
+        store=running(tmp_path)
+        try:
+            assert (await append(store))['receipt_rowid']==1
+            assert await hot_count(store)==1
+            assert (tmp_path/'sessions_archive.db').exists()
+            if preimage=='auxiliary_only':
+                assert await store.submit(lambda c:c.execute("SELECT 1 FROM sqlite_master WHERE name='auxiliary_fixture'").fetchone())
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('existing_rows',[0,1])
+def test_actual_legacy_store_never_bootstraps_missing_archive_after_restart(tmp_path,existing_rows):
+    async def run():
+        store=running(tmp_path)
+        try:
+            def legacy(c):
+                c.execute('DELETE FROM v2_send_receipt_sequence')
+                if existing_rows:
+                    c.execute("INSERT INTO v2_send_receipts(to_stream_id,request_id,receipt_id,state,content_kind,delivery,created_at) VALUES('legacy:target','legacy','legacy','landed','text','landed',?)",(OLD,))
+                c.commit()
+            await store.submit(legacy)
+            store.stop();store=running(tmp_path)
+            with pytest.raises(r.RetentionError,match='unavailable'):await append(store)
+            assert await hot_count(store)==existing_rows
+            assert not (tmp_path/'sessions_archive.db').exists()
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('defect',['different_pair','incompatible_schema'])
+def test_pending_bootstrap_retro_validates_archive_before_union(tmp_path,defect):
+    from tools import daily_retro as retro
+    async def run():
+        first,second=running(tmp_path,'first.db'),running(tmp_path,'second.db')
+        try:
+            await append(first,'foreign',stamp='2026-08-01T12:00:00Z',state='not_landed',delivery='not_landed',from_stream_id='fixture:root')
+            await move(first)
+            await second.open_session('fixture','root',created_at='2026-07-01T00:00:00Z')
+            await second.submit(lambda c:(c.execute("INSERT INTO v2_assistant_direct_binding VALUES('bart','fixture:root','generation',1,'2026-07-01T00:00:00Z')"),c.commit()))
+            sequence=await second.submit(lambda c:dict(c.execute('SELECT * FROM v2_send_receipt_sequence').fetchone()))
+            assert sequence['archive_ready']==0
+            archive=await archive_path(first)
+            if defect=='incompatible_schema':
+                with sqlite3.connect(archive) as c:
+                    c.execute('UPDATE v2_receipt_route_archive SET pair_id=?',(sequence['pair_id'],))
+                    c.execute('ALTER TABLE v2_send_receipts DROP COLUMN meta_json')
+            settings=retro.Settings(tmp_path/'memory',tmp_path/'state','ws://127.0.0.1:12345',tmp_path/'token','fixture',isolated=True,primary_store=Path(second.path),primary_archive=archive)
+            before=archive.read_bytes()
+            packet=retro.primary_evidence(settings,datetime(2026,8,1,tzinfo=timezone.utc),datetime(2026,8,2,tzinfo=timezone.utc))
+            assert packet['coverage']['send_receipts']=={'available':False}
+            assert any(g['source']=='send_receipts' for g in packet['gaps'])
+            assert not any(o.get('request_id')=='foreign' for o in packet['observations'])
+            assert archive.read_bytes()==before
+        finally:first.stop();second.stop()
+    asyncio.run(run())
