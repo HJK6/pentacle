@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise every Desktop-wire spawn cell and surface one red per failed cell."""
+"""Exercise Desktop-wire spawn cells; keep synthetic cards in disposable state."""
 from __future__ import annotations
 
 import argparse
@@ -23,6 +23,7 @@ for _path in (SERVICE_DIR, SERVICES_DIR):
 
 from boot_ready import codex_reset_interstitial_visible  # noqa: E402
 from machines import load_machines  # noqa: E402
+from tools.disposable_smoke import publish_smoke_card  # noqa: E402
 from client_contract_probe import (  # noqa: E402
     CONTROL_PLANE_P95_LIMIT_MS,
     CONVERGENCE_QUIET_LIMIT_MS,
@@ -805,8 +806,8 @@ def run_matrix(
                 except CodexQuotaExhausted as exc:
                     # Environmental, not a daemon regression: record the cell as
                     # the non-code `UNTESTED` class (kept out of daemon
-                    # regression failures by `main`) and surface ONE operator
-                    # `warning` line per host — never a `critical` daemon red.
+                    # regression failures by `main`) and retain a disposable
+                    # warning card plus the normal JSON/log failure evidence.
                     row = {
                         "host": host, "provider": provider, "prompt_mode": prompt_mode,
                         "stage": "event", "class": "untested", "reason": "quota_exhausted",
@@ -817,17 +818,16 @@ def run_matrix(
                         evidence.append({"outcome": "UNTESTED", **row})
                     try:
                         reset = f"; try again at {exc.reset_at}" if exc.reset_at else ""
-                        rpc({
-                            "type": "notification.create",
+                        row["smoke_card"] = publish_smoke_card({
                             "producer": "spawn-fleet-smoke",
                             "severity": "warning",
                             "title": f"Codex quota exhausted: {host}",
                             "body": f"{host} Codex account is over its usage limit{reset}. "
                                     "Restore quota (/usage reset or top-up); not a daemon fault.",
                             "dedup_key": f"spawn-fleet-smoke-quota:{host}",
-                        }, "notification.create")
-                    except Exception:
-                        pass
+                        })
+                    except Exception as card_error:
+                        row["smoke_card_error"] = str(card_error)
                     continue
                 except Exception as exc:
                     stage = _stage_from_error(exc)
@@ -843,33 +843,29 @@ def run_matrix(
                         evidence.append({"outcome": "UNTESTED", **row})
                     if classification["class"] == "untested":
                         try:
-                            rpc({
-                                "type": "notification.create",
+                            row["smoke_card"] = publish_smoke_card({
                                 "producer": "spawn-fleet-smoke",
                                 "severity": "warning",
                                 "title": f"Spawn smoke untested: {host}/{provider}",
                                 "body": f"prompt_mode={prompt_mode}; {exc}",
                                 "dedup_key": f"spawn-fleet-smoke-untested:{host}:{provider}:{prompt_mode}",
-                            }, "notification.create")
-                        except Exception:
-                            pass
+                            })
+                        except Exception as card_error:
+                            row["smoke_card_error"] = str(card_error)
                         continue
                     try:
-                        rpc({
-                            "type": "notification.create",
+                        row["smoke_card"] = publish_smoke_card({
                             "producer": "spawn-fleet-smoke",
                             "severity": "critical",
                             "title": f"Spawn smoke failed: {host}/{provider}/{stage}",
                             "body": f"prompt_mode={prompt_mode}; {exc}",
                             "dedup_key": f"spawn-fleet-smoke:{host}:{provider}:{prompt_mode}:{stage}",
-                        }, "notification.create")
-                    except Exception:
-                        # Connection unusable after the cell failure; the red is
-                        # still recorded and returned to the caller.
-                        pass
+                        })
+                    except Exception as card_error:
+                        row["smoke_card_error"] = str(card_error)
         except Exception as exc:
-            # Connection or handshake failure: the cell still counts as a red,
-            # but no live notification could be emitted on this connection.
+            # Connection or handshake failure still counts as a red in the
+            # returned JSON/log evidence.
             classification = classify_cell_outcome(exc)
             row = {
                 "host": host, "provider": provider, "prompt_mode": prompt_mode,
@@ -886,7 +882,7 @@ def run_matrix(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Exercise Desktop-wire spawn cells and raise one operator red per failed cell. "
+            "Exercise Desktop-wire spawn cells and retain failures in JSON/log output. "
             "With no arguments, runs the full host x provider x prompt-mode matrix; "
             "with URL and HOST, runs only the single post-deploy canary cell."
         ),
