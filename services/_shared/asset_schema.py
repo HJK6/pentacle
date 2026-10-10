@@ -35,7 +35,7 @@ CATALOG_ASSET_ID = "dashboard-catalog"
 CATALOG_MAX_LIBS = 8
 CATALOG_MAX_BOARDS = 64
 CATALOG_MAX_ENTRY_BYTES = 8 * 1024
-CATALOG_BOARD_KINDS = frozenset({"report", "web-adapter", "hosted-view"})
+CATALOG_BOARD_KINDS = frozenset({"report", "web-adapter", "hosted-view", "built-in"})
 CATALOG_HOST_ACTIONS = frozenset({"household", "assistantState", "assetList", "assetGet"})
 CATALOG_VERSION_RE = re.compile(r"[0-9A-Za-z.+-]{1,64}")
 CATALOG_BOARD_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,63}")
@@ -418,8 +418,12 @@ def _validate_catalog_board(board: Any, path: str, seen_ids: set[str]) -> None:
     kind = board.get("kind")
     if not isinstance(kind, str) or kind not in CATALOG_BOARD_KINDS:
         _raise_path(f"{path}.kind", "must be one of: " + ", ".join(sorted(CATALOG_BOARD_KINDS)))
-    common = {"id", "name", "description", "kind"}
-    if kind == "report":
+    if "visible" in board and not isinstance(board["visible"], bool):
+        _raise_path(f"{path}.visible", "must be a boolean")
+    common = {"id", "name", "description", "kind", "visible"}
+    if kind == "built-in":
+        _reject_unknown_keys(board, path, common)
+    elif kind == "report":
         _reject_unknown_keys(board, path, common | {"report"})
         _validate_catalog_report(board.get("report"), f"{path}.report")
     elif kind == "web-adapter":
@@ -443,8 +447,8 @@ def _validate_catalog_board(board: Any, path: str, seen_ids: set[str]) -> None:
             _raise_path(f"{path}.hosted", "must be an object")
         _reject_unknown_keys(hosted, f"{path}.hosted", {"url"})
         url = _require_string(hosted, "url", f"{path}.hosted.url")
-        if not _is_plain_http_url(url):
-            _raise_path(f"{path}.hosted.url", "must be an absolute http(s) URL with a host and no userinfo")
+        if not _is_static_hosted_url(url):
+            _raise_path(f"{path}.hosted.url", "must be credential-free absolute HTTPS without query or fragment")
 
 
 def _validate_catalog_web(web: Any, path: str) -> None:
@@ -595,3 +599,53 @@ def _runs_text(runs: Any) -> str:
             elif isinstance(run.get("chip"), str):
                 parts.append(run["chip"])
     return "".join(parts)
+
+
+# Host-owned URL policy. Structural schema validation is independent of runtime
+# inputs; admission at publication/opening additionally requires this policy.
+HOSTED_SUFFIX_ENV = "PENTACLE_HOSTED_DASHBOARD_TAILNET_SUFFIX"
+HOSTED_ORIGIN_ENV = "PENTACLE_HOSTED_DASHBOARD_PENTACLE_ORIGIN"
+_DNS_HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\Z")
+
+
+def _is_static_hosted_url(url: Any) -> bool:
+    if not isinstance(url, str) or not _is_plain_http_url(url):
+        return False
+    if not url.startswith("https://") or any(c in url for c in ("?", "#", "\\")):
+        return False
+    parsed = urlsplit(url)
+    return bool(_DNS_HOST_RE.fullmatch((parsed.hostname or "").lower()))
+
+
+def hosted_dashboard_policy(environ: Mapping[str, str] | None = None) -> dict[str, str] | None:
+    env = os.environ if environ is None else environ
+    suffix = env.get(HOSTED_SUFFIX_ENV, "")
+    origin = env.get(HOSTED_ORIGIN_ENV, "")
+    if not isinstance(suffix, str) or not _DNS_HOST_RE.fullmatch(suffix.lower()):
+        return None
+    suffix = suffix.lower()
+    if not suffix.endswith(".ts.net") or not _is_static_hosted_url(origin):
+        return None
+    parsed = urlsplit(origin)
+    if parsed.path not in ("", "/") or not (parsed.hostname or "").lower().endswith("." + suffix):
+        return None
+    # URL origin is normalized, with the default HTTPS port omitted.
+    port = parsed.port
+    canonical = "https://" + parsed.hostname.lower() + (f":{port}" if port and port != 443 else "")
+    return {"tailnetSuffix": suffix, "pentacleOrigin": canonical}
+
+
+def validate_hosted_dashboard_url(url: Any, policy: Mapping[str, str] | None) -> None:
+    if not policy:
+        raise AssetValidationError("hosted dashboard URL policy is not configured")
+    validated = hosted_dashboard_policy({HOSTED_SUFFIX_ENV: policy.get("tailnetSuffix", ""),
+                                       HOSTED_ORIGIN_ENV: policy.get("pentacleOrigin", "")})
+    if not validated:
+        raise AssetValidationError("hosted dashboard URL policy is not configured")
+    if not _is_static_hosted_url(url):
+        raise AssetValidationError("hosted.url must be credential-free absolute HTTPS without query or fragment")
+    host = urlsplit(url).hostname.lower()
+    if not host.endswith("." + validated["tailnetSuffix"]):
+        raise AssetValidationError("hosted.url must use the configured fleet tailnet suffix")
+    if host == urlsplit(validated["pentacleOrigin"]).hostname:
+        raise AssetValidationError("hosted.url must use a different hostname from Pentacle")

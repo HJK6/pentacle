@@ -631,7 +631,8 @@ async def run(args: argparse.Namespace) -> int:
     # The blob store owns partial upload state; the server tears a closed
     # connection's in-flight uploads down through this reference.
     server.blobs = blobs
-    assets = Assets(args.assets_db, sessions=sessions, comms=comms, broadcast=server.broadcast)
+    assets = Assets(args.assets_db, sessions=sessions, comms=comms, broadcast=server.broadcast,
+                    fleet_hosts={args.local_host, *peers})
     server.handlers.update(assets.wire_handlers())
     # UI-sent verb group (mobile/desktop day-1): models/grant_token/register_push
     # lifted clean; send.interrupt/close.cancel/question.dismiss/enroll/specs.*

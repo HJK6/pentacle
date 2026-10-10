@@ -43,6 +43,7 @@ if str(SERVICES_ROOT) not in sys.path:
 
 from _shared.asset_schema import (
     AssetBodyTooLarge, AssetValidationError, normalize_tags, validate_asset_payload,
+    hosted_dashboard_policy, validate_hosted_dashboard_url, CATALOG_BOARD_ID_RE,
 )
 from _shared.assets_store import (
     AssetNotFound, AssetStore, AssetStoreError, InvalidAsset, asset_metadata,
@@ -67,9 +68,10 @@ class Assets:
     go through v2's server + comms."""
 
     def __init__(self, db_path: str = DEFAULT_ASSETS_DB, *, sessions: Any = None,
-                 comms: Any = None, broadcast: Any = None) -> None:
+                 comms: Any = None, broadcast: Any = None, fleet_hosts: Any = ()) -> None:
         self._db_path = db_path
         self._sessions = sessions
+        self._fleet_hosts = frozenset(fleet_hosts)
         self._comms = comms
         self._broadcast = broadcast
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asset-store")
@@ -105,7 +107,96 @@ class Assets:
         verbs = ("publish", "get", "list", "health", "delete", "read.set", "review.set",
                  "comment.add", "comment.edit", "comment.delete", "comment.resolve",
                  "comments.list", "comments.send_to_chat")
-        return {f"asset.{v}": self.asset for v in verbs}
+        return {**{f"asset.{v}": self.asset for v in verbs},
+                "dashboard.add": self.dashboard, "dashboard.remove": self.dashboard}
+
+    def _catalog_writer(self, msg: dict) -> dict:
+        auth = msg.get("_auth_context") or {}
+        sid = auth.get("stream_id")
+        if (auth.get("token_verified") is not True or not isinstance(sid, str)
+                or any(auth.get(k) for k in ("service_authenticated", "dot_principal", "scoped_principal", "scope"))
+                or self._sessions is None):
+            raise ValueError("asset_unauthorized")
+        row = self._sessions.get(sid)
+        if (not isinstance(row, dict) or row.get("status") != "open"
+                or row.get("host") not in self._fleet_hosts
+                or sid.split(":", 1)[0] != row.get("host")
+                or row.get("role") in {"external", "dot", "report-producer", "report_producer"}
+                or row.get("scope") or row.get("dot_principal")
+                or (auth.get("session_generation") is not None
+                    and row.get("session_generation") != auth["session_generation"])):
+            raise ValueError("asset_unauthorized")
+        return {**row, "stream_id": sid}
+
+    async def dashboard(self, msg: dict[str, Any]) -> dict[str, Any]:
+        request_id = str(msg.get("request_id") or "")
+        try:
+            await self._await_ready()
+            self._catalog_writer(msg)
+            policy = hosted_dashboard_policy()
+            if not policy:
+                return self._dashboard_error(request_id, "dashboard_policy_unconfigured")
+            verb = str(msg.get("type") or "")
+            board_id = msg.get("id")
+            if not isinstance(board_id, str) or not CATALOG_BOARD_ID_RE.fullmatch(board_id):
+                raise InvalidAsset("id must be a valid board id")
+            if verb not in {"dashboard.add", "dashboard.remove"}:
+                raise InvalidAsset("unknown dashboard command")
+            if verb == "dashboard.add":
+                title = msg.get("title")
+                if not isinstance(title, str) or not title.strip() or len(title) > 64:
+                    raise InvalidAsset("title must be 1-64 characters")
+                validate_hosted_dashboard_url(msg.get("url"), policy)
+                if "hidden" in msg and not isinstance(msg["hidden"], bool):
+                    raise InvalidAsset("hidden must be a boolean")
+                if "order" in msg and (not isinstance(msg["order"], int) or isinstance(msg["order"], bool) or msg["order"] < 0):
+                    raise InvalidAsset("order must be a nonnegative integer")
+            record, outcome = await self._run(self._edit_dashboard, msg)
+            if outcome.get("changed"):
+                await self._broadcast_update(record)
+            return {"type": verb + ".ok", "request_id": request_id, "id": board_id,
+                    "asset": record, **{k:v for k,v in outcome.items() if k != "changed"}}
+        except AssetNotFound:
+            return self._dashboard_error(request_id, "dashboard_catalog_missing")
+        except (InvalidAsset, AssetValidationError, AssetBodyTooLarge) as exc:
+            return self._dashboard_error(request_id, "dashboard_invalid", message=str(exc))
+        except ValueError as exc:
+            code = "dashboard_unauthorized" if str(exc) == "asset_unauthorized" else "dashboard_collision" if str(exc) == "dashboard_collision" else "dashboard_invalid"
+            return self._dashboard_error(request_id, code)
+        except asyncio.TimeoutError:
+            return self._dashboard_error(request_id, "asset_store_not_ready")
+        except Exception:
+            log.exception("dashboard RPC failed")
+            return self._dashboard_error(request_id, "asset_store_error")
+
+    def _edit_dashboard(self, msg: dict) -> tuple[dict, dict]:
+        def edit(catalog):
+            boards = catalog["boards"]
+            index = next((i for i,b in enumerate(boards) if b["id"] == msg["id"]), None)
+            if index is not None and boards[index]["kind"] != "hosted-view":
+                raise ValueError("dashboard_collision")
+            if msg["type"] == "dashboard.remove":
+                if index is not None: boards.pop(index)
+                return {"removed": index is not None, "changed": index is not None}
+            existing = boards[index] if index is not None else None
+            board = dict(existing or {}, id=msg["id"], name=msg["title"], kind="hosted-view", hosted={"url":msg["url"]})
+            if "hidden" in msg: board["visible"] = not msg["hidden"]
+            position = msg.get("order", index if index is not None else len(boards))
+            # Position is in the final array. In a replacement the maximum is
+            # len-1; in an addition len is the append position.
+            if position > len(boards) - (1 if existing else 0):
+                raise InvalidAsset("order is outside the catalog")
+            if index is not None: boards.pop(index)
+            boards.insert(position, board)
+            catalog["requires"]["host_api"] = max(2, catalog["requires"]["host_api"])
+            return {"replaced": existing is not None, "order":position, "changed":True}
+        if self._store is None:
+            raise AssetStoreError("asset store not started")
+        return self._store.mutate_dashboard_catalog(spec_id="pentacle__dashboard_catalog", asset_id="dashboard-catalog", edit=edit)
+
+    @staticmethod
+    def _dashboard_error(request_id: str, code: str, **extra: Any) -> dict:
+        return {"type":"dashboard.error", "request_id":request_id, "error_code":code, "error":code, **extra}
 
     # -- dispatch (lifted) -------------------------------------------------
 
@@ -163,14 +254,14 @@ class Assets:
         )
         # Check and write in ONE call on the store's single worker thread, so no
         # other publish can interleave between the ownership check and the write.
-        record, unchanged = await self._run(self._publish_checked, producer, principal, fields, auth)
+        record, unchanged = await self._run(self._publish_checked, producer, principal, fields, msg)
         if unchanged:
             return {"type": "asset.publish.ok", "request_id": request_id,
                     "asset": record, "unchanged": True}
         await self._broadcast_update(record)
         return {"type": "asset.publish.ok", "request_id": request_id, "asset": record}
 
-    def _publish_checked(self, producer: Any, principal: bool, fields: dict, auth: dict) -> tuple[dict, bool]:
+    def _publish_checked(self, producer: Any, principal: bool, fields: dict, msg: dict) -> tuple[dict, bool]:
         """Runs on the store worker thread. A report producer's asset id is
         immutable: an identical stored form is a no-op, anything else is refused,
         and no other caller may claim its producer id or write one of its ids
@@ -178,6 +269,7 @@ class Assets:
         publish onto the existing row and keeps its producer)."""
         if self._store is None:
             raise AssetStoreError("asset store not started")
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         records = self._store.find_assets_by_id(fields["asset_id"]) if fields["asset_id"] else []
         same_spec = [r for r in records if fields["spec_id"] and r.get("spec_id") == fields["spec_id"]]
         # Resolve the row the store will update: spec+id first, then the
@@ -198,6 +290,22 @@ class Assets:
                 raise InvalidAsset("catalog content type cannot be replaced")
             if fields["spec_id"] and target.get("spec_id") != fields["spec_id"]:
                 raise InvalidAsset("catalog publish conflicts with an existing asset under a different spec")
+        targets = records
+        catalog_target = (fields["content_type"] == "dashboard-catalog"
+            or (fields["spec_id"] == "pentacle__dashboard_catalog" and fields["asset_id"] == "dashboard-catalog")
+            or any(r["content_type"] == "dashboard-catalog" and
+                (r.get("spec_id") == fields["spec_id"] if fields["spec_id"] else
+                 r["host"] == fields["host"] and r["session_name"] == fields["session_name"]) for r in targets))
+        if catalog_target:
+            writer = self._catalog_writer(msg)
+            if fields["content_type"] != "dashboard-catalog":
+                raise InvalidAsset("catalog content type cannot be replaced")
+            body = json.loads(validate_asset_payload("dashboard-catalog", fields["body"]))
+            for board in body["boards"]:
+                if board["kind"] == "hosted-view":
+                    validate_hosted_dashboard_url(board["hosted"]["url"], hosted_dashboard_policy())
+            fields["host"], fields["session_name"] = writer["stream_id"].split(":", 1)
+            fields["stream_id"] = writer["stream_id"]
         if principal and same_spec:
             existing = same_spec[0]
             try:
@@ -274,7 +382,19 @@ class Assets:
                 "asset": {**record, "read": bool(record.get("read_at"))}}
 
     async def _asset_delete(self, msg: dict, request_id: str) -> dict:
-        record = await self._require_record(msg)
+        # Look up the actual target before ordinary row authorization: catalog
+        # writes use the stricter internal-seat rule, including cross-host seats.
+        records = await self._call("find_assets_by_id", asset_id=_asset_id(msg))
+        target = self._target_session_key(msg, required=False)
+        candidates = [r for r in records if target is None or self._record_in_session(r, target)]
+        catalogs = [r for r in candidates if r["content_type"] == "dashboard-catalog"]
+        if catalogs:
+            self._catalog_writer(msg)
+            if len(catalogs) != 1:
+                raise ValueError("asset_spec_ambiguous")
+            record = catalogs[0]
+        else:
+            record = await self._require_record(msg)
         await self._call("delete_asset", host=record["host"], session_name=record["session_name"],
                          asset_id=record["asset_id"])
         await self._broadcast_removed(record)

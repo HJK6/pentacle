@@ -50,6 +50,7 @@ except ImportError:  # pragma: no cover
     from websockets.exceptions import ConnectionClosed  # type: ignore[no-redef]
 
 from _shared import operator_auth
+from _shared.asset_schema import hosted_dashboard_policy
 from comms import ATTACHMENT_MAX_BYTES, AttachmentValidationError, validate_send_attachments
 import store_lifecycle_authority as lifecycle_authority
 import store_consent as consent
@@ -3212,6 +3213,7 @@ class Server:
         if not snapshot_requested:
             frames = [{
                 "type": "ready", "snapshot": False, "events_mode": events_mode,
+                "hostedDashboardPolicy": hosted_dashboard_policy(),
             }]
             if self._any_composite_enabled():
                 frames[0]["capabilities"] = {"assistant_composite_v1": True}
@@ -3319,6 +3321,8 @@ class Server:
         if self._work_lanes_capable_for_message(msg):
             # The hello bootstrap carries the same projection as the push frame.
             snapshot["work_lanes"] = await self.work_lanes.current()
+        hello["hostedDashboardPolicy"] = hosted_dashboard_policy()
+        snapshot["hostedDashboardPolicy"] = hello["hostedDashboardPolicy"]
         frames: list[dict[str, Any]] = [hello, snapshot]
         if "hosts.stats" not in exclude_event_types:
             frames.append(self.hosts_stats_frame())
