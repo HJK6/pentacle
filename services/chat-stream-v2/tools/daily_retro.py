@@ -11,10 +11,12 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -102,6 +104,7 @@ class Settings:
     primary_composite: str = "bart:assistant"
     self_assignment_exclusions: list[str] = field(default_factory=list)
     producers: list[str] = field(default_factory=lambda: ["sol"])
+    usage_spec_id: str | None = None
 
     @classmethod
     def load(cls, path):
@@ -131,11 +134,14 @@ class Settings:
         producers = data.get("producers", ["sol"])
         if producers != ["sol"]:
             raise ValueError("producers must be exactly [sol]")
+        usage_spec_id = data.get("usage_spec_id")
+        if usage_spec_id is not None and not valid_work_id(usage_spec_id):
+            raise ValueError("usage_spec_id must be one valid work ID or null")
         return cls(memory, state, data["ws_url"], Path(data["token_path"]), data["host"],
                    bool(data.get("isolated")), path,
                    Path(data["primary_store"]) if data.get("primary_store") else None,
                    Path(data["primary_archive"]) if data.get("primary_archive") else None,
-                   data.get("primary_composite", "bart:assistant"), exclusions, producers)
+                   data.get("primary_composite", "bart:assistant"), exclusions, producers, usage_spec_id)
 
     def rpc(self):
         return Config(self.ws_url, self.token_path.read_text().strip(), self.host,
@@ -1214,6 +1220,79 @@ def observed_outcome(status, baseline):
     return "observed_unchanged"
 
 
+def read_usage_rollup(settings):
+    """Read the existing unbounded CLI envelope; no aggregate/time inference."""
+    identity = getattr(settings, "usage_spec_id", None)
+    if not valid_work_id(identity):
+        return None
+    try:
+        response = subprocess.run(["agent-orch", "usage", "rollup", "--spec", identity, "--json"],
+                                  capture_output=True, text=True, check=True, timeout=30)
+        envelope = json.loads(response.stdout)
+        specs = envelope.get("specs") if isinstance(envelope, dict) else None
+        if not isinstance(specs, list):
+            return None
+        matching = [row for row in specs if isinstance(row, dict) and row.get("spec_id") == identity]
+        return matching[0] if len(matching) == 1 else None
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return None
+
+
+def recorded_producer_streams(root):
+    streams = set()
+    def retain(row):
+        if not isinstance(row, dict):
+            return
+        admission = row.get("admission")
+        admission = admission if isinstance(admission, dict) else {}
+        session = admission.get("session")
+        session = session if isinstance(session, dict) else {}
+        for identity in (row.get("stream_id"), admission.get("stream_id"), session.get("stream_id")):
+            if isinstance(identity, str) and identity:
+                streams.add(identity)
+    for name in STAGES:
+        retain(read(root / f"{name}.json", {}))
+        attempts = read(root / f"{name}-attempts.json", [])
+        if isinstance(attempts, list):
+            for attempt in attempts:
+                retain(attempt)
+    summary = read(root / "summary.json", {})
+    cost = summary.get("producer_cost", {}) if isinstance(summary, dict) else {}
+    for identity in cost.get("streams", []) if isinstance(cost, dict) else []:
+        if isinstance(identity, str) and identity:
+            streams.add(identity)
+    return sorted(streams)
+
+
+def producer_cost(settings, run_id, rollup):
+    streams = recorded_producer_streams(settings.state_root / "runs" / run_id)
+    unknown = {"state": "unknown", "dollars": None, "streams": streams}
+    if not valid_work_id(getattr(settings, "usage_spec_id", None)):
+        return unknown
+    codex = rollup.get("codex") if isinstance(rollup, dict) else None
+    rows = codex.get("by_stream") if isinstance(codex, dict) else None
+    if not isinstance(rows, list) or not streams:
+        return unknown
+    by_id = {}
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("stream_id"), str):
+            by_id.setdefault(row["stream_id"], []).append(row)
+    usable, complete = [], True
+    for identity in streams:
+        matches = by_id.get(identity, [])
+        row = matches[0] if len(matches) == 1 else {}
+        dollars = row.get("dollars")
+        if isinstance(dollars, bool) or not isinstance(dollars, (int, float)) or not math.isfinite(dollars) or dollars < 0:
+            complete = False
+            continue
+        usable.append(dollars)
+        value = row.get("completeness")
+        complete = complete and not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value == 1.0
+    if not usable:
+        return unknown
+    return {"state": "measured" if complete else "partial", "dollars": sum(usable), "streams": streams}
+
+
 def weekly_summary(settings, end_day):
     """Account from retained receipts; missing measurements stay unknown."""
     end = datetime.fromisoformat(end_day).date()
@@ -1233,6 +1312,8 @@ def weekly_summary(settings, end_day):
         "current_work": [], "current_work_counts": {"defer": 0, "propose": 0, "authorized": 0, "investigate": 0},
         "verified_outcomes": 0, "shipped_observed": 0, "unverified_ownership": 0, "oldest_unresolved": None,
         "dot_measurements": {"sample_receipts": [], "blocked_seconds": [], "correction_rounds": [], "avoidable_stops": []}}
+    result["producer_costs"] = []
+    rollup = read_usage_rollup(settings)
     outcome_receipts = set()
 
     def account_outcome(outcome):
@@ -1265,6 +1346,8 @@ def weekly_summary(settings, end_day):
             result["missing_runs"].append(day)
             continue
         result["runs_collected"] += 1
+        result["producer_costs"].append({"run_id": day, "producer_cost": producer_cost(settings, day, rollup),
+                                         "fd_cost": {"unknown_reason": "shared_fd_seat"}})
         result["sources_selected"] += len(collection["sources"])
         for key in ("deferred", "baseline_not_reviewed"):
             result["retro_coverage"][key] += collection.get("coverage", {}).get(key, 0)
@@ -1406,7 +1489,11 @@ def weekly_summary(settings, end_day):
 def retain_weekly_summary(settings, run_id):
     day = datetime.fromisoformat(run_id).date()
     rolling = weekly_summary(settings, run_id)
-    atomic(settings.state_root / "runs" / run_id / "summary.json", rolling)
+    summary_path = settings.state_root / "runs" / run_id / "summary.json"
+    if not summary_path.exists():
+        current = next((row["producer_cost"] for row in rolling["producer_costs"] if row["run_id"] == run_id),
+                       {"state": "unknown", "dollars": None, "streams": []})
+        atomic(summary_path, {**rolling, "producer_cost": current, "fd_cost": {"unknown_reason": "shared_fd_seat"}})
     # Sunday closes the local week. A later first review catches up the prior
     # week; no timer or additional model is admitted.
     week_end = day if day.weekday() == 6 else day - timedelta(days=day.weekday() + 1)
@@ -1640,6 +1727,11 @@ class Pipeline:
                 raise RuntimeError("legacy Astra cannot admit a new or replacement producer")
             if not stage.get("generation"):
                 raise RuntimeError("owned generation unproven; cleanup and new admission blocked")
+        if daily and (not stage.get("stream_id") or stage.get("failed")):
+            if not valid_work_id(self.settings.usage_spec_id):
+                raise ValueError("usage_spec_id required for new daily producer admission")
+            if stage and not stage.get("failed") and stage.get("payload", {}).get("spec_id") != self.settings.usage_spec_id:
+                raise ValueError("retained producer admission usage_spec_id mismatch; exact intent preserved")
         model, effort = ("gpt-6.1-sol", "medium") if name == "sol" else ("gpt-6-astra", "high")
         if not stage:
             attempt = 1
@@ -1665,6 +1757,8 @@ class Pipeline:
                                  "self_close_on_completion": True,
                                  "request_id": key, "idempotency_key": key,
                                  "initial_prompt": worker_prompt(self.settings, manifest, name, input_path)}}
+            if daily:
+                stage["payload"]["spec_id"] = self.settings.usage_spec_id
             atomic(receipt_path, stage)  # Intent survives interruption before/after admission.
         if not stage.get("stream_id"):
             # Repeating the exact spawn key is the existing admission reconciliation contract.
@@ -2510,7 +2604,7 @@ async def rehearse(settings, workers, evidence_dir):
         send_once = delivery.send_once
         send_receipt_once = delivery.send_receipt_once
 
-    pipeline = Pipeline(replace(settings, host=workers.host), RehearsalTransport())
+    pipeline = Pipeline(replace(settings, host=workers.host, usage_spec_id=workers.usage_spec_id), RehearsalTransport())
     with locked(settings.state_root / "run.lock"):
         manifest = collect(settings, datetime.now(timezone.utc))
         required = {"spec_fixture_repeat_a", "spec_fixture_repeat_b", "spec_fixture_serious",

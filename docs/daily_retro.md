@@ -552,3 +552,30 @@ Publish the weekly gap headline with new-this-week and actionable current first.
 Keep the retained initial terminal-format baseline on one labelled line; never
 combine it into a summed daily-gap headline. Unknown and stale inventory labels
 remain visible.
+
+### Per-run producer usage
+
+The portable `usage_spec_id` default is null. Set one valid work ID before new
+ daily producer admission; absence refuses with `usage_spec_id required`. Each
+new producer payload records that configured `spec_id`. An unresolved retained
+admission intent with an absent or different tag is refused without changing its
+payload or replay key. Already-admitted legacy workers can still await and close
+without the key. History execution retains its existing admission contract.
+Rehearsal propagates the explicitly configured worker usage identity.
+
+Cost reads the existing `agent-orch usage rollup --spec <usage_spec_id> --json`
+without date bounds and selects the unique matching spec's `codex.by_stream`
+rows. Only recorded producer stream IDs, including retries and owned legacy
+stages, are included once. `producer_cost` contains sorted `streams`, `dollars`
+and `state`: `measured` requires every stream's valid row with completeness 1;
+`partial` sums usable rows when any coverage is missing or incomplete; `unknown`
+has null dollars, never inferred zero. Duplicate rows or invalid/negative/nonfinite
+dollars are unavailable; invalid completeness remains incomplete. Explicit zero
+cost is retained as measured or partial. CLI/read/envelope failure is unknown.
+
+New run summaries retain producer cost and separate
+`fd_cost: {unknown_reason: shared_fd_seat}`. The shared ruling seat is excluded.
+Weekly projections refresh late usage rows using retained producer identities
+without rewriting prior per-run or weekly receipts, including pre-activation
+receipts lacking cost fields. These are recorded costs, not a time-window or
+aggregate estimate.

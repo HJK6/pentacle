@@ -19,6 +19,13 @@ def source(root, name, body="Lesson.", day="2026-09-27", status="completed"):
     return path
 
 
+@pytest.fixture(autouse=True)
+def synthetic_usage(monkeypatch):
+    original = retro.read_usage_rollup
+    monkeypatch.setattr(retro, "read_usage_rollup", lambda settings: None)
+    return original
+
+
 @pytest.fixture
 def config(tmp_path):
     memory = tmp_path / "memory"
@@ -26,7 +33,7 @@ def config(tmp_path):
         (memory / "work" / folder).mkdir(parents=True)
     (tmp_path / "token").write_text("fixture")
     return retro.Settings(memory, tmp_path / "state", "ws://127.0.0.1:12345",
-                          tmp_path / "token", "fixture", isolated=True)
+                          tmp_path / "token", "fixture", isolated=True, usage_spec_id="spec_fixture_usage")
 
 
 def at(text="2026-09-28T05:00:00-05:00"):
@@ -1791,7 +1798,7 @@ def test_failure_records_and_notice_never_persist_or_deliver_message_text(tmp_pa
         (memory / "work" / folder).mkdir(parents=True)
     (tmp_path / "token").write_text("fixture")
     config = retro.Settings(memory, tmp_path / "state", "ws://127.0.0.1:12345", tmp_path / "token", "fixture",
-                            isolated=True)
+                            isolated=True, usage_spec_id="spec_fixture_usage")
     source(config.memory_root, "one")
     dynamic = type(_standin(__import__("random").Random(seed)), (RuntimeError,), {})
     parts = [*parts, dynamic.__name__]
@@ -2803,3 +2810,178 @@ def test_producers_history_rejects_premature_sol_review(config, monkeypatch):
     assert not (root / "review.json").exists() and retro.retained_final(root) is None
     assert asyncio.run(pipeline.history_run(baseline, 1))["delivered"] == [manifest["run_id"]]
     assert len(rpc.spawns) == 2 and retro.retained_final_path(root).name == "astra.json"
+
+
+def cost_stage(config, run_id, streams):
+    root = config.state_root / "runs" / run_id
+    if streams:
+        retro.atomic(root / "sol.json", {"stream_id": streams[0], "admission": {"stream_id": streams[0]}})
+        retro.atomic(root / "sol-attempts.json", [{"stream_id": stream, "admission": {"stream_id": stream}} for stream in streams[1:]])
+    return root
+
+
+def test_producer_cost_config(config, monkeypatch, synthetic_usage):
+    assert retro.Settings.load(fixture_settings_file(config)).usage_spec_id is None
+    for value in (True, "", [], " spec_fixture_usage", "../outside"):
+        with pytest.raises(ValueError, match="usage_spec_id"):
+            retro.Settings.load(fixture_settings_file(config, usage_spec_id=value))
+    settings = retro.Settings.load(fixture_settings_file(config, usage_spec_id="spec_fixture_usage"))
+    source(config.memory_root, "one")
+    manifest = retro.collect(settings, at())
+    rpc = Transport()
+    with pytest.raises(ValueError, match="usage_spec_id required"):
+        asyncio.run(retro.Pipeline(replace(settings, usage_spec_id=None), rpc).worker(manifest, "sol"))
+    assert not rpc.spawns
+    pipeline = retro.Pipeline(settings, rpc)
+    asyncio.run(pipeline.worker(manifest, "sol"))
+    assert next(iter(rpc.spawns.values()))["spec_id"] == "spec_fixture_usage"
+    asyncio.run(pipeline.cleanup(manifest))
+    commands = []
+    def run(command, **kwargs):
+        commands.append(command)
+        return type("Result", (), {"stdout": '{"specs":[{"spec_id":"spec_fixture_usage","codex":{"by_stream":[]}}]}'})()
+    monkeypatch.setattr(retro.subprocess, "run", run)
+    assert synthetic_usage(settings) == {"spec_id": "spec_fixture_usage", "codex": {"by_stream": []}}
+    assert commands == [["agent-orch", "usage", "rollup", "--spec", "spec_fixture_usage", "--json"]]
+
+
+@pytest.mark.parametrize("streams,state,dollars", [(["s1"], "measured", 4), (["s1", "s2"], "partial", 6),
+    (["s1", "s3"], "partial", 4), (["s3"], "unknown", None), (["s4"], "partial", 0)])
+def test_producer_cost_rows(config, streams, state, dollars):
+    cost_stage(config, "2026-10-13", streams)
+    rows = [{"stream_id": "s1", "dollars": 4, "completeness": 1.0},
+        {"stream_id": "s2", "dollars": 2, "completeness": 0.6},
+        {"stream_id": "s4", "dollars": 0, "completeness": None},
+        {"stream_id": "shared-fd", "dollars": 999, "completeness": 1.0},
+        {"stream_id": "other-run", "dollars": 777, "completeness": 1.0}]
+    result = retro.producer_cost(config, "2026-10-13", {"codex": {"by_stream": rows}})
+    assert result == {"state": state, "dollars": dollars, "streams": sorted(set(streams))}
+
+
+@pytest.mark.parametrize("rows,expected", [([], ("unknown", None)),
+    ([{"stream_id": "s1", "dollars": True, "completeness": 1}], ("unknown", None)),
+    ([{"stream_id": "s1", "dollars": -1, "completeness": 1}], ("unknown", None)),
+    ([{"stream_id": "s1", "dollars": float("inf"), "completeness": 1}], ("unknown", None)),
+    ([{"stream_id": "s1", "dollars": 2, "completeness": True}], ("partial", 2)),
+    ([{"stream_id": "s1", "dollars": 2, "completeness": 2}], ("partial", 2)),
+    ([{"stream_id": "s1", "dollars": 2, "completeness": 1}]*2, ("unknown", None))])
+def test_producer_cost_empty_unknown(config, rows, expected):
+    empty = retro.producer_cost(config, "2026-10-12", {"codex": {"by_stream": rows}})
+    assert empty == {"state": "unknown", "dollars": None, "streams": []}
+    cost_stage(config, "2026-10-13", ["s1", "s1"])
+    result = retro.producer_cost(config, "2026-10-13", {"codex": {"by_stream": rows}})
+    assert (result["state"], result["dollars"]) == expected and result["streams"] == ["s1"]
+    for invalid in (None, {}, {"codex": []}, {"codex": {"by_stream": {}}}):
+        assert retro.producer_cost(config, "2026-10-13", invalid)["state"] == "unknown"
+
+
+def test_producer_cost_refresh(config, monkeypatch):
+    root = cost_stage(config, "2026-10-13", ["s1", "s2"])
+    retro.atomic(root / "collection.json", {"run_id": "2026-10-13", "sources": [], "collected_at": "2026-10-13T10:00:00Z"})
+    rows = [{"stream_id": "s1", "dollars": 4, "completeness": 1.0}]
+    monkeypatch.setattr(retro, "read_usage_rollup", lambda settings: {"codex": {"by_stream": list(rows)}})
+    retro.retain_weekly_summary(config, "2026-10-13")
+    original = (root / "summary.json").read_bytes()
+    assert retro.read(root / "summary.json")["producer_cost"] == {"state": "partial", "dollars": 4, "streams": ["s1", "s2"]}
+    assert retro.read(root / "summary.json")["fd_cost"] == {"unknown_reason": "shared_fd_seat"}
+    rows.append({"stream_id": "s2", "dollars": 2, "completeness": 1.0})
+    # Retained producer IDs remain known even if an older stage was archived.
+    (root / "sol-attempts.json").unlink()
+    summary = retro.weekly_summary(config, "2026-10-18")
+    item = next(item for item in summary["producer_costs"] if item["run_id"] == "2026-10-13")
+    assert item["producer_cost"] == {"state": "measured", "dollars": 6, "streams": ["s1", "s2"]}
+    assert (root / "summary.json").read_bytes() == original
+    retro.retain_weekly_summary(config, "2026-10-13")
+    assert (root / "summary.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("response", [None, "not-json", {}, {"specs": []},
+    {"specs": [{"spec_id": "other", "codex": {"by_stream": []}}]},
+    {"specs": [{"spec_id": "spec_fixture_usage", "codex": {"by_stream": []}}] * 2}])
+def test_producer_cost_cli_envelope(config, monkeypatch, synthetic_usage, response):
+    def run(*args, **kwargs):
+        if response is None:
+            raise OSError("synthetic unavailable")
+        return type("Result", (), {"stdout": response if isinstance(response, str) else json.dumps(response)})()
+    monkeypatch.setattr(retro.subprocess, "run", run)
+    assert synthetic_usage(config) is None
+    assert synthetic_usage(replace(config, usage_spec_id=None)) is None
+
+
+def test_producer_cost_stream_receipts_and_legacy_bytes(config, monkeypatch):
+    root = cost_stage(config, "2026-10-13", ["s1", "s2"])
+    retro.atomic(root / "astra.json", {"admission": {"session": {"stream_id": "s3"}}})
+    retro.atomic(root / "final-astra.json", {"admission": {"stream_id": "s4"}})
+    retro.atomic(root / "delivery.json", {"attempts": [{"target": "shared-fd", "confirmed": True}]})
+    assert retro.recorded_producer_streams(root) == ["s1", "s2", "s3", "s4"]
+    retro.atomic(root / "collection.json", {"run_id": "2026-10-13", "sources": []})
+    retro.atomic(root / "summary.json", {"pre_activation_summary": True})
+    prior = config.state_root / "weekly/2026-W41.json"
+    retro.atomic(prior, {"week": "2026-W41", "generated_by_run": "2026-10-11", "summary": {"retained": True}})
+    original = {p: p.read_bytes() for p in [root / "summary.json", prior]}
+    result = retro.retain_weekly_summary(config, "2026-10-13")
+    assert result["summary"] == {"retained": True}
+    assert {p: p.read_bytes() for p in original} == original
+    assert retro.producer_cost(replace(config, usage_spec_id=None), "2026-10-13",
+        {"codex": {"by_stream": [{"stream_id": "s1", "dollars": 4, "completeness": 1}]}})["dollars"] is None
+
+
+def test_producer_cost_untagged_intent_refuses_without_mutation(config):
+    source(config.memory_root, "one")
+    manifest = retro.collect(config, at())
+    root = config.state_root / "runs" / manifest["run_id"]
+    stage = {"attempt": 1, "payload": {"request_id": "unresolved-legacy-admission"}}
+    retro.atomic(root / "sol.json", stage)
+    before = (root / "sol.json").read_bytes()
+    rpc = Transport()
+    with pytest.raises(ValueError, match="exact intent preserved"):
+        asyncio.run(retro.Pipeline(config, rpc).worker(manifest, "sol"))
+    assert not rpc.spawns and (root / "sol.json").read_bytes() == before
+    # A proven legacy admitted worker is awaitable without a new usage identity.
+    stage.update(stream_id="fixture:unresolved-legacy-admission", generation="old-generation", report_id="old-report")
+    retro.atomic(root / "sol.json", stage)
+    class Awaited(Transport):
+        async def await_report_once(self, *args, **kwargs):
+            return {"type": "await_report.ok", "ok": True, "result_kind": "report", "report": {
+                "report_id": "old-report", "effective_model": "gpt-6.1-sol", "effective_effort": "medium",
+                "extras": {"daily_retro": {"run_id": manifest["run_id"], "candidates": [], "dispositions": [
+                    {"id": row["id"], "fingerprint": row["fingerprint"], "reason": "Retained legacy source reviewed."} for row in manifest["sources"]]}}}}
+    legacy = Awaited(); pipeline = retro.Pipeline(replace(config, usage_spec_id=None), legacy)
+    assert asyncio.run(pipeline.worker(manifest, "sol"))["packet"]
+    asyncio.run(pipeline.cleanup(manifest))
+    assert not legacy.spawns and legacy.closed == [(stage["stream_id"], "old-generation")]
+
+
+@pytest.mark.parametrize("completeness", [None, -1, float("nan"), float("inf"), "1", False])
+def test_producer_cost_invalid_completeness(config, completeness):
+    cost_stage(config, "2026-10-13", ["s1"])
+    assert retro.producer_cost(config, "2026-10-13", {"codex": {"by_stream": [
+        {"stream_id": "s1", "dollars": 0, "completeness": completeness}]}}) == {
+            "state": "partial", "dollars": 0, "streams": ["s1"]}
+
+
+def test_producer_cost_rehearsal_configured_identity(config, monkeypatch):
+    for name in ("repeat_a", "repeat_b", "serious", "fixed", "owned", "uncertain"):
+        source(config.memory_root, "fixture_" + name)
+    manifest = retro.collect(config, at())
+    monkeypatch.setattr(retro, "collect", lambda *args: manifest)
+    seen = []
+    class RehearsalPipeline:
+        def __init__(self, settings, rpc):
+            seen.append(settings.usage_spec_id)
+        async def worker(self, current, stage):
+            assert stage == "sol"
+            return {"packet": {"candidates": [
+                {"citations": ["spec_fixture_serious"]},
+                {"citations": ["spec_fixture_repeat_a", "spec_fixture_repeat_b"], "consequence": "repeated"},
+                {"citations": ["spec_fixture_uncertain"], "uncertainty": "unknown"}]},
+                "report": {"report_id": "fixture-sol"}}
+        async def deliver(self, *args):
+            pass
+        async def cleanup(self, *args):
+            pass
+    monkeypatch.setattr(retro, "Pipeline", RehearsalPipeline)
+    monkeypatch.setattr(retro, "ProducerTransport", lambda settings: Transport())
+    workers = replace(config, memory_root=config.memory_root.parent / "worker-memory", usage_spec_id="spec_fixture_usage")
+    asyncio.run(retro.rehearse(replace(config, usage_spec_id=None), workers, config.state_root.parent / "evidence"))
+    assert seen == ["spec_fixture_usage"]
