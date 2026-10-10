@@ -244,7 +244,9 @@
       if (entry.poll_interval_ms) {
         board.pollInterval = entry.poll_interval_ms;
         board.pollFn = async refs => {
-          await refs.ready; if (refs.disposed || !refs.adapter?.pollFn) return {};
+          await refs.ready; if (refs.disposed) return {};
+          if (!refs.adapter) return { error: 'Dashboard failed to load' };
+          if (!refs.adapter.pollFn) return {};
           try { const reply = await refs.adapter.pollFn(refs.inner); if (!refs.disposed && reply?.error) errorCard(refs.container, `Board failed to load: ${reply.error}`); return reply; }
           catch (error) { if (!refs.disposed) errorCard(refs.container, `Board failed to load: ${error.message || error}`); throw error; }
         };
