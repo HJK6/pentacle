@@ -2,7 +2,7 @@
 // not a sandbox: installed adapters execute in the renderer's origin.
 (function(root) {
   'use strict';
-  const HOST_API = 1;
+  const HOST_API = 2;
   const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
   const object = (v, p) => { if (!v || typeof v !== 'object' || Array.isArray(v)) fail(p, 'must be an object'); };
   const fail = (p, m) => { throw new Error(`${p}: ${m}`); };
@@ -38,6 +38,21 @@
       const url = new URL(value); const authority = value.split('/')[2];
       return ['http:', 'https:'].includes(url.protocol) && !!url.hostname && !url.username && !url.password && !authority.includes('@') && !authority.includes('\\');
     } catch { return false; }
+  }
+  // Policy is supplied by the authenticated daemon, never by a catalog.
+  function admitHostedUrl(value, policy) {
+    if (!policy || typeof policy.tailnetSuffix !== 'string' || typeof policy.pentacleOrigin !== 'string') return null;
+    const suffix = policy.tailnetSuffix.toLowerCase();
+    const dns = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+    if (!dns.test(suffix) || !suffix.endsWith('.ts.net') || suffix === 'ts.net') return null;
+    if (!plainHttpUrl(value) || /[\\?#]/.test(value)) return null;
+    try {
+      const canonical = new URL(policy.pentacleOrigin), url = new URL(value);
+      if (canonical.protocol !== 'https:' || canonical.origin !== policy.pentacleOrigin || canonical.username || canonical.password) return null;
+      if (!dns.test(canonical.hostname) || !canonical.hostname.endsWith('.' + suffix)) return null;
+      if (url.protocol !== 'https:' || !dns.test(url.hostname) || !url.hostname.endsWith('.' + suffix) || url.hostname === canonical.hostname) return null;
+      return url.href;
+    } catch { return null; }
   }
   // Python json.dumps uses a space after separators; measure the same UTF-8
   // representation rather than admitting oversized entries with compact JSON.
@@ -84,8 +99,10 @@
       match(b, 'id', `${q}.id`, patterns.id); if (ids.has(b.id)) fail(`${q}.id`, `duplicate board id '${b.id}'`); ids.add(b.id);
       string(b, 'name', `${q}.name`, 64);
       if (own(b, 'description') && (typeof b.description !== 'string' || chars(b.description) > 200)) fail(`${q}.description`, 'must be a string of at most 200 characters');
-      const common = ['id', 'name', 'description', 'kind'];
-      if (b.kind === 'report') { unknown(b, q, [...common, 'report']); validateReport(b.report, `${q}.report`); }
+      const common = ['id', 'name', 'description', 'kind', 'visible'];
+      if (own(b, 'visible') && typeof b.visible !== 'boolean') fail(`${q}.visible`, 'must be a boolean');
+      if (b.kind === 'built-in') unknown(b, q, common);
+      else if (b.kind === 'report') { unknown(b, q, [...common, 'report']); validateReport(b.report, `${q}.report`); }
       else if (b.kind === 'web-adapter') {
         unknown(b, q, [...common, 'web', 'actions', 'poll_interval_ms']); unknown(b.web, `${q}.web`, ['script', 'sha256', 'css', 'css_sha256']);
         match(b.web, 'script', `${q}.web.script`, patterns.path); if (!b.web.script.endsWith('.js')) fail(`${q}.web.script`, 'must be a .js path'); match(b.web, 'sha256', `${q}.web.sha256`, patterns.hash);
@@ -97,8 +114,8 @@
         if (own(b, 'poll_interval_ms')) integer(b.poll_interval_ms, `${q}.poll_interval_ms`, 2000, 600000);
       } else if (b.kind === 'hosted-view') {
         unknown(b, q, [...common, 'hosted']); unknown(b.hosted, `${q}.hosted`, ['url']); string(b.hosted, 'url', `${q}.hosted.url`);
-        if (!plainHttpUrl(b.hosted.url)) fail(`${q}.hosted.url`, 'must be an absolute http(s) URL with a host and no userinfo');
-      } else fail(`${q}.kind`, 'must be one of: hosted-view, report, web-adapter');
+        if (!plainHttpUrl(b.hosted.url) || !/^https:/i.test(b.hosted.url) || /[\\?#]/.test(b.hosted.url)) fail(`${q}.hosted.url`, 'must be an absolute HTTPS URL with a host, no userinfo, query or fragment');
+      } else fail(`${q}.kind`, 'must be one of: built-in, hosted-view, report, web-adapter');
     });
     if (v.requires.host_api > HOST_API) { const error = new Error(`requires.host_api ${v.requires.host_api} exceeds ${HOST_API}`); error.unsupported = true; throw error; }
     return v;
@@ -236,40 +253,24 @@
       return board;
     }
     function merge(result, builtins, dependencies = {}) {
-      const boards = [...builtins], errors = [];
+      const boards = [], errors = [];
       activeVersion = result.catalog?.catalog_version || null;
       host.document?.querySelectorAll('link[data-catalog-version]').forEach(tag => { tag.disabled = tag.dataset.catalogVersion !== activeVersion; });
       if (!result.catalog) return { boards, errors };
       for (const entry of result.catalog.boards) {
-        if (boards.some(b => b.id === entry.id)) { errors.push(`Board failed to load: duplicate built-in id ${entry.id}`); continue; }
+        if (entry.visible === false) continue;
         try {
-          if (entry.kind === 'web-adapter') boards.push(wrapAdapter(result.catalog, entry));
+          if (entry.kind === 'built-in') {
+            const implementation = builtins.find(board => board.id === entry.id);
+            boards.push(implementation ? { ...implementation, ...entry, catalog: true } :
+              { ...entry, catalog: true, mount: container => errorCard(container, 'Dashboard implementation unavailable', 'dashboard-board-error', 'unavailable') });
+          } else if (entry.kind === 'web-adapter') boards.push(wrapAdapter(result.catalog, entry));
           else if (entry.kind === 'report') boards.push({ ...dependencies.reportBoard.createBoard(entry, { assetList: p => cc.assetList(p), assetGet: p => cc.assetGet(p), renderAsset: dependencies.renderAsset }), catalog: true });
           else {
             const viewer = dependencies.hostedBoard;
             boards.push({ ...entry, catalog: true,
-              mount(container, ctx = {}) {
-                container.dataset.boardState = 'loading';
-                const config = { ...ctx.config, dashboards: { ...ctx.config?.dashboards, modeler3d: { url: entry.hosted.url } } };
-                try {
-                  const inner = viewer.mount(container, { ...ctx, config });
-                  container.querySelector('h1').textContent = entry.name;
-                  const card = container.ownerDocument.createElement('p'); card.dataset.testid = 'dashboard-board-error'; card.setAttribute('role', 'alert'); card.hidden = true;
-                  inner.shell.appendChild(card);
-                  const refs = { inner, observer: null, disposed: false };
-                  const sync = () => {
-                    if (refs.disposed) return;
-                    const state = inner.shell.dataset.modelerState;
-                    container.dataset.boardState = state === 'loaded' ? 'ready' : state === 'loading' ? 'loading' : 'error';
-                    const frame = container.querySelector('iframe'); if (frame) frame.title = `${entry.name} viewer`;
-                    card.hidden = container.dataset.boardState !== 'error';
-                    card.textContent = card.hidden ? '' : `Board failed to load: ${inner.shell.querySelector('.modeler-status')?.textContent || 'viewer unavailable'}`;
-                  };
-                  refs.observer = new container.ownerDocument.defaultView.MutationObserver(sync);
-                  refs.observer.observe(inner.shell, { attributes: true, attributeFilter: ['data-modeler-state'] });
-                  sync(); return refs;
-                } catch (e) { errorCard(container, `Board failed to load: ${e.message || e}`); return null; }
-              }, unmount: refs => { if (refs) { refs.disposed = true; refs.observer?.disconnect(); viewer.unmount(refs.inner); } } });
+              mount: (container, ctx = {}) => viewer.mount(container, { ...ctx, hostedUrl: entry.hosted.url, name: entry.name }),
+              unmount: refs => viewer.unmount(refs) });
           }
         } catch (error) { boards.push({ ...entry, catalog: true, mount: container => errorCard(container, `Board failed to load: ${error.message || error}`) }); }
       }
@@ -277,7 +278,7 @@
     }
     return { refresh, merge, loadTag, loadAdapter, cancel: () => { generation++; } };
   }
-  const api = { HOST_API, validateCatalog, keyFormatWidth, plainHttpUrl, integrity, fileUrl, actions, errorCard, createLoader };
+  const api = { HOST_API, validateCatalog, keyFormatWidth, plainHttpUrl, admitHostedUrl, integrity, fileUrl, actions, errorCard, createLoader };
   root.DashboardCatalogLoader = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

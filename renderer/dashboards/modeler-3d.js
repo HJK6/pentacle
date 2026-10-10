@@ -1,140 +1,93 @@
-// Configured viewer adapter. "Loaded" means navigation completed, not that a
-// cross-origin model or authenticated page was verified (see dashboards_view.md).
+// Generic hosted panel. A frame load proves navigation, not app health.
 (function(root) {
   'use strict';
-  const LOAD_TIMEOUT_MS = 15000;
-
-  function viewerUrl(config) {
-    const value = config?.dashboards?.modeler3d?.url;
-    if (typeof value !== 'string' || !value.trim()) return null;
-    try {
-      const url = new URL(value);
-      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
-      return url.href;
-    } catch { return null; }
-  }
-
-  function mount(container, { config = {} } = {}) {
+  const urls = root.DashboardCatalogLoader || require('./catalog_loader');
+  const INVALIDATE = 'pentacle:hosted-dashboard-invalidate';
+  function mount(container, { hostedUrl, name = 'Dashboard', getHostedPolicy = () => root.hostedDashboardPolicy } = {}) {
     const doc = container.ownerDocument;
-    const shell = doc.createElement('section');
-    shell.className = 'modeler-3d';
-    const header = doc.createElement('header');
-    header.className = 'modeler-header';
-    const title = doc.createElement('h1');
-    title.textContent = '3D Modeler';
-    const controls = doc.createElement('div');
-    controls.className = 'modeler-controls';
-    const open = doc.createElement('a');
-    open.dataset.modelerOpen = '';
+    const shell = doc.createElement('section'); shell.className = 'modeler-3d';
+    const header = doc.createElement('header'); header.className = 'modeler-header';
+    const title = doc.createElement('h1'); title.textContent = name;
+    const controls = doc.createElement('div'); controls.className = 'modeler-controls';
+    // A button avoids a cached href becoming an ungated browser navigation.
+    const open = doc.createElement('button'); open.type = 'button'; open.dataset.modelerOpen = '';
     open.textContent = 'Open in new window';
-    open.target = '_blank';
-    open.rel = 'noopener noreferrer';
-    const reload = doc.createElement('button');
-    reload.type = 'button';
-    reload.dataset.modelerReload = '';
-    reload.textContent = 'Reload';
-    controls.append(open, reload);
-    header.append(title, controls);
-    const status = doc.createElement('p');
-    status.className = 'modeler-status';
-    status.setAttribute('role', 'status');
-    status.setAttribute('aria-live', 'polite');
-    const openError = doc.createElement('p');
-    openError.className = 'modeler-open-error';
-    openError.setAttribute('role', 'alert');
-    openError.hidden = true;
-    const viewport = doc.createElement('div');
-    viewport.className = 'modeler-viewport';
-    shell.append(header, status, openError, viewport);
-    container.appendChild(shell);
+    const reload = doc.createElement('button'); reload.type = 'button'; reload.dataset.modelerReload = ''; reload.textContent = 'Reload';
+    controls.append(open, reload); header.append(title, controls);
+    const status = doc.createElement('p'); status.className = 'modeler-status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+    const openError = doc.createElement('p'); openError.className = 'modeler-open-error'; openError.setAttribute('role', 'alert'); openError.hidden = true;
+    const viewport = doc.createElement('div'); viewport.className = 'modeler-viewport';
+    shell.append(header, status, openError, viewport); container.appendChild(shell);
     const refs = { container, shell, frame: null, timer: null, generation: 0, disposed: false, cleanupFrame: null };
-
+    const denied = 'Dashboard unavailable: hosted dashboards require current identity mode.';
     function setState(state, message) {
       shell.dataset.modelerState = state;
-      status.textContent = message;
+      container.dataset.boardState = state === 'loaded' ? 'ready' : state === 'loading' ? 'loading' : state === 'unavailable' ? 'unavailable' : 'error';
+      status.textContent = message; reload.textContent = state === 'blocked' ? 'Retry' : 'Reload';
+      root.PentacleHarness?.emit?.('dashboard:state', { subsystem: 'dashboards', bug_ref: 'hosted_dashboards_registry', data: { state } });
     }
     function clearFrame() {
-      refs.generation++;
-      if (refs.timer !== null) clearTimeout(refs.timer);
-      refs.timer = null;
-      refs.cleanupFrame?.();
-      refs.cleanupFrame = null;
-      refs.frame?.remove();
-      refs.frame = null;
+      refs.generation++; clearTimeout(refs.timer); refs.timer = null; refs.cleanupFrame?.(); refs.cleanupFrame = null;
+      refs.frame?.remove(); refs.frame = null;
     }
-    function load() {
+    function publishMode(mode) {
+      root.hostedDashboardAuthMode = mode;
+      root.dispatchEvent(new root.Event('pentacle:hosted-dashboard-mode'));
+    }
+    function invalidate() { if (refs.disposed) return; publishMode('unknown'); clearFrame(); setState('unavailable', denied); }
+    async function admission(generation) {
+      let config;
+      try {
+        const reply = await root.fetch('/api/config', { cache: 'no-store', credentials: 'same-origin' });
+        if (!reply.ok) throw Error('config unavailable'); config = await reply.json();
+      } catch {}
+      if (refs.disposed || refs.generation !== generation) return null;
+      publishMode(config?.hostedDashboardAuthMode === 'identity' ? 'identity' : 'unknown');
+      if (config?.hostedDashboardAuthMode !== 'identity') { clearFrame(); setState('unavailable', denied); return null; }
+      const url = urls.admitHostedUrl(hostedUrl, getHostedPolicy());
+      if (!url) { clearFrame(); setState('unavailable', 'Dashboard unavailable: hosted URL policy is unconfigured or refuses this URL.'); return null; }
+      return url;
+    }
+    async function load() {
       if (refs.disposed) return;
-      clearFrame();
-      openError.hidden = true;
-      openError.textContent = '';
-      const url = viewerUrl(config);
-      open.removeAttribute('href');
-      open.setAttribute('aria-disabled', String(!url));
-      if (!url) {
-        setState('unconfigured', 'Viewer unconfigured. Set dashboards.modeler3d.url to an absolute HTTP(S) viewer URL without embedded credentials in local configuration.');
-        return;
-      }
-      open.href = url;
-      setState('loading', 'Loading viewer…');
+      clearFrame(); openError.hidden = true; setState('loading', 'Loading dashboard…');
       const generation = refs.generation;
-      const frame = doc.createElement('iframe');
-      frame.title = '3D Modeler viewer';
-      frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
-      frame.setAttribute('referrerpolicy', 'no-referrer');
-      frame.setAttribute('allow', 'xr-spatial-tracking; fullscreen');
-      frame.setAttribute('loading', 'lazy');
+      const url = await admission(generation); if (!url) return;
+      const frame = doc.createElement('iframe'); frame.title = `${name} viewer`;
+      frame.setAttribute('sandbox', 'allow-scripts allow-same-origin'); frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.setAttribute('allow', 'xr-spatial-tracking; fullscreen'); frame.setAttribute('loading', 'lazy');
       function finish(state, message) {
         if (refs.disposed || refs.generation !== generation || shell.dataset.modelerState !== 'loading') return;
-        if (refs.timer !== null) clearTimeout(refs.timer);
-        refs.timer = null;
-        setState(state, message);
+        clearTimeout(refs.timer); refs.timer = null; setState(state, message);
       }
       const onLoad = () => finish('loaded', 'Loaded');
-      const onError = () => finish('blocked', 'Viewer could not be loaded. The host may refuse framing or require authentication. Open it in a new window or reload.');
-      frame.addEventListener('load', onLoad);
-      frame.addEventListener('error', onError);
-      refs.cleanupFrame = () => {
-        frame.removeEventListener('load', onLoad);
-        frame.removeEventListener('error', onError);
-      };
-      refs.frame = frame;
-      refs.timer = setTimeout(() => finish('blocked', 'Viewer load timed out. The host may be unreachable, refuse framing, or require authentication. Open it in a new window or reload.'), LOAD_TIMEOUT_MS);
-      frame.src = url;
-      viewport.appendChild(frame);
+      const onError = () => finish('blocked', 'Could not open dashboard. Retry.');
+      frame.addEventListener('load', onLoad); frame.addEventListener('error', onError);
+      refs.cleanupFrame = () => { frame.removeEventListener('load', onLoad); frame.removeEventListener('error', onError); };
+      refs.frame = frame; refs.timer = setTimeout(() => finish('blocked', 'Could not open dashboard: navigation timed out. Retry.'), 15000);
+      // Both admission results are current at the sole iframe assignment.
+      frame.src = url; viewport.appendChild(frame);
     }
-    function onOpen(event) {
-      const url = viewerUrl(config);
-      if (!url || refs.disposed) { event.preventDefault(); return; }
-      // Electron denies normal new windows; its existing bridge opens the URL
-      // in the user's browser. Browser-only callers retain a real anchor.
-      if (typeof root.cc?.openExternal !== 'function') return;
-      event.preventDefault();
-      const generation = refs.generation;
-      const failed = () => {
-        if (refs.disposed || generation !== refs.generation) return;
-        openError.textContent = 'Could not open a new window. Open the configured viewer in your browser.';
-        openError.hidden = false;
-      };
-      try { Promise.resolve(root.cc.openExternal(url)).then(result => { if (!result?.ok) failed(); }, failed); }
-      catch { failed(); }
+    async function onOpen(event) {
+      event.preventDefault(); if (refs.disposed) return;
+      const generation = refs.generation, url = await admission(generation); if (!url) return;
+      const failed = () => { if (!refs.disposed && refs.generation === generation) { openError.textContent = 'Could not open a new window.'; openError.hidden = false; } };
+      try {
+        if (typeof root.cc?.openExternal === 'function') { if (!(await root.cc.openExternal(url))?.ok) failed(); }
+        else if (!root.open(url, '_blank', 'noopener,noreferrer')) failed();
+      } catch { failed(); }
     }
-    open.addEventListener('click', onOpen);
-    reload.addEventListener('click', load);
+    open.addEventListener('click', onOpen); reload.addEventListener('click', load); root.addEventListener(INVALIDATE, invalidate);
     refs.dispose = () => {
-      refs.disposed = true;
-      clearFrame();
-      open.removeEventListener('click', onOpen);
-      reload.removeEventListener('click', load);
-      shell.remove();
+      if (refs.disposed) return; refs.disposed = true; clearFrame();
+      open.removeEventListener('click', onOpen); reload.removeEventListener('click', load); root.removeEventListener(INVALIDATE, invalidate); shell.remove();
     };
-    load();
-    return refs;
+    void load(); return refs;
   }
-  function update() { /* Viewer content owns its rendering; no polling. */ }
+  function update() {}
   function unmount(refs) { refs?.dispose?.(); }
-  const dashboard = { id: 'modeler-3d', name: '3D Modeler',
-    description: 'Explore current 3D models in your configured viewer.',
-    color: 'var(--cosmic-green)', mount, update, unmount };
-  if (root?.DASHBOARDS) root.DASHBOARDS.push(dashboard);
+  const dashboard = { mount, update, unmount };
+  // Renderer implementation only: Modeler membership now belongs to the catalog.
+  root.HostedDashboard = dashboard;
   if (typeof module !== 'undefined' && module.exports) module.exports = { dashboard, mount, update, unmount };
 })(typeof window !== 'undefined' ? window : globalThis);

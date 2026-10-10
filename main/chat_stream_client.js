@@ -151,6 +151,7 @@ class ChatStreamClient {
     this._drafts = {};
     this._sessions = [];
     this._capabilities = {};
+    this._hostedDashboardPolicy = null;
     this._schedules = [];
     this._limits = nullLimits();
     this._limitsHealth = null;
@@ -203,6 +204,7 @@ class ChatStreamClient {
   snapshot({ includeEvents = true } = {}) {
     return {
       connected: this.connected,
+      hostedDashboardPolicy: this.connected ? this._hostedDashboardPolicy : null,
       error: this._connectionError,
       state_version: this._stateVersion,
       // The cache is bounded across *all* streams. It is not an authoritative
@@ -1418,6 +1420,7 @@ try {
         this._drafts = msg.drafts || {};
         this._sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
         this._capabilities = msg.capabilities && typeof msg.capabilities === 'object' ? { ...msg.capabilities } : {};
+        this._hostedDashboardPolicy = msg.hostedDashboardPolicy || null;
         this._workLanes = msg.work_lanes && typeof msg.work_lanes === 'object' ? msg.work_lanes : null;
         this._replaceSchedules(msg.schedules);
         if (Object.prototype.hasOwnProperty.call(msg, 'limits')) {

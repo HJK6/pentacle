@@ -24,7 +24,7 @@ function setup(source = pollSource, shellSource = mountSource) {
   function clearInterval(id) { clock.clearTimeout(intervals.get(id)); intervals.delete(id); }
   const mounts = [], unmounts = [], events = [];
   const config = { dashboards: { catalogSpecId: 'spec_example' } };
-  const container = { innerHTML: 'Previous content' };
+  const dom = new (require('jsdom').JSDOM)('<main>Previous content</main>'), container = dom.window.document.querySelector('main');
   const adapter = { id: 'example-board', name: 'Example Board', actions: ['household'], pollInterval: 30000,
     mount(node, ctx) { const refs = { store: ctx.household.store }; mounts.push({ node, ctx, refs }); return refs; },
     unmount(refs) { unmounts.push(refs); },
@@ -32,10 +32,10 @@ function setup(source = pollSource, shellSource = mountSource) {
   const adapters = [adapter];
   const state = { selectedDashboard: adapter.id, dashboardRefs: { store }, dashboardPollToken: 0,
     dashboardState: 'loading', dashboardLastData: null, dashboardError: null };
-  const context = vm.createContext({ window: { DASHBOARDS: adapters,
+  const context = vm.createContext({ window: { MutationObserver: dom.window.MutationObserver, DASHBOARDS: adapters,
     visibleDashboards: () => adapters,
     PentacleHarness: { emit(name, value) { events.push({ name, value }); } } },
-    document: { getElementById(id) { assert.equal(id, 'dashboard-content'); return container; } },
+    document: { createElement: name => dom.window.document.createElement(name), getElementById(id) { assert.equal(id, 'dashboard-content'); return container; } },
     CONFIG: config, householdSelectors, householdStore: store, state, setInterval, clearInterval,
     updateDashboardStatusBadge() {}, renderDashboardList() {} });
   vm.runInContext(`${shellSource}\n${source}`, context);
@@ -48,11 +48,11 @@ test('actual shell mount passes the config, clears content and owns the single i
   const h = setup(); t.after(h.stop);
   h.mount();
   assert.equal(h.mounts.length, 1);
-  assert.equal(h.mounts[0].node, h.container);
+  assert.equal(h.mounts[0].node, h.container.querySelector('.dashboard-inner'));
   assert.equal(h.mounts[0].ctx.config, h.config);
   assert.equal(h.mounts[0].ctx.household.selectors, householdSelectors);
   assert.equal(h.mounts[0].ctx.household.store, h.store);
-  assert.equal(h.container.innerHTML, '');
+  assert.equal(h.container.querySelector('.dashboard-panel-header h1').textContent, 'Example Board');
   assert.equal(h.state.dashboardRefs, h.mounts[0].refs);
   assert.equal(h.server.reads().length, 1);
   assert.equal(h.intervals.size, 1);

@@ -2,7 +2,7 @@
 
 // Runtime catalog delivery through the real web host and fixture daemon.
 // The bridge observer below records requests and delegates unchanged. Only the
-// explicitly labelled empty-list case overlays synthetic visibility config;
+// the empty-list case confirms there is no registration fallback;
 // no catalog/report reply, adapter registration, or browser SRI result is faked.
 const crypto = require('node:crypto');
 const { reportChecks } = require('./web_voice_scenario');
@@ -151,26 +151,25 @@ async function dashboardCatalog(ctx) {
     const before = await session.eval('window.cc.getConfig().then(c => c.dashboards || null)');
     reportChecks(report, [['default profile has no dashboard catalog', !before || !before.catalogSpecId, { before }]]);
     await session.click('#view-dashboards');
-    await session.waitFor("!!document.querySelector('#dashboard-list [data-dashboard-id=\"modeler-3d\"]')");
+    await session.waitFor("document.getElementById('dashboard-content').dataset.boardState === 'empty'");
     const defaults = await observe();
     // Normal chat inventory calls use a stream/session scope. A catalog read,
     // even an erroneous unscoped read with the config unset, has neither.
     const noCatalogRequests = () => session.eval("window.__dashboardCatalogGate.lists.filter(args => !args?.stream_id && !args?.host && !args?.session_name)");
     const defaultRequests = await noCatalogRequests();
     reportChecks(report, [
-      ['unset catalog preserves the default built-ins', defaults.ids.includes('shared-demo') && defaults.ids.includes('modeler-3d') && defaults.version === null, defaults],
+      ['unset catalog has no separately ordered fallback', defaults.ids.length === 0 && defaults.version === null, defaults],
       ['unset catalog issues zero catalog asset.list calls, including boot', defaultRequests.length === 0, { calls: defaultRequests }],
     ]);
 
-    // The actual base registers two built-ins. Exercise the existing empty UI
-    // with a synthetic visibility setting rather than deleting their registry.
+    // Profile visibility settings cannot create catalog membership.
     await observedReload(ctx, true);
     await session.click('#view-dashboards');
     await session.waitFor("document.getElementById('dashboard-content').dataset.boardState === 'empty'");
     const empty = await observe();
     const emptyRequests = await noCatalogRequests();
     reportChecks(report, [
-      ['synthetic hidden-builtins config shows No dashboards configured', empty.ids.length === 0 && empty.text.includes('No dashboards configured') && empty.registered.includes('shared-demo') && empty.registered.includes('modeler-3d'), empty],
+      ['profile visibility cannot create membership', empty.ids.length === 0 && empty.text.includes('No dashboards configured'), empty],
       ['synthetic empty view also makes no catalog request', emptyRequests.length === 0, { calls: emptyRequests }],
     ]);
 
@@ -186,8 +185,8 @@ async function dashboardCatalog(ctx) {
     await prepareCatalogChat(ctx);
     await enter(first.version);
     const loaded = await observe();
-    reportChecks(report, [[`catalog ${first.version} renders after built-ins`, loaded.version === first.version
-      && JSON.stringify(loaded.ids) === JSON.stringify(['shared-demo', 'modeler-3d', ...first.catalog.boards.map(board => board.id)]), loaded]]);
+    reportChecks(report, [[`catalog ${first.version} renders in catalog array order`, loaded.version === first.version
+      && JSON.stringify(loaded.ids) === JSON.stringify(first.catalog.boards.filter(board => board.visible !== false).map(board => board.id)), loaded]]);
 
     const n = await readCatalogAsset(session, fixture.specId);
     reportChecks(report, [
@@ -250,10 +249,10 @@ async function dashboardCatalog(ctx) {
       await assertCatalogChat(ctx, 'adapter SRI error');
       await enter(first.version);
       await session.click('[data-dashboard-id="example-hosted"]');
-      await session.waitFor("document.querySelector('[data-modeler-state]')?.dataset.modelerState === 'loaded'");
+      await session.waitFor("document.querySelector('[data-modeler-state]')?.dataset.modelerState === 'unavailable'");
       const hosted = await session.eval(`(${readDashboardObservation.toString()})()`);
-      reportChecks(report, viewerChecks(hosted, published.boards.find(board => board.id === 'example-hosted').hosted.url)
-        .map(([name, pass, detail]) => [`catalog hosted-view: ${name}`, pass, detail]));
+      reportChecks(report, [['loopback unknown auth mode refuses hosted entry', hosted.state === 'unavailable' && !await session.eval("!!document.querySelector('#dashboard-content iframe')"), hosted]]);
+      // Identity/cache/isolation browser proof is required at integration.
       await assertCatalogChat(ctx, 'hosted-view navigation');
 
       // N+1 is installed and published with the host running. From this point
@@ -277,13 +276,13 @@ async function dashboardCatalog(ctx) {
       ]);
 
       const newer = JSON.parse(first.assetBody);
-      newer.requires.host_api = 2;
+      newer.requires.host_api = 3;
       catalog.publishBody(`${JSON.stringify(newer, null, 2)}\n`);
       await session.click('#view-chats');
       await session.click('#view-dashboards');
-      await session.waitFor("document.querySelector('[data-testid=\"dashboard-catalog-error\"]')?.textContent.includes('requires.host_api 2')");
+      await session.waitFor("document.querySelector('[data-testid=\"dashboard-catalog-error\"]')?.textContent.includes('requires.host_api 3')");
       const unsupported = await observe();
-      reportChecks(report, [['host_api 2 renders unsupported catalog card without stale catalog boards', unsupported.catalogError.startsWith('Dashboard catalog unsupported/malformed:')
+      reportChecks(report, [['host_api 3 renders unsupported catalog card without stale catalog boards', unsupported.catalogError.startsWith('Dashboard catalog unsupported/malformed:')
         && unsupported.catalogError.includes(`(catalog ${first.version})`) && unsupported.version === null && !unsupported.ids.some(id => id.startsWith('example-')), unsupported]]);
       await assertCatalogChat(ctx, 'unsupported catalog');
 

@@ -5,15 +5,9 @@
 
 window.DASHBOARDS = [];
 
-// Visibility is independent of registration: retired adapters keep their code
-// and existing configuration conditions. Explicit hidden IDs always win.
-function visibleDashboards(config = {}) {
-  const options = config?.dashboards || {};
-  const hidden = new Set(Array.isArray(options.hidden) ? options.hidden : []);
-  const visible = window.DASHBOARDS.filter(d => !hidden.has(d.id)
-    && (d.retired !== true || options.showRetired === true));
-  // Stable registration order within each group; prefer active boards by default.
-  return [...visible.filter(d => d.retired !== true), ...visible.filter(d => d.retired === true)];
+// The catalog supplies list membership and order; registration resolves code.
+function visibleDashboards() {
+  return window.DASHBOARDS.filter(board => board.visible !== false);
 }
 window.visibleDashboards = visibleDashboards;
 

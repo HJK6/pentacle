@@ -12,20 +12,20 @@ function contextHarness(actions, sessions = [], mutate = source => source) {
   const source = app.slice(start, app.indexOf('function unmountCurrentDashboard()', start));
   const selectors = Object.freeze({ synthetic: true }), store = Object.freeze({ synthetic: true });
   const calls = [], warnings = [], sigils = [], mounts = [], config = { dashboards: { catalogSpecId: 'spec_example' } };
-  const reply = { ok: true, synthetic: 'daemon reply' }, container = { innerHTML: 'old content' };
+  const reply = { ok: true, synthetic: 'daemon reply' }, dom = new (require('jsdom').JSDOM)('<main>old content</main>'), container = dom.window.document.querySelector('main');
   const db = { id: 'example-board', name: 'Example Board', actions,
     mount(node, ctx) { mounts.push({ node, ctx }); return { synthetic: true }; } };
   const state = { sessions };
   let polls = 0;
   const context = vm.createContext({ householdSelectors: selectors, householdStore: store, state, CONFIG: config,
-    window: { visibleDashboards: () => [db], cc: {
+    window: { MutationObserver: dom.window.MutationObserver, visibleDashboards: () => [db], cc: {
       async assetList(params) { calls.push({ action: 'assetList', params }); return reply; },
       async assetGet(params) { calls.push({ action: 'assetGet', params }); return reply; },
     } },
     console: { warn(...args) { warnings.push(args); } },
     isProtectedAssistantSession(session) { return session.protected === true; },
     machineSigilMarkup(...args) { sigils.push(args); return '<svg data-synthetic="true"></svg>'; },
-    document: { getElementById(id) { assert.equal(id, 'dashboard-content'); return container; } },
+    document: { createElement: name => dom.window.document.createElement(name), getElementById(id) { assert.equal(id, 'dashboard-content'); return container; } },
     updateDashboardStatusBadge() {}, startDashboardPolling() { polls++; },
   });
   vm.runInContext(mutate(source), context);
@@ -108,7 +108,7 @@ test('assistant is captured once per mount; sigil uses the protected host and id
   const h = contextHarness(['household', 'assistantState'], [{ name: 'Partner', hostId: 'other-host' }, session]);
   h.mount(); assert.equal(h.mounts.length, 1); assert.equal(h.polls(), 1);
   const ctx = h.mounts[0].ctx;
-  assert.equal(h.mounts[0].node, h.container); assert.equal(h.container.innerHTML, '');
+  assert.equal(h.mounts[0].node, h.container.querySelector('.dashboard-inner')); assert.equal(h.container.querySelector('.dashboard-panel-header h1').textContent, 'Example Board');
   assert.equal(ctx.assistant.name, 'Partner Fixture');
   session.hostId = 'next-host'; session.display_name = 'Assistant';
   assert.equal(ctx.assistant.hostId, 'fixture-host'); assert.equal(ctx.assistant.name, 'Partner Fixture');

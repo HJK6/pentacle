@@ -397,6 +397,7 @@ const CFG_READY = (async () => {
   try {
     const cfg = await window.cc.getConfig();
     if (cfg) {
+      if (typeof window.Event === 'function') window.dispatchEvent?.(new window.Event('pentacle:hosted-dashboard-invalidate'));
       Object.assign(CONFIG, cfg);
       // Re-apply persisted overrides on top of the freshly-loaded config so the
       // toggles and the default-view chooser survive the getConfig() merge.
@@ -1892,6 +1893,15 @@ function applyChatStreamState(data) {
   // there's a stale-UI window where the sidebar still shows live state
   // but the daemon is unreachable.
   if (!applyVersionedConnectionState(state.chatStream, data, setDegradedMode)) return;
+  const nextPolicy = data.connected === false ? null : data.hostedDashboardPolicy;
+  if (data.connected === false || Object.prototype.hasOwnProperty.call(data, 'hostedDashboardPolicy')) {
+    window.hostedDashboardPolicy = nextPolicy || null;
+    window.hostedDashboardAuthMode = 'unknown';
+    window.dispatchEvent(new window.Event('pentacle:hosted-dashboard-invalidate'));
+    if (data.connected !== false && state.currentView === 'dashboards') {
+      stopDashboardPolling(); unmountCurrentDashboard(); void enterDashboardView();
+    }
+  }
   // Lanes ride the same ordering gate as the rest of the snapshot: a stale snapshot never rolls them back.
   if (data.work_lanes) applyWorkLanesPayload(data);
   if (Array.isArray(data.events)) {
@@ -6658,11 +6668,15 @@ document.getElementById('modal-input').addEventListener('keydown', (e) => {
 
 // ── View Switcher (Chats / Dashboards) ───────────────────────
 
-require('./dashboards/modeler-3d');
+const hostedDashboardRenderer = require('./dashboards/modeler-3d');
+const builtinDashboardImplementations = window.DASHBOARDS.filter(board => !board.catalog);
 let catalogClient = null;
 let catalogViewGeneration = 0;
 let catalogResult = { status: 'unset', catalog: null };
 let catalogBoardErrors = [];
+window.addEventListener('pentacle:hosted-dashboard-mode', () => {
+  if (state.currentView === 'dashboards' && !state.catalogLoading) renderDashboardList();
+});
 
 async function enterDashboardView() {
   const generation = ++catalogViewGeneration;
@@ -6679,16 +6693,16 @@ async function enterDashboardView() {
     if (generation !== catalogViewGeneration || state.currentView !== 'dashboards' || result.status === 'superseded') return;
     stopDashboardPolling();
     unmountCurrentDashboard();
-    const builtins = window.DASHBOARDS.filter(board => !board.catalog);
+    const builtins = builtinDashboardImplementations;
     const merged = catalogClient.merge(result, builtins, { reportBoard: dashboardReports,
-      renderAsset: assetRender.renderAsset, hostedBoard: window.DASHBOARDS.find(board => board.id === 'modeler-3d' && !board.catalog) });
+      renderAsset: assetRender.renderAsset, hostedBoard: hostedDashboardRenderer });
     window.DASHBOARDS.splice(0, window.DASHBOARDS.length, ...merged.boards);
     catalogResult = result; catalogBoardErrors = merged.errors;
   } catch (error) {
     if (generation !== catalogViewGeneration || state.currentView !== 'dashboards') return;
     stopDashboardPolling(); unmountCurrentDashboard();
     catalogResult = { status: 'unavailable', catalog: null, message: `Dashboard catalog unavailable: ${error.message || error}` };
-    window.DASHBOARDS.splice(0, window.DASHBOARDS.length, ...window.DASHBOARDS.filter(board => !board.catalog));
+    window.DASHBOARDS.splice(0, window.DASHBOARDS.length);
   }
   state.catalogLoading = false;
   if (catalogResult.catalog) container.dataset.catalogVersion = catalogResult.catalog.catalog_version;
@@ -6737,20 +6751,7 @@ function switchView(view) {
   } else {
     // Hide chat panels
     document.getElementById('panel-sessions').style.display = 'none';
-    if (CONFIG.dashboards?.catalogSpecId) {
-      void enterDashboardView();
-      return;
-    }
-    const visible = window.visibleDashboards(CONFIG);
-    if (!visible.some(d => d.id === state.selectedDashboard)) state.selectedDashboard = visible[0]?.id || null;
-    renderDashboardList();
-    if (state.selectedDashboard) mountAndPoll(state.selectedDashboard);
-    else {
-      const container = document.getElementById('dashboard-content');
-      container.replaceChildren();
-      const empty = document.createElement('p'); empty.className = 'dashboards-empty'; empty.textContent = 'No dashboards configured'; container.appendChild(empty);
-      container.dataset.boardState = 'empty';
-    }
+    void enterDashboardView();
   }
 }
 
@@ -6802,13 +6803,36 @@ function mountAndPoll(id) {
   state.dashboardLastUpdated = null;
   const container = document.getElementById('dashboard-content');
   container.innerHTML = ''; // clear previous
-  state.dashboardRefs = db.mount(container, dashboardMountContext(db));
+  container.dataset.boardState = 'loading';
+  let inner = container;
+  if (db.kind !== 'hosted-view') {
+    const header = document.createElement('header'); header.className = 'dashboard-panel-header';
+    const title = document.createElement('h1'); title.textContent = db.name;
+    const reload = document.createElement('button'); reload.textContent = 'Reload';
+    reload.addEventListener('click', () => { stopDashboardPolling(); unmountCurrentDashboard(); mountAndPoll(id); });
+    header.append(title, reload);
+    inner = document.createElement('div'); inner.className = 'dashboard-inner'; inner.dataset.boardState = 'loading';
+    container.append(header, inner);
+  }
+  state.dashboardRefs = db.mount(inner, dashboardMountContext(db));
+  const sync = () => {
+    if (!state.dashboardRefs) return;
+    const panelState = inner.dataset.boardState;
+    if (inner !== container) container.dataset.boardState = panelState;
+    state.dashboardState = panelState === 'ready' ? 'loaded' : panelState === 'loading' ? 'loading' : panelState === 'stale' ? 'stale' : 'error';
+    updateDashboardStatusBadge();
+  };
+  if (db.kind === 'built-in' && !db.pollFn && inner.dataset.boardState === 'loading') inner.dataset.boardState = 'ready';
+  state.dashboardStateObserver = new window.MutationObserver(sync);
+  state.dashboardStateObserver.observe(inner, { attributes: true, attributeFilter: ['data-board-state'] });
+  sync();
   window.PentacleHarness?.emit?.('dashboard:mount', { data: { id, name: db.name } });
   updateDashboardStatusBadge();
   startDashboardPolling();
 }
 
 function unmountCurrentDashboard() {
+  state.dashboardStateObserver?.disconnect(); state.dashboardStateObserver = null;
   if (state.dashboardRefs && state.selectedDashboard) {
     const db = window.DASHBOARDS.find(d => d.id === state.selectedDashboard);
     if (db && db.unmount) db.unmount(state.dashboardRefs);
@@ -6840,14 +6864,13 @@ function renderDashboardList() {
     list.appendChild(empty);
     return;
   }
-  for (const retired of [false, true]) {
-    const boards = visible.filter(d => (d.retired === true) === retired);
+  for (const boards of [visible]) {
     if (!boards.length) continue;
     const group = document.createElement('section');
     const title = document.createElement('h2');
     title.className = 'dashboard-group-title';
-    title.id = `dashboard-group-${retired ? 'retired' : 'active'}`;
-    title.textContent = retired ? 'RETIRED' : 'ACTIVE';
+    title.id = 'dashboard-group-all';
+    title.textContent = 'Dashboards';
     group.setAttribute('aria-labelledby', title.id);
     group.appendChild(title);
     for (const d of boards) {
@@ -6869,7 +6892,8 @@ function renderDashboardList() {
       top.append(dot, name);
       const description = document.createElement('span');
       description.className = 'dashboard-desc';
-      description.textContent = d.description || '';
+      description.textContent = d.kind === 'hosted-view' && window.hostedDashboardAuthMode !== 'identity'
+        ? 'Unavailable — requires identity mode' : d.description || (d.kind === 'hosted-view' ? 'Hosted dashboard' : 'Built-in dashboard');
       item.append(top, description);
       item.addEventListener('click', () => selectDashboard(d.id));
       group.appendChild(item);
@@ -6885,8 +6909,6 @@ function startDashboardPolling() {
   const db = window.DASHBOARDS.find(d => d.id === state.selectedDashboard);
   if (!db || !state.dashboardRefs) return;
   if (typeof db.pollFn !== 'function' || !db.pollInterval) {
-    state.dashboardState = 'loaded';
-    state.dashboardError = null;
     updateDashboardStatusBadge();
     return;
   }
@@ -6920,6 +6942,7 @@ function startDashboardPolling() {
         state.dashboardLastData = data;
         state.dashboardLastUpdated = new Date();
         state.dashboardState = 'loaded';
+        document.getElementById('dashboard-content').dataset.boardState = 'ready';
         state.dashboardError = null;
         db.update(state.dashboardRefs, data);
         window.PentacleHarness?.emit?.('dashboard:loaded', { data: { id: db.id, name: db.name } });
@@ -6935,6 +6958,7 @@ function startDashboardPolling() {
       } else {
         state.dashboardError = data?.error || 'Unknown error';
         state.dashboardState = state.dashboardLastData ? 'stale' : 'error';
+        document.getElementById('dashboard-content').dataset.boardState = state.dashboardState;
         window.PentacleHarness?.emit?.('dashboard:error', { data: { id: db.id, error: String(state.dashboardError) } });
         updateDashboardStatusBadge();
       }
@@ -6942,6 +6966,7 @@ function startDashboardPolling() {
       if (state.dashboardPollToken !== token) return;
       state.dashboardError = e.message;
       state.dashboardState = state.dashboardLastData ? 'stale' : 'error';
+        document.getElementById('dashboard-content').dataset.boardState = state.dashboardState;
       window.PentacleHarness?.emit?.('dashboard:error', { data: { id: db.id, error: e.message } });
       updateDashboardStatusBadge();
     } finally {
