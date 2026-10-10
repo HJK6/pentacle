@@ -52,6 +52,7 @@ except ImportError:  # pragma: no cover
 from _shared import operator_auth
 from comms import ATTACHMENT_MAX_BYTES, AttachmentValidationError, validate_send_attachments
 import store_lifecycle_authority as lifecycle_authority
+from loop_watchdog import RequestTiming, request_timing
 import store_consent as consent
 import local_admin
 from ledger import TERMINAL_REPORT_STATUSES, StatusCardError, _claim_wire_fields
@@ -1069,6 +1070,13 @@ class Server:
             payload["duration_ms"] = age
         log.log(level, "conn_diag %s", json.dumps(payload, separators=(",", ":"), allow_nan=False))
 
+    @_conn_safe
+    def _diag_store_request(self, state, timing) -> None:
+        # Separate fixed-shape request diagnostics; never borrow global Store
+        # timings or include request ids, payloads or credentials.
+        log.info("request_store_diag %s", json.dumps(
+            {"conn_id": state.conn_id, **timing.fields()}, separators=(",", ":")))
+
     def _diag_queue(self, state: _ConnectionDiagnostic, queue: Any = None) -> dict:
         if queue is None and state.snapshot is not None:
             return dict(state.snapshot)
@@ -1934,9 +1942,14 @@ class Server:
             self._diag_hello_metadata(websocket, msg)
         decision = _AuthDiagnostic(websocket, "hello" if is_hello else "request", _monotonic())
         token = _CONN_AUTH.set(decision)
+        timing = RequestTiming()
+        timing_token = request_timing.set(timing)
         try:
             return await self._dispatch_inner(raw, websocket=websocket)
         finally:
+            timing.closed = True
+            self._diag_store_request(state, timing)
+            request_timing.reset(timing_token)
             self._diag_auth_finish(decision)
             _CONN_AUTH.reset(token)
 

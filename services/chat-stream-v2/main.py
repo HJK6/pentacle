@@ -31,6 +31,7 @@ import socket
 from pathlib import Path
 
 from alerts import Alerts
+from loop_watchdog import LoopWatchdog
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from assistant_router import AssistantRouterAdapter
 import launch
@@ -261,6 +262,7 @@ async def run(args: argparse.Namespace) -> int:
     lifecycle = DaemonLifecycle(store, host=args.local_host)
     tmux = Tmux(args.tmux_bin)
     alerts = Alerts(store)
+    watchdog = LoopWatchdog.from_env(store, alerts)
     # Peers come from `machines.json` (lifted v1 config: PENTACLE_MACHINES_JSON /
     # PENTACLE_MACHINES_FILE / ~/.config/pentacle-stream/machines.json). Every
     # machine with an ssh_target that is not this host is a peer; with none, v2
@@ -829,6 +831,7 @@ async def run(args: argparse.Namespace) -> int:
     #    `prompt.*` verb is ready in ~ms rather than behind the tmux reconcile.
     #    Verbs arriving before their store is up park on a bounded readiness gate
     #    (never error); `hello`'s snapshot tolerates an unopened store.
+    watchdog.start(asyncio.get_running_loop())
     store.start()
     await work_lanes.reconcile_index(force_sweep=True)
     work_lanes.start()
@@ -899,7 +902,7 @@ async def run(args: argparse.Namespace) -> int:
 
     # 3. Background tasks start last, each under the loop rules
     #    (cadence, per-pass cap, backoff, kill switch).
-    tasks: list[asyncio.Task] = []
+    tasks: list[asyncio.Task] = [asyncio.create_task(watchdog.run_consumer(), name="stall-handoff")]
     try:
         tasks.append(await server.start_consent())
     except (OSError, ValueError) as exc:
@@ -1013,6 +1016,7 @@ async def run(args: argparse.Namespace) -> int:
         ShutdownBudget(configured_budget_s()),
         server=server, spawnctl=spawnctl, tasks=tasks, composites=list(assistant_composites.values()),
         lane_rulings=server.lane_rulings, notify=notify, assets=assets, lifecycle=lifecycle, store=store,
+        watchdog=watchdog,
     )
     return 0
 
@@ -1022,7 +1026,7 @@ SERVER_CLOSE_MARGIN_S = 0.1
 
 
 async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composites, lane_rulings,
-                   notify, assets, lifecycle, store) -> None:
+                   notify, assets, lifecycle, store, watchdog=None) -> None:
     """Bounded, cancellation-aware shutdown (B14) under one absolute deadline:
     every step gets min(its cap, what remains), and an overrunning step is
     abandoned, so the store stops before launchd's SIGKILL. Never touches
@@ -1052,6 +1056,8 @@ async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composite
     await budget.step("notify", notify.stop(), cap=2.0)
     await budget.step("assets", assets.stop(), cap=2.0)
     await budget.step("lifecycle", lifecycle.stop(reason="signal"), cap=2.0)
+    if watchdog is not None:
+        await budget.step("loop-progress", watchdog.stop(), cap=2.5)
     store.stop(timeout=budget.remaining(5.0, reserved=False))
     if budget.abandoned:
         log.warning("shutdown abandoned steps after the budget: %s", ", ".join(budget.abandoned))

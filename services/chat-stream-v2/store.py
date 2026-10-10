@@ -39,6 +39,7 @@ from typing import Any, Callable
 import uuid
 
 from send_metadata import normalize_send_meta
+from loop_watchdog import StoreProgress, request_timing
 
 import store_exchange
 import store_attachments
@@ -1395,7 +1396,8 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         # Bounded (QA #8): an unbounded write queue is exactly the growth that
         # helped wedge v1 — a stalled store thread let callers pile work up
         # without limit. Past the cap `submit` fails fast rather than growing.
-        self._queue: queue.Queue[tuple[Callable[[sqlite3.Connection], Any], asyncio.Future, asyncio.AbstractEventLoop] | None] = queue.Queue(maxsize=max_pending)
+        self._queue: queue.Queue[tuple | None] = queue.Queue(maxsize=max_pending)
+        self.progress = StoreProgress()
         self._thread: threading.Thread | None = None
         # Serializes the start/stop transition against `submit` so no callable is
         # ever enqueued after the stop sentinel — such a future would never run
@@ -1474,7 +1476,11 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 break
             if item is None:
                 continue
-            _fn, fut, loop = item
+            _fn, fut, loop, *metrics = item
+            # The teardown seam also accepts directly queued legacy/test work,
+            # which was never admitted through the progress bookkeeping.
+            if metrics:
+                self.progress.discard()
             loop.call_soon_threadsafe(_set_exception, fut, RuntimeError(why))
 
     # -- worker thread -----------------------------------------------------
@@ -1722,12 +1728,21 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 item = self._queue.get()
                 if item is None:
                     break
-                fn, fut, loop = item
+                fn, fut, loop, queued, timing = item
+                started = time.monotonic()
+                self.progress.start(started)
                 try:
                     result = fn(conn)
-                    loop.call_soon_threadsafe(_set_result, fut, result)
                 except BaseException as exc:
-                    loop.call_soon_threadsafe(_set_exception, fut, exc)
+                    outcome, failed = exc, True
+                else:
+                    outcome, failed = result, False
+                finally:
+                    finished = time.monotonic()
+                    self.progress.finish()
+                if timing is not None:
+                    loop.call_soon_threadsafe(timing.add, queued, started, finished)
+                loop.call_soon_threadsafe(_set_exception if failed else _set_result, fut, outcome)
         finally:
             conn.close()
             # Belt-and-suspenders (QA #8): resolve anything still queued so no
@@ -1752,7 +1767,8 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             try:
                 # Never block the event loop: past the cap fail fast rather than
                 # wait for the worker to drain (QA #8).
-                self._queue.put_nowait((fn, fut, loop))
+                self.progress.enqueue(self._queue.put_nowait,
+                                      (fn, fut, loop, time.monotonic(), request_timing.get()))
             except queue.Full as exc:
                 raise RuntimeError("store overloaded: pending write queue is full") from exc
         return await fut

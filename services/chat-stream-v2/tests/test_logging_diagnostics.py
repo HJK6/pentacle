@@ -486,3 +486,69 @@ def test_diagnostic_failure_does_not_change_auth_or_wire_outcomes(caplog, monkey
         assert failures, "real lifecycle hooks did not reach diagnostic fault injection"
         assert not diagnostic_records(caplog), "diagnostic injection did not intercept the actual emitter"
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_request_store_diagnostics_do_not_borrow_concurrent_request(tmp_path, caplog, monkeypatch):
+    import asyncio
+    import json
+    import threading
+    from types import SimpleNamespace
+    from server import Server
+    from store import Store
+
+    store = Store(str(tmp_path / 'request-timing.db'))
+    store.start()
+    server = Server(store=store)
+    peers = (object(), object())
+    server._connection_diagnostics = {p: SimpleNamespace(conn_id=str(i)) for i, p in enumerate(peers)}
+    monkeypatch.setattr(server, '_diag_auth_finish', lambda _: None)
+    entered, release = threading.Event(), threading.Event()
+    async def dispatch(raw, *, websocket=None):
+        if websocket is peers[0]:
+            def held(conn):
+                entered.set(); release.wait(3)
+            await store.submit(held)
+        else:
+            await store.get('empty')
+        return []
+    monkeypatch.setattr(server, '_dispatch_inner', dispatch)
+    caplog.set_level('INFO', logger='chat_streamd_v2.server')
+    try:
+        first = asyncio.create_task(server._dispatch('{}', websocket=peers[0]))
+        await asyncio.to_thread(entered.wait, 2)
+        second = asyncio.create_task(server._dispatch('{}', websocket=peers[1]))
+        await asyncio.sleep(.04)
+        release.set(); await asyncio.gather(first, second)
+        rows = {r['conn_id']: r for r in [json.loads(record.message.split(' ', 1)[1])
+            for record in caplog.records if record.message.startswith('request_store_diag ')]}
+        assert set(rows) == {'0', '1'}
+        assert rows['0']['store_calls'] == rows['1']['store_calls'] == 1
+        assert rows['0']['store_execution_ms'] >= 35
+        assert rows['1']['store_execution_ms'] < 20
+        assert rows['1']['store_queue_ms'] >= 35
+    finally:
+        release.set()
+        server._connection_diagnostics.clear()
+        store.stop()
+
+
+@pytest.mark.asyncio
+async def test_request_diagnostic_failure_cannot_replace_rpc(monkeypatch):
+    from types import SimpleNamespace
+    import server as module
+    from loop_watchdog import request_timing
+    daemon = module.Server()
+    peer = object()
+    daemon._connection_diagnostics = {peer: SimpleNamespace(conn_id='fixture')}
+    monkeypatch.setattr(daemon, '_diag_auth_finish', lambda _: None)
+    calls = []
+    def broken(message, *args, **kwargs):
+        calls.append(message)
+        raise OSError('fixture logging failure')
+    monkeypatch.setattr(module.log, 'info', broken)
+    async def inner(*args, **kwargs):
+        return [{'type': 'pong'}]
+    monkeypatch.setattr(daemon, '_dispatch_inner', inner)
+    assert await daemon._dispatch('{}', websocket=peer) == [{'type': 'pong'}]
+    assert calls and request_timing.get() is None
