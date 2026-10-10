@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -121,6 +122,40 @@ def _resolve_specs_memory_root() -> tuple[Path | None, str]:
         return None, "not_configured"
     return Path(configured).expanduser(), "PENTACLE_MEMORY_ROOT"
 
+
+
+class SpecResolutionSnapshot:
+    """``resolve_for_spawn``/``canonical_spec_identity``/``resolution_for`` from
+    one catalog index and one tree scan; each answer equals a direct call made
+    against the same tree."""
+
+    def __init__(self, service: "SpecsSubsystem", catalog, tree) -> None:
+        self._service, self._catalog, self._tree = service, catalog, tree
+        self._resolved: dict[str | None, dict[str, Any]] = {}
+
+    def resolve_for_spawn(self, spec_id: str | None) -> dict[str, Any]:
+        if spec_id not in self._resolved:
+            self._resolved[spec_id] = self._service._resolve_from_indexes(
+                self._catalog, self._tree, spec_id)
+        return dict(self._resolved[spec_id])
+
+    def canonical_spec_identity(self, spec_id: str | None) -> str | None:
+        return self._service._canonical_from_resolution(self.resolve_for_spawn(spec_id))
+
+    def resolution_for(self, spec_id: str | None) -> str | None:
+        if not spec_id:
+            return None
+        return self._service._resolution_for_matches(
+            self._service._matches_from_index(self._catalog, spec_id))
+
+
+async def spec_resolution_view(specs: Any) -> Any:
+    """One-operation spec resolver whose tree walk ran in a worker thread.
+
+    Fakes without ``spec_resolution_snapshot`` are returned unchanged.
+    """
+    factory = getattr(specs, "spec_resolution_snapshot", None)
+    return await asyncio.to_thread(factory) if callable(factory) else specs
 
 class SpecsSubsystem:
     def __init__(
@@ -603,13 +638,17 @@ class SpecsSubsystem:
         ids = list(dict.fromkeys(spec_ids))
         if not any(ids):
             return {spec_id: None for spec_id in ids}
-        catalog = self._folders_by_id()
-        tree = self._scan_folders_by_id(self._spawn_work_dirs())
-        return {
-            spec_id: self._canonical_from_resolution(
-                self._resolve_from_indexes(catalog, tree, spec_id))
-            for spec_id in ids
-        }
+        snapshot = self.spec_resolution_snapshot()
+        return {spec_id: snapshot.canonical_spec_identity(spec_id) for spec_id in ids}
+
+    def spec_resolution_snapshot(self) -> "SpecResolutionSnapshot":
+        """Take the catalog lookup and fresh tree scan once for one operation.
+
+        This is the whole-tree walk; callers on the event loop run it in a
+        worker thread and then resolve every id they need from the result.
+        """
+        return SpecResolutionSnapshot(
+            self, self._folders_by_id(), self._scan_folders_by_id(self._spawn_work_dirs()))
 
     def equivalent_spec_id_family(self, spec_id: str | None) -> tuple[str, ...]:
         """Return legacy persisted spellings for coordination family operations."""

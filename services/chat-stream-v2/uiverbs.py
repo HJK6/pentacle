@@ -61,6 +61,7 @@ if SERVICES_ROOT not in sys.path:
     sys.path.insert(0, SERVICES_ROOT)
 
 from _shared.spawn_profiles import catalog as spawn_catalog  # noqa: E402
+from _shared.specs_service import spec_resolution_view  # noqa: E402
 
 log = logging.getLogger("chat_streamd_v2.uiverbs")
 
@@ -332,6 +333,9 @@ class UIVerbs:
                 "requested spec-id cannot be resolved because the catalog is unavailable",
                 spec_id=spec_id, spec_resolution=None,
             )
+        # One tree walk, in a worker thread, serves every comparison below.
+        view = await spec_resolution_view(self._spec_catalog)
+        resolver = getattr(view, "resolution_for", resolver)
         resolution = resolver(spec_id)
         if resolution != "resolved":
             raise VerbError(
@@ -339,7 +343,7 @@ class UIVerbs:
                 f"spec-id {spec_id} is not catalog-resolved ({resolution or 'unknown'})",
                 spec_id=spec_id, spec_resolution=resolution,
             )
-        canonicalizer = getattr(self._spec_catalog, "canonical_spec_identity", None)
+        canonicalizer = getattr(view, "canonical_spec_identity", None)
         canonical_spec_id = canonicalizer(spec_id) if callable(canonicalizer) else None
         if not canonical_spec_id:
             raise VerbError(
