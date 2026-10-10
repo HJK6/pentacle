@@ -286,6 +286,60 @@ If `--session` is omitted, the CLI uses `discover_leader_stream_id_short()` and 
 
 Republishing with the same `--asset-id` updates the existing asset tab and body in place. Omitting `--asset-id` creates a fresh asset id. The daemon broadcasts metadata only; desktop clients fetch the body lazily when the operator opens the tab. Protocol details live in [../chat-stream/docs/assets.md](../chat-stream/docs/assets.md).
 
+## Dashboard commands
+
+Hosted records live in the sole catalog asset
+`(spec_id=pentacle__dashboard_catalog, asset_id=dashboard-catalog)`. Configure
+clients to read that catalog. It must already exist; these commands do not invent
+package metadata or accept a different catalog selector.
+
+```sh
+agent-orch dashboard add --id example-view --title 'Example view' \
+  --url https://viewer.example-tailnet.ts.net:8444/demo/
+agent-orch dashboard add --id example-view --title 'Example view' \
+  --url https://viewer.example-tailnet.ts.net:8444/revised/ --order 0 --hidden
+agent-orch dashboard remove --id example-view
+```
+
+`add` requires `--id`, `--title` and `--url`; `--order N` and `--hidden` are
+optional. It appends by default. Re-adding a hosted ID replaces its title and URL
+while preserving position and visibility unless supplied. `--order` is a
+zero-based final index in the complete `boards[]` array, including hidden entries;
+`--hidden` sets `visible:false`. There is no separate replace verb or unhide flag;
+use full-catalog editing to restore `visible:true`. `remove --id ID` is
+idempotent. Both verbs refuse collisions with non-hosted entries. Both accept
+`--timeout SECONDS` (default 30).
+
+Commands use the caller's authenticated seat connection and serialize catalog
+read/edit/write. Only a server-verified live internal seat on a configured fleet
+host may add, replace or remove records, including another fleet host's record.
+Anonymous, operator-only, report-producer, external and scoped clients are
+refused. A wire host claim supplies no identity. Direct catalog asset writes and
+deletes have the same restriction, including content-type replacement attempts.
+Existing trusted executable-adapter publication authority is unchanged; record
+commands cannot upload or authorize adapter code.
+
+Successful replies are `dashboard.add.ok` with `id`, `replaced`, `order`, `asset`
+or `dashboard.remove.ok` with `id`, `removed`, `asset`; `asset` is the updated
+catalog asset. Application errors use `dashboard.error` with `error_code` and
+`error`: `dashboard_unauthorized`, `dashboard_invalid`, `dashboard_collision`,
+`dashboard_catalog_missing` or `dashboard_policy_unconfigured`; store failures
+use `asset_store_not_ready` or `asset_store_error`. Other records,
+package/version metadata and libraries are preserved. Catalog-only edits do not
+increment the immutable adapter package version; adding sets `requires.host_api`
+to at least 2. Built-in membership, order and
+visibility remain part of full-catalog editing.
+
+URLs must pass the daemon's host-owned HTTPS/fleet-suffix policy, with no userinfo,
+query or fragment and never Pentacle's own hostname, even on another port.
+Missing policy refuses hosted writes. Clients recheck policy before opening
+cached or fresh entries; web additionally requires current identity mode, while
+mobile opens in the system browser. See
+[Dashboards view](../../docs/dashboards_view.md) for configuration, the complete
+URL rule, token/unknown-mode refusal and isolation requirements. Full package
+publication must preserve current hosted records/order/visibility as described in
+[Runtime catalog](../../docs/dashboards_view.md#runtime-catalog).
+
 ## Self-titling
 
 Agents self-title with `agent-orch title "<succinct durable goal>"` once they understand the session goal. The shared AGENTS.md rule is the primary mechanism; the daemon only backstops desktop-opened interactive chats with a low-frequency naming nudge through the same peer-delivery path when they remain unnamed.

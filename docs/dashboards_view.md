@@ -1,114 +1,171 @@
 # Dashboards view
 
-The web and Electron renderer share the registry, list and adapter lifecycle.
-The list uses cosmic tokens, ACTIVE and optional RETIRED groups, accent dots,
-descriptions and keyboard-native selection buttons. Chat and room controls are
-unchanged. `panel-dashboards`, `dashboard-list` and `dashboard-content` remain
-stable DOM IDs.
+Dashboards presents one ordered list with two kinds of entry:
+
+- **Built-in:** code rendered inside Pentacle, including generic reports and
+  trusted in-page web adapters.
+- **Hosted:** an HTTPS web app served by a fleet machine. Web opens it in the
+  dashboard panel; mobile hands it to the system browser.
+
+The catalog alone controls membership, order and visibility. The renderer walks
+`boards[]` in array order and omits entries with `visible:false` (default: true).
+Registered code resolves built-in IDs; it does not add, prepend or sort list
+items. A missing implementation stays unavailable in its catalog position.
+There is no separate retired group or profile visibility override. Chat and room
+controls are unchanged; `panel-dashboards`, `dashboard-list` and
+`dashboard-content` remain stable DOM IDs.
 
 ## Local configuration
 
-Add these keys to the existing exported configuration object. Keep its other
-settings: the loader does not merge an overlay with the example configuration.
-Select a private JavaScript configuration file outside the repository through
-`PENTACLE_CONFIG=/absolute/path/pentacle.config.local.js`; that filename is not
-automatically discovered. See [Desktop configuration](desktop_config.md).
-Restart the desktop, or restart the web host and reload its page, after edits.
+Use the existing exported configuration object in a private file selected by
+`PENTACLE_CONFIG=/absolute/path/pentacle.config.local.js`; the loader does not
+merge an overlay with the example configuration. See
+[Desktop configuration](desktop_config.md). Restart the desktop, or restart the
+web host and reload its page, after profile changes.
 
-| Key | Default | Effect |
-| --- | --- | --- |
-| `features.dashboards` | Existing feature setting | Boolean that exposes the Dashboards switcher |
-| `dashboards.hidden` | `[]` | Exact dashboard IDs to hide, including otherwise opted-in retired boards |
-| `dashboards.showRetired` | `false` | Only boolean `true` lists registered retired boards |
-| `dashboards.modeler3d.url` | Absent | Absolute HTTP(S) viewer URL without embedded username/password |
-| `dashboards.catalogSpecId` | Absent | Spec containing the runtime `dashboard-catalog` asset; use local configuration only |
+| Key | Effect |
+| --- | --- |
+| `features.dashboards` | Enables the Dashboards switcher |
+| `dashboards.catalogSpecId` | Locates the catalog; set `pentacle__dashboard_catalog` for the hosted-record commands |
+| `dashboards.catalogRoot` | Web-host directory of immutable adapter versions; never sent to the renderer |
 
-The URL has no built-in host or default. Do not put real URLs, credentials,
-private hostnames or captured models in Git. The normal renderer config path
-loads this field: desktop `config-loader` / `getConfig`, or the web host's
-injected public config and the same `getConfig` bridge. No new config service
-or viewer proxy is involved. Keep credentials out of the URL; the configured
-viewer must use its existing browser authentication.
+The profile locates the catalog; `dashboards.hidden`, `dashboards.showRetired`
+and `dashboards.modeler3d.url` no longer control the list or hosted URL. Modeler
+is a normal hosted catalog record, with no separate built-in registration.
+Without a configured catalog or usable cache, there is no independently ordered
+built-in fallback; an empty list reads “No dashboards configured”.
 
-Retired adapters keep registering under their existing conditions. The registry
-filters explicit hidden IDs, then hides retired adapters unless opted in. It
-selects the first visible active board, or the first visible retired board if
-that is all the opt-in leaves. An empty list reads “No dashboards configured”.
-The 3D Modeler stays listed when unconfigured unless explicitly hidden.
+## Hosted URL and web admission
 
-## 3D Modeler states and controls
+The daemon service owns these runtime inputs:
 
-- **Unconfigured:** no usable URL; the setup key is shown and no frame or timer is created
-- **Loading:** a fresh sandboxed iframe is navigating; the load timeout is 15 seconds
-- **Loaded:** the iframe's navigation completed. This does **not** prove that a model rendered, authentication succeeded or framing was allowed. Browsers can fire `load` for error or refused documents
-- **Blocked:** an iframe error event or timeout occurred. The reason suggests possible causes without claiming to diagnose inaccessible cross-origin headers
+- `PENTACLE_HOSTED_DASHBOARD_TAILNET_SUFFIX`: permitted fleet DNS suffix.
+- `PENTACLE_HOSTED_DASHBOARD_PENTACLE_ORIGIN`: canonical HTTPS Pentacle origin,
+  matching the web server's configured origin.
 
-Open in new window and Reload remain visible in every state. The link is
-inactive without a valid URL. Electron uses the existing `openExternal` bridge;
-the web opens the configured viewer in a new tab/window. A reported bridge
-failure appears inline. Reload discards the previous frame and timer. Leaving
-Dashboards removes the frame, its handlers and timeout; late events cannot
-change the next view. The adapter does not poll or fetch viewer headers.
+Clients receive the nonsecret `{tailnetSuffix, pentacleOrigin}` policy through
+`hostedDashboardPolicy` on the authenticated daemon connection. Policy is never
+accepted from catalog content or persisted with cached entries. Missing or
+invalid policy refuses hosted writes and opening.
 
-## Viewer compatibility and isolation
+Admission requires an absolute, credential-free HTTPS URL on a subdomain of the
+configured suffix at a DNS-label boundary. Userinfo, query strings, fragments
+(including empty `?` or `#`), whitespace and backslashes are refused. Pentacle's
+own hostname is refused even on another port: cookies are not port-scoped.
+Commands and full-catalog publication enforce this rule. Clients recheck it
+immediately before frame navigation or external opening, including cached URLs.
+For example, with synthetic suffix `example-tailnet.ts.net` and Pentacle origin
+`https://console.example-tailnet.ts.net`, a record may use
+`https://viewer.example-tailnet.ts.net:8444/demo/`.
 
-The synthetic adapter uses `sandbox="allow-scripts allow-same-origin"` and
+**Hosted web opening requires identity mode.** The web server derives
+`hostedDashboardAuthMode` from its effective authentication object: `tailscale`
+becomes `identity`, `token` becomes `token`, and missing or unrecognized modes
+become `unknown`. It exposes that value in `window.__PENTACLE_CONFIG__` and
+`/api/config`; profile, catalog, daemon and storage values cannot override it.
+
+Before every mount, Reload/Retry or external-open action, the renderer fetches
+same-origin `/api/config` with caching disabled and requires explicit `identity`
+as well as current URL admission. Token/unknown modes, pending resolution,
+malformed responses and failed requests keep hosted entries in place but
+unavailable. They assign no iframe URL and invoke no opener. Cached identity-era
+catalogs and restored selections do not authorize opening. Connection/config
+invalidation removes the frame and discards the admission decision; an obsolete
+asynchronous response cannot reopen it. Built-in behavior is unchanged.
+
+Token-mode hosted opening is excluded. Enabling it requires exact
+canonical-Origin enforcement on the `/cc` bridge **before dispatch**, rejecting
+foreign, `null` and missing Origin, plus real-browser credential and authority
+negative tests. The token cookie check alone is insufficient; token-mode refusal
+is not proof of token-mode isolation.
+
+## Hosted states and isolation
+
+The common dashboard panel shows the selected title, loading and unavailable or
+error states. Hosted navigation has a 15-second timeout; failure offers “Could
+not open dashboard” and Retry. Reload removes the old frame and timer and runs
+admission again. Open in new window also runs admission before opening. Leaving
+the view removes the frame, handlers and timeout; late events cannot update a
+new view. A frame load means navigation completed, not that the app rendered,
+authenticated or passed a health check. There is no hosted health polling.
+
+Hosted frames use `sandbox="allow-scripts allow-same-origin"`,
 `referrerpolicy="no-referrer"`, `allow="xr-spatial-tracking; fullscreen"` and
-`loading="lazy"`. Only configure a trusted viewer. In particular,
-a same-origin viewer with both sandbox permissions is not a strong isolation
-boundary from the parent application. Popups, top navigation and other sandbox
-permissions are not enabled by this adapter.
+`loading="lazy"` on a distinct permitted host. Popup and top-navigation sandbox
+permissions are absent. External web opening uses `noopener,noreferrer`.
+Pentacle supplies no tokens, auth headers, session/config injection or action
+bridge to the hosted page. The hosted app may have its own unrelated session.
 
-The fleet's compatibility errata reports that the viewer is embeddable as served:
-no X-Frame-Options, Content-Security-Policy, CORS or WWW-Authenticate headers;
-no frame-busting or parent/postMessage use. Access depends on network
-reachability. This is a fleet-supplied fact, not a probe performed by this adapter.
-The frame fetches its own same-origin assets. Pentacle never fetches those assets
-or needs their CORS permission.
+Keep application hosting tailnet-only. Deployment validation must prove that
+Pentacle cookies/storage and authority do not reach the hosted app: a broadly
+scoped Pentacle cookie reaching it fails the isolation requirement. Real-browser
+checks must exercise parent DOM/storage reads, action-request `postMessage`,
+top-navigation/opener escape and foreign/null/missing-Origin `/cc` attempts,
+asserting refusal and no host action. Record credential-presence booleans, never
+secrets. A synthetic frame load or configuration readback does not prove this
+boundary. Hosted apps fetch their own assets; no client health probe or CORS
+change is required.
 
-No Content-Security-Policy is added by this packet. If a CSP is ever introduced,
-`frame-src` must include the viewer's exact origin with its port.
-The fleet must verify real rendering with its browser journey against the served
-app before operator acceptance. The synthetic gate and a “Loaded” label do not
-substitute for that check. Real model files and their licences stay outside the
-public source tree.
+## Mobile
+
+Mobile uses the same catalog order and visibility. Hosted selection and explicit
+Open/Retry validate the current daemon URL policy before handing the URL to the
+system browser, including cached entries, with no Pentacle session or headers
+attached. The browser owns loading and unreachable-page presentation. Returning
+to Pentacle does not automatically reopen the URL. Native WebView embedding is
+not used. Existing supported built-ins and reports keep their native behavior;
+unsupported web adapters remain unsupported.
 
 ## Runtime catalog
 
-Personal boards are not part of this repository. An operator delivers their own
-boards at runtime as one `dashboard-catalog` asset, published to the chat-stream
-daemon under a spec id of their choosing, plus (for web adapters) an immutable
-directory of files on the web host. With no `dashboards.catalogSpecId` the view
-shows only the existing `shared-demo` and `modeler-3d` built-ins and makes no
-catalog call. Hiding all visible boards through `dashboards.hidden` shows “No
-dashboards configured”; the normal default does not remove those built-ins.
+Personal boards arrive as the `dashboard-catalog` asset and, for trusted web
+adapters, immutable files installed on the web host. The sole catalog used by
+hosted-record commands is `(spec_id=pentacle__dashboard_catalog,
+asset_id=dashboard-catalog)`. Configure each client's catalog locator to that
+spec. Other configured spec IDs are still readable, but the commands do not
+modify them.
 
-The loader runs after boot in its own error boundary. Entering Dashboards fetches
-once, validates the whole catalog and merges its boards after built-ins in array
-order. Leaving and re-entering fetches again; there is no catalog polling loop.
-Selecting a different board does not refetch the catalog. A catalog id colliding
-with a built-in produces a board-only error and does not replace that built-in.
-A changed local config setting requires the normal restart/reload, but changed
-catalog content needs neither a host restart nor a renderer rebuild.
+Entering Dashboards fetches and validates the whole catalog. Re-entering fetches
+again; selecting a board does not refetch, and there is no catalog polling loop.
+Changed catalog content needs neither a host restart nor a renderer rebuild.
 
-**Catalog asset.** `asset_id` is exactly `dashboard-catalog`, `content_type`
-`dashboard-catalog`, published from an operator seat:
+**Schema.** `services/_shared/asset_schema.py` validates bounded JSON with
+`schema_version:1`, `catalog_version`, `package`, `requires.host_api`, up to eight
+`libs` and up to 64 `boards`. The mixed-list extension uses `requires.host_api:2`;
+API-1 catalogs remain readable. Unknown keys and duplicate IDs reject the whole
+catalog. Every board has `id`, `name`, `kind`, optional `description` and optional
+boolean `visible`. Descriptor kinds are:
 
+- `built-in`: resolves its ID to registered code.
+- `report` and `web-adapter`: retain their existing fields and render as built-in.
+- `hosted-view`: supplies `hosted.url`, without adapter code or actions.
+
+Array position supplies order. File paths remain relative `web/<name>.js|css`
+with a sha256; `hosted.url` is the only URL field. Shared synthetic cases live in
+`test/fixtures/dashboard_catalog/catalog_cases.json`. A minimal hosted record is:
+
+```json
+{"id":"example-view","name":"Example view","kind":"hosted-view","hosted":{"url":"https://viewer.example-tailnet.ts.net:8444/demo/"}}
 ```
+
+**Writers.** Only a server-verified live internal seat on a configured fleet host
+may mutate hosted records, including records served by another fleet host.
+Anonymous, operator-only, report-producer, external and scoped client principals
+are refused; a claimed host string does not establish identity. The same rule
+applies to direct catalog publication and deletion, including attempts to change
+its content type. This does not widen trusted executable-adapter publication
+authority. Hosted-record commands cannot upload or authorize adapter code.
+
+See [Dashboard commands](../services/agent-orch/README.md#dashboard-commands) for
+add, replacement and removal syntax. Full-catalog editing controls built-in
+membership/order/visibility and can restore `visible:true` on a hidden entry.
+An eligible seat publishes a complete validated catalog with:
+
+```sh
 agent-orch asset publish --type dashboard-catalog --title "Dashboard catalog" \
-  --content-file <catalogRoot>/<catalog_version>/catalog.json \
-  --asset-id dashboard-catalog --spec-id <your catalog spec id>
+  --content-file /path/to/catalog.json \
+  --asset-id dashboard-catalog --spec-id pentacle__dashboard_catalog
 ```
-
-The daemon and the CLI validate it with `validate_dashboard_catalog` in
-`services/_shared/asset_schema.py`, the authority for the schema: bounded JSON
-data (`schema_version` 1, `catalog_version`, `package`, `requires.host_api`,
-`libs` ≤ 8, `boards` ≤ 64 of kind `report`, `web-adapter` or `hosted-view`),
-unknown keys refused at every level, duplicate board ids refuse the whole
-catalog, file paths are relative `web/<name>.js|css` with a sha256, and the only
-URL is `hosted.url`. Board order is the catalog's array order. Synthetic accept
-and refuse cases shared by the daemon and the clients are in
-`test/fixtures/dashboard_catalog/catalog_cases.json`.
 
 **Retrieval.** Discovery makes `asset.list { spec_id: catalogSpecId }` and selects
 only the row whose `asset_id` is exactly `dashboard-catalog` and whose
@@ -117,7 +174,7 @@ Metadata includes the owner `stream_id` and the `producer`; the client then call
 `asset.get { stream_id: <listed stream_id>, asset_id, spec_id }` (the existing
 operator-authenticated path). Unknown keys, invalid bounds, paths, hashes,
 URLs, descriptors or duplicate ids reject the whole catalog. `requires.host_api`
-above the client's `HOST_API = 1` is unsupported rather than malformed.
+above the client's `HOST_API = 2` is unsupported rather than malformed.
 
 **Cache and failures.** The last validated catalog is cached per spec in memory
 and `sessionStorage`. On transport/unavailable failure, cached boards may render
@@ -161,11 +218,9 @@ script must register the same declared id in `window.DASHBOARDS`; missing/wrong
 registration, load failures and SRI failures produce a board error. A listed
 file's 404 is reported as “catalog files for version <X> not installed”.
 
-A hosted view uses the existing configured-iframe implementation with its declared
-id, name and URL. The sandbox and 15-second load timeout, Reload and Open in new
-window controls are unchanged. A successful frame navigation does not verify
-cross-origin page contents. Catalog settings do not reconfigure the built-in
-`modeler-3d` board.
+A hosted view uses the generic hosted panel with its catalog ID, name and URL,
+subject to [URL and web admission](#hosted-url-and-web-admission). It has no
+trusted-adapter mount context or Pentacle actions.
 
 **Private files (web host).** `dashboards.catalogRoot` names a directory of
 version directories `<catalogRoot>/<catalog_version>/` (each with its own
@@ -212,75 +267,44 @@ The allowlist is an API convention, not a sandbox. Catalog adapter scripts run i
 the page and can access its existing globals/bridges; install only trusted code.
 SRI verifies the pinned bytes, not whether that code is safe.
 
-**Release.** Install the new version directory, verify every file's sha256
-against its `catalog.json`, fetch one file through the route, then publish the
-catalog asset; publishing is the only pointer switch. Roll back by republishing
-the previous version's `catalog.json` (its directory stays installed). Unset
-`catalogSpecId` and restart the host to turn the catalog off.
-
-**Gate.** Scenario `dashboard_catalog` in `node test/e2e/web_gate.js` seeds only
-synthetic catalogs (`0.2.0+aaaaaaa`, `0.2.1+bbbbbbb`) and report assets. A
-pass-through bridge observer checks that the normal unset profile issues no
-catalog list call from boot through view entry. A separately labelled synthetic
-visibility configuration hides both built-ins to exercise the real empty state
-without removing their registrations. Configured UI assertions cover:
-
-- Catalog array order after built-ins and `data-catalog-version` on
-  `#dashboard-content`; `catalogSpecId` reaches the renderer, `catalogRoot` does not
-- Exact discovery/list/get via the listed owner; one filtered, sorted report
-  window; `example-report-20261007T1300Z` latest, highest-revision history and the
-  actual generic-rendered report body
-- Library/CSS/script order, versioned URLs and SRI; `example-broken` receives
-  HTTP-200 bytes that disagree with the published hash and must not execute
-- `example-hosted` renders the real loopback iframe with the existing sandbox,
-  navigation and controls; leaving the view removes it
-- N+1 installed and published while the host runs, then rendered on view re-entry
-  without rebuilding or reloading the document, while N files stay served
-- `publishBody` supplies a daemon-valid `requires.host_api: 2` catalog and `corrupt`
-  writes a malformed body past daemon validation; both show actual error cards
-- Chat retains its nodes, stream, transcript and editable unsent draft after
-  errors, hosted navigation and rollback; republishing N restores its adapter
-
-List items expose `data-dashboard-id`. Board containers expose `data-board-state`
-(`loading|ready|empty|partial|error|unsupported`), and catalog/report cards expose
-the stable `dashboard-catalog-error`, `dashboard-catalog-unavailable`,
-`dashboard-board-error`, `dashboard-board-unsupported`, `dashboard-report-latest`,
-`dashboard-report-list`, `dashboard-report-truncated` and `dashboard-report-empty`
-test ids as applicable. The unsupported-board card is for clients that do not
-render a supported catalog kind; web renders all three kinds.
-
-Test override for a private dashboard package's e2e (gate process only; it
-changes the gate's scratch profile, never a host default):
-`PENTACLE_TEST_CATALOG_ROOT=<dir of version dirs>` publishes each
-`<version>/catalog.json` verbatim and serves those files;
-`PENTACLE_TEST_CATALOG_REPORT_ROWS=<rows.json>` optionally seeds report assets
-(`[{ "spec_id", "producer", "asset_ids": [...] }]`). The catalog spec id is
-`example__dashboard_catalog`.
+**Release.** Ship compatible readers before an API-2 catalog. Install each
+immutable adapter version directory and verify its hashes and authenticated
+serving route before publishing the catalog. Before a complete package publish,
+read the latest catalog and carry forward hosted additions, array order and
+visibility; retain the complete preimage and verify the resulting union. Use the
+existing owner-coordinated serial publication path. A hosted-record edit leaves
+`package`, `catalog_version`, libraries and unrelated records unchanged; it does
+not create a new immutable adapter package. Coordinate catalog/client/profile
+rollback using retained preimages and installed version directories. Unsetting
+`catalogSpecId` disables catalog retrieval, not a switch to a separate list.
 
 ## Validation
 
-Run `npm test`, `npm run build:web`, and `node test/e2e/web_gate.js` from the
-repository root. `npm run prestart` builds renderer prerequisite bundles when
-needed; the web build also ensures those prerequisites exist.
+Run `npm run prestart && npm test`, `npm run build:web`, and
+`node test/e2e/web_gate.js` from the repository root. Catalog, visibility, hosted
+panel and auth tests cover the shared fixtures, mixed ordering, URL policy and
+server-derived mode. Browser coverage must include fresh and cached catalogs:
+identity opens permitted URLs; token/unknown mode produces no hosted navigation,
+iframe URL assignment or opener call. Include identity-to-token/unknown
+reload/reconnect and invalidated asynchronous decisions.
 
-Catalog validation and retrieval coverage use `test/catalog_loader.test.js` and
-`test/report_board.test.js` with every shared catalog/retrieval fixture.
-Additional coverage is collected from `test/dashboards_visibility.test.js`,
-`test/modeler_3d_dashboard.test.js`, and `test/dashboards_scenario.test.js`.
-The existing four dashboard suites remain unchanged. Adapter tests use synthetic
-frame events and deterministic timers; they do not establish browser behavior.
+The `dashboard_catalog` scenario exercises catalog discovery, report retrieval,
+versioned adapter files/SRI, hosted navigation and preserved chat state. Adapter
+unit tests use synthetic frame events and timers; they do not establish browser
+isolation or deployed app rendering. Use the hermetic gate, never production,
+for synthetic fixtures; report browser startup failures as NOT RUN.
 
-The web scenario `web-dashboards-revamp`, registers the real retired
-adapter manifests under a scratch synthetic profile so absence is non-vacuous.
-It checks the unconfigured modeler, rewrites only that hermetic profile with the
-loopback viewer URL, restarts its test web host, and checks loaded navigation.
-Each phase returns to Chats and checks the same chat nodes, stream, transcript
-and unsent draft; the iframe is removed. The fixture server serves only
-`test/fixtures/modeler_viewer.html`. No real models or external assets are used.
-A screenshot is produced only by a successful real-browser run.
+For private-package gate fixtures only, `PENTACLE_TEST_CATALOG_ROOT` supplies
+version directories whose `catalog.json` files are published verbatim.
+`PENTACLE_TEST_CATALOG_REPORT_ROWS` optionally supplies synthetic report assets
+as `[{ "spec_id", "producer", "asset_ids": [...] }]`. These affect only the gate's
+scratch profile, never host defaults; the fixture spec is
+`example__dashboard_catalog`.
 
-The scenario never mutates an external `--profile` configuration. For acceptance,
-run the default hermetic gate, never against production. A local browser startup
-failure must be reported as **NOT RUN**, with its failure output; unit and build
-success do not certify the browser scenarios. The fleet runs that gate and CI
-after applying the format-patch series when local browser execution is blocked.
+List items expose `data-dashboard-id`; `#dashboard-content` exposes
+`data-catalog-version`. Board state uses `data-board-state`, including
+`loading`, `ready`, `empty`, `partial`, `error`, `unsupported` and `unavailable`.
+Catalog/report cards retain the `dashboard-catalog-error`,
+`dashboard-catalog-unavailable`, `dashboard-board-error`,
+`dashboard-board-unsupported`, `dashboard-report-latest`, `dashboard-report-list`,
+`dashboard-report-truncated` and `dashboard-report-empty` test IDs.
