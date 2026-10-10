@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -19,7 +20,7 @@ REPORT = json.dumps({"schema_version": 1, "title": "Example", "sections": [
     {"id": "s1", "title": "S", "status": "reference", "blocks": []}]})
 
 
-def run_catalog_wire(tmp_path, scenario):
+def run_catalog_wire(tmp_path, scenario, catalog_spec="example__catalog"):
     class Peer:
         remote_address = ("127.0.0.1", 12345)
 
@@ -31,7 +32,7 @@ def run_catalog_wire(tmp_path, scenario):
             await sessions.open("node-alpha", name, provider="codex", pane_status="pane_alive")
             await store.grant_stream_token("node-alpha", name,
                 hashlib.sha256(("synthetic-" + name).encode()).hexdigest(), STREAM_TOKEN_HASH_VERSION)
-        assets = Assets(str(tmp_path / "assets.db"), sessions=sessions)
+        assets = Assets(str(tmp_path / "assets.db"), sessions=sessions, fleet_hosts={"node-alpha", "node-beta"})
         await assets.start()
         server = Server(store=store, sessions=sessions, local_host="node-alpha")
         server.handlers.update(assets.wire_handlers())
@@ -39,18 +40,21 @@ def run_catalog_wire(tmp_path, scenario):
         async def dispatch(message, seat=None):
             message = dict(message)
             if seat:
-                message.update(from_stream_id="node-alpha:" + seat, stream_token="synthetic-" + seat)
+                sid = seat if ":" in seat else "node-alpha:" + seat
+                message.update(from_stream_id=sid, stream_token="synthetic-" + sid.split(":", 1)[1])
             return (await server._dispatch(json.dumps(message), websocket=Peer()))[0]
 
         try:
             before = await assets._call("publish_asset", host="node-alpha", session_name="owner",
-                stream_id="node-alpha:owner", asset_id="dashboard-catalog", spec_id="example__catalog",
+                stream_id="node-alpha:owner", asset_id="dashboard-catalog", spec_id=catalog_spec,
                 title="Catalog", content_type="dashboard-catalog", body=json.dumps(CATALOG))
             await scenario(assets, server, dispatch, before)
         finally:
             await assets.stop()
             store.stop()
-    asyncio.run(main())
+    with patch.dict("os.environ", {"PENTACLE_HOSTED_DASHBOARD_TAILNET_SUFFIX":"example.ts.net",
+                                  "PENTACLE_HOSTED_DASHBOARD_PENTACLE_ORIGIN":"https://pentacle.example.ts.net"}):
+        asyncio.run(main())
 
 
 def publish(**fields):
@@ -162,3 +166,24 @@ def test_publish_rejects_noncanonical_identity_without_write(tmp_path, field, wh
                                          assets._store._conn.total_changes)) == snapshot
         assert updates == []
     run_catalog_wire(tmp_path, scenario)
+
+
+@pytest.mark.parametrize("catalog_spec", ["pentacle__dashboard_catalog", "pentacle__dashboard_catalog_v2"])
+def test_wire_cross_host_catalog_publication_requires_attached_spec(tmp_path, catalog_spec):
+    async def scenario(assets, server, dispatch, before):
+        async def open_cross_host(spec_ids):
+            await assets._sessions.open("node-beta", "cross", provider="codex", pane_status="pane_alive", spec_ids=spec_ids)
+            await assets._sessions.store.grant_stream_token("node-beta", "cross",
+                hashlib.sha256(b"synthetic-cross").hexdigest(), STREAM_TOKEN_HASH_VERSION)
+        await open_cross_host([])
+        denied = await dispatch(publish(spec_id=catalog_spec, title="Denied"), "node-beta:cross")
+        assert denied["error_code"] == "asset_unauthorized", denied
+        assert await assets._call("find_assets_by_id", asset_id="dashboard-catalog") == [before]
+        await assets._sessions.store.update_session("node-beta", "cross", spec_ids=[catalog_spec])
+        await assets._sessions.refresh()
+        reply = await dispatch(publish(spec_id=catalog_spec, title="Updated"), "node-beta:cross")
+        assert reply["type"] == "asset.publish.ok", reply
+        assert reply["asset"]["stream_id"] == before["stream_id"]
+        assert reply["asset"]["spec_id"] == catalog_spec
+        assert reply["asset"]["title"] == "Updated"
+    run_catalog_wire(tmp_path, scenario, catalog_spec)
