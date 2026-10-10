@@ -861,3 +861,28 @@ async def test_late_binding_change_after_owned_stage_leaves_no_commission_intent
 def test_status_projection_does_not_expose_arbitrary_transport_prose():
     outcome={'state':'failed','reason':'token_stage_failed: secret-token-command-fixture'}
     assert SpawnCtl._public_outcome_failure(outcome)=={'reason':'token_stage_failed','error_code':'token_stage_failed'}
+
+
+@pytest.mark.parametrize('state', ['queued', 'admitted', 'delivered', 'indeterminate'])
+@pytest.mark.parametrize('reason', [None, ''])
+@pytest.mark.asyncio
+async def test_status_retained_nonfailure_without_reason_does_not_invent_failure(tmp_path, state, reason):
+    path = str(tmp_path / 'retained-outcomes.db')
+    store = Store(path); store.start()
+    try:
+        assert await store.set_spawn_outcome(HOST, 'retained-seat', state,
+                                            request_id='retained-request', reason=reason)
+    finally:
+        store.stop()
+    # The status consumer must handle the store's nullable historical field
+    # after restart, independently of fresh-spawn receipt defaults.
+    store = Store(path); store.start(); tmux = PerNameTmux()
+    try:
+        ctl = SpawnCtl(store, Sessions(store, tmux=tmux, local_host=HOST), tmux=tmux)
+        status = await ctl.spawn_status({'target': 'retained-request'}, HOST)
+        outcome, = status['outcomes']
+        assert outcome['state'] == state
+        assert outcome['reason'] is None and outcome['error_code'] is None, outcome
+        assert tmux.created == 0
+    finally:
+        store.stop()

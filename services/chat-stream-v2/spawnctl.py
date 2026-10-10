@@ -4613,9 +4613,10 @@ class SpawnCtl:
         """
         reason = str(outcome.get("reason") or "")
         candidate = reason.split(":", 1)[0].strip()
-        code = candidate if re.fullmatch(r"[a-z][a-z0-9_]{0,79}", candidate) else "spawn_failed"
-        safe = " ".join(reason.split())[:1024] if code.startswith("qa_") else code
-        return {"reason": safe, "error_code": code if outcome.get("state") == "failed" else None}
+        failed = outcome.get("state") == "failed"
+        code = candidate if re.fullmatch(r"[a-z][a-z0-9_]{0,79}", candidate) else ("spawn_failed" if failed else None)
+        safe = " ".join(reason.split())[:1024] if code and code.startswith("qa_") else code
+        return {"reason": safe, "error_code": code if failed else None}
 
     async def spawn_status(self, msg: dict[str, Any], local_host: str) -> dict[str, Any]:
         """List the outcome/reservation rows for an idempotency key or request
