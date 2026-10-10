@@ -1386,6 +1386,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000) -> None:
         self._path = path
         self._spec_identity_resolver: Callable[[str | None], str | None] | None = None
+        self._spec_identities_resolver: Callable[[Any], dict] | None = None
         # (stream_id, session_created_at) -> the stream's other event lifecycles;
         # read and written only on the store thread.
         self._other_event_lifecycles: dict[tuple[str, str], tuple[str, ...]] = {}
@@ -1427,9 +1428,15 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
 
     def set_spec_identity_resolver(
         self, resolver: Callable[[str | None], str | None] | None,
+        batch: Callable[[Any], dict] | None = None,
     ) -> None:
-        """Configure resolver-proven identity lookup for attestation reads."""
+        """Configure resolver-proven identity lookup for attestation reads.
+
+        ``batch`` resolves several ids from one work-tree snapshot; QA
+        admission runs it off the Store thread before its write transaction.
+        """
         self._spec_identity_resolver = resolver
+        self._spec_identities_resolver = batch
 
     def start(self) -> None:
         if self._thread is not None:

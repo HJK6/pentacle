@@ -586,9 +586,30 @@ class SpecsSubsystem:
         tree resolves both to exactly one document. No character folding may
         create an identity shared by independently declared documents.
         """
-        resolution = self.resolve_for_spawn(spec_id)
+        return self._canonical_from_resolution(self.resolve_for_spawn(spec_id))
+
+    @staticmethod
+    def _canonical_from_resolution(resolution: dict[str, Any]) -> str | None:
         identity = resolution.get("canonical_spec_id")
         return str(identity) if resolution.get("resolution") == "resolved" and identity else None
+
+    def canonical_spec_identities(self, spec_ids) -> dict:
+        """``canonical_spec_identity`` for several ids from one shared snapshot.
+
+        One catalog lookup and one fresh tree scan serve every id, instead of
+        a full work-tree walk per id; each result is what a single call
+        against the same tree returns.
+        """
+        ids = list(dict.fromkeys(spec_ids))
+        if not any(ids):
+            return {spec_id: None for spec_id in ids}
+        catalog = self._folders_by_id()
+        tree = self._scan_folders_by_id(self._spawn_work_dirs())
+        return {
+            spec_id: self._canonical_from_resolution(
+                self._resolve_from_indexes(catalog, tree, spec_id))
+            for spec_id in ids
+        }
 
     def equivalent_spec_id_family(self, spec_id: str | None) -> tuple[str, ...]:
         """Return legacy persisted spellings for coordination family operations."""
@@ -675,20 +696,38 @@ class SpecsSubsystem:
                 "tree_candidates": [],
             }
 
-        # Catalog-first: use the subsystem's current index, but never count a
-        # row whose directory has disappeared since the index was built.
-        catalog_matches = [
-            match for match in self._matches_for_spec_id(spec_id)
-            if match[1].is_dir()
-        ]
-        catalog_resolution = self._resolution_for_matches(catalog_matches)
-
         # Always take one fresh snapshot before authorizing ownership. This is
         # what detects the resolved↔resolved race where the old cached path
         # still exists but its frontmatter now declares a different id.
-        tree_matches = self._declared_matches_from_index(
-            self._scan_folders_by_id(self._spawn_work_dirs()), spec_id,
+        return self._resolve_from_indexes(
+            self._folders_by_id(),
+            self._scan_folders_by_id(self._spawn_work_dirs()),
+            spec_id,
         )
+
+    def _resolve_from_indexes(
+        self,
+        catalog: dict[str, list[tuple[str, Path]]],
+        tree: dict[str, list[tuple[str, Path]]],
+        spec_id: str | None,
+    ) -> dict[str, Any]:
+        if not spec_id:
+            return {
+                "resolution": None,
+                "source": "work_tree",
+                "catalog_resolution": None,
+                "tree_resolution": None,
+                "catalog_candidates": [],
+                "tree_candidates": [],
+            }
+        # Catalog-first: use the subsystem's current index, but never count a
+        # row whose directory has disappeared since the index was built.
+        catalog_matches = [
+            match for match in self._matches_from_index(catalog, spec_id)
+            if match[1].is_dir()
+        ]
+        catalog_resolution = self._resolution_for_matches(catalog_matches)
+        tree_matches = self._declared_matches_from_index(tree, spec_id)
         tree_resolution = self._resolution_for_matches(tree_matches)
         catalog_paths = {path.resolve() for _status, path in catalog_matches}
         tree_paths = {path.resolve() for _status, path in tree_matches}
