@@ -2510,10 +2510,14 @@ def test_observed_outcome_receipt_precedence(config, baseline, status, expected)
     row, = summary["current_work"]
     assert row["outcome"] == expected
     assert summary["verified_outcomes"] == summary["shipped_observed"] == 0
-    assert row["version"] == record["version"] and decision_bytes(config) == receipts
+    assert decision_bytes(config) == receipts
     if path.exists():
+        assert row["version"] == record["version"]
         assert row["baseline_status"] == baseline if baseline is not None else "baseline_status" not in row
         assert row["checkpoint_state"] == "overdue"
+    else:
+        assert row["decision_receipt"]["version"] == record["version"]
+        assert "state" not in row and "version" not in row and "baseline_status" not in row
 
 
 def test_observed_outcome_non_authorized(config):
@@ -2570,3 +2574,36 @@ def test_observed_outcome_checkpoint(config, monkeypatch, catchup):
     assert "outcome" not in resolved and "outcome_evidence" in resolved
     assert projected["verified_outcomes"] == projected["shipped_observed"] == 2
     assert all(p.read_bytes() == data for p, data in before.items())
+
+
+@pytest.mark.parametrize("schema,last", [(1, "authorized"), (1, "no_change"), (2, "authorized"), (2, "defer")])
+def test_observed_outcome_missing_replay_has_no_current_authority(config, monkeypatch, schema, last):
+    path = source(config.memory_root, "replayed", status="in_progress")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    alternate = ("defer" if schema == 2 else "no_change") if last == "authorized" else "authorized"
+    for day, disposition in zip(("13", "14", "15"), (last, alternate, last)):
+        monkeypatch.setattr(retro, "now_iso", lambda day=day: f"2026-10-{day}T10:00:00+00:00")
+        payload = proposal2(disposition) if schema == 2 else {**proposal(), "disposition": disposition, "authority": "fixture grant"}
+        current = asyncio.run(pipeline.decision("spec_replayed", payload))
+    assert current["state"] == last
+    receipts = decision_bytes(config)
+    path.unlink()
+    row, = retro.weekly_summary(config, "2026-10-18")["current_work"]
+    assert row["outcome"] == "not_found" and row["coverage"] == "proposal unavailable"
+    assert "state" not in row and "version" not in row and "baseline_status" not in row
+    assert row["decision_receipt"]["state"] == alternate
+    assert decision_bytes(config) == receipts
+    assert retro.weekly_summary(config, "2026-10-18")["current_work_counts"]["authorized"] == 0
+
+
+
+def test_observed_outcome_defer_only_missing(config):
+    observed_fixture(config, "defer_only", None, None, disposition="defer")
+    before = decision_bytes(config)
+    summary = retro.weekly_summary(config, "2026-10-18")
+    row, = summary["current_work"]
+    assert row["outcome"] == "not_found" and row["decision_receipt"]["state"] == "defer"
+    assert "current proposal unavailable" in row["decision_receipt"]["evidence_scope"]
+    assert "state" not in row and "version" not in row and "baseline_status" not in row
+    assert not any(summary["current_work_counts"].values()) and decision_bytes(config) == before

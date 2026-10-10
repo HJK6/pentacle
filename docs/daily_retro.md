@@ -322,12 +322,17 @@ completed is `observed_completed`; blocked or an earlier active folder is
 `observed_unchanged`. The order is backlog, analysis, ready_for_dev, in_progress,
 needs_qa, completed. Leaving blocked for an active folder is progressed; an active
 folder after a terminal baseline is regressed. Legacy baseline absence precedes
-terminal labels. Missing work remains visible through its decision receipt.
+terminal labels. Missing work remains visible through its decision receipt. Under the missing-work
+exception, a disappeared receipt-linked record reports `not_found` even if its
+historical disposition was defer. It carries no inferred current state, version or
+baseline and contributes nothing to current-authority counts. Receipt fields are
+nested historical evidence only: immutable receipt creation times cannot reconstruct
+later replay order.
 
 These labels never increment verified/shipped counts, meet a checkpoint, or prove
 causation. Independently validated `outcome_evidence` alone establishes those
 observations; an authorized row can carry both kinds of evidence. Non-authorized
-rows without valid explicit evidence report `legacy_unknown`, replacing the former
+rows that still exist without valid explicit evidence report `legacy_unknown`, replacing the former
 outcome literal `unverified`; ownership coverage and its counts are unchanged.
 Weekly reads and folder moves never rewrite earlier published receipts.
 

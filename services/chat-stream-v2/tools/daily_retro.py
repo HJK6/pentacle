@@ -1315,7 +1315,7 @@ def weekly_summary(settings, end_day):
         if local_day <= days[-1]:
             key = (receipt["work_id"], receipt["proposal_id"])
             linked[key] = min(linked.get(key, receipt["recorded_at"]), receipt["recorded_at"])
-            if key not in latest_decisions or receipt["recorded_at"] > latest_decisions[key]["recorded_at"]:
+            if key not in latest_decisions or aware(receipt["recorded_at"]) > aware(latest_decisions[key]["recorded_at"]):
                 latest_decisions[key] = receipt
     for (work_id, identity), first_seen in sorted(linked.items()):
         missing = False
@@ -1330,10 +1330,14 @@ def weekly_summary(settings, end_day):
             entry = {"work_id": work_id, "proposal_id": identity, "coverage": "proposal unavailable",
                      "outcome": "legacy_unknown"}
             receipt = latest_decisions.get((work_id, identity), {})
-            if missing and receipt.get("state") == "authorized":
-                entry.update(version=receipt["version"], state="authorized", outcome="not_found")
-                if "baseline_status" in receipt:
-                    entry["baseline_status"] = receipt["baseline_status"]
+            if missing:
+                entry["outcome"] = "not_found"
+            if receipt:
+                # Receipt creation time cannot reconstruct replay chronology or
+                # current authority after the normal work record disappears.
+                entry["decision_receipt"] = {key: receipt[key] for key in
+                    ("version", "state", "recorded_at", "baseline_status") if key in receipt}
+                entry["decision_receipt"]["evidence_scope"] = "historical receipt; current proposal unavailable"
             result["current_work"].append(entry)
             continue
         entry = {"work_id": work_id, "proposal_id": identity, "version": record["version"],
