@@ -297,9 +297,7 @@ class Assets:
         catalog_target = (fields["content_type"] == "dashboard-catalog"
             or (fields["spec_id"] in {DEFAULT_DASHBOARD_CATALOG_SPEC_ID, self._catalog_spec_id}
                 and fields["asset_id"] == "dashboard-catalog")
-            or any(r["content_type"] == "dashboard-catalog" and
-                (r.get("spec_id") == fields["spec_id"] if fields["spec_id"] else
-                 r["host"] == fields["host"] and r["session_name"] == fields["session_name"]) for r in targets))
+            or (target is not None and target["content_type"] == "dashboard-catalog"))
         if catalog_target:
             writer = self._catalog_writer(msg)
             if fields["content_type"] != "dashboard-catalog":
@@ -310,6 +308,12 @@ class Assets:
                     validate_hosted_dashboard_url(board["hosted"]["url"], hosted_dashboard_policy())
             fields["host"], fields["session_name"] = writer["stream_id"].split(":", 1)
             fields["stream_id"] = writer["stream_id"]
+            # Re-resolve after the authenticated writer replaces wire claims.
+            # A new catalog spec must never upsert another spec's owner row.
+            target = same_spec[0] if same_spec else next((r for r in records
+                if r["host"] == fields["host"] and r["session_name"] == fields["session_name"]), None)
+            if target is not None and target.get("spec_id") != fields["spec_id"]:
+                raise InvalidAsset("catalog publish conflicts with an existing asset under a different spec")
         if principal and same_spec:
             existing = same_spec[0]
             try:

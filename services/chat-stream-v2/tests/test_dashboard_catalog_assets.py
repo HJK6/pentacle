@@ -100,6 +100,13 @@ def test_catalog_body_cap_and_malformed_json(monkeypatch):
         validate_asset_payload("dashboard-catalog", "{")
 
 
+def test_catalog_accepts_lanes_and_navigate_action_names():
+    catalog = json.loads(json.dumps(CATALOG_CASES["valid"][0]["catalog"]))
+    board = next(b for b in catalog["boards"] if b["kind"] == "web-adapter")
+    board["actions"] = ["lanes", "navigate"]
+    assert json.loads(validate_asset_payload("dashboard-catalog", json.dumps(catalog))) == catalog
+
+
 def test_report_type_unchanged_and_types_not_interchangeable():
     report = _report_body("r")
     assert json.loads(validate_asset_payload("report", report))["title"] == "r"
@@ -573,3 +580,86 @@ def test_configured_catalog_reserved_target_refuses_first_non_catalog_write(tmp_
         finally:
             await assets.stop()
     asyncio.run(run())
+
+
+def catalog_wire_run(tmp_path, monkeypatch, scenario):
+    """Real dispatch derives authority from a granted synthetic seat token."""
+    from server import Server
+    from sessions import Sessions
+    from store import Store, STREAM_TOKEN_HASH_VERSION
+    import hashlib
+
+    class Peer:
+        remote_address = ("127.0.0.1", 12345)
+
+    async def main():
+        store = Store(str(tmp_path / "wire-sessions.db"))
+        store.start()
+        sessions = Sessions(store, local_host="node-alpha")
+        await sessions.open("node-alpha", "seat", provider="codex", pane_status="pane_alive")
+        await store.grant_stream_token("node-alpha", "seat",
+            hashlib.sha256(b"synthetic-dashboard-seat").hexdigest(), STREAM_TOKEN_HASH_VERSION)
+        assets = Assets(str(tmp_path / "wire-assets.db"), sessions=sessions,
+            fleet_hosts={"node-alpha"}, catalog_spec_id="pentacle__dashboard_catalog_v2")
+        await assets.start()
+        server = Server(store=store, sessions=sessions, local_host="node-alpha")
+        server.handlers.update(assets.wire_handlers())
+
+        async def dispatch(msg, *, verified=False):
+            msg = dict(msg)
+            if verified:
+                msg.update(from_stream_id="node-alpha:seat", stream_token="synthetic-dashboard-seat")
+            return (await server._dispatch(json.dumps(msg), websocket=Peer()))[0]
+
+        try:
+            catalog = CATALOG_CASES["valid"][0]["catalog"]
+            await scenario(assets, catalog, dispatch)
+        finally:
+            await assets.stop()
+            store.stop()
+
+    monkeypatch.setenv("PENTACLE_HOSTED_DASHBOARD_TAILNET_SUFFIX", POLICY["tailnetSuffix"])
+    monkeypatch.setenv("PENTACLE_HOSTED_DASHBOARD_PENTACLE_ORIGIN", POLICY["pentacleOrigin"])
+    asyncio.run(main())
+
+
+def catalog_wire_publish(catalog, spec_id, **fields):
+    return {"type": "asset.publish", "host": "node-alpha", "session_name": "seat",
+        "asset_id": "dashboard-catalog", "spec_id": spec_id, "title": "Catalog",
+        "content_type": "dashboard-catalog", "body": json.dumps(catalog), **fields}
+
+
+@pytest.mark.parametrize("seed_spec", ["arbitrary__catalog", "pentacle__dashboard_catalog", "pentacle__dashboard_catalog_v2"])
+@pytest.mark.parametrize("verb,verified", [("publish", False), ("publish", True), ("delete", False)])
+def test_wire_alternate_spec_cannot_replace_or_delete_catalog(tmp_path, monkeypatch, seed_spec, verb, verified):
+    async def scenario(assets, catalog, dispatch):
+        seeded = await dispatch(catalog_wire_publish(catalog, seed_spec), verified=True)
+        assert seeded["type"] == "asset.publish.ok", seeded
+        before = seeded["asset"]
+        attack = catalog_wire_publish(catalog, "unrelated__report", type="asset." + verb,
+            content_type="report", body=_report_body("Spoof"), title="Spoof",
+            _auth_context=INTERNAL)  # Wire authority must be discarded by Server.
+        reply = await dispatch(attack, verified=verified)
+        assert reply["type"] == "asset.error", reply
+        if not verified:
+            assert reply["error_code"] == "asset_unauthorized", reply
+        assert await assets._call("find_assets_by_id", asset_id="dashboard-catalog") == [before]
+    catalog_wire_run(tmp_path, monkeypatch, scenario)
+
+
+def test_wire_same_writer_legacy_then_v2_refuses_physical_alias_without_changing_old_row(tmp_path, monkeypatch):
+    async def scenario(assets, catalog, dispatch):
+        old = await dispatch(catalog_wire_publish(catalog, "pentacle__dashboard_catalog"), verified=True)
+        assert old["type"] == "asset.publish.ok", old
+        revised = dict(catalog, catalog_version="v2-candidate")
+        reply = await dispatch(catalog_wire_publish(revised, "pentacle__dashboard_catalog_v2"), verified=True)
+        assert reply["type"] == "asset.error", reply
+        assert reply["error_code"] == "asset_invalid", reply
+        assert "spec" in reply["message"], reply
+        readback = await dispatch({"type": "asset.get", "stream_id": "node-alpha:seat",
+            "spec_id": "pentacle__dashboard_catalog", "asset_id": "dashboard-catalog"}, verified=True)
+        assert readback["type"] == "asset.get.ok", readback
+        assert readback["asset"]["body"] == old["asset"]["body"]
+        assert readback["asset"]["spec_id"] == "pentacle__dashboard_catalog"
+        assert await assets._call("list_by_spec_id", spec_id="pentacle__dashboard_catalog_v2") == []
+    catalog_wire_run(tmp_path, monkeypatch, scenario)
