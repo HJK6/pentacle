@@ -203,6 +203,28 @@ checks the `spec.md` byte preimage before each update so concurrent edits surviv
 Approval remains authorization until an observed success or honest blocker is
 recorded there through the normal delivery process.
 
+`self_assignment_exclusions` is an optional list of exact, case-sensitive work IDs
+(default `[]`). Supply the actual exclusion list in private configuration. Malformed
+lists or IDs refuse configuration loading. Explicit authorization of an excluded,
+completed or deprecated item refuses with `refused: use resolved or duplicate`;
+a missing work ID refuses with `unknown_work_id`. Eligibility is checked inside
+the work lock on every authorization, including replay, before prompt reconciliation
+or writes. Actor, existing authority, containment and version checks still apply.
+
+A new authorization records collector-owned `baseline_status` from its physical
+work folder in both the proposal and immutable decision receipt. Caller metadata
+and frontmatter cannot override it. It is excluded from proposal-version hashing.
+Replay of the same authorization/version preserves that observation, including
+legacy absence; old receipts are never backfilled. A changed version captures its
+own current folder. Non-authorized transitions clear the active proposal baseline;
+re-authorizing an already-receipted version reuses its immutable observation.
+This is a folder observation, not proof of delivery, progress or causation.
+A failed compare-and-swap preserves the concurrent spec and writes no new proposal
+or decision receipt, ask, send or spawn. Existing cancellation of a live stale-version
+question precedes persistence and may stand after a failed save. A retry observes
+that cancellation without repeating it, then records the decision normally. Guard
+refusals occur before all prompt reconciliation, including cancellation.
+
 New defers and proposals linked by schema-2 review also carry `schema_version: 2`
 and explicit acceptance/checkpoint fields:
 

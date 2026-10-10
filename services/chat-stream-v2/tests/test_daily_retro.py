@@ -526,7 +526,7 @@ def proposal2(disposition="defer"):
 
 
 def test_future_work_requires_honest_defer_helper_and_observed_outcome(config, monkeypatch):
-    source(config.memory_root, "one")
+    continuous_source(config, "one")
     monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
     pipeline = retro.Pipeline(config, Transport())
     manifest = retro.collect(config, at())
@@ -793,7 +793,7 @@ def test_outcome_requires_observed_times_before_counting_success(damage):
 
 def test_changed_schema2_scope_does_not_inherit_old_observed_outcome(config, monkeypatch):
     monkeypatch.setattr(retro, "now_iso", lambda: "2026-10-05T12:00:00+00:00")
-    source(config.memory_root, "one")
+    source(config.memory_root, "one", status="in_progress")
     monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
     pipeline = retro.Pipeline(config, Transport())
     old = {**proposal2("resolved"), "outcome_evidence": {"receipt": "old-scope-result", "observed_at": "2026-09-28T11:00:00Z", "measure": "Old output confirmed."}}
@@ -1076,7 +1076,7 @@ def test_worker_crash_report_retention_and_stale_cleanup(config):
 
 def test_authorized_work_and_review_require_durable_version(config, monkeypatch):
     async def run():
-        source(config.memory_root, "one")
+        continuous_source(config, "one")
         monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
         rpc = Transport()
         pipeline = retro.Pipeline(config, rpc)
@@ -1104,7 +1104,7 @@ def test_authorized_work_and_review_require_durable_version(config, monkeypatch)
 
 def test_decision_lock_stays_in_private_state(config, monkeypatch):
     async def run():
-        path = source(config.memory_root, "one")
+        path = source(config.memory_root, "one", status="in_progress")
         monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
         rpc = Transport()
         authorized = {**proposal(), "disposition": "authorized", "authority": "Existing fixture grant"}
@@ -1124,7 +1124,7 @@ def test_decision_lock_stays_in_private_state(config, monkeypatch):
 
 def test_decision_spec_compare_and_swap_preserves_concurrent_edit(config, monkeypatch):
     async def run():
-        path = source(config.memory_root, "one")
+        path = source(config.memory_root, "one", status="in_progress")
         monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
         original_save = retro.save_proposals
         concurrent = path.read_bytes() + b"\n## Concurrent note\nKeep this edit.\n"
@@ -1941,3 +1941,304 @@ def test_cli_failure_writes_only_the_structured_record_to_stderr(tmp_path):
     assert f"{record['sha256']}.txt" in kept and f"{record['sha256']}.traceback.txt" in kept
     assert all(p.stat().st_mode & 0o777 == 0o600 for p in kept.values())
     assert secret in kept[f"{record['sha256']}.traceback.txt"].read_text()
+
+
+def fixture_settings_file(config, **overrides):
+    path = config.state_root.parent / "fixture-config.json"
+    retro.atomic(path, {"timezone": "America/Chicago", "memory_root": str(config.memory_root),
+        "state_root": str(config.state_root), "ws_url": config.ws_url,
+        "token_path": str(config.token_path), "host": config.host, "isolated": True, **overrides})
+    return path
+
+
+def move_fixture(path, status):
+    target = path.parents[2] / status / path.parent.name / "spec.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    path.rename(target)
+    return target
+
+
+def decision_bytes(config):
+    return {str(p.relative_to(config.state_root)): p.read_bytes()
+            for p in (config.state_root / "decision-receipts").glob("*.json")}
+
+
+def test_authorized_guard_config(config, monkeypatch):
+    omitted = retro.Settings.load(fixture_settings_file(config))
+    assert omitted.self_assignment_exclusions == []
+    for invalid in (None, True, "spec_fixture_umbrella", {}, [""], [None], [True],
+                    [" spec_fixture_umbrella"], ["../escape"], ["spec/one"]):
+        with pytest.raises(ValueError, match="self_assignment_exclusions"):
+            retro.Settings.load(fixture_settings_file(config, self_assignment_exclusions=invalid))
+    configured = retro.Settings.load(fixture_settings_file(config,
+        self_assignment_exclusions=["spec_fixture_umbrella", "spec_fixture_umbrella"]))
+    path = source(config.memory_root, "fixture_umbrella", status="in_progress")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    rpc = Transport()
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="^refused: use resolved or duplicate$"):
+        asyncio.run(retro.Pipeline(configured, rpc).decision("spec_fixture_umbrella", proposal2("authorized")))
+    assert path.read_bytes() == before and not decision_bytes(config)
+    assert not rpc.questions and not rpc.sent and not rpc.spawns
+    case = source(config.memory_root, "FIXTURE_UMBRELLA", status="in_progress")
+    result = asyncio.run(retro.Pipeline(configured, rpc).decision("spec_FIXTURE_UMBRELLA", proposal2("authorized")))
+    assert result["baseline_status"] == "in_progress" and case.exists()
+
+
+@pytest.mark.parametrize("status", ["completed", "deprecated", "missing"])
+def test_authorized_guard_refusal(config, monkeypatch, status):
+    path = source(config.memory_root, "one", status=status) if status != "missing" else None
+    before = path.read_bytes() if path else None
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    rpc = Transport()
+    expected = "unknown_work_id" if status == "missing" else "refused: use resolved or duplicate"
+    with pytest.raises(ValueError, match="^" + expected + "$"):
+        asyncio.run(retro.Pipeline(config, rpc).decision("spec_one", proposal2("authorized")))
+    assert (path.read_bytes() if path else None) == before and not decision_bytes(config)
+    assert not rpc.questions and not rpc.sent and not rpc.spawns
+
+
+@pytest.mark.parametrize("replay", ["terminal", "excluded", "missing"])
+def test_authorized_guard_replay_baseline(config, monkeypatch, replay):
+    path = source(config.memory_root, "one", status="in_progress")
+    path.write_text(path.read_text().replace("status: in_progress", "status: completed\nbaseline_status: forged"))
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    rpc = Transport(); pipeline = retro.Pipeline(config, rpc)
+    payload = {**proposal2("authorized"), "baseline_status": "forged"}
+    first = asyncio.run(pipeline.decision("spec_one", payload))
+    assert first["baseline_status"] == "in_progress"
+    receipts = decision_bytes(config)
+    assert len(receipts) == 1 and json.loads(next(iter(receipts.values())))["baseline_status"] == "in_progress"
+    path = move_fixture(path, "needs_qa")
+    assert asyncio.run(pipeline.decision("spec_one", payload)) == first
+    assert decision_bytes(config) == receipts
+    if replay == "terminal":
+        path = move_fixture(path, "completed")
+    elif replay == "excluded":
+        pipeline = retro.Pipeline(replace(config, self_assignment_exclusions=["spec_one"]), rpc)
+    else:
+        path.unlink()
+    before = path.read_bytes() if path.exists() else None
+    expected = "unknown_work_id" if replay == "missing" else "refused: use resolved or duplicate"
+    with pytest.raises(ValueError, match="^" + expected + "$"):
+        asyncio.run(pipeline.decision("spec_one", payload))
+    assert (path.read_bytes() if path.exists() else None) == before and decision_bytes(config) == receipts
+    assert not rpc.questions and not rpc.sent and not rpc.spawns
+
+
+def test_authorized_guard_new_version(config, monkeypatch):
+    path = source(config.memory_root, "one", status="analysis")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    first = asyncio.run(pipeline.decision("spec_one", proposal2("authorized")))
+    old_receipts = decision_bytes(config)
+    path = move_fixture(path, "in_progress")
+    changed = {**proposal2("authorized"), "scope": "New fixture scope"}
+    second = asyncio.run(pipeline.decision("spec_one", changed))
+    assert second["version"] != first["version"] and second["baseline_status"] == "in_progress"
+    assert all(decision_bytes(config)[k] == v for k, v in old_receipts.items())
+    cleared = asyncio.run(pipeline.decision("spec_one", {**changed, "disposition": "no_change", "baseline_status": "forged"}))
+    assert "baseline_status" not in cleared
+    path = move_fixture(path, "needs_qa")
+    third = asyncio.run(pipeline.decision("spec_one", {**changed, "scope": "Third fixture scope"}))
+    assert third["baseline_status"] == "needs_qa"
+    assert all(decision_bytes(config)[k] == v for k, v in old_receipts.items())
+
+
+def test_authorized_guard_hash_and_legacy(config, monkeypatch):
+    path = source(config.memory_root, "one", status="in_progress")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    payload = proposal2("authorized")
+    version = retro.proposal_version(payload)
+    assert retro.proposal_version({**payload, "baseline_status": "forged"}) == version
+    legacy = {**payload, "version": version, "state": "authorized", "attempts": []}
+    retro.save_proposals(path, path.read_bytes(), {legacy["id"]: legacy})
+    receipt_path = config.state_root / "decision-receipts" / (retro.digest(["spec_one", legacy["id"], version, "authorized"]) + ".json")
+    retro.atomic(receipt_path, {"work_id": "spec_one", "proposal_id": legacy["id"], "version": version, "state": "authorized"})
+    old_receipts = decision_bytes(config)
+    pipeline = retro.Pipeline(config, Transport())
+    result = asyncio.run(pipeline.decision("spec_one", {**payload, "baseline_status": "forged"}))
+    assert result.get("baseline_status", "legacy_unknown") == "legacy_unknown"
+    assert decision_bytes(config) == old_receipts
+    for invalid in ("../escape", "", None):
+        with pytest.raises(ValueError, match="normal work ID required"):
+            asyncio.run(pipeline.decision(invalid, payload))
+    duplicate = source(config.memory_root, "duplicate", status="analysis")
+    duplicate.write_text(duplicate.read_text().replace("spec_duplicate", "spec_one"))
+    with pytest.raises(ValueError, match="resolve exactly once"):
+        asyncio.run(pipeline.decision("spec_one", payload))
+    assert decision_bytes(config) == old_receipts and not pipeline.rpc.questions
+    duplicate.unlink()
+    external = config.state_root.parent / "outside-spec.md"
+    external.write_text(path.read_text().replace("spec_one", "spec_escape"))
+    escaped = config.memory_root / "work/in_progress/escape/spec.md"
+    escaped.parent.mkdir(); escaped.symlink_to(external)
+    with pytest.raises(ValueError, match="escapes memory root"):
+        asyncio.run(pipeline.decision("spec_escape", payload))
+    assert decision_bytes(config) == old_receipts
+    authorized_guard_stale_cas_control(config, monkeypatch)
+
+
+def test_authorized_guard_cli_and_cas(config, monkeypatch, capsys):
+    path = source(config.memory_root, "one", status="in_progress")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    cfg = fixture_settings_file(config)
+    payload = config.state_root.parent / "proposal.json"
+    retro.atomic(payload, proposal2("authorized"))
+    rpc = Transport(); original = retro.Pipeline
+    monkeypatch.setattr(retro, "Pipeline", lambda settings: original(settings, rpc))
+    monkeypatch.setattr(retro.sys, "argv", ["daily_retro.py", "decision", "--config", str(cfg),
+        "--work-id", "spec_one", "--proposal", str(payload)])
+    retro.main()
+    assert json.loads(capsys.readouterr().out)["baseline_status"] == "in_progress"
+    before = decision_bytes(config)
+    save = retro.save_proposals
+    def concurrent(p, preimage, records):
+        p.write_bytes(preimage + b"\nConcurrent fixture note.\n")
+        return save(p, preimage, records)
+    monkeypatch.setattr(retro, "save_proposals", concurrent)
+    with pytest.raises(RuntimeError, match="preimage moved"):
+        asyncio.run(original(config, rpc).decision("spec_one", {**proposal2("authorized"), "scope": "Changed scope"}))
+    assert path.read_bytes().endswith(b"Concurrent fixture note.\n") and decision_bytes(config) == before
+    assert not rpc.questions and not rpc.sent and not rpc.spawns
+
+
+def test_authorized_guard_lock_move(config, monkeypatch):
+    path = source(config.memory_root, "one", status="in_progress")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    original = retro.locked
+    @retro.contextmanager
+    def moved(lock):
+        with original(lock):
+            move_fixture(path, "completed")
+            yield
+    monkeypatch.setattr(retro, "locked", moved)
+    rpc = Transport()
+    with pytest.raises(ValueError, match="refused: use resolved or duplicate"):
+        asyncio.run(retro.Pipeline(config, rpc).decision("spec_one", proposal2("authorized")))
+    assert not decision_bytes(config) and not rpc.questions and not rpc.sent and not rpc.spawns
+
+
+def test_authorized_guard_schema1_roundtrip(config, monkeypatch):
+    path = source(config.memory_root, "one", status="analysis")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    pipeline = retro.Pipeline(config, Transport())
+    payload = {**proposal(), "disposition": "authorized", "authority": "fixture grant"}
+    first = asyncio.run(pipeline.decision("spec_one", payload))
+    before = decision_bytes(config)
+    cleared = asyncio.run(pipeline.decision("spec_one", {**payload, "disposition": "no_change"}))
+    assert cleared["state"] == "no_change" and "baseline_status" not in cleared
+    path = move_fixture(path, "in_progress")
+    replay = asyncio.run(pipeline.decision("spec_one", payload))
+    assert replay["state"] == "authorized" and replay["baseline_status"] == first["baseline_status"] == "analysis"
+    assert all(decision_bytes(config)[k] == v for k, v in before.items())
+    assert not pipeline.rpc.questions
+
+
+def test_authorized_guard_preserves_default_disposition_replay(config, monkeypatch):
+    path = source(config.memory_root, "one", status="analysis")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    payload = proposal()
+    record = {**payload, "version": retro.proposal_version(payload), "state": "rejected", "attempts": []}
+    retro.save_proposals(path, path.read_bytes(), {record["id"]: record})
+    rpc = Transport()
+    assert asyncio.run(retro.Pipeline(config, rpc).decision("spec_one", payload))["state"] == "rejected"
+    assert not rpc.questions and not rpc.sent
+
+
+def test_authorized_guard_pending_baseline(config, monkeypatch):
+    path = source(config.memory_root, "one", status="analysis")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    rpc = Transport(); pipeline = retro.Pipeline(config, rpc)
+    asyncio.run(pipeline.decision("spec_one", proposal()))
+    payload = {**proposal(), "disposition": "authorized", "authority": "fixture grant"}
+    first = asyncio.run(pipeline.decision("spec_one", payload))
+    assert first["state"] == "pending" and first["baseline_status"] == "analysis"
+    receipts = decision_bytes(config)
+    move_fixture(path, "in_progress")
+    replay = asyncio.run(pipeline.decision("spec_one", payload))
+    assert replay["baseline_status"] == "analysis" and decision_bytes(config) == receipts
+    assert len(rpc.questions) == 1
+
+
+def test_authorized_guard_legacy_shipped_baseline(config, monkeypatch):
+    path = source(config.memory_root, "one", status="analysis")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    payload = {**proposal(), "disposition": "authorized", "authority": "fixture grant"}
+    legacy = {**payload, "version": retro.proposal_version(payload), "state": "shipped", "attempts": []}
+    retro.save_proposals(path, path.read_bytes(), {legacy["id"]: legacy})
+    rpc = Transport()
+    current = asyncio.run(retro.Pipeline(config, rpc).decision("spec_one", payload))
+    assert current["state"] == "shipped" and "baseline_status" not in current
+    assert not rpc.questions
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_authorized_guard_preserves_historical_authorized_replay(config, monkeypatch, explicit):
+    path = source(config.memory_root, "one", status="analysis")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    payload = {**proposal(), **({"disposition": "propose"} if explicit else {})}
+    record = {**payload, "version": retro.proposal_version(payload), "state": "authorized", "attempts": []}
+    retro.save_proposals(path, path.read_bytes(), {record["id"]: record})
+    rpc = Transport()
+    assert asyncio.run(retro.Pipeline(config, rpc).decision("spec_one", payload))["state"] == "authorized"
+    assert not rpc.questions and not rpc.sent
+
+
+def authorized_guard_stale_cas_control(config, monkeypatch):
+    class ObservedTransport(Transport):
+        def __init__(self):
+            super().__init__()
+            self.prompt_calls = []
+        async def prompt_status_once(self, config, qid):
+            self.prompt_calls.append("status")
+            return await super().prompt_status_once(config, qid)
+        async def prompt_ask_once(self, config, payload):
+            self.prompt_calls.append("ask")
+            return await super().prompt_ask_once(config, payload)
+        async def prompt_cancel_once(self, config, payload):
+            self.prompt_calls.append("cancel")
+            return await super().prompt_cancel_once(config, payload)
+    path = source(config.memory_root, "cas_fixture", status="in_progress")
+    rpc = ObservedTransport(); pipeline = retro.Pipeline(config, rpc)
+    pending = asyncio.run(pipeline.decision("spec_cas_fixture", proposal2("propose")))
+    qid = pending["attempts"][0]["question_id"]
+    receipts = decision_bytes(config)
+    concurrent = path.read_bytes() + b"\nSettled concurrent fixture edit.\n"
+    save = retro.save_proposals
+    def moved(p, preimage, records):
+        p.write_bytes(concurrent)
+        return save(p, preimage, records)
+    rpc.prompt_calls.clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(retro, "save_proposals", moved)
+        with pytest.raises(RuntimeError, match="preimage moved"):
+            asyncio.run(pipeline.decision("spec_cas_fixture", proposal2("authorized")))
+    assert path.read_bytes() == concurrent and decision_bytes(config) == receipts
+    assert [c for c in rpc.prompt_calls if c != "status"] == ["cancel"]
+    assert rpc.questions[qid]["state"] == "cancelled" and not rpc.sent and not rpc.spawns
+    rpc.prompt_calls.clear()
+    result = asyncio.run(pipeline.decision("spec_cas_fixture", proposal2("authorized")))
+    assert result["state"] == "authorized" and result["baseline_status"] == "in_progress"
+    assert rpc.prompt_calls == ["status"]  # Reconciliation reads; no prompt mutation.
+    assert len(decision_bytes(config)) == len(receipts) + 1
+    for case in ("excluded", "completed", "missing"):
+        path = source(config.memory_root, "guard_" + case, status="in_progress")
+        work_id = "spec_guard_" + case
+        rpc = ObservedTransport(); pipeline = retro.Pipeline(config, rpc)
+        pending = asyncio.run(pipeline.decision(work_id, proposal2("propose")))
+        qid = pending["attempts"][0]["question_id"]
+        receipts = decision_bytes(config)
+        if case == "excluded":
+            pipeline = retro.Pipeline(replace(config, self_assignment_exclusions=[work_id]), rpc)
+        elif case == "completed":
+            path = move_fixture(path, "completed")
+        else:
+            path.unlink()
+        before = path.read_bytes() if path.exists() else None
+        rpc.prompt_calls.clear()
+        with pytest.raises(ValueError, match="unknown_work_id" if case == "missing" else "refused: use resolved or duplicate"):
+            asyncio.run(pipeline.decision(work_id, proposal2("authorized")))
+        assert not rpc.prompt_calls and rpc.questions[qid]["state"] == "open"
+        assert not rpc.sent and not rpc.spawns and decision_bytes(config) == receipts
+        assert (path.read_bytes() if path.exists() else None) == before

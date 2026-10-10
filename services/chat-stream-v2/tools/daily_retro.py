@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta, timezone
 import errno
 import fcntl
@@ -100,6 +100,7 @@ class Settings:
     primary_store: Path | None = None
     primary_archive: Path | None = None
     primary_composite: str = "bart:assistant"
+    self_assignment_exclusions: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path):
@@ -123,11 +124,14 @@ class Settings:
         for key in ("primary_store", "primary_archive"):
             if data.get(key) and not Path(data[key]).is_absolute():
                 raise ValueError(f"{key} must be absolute")
+        exclusions = data.get("self_assignment_exclusions", [])
+        if not isinstance(exclusions, list) or any(not valid_work_id(value) for value in exclusions):
+            raise ValueError("self_assignment_exclusions must be a list of valid work IDs")
         return cls(memory, state, data["ws_url"], Path(data["token_path"]), data["host"],
                    bool(data.get("isolated")), path,
                    Path(data["primary_store"]) if data.get("primary_store") else None,
                    Path(data["primary_archive"]) if data.get("primary_archive") else None,
-                   data.get("primary_composite", "bart:assistant"))
+                   data.get("primary_composite", "bart:assistant"), exclusions)
 
     def rpc(self):
         return Config(self.ws_url, self.token_path.read_text().strip(), self.host,
@@ -2011,7 +2015,11 @@ class Pipeline:
 
     async def decision(self, work_id, proposal, *, retry_blocked=False):
         binding = await self.actor()
-        path = work_path(self.settings, work_id)
+        # Validate before using the ID as a lock name; authorization resolves
+        # again under that lock so status moves cannot bypass the guard.
+        if not valid_work_id(work_id):
+            raise ValueError("normal work ID required")
+        path = None if proposal.get("disposition") == "authorized" else work_path(self.settings, work_id)
         identity = proposal.get("id")
         if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", identity):
             raise ValueError("stable proposal ID required")
@@ -2029,6 +2037,14 @@ class Pipeline:
             raise ValueError("existing authority reference required")
         version = proposal_version(proposal)
         with locked(self.settings.state_root / "locks" / f"{work_id}.lock"):
+            baseline = None
+            if disposition == "authorized":
+                if work_id in self.settings.self_assignment_exclusions:
+                    raise ValueError("refused: use resolved or duplicate")
+                path = work_path(self.settings, work_id, authorization=True)
+                baseline = path.resolve().parent.parent.name
+                if baseline in {"completed", "deprecated"}:
+                    raise ValueError("refused: use resolved or duplicate")
             preimage = path.read_bytes()
             text = preimage.decode()
             records = proposals(text)
@@ -2036,6 +2052,20 @@ class Pipeline:
             validate_proposal(proposal, require_v2=record.get("schema_version") == 2 or
                               (disposition == "defer" and identity not in records))
             old_version = record.get("version")
+            old_disposition = record.get("disposition", "propose")
+            if disposition == "authorized":
+                receipt_path = self.settings.state_root / "decision-receipts" / (
+                    digest([work_id, identity, version, "authorized"]) + ".json")
+                previous = read(receipt_path)
+                # One authorization/version has one immutable observation,
+                # including a legacy absence, even after another disposition.
+                if previous is not None:
+                    baseline = previous.get("baseline_status")
+                elif old_version == version and (old_disposition == "authorized" or record.get("state") == "authorized"):
+                    baseline = record.get("baseline_status")
+            record.pop("baseline_status", None)
+            if disposition == "authorized" and baseline is not None:
+                record["baseline_status"] = baseline
             attempts = record["attempts"]
             # Query all historical attempts, including terminal ones: an answer
             # may have committed before its former generation's final turn.
@@ -2069,7 +2099,7 @@ class Pipeline:
                 live = []
             if old_version != version and "outcome_evidence" not in proposal:
                 record.pop("outcome_evidence", None)
-            record.update({k: proposal[k] for k in proposal if k not in {"attempts", "answer", "version", "state"}})
+            record.update({k: proposal[k] for k in proposal if k not in {"attempts", "answer", "version", "state", "baseline_status"}})
             record["version"] = version
             if answers:
                 if len({digest(a["answer"]) for a in answers}) != 1:
@@ -2082,7 +2112,8 @@ class Pipeline:
                     a.get("state") == "blocked" and a["version"] == version for a in attempts):
                 attempt = next(a for a in reversed(attempts) if a.get("state") == "blocked" and a["version"] == version)
                 return await self._blocked_report(path, preimage, records, record, attempt)
-            elif old_version == version and record.get("state") in {"rejected", "deferred", "authorized", "shipped"}:
+            elif (old_version == version and record.get("state") in {"rejected", "deferred", "authorized", "shipped"}
+                  and not (record.get("state") == "authorized" and old_disposition != disposition)):
                 pass
             elif proposal.get("disposition") in {"resolved", "duplicate", "no_change", "authorized", "investigate", "defer"}:
                 record["state"] = proposal["disposition"]
@@ -2116,12 +2147,17 @@ class Pipeline:
             receipt_path = self.settings.state_root / "decision-receipts" / (digest([work_id, identity, version, record["state"]]) + ".json")
             if not receipt_path.exists():
                 atomic(receipt_path, {"work_id": work_id, "proposal_id": identity, "version": version,
-                                     "state": record["state"], "recorded_at": now_iso(), "path": str(path)})
+                                     "state": record["state"], "recorded_at": now_iso(), "path": str(path),
+                                     **({"baseline_status": record["baseline_status"]} if "baseline_status" in record else {})})
             return record
 
 
-def work_path(settings, work_id):
-    if not isinstance(work_id, str) or not re.fullmatch(r"[A-Za-z0-9_:-]+", work_id):
+def valid_work_id(value):
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_:-]+", value) is not None
+
+
+def work_path(settings, work_id, *, authorization=False):
+    if not valid_work_id(work_id):
         raise ValueError("normal work ID required")
     found = []
     for path in (settings.memory_root / "work").glob("*/*/spec.md"):
@@ -2133,6 +2169,8 @@ def work_path(settings, work_id):
                 found.append(path)
         except (OSError, UnicodeError, RuntimeError):
             continue
+    if not found and authorization:
+        raise ValueError("unknown_work_id")
     if len(found) != 1:
         raise ValueError("normal work ID must resolve exactly once; create with existing triage first")
     return found[0]
