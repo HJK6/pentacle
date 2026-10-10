@@ -514,6 +514,11 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
                     "plan_provenance": {"source": session.get("plan_source"), "updated_at": session.get("plan_updated_at"),
                         "statuses": statuses}, "waiting_provenance": waiting_provenance,
                     "execution_evidence": "provider_working_flag; specific tool unknown" if lane["working"] is True else "no live-tool proof"})
+    except ImportError:
+        packet["gaps"].append({"source": "primary_store", "reason":
+            "Primary evidence incomplete: required receipt-history dependency unavailable; observations from completed reads retained."})
+        packet["coverage"]["send_receipts"] = {"available": False}
+        # Later reads were not attempted: absent coverage remains unknown.
     except (sqlite3.Error, OSError):
         packet["gaps"].append({"source": "primary_store", "reason": "unavailable"})
     finally:
