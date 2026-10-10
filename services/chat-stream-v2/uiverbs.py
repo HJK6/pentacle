@@ -37,6 +37,10 @@ the honest level v2 can support this increment:
 
 from __future__ import annotations
 
+from copy import deepcopy
+
+from store_qa import spec_binding_source, SpecInputsUnavailable
+
 import asyncio
 import hashlib
 import logging
@@ -61,7 +65,7 @@ if SERVICES_ROOT not in sys.path:
     sys.path.insert(0, SERVICES_ROOT)
 
 from _shared.spawn_profiles import catalog as spawn_catalog  # noqa: E402
-from _shared.specs_service import spec_resolution_view  # noqa: E402
+from _shared.specs_service import spec_resolution_view, SpecResolutionUnavailable  # noqa: E402
 
 log = logging.getLogger("chat_streamd_v2.uiverbs")
 
@@ -314,7 +318,16 @@ class UIVerbs:
                 "error": "specs_not_configured", "error_code": "specs_not_configured"}
 
     async def session_spec_update(self, msg: dict[str, Any]) -> dict[str, Any]:
-        """Attach or detach one catalog-resolved work item durably."""
+        """Attach/detach using a fresh source CAS and at most one recapture."""
+        msg = deepcopy(msg)
+        for attempt in range(2):
+            try:
+                return await self._session_spec_update_once(msg)
+            except (SpecInputsUnavailable, SpecResolutionUnavailable):
+                if attempt:
+                    raise VerbError("spec_unavailable", "spec identity or session binding changed") from None
+
+    async def _session_spec_update_once(self, msg: dict[str, Any]) -> dict[str, Any]:
         rid = str(msg.get("request_id") or "")
         action = str(msg.get("action") or "").strip()
         host = str(msg.get("host") or "").strip()
@@ -333,6 +346,11 @@ class UIVerbs:
                 "requested spec-id cannot be resolved because the catalog is unavailable",
                 spec_id=spec_id, spec_resolution=None,
             )
+        stream_id = f"{host}:{name}"
+        source = await self.store.fetch_session(host, name)
+        if source is None:
+            raise VerbError("session_not_found", "session does not exist", stream_id=stream_id)
+        source_check = spec_binding_source(source)
         # One tree walk, in a worker thread, serves every comparison below.
         view = await spec_resolution_view(self._spec_catalog)
         resolver = getattr(view, "resolution_for", resolver)
@@ -354,10 +372,6 @@ class UIVerbs:
             )
         spec_id = str(canonical_spec_id)
 
-        stream_id = f"{host}:{name}"
-        source = await self.store.fetch_session(host, name)
-        if source is None:
-            raise VerbError("session_not_found", "session does not exist", stream_id=stream_id)
         spec_ids = normalize_spec_ids(source.get("spec_ids"), source.get("spec_id"))
         bindings = normalize_spec_binding_provenance(
             source.get("spec_binding_provenance"), spec_ids=spec_ids
@@ -395,6 +409,7 @@ class UIVerbs:
         updated = await self.store.update_session(
             host,
             name,
+            expected_spec_source=source_check,
             spec_id=first_spec_id,
             spec_ids=spec_ids,
             spec_resolution=resolver(first_spec_id) if first_spec_id else None,

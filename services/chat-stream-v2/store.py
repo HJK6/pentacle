@@ -24,6 +24,7 @@ stored). v2-only auxiliary tables are prefixed `v2_` and are invisible to v1.
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -56,7 +57,7 @@ from store_assistant_binding import (
 from assistant_lane_rulings import RULING_REQUESTS_DDL, BART_LANE_OWNERSHIP_DDL, RULING_AUDIT_DDL
 from voice_answers import VOICE_ANSWER_ACKS_DDL, VOICE_ANSWER_BINDINGS_DDL, VoiceAnswersStoreMixin
 import store_consent as consent
-from store_qa import QaStoreMixin
+from store_qa import QaStoreMixin, SpecInputsUnavailable, spec_binding_source
 from store_exchange import ExchangeStoreMixin
 
 from store_work_lanes import _WorkLanesStoreMixin, ensure_work_lane_schema
@@ -1533,6 +1534,20 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             conn.execute(ROUTING_INTEGRITY_DDL)
             conn.execute(ROUTING_INTEGRITY_AUDIT_DDL)
             conn.execute(OUTBOUND_NOTICE_DDL)
+            # Measured error-alert dependency lookups. Partial indexes exclude
+            # unrelated notice families without imposing a second notice store.
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_v2_error_notification ON v2_outbound_notices "
+                         "(json_extract(metadata,'$.notification_id')) "
+                         "WHERE json_extract(metadata,'$.notification_id') IS NOT NULL")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_v2_error_predecessor ON v2_outbound_notices "
+                         "(json_extract(metadata,'$.predecessor_notice_id')) "
+                         "WHERE json_extract(metadata,'$.predecessor_notice_id') IS NOT NULL")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_v2_error_pending ON v2_outbound_notices "
+                         "(json_extract(metadata,'$.error_alert_v1'),terminal_at,delivered_at) "
+                         "WHERE json_extract(metadata,'$.error_alert_v1')=1")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_v2_error_recent ON v2_outbound_notices "
+                         "(json_extract(metadata,'$.error_alert_v1'),kind,created_at) "
+                         "WHERE kind='error_alert' AND json_extract(metadata,'$.error_alert_v1')=1")
             if "proof_binding" not in {
                 r[1] for r in conn.execute("PRAGMA table_info(v2_outbound_notices)")
             }:
@@ -2535,6 +2550,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         session_name: str,
         *,
         expected_generation: str | None = None,
+        expected_spec_source: dict[str, Any] | None = None,
         **fields: Any,
     ) -> dict[str, Any] | None:
         """Patch named columns on one row. Returns the row, or None if absent."""
@@ -2554,6 +2570,10 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         closing = str(cols.get("status") or "") == "closed"
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            if expected_spec_source is not None:
+                current = _session_for_stream_conn(conn, f"{host}:{session_name}")
+                if spec_binding_source(current) != expected_spec_source:
+                    raise SpecInputsUnavailable("spec_inputs_changed")
             if expected_generation is not None:
                 current = conn.execute(
                     "SELECT created_at FROM sessions WHERE host=? AND session_name=?",
@@ -2612,6 +2632,8 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             finally:
                 self._retire_routing_integrity_lifecycle_lock(stream_id)
             return result
+        if expected_spec_source is not None:
+            return await self._submit_spec_commit(_op)
         return await self.submit(_op)
 
     async def update_context(
@@ -3412,11 +3434,15 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
     async def record_spawn_intent(
         self, host: str, session_name: str, payload: dict[str, Any], *,
         request_id: str | None = None, nonce: str | None = None,
+        expected_spec_sources=(), prepared_qa=None,
     ) -> bool:
         """Persist what it would take to finish this spawn's row, BEFORE the
         pane exists. Written to the reservation the spawn already holds."""
 
         def _op(conn: sqlite3.Connection) -> bool:
+            for stream_id, expected in expected_spec_sources:
+                if spec_binding_source(_session_for_stream_conn(conn, stream_id)) != expected:
+                    raise SpecInputsUnavailable("spec_inputs_changed")
             held = conn.execute(
                 "SELECT request_id FROM v2_stream_reservations WHERE host=? AND session_name=?",
                 (host, session_name),
@@ -3438,6 +3464,8 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 prior_intent = {**payload, "exchange_binding": prior_intent["exchange_binding"]}
             else:
                 prior_intent = payload
+            if prepared_qa is not None:
+                prepared_qa(conn)
             cursor = conn.execute(
                 "UPDATE v2_stream_reservations SET payload=? WHERE host=? AND session_name=?",
                 (json.dumps(prior_intent, separators=(",", ":")), host, session_name),
@@ -3445,7 +3473,11 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             conn.commit()
             return cursor.rowcount == 1
 
-        return await self.submit(_op)
+        def transaction(conn):
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                return _op(conn)
+        return await self.submit(transaction)
 
     async def mark_tmux_created(
         self, host: str, session_name: str, *,
@@ -4367,6 +4399,27 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         store boundary and refuses a changed source before inserting anything.
         """
 
+        fields, routing_snapshot = copy.deepcopy(fields), copy.deepcopy(routing_snapshot)
+
+        def capture(conn):
+            reporter = _session_for_stream_conn(conn, str(fields.get("from_stream_id") or ""))
+            attestation = fields.get("qa_attestation")
+            qa_id = attestation.get("stream_id") if isinstance(attestation, dict) else None
+            report_id = attestation.get("report_id") if isinstance(attestation, dict) else None
+            reviewer = _session_for_stream_conn(conn, qa_id) if qa_id else None
+            report = conn.execute("SELECT * FROM v2_reports WHERE report_id=?", (report_id,)).fetchone() if report_id else None
+            return (spec_binding_source(reporter), spec_binding_source(reviewer), dict(report) if report else None)
+
+        def replay(conn):
+            row = conn.execute("SELECT * FROM v2_reports WHERE report_id=?", (fields["report_id"],)).fetchone()
+            if row is None:
+                return None
+            stored = _report_row(row)
+            if not _report_replay_matches(stored, fields):
+                raise ReportReplayConflict(str(fields["report_id"]))
+            stored["_report_inserted"] = False
+            return stored
+
         def _put(conn: sqlite3.Connection) -> dict[str, Any]:
             existing = conn.execute(
                 "SELECT * FROM v2_reports WHERE report_id=?", (fields["report_id"],)
@@ -4378,6 +4431,8 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                         raise ReportReplayConflict(str(fields["report_id"]))
                     stored["_report_inserted"] = False
                 return stored
+            if capture(conn) != source:
+                raise SpecInputsUnavailable("spec_inputs_changed")
             if not _complete_report_provenance(routing_snapshot, fields):
                 raise ReportProvenanceUnavailable(routing_snapshot)
             stream_id = str(fields.get("from_stream_id") or "")
@@ -4439,7 +4494,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 completion_kind=stored_fields.get("completion_kind"),
                 attestation=stored_fields.get("qa_attestation"),
                 mode=qa_attestation_mode,
-                canonical_spec_identity=self._spec_identity_resolver,
+                canonical_spec_identity=lookup,
             )
             if qa_attestation_mode == "enforce" and validation and validation["state"] == "unverified":
                 raise QAAttestationUnverified(validation)
@@ -4484,7 +4539,23 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 conn.execute("BEGIN IMMEDIATE")
                 return _put(conn)
 
-        return await self.submit(_op)
+        existing = await self.submit(replay)
+        if existing is not None:
+            return existing
+        for attempt in range(2):
+            source = await self.submit(capture)
+            ids = []
+            if fields.get("completion_kind") == "implementation_ready" and qa_attestation_mode != "off" and fields.get("qa_attestation") is not None:
+                for row in source[:2]:
+                    row = row or {}
+                    ids.extend(normalize_spec_ids(row.get("qualified_spec_ids") or row.get("spec_ids"), row.get("spec_id")))
+            try:
+                lookup = await self._resolve_spec_inputs(ids, warn_single=qa_attestation_mode == "warn")
+                return await self._submit_spec_commit(_op)
+            except SpecInputsUnavailable:
+                if attempt:
+                    raise ReportProvenanceUnavailable(routing_snapshot) from None
+
 
     # -- durable awaiters (C5) --------------------------------------------
 
@@ -6096,6 +6167,8 @@ def _attestation_spec_identities(
     for spec_id in normalize_spec_ids(source, (session or {}).get("spec_id")):
         try:
             resolved = canonical_spec_identity(spec_id)
+        except SpecInputsUnavailable:
+            raise
         except Exception:
             continue
         identity = str(resolved or "").strip()

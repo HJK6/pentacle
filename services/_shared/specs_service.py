@@ -11,6 +11,10 @@ import stat
 from contextlib import contextmanager
 import yaml
 from collections import defaultdict
+from collections.abc import Mapping
+from concurrent.futures import Future
+from types import MappingProxyType
+from . import specs_parser
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -124,11 +128,34 @@ def _resolve_specs_memory_root() -> tuple[Path | None, str]:
 
 
 
-class SpecResolutionSnapshot:
-    """``resolve_for_spawn``/``canonical_spec_identity``/``resolution_for`` from
-    one catalog index and one tree scan; each answer equals a direct call made
-    against the same tree."""
+class SpecResolutionUnavailable(ValueError):
+    """Fresh identity inputs could not be captured within the local bound."""
 
+
+class _IdentityIndex(Mapping):
+    """Published together: aliases, declared owners and immutable file inputs."""
+    def __init__(self, folders, identities):
+        self._folders = MappingProxyType({key: tuple(value) for key, value in folders.items()})
+        self.identities = MappingProxyType(dict(identities))
+        owners = defaultdict(list)
+        for path, (identity, declared) in identities.items():
+            if declared:
+                owners[identity].append((path.parent.name, path))
+        self.owners = MappingProxyType({key: tuple(value) for key, value in owners.items()})
+        self.collisions = frozenset(key for key, value in owners.items() if len(value) > 1)
+
+    def __getitem__(self, key):
+        return self._folders[key]
+
+    def __iter__(self):
+        return iter(self._folders)
+
+    def __len__(self):
+        return len(self._folders)
+
+
+class SpecResolutionSnapshot:
+    """Answers only from one captured identity view; never reads live files."""
     def __init__(self, service: "SpecsSubsystem", catalog, tree) -> None:
         self._service, self._catalog, self._tree = service, catalog, tree
         self._resolved: dict[str | None, dict[str, Any]] = {}
@@ -137,7 +164,9 @@ class SpecResolutionSnapshot:
         if spec_id not in self._resolved:
             self._resolved[spec_id] = self._service._resolve_from_indexes(
                 self._catalog, self._tree, spec_id)
-        return dict(self._resolved[spec_id])
+        # Candidate lists must not let a consumer mutate later answers.
+        return {key: list(value) if isinstance(value, list) else value
+                for key, value in self._resolved[spec_id].items()}
 
     def canonical_spec_identity(self, spec_id: str | None) -> str | None:
         return self._service._canonical_from_resolution(self.resolve_for_spawn(spec_id))
@@ -150,12 +179,32 @@ class SpecResolutionSnapshot:
 
 
 async def spec_resolution_view(specs: Any) -> Any:
-    """One-operation spec resolver whose tree walk ran in a worker thread.
+    """Coalesce overlapping captures, with at most 16 admitted async callers.
 
-    Fakes without ``spec_resolution_snapshot`` are returned unchanged.
+    Cancellation abandons this caller, not a worker shared with other callers.
+    No additional executor work is queued by followers.
     """
     factory = getattr(specs, "spec_resolution_snapshot", None)
-    return await asyncio.to_thread(factory) if callable(factory) else specs
+    if not callable(factory):
+        return specs
+    # The daemon has one event loop. Keep loop ownership explicit for test
+    # fixtures reused across asyncio.run calls rather than reusing old Tasks.
+    loop = asyncio.get_running_loop()
+    state = getattr(specs, "_resolution_async", None)
+    if state is None or state[0] is not loop:
+        state = [loop, None, 0]
+        specs._resolution_async = state
+    if state[2] >= 16:
+        raise SpecResolutionUnavailable("spec_resolution_overloaded")
+    state[2] += 1
+    try:
+        if state[1] is None or state[1].done():
+            state[1] = asyncio.create_task(asyncio.to_thread(factory))
+            # Retrieve abandoned failures without changing shared cancellation.
+            state[1].add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+        return await asyncio.shield(state[1])
+    finally:
+        state[2] -= 1
 
 class SpecsSubsystem:
     def __init__(
@@ -199,8 +248,11 @@ class SpecsSubsystem:
         self._presentation_cache_lock = threading.Lock()
         self._folder_index_cache: dict[str, list[tuple[str, Path]]] | None = None
         self._status_card_metadata_cache: dict[tuple[str, str], dict[str, Any]] = {}
-        self._declared_id_collisions: set[str] = set()
-        self._declared_id_owners: dict[str, list[tuple[str, Path]]] = {}
+        self._identity_lock = threading.RLock()
+        self._identity_cache = {}
+        self._capture_lock = threading.Lock()
+        self._capture_future = None
+        self._capture_waiters = 0
         if self.disabled:
             log.warning(
                 "specs subsystem disabled: memory root is missing or invalid source=%s path=%s",
@@ -512,39 +564,71 @@ class SpecsSubsystem:
         root = self.memory_root / "work"
         return sum(1 for path in root.rglob("*") if _is_spec_sync_conflict(path)) if root.exists() else 0
 
-    def _scan_folders_by_id(
-        self, status_dirs: list[Path] | None = None,
-    ) -> dict[str, list[tuple[str, Path]]]:
-        folders: dict[str, list[tuple[str, Path]]] = defaultdict(list)
-        declared_paths: dict[str, set[Path]] = defaultdict(set)
-        self._declared_id_owners = {}
-        for status_dir in self._work_dirs() if status_dirs is None else status_dirs:
-            status_name = status_dir.name
-            if status_dir.is_dir():
+    @staticmethod
+    def _identity_fingerprint(path):
+        try:
+            value = path.lstat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(value.st_mode):
+            raise SpecResolutionUnavailable("spec_identity_not_regular")
+        return (str(path), value.st_dev, value.st_ino, value.st_size,
+                value.st_mtime_ns, value.st_ctime_ns)
+
+    def _scan_folders_by_id(self, status_dirs=None, *, strict=False):
+        """Fresh bounded-depth metadata enumeration; parse only changed files.
+
+        Keep only the current tree's inputs. A failed capture never publishes
+        partial inputs or falls back to a last-success authorization snapshot.
+        """
+        with self._identity_lock:
+            folders, identities, cache, fingerprints, directories = defaultdict(list), {}, {}, {}, {}
+            for status_dir in self._work_dirs() if status_dirs is None else status_dirs:
+                try:
+                    before = status_dir.lstat()
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISDIR(before.st_mode):
+                    continue
+                directories[status_dir] = (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns)
                 for child in status_dir.iterdir():
-                    if child.is_dir() and not _is_spec_sync_conflict(child):
-                        try:
-                            declared_id = declared_spec_id(child)
-                            has_id = has_declared_spec_id(child)
-                        except SOURCE_READ_ERRORS:
-                            # An unrelated malformed/transient file cannot take
-                            # down the existing specs inventory or resolver.
-                            continue
-                        aliases = set(self._spec_id_aliases(declared_id))
-                        if self._folder_name_is_declared_alias(child.name, declared_id):
-                            aliases.add(child.name)
-                        for alias in aliases:
-                            folders[alias].append((status_name, child))
-                        if has_id:
-                            self._declared_id_owners.setdefault(declared_id, []).append((status_name, child))
-                            declared_paths[declared_id].add(child)
-        self._declared_id_collisions = {
-            alias
-            for declared_id, paths in declared_paths.items()
-            if len(paths) > 1
-            for alias in self._spec_id_aliases(declared_id)
-        }
-        return folders
+                    if _is_spec_sync_conflict(child) or child.is_symlink() or not child.is_dir():
+                        continue
+                    path = child / "spec.md"
+                    try:
+                        fingerprint = self._identity_fingerprint(path)
+                        prior = self._identity_cache.get(path)
+                        if prior is not None and prior[0] == fingerprint:
+                            declared_id, has_id = prior[1:]
+                        else:
+                            front = specs_parser._frontmatter(path)
+                            has_id = bool(front.get("id"))
+                            declared_id = str(front.get("id") or child.name)
+                        if self._identity_fingerprint(path) != fingerprint:
+                            raise SpecResolutionUnavailable("spec_identity_changed")
+                    except SOURCE_READ_ERRORS:
+                        if strict:
+                            raise SpecResolutionUnavailable("spec_identity_unavailable") from None
+                        continue
+                    fingerprints[path] = fingerprint
+                    cache[path] = (fingerprint, declared_id, has_id)
+                    identities[child] = (declared_id, has_id)
+                    aliases = set(self._spec_id_aliases(declared_id))
+                    if self._folder_name_is_declared_alias(child.name, declared_id):
+                        aliases.add(child.name)
+                    for alias in aliases:
+                        folders[alias].append((status_dir.name, child))
+            # Recheck the whole capture. This detects edits to an early file
+            # while a later file parses, including preserved-mtime replacement.
+            for path, fingerprint in fingerprints.items():
+                if self._identity_fingerprint(path) != fingerprint:
+                    raise SpecResolutionUnavailable("spec_identity_changed")
+            for path, fingerprint in directories.items():
+                value = path.lstat()
+                if (value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns) != fingerprint:
+                    raise SpecResolutionUnavailable("spec_identity_changed")
+            self._identity_cache = cache
+            return _IdentityIndex(folders, identities)
 
     def _folders_by_id(self) -> dict[str, list[tuple[str, Path]]]:
         if not self.push_enabled:
@@ -642,13 +726,60 @@ class SpecsSubsystem:
         return {spec_id: snapshot.canonical_spec_identity(spec_id) for spec_id in ids}
 
     def spec_resolution_snapshot(self) -> "SpecResolutionSnapshot":
-        """Take the catalog lookup and fresh tree scan once for one operation.
-
-        This is the whole-tree walk; callers on the event loop run it in a
-        worker thread and then resolve every id they need from the result.
-        """
-        return SpecResolutionSnapshot(
-            self, self._folders_by_id(), self._scan_folders_by_id(self._spawn_work_dirs()))
+        """One owner rebuilds; at most 16 overlapping synchronous followers."""
+        with self._capture_lock:
+            future = self._capture_future
+            owner = future is None
+            if owner:
+                future = self._capture_future = Future()
+            elif self._capture_waiters >= 16:
+                raise SpecResolutionUnavailable("spec_resolution_overloaded")
+            self._capture_waiters += 1
+        try:
+            if not owner:
+                return future.result()
+            try:
+                # One bounded retry for a concurrent filesystem mutation.
+                for attempt in range(2):
+                    try:
+                        if self.memory_root is not None and not (self.memory_root / "work").is_dir():
+                            raise SpecResolutionUnavailable("spec_root_unavailable")
+                        root = self.memory_root / "work" if self.memory_root else None
+                        root_before = root.stat() if root else None
+                        config_before = self._identity_fingerprint(root / "statuses.json") if root else None
+                        allowed = set(self._spawn_work_dirs())
+                        current = self._scan_folders_by_id(strict=True)
+                        tree = _IdentityIndex(
+                            {key: [entry for entry in entries if entry[1].parent in allowed]
+                             for key, entries in current.items()},
+                            {path: identity for path, identity in current.identities.items() if path.parent in allowed})
+                        catalog = current
+                        if self.push_enabled and self._folder_index_cache is not None:
+                            # Preserve catalog diagnostics but capture liveness
+                            # now, never from a reader of this immutable view.
+                            catalog = _IdentityIndex(
+                                {key: [entry for entry in entries if entry[1] in current.identities]
+                                 for key, entries in self._folder_index_cache.items()}, current.identities)
+                        if root:
+                            root_after = root.stat()
+                            if ((root_before.st_dev, root_before.st_ino, root_before.st_mtime_ns, root_before.st_ctime_ns)
+                                    != (root_after.st_dev, root_after.st_ino, root_after.st_mtime_ns, root_after.st_ctime_ns)
+                                    or config_before != self._identity_fingerprint(root / "statuses.json")):
+                                raise SpecResolutionUnavailable("spec_identity_changed")
+                        snapshot = SpecResolutionSnapshot(self, catalog, tree)
+                        future.set_result(snapshot)
+                        return snapshot
+                    except (OSError, ValueError):
+                        if attempt:
+                            raise SpecResolutionUnavailable("spec_identity_unavailable") from None
+            except BaseException as exc:
+                future.set_exception(exc)
+                raise
+        finally:
+            with self._capture_lock:
+                self._capture_waiters -= 1
+                if owner:
+                    self._capture_future = None
 
     def equivalent_spec_id_family(self, spec_id: str | None) -> tuple[str, ...]:
         """Return legacy persisted spellings for coordination family operations."""
@@ -690,14 +821,14 @@ class SpecsSubsystem:
         direct_matches = [
             match
             for match in self._matches_from_index(folders, spec_id)
-            if has_declared_spec_id(match[1])
+            if folders.identities[match[1]][1]
         ]
-        declared_ids = {declared_spec_id(folder) for _status, folder in direct_matches}
+        declared_ids = {folders.identities[folder][0] for _status, folder in direct_matches}
         matches = list(direct_matches)
         seen = {folder for _status, folder in matches}
         for declared_id in declared_ids:
             for match in self._matches_from_index(folders, declared_id):
-                if match[1] in seen or declared_spec_id(match[1]) != declared_id:
+                if match[1] in seen or folders.identities[match[1]][0] != declared_id:
                     continue
                 seen.add(match[1])
                 matches.append(match)
@@ -738,11 +869,7 @@ class SpecsSubsystem:
         # Always take one fresh snapshot before authorizing ownership. This is
         # what detects the resolved↔resolved race where the old cached path
         # still exists but its frontmatter now declares a different id.
-        return self._resolve_from_indexes(
-            self._folders_by_id(),
-            self._scan_folders_by_id(self._spawn_work_dirs()),
-            spec_id,
-        )
+        return self.spec_resolution_snapshot().resolve_for_spawn(spec_id)
 
     def _resolve_from_indexes(
         self,
@@ -761,19 +888,16 @@ class SpecsSubsystem:
             }
         # Catalog-first: use the subsystem's current index, but never count a
         # row whose directory has disappeared since the index was built.
-        catalog_matches = [
-            match for match in self._matches_from_index(catalog, spec_id)
-            if match[1].is_dir()
-        ]
+        catalog_matches = self._matches_from_index(catalog, spec_id)
         catalog_resolution = self._resolution_for_matches(catalog_matches)
         tree_matches = self._declared_matches_from_index(tree, spec_id)
         tree_resolution = self._resolution_for_matches(tree_matches)
-        catalog_paths = {path.resolve() for _status, path in catalog_matches}
-        tree_paths = {path.resolve() for _status, path in tree_matches}
+        catalog_paths = {path for _status, path in catalog_matches}
+        tree_paths = {path for _status, path in tree_matches}
         agrees = catalog_resolution == tree_resolution and catalog_paths == tree_paths
         source = "catalog" if agrees and tree_resolution == "resolved" else "work_tree"
         canonical_spec_id = (
-            declared_spec_id(tree_matches[0][1]) if tree_resolution == "resolved" else None
+            tree.identities[tree_matches[0][1]][0] if tree_resolution == "resolved" else None
         )
 
         return {
@@ -1023,13 +1147,14 @@ class SpecsSubsystem:
     def get_spec(self, spec_id: str) -> dict[str, Any]:
         if self.disabled:
             return {"error": "specs_not_configured"}
-        matches = self._matches_for_spec_id(spec_id)
-        declared_matches = self._declared_id_owners.get(spec_id, [])
+        index = self._folders_by_id()
+        matches = self._matches_from_index(index, spec_id)
+        declared_matches = index.owners.get(spec_id, [])
         if declared_matches:
             matches = declared_matches
         if not matches:
             return {"error": "spec_not_found"}
-        if len(matches) > 1 and set(self._spec_id_aliases(spec_id)).intersection(self._declared_id_collisions):
+        if len(matches) > 1 and any(identity in index.collisions for identity in self._spec_id_aliases(spec_id)):
             candidates = sorted({f"{status}:{folder.name}" for status, folder in matches})
             return {
                 "error": "spec_multiple_matches",
