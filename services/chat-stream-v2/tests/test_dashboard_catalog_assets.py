@@ -647,12 +647,13 @@ def test_wire_alternate_spec_cannot_replace_or_delete_catalog(tmp_path, monkeypa
     catalog_wire_run(tmp_path, monkeypatch, scenario)
 
 
-def test_wire_same_writer_legacy_then_v2_refuses_physical_alias_without_changing_old_row(tmp_path, monkeypatch):
+@pytest.mark.parametrize("wire_host", ["node-alpha", "node-beta"])
+def test_wire_same_writer_legacy_then_v2_refuses_physical_alias_without_changing_old_row(tmp_path, monkeypatch, wire_host):
     async def scenario(assets, catalog, dispatch):
         old = await dispatch(catalog_wire_publish(catalog, "pentacle__dashboard_catalog"), verified=True)
         assert old["type"] == "asset.publish.ok", old
         revised = dict(catalog, catalog_version="v2-candidate")
-        reply = await dispatch(catalog_wire_publish(revised, "pentacle__dashboard_catalog_v2"), verified=True)
+        reply = await dispatch(catalog_wire_publish(revised, "pentacle__dashboard_catalog_v2", host=wire_host), verified=True)
         assert reply["type"] == "asset.error", reply
         assert reply["error_code"] == "asset_invalid", reply
         assert "spec" in reply["message"], reply
