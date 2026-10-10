@@ -40,6 +40,7 @@ if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide module, never a
     sys.path.insert(0, SERVICES_ROOT)
 
 from _shared.spawn_objective import objective_error, objective_required_for, resolve_objective
+from _shared.specs_service import spec_resolution_view  # noqa: E402
 
 import assistant_restore
 import qa_dispatch
@@ -415,8 +416,12 @@ class SpawnCtl:
                 "after Syncthing converges",
                 spec_id=explicit[0], spec_resolution=None,
             )
-        spawn_resolver = getattr(self.specs, "resolve_for_spawn", None)
-        canonicalizer = getattr(self.specs, "canonical_spec_identity", None)
+        # The whole-tree walk runs once, off the event loop; every id below
+        # resolves from that one snapshot.
+        view = await spec_resolution_view(self.specs)
+        resolver = getattr(view, "resolution_for", resolver)
+        spawn_resolver = getattr(view, "resolve_for_spawn", None)
+        canonicalizer = getattr(view, "canonical_spec_identity", None)
         canonical_explicit: list[str] = []
         for spec_id in explicit:
             details = spawn_resolver(spec_id) if callable(spawn_resolver) else None
