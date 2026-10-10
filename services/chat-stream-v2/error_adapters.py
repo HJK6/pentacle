@@ -16,6 +16,7 @@ from typing import Callable, Mapping
 
 #: family -> fixed codes. Add one line per accepted producer family.
 FAMILY_CODES: dict[str, frozenset[str]] = {
+    "daemon_runtime.v1": frozenset({"loop_stalled"}),
     "work_lane.v1": frozenset({"lane_stale", "lane_completed"}),
     "session_lifecycle": frozenset({"session_dead", "close_failed", "close_carcass", "reap_exhausted", "reap_fenced"}),
     "integrity": frozenset({"pin_drift", "close_claim_mismatch"}),
@@ -107,9 +108,19 @@ def _map_bot_messaging(fields: Mapping[str, object]) -> ErrorFact | None:
     return _map_fields("bot_messaging", step + "_failed", fields, ("step", "operation_id"), stage=status)
 
 
+def _map_daemon_stall(fields: Mapping[str, object]) -> ErrorFact | None:
+    episode, condition, cause = (fields.get(key) for key in ('episode_id', 'condition', 'cause'))
+    if (not isinstance(episode, str) or not re.fullmatch('[0-9a-f]{64}', episode)
+            or not isinstance(condition, str) or condition not in {'active', 'recovered'}
+            or not isinstance(cause, str) or cause not in {'loop', 'store', 'loop_store', 'unavailable'}):
+        return None
+    return ErrorFact('daemon_runtime.v1', 'loop_stalled', episode, condition, cause)
+
+
 #: Alerts kind -> pure mapper(fields) returning a fact, or None to stay log-only.
 #: Producers call `await alerts.record(kind, **fields)`; it commits before return.
 ADAPTERS: dict[str, Callable[[Mapping[str, object]], ErrorFact | None]] = {
+    "daemon_loop_stalled": _map_daemon_stall,
     "reconciler_session_dead": lambda fields: _map_fields("session_lifecycle", "session_dead", fields, ("episode_id",)),
     "close_failed": lambda fields: _map_fields("session_lifecycle", "close_failed", fields, ("stream_id", "generation", "reason")),
     "close_carcass": lambda fields: _map_fields("session_lifecycle", "close_carcass", fields, ("stream_id", "generation")),
