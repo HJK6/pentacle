@@ -34,7 +34,7 @@ from alerts import Alerts
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from assistant_router import AssistantRouterAdapter
 import launch
-from assets import DEFAULT_ASSETS_DB, Assets
+from assets import DEFAULT_ASSETS_DB, DEFAULT_DASHBOARD_CATALOG_SPEC_ID, Assets
 from blobs import DEFAULT_BLOB_ROOT, BlobStore
 from comms import Comms
 from daemon_lifecycle import DaemonLifecycle
@@ -190,6 +190,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--agent-orch-bin-dir", default="", help="dir put on a spawned pane's PATH")
     p.add_argument("--notifications-db", default=DEFAULT_NOTIFICATIONS_DB, help="notifications.db path (v1's, for cutover)")
     p.add_argument("--assets-db", default=DEFAULT_ASSETS_DB, help="assets.db path (v1's, for cutover)")
+    p.add_argument("--dashboard-catalog-spec-id", default=DEFAULT_DASHBOARD_CATALOG_SPEC_ID,
+                   help="spec id of the catalog edited by dashboard add/remove")
     p.add_argument("--blob-root", default=DEFAULT_BLOB_ROOT, help="content-addressed blob store root")
     p.add_argument("--notification-expiry-interval-s", type=float, default=60.0)
     # Named kill switches, one per implemented recurring background task. Keep
@@ -632,7 +634,7 @@ async def run(args: argparse.Namespace) -> int:
     # connection's in-flight uploads down through this reference.
     server.blobs = blobs
     assets = Assets(args.assets_db, sessions=sessions, comms=comms, broadcast=server.broadcast,
-                    fleet_hosts={args.local_host, *peers})
+                    fleet_hosts={args.local_host, *peers}, catalog_spec_id=args.dashboard_catalog_spec_id)
     server.handlers.update(assets.wire_handlers())
     # UI-sent verb group (mobile/desktop day-1): models/grant_token/register_push
     # lifted clean; send.interrupt/close.cancel/question.dismiss/enroll/specs.*

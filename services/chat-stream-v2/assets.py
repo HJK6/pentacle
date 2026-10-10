@@ -55,6 +55,7 @@ import report_producer
 log = logging.getLogger("chat_streamd_v2.assets")
 
 DEFAULT_ASSETS_DB = str(Path.home() / ".local/share/pentacle-stream/assets.db")
+DEFAULT_DASHBOARD_CATALOG_SPEC_ID = "pentacle__dashboard_catalog"
 
 
 def _nullable_text(value: object) -> str | None:
@@ -68,10 +69,12 @@ class Assets:
     go through v2's server + comms."""
 
     def __init__(self, db_path: str = DEFAULT_ASSETS_DB, *, sessions: Any = None,
-                 comms: Any = None, broadcast: Any = None, fleet_hosts: Any = ()) -> None:
+                 comms: Any = None, broadcast: Any = None, fleet_hosts: Any = (),
+                 catalog_spec_id: str = DEFAULT_DASHBOARD_CATALOG_SPEC_ID) -> None:
         self._db_path = db_path
         self._sessions = sessions
         self._fleet_hosts = frozenset(fleet_hosts)
+        self._catalog_spec_id = catalog_spec_id
         self._comms = comms
         self._broadcast = broadcast
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asset-store")
@@ -192,7 +195,7 @@ class Assets:
             return {"replaced": existing is not None, "order":position, "changed":True}
         if self._store is None:
             raise AssetStoreError("asset store not started")
-        return self._store.mutate_dashboard_catalog(spec_id="pentacle__dashboard_catalog", asset_id="dashboard-catalog", edit=edit)
+        return self._store.mutate_dashboard_catalog(spec_id=self._catalog_spec_id, asset_id="dashboard-catalog", edit=edit)
 
     @staticmethod
     def _dashboard_error(request_id: str, code: str, **extra: Any) -> dict:
@@ -292,7 +295,8 @@ class Assets:
                 raise InvalidAsset("catalog publish conflicts with an existing asset under a different spec")
         targets = records
         catalog_target = (fields["content_type"] == "dashboard-catalog"
-            or (fields["spec_id"] == "pentacle__dashboard_catalog" and fields["asset_id"] == "dashboard-catalog")
+            or (fields["spec_id"] in {DEFAULT_DASHBOARD_CATALOG_SPEC_ID, self._catalog_spec_id}
+                and fields["asset_id"] == "dashboard-catalog")
             or any(r["content_type"] == "dashboard-catalog" and
                 (r.get("spec_id") == fields["spec_id"] if fields["spec_id"] else
                  r["host"] == fields["host"] and r["session_name"] == fields["session_name"]) for r in targets))
