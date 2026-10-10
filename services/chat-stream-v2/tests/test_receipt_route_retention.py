@@ -18,6 +18,7 @@ import time
 import pytest
 
 import retention as r
+from assistant_composite import AssistantCompositeConfig
 from store import Store
 
 NOW = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
@@ -576,7 +577,7 @@ def test_retro_older_window_combines_before_latest_and_cutoff(tmp_path):
         store = running(tmp_path)
         try:
             await store.open_session("fixture", "root", created_at="2026-07-01T00:00:00Z")
-            await store.submit(lambda c:(c.execute("INSERT INTO v2_assistant_direct_binding VALUES('bart','fixture:root','generation',1,'2026-07-01T00:00:00Z')"),c.commit()))
+            await store.submit(lambda c:(c.execute("INSERT INTO v2_assistant_direct_binding VALUES(?,'fixture:root','generation',1,'2026-07-01T00:00:00Z')", (AssistantCompositeConfig().name,)),c.commit()))
             await append(store, "failure", stamp="2026-08-01T12:00:00Z", state="not_landed", delivery="not_landed", from_stream_id="fixture:root")
             await append(store, "failure", stamp="2026-08-02T12:00:00Z", from_stream_id="fixture:root")
             # Give archived recipient membership the established same-name schema.
@@ -836,7 +837,7 @@ def test_pending_bootstrap_retro_validates_archive_before_union(tmp_path,defect)
             await append(first,'foreign',stamp='2026-08-01T12:00:00Z',state='not_landed',delivery='not_landed',from_stream_id='fixture:root')
             await move(first)
             await second.open_session('fixture','root',created_at='2026-07-01T00:00:00Z')
-            await second.submit(lambda c:(c.execute("INSERT INTO v2_assistant_direct_binding VALUES('bart','fixture:root','generation',1,'2026-07-01T00:00:00Z')"),c.commit()))
+            await second.submit(lambda c:(c.execute("INSERT INTO v2_assistant_direct_binding VALUES(?,'fixture:root','generation',1,'2026-07-01T00:00:00Z')", (AssistantCompositeConfig().name,)),c.commit()))
             sequence=await second.submit(lambda c:dict(c.execute('SELECT * FROM v2_send_receipt_sequence').fetchone()))
             assert sequence['archive_ready']==0
             archive=await archive_path(first)
