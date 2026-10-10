@@ -100,6 +100,15 @@ Run tests in a harness-owned tmux session on an explicit `tmux -L <test-socket>`
 
 Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the real desktop smoke. Fixtures must use invented content and valid public wire identifiers.
 
+Broadcast queues replace pending `session.inventory` and `hosts.stats` snapshots,
+and `working.state` snapshots for the same stream, at every enqueue. The newest
+state stays at its arrival position after intervening events; an in-flight send
+is never replaced. Other existing state families retain warning/overflow
+compaction. Chat events and all non-coalescible frames (including
+`work_lanes.inventory`) preserve their exact bytes and order. An incompressible
+full queue still disconnects with 1011/`slow_consumer`, signaling the client to
+reconnect and refetch.
+
 ### Scheduled spawn fleet smoke
 
 `tools/spawn_fleet_smoke.py --dry-run` resolves the full matrix without opening a WebSocket or spawning a session. The no-argument full run requires `PENTACLE_MACHINES_FILE` to point to the same file configured for the daemon. It rejects a missing file or `PENTACLE_MACHINES_JSON`, reads host names from that file, and includes every configured host by default. Set `PENTACLE_SMOKE_EXCLUDED_HOSTS` to a comma-separated list of unique configured host IDs only when a deployment explicitly excludes them; unknown names and an empty final matrix are refused. An optional `PENTACLE_SMOKE_HOSTS` subset must contain only remaining configured hosts. The dry-run output names the source, selected hosts, explicit excluded names and their configuration source, and every host/provider/prompt cell.

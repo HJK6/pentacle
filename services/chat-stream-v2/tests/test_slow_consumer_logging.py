@@ -356,7 +356,7 @@ def test_pressure_episode_rate_limit_keeps_matching_recovery_and_boundary(caplog
     asyncio.run(run())
 
 
-def test_precompaction_peak_and_immediate_recovery_preserve_chat_order(caplog):
+def test_early_coalescing_bounds_peak_and_preserves_chat_order(caplog):
     async def run():
         caplog.set_level(logging.INFO)
         async with _connection() as (daemon, peer, queue, _handler):
@@ -369,14 +369,39 @@ def test_precompaction_peak_and_immediate_recovery_preserve_chat_order(caplog):
                 ("session.inventory", '{"type":"session.inventory","version":999}'),
             ]
             pressure = _events(caplog, "slow_consumer")
-            assert [(p["phase"], p["queue_depth"]) for p in pressure] == [("enter", 204), ("recover", 2)]
-            assert [p["queue_peak"] for p in pressure] == [204, 204]
-            assert pressure[0]["traffic"]["session.inventory"]["coalesced"] == 0
-            assert pressure[1]["traffic"]["session.inventory"]["coalesced"] == 202
+            assert pressure == []
+            state = daemon._connection_diagnostics[peer]
+            assert state.queue_peak == 2
+            assert state.traffic["session.inventory"]["coalesced"] == 202
             await _until(lambda: len(peer.sent) == 3)
         close = _only_event(caplog, "close")
         assert close["traffic"]["session.inventory"]["broadcast_enqueued"] == 203
         assert close["traffic"]["session.inventory"]["broadcast_sent"] == 1
+        assert close["traffic"]["chat.event"]["broadcast_sent"] == 1
+        assert not _events(caplog, "force_close")
+    asyncio.run(run())
+
+def test_legacy_compaction_peak_and_immediate_recovery_preserve_chat_order(caplog):
+    async def run():
+        caplog.set_level(logging.INFO)
+        async with _connection() as (daemon, peer, queue, _handler):
+            for seq in range(202):
+                assert daemon._enqueue(peer, "host.status", json.dumps({"type": "host.status", "version": seq}))
+            assert daemon._enqueue(peer, "chat.event", '{"type":"chat.event","seq":1}')
+            assert daemon._enqueue(peer, "host.status", '{"type":"host.status","version":999}')
+            assert list(queue._queue) == [
+                ("chat.event", '{"type":"chat.event","seq":1}'),
+                ("host.status", '{"type":"host.status","version":999}'),
+            ]
+            pressure = _events(caplog, "slow_consumer")
+            assert [(p["phase"], p["queue_depth"]) for p in pressure] == [("enter", 204), ("recover", 2)]
+            assert [p["queue_peak"] for p in pressure] == [204, 204]
+            assert pressure[0]["traffic"]["host.status"]["coalesced"] == 0
+            assert pressure[1]["traffic"]["host.status"]["coalesced"] == 202
+            await _until(lambda: len(peer.sent) == 3)
+        close = _only_event(caplog, "close")
+        assert close["traffic"]["host.status"]["broadcast_enqueued"] == 203
+        assert close["traffic"]["host.status"]["broadcast_sent"] == 1
         assert close["traffic"]["chat.event"]["broadcast_sent"] == 1
         assert not _events(caplog, "force_close")
     asyncio.run(run())
@@ -387,16 +412,16 @@ def test_small_queue_diagnostics_do_not_move_coalescing_policy_threshold(caplog)
         caplog.set_level(logging.INFO)
         async with _connection(maxsize=5) as (daemon, peer, queue, _handler):
             for version in range(4):
-                assert daemon._enqueue(peer, "session.inventory", json.dumps({"version": version}))
+                assert daemon._enqueue(peer, "host.status", json.dumps({"version": version}))
             # Baseline proactive coalescing still uses 204, even though the new
             # diagnostic enter must use this queue's actual threshold of four.
             assert queue.qsize() == 4
             assert [json.loads(f)["version"] for _t, f in queue._queue] == list(range(4))
             pressure = _events(caplog, "slow_consumer")
             assert [(p["phase"], p["queue_depth"]) for p in pressure] == [("enter", 4)]
-            assert daemon._enqueue(peer, "session.inventory", '{"version":4}')
+            assert daemon._enqueue(peer, "host.status", '{"version":4}')
             assert daemon._enqueue(peer, "chat.event", '{"seq":1}')
-            assert list(queue._queue) == [("session.inventory", '{"version":4}'), ("chat.event", '{"seq":1}')]
+            assert list(queue._queue) == [("host.status", '{"version":4}'), ("chat.event", '{"seq":1}')]
             assert peer.close_calls == 0
             assert _events(caplog, "slow_consumer")[-1]["phase"] == "recover"
     asyncio.run(run())
