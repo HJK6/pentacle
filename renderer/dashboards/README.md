@@ -12,42 +12,36 @@ Personal boards arrive at runtime through the operator's `dashboard-catalog` ass
 
 ## Visibility and selection
 
-Adapters self-register in `window.DASHBOARDS`. Their optional `retired: true`
-manifest flag keeps the implementation registered but hides it from the list by
-default. Foreclosure Pipeline and Scraper Bot are retired; their original
-configuration conditions still determine whether they register at all.
+The catalog is the only list authority. `boards[]` supplies order and membership;
+optional `visible:false` hides an entry. The renderer does not prepend registered
+code, group by retirement status or apply `dashboards.hidden` /
+`dashboards.showRetired`. Registration is an implementation lookup: a `built-in`
+record resolves by ID, and a missing implementation gets an unavailable card in
+its catalog position. Reports and trusted web adapters also present as built-in;
+`hosted-view` is the other presentation kind.
 
-`window.visibleDashboards(config)` applies `dashboards.hidden` (an array of exact
-IDs) and `dashboards.showRetired` (only boolean `true` enables retired boards).
-Explicit hidden IDs win. Active boards come first, then retired boards, retaining
-registration order within each group. A previously selected hidden board is
-replaced by the first visible board. When only opted-in retired boards remain,
-the first one is selected; no visible boards produces “No dashboards configured”.
-Visibility settings take effect after the app/web host is restarted and reloaded.
-
-The built-in `modeler-3d` adapter is always registered, including when unconfigured.
-The view passes the resolved renderer config in the mount context described below.
-It owns its navigation status and does not poll; `unmount` removes its iframe,
-event handlers and timeout. Existing adapters may ignore the optional context.
-See [Dashboards view](../../docs/dashboards_view.md) for viewer configuration,
-state meanings, security limits and the synthetic browser gate.
+Modeler uses the generic hosted implementation in `modeler-3d.js`; its membership
+and URL come from a hosted catalog record, not a separate registration or
+`dashboards.modeler3d.url`. See [Dashboards view](../../docs/dashboards_view.md)
+for the public behavior and [hosted admission](../../docs/dashboards_view.md#hosted-url-and-web-admission)
+for the URL, auth-mode and isolation requirements.
 
 ## Runtime catalog client
 
-Set `dashboards.catalogSpecId` to a synthetic example such as
-`example__dashboard_catalog` in an operator-owned, gitignored local profile.
-Keep the actual spec id, endpoints, tokens and catalog root out of public source.
-Restart/reload after changing that local setting. The catalog's content is
-fetched on Dashboards view entry, after app boot; publishing a newer catalog
-needs no renderer rebuild or host restart. There is no catalog polling loop.
+Set `dashboards.catalogSpecId` to `pentacle__dashboard_catalog` to read the sole
+catalog managed by the [dashboard commands](../../services/agent-orch/README.md#dashboard-commands).
+Keep endpoints, tokens and the catalog root in an operator-owned local profile,
+outside public source. Restart/reload after changing that locator. Catalog content
+is fetched on view entry after app boot; publishing changes needs no rebuild or
+host restart. There is no catalog polling loop.
 
-`catalog_loader.js` discovers only the exact `dashboard-catalog` asset with the
-matching content type, gets it through its listed owner `stream_id`, and ports
-the daemon's schema validation before merging boards after the built-ins in
-array order. A duplicate built-in id produces a board error. With the setting
-unset there is no catalog request; the existing `shared-demo` and `modeler-3d`
-built-ins remain. If visibility settings hide all boards, the existing “No
-dashboards configured” state appears.
+`catalog_loader.js` discovers the exact `dashboard-catalog` asset and content
+type, retrieves it through its listed owner `stream_id`, and validates the whole
+catalog. `HOST_API` is 2; API-1 catalogs remain readable. `merge` walks catalog
+entries once in array order, filters hidden entries and resolves each renderer.
+Duplicate IDs reject the catalog. With the locator unset there is no catalog
+request or separately populated built-in list; no visible entries produces
+“No dashboards configured”.
 
 The last validated catalog is kept in memory and `sessionStorage`, scoped by
 spec id. A transport/unavailable result may display it with a “catalog cached
@@ -69,18 +63,24 @@ from startup, chat and other views.
   `crossorigin="anonymous"`. The script must register its declared id. Missing
   files, failed integrity, failed loading or incorrect registration produce a
   board error, while other boards remain selectable. No adapter ships here
-- `hosted-view` reuses the existing modeler iframe lifecycle, sandbox, timeout,
-  reload and open-in-new-window controls with the catalog's id/name/URL. It does
-  not change how the built-in modeler is configured
+- `built-in` resolves registered code by ID without altering catalog position
+- `hosted-view` uses the generic sandboxed iframe lifecycle, 15-second timeout,
+  Reload/Retry and external-open controls. Every opening first fetches uncached
+  `/api/config`, requires server-derived `hostedDashboardAuthMode: "identity"`
+  and validates the URL against current authenticated daemon policy. Token,
+  unknown, failed config or missing policy stays unavailable, including cached
+  entries. Connection/config invalidation removes the frame and prevents stale
+  asynchronous admission from reopening it. Hosted pages receive no adapter
+  context or Pentacle authority
 
 The stable view hook is `#dashboard-content[data-catalog-version]`; board state
-is `data-board-state` (`loading`, `ready`, `empty`, `partial`, `error`, or
-`unsupported`). List buttons use `data-dashboard-id`. Error/report elements use
+is `data-board-state` (`loading`, `ready`, `empty`, `partial`, `error`,
+`unsupported`, or `unavailable`). List buttons use `data-dashboard-id`. Error/report elements use
 `data-testid="dashboard-catalog-error"`, `dashboard-catalog-unavailable`,
 `dashboard-board-unsupported`, `dashboard-board-error`, `dashboard-report-latest`,
 `dashboard-report-list`, `dashboard-report-truncated`, and `dashboard-report-empty`
-as applicable. Web supports all three catalog kinds; the unsupported-board hook
-is for clients that cannot render a kind.
+as applicable. The unsupported-board hook is for clients that cannot render a
+descriptor kind; unavailable hosted entries keep their catalog position.
 
 ## Catalog mount context
 
