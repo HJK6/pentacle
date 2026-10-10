@@ -314,6 +314,23 @@ When an outcome receipt measures a DOT milestone, use
 sample count and total; absent values remain unknown, including unmeasured days.
 Only observed outcome receipts within the named week count as that week's
 verified/shipped results. Older retained unresolved work remains visible.
+Authorized current proposals also report their physical-folder observation against
+their own current-version `baseline_status`: missing work is `not_found`; missing,
+invalid or unknown baseline is `legacy_unknown`; deprecated is `observed_dropped`;
+completed is `observed_completed`; blocked or an earlier active folder is
+`observed_regressed`; a later folder is `observed_progressed`; otherwise it is
+`observed_unchanged`. The order is backlog, analysis, ready_for_dev, in_progress,
+needs_qa, completed. Leaving blocked for an active folder is progressed; an active
+folder after a terminal baseline is regressed. Legacy baseline absence precedes
+terminal labels. Missing work remains visible through its decision receipt.
+
+These labels never increment verified/shipped counts, meet a checkpoint, or prove
+causation. Independently validated `outcome_evidence` alone establishes those
+observations; an authorized row can carry both kinds of evidence. Non-authorized
+rows without valid explicit evidence report `legacy_unknown`, replacing the former
+outcome literal `unverified`; ownership coverage and its counts are unchanged.
+Weekly reads and folder moves never rewrite earlier published receipts.
+
 Outcome accounting deduplicates exact receipt references from retained resolved
 review rows and current normal-work proposals. Prior proposal versions without
 retained outcome receipts remain unknown. Inspect retained receipts without

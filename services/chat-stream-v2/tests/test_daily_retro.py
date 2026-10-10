@@ -2472,3 +2472,101 @@ def test_candidate_key_non_action_links(config, monkeypatch, disposition):
     projected, = receipt["result"]["dispositions"]
     assert projected["version"] == packet["candidates"][0]["version"] and "proposal_version" not in projected
     assert asyncio.run(pipeline.record_review(manifest["run_id"], result)) == receipt
+
+
+def observed_fixture(config, name, baseline="in_progress", status="in_progress", *, disposition="authorized", evidence=None):
+    path = source(config.memory_root, name, status="in_progress", day="2026-10-12")
+    record = {**proposal2(disposition), "id": name, "state": disposition, "attempts": []}
+    if baseline is not None:
+        record["baseline_status"] = baseline
+    if evidence is not None:
+        record["outcome_evidence"] = evidence
+    record["version"] = retro.proposal_version(record)
+    retro.save_proposals(path, path.read_bytes(), {name: record})
+    retro.atomic(config.state_root / "decision-receipts" / (name + ".json"), {
+        "work_id": "spec_" + name, "proposal_id": name, "version": record["version"], "state": disposition,
+        "recorded_at": "2026-10-13T10:00:00+00:00", "path": str(path),
+        **({"baseline_status": baseline} if baseline is not None else {})})
+    if status is None:
+        path.unlink()
+    elif status != "in_progress":
+        path = move_fixture(path, status)
+    return path, record
+
+
+@pytest.mark.parametrize("baseline,status,expected", [
+    ("in_progress", "completed", "observed_completed"), ("in_progress", "deprecated", "observed_dropped"),
+    ("in_progress", "blocked", "observed_regressed"), ("in_progress", "in_progress", "observed_unchanged"),
+    ("in_progress", "needs_qa", "observed_progressed"), ("in_progress", "analysis", "observed_regressed"),
+    ("in_progress", None, "not_found"), (None, None, "not_found"), (None, "completed", "legacy_unknown"),
+    (None, "deprecated", "legacy_unknown"), ({}, "completed", "legacy_unknown"),
+    (True, "completed", "legacy_unknown"), ("unknown", "completed", "legacy_unknown"),
+    ("blocked", "in_progress", "observed_progressed"), ("completed", "analysis", "observed_regressed"),
+    ("deprecated", "in_progress", "observed_regressed")])
+def test_observed_outcome_receipt_precedence(config, baseline, status, expected):
+    path, record = observed_fixture(config, "observed", baseline, status)
+    receipts = decision_bytes(config)
+    summary = retro.weekly_summary(config, "2026-10-18")
+    row, = summary["current_work"]
+    assert row["outcome"] == expected
+    assert summary["verified_outcomes"] == summary["shipped_observed"] == 0
+    assert row["version"] == record["version"] and decision_bytes(config) == receipts
+    if path.exists():
+        assert row["baseline_status"] == baseline if baseline is not None else "baseline_status" not in row
+        assert row["checkpoint_state"] == "overdue"
+
+
+def test_observed_outcome_non_authorized(config):
+    path, record = observed_fixture(config, "deferred", None, "completed", disposition="defer")
+    record.pop("owner_acceptance")
+    retro.save_proposals(path, path.read_bytes(), {record["id"]: record})
+    summary = retro.weekly_summary(config, "2026-10-18")
+    row, = summary["current_work"]
+    assert row["outcome"] == "legacy_unknown"
+    assert summary["current_work_counts"]["defer"] == 1 and summary["unverified_ownership"] == 1
+    assert summary["oldest_unresolved"]["proposal_id"] == "deferred"
+    assert row["ownership_coverage"] == "legacy or unverified acceptance/checkpoint"
+
+
+@pytest.mark.parametrize("catchup", [False, True])
+def test_observed_outcome_checkpoint(config, monkeypatch, catchup):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = cls.fromisoformat("2026-10-20T12:00:00+00:00")
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+    monkeypatch.setattr(retro, "datetime", Clock)
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    expectations = {"done": ("completed", "observed_completed"), "dropped": ("deprecated", "observed_dropped"),
+        "blocked": ("blocked", "observed_regressed"), "same": ("in_progress", "observed_unchanged"),
+        "missing": (None, "not_found"), "legacy": ("completed", "legacy_unknown")}
+    for name, (status, _) in expectations.items():
+        observed_fixture(config, name, None if name == "legacy" else "in_progress", status)
+    pipeline = retro.Pipeline(config, Transport())
+    day = "2026-10-19" if catchup else "2026-10-18"
+    monkeypatch.setattr(retro, "now_iso", lambda: day + "T10:00:00+00:00")
+    manifest = retro.collect(config, at(day + "T10:00:00+00:00"))
+    root = config.state_root / "runs" / day
+    retro.atomic(root / "astra.json", {"packet_hash": day, "packet": {"schema_version": 2, "candidates": []}})
+    result = {"packet_hash": day, "dispositions": []}
+    receipt = asyncio.run(pipeline.record_review(day, result))
+    summary = receipt["weekly_summary"]["summary"]
+    assert {r["proposal_id"]: r["outcome"] for r in summary["current_work"]} == {k: v[1] for k, v in expectations.items()}
+    assert summary["verified_outcomes"] == summary["shipped_observed"] == 0
+    assert all(r.get("checkpoint_state") != "met by observed outcome" for r in summary["current_work"])
+    before = {p: p.read_bytes() for p in config.state_root.rglob("*.json")}
+    assert asyncio.run(pipeline.record_review(day, result)) == receipt
+    assert {p: p.read_bytes() for p in before} == before
+    assert len(list((config.state_root / "weekly").glob("*.json"))) == 1
+    evidence = {"receipt": "fixture-observed-output", "observed_at": "2026-10-14T10:00:00Z",
+        "shipped_at": "2026-10-14T10:00:00Z", "measure": "Fixture output confirmed."}
+    observed_fixture(config, "proven", "in_progress", "completed", evidence=evidence)
+    observed_fixture(config, "resolved", None, "completed", disposition="resolved", evidence={**evidence, "receipt": "fixture-resolved-output"})
+    projected = retro.weekly_summary(config, "2026-10-18")
+    proven = next(r for r in projected["current_work"] if r["proposal_id"] == "proven")
+    resolved = next(r for r in projected["current_work"] if r["proposal_id"] == "resolved")
+    assert proven["outcome"] == "observed_completed" and proven["outcome_evidence"] == evidence
+    assert proven["checkpoint_state"] == "met by observed outcome"
+    assert "outcome" not in resolved and "outcome_evidence" in resolved
+    assert projected["verified_outcomes"] == projected["shipped_observed"] == 2
+    assert all(p.read_bytes() == data for p, data in before.items())

@@ -1172,6 +1172,29 @@ def weekly_gap_accounting(settings, days):
             "coverage_limit": "Distinct source inventories, not resolved work or fleet health. Missing scans cannot prove resolution. First-observed comparison has an unknown left boundary; stale snapshots are not current scans. Primary gaps have separate sampled denominators."}
 
 
+def observed_outcome(status, baseline):
+    """Physical-folder observation only; never proof of shipment or causation."""
+    if status is None:
+        return "not_found"
+    order = ("backlog", "analysis", "ready_for_dev", "in_progress", "needs_qa", "completed")
+    valid = set(order) | {"deprecated", "blocked"}
+    if not isinstance(baseline, str) or baseline not in valid or status not in valid:
+        return "legacy_unknown"
+    if status == "deprecated":
+        return "observed_dropped"
+    if status == "completed":
+        return "observed_completed"
+    if status == "blocked" or baseline in {"completed", "deprecated"}:
+        return "observed_regressed"
+    if baseline == "blocked":
+        return "observed_progressed"
+    if order.index(status) < order.index(baseline):
+        return "observed_regressed"
+    if order.index(status) > order.index(baseline):
+        return "observed_progressed"
+    return "observed_unchanged"
+
+
 def weekly_summary(settings, end_day):
     """Account from retained receipts; missing measurements stay unknown."""
     end = datetime.fromisoformat(end_day).date()
@@ -1285,24 +1308,42 @@ def weekly_summary(settings, end_day):
                 linked[key] = min(linked.get(key, review["reviewed_at"]), review["reviewed_at"])
     # These immutable pointers are helper receipts, not a second authority
     # ledger. The proposal in the normal work record remains authoritative.
+    latest_decisions = {}
     for path in sorted((settings.state_root / "decision-receipts").glob("*.json")):
         receipt = read(path)
         local_day = aware(receipt["recorded_at"]).astimezone(ZONE).date().isoformat()
         if local_day <= days[-1]:
             key = (receipt["work_id"], receipt["proposal_id"])
             linked[key] = min(linked.get(key, receipt["recorded_at"]), receipt["recorded_at"])
+            if key not in latest_decisions or receipt["recorded_at"] > latest_decisions[key]["recorded_at"]:
+                latest_decisions[key] = receipt
     for (work_id, identity), first_seen in sorted(linked.items()):
+        missing = False
         try:
-            record = proposals(work_path(settings, work_id).read_text()).get(identity)
-        except (ValueError, OSError):
+            path = work_path(settings, work_id, authorization=True)
+            status = path.resolve().parent.parent.name
+            record = proposals(path.read_text()).get(identity)
+        except (ValueError, OSError) as exc:
             record = None
+            missing = isinstance(exc, FileNotFoundError) or str(exc) == "unknown_work_id"
         if not record:
-            result["current_work"].append({"work_id": work_id, "proposal_id": identity, "coverage": "proposal unavailable"})
+            entry = {"work_id": work_id, "proposal_id": identity, "coverage": "proposal unavailable",
+                     "outcome": "legacy_unknown"}
+            receipt = latest_decisions.get((work_id, identity), {})
+            if missing and receipt.get("state") == "authorized":
+                entry.update(version=receipt["version"], state="authorized", outcome="not_found")
+                if "baseline_status" in receipt:
+                    entry["baseline_status"] = receipt["baseline_status"]
+            result["current_work"].append(entry)
             continue
         entry = {"work_id": work_id, "proposal_id": identity, "version": record["version"],
             "state": record.get("state"), "disposition": record.get("disposition"), "first_observed_at": first_seen,
             "owner": record.get("owner"), "owner_acceptance": record.get("owner_acceptance"),
             "checkpoint": record.get("checkpoint"), "success_measure": record.get("success_measure")}
+        if "baseline_status" in record:
+            entry["baseline_status"] = record["baseline_status"]
+        if record.get("state") == "authorized":
+            entry["outcome"] = observed_outcome(status, record.get("baseline_status"))
         try:
             validate_proposal(record, require_v2=True)
             entry["ownership_coverage"] = "schema2 receipt; independent verification required"
@@ -1315,7 +1356,7 @@ def weekly_summary(settings, end_day):
         if account_outcome(outcome):
             entry["outcome_evidence"] = outcome
         else:
-            entry["outcome"] = "unverified"
+            entry.setdefault("outcome", "legacy_unknown")
             if not result["oldest_unresolved"] or first_seen < result["oldest_unresolved"]["first_observed_at"]:
                 result["oldest_unresolved"] = {"work_id": work_id, "proposal_id": identity, "first_observed_at": first_seen}
         checkpoint = record.get("checkpoint")
