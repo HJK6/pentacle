@@ -102,6 +102,13 @@ Run the final merge gate from a clean checkout; it produces a source-bound evide
 
 ### Scheduled spawn fleet smoke
 
+Synthetic warning and failure cards are published only in a harness-owned
+temporary loopback daemon with a unique `smoke-*:assistant` composite, then
+removed with its state. The harness refuses the configured operator composite
+as a target. Fleet RPCs never submit these cards through `notification.create`;
+failures and disposable-publication receipts remain in the runner's JSON/log
+output. PASS, FAIL and UNTESTED exit behavior is preserved.
+
 `tools/spawn_fleet_smoke.py --dry-run` resolves the full matrix without opening a WebSocket or spawning a session. The no-argument full run requires `PENTACLE_MACHINES_FILE` to point to the same file configured for the daemon. It rejects a missing file or `PENTACLE_MACHINES_JSON`, reads host names from that file, and includes every configured host by default. Set `PENTACLE_SMOKE_EXCLUDED_HOSTS` to a comma-separated list of unique configured host IDs only when a deployment explicitly excludes them; unknown names and an empty final matrix are refused. An optional `PENTACLE_SMOKE_HOSTS` subset must contain only remaining configured hosts. The dry-run output names the source, selected hosts, explicit excluded names and their configuration source, and every host/provider/prompt cell.
 
 The launchd template under `deploy/` runs every 12 hours and sets the machine-file path. The deploy helper also passes the installed daemon’s machine-file setting explicitly to its immediate full smoke, clearing inherited JSON configuration and host-subset overrides. A missing or invalid setting remains a post-activation smoke failure (exit 6); the activated SHA/PID stamp and do-not-retry instruction are preserved. A full run closes each spawned session, including after cell failure; a failed teardown is reported as a failure even if the provider is over quota. The explicit `<url> <host>` post-deploy canary remains a single Codex promptless cell.
