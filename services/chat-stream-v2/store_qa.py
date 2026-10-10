@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 import sqlite3
 import time
+import threading
 from typing import Any
 
 from store_specs import _session_row, normalize_spec_ids
@@ -16,6 +18,68 @@ class QaError(ValueError):
     def __init__(self, code: str, message: str, **extra: Any):
         super().__init__(message)
         self.code, self.extra = code, extra
+
+
+SPEC_SOURCE_FIELDS = (
+    "created_at", "session_generation", "status", "role", "parent_stream_id",
+    "handoff_from_stream_id", "spec_id", "spec_ids", "qualified_spec_ids",
+    "spec_binding_provenance", "requested_model", "requested_effort",
+    "effective_model", "effective_effort", "provider",
+)
+
+
+def spec_binding_source(row):
+    """Exact consumed lifecycle/binding inputs, excluding mutable telemetry."""
+    return None if row is None else {key: row.get(key) for key in SPEC_SOURCE_FIELDS}
+
+
+class SpecInputsUnavailable(ValueError):
+    pass
+
+
+class _SpecCommitConnection:
+    """Operation-local abandonment guard, including nested context commits."""
+    def __init__(self, conn, check):
+        self._conn, self._check = conn, check
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, *args, **kwargs):
+        self._check()
+        return self._conn.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        self._check()
+        return self._conn.executemany(*args, **kwargs)
+
+    def commit(self):
+        self._check()
+        return self._conn.commit()
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        if kind is None:
+            try:
+                self._check()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        return self._conn.__exit__(kind, value, traceback)
+
+
+class _SpecLookup:
+    def __init__(self, values):
+        self.values = dict(values)
+
+    def __call__(self, value):
+        if value not in self.values:
+            raise SpecInputsUnavailable("spec_identity_unavailable")
+        return self.values[value]
+
 
 
 def initialize(conn):
@@ -166,38 +230,108 @@ def _authorized_lineage(conn, actor, commission):
 
 
 class QaStoreMixin:
-    async def _qa_spec_lookup(self, spec, actor, reviewer=None, target_specs=()):
-        """Resolve every id this QA check reads from one work-tree snapshot.
+    async def _resolve_spec_inputs(self, ids, *, warn_single=False):
+        """Bound submissions, including single-only callers, before to_thread.
 
-        The walk runs in a worker thread before the write transaction, never on
-        the Store thread. An id that is not prefetched (a row changed in
-        between) falls back to the single resolver, so results are unchanged.
+        An abandoned worker retains its slot until completion. Missing batch
+        entries and exceptions are unavailable, never synchronous fallbacks.
         """
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            return _SpecLookup({})
         single = self._spec_identity_resolver
         batch = getattr(self, "_spec_identities_resolver", None)
-        if not callable(single) or not callable(batch):
-            return single
+        if not callable(single) and not callable(batch) and warn_single:
+            return _SpecLookup({value: None for value in ids})
+        if not callable(single) and not callable(batch):
+            raise SpecInputsUnavailable("spec_identity_unavailable")
+        active = getattr(self, "_spec_workers", 0)
+        if active >= 8:
+            raise SpecInputsUnavailable("spec_resolution_overloaded")
+        self._spec_workers = active + 1
+        def singles(values):
+            result = {}
+            for value in values:
+                try:
+                    result[value] = single(value)
+                except Exception:
+                    if not warn_single:
+                        raise
+                    result[value] = None
+            return result
+        async def run():
+            try:
+                service = getattr(batch, "__self__", None)
+                if service is not None and hasattr(service, "spec_resolution_snapshot"):
+                    from _shared.specs_service import spec_resolution_view
+                    view = await spec_resolution_view(service)
+                    values = {value: view.canonical_spec_identity(value) for value in ids}
+                else:
+                    values = await asyncio.to_thread(
+                        batch if callable(batch) else singles, ids)
+                if not isinstance(values, dict) or any(value not in values for value in ids):
+                    raise SpecInputsUnavailable("spec_identity_unavailable")
+                return _SpecLookup(values)
+            except Exception:
+                raise SpecInputsUnavailable("spec_identity_unavailable") from None
+            finally:
+                self._spec_workers -= 1
+        task = asyncio.create_task(run())
+        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        return await asyncio.shield(task)
 
-        def rows(conn):
-            caller = _session(conn, actor) or {}
-            target = _session(conn, reviewer) or {} if reviewer else {}
-            return caller, target
+    async def _submit_spec_commit(self, callback):
+        """Do not execute an abandoned queued binding/report/QA write."""
+        caller = asyncio.current_task()
+        abandoned = threading.Event()
+        def check():
+            if abandoned.is_set() or (caller is not None and caller.cancelling()):
+                raise asyncio.CancelledError()
+        def checked(conn):
+            check()
+            try:
+                return callback(_SpecCommitConnection(conn, check))
+            except BaseException:
+                conn.rollback()
+                raise
+        try:
+            return await self.submit(checked)
+        except asyncio.CancelledError:
+            abandoned.set()
+            raise
 
-        caller, target = await self.submit(rows)
+    def _qa_source(self, conn, spec, surface, actor, reviewer=None, report_id=None):
+        commissions = [dict(row) for row in conn.execute(
+            "SELECT * FROM v2_qa_commissions WHERE spec_id=? AND surface=? ORDER BY reviewer,generation,msg_id",
+            (spec, surface))]
+        pending = [actor, reviewer, *(row["coordinator"] for row in commissions)]
+        sources = {}
+        while pending:
+            stream = pending.pop()
+            if not stream or stream in sources:
+                continue
+            row = _session(conn, stream)
+            sources[stream] = spec_binding_source(row)
+            if row:
+                pending.extend((row.get("parent_stream_id"), row.get("handoff_from_stream_id")))
+        report = conn.execute("SELECT * FROM v2_reports WHERE report_id=?", (report_id,)).fetchone() if report_id else None
+        return (sources, commissions, _current(conn, spec, surface), dict(report) if report else None,
+                [dict(row) for row in conn.execute(
+                    "SELECT * FROM v2_qa_diagnoses WHERE spec_id=? AND surface=? ORDER BY cycle", (spec, surface))])
+
+    async def _qa_spec_lookup(self, spec, actor, reviewer=None, target_specs=(), *, surface="", report_id=None):
+        def capture(conn):
+            return self._qa_source(conn, spec, surface, actor, reviewer, report_id)
+        source = await self.submit(capture)
+        caller, target = source[0].get(actor) or {}, source[0].get(reviewer) or {}
         ids = [spec, *normalize_spec_ids(
             caller.get("qualified_spec_ids") or caller.get("spec_ids"), caller.get("spec_id"))]
         ids += normalize_spec_ids(target.get("spec_ids"), target.get("spec_id")) if reviewer else list(target_specs or ())
-        try:
-            resolved = await asyncio.to_thread(batch, ids)
-        except TypeError:
-            return single
-
-        def lookup(value):
-            try:
-                return resolved[value]
-            except (KeyError, TypeError):
-                return single(value)
-
+        lookup = await self._resolve_spec_inputs(ids)
+        def check(conn):
+            if capture(conn) != source:
+                raise SpecInputsUnavailable("spec_inputs_changed")
+        lookup.check = check
         return lookup
 
     def _qa_actor(self, conn, actor, generation, spec, resolver=None):
@@ -214,7 +348,6 @@ class QaStoreMixin:
             raise QaError(
                 "qa_unauthorized", "a lead or Nexus must commission/adjudicate QA"
             )
-        resolver = resolver or self._spec_identity_resolver
         if not callable(resolver) or resolver(spec) != spec:
             raise QaError(
                 "qa_spec_mismatch", "spec_id must be a resolved canonical identity"
@@ -240,16 +373,25 @@ class QaStoreMixin:
         enforce=True,
         check_only=False,
         existing_reviewer=False,
+        prepare_only=False,
     ):
+        scope, target_specs = copy.deepcopy(scope), copy.deepcopy(target_specs)
         spec, surface, cycle = _scope(scope)
         if type(msg_id) is not int or msg_id < 0:
             raise QaError("qa_invalid_request", "msg_id must be a nonnegative integer")
-        resolve = await self._qa_spec_lookup(
-            spec, actor, reviewer if existing_reviewer else None, target_specs)
-
-        def op(conn):
-            conn.execute("BEGIN IMMEDIATE")
+        if existing_reviewer:
+            # A caller may have read this seat before admission began. Bind the
+            # current open generation once, then retain it across every await
+            # and retry; a later reopen must never inherit this commission.
+            target = await self.submit(lambda conn: _session(conn, reviewer))
+            if not target or target.get("status") != "open":
+                raise QaError("qa_reviewer_unavailable", "QA reviewer is not open")
+            generation = target.get("session_generation")
+        def op(conn, *, transaction=True, validate_only=False):
+            if transaction:
+                conn.execute("BEGIN IMMEDIATE")
             try:
+                resolve.check(conn)
                 owner = self._qa_actor(conn, actor, actor_generation, spec, resolve)
                 reviewer_generation = generation
                 reviewer_specs = target_specs
@@ -259,12 +401,14 @@ class QaStoreMixin:
                         raise QaError(
                             "qa_reviewer_unavailable", "QA reviewer is not open"
                         )
+                    if target.get("session_generation") != generation:
+                        raise QaError("qa_reviewer_unavailable", "QA reviewer generation changed")
                     reviewer_generation = target.get("session_generation")
                     reviewer_specs = normalize_spec_ids(
                         target.get("spec_ids"), target.get("spec_id")
                     )
                 canonical_targets = {
-                    (resolve or self._spec_identity_resolver)(value) for value in reviewer_specs
+                    resolve(value) for value in reviewer_specs
                 }
                 if spec not in canonical_targets or reviewer == actor:
                     raise QaError(
@@ -301,10 +445,11 @@ class QaStoreMixin:
                                 "qa_commission_conflict",
                                 "review commission cannot be rebound",
                             )
-                        conn.commit()
+                        if transaction:
+                            conn.commit()
                         return dict(prior)
                 _check_cycle(conn, spec, surface, cycle, enforce)
-                if not check_only:
+                if not check_only and not validate_only:
                     _text(reviewer_generation, "reviewer generation", 256)
                     conn.execute(
                         "INSERT OR IGNORE INTO v2_qa_surfaces VALUES (?,?,1)",
@@ -327,7 +472,8 @@ class QaStoreMixin:
                             time.time(),
                         ),
                     )
-                conn.commit()
+                if transaction:
+                    conn.commit()
                 return {
                     "spec_id": spec,
                     "surface": surface,
@@ -336,14 +482,27 @@ class QaStoreMixin:
                     "generation": reviewer_generation,
                 }
             except BaseException:
-                conn.rollback()
+                if transaction:
+                    conn.rollback()
                 raise
 
-        return await self.submit(op)
+        for attempt in range(2):
+            try:
+                resolve = await self._qa_spec_lookup(
+                    spec, actor, reviewer if existing_reviewer else None, target_specs, surface=surface)
+                if prepare_only:
+                    await self._submit_spec_commit(lambda conn: op(conn, validate_only=True))
+                    # One operation-local callback: the intent writer owns the
+                    # transaction and repeats every current authority check.
+                    return lambda conn: op(conn, transaction=False)
+                return await self._submit_spec_commit(op)
+            except SpecInputsUnavailable as exc:
+                if attempt:
+                    raise QaError("qa_spec_unavailable", str(exc)) from None
 
     async def qa_issue(self, verb, msg, *, actor="", actor_generation=""):
+        msg = copy.deepcopy(msg)
         spec, surface, cycle = _scope(msg)
-        resolve = None if verb == "show" else await self._qa_spec_lookup(spec, actor)
 
         def op(conn):
             conn.execute("BEGIN IMMEDIATE")
@@ -372,6 +531,7 @@ class QaStoreMixin:
                         ],
                     }
                 else:
+                    resolve.check(conn)
                     caller = self._qa_actor(conn, actor, actor_generation, spec, resolve)
                     if verb == "adjudicate":
                         report_id = _text(msg.get("report_id"), "report_id", 256)
@@ -566,4 +726,12 @@ class QaStoreMixin:
                 conn.rollback()
                 raise
 
-        return await self.submit(op)
+        if verb == "show":
+            return await self.submit(op)
+        for attempt in range(2):
+            try:
+                resolve = await self._qa_spec_lookup(spec, actor, surface=surface, report_id=msg.get("report_id"))
+                return await self._submit_spec_commit(op)
+            except SpecInputsUnavailable as exc:
+                if attempt:
+                    raise QaError("qa_spec_unavailable", str(exc)) from None

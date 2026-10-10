@@ -29,6 +29,9 @@ may be triggered by a daemon-internal failure signal.
 
 from __future__ import annotations
 
+from copy import deepcopy
+from store_qa import QaError
+
 import sys
 from pathlib import Path
 
@@ -40,7 +43,7 @@ if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide module, never a
     sys.path.insert(0, SERVICES_ROOT)
 
 from _shared.spawn_objective import objective_error, objective_required_for, resolve_objective
-from _shared.specs_service import spec_resolution_view  # noqa: E402
+from _shared.specs_service import spec_resolution_view, SpecResolutionUnavailable  # noqa: E402
 
 import assistant_restore
 import qa_dispatch
@@ -90,7 +93,7 @@ from _shared.spawn_profiles import (  # noqa: E402
     resolve_spawn,
     validate_v2,
 )
-from store import STREAM_TOKEN_HASH_VERSION, normalize_spec_binding_provenance, normalize_spec_ids  # noqa: E402
+from store import STREAM_TOKEN_HASH_VERSION, normalize_spec_binding_provenance, normalize_spec_ids, spec_binding_source, SpecInputsUnavailable  # noqa: E402
 
 log = logging.getLogger("chat_streamd_v2.spawnctl")
 
@@ -230,6 +233,29 @@ PANE_NONCE_ENV = "PENTACLE_SPAWN_NONCE"
 #: scrolls off or repaints, unlike a pane capture.
 #:   claude: ~/.claude/projects/<project>/<session>.jsonl
 #:   codex:  ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+class _PreparingQaStore:
+    """Defer only this spawn's commission to its existing intent transaction."""
+    def __init__(self, store):
+        self.store = store
+
+    def __getattr__(self, name):
+        return getattr(self.store, name)
+
+    async def qa_admit(self, **kwargs):
+        prepared = await self.store.qa_admit(**kwargs, prepare_only=True)
+        def commit(conn):
+            try:
+                return prepared(conn)
+            except QaError as exc:
+                raise VerbError(exc.code, str(exc), **exc.extra) from exc
+        return commit
+
+
+class _SpecBinding(dict):
+    """Local checked-source evidence; never serialized into public bindings."""
+    source_checks = ()
+
+
 class SpawnCtl:
     """spawn / await_spawn + receipt-confirmed brief delivery."""
 
@@ -392,11 +418,12 @@ class SpawnCtl:
             msg.get("handoff_from_stream_id") or msg.get("parent_stream_id") or ""
         ).strip()
         source_row: dict[str, Any] = {}
-        if not explicit and source_id and ":" in source_id:
+        if source_id and ":" in source_id:
             source_host, source_name = source_id.split(":", 1)
             source_row = await self.store.fetch_session(source_host, source_name) or {}
-            explicit = normalize_spec_ids(source_row.get("spec_ids"), source_row.get("spec_id"))
-            inherited = bool(explicit)
+            if not explicit:
+                explicit = normalize_spec_ids(source_row.get("spec_ids"), source_row.get("spec_id"))
+                inherited = bool(explicit)
 
         if not explicit:
             return {
@@ -418,7 +445,14 @@ class SpawnCtl:
             )
         # The whole-tree walk runs once, off the event loop; every id below
         # resolves from that one snapshot.
-        view = await spec_resolution_view(self.specs)
+        try:
+            view = await spec_resolution_view(self.specs)
+        except SpecResolutionUnavailable:
+            raise VerbError("spec_unavailable", "fresh spec identity is unavailable") from None
+        if source_row:
+            current_source = await self.store.fetch_session(source_host, source_name)
+            if spec_binding_source(current_source) != spec_binding_source(source_row):
+                raise VerbError("spec_source_changed", "source lifecycle or spec binding changed")
         resolver = getattr(view, "resolution_for", resolver)
         spawn_resolver = getattr(view, "resolve_for_spawn", None)
         canonicalizer = getattr(view, "canonical_spec_identity", None)
@@ -537,13 +571,16 @@ class SpawnCtl:
                 for spec_id in explicit
             ]
 
-        return {
+        binding = _SpecBinding({
             "spec_id": explicit[0],
             "spec_ids": explicit,
             "spec_resolution": "resolved",
             "qualified_spec_ids": [binding["spec_id"] for binding in provenance],
             "spec_binding_provenance": provenance,
-        }
+        })
+        if source_row:
+            binding.source_checks = ((source_id, spec_binding_source(source_row)),)
+        return binding
 
     def _tmux_for(self, host: str) -> tmux_transport.Tmux:
         """Local tmux, or a peer's ssh-scoped tmux when `hosts` knows it."""
@@ -737,6 +774,9 @@ class SpawnCtl:
         )
         if prior_open:
             await self._close_open_prior_if_pane_gone(host, name, prior, tmux)
+            # The owned close changes only lifecycle status in the captured
+            # binding tuple; do not adopt concurrent binding edits by refetch.
+            prior = {**prior, "status": "closed"}
         elif prior is not None and await tmux.has_session(name):
             raise VerbError(
                 "resume_session_already_live", "Claude session still has a live pane",
@@ -1376,7 +1416,7 @@ class SpawnCtl:
         if error:
             raise VerbError(error, error)
         # Caller-supplied provenance cannot relabel a resolved objective.
-        msg = {**msg, "objective": objective, "objective_source": objective_source}
+        msg = {**deepcopy(msg), "objective": objective, "objective_source": objective_source}
         if "no_watch" in msg and not isinstance(msg["no_watch"], bool):
             raise VerbError("invalid_request", "no_watch must be boolean")
         admission: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
@@ -1881,7 +1921,7 @@ class SpawnCtl:
                     host, excluding=f"{host}:{name}",
                     predecessor=str(msg.get("handoff_from_stream_id") or "") if msg.get("handoff") else "",
                 )
-            await qa_dispatch.admit(self.store, msg, row=open_flds, reviewer=f"{host}:{name}",
+            prepared_qa = await qa_dispatch.admit(_PreparingQaStore(self.store), msg, row=open_flds, reviewer=f"{host}:{name}",
                                     generation=spawn_generation, msg_id=0,
                                     handoff=bool(msg.get("handoff") and open_flds.get("handoff_from_stream_id")))
             if await tmux.has_session(name):
@@ -1932,6 +1972,11 @@ class SpawnCtl:
                             and bool((msg.get("_auth_context") or {}).get("operator_authenticated"))
                         ),
                     }, request_id=request_id, nonce=nonce,
+                    expected_spec_sources=(
+                        *getattr(spec_binding, "source_checks", ()),
+                        *((((f"{host}:{name}", spec_binding_source(resume_prior_row)),)) if resume_prior_row is not None else ()),
+                    ),
+                    prepared_qa=prepared_qa,
                 )
             if not recorded:
                 raise VerbError("spawn_fence_lost", "spawn intent reservation expired or was cancelled")
@@ -2061,6 +2106,8 @@ class SpawnCtl:
                 return reply
             raise RuntimeError("prompt spawn retry loop exhausted without an outcome")
         except Exception as exc:
+            if isinstance(exc, SpecInputsUnavailable):
+                exc = VerbError("spec_source_changed", "source lifecycle or spec binding changed")
             reason = getattr(exc, "code", None) or "spawn_failed"
             if await self.store.spawn_cancelled(host, name, request_id):
                 keep_reservation = intent_recorded
@@ -2332,7 +2379,7 @@ class SpawnCtl:
                 exc.extra.setdefault(
                     "initial_prompt_delivery", outcome_fields["delivery_receipt"]
                 )
-            raise
+            raise exc
         except BaseException:
             # INV-3: `asyncio.CancelledError` (and any other `BaseException`) is
             # NOT a confirmed terminal outcome — it bypasses the `except

@@ -502,15 +502,83 @@ class ErrorAlerts:
             )
         return result
 
-    async def notice_rows(self):
-        return await self.store.submit(
-            lambda conn: [
-                dict(r)
-                for r in conn.execute(
-                    "SELECT n.*,t.reply AS proof_envelope FROM v2_outbound_notices n LEFT JOIN v2_tell_deliveries t ON t.tell_id=n.tell_id"
-                )
-            ]
-        )
+    async def _error_rows(self):
+        """Read supported typed facts on Notify's existing serialized worker.
+
+        error_upsert supplies both error_key and error_context. Reusing its
+        existing partial index avoids examining unrelated notification history.
+        The small call-only adapter is retained for existing isolated fixtures.
+        """
+        db = self.notify._db
+        if not hasattr(db, "_run"):
+            return await db.call("error_rows")
+        from _shared.notifications_store import NotificationStoreError
+        store = db._store
+        if store is None:
+            raise NotificationStoreError("notification store not started")
+        def read():
+            with store._lock:
+                store._require_open()
+                rows = store._conn.execute(
+                    "SELECT * FROM notifications INDEXED BY notifications_error_key "
+                    "WHERE error_key IS NOT NULL AND error_context IS NOT NULL ORDER BY rowid"
+                ).fetchall()
+                return [store._error_row(row) for row in rows]
+        return await db._run(read)
+
+    async def notice_rows(self, *, notice_ids=None, notification_ids=(), pending=False,
+                          predecessor_ids=(), dependencies=True):
+        """Indexed notice/proof inputs plus their explicit dependency closure.
+
+        No-argument inventory remains for existing inspection consumers. Every
+        reconciliation caller supplies selectors, including an empty ID list.
+        Fresh reads after writes avoid a stale pass-local cache.
+        """
+        def read(conn):
+            select = ("SELECT n.*,t.reply AS proof_envelope FROM v2_outbound_notices n "
+                      "LEFT JOIN v2_tell_deliveries t ON t.tell_id=n.tell_id ")
+            rows, attempted = {}, set()
+            def query(where, values=()):
+                for row in conn.execute(select + where, values):
+                    rows[row["notice_id"]] = dict(row)
+            def by_ids(ids):
+                ids = list(dict.fromkeys(ids))
+                for start in range(0, len(ids), 400):
+                    chunk = ids[start:start + 400]
+                    if chunk:
+                        query("WHERE n.notice_id IN (" + ",".join("?" for _ in chunk) + ")", chunk)
+                    attempted.update(chunk)
+            if notice_ids is None and not notification_ids and not pending and not predecessor_ids:
+                query("ORDER BY n.rowid")
+            else:
+                by_ids(notice_ids or ())
+                for nid in dict.fromkeys(notification_ids):
+                    query("WHERE json_extract(n.metadata,'$.notification_id')=? ORDER BY n.rowid", (nid,))
+                if pending:
+                    query("WHERE json_extract(n.metadata,'$.error_alert_v1')=1 "
+                          "AND n.terminal_at IS NULL AND n.delivered_at IS NULL ORDER BY n.rowid")
+                for nid in dict.fromkeys(predecessor_ids):
+                    query("WHERE json_extract(n.metadata,'$.predecessor_notice_id')=? "
+                          "AND json_extract(n.metadata,'$.awareness')=1 ORDER BY n.rowid", (nid,))
+            if dependencies:
+                expanded = set()
+                while True:
+                    wanted = set()
+                    for nid, row in list(rows.items()):
+                        if nid in expanded:
+                            continue
+                        expanded.add(nid)
+                        meta = metadata(row)
+                        wanted.update(value for value in (meta.get("folded_into_notice_id"),
+                                                          meta.get("predecessor_notice_id")) if value)
+                        wanted.update(meta.get("member_notice_ids") or ())
+                    wanted.difference_update(rows)
+                    wanted.difference_update(attempted)
+                    if not wanted:
+                        break
+                    by_ids(wanted)
+            return list(rows.values())
+        return await self.store.submit(read)
 
     async def reconcile(self, now=None):
         now = time.time() if now is None else now
@@ -560,7 +628,7 @@ class ErrorAlerts:
                 operation["principal"], operation["operation_id"], operation["revision"]
             )
             await self._reconcile_fact(row, now)
-        for row in await self.notify._db.call("error_rows"):
+        for row in await self._error_rows():
             if row["error_context"]["family"] != VOICE:
                 await self._reconcile_fact(row, now)
         await self._rebind_pending(now)
@@ -611,7 +679,8 @@ class ErrorAlerts:
         nid = row["notification_id"]
         lane = ctx["family"] == WORK_LANE
         policy = {"effective_delivery_mode": "digest"} if lane else POLICY
-        notices = {r["notice_id"]: r for r in await self.notice_rows()}
+        notices = {r["notice_id"]: r for r in await self.notice_rows(
+            notice_ids=ctx.get("notice_ids", ()), notification_ids=(nid,))}
         # A crash can commit enqueue before the cross-store link/watermark.
         # Recover those immutable rows before applying cancellation or policy.
         ids = list(
@@ -945,7 +1014,7 @@ class ErrorAlerts:
             binding = await composite.binding()
             if not binding.get("stream_id") or not binding.get("generation"):
                 return
-            rows = await self.notice_rows()
+            rows = await self.notice_rows(notice_ids=(), pending=True, dependencies=False)
             for old in rows:
                 m = metadata(old)
                 if (
@@ -975,7 +1044,8 @@ class ErrorAlerts:
                         )
                         continue
                 if m.get("typed_digest"):
-                    await self._rebind_digest(old, binding, prior, rows, now)
+                    history = await self.notice_rows(notice_ids=(), predecessor_ids=(old["notice_id"],)) if prior else []
+                    await self._rebind_digest(old, binding, prior, history, now)
                     continue
                 fact = await self.notify._db.call("error_get", m["notification_id"])
                 if not fact:
@@ -983,10 +1053,11 @@ class ErrorAlerts:
                 ctx = fact["error_context"]
                 if ctx["condition"] in ("recovered", "cancelled") and not prior:
                     continue
+                history = await self.notice_rows(notice_ids=(), notification_ids=(m["notification_id"],)) if prior else []
                 if prior and any(
                     metadata(r).get("awareness")
                     and metadata(r).get("notification_id") == m["notification_id"]
-                    for r in rows
+                    for r in history
                 ):
                     continue
                 new = await self._enqueue(
@@ -1084,9 +1155,11 @@ class ErrorAlerts:
             )
 
     async def _prune(self, now):
-        notices = {r["notice_id"]: r for r in await self.notice_rows()}
+        facts = await self._error_rows()
+        notice_ids = {nid for fact in facts for nid in (fact.get("error_context") or {}).get("notice_ids", ())}
+        notices = {r["notice_id"]: r for r in await self.notice_rows(notice_ids=notice_ids)}
         settled = set()
-        for fact in await self.notify._db.call("error_rows"):
+        for fact in facts:
             ctx = fact.get("error_context")
             if not ctx:
                 continue
@@ -1115,7 +1188,7 @@ class ErrorAlerts:
         )
         retained = {
             (r["error_context"]["principal"], r["error_context"]["operation_id"])
-            for r in await self.notify._db.call("error_rows")
+            for r in await self._error_rows()
             if r["error_context"]["family"] == VOICE
         }
         await self.store.voice_prune(retained, now)
