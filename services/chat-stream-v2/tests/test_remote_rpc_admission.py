@@ -259,7 +259,7 @@ def test_fixed_system_producer_rpc_does_not_gain_inventory_or_admin_privilege(mo
         hello = {"type": "hello", "from_stream_id": "altum-bot-cd",
                  "stream_token": "synthetic-system-token", "subscribe": {"mode": "rpc", "snapshot": False}}
         frames = await daemon._dispatch(json.dumps(hello), websocket=peer)
-        assert frames == [{"type": "ready", "snapshot": False, "events_mode": "full"}]
+        assert frames == [{"type": "ready", "snapshot": False, "hostedDashboardPolicy": None, "events_mode": "full"}]
         assert peer not in daemon._clients
         hello["subscribe"] = {"all": True}
         assert (await daemon._dispatch(json.dumps(hello), websocket=Peer()))[0]["error_code"] == "system_producer_auth_required"
