@@ -44,8 +44,13 @@ def _report_body(title: str) -> str:
 def _run(tmp_path, scenario):
     async def _main():
         class Seats:
+            def __init__(self):
+                self.specs = {}
+            def attach(self, sid, spec_id):
+                self.specs.setdefault(sid, []).append(spec_id)
             def get(self, sid):
-                return {"host": "fixturehost", "status": "open", "role": "worker"} if sid.startswith("fixturehost:") else None
+                return {"host": "fixturehost", "status": "open", "role": "worker",
+                        "spec_ids": self.specs.get(sid, [])} if sid.startswith("fixturehost:") else None
         assets = Assets(str(tmp_path / "assets.db"), sessions=Seats(), fleet_hosts={"fixturehost"})
         await assets.start()
         try:
@@ -67,8 +72,6 @@ async def _publish(assets: Assets, stream_id: str, asset_id: str, *, content_typ
         msg["_auth_context"] = {"token_verified":True, "stream_id":stream_id}
     if producer is not None:
         msg["producer"] = producer
-    if content_type == "dashboard-catalog":
-        msg["_auth_context"] = OPERATOR
     reply = await assets.asset(msg)
     assert reply["type"] == "asset.publish.ok", reply
     return reply["asset"]
@@ -180,6 +183,7 @@ def test_catalog_republish_from_another_seat_keeps_owner_anchor(tmp_path):
     async def scenario(assets):
         await _publish(assets, "fixturehost:seat1", "dashboard-catalog", content_type="dashboard-catalog",
                        body=json.dumps(catalog), spec_id=CATALOG_SPEC_ID)
+        assets._sessions.attach("fixturehost:seat2", CATALOG_SPEC_ID)
         await _publish(assets, "fixturehost:seat2", "dashboard-catalog", content_type="dashboard-catalog",
                        body=json.dumps(next_catalog), spec_id=CATALOG_SPEC_ID)
         listed = await assets.asset({"type": "asset.list", "request_id": "l",
@@ -322,11 +326,17 @@ POLICY = CATALOG_CASES["hosted_policy"]
 INTERNAL = {"token_verified": True, "stream_id": "node-alpha:seat", "session_generation": "g"}
 
 class FleetSeats:
+    def __init__(self):
+        self.specs = {}
+
+    def attach(self, sid, spec_id):
+        self.specs.setdefault(sid, []).append(spec_id)
+
     def get(self, sid):
         if sid not in {"node-alpha:seat", "node-beta:seat", "foreign:seat"}:
             return None
         return {"stream_id": sid, "host": sid.split(":")[0], "status": "open",
-                "session_generation": "g", "role": "worker", "spec_ids": []}
+                "session_generation": "g", "role": "worker", "spec_ids": self.specs.get(sid, [])}
 
 
 def hosted_run(tmp_path, monkeypatch, scenario, *, configured=True, catalog_spec_id=None):
@@ -467,17 +477,25 @@ def test_missing_invalid_policy_hello_has_explicit_null(monkeypatch,suffix,origi
     assert next(f for f in frames if f["type"]=="snapshot")["hostedDashboardPolicy"] is None
 
 
-def test_verified_cross_host_direct_catalog_publish_delete(tmp_path,monkeypatch):
+@pytest.mark.parametrize("catalog_spec_id", ["pentacle__dashboard_catalog", "pentacle__dashboard_catalog_v2"])
+def test_verified_cross_host_direct_catalog_publish_delete(tmp_path,monkeypatch,catalog_spec_id):
     async def scenario(assets,catalog):
         auth=dict(INTERNAL,stream_id="node-beta:seat")
+        before = await assets._call("find_assets_by_id", asset_id="dashboard-catalog")
+        denied = await assets.asset({"type":"asset.publish", "stream_id":"node-alpha:seat",
+            "content_type":"dashboard-catalog", "spec_id":catalog_spec_id,
+            "asset_id":"dashboard-catalog", "title":"Denied", "body":json.dumps(catalog), "_auth_context":auth})
+        assert denied["error_code"] == "asset_unauthorized", denied
+        assert await assets._call("find_assets_by_id", asset_id="dashboard-catalog") == before
+        assets._sessions.attach("node-beta:seat", catalog_spec_id)
         reply=await assets.asset({"type":"asset.publish","stream_id":"node-alpha:seat","content_type":"dashboard-catalog",
-            "spec_id":"pentacle__dashboard_catalog","asset_id":"dashboard-catalog", "title":"Catalog",
+            "spec_id":catalog_spec_id,"asset_id":"dashboard-catalog", "title":"Catalog",
             "body":json.dumps(catalog),"_auth_context":auth})
         assert reply["type"]=="asset.publish.ok",reply
         assert reply["asset"]["stream_id"]=="node-alpha:seat"
         deleted=await assets.asset({"type":"asset.delete","stream_id":"node-alpha:seat","asset_id":"dashboard-catalog","_auth_context":auth})
         assert deleted["type"]=="asset.delete.ok",deleted
-    hosted_run(tmp_path,monkeypatch,scenario)
+    hosted_run(tmp_path,monkeypatch,scenario,catalog_spec_id=catalog_spec_id)
 
 
 def test_wire_forgery_refused_and_verified_token_commands_work(tmp_path,monkeypatch):
