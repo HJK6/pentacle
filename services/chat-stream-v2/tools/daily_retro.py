@@ -141,7 +141,7 @@ class Settings:
                    bool(data.get("isolated")), path,
                    Path(data["primary_store"]) if data.get("primary_store") else None,
                    Path(data["primary_archive"]) if data.get("primary_archive") else None,
-                   data.get("primary_composite", "bart:assistant"), exclusions, producers, usage_spec_id)
+                   data.get("primary_composite", cls.__dataclass_fields__["primary_composite"].default), exclusions, producers, usage_spec_id)
 
     def rpc(self):
         return Config(self.ws_url, self.token_path.read_text().strip(), self.host,
@@ -1347,16 +1347,17 @@ def weekly_summary(settings, end_day):
     linked = {}
     for day in days:
         root = settings.state_root / "runs" / day
+        if (root / "collection.json").is_file():
+            result["runs_total"] += 1
+            delivery = read(root / "delivery.json", {})
+            failed = any(path.is_file() for path in root.glob("failure*.json")) or any(
+                isinstance(attempt, dict) and attempt.get("confirmed") is False for attempt in delivery.get("attempts", []))
+            result["runs_failed"] += int(failed)
         collection = read(root / "collection.json") if (root / "collection.json").is_file() else None
         if not collection:
             result["missing_runs"].append(day)
             continue
         result["runs_collected"] += 1
-        result["runs_total"] += 1
-        delivery = read(root / "delivery.json", {})
-        failed = any(path.is_file() for path in root.glob("failure*.json")) or any(
-            isinstance(attempt, dict) and attempt.get("confirmed") is False for attempt in delivery.get("attempts", []))
-        result["runs_failed"] += int(failed)
         result["producer_costs"].append({"run_id": day, "producer_cost": producer_cost(settings, day, rollup),
                                          "fd_cost": {"unknown_reason": "shared_fd_seat"}})
         result["sources_selected"] += len(collection["sources"])
@@ -1956,7 +1957,7 @@ class Pipeline:
                     # Persist consumption before any retry RPC, including binding.
                     budget["consumed"] = True
                     atomic(path, record)
-                notice_rpc = False
+                notice_rpc, persisting = False, False
                 try:
                     if not attempt:
                         binding = await self.binding()
@@ -1968,21 +1969,31 @@ class Pipeline:
                                    "payload": {"host": host, "session_name": session, "request_id": key, "optimistic_id": key,
                                                "text": self._failure_body(manifest, pending.get("stage"), pending["failure"], root)}}
                         record["attempts"].append(attempt)
+                        persisting = True
                         atomic(path, record)
+                        persisting = False
                     notice_rpc = True
                     receipts = await self.rpc.send_receipt_once(self.config, attempt["target"], attempt["request_id"])
+                    notice_rpc = False
                     if receipts.get("type") != "send.receipt.get.ok":
                         raise RuntimeError("delivery reconciliation unavailable")
                     landed = next((r for r in receipts.get("receipts", []) if r.get("delivery") == "landed" or r.get("state") == "landed"), None)
-                    response = landed or await self.rpc.send_once(self.config, dict(attempt["payload"]))
+                    response = landed
+                    if response is None:
+                        notice_rpc = True
+                        response = await self.rpc.send_once(self.config, dict(attempt["payload"]))
+                        notice_rpc = False
                     attempt.update(receipt=response, confirmed=response.get("delivery") == "landed" or response.get("state") == "landed", at=now_iso())
                     attempt["collection_to_delivery_seconds"] = (aware(attempt["at"]) - aware(manifest["collected_at"])).total_seconds()
                     if not attempt["confirmed"]:
                         raise RuntimeError("delivery pending; exact target/body/key retained")
+                    persisting = True
                     notice_event(index, receipt=response, confirmed=True)
                     self._notice_landed(manifest, record, path, seq)
                     return record
                 except Exception as exc:
+                    if persisting:
+                        raise
                     refused = isinstance(exc, ConnectionRefusedError) or (isinstance(exc, OSError) and exc.errno == errno.ECONNREFUSED)
                     retry = refused and notice_rpc and budget is None
                     if retry:

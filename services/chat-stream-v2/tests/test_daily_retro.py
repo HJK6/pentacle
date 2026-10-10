@@ -2421,14 +2421,14 @@ def test_candidate_key_history_hash_preservation():
         "sources": [{"id": "spec_original", "fingerprint": "fixture-fingerprint"}]}
     candidate = {k: "fixture" for k in ("id", "problem", "consequence", "prior_occurrences", "existing",
         "action", "benefit", "effort", "risk", "uncertainty", "owner", "decision")}
-    candidate.update(id="legacy", citations=["spec_original"], finding_key="fixture-issue",
-        bart_attention={"reasons": ["uncertain"], "rationale": "Fixture relevance uncertain."})
+    candidate.update(id="legacy", citations=["spec_original"], finding_key="fixture-issue")
+    candidate = retro.finding(candidate, {"run_id": manifest["run_id"], "candidate_id": candidate["id"]}, legacy=True)["candidate"]
     packet = {"run_id": manifest["run_id"], "dispositions": [{"id": "spec_original",
         "fingerprint": "fixture-fingerprint", "reason": "Fixture original reviewed."}], "candidates": [candidate]}
     before = retro.encoded(packet)
     normalized = retro.validate_history_packet(packet, manifest)
-    assert retro.digest(normalized) == "13d7e0d58d8e5ada3d1e359d75e03c49b2fcd8fe39509a4f0ff2e6b6b254aa91"
-    assert normalized["candidates"][0]["finding_version"] == "371d2cf03e18fdb13f7e49420a12391666c572a9043bdbabec3c80bbf8cfff3d"
+    assert retro.digest(normalized) == "e955e7a41e309feaae5a3d318203da6d5eee4120faf6249a1e58665f3562c125"
+    assert normalized["candidates"][0]["finding_version"] == "da03c4f9d155748d9da7c5450a338d54f050ceca111b9a44922701d33b89809b"
     assert "candidate_key" not in normalized["candidates"][0] and retro.encoded(packet) == before
 
 
@@ -3752,3 +3752,35 @@ def test_combined_release_archive_collect(config, tmp_path):
     finally:
         shutil.rmtree(owned)
         assert not owned.exists() and not release.exists() and not outside.exists()
+
+
+def test_run_failed_persistence_refusal_is_not_transport_retry(config, monkeypatch):
+    rpc = Transport(); manifest, root, pipeline = notice_fixture(config, rpc)
+    original = retro.atomic
+    async def no_retry(delay):
+        raise AssertionError("persistence errors must not consume notice retry budget")
+    monkeypatch.setattr(retro.asyncio, "sleep", no_retry)
+    failed = [False]
+    def projection_down(path, value):
+        if path == root / "delivery.json" and not failed[0]:
+            failed[0] = True
+            raise OSError(retro.errno.ECONNREFUSED, "synthetic filesystem")
+        return original(path, value)
+    monkeypatch.setattr(retro, "atomic", projection_down)
+    with pytest.raises(OSError):
+        asyncio.run(pipeline.deliver(manifest, failure=True))
+    state = retro.read(root / "failure-delivery.json")
+    assert not state["notice_retries"] and [e["confirmed"] for e in state["notice_attempts"]] == [True]
+    assert len(rpc.sent) == 1
+    asyncio.run(retro.Pipeline(config, rpc).deliver(manifest, failure=True))
+    assert len(rpc.sent) == 1 and retro.read(root / "delivery.json")["notice_attempts"] == state["notice_attempts"]
+
+
+def test_run_failed_empty_collection_file_counts_presence(config):
+    root = config.state_root / "runs/2026-10-13"
+    retro.atomic(root / "collection.json", {})
+    retro.atomic(root / "failure.json", {})
+    summary = retro.weekly_summary(config, "2026-10-18")
+    assert summary["runs_total"] == summary["runs_failed"] == 1
+    assert summary["runs_collected"] == 0 and "2026-10-13" in summary["missing_runs"]
+    assert "2026-10-13" not in {r["run_id"] for r in summary["coverage"]["excluded_runs"]}
