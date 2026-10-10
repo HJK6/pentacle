@@ -65,3 +65,27 @@ test('names and descriptions render as text and built-in retirement code stays r
  h.run("switchView('dashboards')"); await tick(); assert.equal(h.window.document.querySelector('#dashboard-list img, #dashboard-list script'), null);
  for (const file of ['foreclosure','scraper-bot']) assert.match(fs.readFileSync(require.resolve('../renderer/dashboards/'+file), 'utf8'), /retired:\s*true/);
 });
+
+for (const reportState of ['empty', 'partial']) test(`successful ${reportState} report has a loaded common state`, async t => {
+ const { createBoard } = require('../renderer/dashboards/report_board');
+ const dom = new JSDOM('<div id="dashboard-content"></div><span id="dashboard-status"></span><span id="dashboard-last-updated"></span><button id="dashboard-retry"></button>');
+ const window = dom.window, state = { selectedDashboard: 'example-report' };
+ const entry = { id: 'example-report', name: 'Example reports', kind: 'report', report: {
+  spec_id: 'example__reports', asset_id_prefix: 'example-', key_format: '[0-9]{8}', rev_width: 0,
+  writer_enforced: false, select: 'latest', list: true, history_limit: 1 } };
+ const rows = reportState === 'empty' ? [] : [4,3,2,1].map(day => ({ asset_id: `example-2026100${day}`, stream_id: 'node-alpha:seat', content_type: 'report' }));
+ const board = createBoard(entry, { assetList: async () => ({ assets: rows }),
+  assetGet: async () => ({ asset: { content_type: 'report', body: JSON.stringify({ schema_version: 1, title: 'Example', sections: [] }) } }) });
+ window.DASHBOARDS = [board]; window.visibleDashboards = () => [board];
+ const context = vm.createContext({ window, document: window.document, state, CONFIG: {}, dashboardMountContext: () => ({}), startDashboardPolling() {}, stopDashboardPolling() {} });
+ const app = fs.readFileSync(require.resolve('../renderer/app'), 'utf8');
+ vm.runInContext(app.slice(app.indexOf('function mountAndPoll(id)'), app.indexOf('function unmountCurrentDashboard()')) +
+  app.slice(app.indexOf('function updateDashboardStatusBadge()'), app.indexOf('// Exposed for dashboard DOM actions.')), context);
+ t.after(() => { state.dashboardStateObserver?.disconnect(); board.unmount(state.dashboardRefs); window.close(); });
+ vm.runInContext("mountAndPoll('example-report')", context);
+ await state.dashboardRefs.ready; await tick();
+ assert.equal(window.document.querySelector('.dashboard-inner').dataset.boardState, reportState);
+ assert.equal(window.document.getElementById('dashboard-content').dataset.boardState, reportState);
+ assert.equal(state.dashboardState, 'loaded');
+ assert.match(window.document.getElementById('dashboard-content').textContent, reportState === 'empty' ? /No Example reports yet/ : /latest in loaded window/);
+});
