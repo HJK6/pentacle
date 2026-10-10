@@ -59,7 +59,7 @@
             "name": "Example Hosted",
             "kind": "hosted-view",
             "hosted": {
-              "url": "https://viewer.example.test/app"
+              "url": "https://viewer.example.ts.net/app"
             }
           }
         ]

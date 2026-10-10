@@ -27,6 +27,7 @@ from .wsclient import (
     asset_health_once,
     asset_list_once,
     asset_publish_once,
+    dashboard_once,
     await_spawn_once,
     await_report_once,
     close_once,
@@ -2706,6 +2707,31 @@ def _asset_session_payload_from_args(
     if spec_id:
         payload["spec_id"] = str(spec_id)
     return payload
+
+
+def dashboard(args: argparse.Namespace) -> int:
+    command = args.dashboard_command
+    try:
+        config = load_config()
+        caller = discover_leader_stream_id_short(config)
+        if not caller:
+            raise ValueError("authenticated internal seat identity is required")
+        payload = {"type":f"dashboard.{command}", "from_stream_id":caller, "id":args.id}
+        if command == "add":
+            payload.update(title=args.title, url=args.url)
+            if args.order is not None: payload["order"] = args.order
+            if args.hidden is not None: payload["hidden"] = args.hidden
+        response = asyncio.run(dashboard_once(config, payload, timeout=args.timeout))
+        _print_response(response)
+        return 0 if response.get("type") == f"dashboard.{command}.ok" else 1
+    except ValueError as exc:
+        _print_response({"type":"dashboard.error", "error_code":"dashboard_invalid", "error":str(exc)})
+        return 2
+    except Exception as exc:
+        response, exit_code, message = _direct_rpc_transport_error("dashboard", None, exc)
+        _print_response(response)
+        print(f"agent-orch dashboard: {message}", file=sys.stderr)
+        return exit_code
 
 
 def asset(args: argparse.Namespace) -> int:
@@ -5576,6 +5602,19 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
 
+
+    dashboard_parser = subparsers.add_parser("dashboard")
+    dashboard_commands = dashboard_parser.add_subparsers(dest="dashboard_command", required=True)
+    for command in ("add", "remove"):
+        dp = dashboard_commands.add_parser(command)
+        dp.add_argument("--id", required=True)
+        dp.add_argument("--timeout", type=float, default=30.0)
+        if command == "add":
+            dp.add_argument("--title", required=True)
+            dp.add_argument("--url", required=True)
+            dp.add_argument("--order", type=int)
+            dp.add_argument("--hidden", action="store_true", default=None)
+        dp.set_defaults(func=dashboard)
 
     asset_parser = subparsers.add_parser("asset")
     asset_parser.add_argument("asset_command", nargs="?", choices=["publish", "list", "get", "comments", "health"], default="publish")

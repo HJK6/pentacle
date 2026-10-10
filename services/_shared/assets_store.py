@@ -139,7 +139,7 @@ class AssetStore:
         self.path = str(path or _default_path())
         if self.path != ":memory:":
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._closed = False
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -361,6 +361,23 @@ class AssetStore:
                 )
             self._conn.commit()
             return self._get_locked(host, session_name, aid)
+
+    def mutate_dashboard_catalog(self, *, spec_id: str, asset_id: str, edit: Any) -> tuple[dict, dict]:
+        """One serialized read/edit/write, preserving the catalog's asset and
+        immutable package metadata. Caller admission belongs to the handler."""
+        with self._lock:
+            records = [r for r in self.find_assets_by_id(asset_id) if r.get("spec_id") == spec_id]
+            if len(records) != 1:
+                raise AssetNotFound(asset_id)
+            record = records[0]
+            catalog = json.loads(record["body"])
+            outcome = edit(catalog)
+            if not outcome.get("changed"):
+                return record, outcome
+            updated = self.publish_asset(**{key:record[key] for key in (
+                "host", "session_name", "stream_id", "asset_id", "title", "content_type", "tags", "producer", "spec_id")},
+                body=json.dumps(catalog, ensure_ascii=False))
+            return updated, outcome
 
     def list_assets(
         self,
