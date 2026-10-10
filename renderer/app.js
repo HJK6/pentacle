@@ -6819,7 +6819,7 @@ function mountAndPoll(id) {
     if (!state.dashboardRefs) return;
     const panelState = inner.dataset.boardState;
     if (inner !== container) container.dataset.boardState = panelState;
-    state.dashboardState = panelState === 'ready' ? 'loaded' : panelState === 'loading' ? 'loading' : panelState === 'stale' ? 'stale' : 'error';
+    state.dashboardState = ['ready', 'empty', 'partial'].includes(panelState) ? 'loaded' : panelState === 'loading' ? 'loading' : panelState === 'stale' ? 'stale' : 'error';
     updateDashboardStatusBadge();
   };
   if (db.kind === 'built-in' && !db.pollFn && inner.dataset.boardState === 'loading') inner.dataset.boardState = 'ready';
