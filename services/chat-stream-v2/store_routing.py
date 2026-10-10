@@ -7,6 +7,8 @@ Store.submit worker boundary through the composed façade.
 
 from __future__ import annotations
 
+from retention import history_query, next_receipt_rowid
+
 import asyncio
 import hashlib
 import json
@@ -919,7 +921,7 @@ class _RoutingStoreMixin:
             # The canonical USER admission is landed even while its answer is
             # pending. Keep the mobile/desktop transport attempt in the same
             # transaction as the USER row, including a rotated-request retry.
-            prior = conn.execute(
+            prior = history_query(conn,
                 "SELECT optimistic_id,receipt_id,state FROM v2_send_receipts "
                 "WHERE to_stream_id=? AND request_id=? ORDER BY rowid DESC LIMIT 1",
                 (stream_id, input_request_id),
@@ -936,11 +938,11 @@ class _RoutingStoreMixin:
                     "attachment_only" if attachments else "text")
             conn.execute(
                 """INSERT INTO v2_send_receipts (
-                    to_stream_id,request_id,receipt_id,state,optimistic_id,wire_digest,
+                    rowid,to_stream_id,request_id,receipt_id,state,optimistic_id,wire_digest,
                     display_text,content_kind,attachments_json,delivery,submission_confirmed,
                     created_at,actor_stream_id,actor_trusted,meta_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (stream_id, input_request_id, receipt_id, "landed", input_identity,
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (next_receipt_rowid(conn), stream_id, input_request_id, receipt_id, "landed", input_identity,
                  _send_wire_digest(body), body, kind, canonical_attachments, "landed", 1,
                  stamp, actor_stream_id, 1, json.dumps({"assistant_composite": True, **voice_meta}, sort_keys=True)),
             )
@@ -957,11 +959,11 @@ class _RoutingStoreMixin:
             ).fetchone()
             if owner is not None and owner[0] != scoped_credential_id:
                 raise ValueError("assistant_request_owner_conflict")
-            prior_receipts = conn.execute(
+            prior_receipts = history_query(conn,
                 "SELECT actor_stream_id FROM v2_send_receipts WHERE request_id=?",
                 (input_request_id,),
             ).fetchall()
-            prior_routes = conn.execute(
+            prior_routes = history_query(conn,
                 "SELECT actor_stream_id FROM v2_assistant_composite_routes WHERE input_request_id=?",
                 (input_request_id,),
             ).fetchall()
@@ -976,7 +978,7 @@ class _RoutingStoreMixin:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 _claim_scoped_request(conn)
-                prior = conn.execute(
+                prior = history_query(conn,
                     "SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND input_identity=?",
                     (stream_id, input_identity),
                 ).fetchone()
@@ -1076,7 +1078,7 @@ class _RoutingStoreMixin:
                     ),
                 )
                 receipt_id = _ensure_receipt(conn, timestamp) if direct_primary else None
-                row = dict(conn.execute(
+                row = dict(history_query(conn,
                     "SELECT * FROM v2_assistant_composite_routes WHERE route_id=?", (route_id,),
                 ).fetchone())
                 row["event"] = event | {"daemon_seq": event_id}
@@ -1255,7 +1257,7 @@ class _RoutingStoreMixin:
         self, dispatch_id: str,
     ) -> dict[str, Any] | None:
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
-            row = conn.execute(
+            row = history_query(conn,
                 "SELECT * FROM v2_assistant_composite_routes WHERE dispatch_id=?", (dispatch_id,),
             ).fetchone()
             return dict(row) if row is not None else None
@@ -1272,7 +1274,7 @@ class _RoutingStoreMixin:
         self, *, stream_id: str, input_identity: str,
     ) -> dict[str, Any] | None:
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
-            row = conn.execute(
+            row = history_query(conn,
                 "SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND input_identity=?",
                 (stream_id, input_identity),
             ).fetchone()
@@ -1318,7 +1320,7 @@ class _RoutingStoreMixin:
                     OR (EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity AND json_extract(p.canonical_payload_json,'$.response_state')='acknowledged')
                         AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity AND (p.publish_kind='result' OR json_extract(p.canonical_payload_json,'$.response_state')='final'))))"""
                 params.append(stream_id)
-            rows = [dict(r) for r in conn.execute("SELECT r.input_identity,r.created_at,r.routing_state,r.delivery_state,r.dispatch_id,r.route_json,r.error_code FROM v2_assistant_composite_routes r WHERE " + where, params)]
+            rows = [dict(r) for r in history_query(conn, "SELECT r.input_identity,r.created_at,r.routing_state,r.delivery_state,r.dispatch_id,r.route_json,r.error_code FROM v2_assistant_composite_routes r WHERE " + where, params)]
             result = {}
             for row in rows:
                 pubs = [dict(p) for p in conn.execute("SELECT publication_key,created_at,canonical_payload_json,publish_kind FROM v2_assistant_composite_publications WHERE stream_id=? AND reply_to_message_id=? ORDER BY created_at,event_id", (stream_id, row["input_identity"]))]

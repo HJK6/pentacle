@@ -3,14 +3,14 @@
 Contract (v2_design.md module table):
   owns: SQLite in one worker thread, WAL, write queue.
   notes: **only** module touching the DB; the daemon's bounded retention job
-         archives terminal rows and vacuums on a cadence so the hot set stays
+         archives eligible history on a cadence so the hot set stays
          O(open).
 
 The retention job lives in `retention.py` and runs its passes through `submit()`
 like any other caller, one bounded batch per trip. Its loop-rule knobs are
 documented on `retention.RetentionConfig`; the store's only obligations to it
-are `path` (to locate the archive DB beside the hot one) and `pending()` (so a
-VACUUM can stand down when requests are waiting).
+are `path` (to locate the archive beside the hot DB) and the configured paired
+history archive; compaction is offline maintenance.
 
 Architecture constraint 2 (spec): zero blocking I/O on the event loop. The
 asyncio side NEVER calls sqlite3 directly — it submits a callable to the queue
@@ -38,6 +38,8 @@ import time
 from typing import Any, Callable
 import uuid
 
+from retention import (HistoryConnection, prepare_history_schema, history_query,
+                       next_receipt_rowid, bind_history_archive, default_archive_path)
 from send_metadata import normalize_send_meta
 from loop_watchdog import StoreProgress, request_timing
 
@@ -570,7 +572,7 @@ def _project_send_receipt_row(
 ) -> dict[str, Any]:
     """Keep latest outcome fields, but bind meta to the request's first row."""
     result = _send_receipt_row(row, **options)
-    original = conn.execute(
+    original = history_query(conn,
         "SELECT meta_json FROM v2_send_receipts "
         "WHERE to_stream_id=? AND request_id=? ORDER BY rowid ASC LIMIT 1",
         (row["to_stream_id"], row["request_id"]),
@@ -600,7 +602,7 @@ def _project_session_events_conn(
         receipt_id = str(event.get("receipt_id") or "")
         if event.get("kind") != "USER" or not receipt_id or not _SEND_REQUEST_ID_RE.fullmatch(request_id):
             continue
-        row = conn.execute(
+        row = history_query(conn,
             "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? "
             "AND receipt_id=? ORDER BY rowid DESC LIMIT 1",
             (str(event.get("stream_id") or ""), request_id, receipt_id),
@@ -632,25 +634,32 @@ def _insert_send_receipt_row(
     The single authoritative INSERT shared by ``append_send_receipt`` and the
     atomic ``claim_or_coalesce_send`` claim, so both write identical column shapes.
     """
-    cur = conn.execute(
-        """INSERT INTO v2_send_receipts (
-            to_stream_id, request_id, receipt_id, state, optimistic_id,
-            wire_digest, display_text, content_kind, attachments_json,
-            delivery, submission_confirmed, reason, attempts, created_at,
-            from_stream_id, actor_stream_id, actor_trusted, meta_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            to_stream_id, request_id, receipt_id, state, optimistic_id or None,
-            wire_digest, str(display_text or ""), str(content_kind),
-            attachments_json, str(delivery or state),
-            1 if submission_confirmed else 0, reason or None, attempts, created_at,
-            _safe_provenance_id(from_stream_id),
-            _safe_provenance_id(actor_stream_id),
-            1 if actor_trusted else 0,
-            str(meta_json or "{}"),
-        ),
-    )
-    conn.commit()
+    try:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        receipt_rowid = next_receipt_rowid(conn)
+        cur = conn.execute(
+            """INSERT INTO v2_send_receipts (
+                rowid, to_stream_id, request_id, receipt_id, state, optimistic_id,
+                wire_digest, display_text, content_kind, attachments_json,
+                delivery, submission_confirmed, reason, attempts, created_at,
+                from_stream_id, actor_stream_id, actor_trusted, meta_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                receipt_rowid, to_stream_id, request_id, receipt_id, state, optimistic_id or None,
+                wire_digest, str(display_text or ""), str(content_kind),
+                attachments_json, str(delivery or state),
+                1 if submission_confirmed else 0, reason or None, attempts, created_at,
+                _safe_provenance_id(from_stream_id),
+                _safe_provenance_id(actor_stream_id),
+                1 if actor_trusted else 0,
+                str(meta_json or "{}"),
+            ),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     row = conn.execute(
         "SELECT rowid AS receipt_rowid, * FROM v2_send_receipts WHERE rowid=?",
         (int(cur.lastrowid),),
@@ -884,8 +893,8 @@ SESSION_EVENT_TAIL_RECORDED_DDL = (
 INBOUND_TURN_KINDS = ("USER", "TELL")
 
 # v2-only. The receipt lane deliberately owns one append-only log and no
-# retention worker, cache, or retry machinery. SQLite's implicit rowid is the
-# projection order: callers read the newest physical row for one
+# cache or retry machinery. The paired-history allocator owns each committed
+# rowid across hot/archive; callers read the newest physical row for one
 # (to_stream_id, request_id) key.
 SEND_RECEIPT_DDL = """
 CREATE TABLE IF NOT EXISTS v2_send_receipts (
@@ -1385,8 +1394,10 @@ from store_voice_operations import VoiceOperationsStoreMixin, DDL as VOICE_OPERA
 class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStoreMixin, store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
-    def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000) -> None:
+    def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000,
+                 archive_path: str | None = None) -> None:
         self._path = path
+        self._configured_archive_path = archive_path
         self._spec_identity_resolver: Callable[[str | None], str | None] | None = None
         self._spec_identities_resolver: Callable[[Any], dict] | None = None
         # (stream_id, session_created_at) -> the stream's other event lifecycles;
@@ -1422,9 +1433,8 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
 
     def pending(self) -> int:
         """Callables queued but not yet run. Read from the store thread by the
-        retention job, which skips its VACUUM whenever anything is waiting: the
-        thread is single-threaded, so a VACUUM is a hard stall for every queued
-        request, not merely slow I/O."""
+        retention job and diagnostics. Bounded batches allow waiting callers
+        to interleave; whole-database compaction is never routine live work."""
         return self._queue.qsize()
 
     # -- lifecycle ---------------------------------------------------------
@@ -1491,7 +1501,8 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             # ATTACH for configured retention archives. Memory stores stay local.
             from pathlib import Path
             database = self._path if self._path in (':memory:', '') else Path(self._path).absolute().as_uri()
-            conn = sqlite3.connect(database, uri=True)
+            fresh_history = self._path in (':memory:', '') or not Path(self._path).exists()
+            conn = sqlite3.connect(database, uri=True, factory=HistoryConnection)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
@@ -1715,8 +1726,12 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             if "usage_snapshot" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
                 conn.execute("ALTER TABLE v2_reports ADD COLUMN usage_snapshot TEXT")
             store_exchange.repair(conn)
+            history_path = None if self._path in (':memory:', '') else default_archive_path(Path(self._path).absolute())
+            prepare_history_schema(conn, fresh=fresh_history, archive_path=history_path)
             self.schedule_schema_health = "ok"
             conn.commit()
+            if self._configured_archive_path is not None:
+                bind_history_archive(conn, Path(self._configured_archive_path))
             self._columns = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
         except BaseException as exc:  # pragma: no cover - startup failure path
             self._start_error = exc
@@ -5223,7 +5238,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             return None
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
-            row = conn.execute(
+            row = history_query(conn,
                 """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
                    WHERE to_stream_id=? AND request_id=?
                    ORDER BY rowid DESC LIMIT 1""",
@@ -5247,7 +5262,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             return await self.get_send_receipt(target, request)
 
         def rows_for(conn):
-            return conn.execute(
+            return history_query(conn,
                 "SELECT rowid AS receipt_rowid,* FROM v2_send_receipts "
                 "WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
                 (target, request)).fetchall()
@@ -5267,12 +5282,12 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             return int(row[0]) if row else 0
 
         def peers(conn, row, birth):
-            return conn.execute(
+            return history_query(conn,
                 "SELECT COUNT(*) FROM v2_send_receipts r JOIN "
                 "(SELECT request_id,MAX(rowid) AS rid FROM v2_send_receipts "
                 "WHERE to_stream_id=? GROUP BY request_id) x ON x.rid=r.rowid "
-                "WHERE r.state!='not_landed' AND r.wire_digest=? AND r.created_at>=?",
-                (target, row["wire_digest"], birth)).fetchone()[0]
+                "WHERE r.to_stream_id=? AND r.state!='not_landed' AND r.wire_digest=? AND r.created_at>=?",
+                (target, target, row["wire_digest"], birth), receipt_stream=target).fetchone()[0]
 
         def observe(conn):
             rows = rows_for(conn)
@@ -5310,7 +5325,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         if not observed["ready"]:
             return observed["result"]
         archive, complete = await asyncio.to_thread(
-            proof.scan_archive, default_archive_path(Path(self.path)),
+            proof.scan_archive, await self.submit(lambda conn: conn.history_archive_path),
             target, observed["birth"], observed["claim"])
         if not complete:
             return await self.get_send_receipt(target, request)
@@ -5350,7 +5365,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 reason="late_user_proof", attempts=latest["attempts"], created_at=iso_now(),
                 from_stream_id=latest["from_stream_id"], actor_stream_id=latest["actor_stream_id"],
                 actor_trusted=bool(latest["actor_trusted"]), meta_json=latest["meta_json"])
-            row = conn.execute("SELECT rowid AS receipt_rowid,* FROM v2_send_receipts WHERE rowid=?",
+            row = history_query(conn, "SELECT rowid AS receipt_rowid,* FROM v2_send_receipts WHERE rowid=?",
                                (inserted["receipt_rowid"],)).fetchone()
             return _project_send_receipt_row(conn, row)
 
@@ -5419,7 +5434,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             # onto its own stale accepted claim). A prior attempt that truly landed
             # would already have made THIS attempt coalesce and append a mirrored
             # landed row, so 'newest is not_landed' reliably means not-yet-landed.
-            latest = conn.execute(
+            latest = history_query(conn,
                 """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
                    WHERE to_stream_id=?
                      AND (
@@ -5487,7 +5502,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             if kind == "TELL":
                 if not peer_anchor:
                     return None
-                anchored = conn.execute(
+                anchored = history_query(conn,
                     """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
                        WHERE to_stream_id=? AND request_id=?
                        ORDER BY rowid DESC LIMIT 1""",
@@ -5505,7 +5520,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             # An event already stamped with a client-minted request ID must
             # stay bound to that durable attempt when it is replayed.
             if _SEND_REQUEST_ID_RE.fullmatch(request_id):
-                exact = conn.execute(
+                exact = history_query(conn,
                     """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
                        WHERE to_stream_id=? AND request_id=?
                        ORDER BY rowid DESC LIMIT 1""",
@@ -5528,7 +5543,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             digest = _send_wire_digest(text)
             if not digest:
                 return None
-            row = conn.execute(
+            row = history_query(conn,
                 """SELECT r.rowid AS receipt_rowid, r.*
                    FROM v2_send_receipts AS r
                    JOIN (
@@ -5537,9 +5552,9 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                        WHERE to_stream_id=?
                        GROUP BY request_id
                    ) AS current ON current.receipt_rowid=r.rowid
-                   WHERE r.wire_digest=?
+                   WHERE r.to_stream_id=? AND r.wire_digest=?
                    ORDER BY r.rowid DESC LIMIT 1""",
-                (stream_id, digest),
+                (stream_id, stream_id, digest), receipt_stream=stream_id,
             ).fetchone()
             if row is not None:
                 return _project_send_receipt_row(

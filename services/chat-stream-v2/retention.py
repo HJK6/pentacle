@@ -5,7 +5,7 @@ hot set O(open) without a second offline operator surface. The daemon is the
 process holding the DB open and uses bounded batches rather than a whole-file
 copy for crash safety.
 
-The passes, in the order a full run applies them:
+The existing cadence performs these bounded passes:
 
   1. `archive_rows`   — terminal `sessions` rows move to `sessions_archive.db`,
                         except those a live row still descends from (lineage).
@@ -18,10 +18,10 @@ The passes, in the order a full run applies them:
                         the pass that actually shrinks the file: measured on the
                         live DB, `sessions` archival alone took 1.7 -> 1.5 GiB
                         while the event tail held 1.18 GB + 208 MB of indexes.
-  3. VACUUM           — reclaims the freelist the moves created. In WAL mode a
-                        VACUUM rewrites the DB *into the WAL*, so it must be
-                        followed by `wal_checkpoint(TRUNCATE)` or the on-disk
-                        footprint grows instead of shrinking.
+  3. Receipt/route histories move with an independent durable archive commit,
+     full equality verification, and a separate revalidated hot deletion.
+     Per transaction: at most 500 rows / 1 MiB payload. Per pass: 2,000 keys
+     examined across alternating families. Compaction is offline maintenance.
 
 Errors raise `RetentionError`, never `SystemExit`: a `SystemExit` escaping into
 an asyncio background task is a `BaseException` that bypasses ordinary handling.
@@ -58,6 +58,542 @@ def default_archive_path(db: Path) -> Path:
 
 class RetentionError(Exception):
     """A pass cannot proceed safely (bad schema, mismatched archive, ...)."""
+
+
+# Receipt/route history is a paired store, not an attached-database transaction.
+# The archive commits first. Its rows are immutable and identities are never reused.
+RECEIPT_TABLE = "v2_send_receipts"
+ROUTE_TABLE = "v2_assistant_composite_routes"
+HISTORY_TABLES = (RECEIPT_TABLE, ROUTE_TABLE)
+HISTORY_MAX_ROWS = 500
+HISTORY_MAX_BYTES = 1024 * 1024
+HISTORY_PASS_ROWS = 2000
+MAX_RECEIPT_ROWID = 2**63 - 1
+HISTORY_SEQUENCE_DDL = """CREATE TABLE IF NOT EXISTS v2_send_receipt_sequence (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    high_water INTEGER NOT NULL CHECK(high_water>=0),
+    pair_id TEXT NOT NULL, archive_path TEXT NOT NULL,
+    archive_ready INTEGER NOT NULL CHECK(archive_ready IN (0,1)))"""
+HISTORY_MARKER_DDL = """CREATE TABLE v2_receipt_route_archive (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    version INTEGER NOT NULL CHECK(version=1), pair_id TEXT NOT NULL)"""
+
+
+class HistoryConnection(sqlite3.Connection):
+    """Store-owned connection state; never accessed from the asyncio thread."""
+    history_archive_path: Path | None = None
+    history_attachment_identity: tuple[int, int] | None = None
+    history_schema_version: int | None = None
+
+
+def _columns(conn, table, schema="main"):
+    return [r[1] for r in conn.execute(f'PRAGMA {schema}.table_info("{table}")')]
+
+
+def _sequence(conn):
+    return conn.execute("SELECT * FROM v2_send_receipt_sequence WHERE singleton=1").fetchone()
+
+
+def prepare_history_schema(conn, *, fresh: bool, archive_path: Path | None) -> None:
+    """Additive migration only; an existing missing archive is never bootstrapped."""
+    import uuid
+    conn.execute(HISTORY_SEQUENCE_DDL)
+    # Keys also bound dependency probes. Do not predicate-scan unrelated history.
+    indexes = (
+        (RECEIPT_TABLE, "receipt_key", "to_stream_id,request_id"),
+        (RECEIPT_TABLE, "receipt_request", "request_id"),
+        (RECEIPT_TABLE, "receipt_optimistic", "to_stream_id,optimistic_id"),
+        (ROUTE_TABLE, "route_request", "stream_id,input_request_id"),
+        (ROUTE_TABLE, "route_request_actor", "input_request_id"),
+        (ROUTE_TABLE, "route_dependency", "stream_id,depends_on_message_id"),
+        (ROUTE_TABLE, "route_reply", "stream_id,reply_to_message_id"),
+        (ROUTE_TABLE, "route_target", "route_target,route_target_generation"),
+        ("v2_assistant_composite_operations", "operation_dispatch", "stream_id,dispatch_id"),
+        ("v2_assistant_composite_operations", "operation_reply", "stream_id,reply_to_message_id"),
+        ("v2_assistant_composite_publications", "publication_input", "stream_id,reply_to_message_id,created_at DESC"),
+        ("v2_assistant_composite_publications", "publication_dispatch", "stream_id,dispatch_id"),
+        ("v2_assistant_composite_question_bridges", "bridge_scope", "stream_id,lane_id"),
+        ("v2_assistant_composite_question_bridges", "bridge_state", "stream_id,state"),
+        ("sessions", "session_handoff", "handoff_from_stream_id"),
+    )
+    for table, name, columns in indexes:
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_history_{name} ON {table}({columns})")
+    if fresh and _sequence(conn) is None:
+        conn.execute("INSERT INTO v2_send_receipt_sequence VALUES(1,0,?,?,?)",
+                     (uuid.uuid4().hex, str(archive_path or ""), int(archive_path is None)))
+    row = _sequence(conn)
+    if isinstance(conn, HistoryConnection):
+        conn.history_archive_path = Path(row["archive_path"]) if row and row["archive_path"] else archive_path
+    conn.create_function("history_identity_conflict", 0, _history_identity_conflict)
+
+
+def _history_identity_conflict():
+    raise RetentionError("conflicting hot/archive history identity")
+
+
+def _archive_schema(conn, archive, *, initialize: bool, pair_id: str) -> None:
+    """Require the exact receipt/route schema, including the rowid alias and keys."""
+    tables = {r[0] for r in archive.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    marker = "v2_receipt_route_archive" in tables
+    if marker:
+        row = archive.execute("SELECT version,pair_id FROM v2_receipt_route_archive WHERE singleton=1").fetchone()
+        if row is None or tuple(row) != (1, pair_id):
+            raise RetentionError("archive pair/format mismatch")
+    elif not initialize:
+        raise RetentionError("archive pair marker missing")
+    for table in HISTORY_TABLES:
+        expected = [tuple(r)[1:] for r in conn.execute(f'PRAGMA main.table_info("{table}")')]
+        if table == RECEIPT_TABLE:
+            expected = [("receipt_rowid", "INTEGER", 0, None, 1), *expected]
+        if table not in tables:
+            if not initialize or marker:
+                raise RetentionError(f"archive schema missing {table}")
+            ddl = conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()[0]
+            if table == RECEIPT_TABLE:
+                left = ddl.index("(") + 1
+                ddl = ddl[:left] + "receipt_rowid INTEGER PRIMARY KEY," + ddl[left:]
+            archive.execute(ddl)
+        actual = [tuple(r)[1:] for r in archive.execute(f'PRAGMA table_info("{table}")')]
+        if actual != expected:
+            raise RetentionError(f"incompatible archive schema: {table}")
+        if table == RECEIPT_TABLE:
+            # INTEGER PRIMARY KEY DESC is not a rowid alias. Verify actual identity.
+            sql = archive.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()[0]
+            import re
+            if (re.search(r"receipt_rowid\s+INTEGER\s+PRIMARY\s+KEY\s+DESC", sql, re.I)
+                    or any(index[3] == "pk" for index in archive.execute(f'PRAGMA index_list("{table}")'))):
+                raise RetentionError("archive receipt identity is not a rowid alias")
+        else:
+            keys = {tuple(r[2] for r in archive.execute(f'PRAGMA index_info("{i[1]}")'))
+                    for i in archive.execute(f'PRAGMA index_list("{table}")') if i[2]}
+            if not {("route_id",), ("stream_id", "input_identity"), ("dispatch_id",)} <= keys:
+                raise RetentionError("archive route identity keys incompatible")
+    if initialize and not marker and has_table(conn, EVENT_TABLE) and EVENT_TABLE not in tables:
+        # A fresh pair has known empty event history. The existing late-proof
+        # scanner requires the event table to distinguish empty from a gap.
+        archive.execute(conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (EVENT_TABLE,)).fetchone()[0])
+    if not marker:
+        archive.execute(HISTORY_MARKER_DDL)
+        archive.execute("INSERT INTO v2_receipt_route_archive VALUES(1,1,?)", (pair_id,))
+    if initialize:
+        archive.execute(f"CREATE INDEX IF NOT EXISTS idx_archive_receipt_key ON {RECEIPT_TABLE}(to_stream_id,request_id,receipt_rowid)")
+        archive.execute(f"CREATE INDEX IF NOT EXISTS idx_archive_receipt_request ON {RECEIPT_TABLE}(request_id)")
+        archive.execute(f"CREATE INDEX IF NOT EXISTS idx_archive_receipt_optimistic ON {RECEIPT_TABLE}(to_stream_id,optimistic_id)")
+        archive.execute(f"CREATE INDEX IF NOT EXISTS idx_archive_route_request ON {ROUTE_TABLE}(input_request_id)")
+        archive.commit()
+
+
+def _open_archive(path: Path, *, create=False, readonly=False):
+    mode = "rwc" if create else "ro" if readonly else "rw"
+    try:
+        result = sqlite3.connect(Path(path).absolute().as_uri() + f"?mode={mode}", uri=True, timeout=0.1)
+        result.row_factory = sqlite3.Row
+        if not readonly:
+            result.execute("PRAGMA synchronous=FULL")
+        return result
+    except (sqlite3.Error, OSError) as exc:
+        raise RetentionError("required history archive unavailable") from exc
+
+
+def initialize_history_pair(conn) -> None:
+    """Seed within the caller's transaction; never commit a composite admission."""
+    import uuid
+    row = _sequence(conn)
+    path = getattr(conn, "history_archive_path", None)
+    if path is None:
+        if row is None:
+            conn.execute("INSERT INTO v2_send_receipt_sequence VALUES(1,0,?,'',1)", (uuid.uuid4().hex,))
+        return
+    if row is not None and row["archive_ready"]:
+        return
+    pair_id = row["pair_id"] if row else None
+    archive = _open_archive(path, create=bool(row and not row["archive_ready"]))
+    try:
+        if pair_id is None:
+            marker = archive.execute("SELECT 1 FROM sqlite_master WHERE name='v2_receipt_route_archive'").fetchone()
+            pair_id = (archive.execute("SELECT pair_id FROM v2_receipt_route_archive WHERE singleton=1").fetchone()[0]
+                       if marker else uuid.uuid4().hex)
+        _archive_schema(conn, archive, initialize=True, pair_id=pair_id)
+        maximum = max(int(conn.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {RECEIPT_TABLE}").fetchone()[0]),
+                      int(archive.execute(f"SELECT COALESCE(MAX(receipt_rowid),0) FROM {RECEIPT_TABLE}").fetchone()[0]),
+                      int(row["high_water"]) if row else 0)
+        if row is None:
+            conn.execute("INSERT INTO v2_send_receipt_sequence VALUES(1,?,?,?,1)",
+                         (maximum, pair_id, str(path)))
+        else:
+            conn.execute("UPDATE v2_send_receipt_sequence SET high_water=?,archive_ready=1 WHERE singleton=1", (maximum,))
+    finally:
+        archive.close()
+
+
+def bind_history_archive(conn, path: Path) -> None:
+    """Bind configuration, or explicitly relocate a validated matching pair."""
+    path = Path(path).absolute()
+    current = getattr(conn, "history_archive_path", None)
+    if current == path:
+        return
+    row = _sequence(conn)
+    if row is None or not row["archive_ready"]:
+        # Explicit configuration requires an existing readable archive. Default
+        # fresh-pair bootstrap is the only path allowed to create a missing file.
+        target = _open_archive(path, readonly=True)
+        target.close()
+    else:
+        target = _open_archive(path, readonly=True)
+        try:
+            marker = target.execute("SELECT 1 FROM sqlite_master WHERE name='v2_receipt_route_archive'").fetchone()
+            same_pair = bool(marker and target.execute("SELECT pair_id FROM v2_receipt_route_archive WHERE singleton=1").fetchone()[0] == row["pair_id"])
+        finally:
+            target.close()
+        if not same_pair:
+            old = _open_archive(Path(row["archive_path"]), readonly=True)
+            try:
+                _archive_schema(conn, old, initialize=False, pair_id=row["pair_id"])
+                owner_tables = [entry[0] for entry in old.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+                    "AND name!='v2_receipt_route_archive'")]
+                if any(old.execute(f'SELECT 1 FROM "{table.replace(chr(34), chr(34)*2)}" LIMIT 1').fetchone()
+                       for table in owner_tables):
+                    raise RetentionError("cannot switch a populated history archive")
+            finally:
+                old.close()
+    if getattr(conn, "history_attachment_identity", None) is not None:
+        if conn.in_transaction:
+            raise RetentionError("archive rebinding requires a transaction boundary")
+        conn.execute("DETACH DATABASE receipt_archive")
+        conn.history_attachment_identity = None
+    conn.history_archive_path = path
+    if row:
+        conn.execute("UPDATE v2_send_receipt_sequence SET archive_path=?,archive_ready=0 WHERE singleton=1", (str(path),))
+    initialize_history_pair(conn)
+    conn.commit()
+
+
+def _attached_history(conn):
+    initialize_history_pair(conn)
+    path = getattr(conn, "history_archive_path", None)
+    if path is None:
+        return None
+    # Check the name as well as the open SQLite handle: an unlinked inode is an
+    # outage, not an indefinitely healthy historical snapshot.
+    try:
+        stat = Path(path).stat()
+        identity = (stat.st_dev, stat.st_ino)
+    except OSError as exc:
+        raise RetentionError("history archive path unavailable") from exc
+    previous = getattr(conn, "history_attachment_identity", None)
+    if previous is not None and previous != identity:
+        raise RetentionError("history archive replaced; reopen the Store after validating the pair")
+    if previous is None:
+        archive = _open_archive(path, readonly=True)
+        try:
+            _archive_schema(conn, archive, initialize=False, pair_id=_sequence(conn)["pair_id"])
+        finally:
+            archive.close()
+        conn.execute("ATTACH DATABASE ? AS receipt_archive", (Path(path).absolute().as_uri() + "?mode=ro",))
+        conn.history_attachment_identity = identity
+    version = conn.execute("PRAGMA receipt_archive.schema_version").fetchone()[0]
+    if version != getattr(conn, "history_schema_version", None):
+        archive = _open_archive(path, readonly=True)
+        try:
+            _archive_schema(conn, archive, initialize=False, pair_id=_sequence(conn)["pair_id"])
+        finally:
+            archive.close()
+        conn.history_schema_version = version
+    marker = conn.execute("SELECT version,pair_id FROM receipt_archive.v2_receipt_route_archive WHERE singleton=1").fetchone()
+    if marker is None or tuple(marker) != (1, _sequence(conn)["pair_id"]):
+        raise RetentionError("history archive pair mismatch")
+    return "receipt_archive"
+
+
+def next_receipt_rowid(conn) -> int:
+    """The caller owns BEGIN/COMMIT/ROLLBACK. Initialized allocation needs no archive."""
+    initialize_history_pair(conn)
+    row = _sequence(conn)
+    highest = int(conn.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {RECEIPT_TABLE}").fetchone()[0])
+    value = max(int(row["high_water"]), highest)
+    if value >= MAX_RECEIPT_ROWID:
+        raise RetentionError("send receipt identity exhausted")
+    value += 1
+    conn.execute("UPDATE v2_send_receipt_sequence SET high_water=? WHERE singleton=1", (value,))
+    return value
+
+
+def history_union_sql(conn, table, archive_schema, *, receipt_stream=False):
+    """Combine before ordering/filtering; validate selected duplicate payloads in BOTH arms."""
+    columns = _columns(conn, table)
+    key = "receipt_rowid" if table == RECEIPT_TABLE else "route_id"
+    hot_key = "rowid" if table == RECEIPT_TABLE else "route_id"
+    equal = " AND ".join(f'h."{c}" IS a."{c}"' for c in columns)
+    hot = ("h.rowid AS rowid," if table == RECEIPT_TABLE else "") + ",".join(f'h."{c}"' for c in columns)
+    cold = ("a.receipt_rowid AS rowid," if table == RECEIPT_TABLE else "") + ",".join(f'a."{c}"' for c in columns)
+    hot_scope = " AND h.to_stream_id=?" if receipt_stream else ""
+    cold_scope = " AND a.to_stream_id=?" if receipt_stream else ""
+    join = f'a."{key}"=h."{hot_key}"'
+    if table == ROUTE_TABLE:
+        join += " OR (a.stream_id=h.stream_id AND a.input_identity=h.input_identity) OR a.dispatch_id=h.dispatch_id"
+    return (f'SELECT {hot} FROM main."{table}" h LEFT JOIN {archive_schema}."{table}" a '
+            f'ON ({join}) WHERE CASE WHEN a."{key}" IS NULL THEN 1 '
+            f'WHEN {equal} THEN 1 ELSE history_identity_conflict() END {hot_scope} '
+            f'UNION ALL SELECT {cold} FROM {archive_schema}."{table}" a LEFT JOIN main."{table}" h '
+            f'ON ({join}) WHERE CASE WHEN h."{hot_key}" IS NULL THEN 1 '
+            f'WHEN {equal} THEN 0 ELSE history_identity_conflict() END {cold_scope}')
+
+
+def history_query(conn, sql, parameters=(), *, receipt_stream=None):
+    """Explicit historical reader seam. Mutators keep their protected hot joins."""
+    import re
+    owned = not conn.in_transaction
+    try:
+        schema = _attached_history(conn)
+        if owned and conn.in_transaction:
+            conn.commit()  # only initialization; never a caller's transaction
+        if schema is None:
+            return conn.execute(sql, parameters)
+        definitions = []
+        prefix_parameters = []
+        for table in HISTORY_TABLES:
+            if re.search(r"\b" + table + r"\b", sql):
+                alias = "retained_" + table
+                scoped = table == RECEIPT_TABLE and receipt_stream is not None
+                definitions.append(f'{alias} AS NOT MATERIALIZED ({history_union_sql(conn, table, schema, receipt_stream=scoped)})')
+                if scoped:
+                    prefix_parameters.extend((receipt_stream, receipt_stream))
+                sql = re.sub(r"\b" + table + r"\b", alias, sql)
+        return conn.execute("WITH " + ",".join(definitions) + " " + sql, (*prefix_parameters, *parameters))
+    except sqlite3.Error as exc:
+        raise RetentionError("history archive coverage gap or conflicting identity") from exc
+
+
+def _settled_receipt(conn, row, cutoff) -> bool:
+    latest = conn.execute(f"SELECT state,delivery,submission_confirmed,created_at FROM {RECEIPT_TABLE} "
+                          "WHERE to_stream_id=? AND request_id=? ORDER BY rowid DESC LIMIT 1",
+                          (row["to_stream_id"], row["request_id"])).fetchone()
+    if not latest or not _old_enough(latest["created_at"], cutoff):
+        return False
+    if not ((latest["state"] == "landed" and latest["delivery"] == "landed" and latest["submission_confirmed"])
+            or (latest["state"] == "not_landed" and latest["delivery"] == "not_landed")):
+        return False
+    host, sep, name = row["to_stream_id"].partition(":")
+    if sep:
+        session = conn.execute("SELECT created_at FROM sessions WHERE host=? AND session_name=?", (host, name)).fetchone()
+        if session and (_epoch(session[0]) is None or _epoch(row["created_at"]) >= _epoch(session[0])):
+            return False  # current generation proof, including closed-but-retained seats
+    if conn.execute(f"SELECT 1 FROM {ROUTE_TABLE} WHERE stream_id=? AND input_request_id=? LIMIT 1",
+                    (row["to_stream_id"], row["request_id"])).fetchone():
+        return False
+    if row["optimistic_id"] and conn.execute(f"SELECT 1 FROM {ROUTE_TABLE} WHERE stream_id=? AND input_identity=?",
+                                             (row["to_stream_id"], row["optimistic_id"])).fetchone():
+        return False
+    return True
+
+
+def _settled_route(conn, row, cutoff) -> bool:
+    if (row["routing_state"] not in ("resolved", "routing_failed")
+            or row["delivery_state"] not in ("landed", "failed")
+            or not _old_enough(row["updated_at"], cutoff)
+            or row["lease_owner"] or row["lease_until"] is not None
+            or row["depends_on_message_id"] or row["reply_to_question_id"]):
+        return False
+    # Standing operator authority has no age expiry. Completed lanes can reopen.
+    if str(row["actor_stream_id"] or "").startswith("operator:"):
+        return False
+    import json
+    try:
+        payload = json.loads(row["route_json"] or "{}")
+        if not isinstance(payload, dict) or payload.get("lane_id"):
+            return False
+    except (ValueError, TypeError):
+        return False
+    stream, identity, dispatch = row["stream_id"], row["input_identity"], row["dispatch_id"]
+    if dispatch and (not row["route_target"] or not row["route_target_generation"]):
+        return False  # incomplete dispatch scope is not proof of immutability
+    if conn.execute("SELECT 1 FROM v2_assistant_composite_question_bridges WHERE stream_id=? AND state='prepared' LIMIT 1", (stream,)).fetchone():
+        return False  # prepared bridges do not retain a separately queryable dispatch key
+    for field in ("depends_on_message_id", "reply_to_message_id"):
+        if conn.execute(f"SELECT 1 FROM {ROUTE_TABLE} WHERE stream_id=? AND {field}=? LIMIT 1", (stream, identity)).fetchone():
+            return False
+    if conn.execute("SELECT 1 FROM v2_assistant_composite_operations WHERE stream_id=? AND reply_to_message_id=? LIMIT 1", (stream, identity)).fetchone():
+        return False
+    if dispatch and conn.execute("SELECT 1 FROM v2_assistant_composite_operations WHERE stream_id=? AND dispatch_id=? LIMIT 1", (stream, dispatch)).fetchone():
+        return False
+    if row["route_target"]:
+        host, sep, name = row["route_target"].partition(":")
+        if not sep:
+            return False
+        current = conn.execute("SELECT g.generation FROM sessions s LEFT JOIN v2_session_generations g "
+                               "ON s.host=g.host AND s.session_name=g.session_name WHERE s.host=? AND s.session_name=?", (host, name)).fetchone()
+        if current and (not row["route_target_generation"] or current[0] == row["route_target_generation"]):
+            return False
+        if conn.execute("SELECT 1 FROM sessions WHERE handoff_from_stream_id=? LIMIT 1", (row["route_target"],)).fetchone():
+            return False
+    # Real dispatched inputs retain publication obligations until a final result.
+    if dispatch and row["delivery_state"] == "landed":
+        final = conn.execute(
+            "SELECT created_at FROM v2_assistant_composite_publications WHERE stream_id=? AND reply_to_message_id=? "
+            "AND (publish_kind='result' OR json_extract(CASE WHEN json_valid(canonical_payload_json) "
+            "THEN canonical_payload_json ELSE '{}' END,'$.response_state')='final') "
+            "ORDER BY created_at DESC LIMIT 1", (stream, identity)).fetchone()
+        if final is None or not _old_enough(final[0], cutoff):
+            return False
+    return True
+
+
+def _epoch(stamp):
+    try:
+        value = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        return value.timestamp() if value.tzinfo is not None else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _old_enough(stamp, cutoff):
+    value = _epoch(stamp)
+    return value is not None and value <= cutoff.timestamp()
+
+
+def history_checkpoint(stage, table, rows):
+    """Crash-test seam at durable boundaries; production has no side effects."""
+
+
+def move_history_batch(conn, table, *, after, cutoff, limit=HISTORY_MAX_ROWS):
+    """Bound input keys AND materialized bytes; archive commit -> verify -> hot CAS."""
+    initialize_history_pair(conn)
+    conn.commit()
+    _attached_history(conn)
+    path = conn.history_archive_path
+    columns = _columns(conn, table)
+    key = "rowid" if table == RECEIPT_TABLE else "route_id"
+    archive_key = "receipt_rowid" if table == RECEIPT_TABLE else key
+    budget = min(HISTORY_MAX_ROWS, max(0, int(limit)))
+    sizes = "+".join(f'COALESCE(octet_length("{c}"),0)' for c in columns) + "+8"
+    candidates = conn.execute(f'SELECT {key} AS identity,({sizes}) AS bytes FROM "{table}" '
+                              f'WHERE {key}>? ORDER BY {key} LIMIT ?', (after, budget)).fetchall()
+    rows, materialized, oversized, examined = [], 0, 0, 0
+    cursor = after
+    eligible = _settled_receipt if table == RECEIPT_TABLE else _settled_route
+    for candidate in candidates:
+        size = int(candidate["bytes"])
+        if size > HISTORY_MAX_BYTES:
+            oversized += 1
+            examined += 1
+            cursor = candidate["identity"]
+            continue
+        if materialized + size > HISTORY_MAX_BYTES:
+            break
+        cursor = candidate["identity"]
+        examined += 1
+        row = conn.execute(f'SELECT {key} AS history_identity,* FROM "{table}" WHERE {key}=?', (cursor,)).fetchone()
+        materialized += size  # includes protected candidates, not just moved rows
+        if row and _old_enough(row["created_at"], cutoff) and eligible(conn, row, cutoff):
+            rows.append(dict(row))
+    if not candidates or (examined == len(candidates) and len(candidates) < budget):
+        cursor = 0 if table == RECEIPT_TABLE else ""
+    result = dict(moved=0, examined=examined, materialized_bytes=materialized, oversized=oversized, cursor=cursor)
+    if oversized:
+        log.warning("retention history retained %d oversized %s row(s)", oversized, table)
+    if not rows:
+        return result
+    archive = _open_archive(path)
+    try:
+        _archive_schema(conn, archive, initialize=False, pair_id=_sequence(conn)["pair_id"])
+        archive.execute("BEGIN IMMEDIATE")
+        try:
+            archive_columns = (["receipt_rowid"] if table == RECEIPT_TABLE else []) + columns
+            for row in rows:
+                values = ([row["history_identity"]] if table == RECEIPT_TABLE else []) + [row[c] for c in columns]
+                equality = " AND ".join(f'"{c}" IS ?' for c in archive_columns)
+                prior = archive.execute(f'SELECT ({equality}) FROM "{table}" WHERE "{archive_key}"=?',
+                                        (*values, row["history_identity"])).fetchone()
+                if prior is not None:
+                    if not prior[0]:
+                        raise RetentionError("conflicting archive history identity; no hot rows deleted")
+                else:
+                    archive.execute(f'INSERT INTO "{table}" ({_q(archive_columns)}) VALUES ({",".join("?" for _ in values)})', values)
+            archive.commit()
+        except BaseException:
+            archive.rollback()
+            raise
+        history_checkpoint("archive_committed", table, rows)
+        # Pin the committed archive against a second writer through hot
+        # deletion, including configured WAL archives. This is a new archive
+        # transaction after the durable copy, not cross-database atomicity.
+        archive.execute("BEGIN IMMEDIATE")
+        for row in rows:
+            expected = ([row["history_identity"]] if table == RECEIPT_TABLE else []) + [row[c] for c in columns]
+            equality = " AND ".join(f'"{c}" IS ?' for c in archive_columns)
+            verified = archive.execute(f'SELECT 1 FROM "{table}" WHERE "{archive_key}"=? AND {equality}',
+                                       (row["history_identity"], *expected)).fetchone()
+            if verified is None:
+                raise RetentionError("archive full-payload verification failed")
+        history_checkpoint("verified", table, rows)
+        _attached_history(conn)  # detect disappeared/replaced archive before deletion
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for row in rows:
+                equality = " AND ".join(f'"{c}" IS ?' for c in columns)
+                current = conn.execute(f'SELECT 1 FROM "{table}" WHERE {key}=? AND {equality}',
+                                       (row["history_identity"], *[row[c] for c in columns])).fetchone()
+                if current is not None and _old_enough(row["created_at"], cutoff) and eligible(conn, row, cutoff):
+                    conn.execute(f'DELETE FROM "{table}" WHERE {key}=?', (row["history_identity"],))
+                    result["moved"] += 1
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        history_checkpoint("hot_deleted", table, rows)
+        return result
+    finally:
+        archive.close()
+
+
+def restore_history_batch(conn, *, table, after, limit=HISTORY_MAX_ROWS):
+    """Compatible offline recovery. Retain archive and intervening hot writes."""
+    initialize_history_pair(conn)
+    conn.commit()
+    _attached_history(conn)
+    columns = _columns(conn, table)
+    key = "receipt_rowid" if table == RECEIPT_TABLE else "route_id"
+    hot_key = "rowid" if table == RECEIPT_TABLE else key
+    archive = _open_archive(conn.history_archive_path, readonly=True)
+    try:
+        sizes = "+".join(f'COALESCE(octet_length("{c}"),0)' for c in columns) + "+8"
+        candidates = archive.execute(f'SELECT "{key}",({sizes}) AS bytes FROM "{table}" WHERE "{key}">? '
+                                     f'ORDER BY "{key}" LIMIT ?', (after, min(HISTORY_MAX_ROWS, limit))).fetchall()
+        rows, materialized, cursor = [], 0, after
+        for candidate in candidates:
+            size = int(candidate["bytes"])
+            if size > HISTORY_MAX_BYTES:
+                raise RetentionError("oversized archived row requires offline recovery review")
+            if materialized + size > HISTORY_MAX_BYTES:
+                break
+            cursor = candidate[key]
+            row = archive.execute(f'SELECT * FROM "{table}" WHERE "{key}"=?', (cursor,)).fetchone()
+            rows.append(dict(row)); materialized += size
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for row in rows:
+                equality = " AND ".join(f'"{c}" IS ?' for c in columns)
+                current = conn.execute(f'SELECT ({equality}) FROM "{table}" WHERE {hot_key}=?',
+                                       (*[row[c] for c in columns], row[key])).fetchone()
+                if current is not None:
+                    if not current[0]:
+                        raise RetentionError("recovery identity collision; intervening writes preserved")
+                else:
+                    names = (["rowid"] if table == RECEIPT_TABLE else []) + columns
+                    values = ([row[key]] if table == RECEIPT_TABLE else []) + [row[c] for c in columns]
+                    conn.execute(f'INSERT INTO "{table}" ({_q(names)}) VALUES ({",".join("?" for _ in values)})', values)
+            maximum = max(int(_sequence(conn)["high_water"]),
+                          int(conn.execute(f"SELECT COALESCE(MAX(rowid),0) FROM {RECEIPT_TABLE}").fetchone()[0]),
+                          int(archive.execute(f"SELECT COALESCE(MAX(receipt_rowid),0) FROM {RECEIPT_TABLE}").fetchone()[0]))
+            conn.execute("UPDATE v2_send_receipt_sequence SET high_water=? WHERE singleton=1", (maximum,))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return dict(restored=len(rows), cursor=cursor, materialized_bytes=materialized, done=not candidates)
+    finally:
+        archive.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -567,6 +1103,9 @@ class PassResult:
     managed_uploads_reconciled: int = 0
     managed_uploads_promoted: int = 0
     history_pruned: int = 0
+    receipts_moved: int = 0
+    routes_moved: int = 0
+    history_batches: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def events_moved(self) -> int:
@@ -609,7 +1148,8 @@ class RetentionJob:
             result.skipped = "in_memory_db"
             return result
         db = Path(db_path)
-        archive_path = cfg.archive_path or default_archive_path(db)
+        archive_path = cfg.archive_path or await self._submit(
+            lambda conn: conn.history_archive_path or default_archive_path(db))
         # An explicitly configured archive is part of the owner inventory.
         # Never replace an unavailable archive with a new empty database, even
         # before GC: schedule/session mutations must also wait for recovery.
@@ -625,6 +1165,39 @@ class RetentionJob:
                     raise RetentionError('configured archive unavailable; retention aborted') from exc
             await self._submit(check_archive)
         result.size_before = db_size(db)
+        await self._submit(lambda conn: bind_history_archive(conn, archive_path))
+        # Persist allocator seeding before any archive commit, then alternate the
+        # two families so a receipt backlog never starves routes.
+        def prepare_pair(conn):
+            initialize_history_pair(conn)
+            conn.commit()
+            _attached_history(conn)
+        await self._submit(prepare_pair)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        for turn in range(HISTORY_PASS_ROWS // HISTORY_MAX_ROWS):
+            table = HISTORY_TABLES[turn % 2]
+            cursor_name = "_receipt_cursor" if table == RECEIPT_TABLE else "_route_cursor"
+            cursor = getattr(self, cursor_name, 0 if table == RECEIPT_TABLE else "")
+            batch = await self._submit(lambda conn, t=table, a=cursor: move_history_batch(
+                conn, t, after=a, cutoff=cutoff, limit=min(HISTORY_MAX_ROWS, max(1, cfg.batch_size))))
+            setattr(self, cursor_name, batch["cursor"])
+            result.history_batches.append({"table": table, **batch})
+            if table == RECEIPT_TABLE:
+                result.receipts_moved += batch["moved"]
+            else:
+                result.routes_moved += batch["moved"]
+            await asyncio.sleep(0)
+
+        # Existing session/event archival attaches the same file for writes.
+        # Release our read-only alias first; duplicate attachments to one SQLite
+        # file would otherwise contend with each other at commit.
+        def release_history_reader(conn):
+            conn.commit()
+            if conn.history_attachment_identity is not None:
+                conn.execute("DETACH DATABASE receipt_archive")
+                conn.history_attachment_identity = None
+                conn.history_schema_version = None
+        await self._submit(release_history_reader)
 
         # Schedule durability shares this 6h cadence but has an independent
         # locked 500-row cap for each class.  One store-thread transaction keeps
@@ -652,7 +1225,7 @@ class RetentionJob:
             budget,
             lambda conn, limit: archive_rows(
                 conn, Schema(conn), archive_path, cfg.statuses, keep, cfg.batch_size, max_rows=limit,
-                require_existing=cfg.archive_path is not None
+                require_existing=True
             ),
         )
         result.sessions_moved = moved
@@ -682,7 +1255,7 @@ class RetentionJob:
                 return archive_events(
                     conn, EventSchema(conn), archive_path, cfg.tail_keep,
                     cfg.batch_size, max_rows=limit, protected_stream_ids=protected,
-                    require_existing=cfg.archive_path is not None,
+                    require_existing=True,
                 )
 
             ev_moved = await self._drain_pairs(budget, _events)
@@ -739,6 +1312,12 @@ class RetentionJob:
                     result.schedule_blobs_unreclaimed,
                     result.schedule_blob_bytes_unreclaimed,
                 )
+                if result.receipts_moved or result.routes_moved:
+                    log.info("retention history: receipts=%d routes=%d examined=%d bytes=%d oversized=%d",
+                             result.receipts_moved, result.routes_moved,
+                             sum(b["examined"] for b in result.history_batches),
+                             sum(b["materialized_bytes"] for b in result.history_batches),
+                             sum(b["oversized"] for b in result.history_batches))
                 if result.sessions_moved or result.events_moved or result.vacuumed:
                     log.info(
                         "retention: %d session row(s), %d event row(s), vacuum=%s in %.1fs "
@@ -885,39 +1464,64 @@ class RetentionJob:
         return a, b
 
     def _maybe_vacuum(self, conn: sqlite3.Connection, cfg: RetentionConfig) -> tuple[bool, str, int]:
-        """VACUUM, but only when it is worth what it costs.
-
-        Tradeoff, stated plainly: VACUUM rewrites the entire database and holds
-        it for the duration -- and because every DB call in this daemon is
-        serialized through the one store thread, a VACUUM is a hard stall for
-        every queued RPC, not merely slow I/O. It is therefore gated twice:
-
-          * by value  -- skipped unless the freelist the passes just created
-                         exceeds `vacuum_min_bytes`, so a pass that reclaimed
-                         nothing never pays the cost; and
-          * by timing -- skipped outright if ANY request is already queued
-                         behind us. Deferring costs one cadence interval; not
-                         deferring costs live requests their latency.
-
-        Running it here (on the store thread) rather than on a private
-        connection is deliberate: a second connection would contend for the same
-        write lock and the stall would happen anyway, minus the queue check.
-
-        In WAL mode the VACUUM rewrite lands in the WAL, so the truncating
-        checkpoint is what actually returns the space to the filesystem.
-        """
+        """Live retention never rewrites the database or blocks on a truncation."""
         conn.commit()
-        reclaimable = freelist_bytes(conn)
-        if reclaimable < cfg.vacuum_min_bytes:
-            return False, "below_threshold", reclaimable
-        pending = getattr(self._store, "pending", None)
-        if callable(pending) and pending() > 0:
-            return False, "requests_queued", reclaimable
-        prior = conn.isolation_level
-        conn.isolation_level = None
-        try:
-            conn.execute("VACUUM")
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        finally:
-            conn.isolation_level = prior
-        return True, "", reclaimable
+        return False, "offline_maintenance_only", freelist_bytes(conn)
+
+
+def history_recovery_main(argv=None) -> int:
+    """Offline, identity-preserving backup/rehydration for an initialized pair."""
+    import argparse
+    import json
+    parser = argparse.ArgumentParser(description="Offline paired receipt/route recovery; never a rollback to old readers")
+    parser.add_argument("operation", choices=("backup", "restore"))
+    parser.add_argument("--hot", type=Path, required=True)
+    parser.add_argument("--archive", type=Path, required=True)
+    parser.add_argument("--output", type=Path, help="new directory for paired backup")
+    parser.add_argument("--offline", action="store_true", help="confirm all writers and retention are stopped")
+    args = parser.parse_args(argv)
+    if not args.offline:
+        parser.error("stop all writers and pass --offline; this is not a live backup utility")
+    if args.operation == "backup" and args.output is None:
+        parser.error("backup requires --output")
+    conn = sqlite3.connect(args.hot.absolute().as_uri() + "?mode=rw", uri=True, factory=HistoryConnection)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = _sequence(conn)
+        if row is None or not row["archive_ready"]:
+            raise RetentionError("recovery requires an initialized, paired allocator")
+        conn.history_archive_path = Path(row["archive_path"])
+        conn.create_function("history_identity_conflict", 0, _history_identity_conflict)
+        bind_history_archive(conn, args.archive)
+        _attached_history(conn)
+        result = {"operation": args.operation, "pair_id": _sequence(conn)["pair_id"]}
+        if args.operation == "backup":
+            args.output.mkdir(parents=True, exist_ok=False)
+            for source, filename in ((args.hot, "hot.db"), (args.archive, "archive.db")):
+                with sqlite3.connect(source.absolute().as_uri() + "?mode=ro", uri=True) as src:
+                    with sqlite3.connect(str(args.output / filename)) as dest:
+                        src.backup(dest)
+                        if dest.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                            raise RetentionError("backup integrity check failed")
+            result["backup_directory"] = str(args.output)
+        else:
+            result["verified_rows"] = {}
+            for table in HISTORY_TABLES:
+                cursor = 0 if table == RECEIPT_TABLE else ""
+                count = 0
+                while True:
+                    batch = restore_history_batch(conn, table=table, after=cursor)
+                    cursor = batch["cursor"]
+                    count += batch["restored"]
+                    if batch["done"]:
+                        break
+                result["verified_rows"][table] = count
+        result["high_water"] = _sequence(conn)["high_water"]
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(history_recovery_main())

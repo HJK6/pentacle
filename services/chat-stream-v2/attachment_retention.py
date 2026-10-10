@@ -133,10 +133,29 @@ def sweep_managed(conn, root, *, archive_path=None, now=None, limit=100, after_s
     if not root.is_dir() or root.is_symlink() or not (root / '.attachment-locks').is_dir():
         return counts
     archive = None
+    if archive_path is None and getattr(conn, 'history_archive_path', None) is not None:
+        sequence = conn.execute("SELECT * FROM v2_send_receipt_sequence WHERE singleton=1").fetchone()
+        if sequence and sequence['archive_ready']:
+            archive_path = conn.history_archive_path
+    archive_identity = None
     if archive_path is not None:
         # Never create an archive. Main's write transaction also serializes the
         # existing retention migration into this archive.
+        try:
+            stat = Path(archive_path).stat()
+            archive_identity = (stat.st_dev, stat.st_ino)
+        except OSError as exc:
+            raise sqlite3.OperationalError('configured archive unavailable') from exc
         archive = sqlite3.connect(Path(archive_path).resolve().as_uri() + '?mode=ro', uri=True)
+        try:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='v2_send_receipt_sequence'").fetchone():
+                sequence = conn.execute("SELECT * FROM v2_send_receipt_sequence WHERE singleton=1").fetchone()
+                if sequence and sequence['archive_ready']:
+                    from retention import _archive_schema
+                    _archive_schema(conn, archive, initialize=False, pair_id=sequence['pair_id'])
+        except BaseException:
+            archive.close()
+            raise
     try:
         bounded = max(0, min(limit, 500))
         candidates = conn.execute('SELECT DISTINCT blob_sha FROM v2_attachment_uploads WHERE blob_sha>? ORDER BY blob_sha LIMIT ?', (after_sha, bounded)).fetchall()
@@ -161,6 +180,10 @@ def sweep_managed(conn, root, *, archive_path=None, now=None, limit=100, after_s
                             continue
                         ids = [r['upload_id'] for r in rows]
                         owner = retained_owner(conn, sha, ids) or (archive is not None and retained_owner(archive, sha, ids))
+                        if archive_identity is not None:
+                            current = Path(archive_path).stat()
+                            if (current.st_dev, current.st_ino) != archive_identity:
+                                raise sqlite3.OperationalError('archive changed during managed-owner scan')
                         protected = any(r['legacy_protected'] for r in rows)
                         nonmanaged = retained_owner(conn, sha, ids, only={'v2_reports', 'v2_schedules'}) or (archive is not None and retained_owner(archive, sha, ids, only={'v2_reports', 'v2_schedules'}))
                         if nonmanaged:
