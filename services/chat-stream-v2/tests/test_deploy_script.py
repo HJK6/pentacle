@@ -939,10 +939,11 @@ def test_u2_scan_empty_defaults(tmp_path, monkeypatch, logs):
         stdout.touch()
         stderr.touch()
     scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0)
-    assert scan == {"class": "slow_consumer", "outcome": deploy_mod.SLOW_CONSUMER_PASSED,
-                    "boot_marker_seen": False, "queue_depth_warnings": 0, "overflow_drops": 0,
-                    "peer_4000_other": 0, "unparsed_conn_diag": 0, "failures": [],
-                    "log_paths": [] if logs == "none" else [str(stdout), str(stderr)]}
+    assert scan["outcome"] == deploy_mod.SLOW_CONSUMER_FAILED
+    assert scan["boot_marker_seen"] is False
+    assert scan["failures"] == []
+    assert scan["scan_complete"] is (logs != "missing")
+    assert scan["log_paths"] == ([] if logs == "none" else [str(stdout), str(stderr)])
 
 
 @pytest.mark.parametrize("marker", [False, True])
@@ -974,8 +975,8 @@ def test_u2_scan_deduplicates_across_sinks(tmp_path, monkeypatch, reverse, force
     second = [_u2_line(close_received_code=1011), _u2_peer_close(), _u2_line("slow_consumer")]
     if reverse:
         first, second = second, first
-    stdout.write_text("\n".join([deploy_mod.V2_BOOT_LINE, *first, "conn_diag {"]))
-    stderr.write_text("\n".join(second))
+    stdout.write_text("\n".join([deploy_mod.V2_BOOT_LINE, *first, "conn_diag {", ""]))
+    stderr.write_text("\n".join([*second, ""]))
     scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0)
     assert scan["failures"] == [{"kind": force_kind, "client": _U2_CONN_A,
                                   "transport": "loopback", "line": force}]
@@ -986,9 +987,9 @@ def test_u2_scan_deduplicates_across_sinks(tmp_path, monkeypatch, reverse, force
 
 def test_u2_each_sink_keeps_its_own_first_marker_selection(tmp_path, monkeypatch):
     stdout, stderr = _u2_log_paths(tmp_path, monkeypatch)
-    stdout.write_text("\n".join([_u2_line("force_close"), deploy_mod.V2_BOOT_LINE, _u2_peer_close()]))
+    stdout.write_text("\n".join([_u2_line("force_close"), deploy_mod.V2_BOOT_LINE, _u2_peer_close(), ""]))
     stderr.write_text("\n".join(["slow_consumer overflow", "conn_diag {", deploy_mod.V2_BOOT_LINE,
-                                "slow_consumer queue depth=1", _u2_line("slow_consumer")]))
+                                "slow_consumer queue depth=1", _u2_line("slow_consumer"), ""]))
     scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0)
     assert scan["failures"] == []
     assert scan["peer_4000_other"] == 1

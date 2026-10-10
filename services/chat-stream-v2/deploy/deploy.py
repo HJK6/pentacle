@@ -65,7 +65,7 @@ SERVICES: dict[str, ServiceConfig] = {
 
 
 Runner = Callable[[Sequence[str], Path], subprocess.CompletedProcess[str]]
-LogOffsets = int | dict[str, int | None]
+LogOffsets = int | dict[str, int | dict[str, int] | None]
 
 
 def _run(cmd: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -805,10 +805,11 @@ def _daemon_log_paths(service: ServiceConfig) -> tuple[Path, ...]:
 
 
 def _capture_log_offsets(paths: Sequence[Path]) -> LogOffsets | None:
-    offsets: dict[str, int | None] = {}
+    offsets: dict[str, int | dict[str, int] | None] = {}
     for path in paths:
         try:
-            offsets[str(path)] = path.stat().st_size
+            stat = path.stat()
+            offsets[str(path)] = {"size": stat.st_size, "inode": stat.st_ino, "device": stat.st_dev}
         except OSError:
             offsets[str(path)] = None
     return offsets or None
@@ -872,13 +873,23 @@ def classify_slow_consumer_log(
     Queue pressure, other peer 4000 closes and unparseable diagnostics are telemetry.
     """
     window, boot_marker_seen = _slow_consumer_log_window(log_text, boot_line)
+    result = classify_slow_consumer_lines(window.splitlines(), boot_marker_seen=boot_marker_seen)
+    result.pop("failure_count")
+    return result
+
+
+def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=None):
+    """The existing classifier over a stream; count all failures, cap examples."""
     queue_depth_warnings = 0
     unparsed_conn_diag = 0
     failures: list[dict[str, str]] = []
     connection_failures: dict[str, int] = {}
     peer_4000_connections: list[str] = []
     priority = {"1011_close": 1, "peer_liveness": 2, "overflow": 3}
-    for raw_line in window.splitlines():
+    for raw_line in lines:
+        raw_line = raw_line.rstrip("\r\n")
+        if len(connection_failures) + len(peer_4000_connections) + len(failures) > 100000:
+            raise ValueError("diagnostic identity resource limit")
         line = raw_line.strip()
         if "conn_diag " in raw_line:
             try:
@@ -922,6 +933,8 @@ def classify_slow_consumer_log(
                 row = {"kind": kind, "client": conn_id, "line": raw_line}
                 if "transport" in record:
                     row["transport"] = record["transport"]
+                if max_examples is not None and len(failures) >= max_examples:
+                    row.pop("line", None)
                 previous = connection_failures.get(conn_id)
                 if previous is None:
                     connection_failures[conn_id] = len(failures)
@@ -948,9 +961,12 @@ def classify_slow_consumer_log(
             failures.append({
                 "kind": kind,
                 "client": client_match.group(1) if client_match else "unknown",
-                "line": line,
+                "line": line if max_examples is None or len(failures) < max_examples else "",
             })
 
+    if max_examples is not None:
+        for row in failures[max_examples:]:
+            row.pop("line", None)
     # Defer terminal-close telemetry until all force-close evidence is known,
     # including a force_close encountered later or in another selected sink.
     forced_connections = {
@@ -967,7 +983,8 @@ def classify_slow_consumer_log(
         "overflow_drops": overflow_drops,
         "peer_4000_other": peer_4000_other,
         "unparsed_conn_diag": unparsed_conn_diag,
-        "failures": failures,
+        "failure_count": len(failures),
+        "failures": failures if max_examples is None else failures[:max_examples],
     }
 
 
@@ -1010,7 +1027,8 @@ _LAUNCHD_PID_RE = re.compile(r"^\s*pid\s*=\s*(\d+)", re.MULTILINE)
 
 def _previous_log_offset(previous_size: LogOffsets | None, path: Path) -> int | None:
     if isinstance(previous_size, dict):
-        return previous_size.get(str(path))
+        value = previous_size.get(str(path))
+        return value.get("size") if isinstance(value, dict) else value
     return previous_size
 
 
@@ -1070,33 +1088,40 @@ def _scan_slow_consumer_window(
     service: ServiceConfig,
     previous_size: LogOffsets | None,
 ) -> dict[str, object]:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from deploy.packet.log_scan import freeze, lines
     paths = _daemon_log_paths(service)
-    appended: list[tuple[Path, str]] = []
-    for path in paths:
-        text = _AppendedLogScanner(path, previous_size).read_new()
-        if text:
-            appended.append((path, text))
+    inputs = []
+    try:
+        for path in paths:
+            offset = _previous_log_offset(previous_size, path)
+            if offset is None:
+                raise ValueError("missing frozen start offset")
+            identity = previous_size.get(str(path)) if isinstance(previous_size, dict) else None
+            identity = identity if isinstance(identity, dict) else {}
+            inputs.append(freeze(path, offset, identity.get("inode"), identity.get("device")))
+        boot_marker_seen = any(V2_BOOT_LINE in line for item in inputs for line in lines(item))
+        def selected():
+            for item in inputs:
+                seen = False
+                # stderr has no boot marker; pre-restart offsets delimit it.
+                has_boot = any(V2_BOOT_LINE in line for line in lines(item))
+                for line in lines(item):
+                    seen |= V2_BOOT_LINE in line
+                    if boot_marker_seen and (seen or not has_boot):
+                        yield line
+        scan = classify_slow_consumer_lines(selected(), boot_marker_seen=boot_marker_seen, max_examples=100)
+        if not boot_marker_seen:
+            scan["outcome"] = SLOW_CONSUMER_FAILED
+        return {**scan, "scan_complete": True, "inputs": inputs,
+                "bytes_read": sum(i["bytes_read"] for i in inputs),
+                "log_paths": [str(path) for path in paths]}
+    except (OSError, ValueError) as error:
+        return {"class": "slow_consumer", "outcome": SLOW_CONSUMER_FAILED,
+                "scan_complete": False, "incomplete_reason": str(error),
+                "boot_marker_seen": False, "failures": [],
+                "log_paths": [str(path) for path in paths]}
 
-    boot_marker_seen = any(V2_BOOT_LINE in text for _path, text in appended)
-    windows: list[str] = []
-    for _path, text in appended:
-        # The daemon's boot line is stdout while logging warnings are stderr. The
-        # pre-restart offset excludes old records; stderr has no boot line of its
-        # own, so once stdout establishes the window, scan its appended text too.
-        window, _seen = _slow_consumer_log_window(
-            text,
-            V2_BOOT_LINE if V2_BOOT_LINE in text else (None if boot_marker_seen else V2_BOOT_LINE),
-        )
-        windows.append(window)
-
-    # Select each sink's window first; classify them together so a connection's
-    # force_close and terminal close cannot count twice across stdout/stderr.
-    scan = classify_slow_consumer_log("\n".join(windows), boot_line=None)
-    return {
-        **scan,
-        "boot_marker_seen": boot_marker_seen,
-        "log_paths": [str(path) for path in paths],
-    }
 
 
 def verify_fresh_daemon_log_line(
