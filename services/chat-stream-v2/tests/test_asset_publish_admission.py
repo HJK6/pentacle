@@ -32,7 +32,7 @@ def run_catalog_wire(tmp_path, scenario, catalog_spec="example__catalog"):
             await sessions.open("node-alpha", name, provider="codex", pane_status="pane_alive")
             await store.grant_stream_token("node-alpha", name,
                 hashlib.sha256(("synthetic-" + name).encode()).hexdigest(), STREAM_TOKEN_HASH_VERSION)
-        assets = Assets(str(tmp_path / "assets.db"), sessions=sessions, fleet_hosts={"node-alpha", "node-beta"})
+        assets = Assets(str(tmp_path / "assets.db"), sessions=sessions, fleet_hosts={"node-alpha", "node-beta"}, catalog_spec_id=catalog_spec)
         await assets.start()
         server = Server(store=store, sessions=sessions, local_host="node-alpha")
         server.handlers.update(assets.wire_handlers())
@@ -169,21 +169,26 @@ def test_publish_rejects_noncanonical_identity_without_write(tmp_path, field, wh
 
 
 @pytest.mark.parametrize("catalog_spec", ["pentacle__dashboard_catalog", "pentacle__dashboard_catalog_v2"])
-def test_wire_cross_host_catalog_publication_requires_attached_spec(tmp_path, catalog_spec):
+def test_wire_cross_host_full_publish_refused_and_entry_mutations_allowed(tmp_path, catalog_spec):
     async def scenario(assets, server, dispatch, before):
-        async def open_cross_host(spec_ids):
-            await assets._sessions.open("node-beta", "cross", provider="codex", pane_status="pane_alive", spec_ids=spec_ids)
-            await assets._sessions.store.grant_stream_token("node-beta", "cross",
-                hashlib.sha256(b"synthetic-cross").hexdigest(), STREAM_TOKEN_HASH_VERSION)
-        await open_cross_host([])
-        denied = await dispatch(publish(spec_id=catalog_spec, title="Denied"), "node-beta:cross")
-        assert denied["error_code"] == "asset_unauthorized", denied
-        assert await assets._call("find_assets_by_id", asset_id="dashboard-catalog") == [before]
-        await assets._sessions.store.update_session("node-beta", "cross", spec_ids=[catalog_spec])
-        await assets._sessions.refresh()
-        reply = await dispatch(publish(spec_id=catalog_spec, title="Updated"), "node-beta:cross")
-        assert reply["type"] == "asset.publish.ok", reply
-        assert reply["asset"]["stream_id"] == before["stream_id"]
-        assert reply["asset"]["spec_id"] == catalog_spec
-        assert reply["asset"]["title"] == "Updated"
+        await assets._sessions.open("node-beta", "cross", provider="codex", pane_status="pane_alive")
+        await assets._sessions.store.grant_stream_token("node-beta", "cross",
+            hashlib.sha256(b"synthetic-cross").hexdigest(), STREAM_TOKEN_HASH_VERSION)
+        for spec_ids in ([], [catalog_spec]):
+            await assets._sessions.store.update_session("node-beta", "cross", spec_ids=spec_ids)
+            await assets._sessions.refresh()
+            denied = await dispatch(publish(spec_id=catalog_spec, title="Denied"), "node-beta:cross")
+            assert denied["error_code"] == "asset_unauthorized", denied
+            assert await assets._call("find_assets_by_id", asset_id="dashboard-catalog") == [before]
+        owner = await dispatch(publish(spec_id=catalog_spec, title="Updated"), "owner")
+        assert owner["type"] == "asset.publish.ok", owner
+        assert owner["asset"]["stream_id"] == before["stream_id"]
+        assert owner["asset"]["spec_id"] == catalog_spec
+        added = await dispatch({"type":"dashboard.add", "id":"cross-host-entry", "title":"Cross host entry",
+            "url":"https://viewer.example.ts.net/app/"}, "node-beta:cross")
+        assert added["type"] == "dashboard.add.ok", added
+        assert added["asset"]["stream_id"] == before["stream_id"]
+        removed = await dispatch({"type":"dashboard.remove", "id":"cross-host-entry"}, "node-beta:cross")
+        assert removed["type"] == "dashboard.remove.ok", removed
+        assert removed["asset"]["body"] == owner["asset"]["body"]
     run_catalog_wire(tmp_path, scenario, catalog_spec)
