@@ -22,8 +22,8 @@ function harness(options = {}) {
 for (const c of cases.valid) test(`catalog fixture valid: ${c.name}`, () => assert.equal(api.validateCatalog(c.catalog), c.catalog));
 for (const c of cases.invalid) test(`catalog fixture invalid: ${c.name}`, () => assert.throws(() => api.validateCatalog(c.catalog), error => error.message.includes(c.error), c.error));
 
-test('host_api 2 is unsupported only after full schema validation', () => {
-  const catalog = full(); catalog.requires.host_api = 2;
+test('host_api above 2 is unsupported only after full schema validation', () => {
+  const catalog = full(); catalog.requires.host_api = 3;
   assert.throws(() => api.validateCatalog(catalog), e => e.unsupported === true);
   catalog.requires.host_api = 9007199254740992;
   assert.throws(() => api.validateCatalog(catalog), e => e.unsupported === true);
@@ -60,12 +60,12 @@ test('transport unavailable without cache, malformed and unsupported cards are e
   let r = await h.loader.refresh('example__catalog'); assert.equal(r.message, 'Dashboard catalog unavailable: offline'); assert.equal(r.catalog, null);
   h.setList({ assets: [meta] }); h.setGet({ asset: { body: '{broken' } });
   r = await h.loader.refresh('example__catalog'); assert.equal(r.status, 'malformed'); assert.match(r.message, /^Dashboard catalog unsupported\/malformed: .* \(catalog unknown\)$/);
-  const c = full(); c.requires.host_api = 2; h.setGet(ok(c)); r = await h.loader.refresh('example__catalog'); assert.equal(r.status, 'unsupported'); assert.match(r.message, /catalog 0\.1\.0\+aaaaaaa/);
+  const c = full(); c.requires.host_api = 3; h.setGet(ok(c)); r = await h.loader.refresh('example__catalog'); assert.equal(r.status, 'unsupported'); assert.match(r.message, /catalog 0\.1\.0\+aaaaaaa/);
 });
 test('validated cache survives malformed/unsupported fetches and is shown only on unavailability', async () => {
   const h = harness(); const good = await h.loader.refresh('example__catalog');
   h.setGet({ asset: { body: '{broken' } }); let r = await h.loader.refresh('example__catalog'); assert.equal(r.catalog, null); assert.equal(r.cached, false);
-  const unsupported = full(); unsupported.requires.host_api = 2; h.setGet(ok(unsupported)); r = await h.loader.refresh('example__catalog'); assert.equal(r.catalog, null);
+  const unsupported = full(); unsupported.requires.host_api = 3; h.setGet(ok(unsupported)); r = await h.loader.refresh('example__catalog'); assert.equal(r.catalog, null);
   h.setGet(new Error('offline')); r = await h.loader.refresh('example__catalog'); assert.equal(r.cached, true); assert.deepEqual(r.catalog, good.catalog); assert.equal(r.age, 0);
   r = await h.loader.refresh('example__other'); assert.equal(r.cached, false);
 });
@@ -131,10 +131,11 @@ test('allowlist has exactly asset actions and denied calls resolve plus warn', a
   const warnings = [], cc = { assetList: async p => ({ ok: true, p }) }; const actions = api.actions({ id: 'example-board', actions: ['assetList', 'household'] }, cc, (...x) => warnings.push(x));
   assert.deepEqual(Object.keys(actions), ['assetList', 'assetGet']); assert.equal((await actions.assetList({})).ok, true); assert.deepEqual(await actions.assetGet({}), { ok: false, error: 'action_not_allowed' }); assert.equal(warnings.length, 1);
 });
-test('merge preserves built-ins and array order, isolates a collision as a card', () => {
+test('merge resolves built-ins only where the catalog references them', () => {
   const h = harness(), c = full(), builtin = { id: 'example-board', mount() {} };
+  c.boards[1] = { id: builtin.id, name: 'Built in', kind: 'built-in' };
   const result = h.loader.merge({ catalog: c }, [builtin], { reportBoard: { createBoard: entry => entry }, hostedBoard: {} });
-  assert.deepEqual(result.boards.map(b => b.id), ['example-board', 'example-report', 'example-hosted']); assert.equal(result.boards[0], builtin); assert.match(result.errors[0], /Board failed to load/);
+  assert.deepEqual(result.boards.map(b => b.id), ['example-report', 'example-board', 'example-hosted']); assert.equal(result.boards[1].mount, builtin.mount); assert.deepEqual(result.errors, []);
 });
 test('mount throws into an isolated board card; late loads after disposal never mount', async () => {
   for (const dispose of [false, true]) {
@@ -145,14 +146,26 @@ test('mount throws into an isolated board card; late loads after disposal never 
     assert.equal(mounts, dispose ? 0 : 1); if (!dispose) { assert.equal(container.dataset.boardState, 'error'); assert.equal(container.querySelector('[data-testid="dashboard-board-error"]').textContent, 'Board failed to load: synthetic mount'); }
   }
 });
-test('hosted entries reuse configured iframe behavior and leave original config unchanged', () => {
-  const h = harness(), c = full(); c.boards = [c.boards[2]];
-  const viewer = require('../renderer/dashboards/modeler-3d');
-  const board = h.loader.merge({ catalog: c }, [], { hostedBoard: viewer }).boards[0];
-  const config = { dashboards: { modeler3d: { url: 'https://example.test/original' } } }, container = h.root.document.querySelector('main');
-  const refs = board.mount(container, { config }); const frame = container.querySelector('iframe');
-  assert.equal(frame.getAttribute('src'), c.boards[0].hosted.url); assert.equal(frame.getAttribute('sandbox'), 'allow-scripts allow-same-origin'); assert.equal(frame.getAttribute('referrerpolicy'), 'no-referrer'); assert.equal(frame.getAttribute('allow'), 'xr-spatial-tracking; fullscreen');
-  assert.equal(container.querySelector('h1').textContent, c.boards[0].name); assert.equal(config.dashboards.modeler3d.url, 'https://example.test/original'); board.unmount(refs); assert.equal(container.querySelector('iframe'), null);
+function hostedViewer(h, timers) {
+ const vm = require('node:vm'); h.root.DashboardCatalogLoader = api;
+ h.root.fetch = async () => ({ ok: true, json: async () => ({ hostedDashboardAuthMode: 'identity' }) });
+ h.root.hostedDashboardPolicy = cases.hosted_policy;
+ let serial = 0;
+ const context = vm.createContext({ window: h.root, module: { exports: {} }, URL,
+  setTimeout: timers ? fn => { timers.set(++serial, fn); return serial; } : setTimeout,
+  clearTimeout: timers ? id => timers.delete(id) : clearTimeout });
+ vm.runInContext(fs.readFileSync(path.join(__dirname, '../renderer/dashboards/modeler-3d.js'), 'utf8'), context);
+ return context.module.exports;
+}
+test('hosted entries use current policy/auth and leave profile configuration unchanged', async () => {
+ const h = harness(), c = full(); c.boards = [c.boards[2]];
+ c.boards[0].hosted.url = 'https://viewer.example.ts.net/app/';
+ const board = h.loader.merge({ catalog: c }, [], { hostedBoard: hostedViewer(h) }).boards[0];
+ const config = { dashboards: { modeler3d: { url: 'https://example.test/original' } } }, container = h.root.document.querySelector('main');
+ const refs = board.mount(container, { config }); await new Promise(r => setImmediate(r));
+ const frame = container.querySelector('iframe');
+ assert.equal(frame.getAttribute('src'), c.boards[0].hosted.url); assert.equal(frame.getAttribute('sandbox'), 'allow-scripts allow-same-origin'); assert.equal(frame.getAttribute('referrerpolicy'), 'no-referrer');
+ assert.equal(container.querySelector('h1').textContent, c.boards[0].name); assert.equal(config.dashboards.modeler3d.url, 'https://example.test/original'); board.unmount(refs); assert.equal(container.querySelector('iframe'), null); h.root.close();
 });
 test('app/build wiring loads optional catalog on view entry, preserves startup isolation and external scripts', () => {
   const app = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8'); const build = fs.readFileSync(path.join(__dirname, '../scripts/build-web.js'), 'utf8');
@@ -222,22 +235,44 @@ test('pending catalog refresh disables stale selection and disposes old refs bef
   window.DASHBOARDS.push({ id: 'example-board', mount() { oldMounts++; } }); oldTag.onload(); await tick();
   const newTag = [...document.querySelectorAll('script')].find(tag => tag !== oldTag); assert.ok(newTag);
   window.DASHBOARDS.push({ id: 'example-board', mount(c) { c.textContent = 'new adapter'; } }); newTag.onload(); await newRefs.ready;
-  assert.equal(oldMounts, 0); assert.equal(document.getElementById('dashboard-content').textContent, 'new adapter');
+  assert.equal(oldMounts, 0); assert.match(document.getElementById('dashboard-content').textContent, /new adapter/);
   assert.equal(document.getElementById('dashboard-content').dataset.catalogVersion, next.catalog_version); run("switchView('chats')"); window.close();
 });
-test('hosted wrapper mirrors loading/error/timeout/reload/success and disposes its observer', async () => {
-  const vm = require('node:vm'), h = harness(), catalog = full(); catalog.boards = [catalog.boards[2]];
-  const timers = new Map(); let serial = 0;
-  const context = vm.createContext({ window: h.root, module: { exports: {} }, URL, setTimeout: fn => { timers.set(++serial, fn); return serial; }, clearTimeout: id => timers.delete(id) });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../renderer/dashboards/modeler-3d.js'), 'utf8'), context);
-  const board = h.loader.merge({ catalog }, [], { hostedBoard: context.module.exports }).boards[0], container = h.root.document.querySelector('main');
-  const refs = board.mount(container, { config: {} }), flush = () => new Promise(r => setImmediate(r));
-  assert.equal(container.dataset.boardState, 'loading');
-  container.querySelector('iframe').dispatchEvent(new h.root.Event('error')); await flush();
-  assert.equal(container.dataset.boardState, 'error'); assert.match(container.querySelector('[data-testid="dashboard-board-error"]').textContent, /^Board failed to load:/);
-  assert.ok(container.querySelector('[data-modeler-open]')); container.querySelector('[data-modeler-reload]').click(); await flush(); assert.equal(container.dataset.boardState, 'loading');
-  [...timers.values()][0](); await flush(); assert.equal(container.dataset.boardState, 'error'); assert.match(container.querySelector('[data-testid="dashboard-board-error"]').textContent, /timed out/);
-  container.querySelector('[data-modeler-reload]').click(); await flush(); const frame = container.querySelector('iframe'); frame.dispatchEvent(new h.root.Event('load')); await flush();
-  assert.equal(container.dataset.boardState, 'ready'); assert.equal(container.querySelector('[data-testid="dashboard-board-error"]').hidden, true);
-  board.unmount(refs); frame.dispatchEvent(new h.root.Event('error')); await flush(); assert.equal(container.querySelector('iframe'), null); assert.equal(timers.size, 0); h.root.close();
+test('hosted panel synchronizes loading/error/timeout/reload/success and cancels events', async () => {
+ const h = harness(), catalog = full(); catalog.boards = [catalog.boards[2]]; catalog.boards[0].hosted.url = 'https://viewer.example.ts.net/app/';
+ const timers = new Map(); const viewer = hostedViewer(h, timers);
+ const board = h.loader.merge({ catalog }, [], { hostedBoard: viewer }).boards[0], container = h.root.document.querySelector('main');
+ const refs = board.mount(container), flush = () => new Promise(r => setImmediate(r));
+ assert.equal(container.dataset.boardState, 'loading'); await flush();
+ container.querySelector('iframe').dispatchEvent(new h.root.Event('error'));
+ assert.equal(container.dataset.boardState, 'error'); assert.match(container.textContent, /Could not open dashboard/);
+ container.querySelector('[data-modeler-reload]').click(); await flush(); assert.equal(container.dataset.boardState, 'loading');
+ [...timers.values()][0](); assert.equal(container.dataset.boardState, 'error'); assert.match(container.textContent, /timed out/);
+ container.querySelector('[data-modeler-reload]').click(); await flush(); const frame = container.querySelector('iframe'); frame.dispatchEvent(new h.root.Event('load'));
+ assert.equal(container.dataset.boardState, 'ready');
+ board.unmount(refs); frame.dispatchEvent(new h.root.Event('error')); assert.equal(container.querySelector('iframe'), null); assert.equal(timers.size, 0); h.root.close();
 });
+
+test('mixed catalog alone supplies membership, array order and visibility', () => {
+ const h = harness();
+ const catalog = full(); catalog.requires.host_api = 2;
+ catalog.boards = [
+  { id: 'missing-board', name: 'Missing', kind: 'built-in' },
+  { id: 'hosted-board', name: 'Hosted', kind: 'hosted-view', hosted: { url: 'https://board.example.ts.net/' } },
+  { id: 'static-board', name: 'Static', kind: 'built-in' },
+  { id: 'hidden-board', name: 'Hidden', kind: 'built-in', visible: false },
+ ];
+ api.validateCatalog(catalog);
+ const result = h.loader.merge({ catalog }, [{ id: 'static-board', name: 'Code', mount() {} }, { id: 'extra-board', name: 'Extra' }], { hostedBoard: { mount() {} } });
+ assert.deepEqual(result.boards.map(b => b.id), ['missing-board', 'hosted-board', 'static-board']);
+ const container = h.root.document.querySelector('main'); result.boards[0].mount(container);
+ assert.match(container.textContent, /unavailable/i); h.root.close();
+});
+test('hosted URL policy rejects unsafe URLs and missing policy at opening', () => {
+ const policy = { tailnetSuffix: 'example.ts.net', pentacleOrigin: 'https://chat.example.ts.net' };
+ assert.equal(api.admitHostedUrl('https://board.example.ts.net:8444/project-map/', policy), 'https://board.example.ts.net:8444/project-map/');
+ for (const url of ['http://board.example.ts.net/', 'https://board.example.ts.net.evil.test/', 'https://badexample.ts.net/', 'https://chat.example.ts.net:8444/', 'https://u@board.example.ts.net/', 'https://board.example.ts.net/?', 'https://board.example.ts.net/#', 'https://board.example.ts.net/?token=x']) assert.equal(api.admitHostedUrl(url, policy), null);
+ assert.equal(api.admitHostedUrl('https://board.example.ts.net/', null), null);
+});
+
+for (const item of cases.hosted_urls) test('shared URL opening: ' + item.name, () => assert.equal(!!api.admitHostedUrl(item.url, cases.hosted_policy), item.allowed));

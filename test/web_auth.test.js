@@ -169,3 +169,13 @@ test('with a token, unauthenticated access is rejected and /login mints a workin
   // A tampered cookie is not accepted.
   assert.equal(await tryWs(host.port, { Cookie: 'pentacle_web=deadbeef' }), 'rejected', 'a bogus cookie is rejected');
 });
+
+test('hosted auth mode is derived from the effective server auth object only', () => {
+  const { createAuth, hostedDashboardAuthMode } = require('../server/index.js');
+  assert.equal(createAuth('synthetic-token').mode, 'token');
+  assert.equal(hostedDashboardAuthMode({ mode: 'tailscale' }), 'identity');
+  assert.equal(hostedDashboardAuthMode({ mode: 'token' }), 'token');
+  for (const auth of [null, undefined, {}, { mode: 'identity' }, { mode: 'other' }]) {
+    assert.equal(hostedDashboardAuthMode(auth), 'unknown');
+  }
+});

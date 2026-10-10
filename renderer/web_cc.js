@@ -106,6 +106,11 @@ function createTransport({ url, logger = console } = {}) {
     });
     socket.addEventListener('close', () => {
       // A dropped socket can never answer; failing fast beats a hung promise.
+      if (typeof window !== 'undefined') {
+        window.hostedDashboardPolicy = null;
+        window.hostedDashboardAuthMode = 'unknown';
+        window.dispatchEvent(new window.Event('pentacle:hosted-dashboard-invalidate'));
+      }
       rejectAllPending('pentacle web host connection lost');
       // Auth material never survives a connection loss or enters the replay queue.
       try { listeners.get('provider-relogin:state')?.({ state: 'disconnected' }); } catch {}
@@ -350,7 +355,13 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
     // host's tmpdir (what pty:save-image does on the desktop).
     saveImage: (base64Data) => Promise.resolve(browserDownloadImage(base64Data)),
 
-    getConfig: () => call('get-config'),
+    getConfig: () => {
+      if (typeof window !== 'undefined' && typeof window.Event === 'function') {
+        window.hostedDashboardAuthMode = 'unknown';
+        window.dispatchEvent(new window.Event('pentacle:hosted-dashboard-invalidate'));
+      }
+      return call('get-config');
+    },
     getBuild: () => call('get-build'),
     // In a browser the OS browser IS the browser; opening a tab beats a round
     // trip to a channel the host refuses.

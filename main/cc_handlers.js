@@ -144,6 +144,7 @@ function createCcHandlers({
   startMicServer = null,
   micRequest = null,
   buildId = null,
+  hostedDashboardAuthMode = 'unknown',
 }) {
   const telemetry = [];
 
@@ -155,7 +156,7 @@ function createCcHandlers({
     const { catalogRoot, ...dashboards } = CONFIG.dashboards || {};
     return { ...CONFIG, mic, chatStream, ...(CONFIG.dashboards ? { dashboards } : {}), hostIds: CONFIG.chatStream?.hosts || ['local'], platform: process.platform,
       hostname: os.hostname(), isClient: Boolean(CONFIG.remote), configError: configError?.message || null, configWarnings,
-      buildId };
+      buildId, hostedDashboardAuthMode };
   }
 
   function protectedAssistantRenameError(host, sessionName) {
