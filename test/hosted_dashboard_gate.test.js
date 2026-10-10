@@ -72,3 +72,15 @@ test('current policy is revalidated on every action and delayed opener dies on i
  h.root.dispatchEvent(new h.root.Event('pentacle:hosted-dashboard-invalidate'));
  resolve({ok:true,json:async()=>({hostedDashboardAuthMode:'identity'})});await settled();assert.deepEqual(h.calls,[]);
 });
+
+for(const mode of ['token','unknown',undefined,'other','malformed','failed']) test('cached identity catalog stays denied under '+String(mode),async t=>{
+ const h=harness('identity');t.after(h.close);await settled();h.renderer.unmount(h.refs);
+ const api=require('../renderer/dashboards/catalog_loader');
+ const catalog={schema_version:1,catalog_version:'cache-test',package:{repo:'example/dashboards',commit:'1'.repeat(40)},requires:{host_api:2},boards:[{id:'hosted-board',name:'Hosted',kind:'hosted-view',hosted:{url}}]};
+ let offline=false;
+ const loader=api.createLoader({root:h.root,cc:{assetList:async()=>{if(offline)throw Error('offline');return{assets:[{stream_id:'example:catalog',asset_id:'dashboard-catalog',content_type:'dashboard-catalog'}]}},assetGet:async()=>({asset:{body:JSON.stringify(catalog)}})}});
+ await loader.refresh('example__catalog');offline=true;const cached=await loader.refresh('example__catalog');assert.equal(cached.cached,true);
+ h.root.fetch=async()=>{if(mode==='failed')throw Error('config failed');return{ok:true,json:async()=>mode==='malformed'?null:{hostedDashboardAuthMode:mode}}};
+ const board=loader.merge(cached,[],{hostedBoard:h.renderer}).boards[0];const refs=board.mount(h.container,{getHostedPolicy:()=>policy});t.after(()=>board.unmount(refs));await settled();
+ h.open();h.reload();await settled();assert.equal(h.frame(),null);assert.deepEqual(h.calls,[]);assert.match(h.container.textContent,/identity mode/i);
+});
