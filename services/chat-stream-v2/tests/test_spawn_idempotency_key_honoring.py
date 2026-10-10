@@ -626,3 +626,238 @@ def test_new_key_after_a_dead_seat_starts_a_fresh_seat() -> None:
     assert reply["type"] == "spawn.ok"
     assert reply["stream_id"] != first["stream_id"]
     assert tmux.created == 2
+
+
+class _TokenTmux(PerNameTmux):
+    """Only the provider boundary is fake; stage actual private fixture bytes."""
+    def __init__(self):
+        super().__init__()
+        self.stages = []
+        self.creation_entered = asyncio.Event()
+        self.creation_release = asyncio.Event()
+        self.creation_release.set()
+        self.stage_failure = False
+        self.nonce = ""
+
+    async def stage_text(self, path, data):
+        from pathlib import Path
+        self.stages.append(path)
+        if self.stage_failure:
+            raise RuntimeError('fixture transport detail must not be exposed')
+        target = Path(path); target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data); target.chmod(0o600)
+
+    async def new_session(self, name, command, cwd=None, env=None):
+        self.nonce = str((env or {}).get("PENTACLE_SPAWN_NONCE") or "")
+        self.creation_entered.set()
+        await self.creation_release.wait()
+        await super().new_session(name, command, cwd, env)
+
+    async def run(self, *args, **kwargs):
+        if args and args[0] == "show-environment":
+            return 0, f"PENTACLE_SPAWN_NONCE={self.nonce}\n"
+        return 0, ""
+
+
+def _native_machine(tmp_path):
+    import launch
+    return launch.local_machine(HOST, cwd=str(tmp_path), claude_bin='/bin/echo',
+                                codex_bin='/bin/echo', projects_root=str(tmp_path/'projects'), agent_orch_bin_dir='/bin')
+
+
+def _native_message(provider='claude', **extra):
+    return {'objective':'Exercise owned token admission', 'provider':provider,
+            'ready_marker':'READY', 'request_id':'owned-token', 'idempotency_key':'owned-token',
+            'session_name':'owned-token', **extra}
+
+
+@pytest.mark.parametrize('provider', ['claude','codex'])
+@pytest.mark.asyncio
+async def test_native_token_stages_once_after_claim_and_replay_preserves_file(tmp_path, provider):
+    import hashlib
+    import launch
+    from pathlib import Path
+    store = Store(':memory:'); store.start(); tmux = _TokenTmux()
+    machine = _native_machine(tmp_path)
+    try:
+        sessions = Sessions(store, tmux=tmux, local_host=HOST)
+        ctl = SpawnCtl(store, sessions, tmux=tmux, machine=machine)
+        message = _native_message(provider)
+        first = await ctl.spawn(message, HOST)
+        path = Path(launch.stream_token_file_for(machine,'owned-token'))
+        before = (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns)
+        assert len(tmux.stages) == tmux.created == 1
+        assert before[1] & 0o777 == 0o600
+        row = await store.fetch_session(HOST,'owned-token')
+        assert hashlib.sha256(before[0]).hexdigest() == row['token_hash']
+        assert await store.stream_token_state(row['token_hash'])
+        assert (await ctl.spawn(message, HOST)).get('replayed')
+        with pytest.raises(VerbError) as error:
+            await ctl.spawn({**message,'objective':'changed payload'}, HOST)
+        assert error.value.code == 'idempotency_key_conflict'
+        assert (path.read_bytes(),path.stat().st_mode,path.stat().st_mtime_ns) == before
+        assert len(tmux.stages) == tmux.created == 1
+    finally:
+        tmux.live.clear(); store.stop()
+
+
+@pytest.mark.asyncio
+async def test_inflight_claim_loser_and_disconnected_caller_do_not_restage(tmp_path):
+    import launch
+    from pathlib import Path
+    store=Store(':memory:'); store.start(); tmux=_TokenTmux(); tmux.creation_release.clear()
+    machine=_native_machine(tmp_path)
+    try:
+        sessions=Sessions(store,tmux=tmux,local_host=HOST)
+        ctl=SpawnCtl(store,sessions,tmux=tmux,machine=machine)
+        first=asyncio.create_task(ctl.spawn(_native_message(),HOST))
+        await asyncio.wait_for(tmux.creation_entered.wait(),3)
+        path=Path(launch.stream_token_file_for(machine,'owned-token'))
+        before=(path.read_bytes(),path.stat().st_mode,path.stat().st_mtime_ns)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError): await first
+        reply=await ctl.spawn(_native_message(),HOST)
+        assert reply['state'] in ('starting','queued')
+        assert (path.read_bytes(),path.stat().st_mode,path.stat().st_mtime_ns)==before
+        assert len(tmux.stages)==1
+        tmux.creation_release.set()
+        await asyncio.gather(*list(ctl._background_spawns),return_exceptions=True)
+        assert tmux.created==1
+    finally:
+        tmux.creation_release.set(); tmux.live.clear(); store.stop()
+
+
+@pytest.mark.asyncio
+async def test_stage_failure_is_truthful_and_releases_only_own_reservation(tmp_path):
+    store=Store(':memory:'); store.start(); tmux=_TokenTmux(); tmux.stage_failure=True
+    try:
+        assert await store.reserve_stream_id(HOST,'foreign',ttl_s=30,request_id='foreign',nonce='foreign')
+        ctl=SpawnCtl(store,Sessions(store,tmux=tmux,local_host=HOST),tmux=tmux,machine=_native_machine(tmp_path))
+        with pytest.raises(VerbError) as error: await ctl.spawn(_native_message(),HOST)
+        assert error.value.code=='token_stage_failed'
+        assert 'fixture transport' not in str(error.value)
+        assert tmux.created==0 and len(tmux.stages)==1
+        assert [row['session_name'] for row in await store.reservations()]==['foreign']
+        status=await ctl.spawn_status({'target':'owned-token'},HOST)
+        assert status['outcomes'][0]['state']=='failed'
+        assert status['outcomes'][0]['error_code']=='token_stage_failed'
+        with pytest.raises(VerbError) as replay: await ctl.spawn(_native_message(),HOST)
+        assert replay.value.code=='token_stage_failed' and len(tmux.stages)==1
+    finally: store.stop()
+
+
+@pytest.mark.asyncio
+async def test_known_qa_refusal_stages_nothing_and_status_keeps_reason(tmp_path):
+    import hashlib
+    store=Store(':memory:'); store.start(); tmux=_TokenTmux()
+    try:
+        token='fixture-only-token'
+        store.set_spec_identity_resolver(lambda value:value)
+        await store.open_session(HOST,'worker',role='worker',spec_id='spec_fixture__work',token_hash=hashlib.sha256(token.encode()).hexdigest(),token_hash_version='sha256:v1')
+        ctl=SpawnCtl(store,Sessions(store,tmux=tmux,local_host=HOST),tmux=tmux,machine=_native_machine(tmp_path))
+        message=_native_message(role='qa',from_stream_id=f'{HOST}:worker',stream_token=token,qa_spec_id='spec_fixture__work',qa_surface='implementation',qa_cycle=1)
+        with pytest.raises(VerbError) as error: await ctl.spawn(message,HOST)
+        assert error.value.code=='qa_unauthorized'
+        status=await ctl.spawn_status({'target':'owned-token'},HOST)
+        saved=status['outcomes'][0]
+        assert saved['error_code']==error.value.code and str(error.value) in saved['reason']
+        with pytest.raises(VerbError) as replay: await ctl.spawn(message,HOST)
+        assert replay.value.code==error.value.code and str(error.value) in str(replay.value)
+        assert tmux.stages==[] and tmux.created==0
+        assert await store.submit(lambda conn:conn.execute('SELECT count(*) FROM v2_qa_commissions').fetchone()[0])==0
+    finally: store.stop()
+
+
+@pytest.mark.asyncio
+async def test_explicit_command_and_frozen_request_do_not_stage_tokens(tmp_path):
+    store=Store(':memory:'); store.start(); tmux=_TokenTmux()
+    try:
+        ctl=SpawnCtl(store,Sessions(store,tmux=tmux,local_host=HOST),tmux=tmux,machine=_native_machine(tmp_path))
+        await ctl.spawn(_native_message(command='fixture-command'),HOST)
+        assert tmux.stages==[]
+        await store.set_spawn_admission_hold(HOST,held_until=__import__('time').time()+30,reason='fixture')
+        with pytest.raises(VerbError) as error:
+            await ctl.spawn(_native_message(request_id='other',idempotency_key='other',session_name='other'),HOST)
+        assert error.value.code=='spawn_frozen' and tmux.stages==[]
+    finally: tmux.live.clear(); store.stop()
+
+
+@pytest.mark.asyncio
+async def test_keyless_name_refusal_preserves_existing_token_file(tmp_path):
+    import launch
+    from pathlib import Path
+    store=Store(':memory:'); store.start(); tmux=_TokenTmux(); machine=_native_machine(tmp_path)
+    try:
+        ctl=SpawnCtl(store,Sessions(store,tmux=tmux,local_host=HOST),tmux=tmux,machine=machine)
+        message=_native_message(request_id='',idempotency_key='')
+        await ctl.spawn(message,HOST)
+        path=Path(launch.stream_token_file_for(machine,'owned-token'))
+        before=(path.read_bytes(),path.stat().st_mode,path.stat().st_mtime_ns)
+        with pytest.raises(VerbError) as error: await ctl.spawn(message,HOST)
+        assert error.value.code=='stream_id_unavailable'
+        assert (path.read_bytes(),path.stat().st_mode,path.stat().st_mtime_ns)==before
+        assert len(tmux.stages)==tmux.created==1
+    finally: tmux.live.clear(); store.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_internal_preclaim_preparation_leaves_no_token_or_claim(tmp_path):
+    store=Store(':memory:'); store.start(); tmux=_TokenTmux()
+    release=asyncio.Event(); entered=asyncio.Event()
+    try:
+        ctl=SpawnCtl(store,Sessions(store,tmux=tmux,local_host=HOST),tmux=tmux,machine=_native_machine(tmp_path))
+        original=ctl._resolve_launch
+        async def prepare(*args,**kwargs):
+            result=await original(*args,**kwargs)
+            entered.set(); await release.wait(); return result
+        ctl._resolve_launch=prepare
+        task=asyncio.create_task(ctl._spawn_impl(_native_message(),HOST))
+        await asyncio.wait_for(entered.wait(),3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError): await task
+        assert tmux.stages==[] and tmux.created==0 and await store.reservations()==[]
+    finally: release.set(); store.stop()
+
+
+@pytest.mark.asyncio
+async def test_late_binding_change_after_owned_stage_leaves_no_commission_intent_or_provider(tmp_path):
+    import hashlib
+    import launch
+    from pathlib import Path
+    from _shared.specs_service import SpecsSubsystem
+    spec='spec_fixture__work'
+    path=tmp_path/'work/in_progress/fixture__work/spec.md'; path.parent.mkdir(parents=True)
+    path.write_text(f'---\nid: {spec}\n---\n')
+    specs=SpecsSubsystem(memory_root=tmp_path.resolve(),session_summaries=lambda:[],changed_callback=lambda ids:None)
+    store=Store(':memory:'); store.start(); tmux=_TokenTmux(); machine=_native_machine(tmp_path)
+    try:
+        token='fixture-parent-token'
+        store.set_spec_identity_resolver(specs.canonical_spec_identity,specs.canonical_spec_identities)
+        await store.open_session(HOST,'lead',role='lead',spec_id=spec,spec_ids=[spec],
+            spec_binding_provenance=[{'spec_id':spec,'provenance':'operator_v2','granting_principal':'operator','granted_at':'2026-01-01T00:00:00Z'}],
+            token_hash=hashlib.sha256(token.encode()).hexdigest(),token_hash_version='sha256:v1')
+        stage=tmux.stage_text
+        async def changed(path,data):
+            await stage(path,data)
+            await store.update_session(HOST,'lead',spec_id=spec,spec_ids=[spec],
+                spec_binding_provenance=[{'spec_id':spec,'provenance':'operator_v2','granting_principal':'new-operator','granted_at':'2026-01-02T00:00:00Z'}])
+        tmux.stage_text=changed
+        ctl=SpawnCtl(store,Sessions(store,tmux=tmux,local_host=HOST),tmux=tmux,machine=machine,specs=specs)
+        msg=_native_message(role='qa',parent_stream_id=f'{HOST}:lead',from_stream_id=f'{HOST}:lead',stream_token=token,
+                            qa_spec_id=spec,qa_surface='implementation',qa_cycle=1)
+        with pytest.raises(VerbError) as error: await ctl.spawn(msg,HOST)
+        assert error.value.code=='spec_source_changed'
+        assert len(tmux.stages)==1 and tmux.created==0
+        assert await store.reservations()==[]
+        assert await store.submit(lambda conn:conn.execute('SELECT count(*) FROM v2_qa_commissions').fetchone()[0])==0
+        assert await store.submit(lambda conn:conn.execute('SELECT count(*) FROM v2_qa_surfaces').fetchone()[0])==0
+        token_path=Path(launch.stream_token_file_for(machine,'owned-token'))
+        assert token_path.stat().st_mode & 0o777==0o600
+        # Retaining an inert owned stage avoids deleting another claimant's file.
+        assert await store.stream_token_state(hashlib.sha256(token_path.read_bytes()).hexdigest()) is None
+    finally: store.stop()
+
+
+def test_status_projection_does_not_expose_arbitrary_transport_prose():
+    outcome={'state':'failed','reason':'token_stage_failed: secret-token-command-fixture'}
+    assert SpawnCtl._public_outcome_failure(outcome)=={'reason':'token_stage_failed','error_code':'token_stage_failed'}

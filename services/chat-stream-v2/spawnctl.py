@@ -56,6 +56,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Any, Awaitable, Callable, NamedTuple
@@ -947,10 +948,8 @@ class SpawnCtl:
             )
         try:
             await stager(plan.stream_token_file, plan.stream_token.encode("utf-8"))
-        except VerbError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - normalize without token data
-            raise VerbError("token_stage_failed", str(exc)) from exc
+        except Exception as exc:  # never expose transport/token/command bytes
+            raise VerbError("token_stage_failed", "private stream token could not be staged") from exc
         self.token_telemetry.record_issuance(
             stream_id=f"{host}:{name}",
             operation=f"spawn:{provider}",
@@ -1833,7 +1832,7 @@ class SpawnCtl:
             **({"_native_initial_prompt_path": native_prompt_path} if native_prompt_path else {}),
             **({"_resume_jsonl_path": resume_jsonl_path} if resume_jsonl_path else {}),
             **({"_resume_cwd": resume_cwd} if resume_cwd else {}),
-            **({"_defer_launch_token_stage": True} if resume_session_id else {}),
+            "_defer_launch_token_stage": True,
         }
         launch_context = tmux_transport._ACTIVE_LAUNCH_TMUX.set(tmux)
         try:
@@ -1935,7 +1934,7 @@ class SpawnCtl:
                     deferred_launch_plan,
                     host=host,
                     name=name,
-                    provider="claude",
+                    provider=str((resolution.get("resolved_launch_tuple") or {}).get("provider") or ""),
                     transport=tmux,
                 )
             # Persist intent before creation so restart reconciliation can recover it.
@@ -4604,6 +4603,20 @@ class SpawnCtl:
             "error": f"no pending or bound spawn for target on {host}",
         }
 
+    @staticmethod
+    def _public_outcome_failure(outcome):
+        """Expose bounded QA explanations; other failures expose their safe code.
+
+        QA messages originate in the fixed validation vocabulary. Arbitrary
+        transport exceptions can contain commands or credentials, so do not
+        newly expose that prose through the status projection.
+        """
+        reason = str(outcome.get("reason") or "")
+        candidate = reason.split(":", 1)[0].strip()
+        code = candidate if re.fullmatch(r"[a-z][a-z0-9_]{0,79}", candidate) else "spawn_failed"
+        safe = " ".join(reason.split())[:1024] if code.startswith("qa_") else code
+        return {"reason": safe, "error_code": code if outcome.get("state") == "failed" else None}
+
     async def spawn_status(self, msg: dict[str, Any], local_host: str) -> dict[str, Any]:
         """List the outcome/reservation rows for an idempotency key or request
         id so a caller can find the seat before retrying, plus any active hold."""
@@ -4620,6 +4633,7 @@ class SpawnCtl:
                 "idempotency_key": oc.get("idempotency_key"),
                 "request_payload_hash": oc.get("request_payload_hash"),
                 "updated_at": oc.get("updated_at"),
+                **self._public_outcome_failure(oc),
                 **({"handoff": oc["delivery_receipt"]["handoff"]}
                    if isinstance(oc.get("delivery_receipt"), dict) and "handoff" in oc["delivery_receipt"] else {}),
             }
