@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sqlite3
@@ -165,7 +166,41 @@ def _authorized_lineage(conn, actor, commission):
 
 
 class QaStoreMixin:
-    def _qa_actor(self, conn, actor, generation, spec):
+    async def _qa_spec_lookup(self, spec, actor, reviewer=None, target_specs=()):
+        """Resolve every id this QA check reads from one work-tree snapshot.
+
+        The walk runs in a worker thread before the write transaction, never on
+        the Store thread. An id that is not prefetched (a row changed in
+        between) falls back to the single resolver, so results are unchanged.
+        """
+        single = self._spec_identity_resolver
+        batch = getattr(self, "_spec_identities_resolver", None)
+        if not callable(single) or not callable(batch):
+            return single
+
+        def rows(conn):
+            caller = _session(conn, actor) or {}
+            target = _session(conn, reviewer) or {} if reviewer else {}
+            return caller, target
+
+        caller, target = await self.submit(rows)
+        ids = [spec, *normalize_spec_ids(
+            caller.get("qualified_spec_ids") or caller.get("spec_ids"), caller.get("spec_id"))]
+        ids += normalize_spec_ids(target.get("spec_ids"), target.get("spec_id")) if reviewer else list(target_specs or ())
+        try:
+            resolved = await asyncio.to_thread(batch, ids)
+        except TypeError:
+            return single
+
+        def lookup(value):
+            try:
+                return resolved[value]
+            except (KeyError, TypeError):
+                return single(value)
+
+        return lookup
+
+    def _qa_actor(self, conn, actor, generation, spec, resolver=None):
         row = _session(conn, actor)
         if (
             not row
@@ -179,7 +214,7 @@ class QaStoreMixin:
             raise QaError(
                 "qa_unauthorized", "a lead or Nexus must commission/adjudicate QA"
             )
-        resolver = self._spec_identity_resolver
+        resolver = resolver or self._spec_identity_resolver
         if not callable(resolver) or resolver(spec) != spec:
             raise QaError(
                 "qa_spec_mismatch", "spec_id must be a resolved canonical identity"
@@ -209,11 +244,13 @@ class QaStoreMixin:
         spec, surface, cycle = _scope(scope)
         if type(msg_id) is not int or msg_id < 0:
             raise QaError("qa_invalid_request", "msg_id must be a nonnegative integer")
+        resolve = await self._qa_spec_lookup(
+            spec, actor, reviewer if existing_reviewer else None, target_specs)
 
         def op(conn):
             conn.execute("BEGIN IMMEDIATE")
             try:
-                owner = self._qa_actor(conn, actor, actor_generation, spec)
+                owner = self._qa_actor(conn, actor, actor_generation, spec, resolve)
                 reviewer_generation = generation
                 reviewer_specs = target_specs
                 if existing_reviewer:
@@ -227,7 +264,7 @@ class QaStoreMixin:
                         target.get("spec_ids"), target.get("spec_id")
                     )
                 canonical_targets = {
-                    self._spec_identity_resolver(value) for value in reviewer_specs
+                    (resolve or self._spec_identity_resolver)(value) for value in reviewer_specs
                 }
                 if spec not in canonical_targets or reviewer == actor:
                     raise QaError(
@@ -306,6 +343,7 @@ class QaStoreMixin:
 
     async def qa_issue(self, verb, msg, *, actor="", actor_generation=""):
         spec, surface, cycle = _scope(msg)
+        resolve = None if verb == "show" else await self._qa_spec_lookup(spec, actor)
 
         def op(conn):
             conn.execute("BEGIN IMMEDIATE")
@@ -334,7 +372,7 @@ class QaStoreMixin:
                         ],
                     }
                 else:
-                    caller = self._qa_actor(conn, actor, actor_generation, spec)
+                    caller = self._qa_actor(conn, actor, actor_generation, spec, resolve)
                     if verb == "adjudicate":
                         report_id = _text(msg.get("report_id"), "report_id", 256)
                         valid = msg.get("adjudicated_valid")

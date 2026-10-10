@@ -286,6 +286,7 @@ async def run(args: argparse.Namespace) -> int:
     specs = _spec_catalog(sessions)
     store.set_spec_identity_resolver(
         getattr(specs, "canonical_spec_identity", None) if specs is not None else None,
+        getattr(specs, "canonical_spec_identities", None) if specs is not None else None,
     )
     # Build the prompt blob store before spawnctl so blob-backed
     # `initial_prompt_file` requests can be dereferenced at the same durable
