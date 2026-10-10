@@ -872,12 +872,12 @@ def test_worker_and_delivery_restart(config, monkeypatch):
         pipeline = retro.Pipeline(config, rpc)
         with pytest.raises(ConnectionError):
             await pipeline.run(at())
-        assert len(rpc.spawns) == 2 and len(rpc.closed) == 2
+        assert len(rpc.spawns) == 1 and len(rpc.closed) == 1
         await pipeline.run(at())
         # One real packet delivery and one retained failure notice, no replay paste.
-        assert len(rpc.spawns) == 2 and len(rpc.sent) == 2
+        assert len(rpc.spawns) == 1 and len(rpc.sent) == 2
         assert all(generation == stream.split(":", 1)[1] for stream, generation in rpc.closed)
-        final = retro.read(config.state_root / "runs/2026-09-28/astra.json")
+        final = retro.read(config.state_root / "runs/2026-09-28/sol.json")
         monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
         result = {"packet_hash": final["packet_hash"], "dispositions": []}
         review = await pipeline.record_review("2026-09-28", result)
@@ -910,8 +910,8 @@ def test_worker_survives_rpc_wait_cap_without_another_admission(config, monkeypa
         else:
             source(config.memory_root, "one")
             assert (await retro.Pipeline(config, rpc).run(at()))["delivered"]
-        assert len(rpc.spawns) == len(rpc.closed) == 2
-        assert len(rpc.calls) == 4
+        assert len(rpc.spawns) == len(rpc.closed) == (2 if quiet else 1)
+        assert len(rpc.calls) == (4 if quiet else 3)
         assert len({stream for stream, _, _ in rpc.calls[:3]}) == 1
         assert all(msg == 0 and 0 < timeout <= 900 for _, msg, timeout in rpc.calls)
         assert len(rpc.sent) == (0 if quiet else 1)
@@ -1059,9 +1059,9 @@ def test_worker_crash_report_retention_and_stale_cleanup(config):
         with pytest.raises(RuntimeError, match="confirmed failed"):
             await pipeline.run(at())
         await pipeline.run(at())
-        assert len(rpc.spawns) == 3  # Only confirmed failed Sol gets a recovery seat.
+        assert len(rpc.spawns) == 2  # Only confirmed failed Sol gets a recovery seat.
         assert retro.read(config.state_root / "runs/2026-09-28/sol-attempts.json")[0]["failed"]
-        path = config.state_root / "runs/2026-09-28/astra.json"
+        path = config.state_root / "runs/2026-09-28/sol.json"
         stage = retro.read(path); stage["closed"] = False; retro.atomic(path, stage)
 
         async def replaced(*args, **kwargs):
@@ -1570,6 +1570,28 @@ def test_compiled_packet_and_hash_cannot_replace_frozen_inputs(config):
 # daemon (tests/soak/test_restart_continuity.py); these pin the driver contract.
 
 
+def seed_legacy_owned_producers(config, rpc):
+    """Retained C4/C4b: completed Sol and already-admitted Astra, no new legacy spawn."""
+    manifest = retro.collect(config, at())
+    manifest.pop("producers", None)
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "collection.json", manifest)
+    # Seed with the ordinary synthetic transport so the tested outage starts only
+    # after both historic admissions; no live worker or changed driver policy.
+    seed = Transport()
+    sol = asyncio.run(retro.Pipeline(config, seed).worker(manifest, "sol"))
+    report_id = "legacy-astra-report"
+    inp = root / "legacy-astra-input.json"
+    retro.atomic(inp, {"collection": manifest, "sol": sol["packet"], "report_id": report_id})
+    payload = {"request_id": "legacy-astra", "model": "gpt-6-astra", "effort": "high",
+               "initial_prompt": f"Read immutable input JSON {inp};"}
+    admitted = asyncio.run(seed.spawn_once(config.rpc(), payload))
+    retro.atomic(root / "astra.json", {"attempt": 1, "report_id": report_id, "payload": payload,
+        "stream_id": admitted["stream_id"], "generation": admitted["session"]["session_generation"],
+        "admission": admitted})
+    rpc.spawns.update(seed.spawns)
+
+
 class DaemonDown(Transport):
     """The daemon restarted under the Astra await and stays down."""
     def __init__(self):
@@ -1603,6 +1625,7 @@ def test_unrecoverable_outage_persists_failure_then_flushes_notice_once(config):
     """C4b: primary error survives cleanup, notice queued before any RPC, flushed once."""
     source(config.memory_root, "one", body="No lessons.")
     rpc = DaemonDown()
+    seed_legacy_owned_producers(config, rpc)
     pipeline = retro.Pipeline(config, rpc)
     with pytest.raises(ConnectionRefusedError):
         asyncio.run(pipeline.run(at()))
@@ -1634,8 +1657,10 @@ def test_cleanup_error_never_replaces_primary_error(config):
             return await super().await_report_once(config, stream, msg_id, **kwargs)
         async def close_once(self, config, stream, **kwargs):
             raise ConnectionRefusedError(111, "refused")
+    rpc = CleanupDown()
+    seed_legacy_owned_producers(config, rpc)
     with pytest.raises(RuntimeError, match="primary astra failure"):
-        asyncio.run(retro.Pipeline(config, CleanupDown()).run(at()))
+        asyncio.run(retro.Pipeline(config, rpc).run(at()))
     failure = retro.read(config.state_root / "runs/2026-09-28/failure.json")
     assert failure["error"] == retro.structured_error(RuntimeError("primary astra failure"))
     assert failure["cleanup_error"]["class"] == "ConnectionRefusedError"
@@ -1646,7 +1671,7 @@ def test_interrupt_queues_notice_truthfully_without_rpc(config):
     source(config.memory_root, "one")
     class Interrupted(Transport):
         async def await_report_once(self, config, stream, msg_id, **kwargs):
-            if "astra" in stream:
+            if "sol" in stream:
                 raise KeyboardInterrupt
             return await super().await_report_once(config, stream, msg_id, **kwargs)
         async def assistant_once(self, config, payload):
@@ -1655,13 +1680,14 @@ def test_interrupt_queues_notice_truthfully_without_rpc(config):
         asyncio.run(retro.Pipeline(config, Interrupted()).run(at()))
     root = config.state_root / "runs/2026-09-28"
     assert retro.read(root / "failure.json")["notice"] == "pending"
-    assert retro.read(root / "failure-delivery.json")["pending"]["stage"] == "astra"
+    assert retro.read(root / "failure-delivery.json")["pending"]["stage"] == "sol"
 
 
 def test_newer_failure_supersedes_unlanded_notice_and_keeps_history(config):
     """Finding (a): one notice per failure; the latest is marked, earlier kept."""
     source(config.memory_root, "one")
     rpc = DaemonDown()
+    seed_legacy_owned_producers(config, rpc)
     pipeline = retro.Pipeline(config, rpc)
     for down_from_start in (False, True):  # the second pass cannot flush notice 1
         rpc.down = down_from_start
@@ -1679,6 +1705,7 @@ def test_recorded_review_supersedes_pending_notice(config, monkeypatch):
     """Finding (d): a later-reviewed run never leaves a stale pending notice."""
     source(config.memory_root, "one")
     rpc = DaemonDown()
+    seed_legacy_owned_producers(config, rpc)
     pipeline = retro.Pipeline(config, rpc)
     with pytest.raises(ConnectionRefusedError):
         asyncio.run(pipeline.run(at()))
@@ -1796,6 +1823,7 @@ def test_failure_records_and_notice_never_persist_or_deliver_message_text(tmp_pa
             return await super().send_receipt_once(config, target, key)
 
     rpc = Failing()
+    seed_legacy_owned_producers(config, rpc)
     with pytest.raises(Exception):
         asyncio.run(retro.Pipeline(config, rpc).run(at()))
     rpc.notice_down = False
@@ -2607,3 +2635,171 @@ def test_observed_outcome_defer_only_missing(config):
     assert "current proposal unavailable" in row["decision_receipt"]["evidence_scope"]
     assert "state" not in row and "version" not in row and "baseline_status" not in row
     assert not any(summary["current_work_counts"].values()) and decision_bytes(config) == before
+
+
+def test_producers_config(config):
+    assert retro.Settings.load(fixture_settings_file(config)).producers == ["sol"]
+    assert retro.Settings.load(fixture_settings_file(config, producers=["sol"])).producers == ["sol"]
+    for invalid in (None, True, "sol", [], ["astra"], ["sol", "astra"], ["sol", "sol"]):
+        with pytest.raises(ValueError, match="producers"):
+            retro.Settings.load(fixture_settings_file(config, producers=invalid))
+    source(config.memory_root, "one")
+    manifest = retro.collect(config, at())
+    assert manifest["producers"] == ["sol"]
+    rpc = Transport(); pipeline = retro.Pipeline(config, rpc)
+    assert asyncio.run(pipeline.run(at()))["delivered"] == [manifest["run_id"]]
+    assert len(rpc.spawns) == len(rpc.closed) == 1
+    assert {p["model"] for p in rpc.spawns.values()} == {"gpt-6.1-sol"}
+    root = config.state_root / "runs" / manifest["run_id"]
+    assert not list(root.glob("astra*"))
+
+
+def test_producers_legacy_resume(config, monkeypatch):
+    source(config.memory_root, "one")
+    manifest = retro.collect(config, at())
+    manifest.pop("producers", None)
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "collection.json", manifest)
+    original = (root / "collection.json").read_bytes()
+    assert retro.collect(config, at()) == manifest
+    rpc = Transport(); pipeline = retro.Pipeline(config, rpc)
+    # An unadmitted legacy intent is not authority to create another producer.
+    retro.atomic(root / "astra.json", {"attempt": 1, "payload": {"request_id": "unadmitted"}})
+    asyncio.run(pipeline.run_manifest(manifest))
+    assert len(rpc.spawns) == 1 and not any("astra" in key for key in rpc.spawns)
+    assert (root / "collection.json").read_bytes() == original
+    old_final = {"packet_hash": "legacy-final", "packet": {"schema_version": 2, "candidates": [],
+        "astra_changes": ["retained"], "acceptance_audit": {"legacy": True}}, "closed": True}
+    retro.atomic(root / "astra.json", old_final)
+    before = (root / "astra.json").read_bytes()
+    assert retro.retained_final(root) == old_final
+    assert (root / "astra.json").read_bytes() == before
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    with pytest.raises(ValueError, match="exact final packet hash"):
+        asyncio.run(pipeline.record_review(manifest["run_id"], {"packet_hash": retro.read(root / "sol.json")["packet_hash"], "dispositions": []}))
+    asyncio.run(pipeline.record_review(manifest["run_id"], {"packet_hash": "legacy-final", "dispositions": []}))
+    assert retro.weekly_summary(config, manifest["run_id"])["runs_reviewed"] == 1
+    assert (root / "astra.json").read_bytes() == before
+    fresh = replace(config, memory_root=config.memory_root.parent / "history-memory",
+                    state_root=config.state_root.parent / "history-daily")
+    history, baseline = history_fixture(fresh, count=1)
+    historic = retro.history_collect(history, baseline, 1)
+    assert "producers" not in historic and retro.history_collect(history, baseline, 1) == historic
+
+
+@pytest.mark.parametrize("generation", ["legacy-generation", None])
+def test_producers_owned_legacy_await_only(config, generation):
+    source(config.memory_root, "one")
+    manifest = retro.collect(config, at())
+    root = config.state_root / "runs" / manifest["run_id"]
+    class LegacyTransport(Transport):
+        async def await_report_once(self, conf, stream, msg_id, **kwargs):
+            if stream == "fixture:legacy-astra":
+                return {"type": "await_report.ok", "ok": True, "result_kind": "report", "report": {
+                    "report_id": "legacy-report", "effective_model": "gpt-6-astra", "effective_effort": "high",
+                    "extras": {"daily_retro": {"run_id": manifest["run_id"], "candidates": [], "dispositions": [
+                        {"id": s["id"], "fingerprint": s["fingerprint"], "reason": "Legacy source reviewed."} for s in manifest["sources"]]}}}}
+            return await super().await_report_once(conf, stream, msg_id, **kwargs)
+    rpc = LegacyTransport(); pipeline = retro.Pipeline(config, rpc)
+    asyncio.run(pipeline.worker(manifest, "sol"))
+    retro.atomic(root / "astra.json", {"attempt": 1, "report_id": "legacy-report",
+        "stream_id": "fixture:legacy-astra", "generation": generation, "payload": {"request_id": "legacy-intent"}})
+    if generation:
+        assert asyncio.run(pipeline.run_manifest(manifest))
+        assert ("fixture:legacy-astra", generation) in rpc.closed
+        assert retro.read(root / "astra.json")["packet"]
+    else:
+        with pytest.raises(RuntimeError, match="generation"):
+            asyncio.run(pipeline.run_manifest(manifest))
+        assert not any(stream == "fixture:legacy-astra" for stream, _ in rpc.closed)
+    assert len(rpc.spawns) == 1 and not list(root.glob("astra-input-*"))
+
+
+def test_producers_history_boundary(config):
+    history, baseline, rpc, pipeline = prepared_history(config, count=1)
+    assert len(rpc.spawns) == len(rpc.closed) == 2
+    result = asyncio.run(pipeline.history_consolidate(baseline, final=True))
+    assert len(rpc.spawns) == len(rpc.closed) == 3
+    assert retro.read(history.state_root / "runs" / result["run_id"] / "astra.json")["packet"]
+    test_candidate_key_history_hash_preservation()
+
+
+def test_producers_removed_fields(config, monkeypatch):
+    source(config.memory_root, "one")
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    class OldFields(Transport):
+        async def await_report_once(self, conf, stream, msg_id, **kwargs):
+            reply = await super().await_report_once(conf, stream, msg_id, **kwargs)
+            reply["report"]["extras"]["daily_retro"].update(astra_changes=["raw"], acceptance_audit={"raw": True})
+            return reply
+    rpc = OldFields(); pipeline = retro.Pipeline(config, rpc)
+    asyncio.run(pipeline.run(at()))
+    root = config.state_root / "runs/2026-09-28"
+    final = retro.read(root / "sol.json")
+    assert not {"astra_changes", "acceptance_audit"} & final["packet"].keys()
+    assert final["report"]["extras"]["daily_retro"]["astra_changes"] == ["raw"]
+    assert "sol.json" in next(iter(rpc.sent.values()))["payload"]["text"] and not (root / "astra.json").exists()
+    result = {"packet_hash": final["packet_hash"], "dispositions": []}
+    receipt = asyncio.run(pipeline.record_review("2026-09-28", result))
+    before = {p: p.read_bytes() for p in root.glob("*.json")}
+    assert asyncio.run(pipeline.record_review("2026-09-28", result)) == receipt
+    assert retro.weekly_summary(config, "2026-09-28")["runs_reviewed"] == 1
+    assert {p: p.read_bytes() for p in before} == before
+    asyncio.run(pipeline.run(at()))
+    assert len(rpc.spawns) == len(rpc.closed) == 1
+
+
+
+def test_producers_failed_legacy_never_replaces(config):
+    source(config.memory_root, "one")
+    manifest = retro.collect(config, at())
+    rpc = Transport(); pipeline = retro.Pipeline(config, rpc)
+    asyncio.run(pipeline.worker(manifest, "sol"))
+    root = config.state_root / "runs" / manifest["run_id"]
+    retro.atomic(root / "astra.json", {"attempt": 1, "failed": True,
+        "stream_id": "fixture:legacy-astra", "generation": "legacy-generation"})
+    with pytest.raises(RuntimeError, match="legacy Astra cannot admit"):
+        asyncio.run(pipeline.run_manifest(manifest))
+    assert len(rpc.spawns) == 1 and ("fixture:legacy-astra", "legacy-generation") in rpc.closed
+    assert not list(root.glob("astra-input-*"))
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_producers_rehearsal_stored_final(config, monkeypatch, legacy):
+    for name in ("repeat_a", "repeat_b", "serious", "fixed", "owned", "uncertain"):
+        source(config.memory_root, "fixture_" + name)
+    manifest = retro.collect(config, at())
+    monkeypatch.setattr(retro, "collect", lambda *args: manifest)
+    root = config.state_root / "runs" / manifest["run_id"]
+    candidates = [{"id": "serious", "citations": ["spec_fixture_serious"], "uncertainty": ""},
+        {"id": "repeated", "citations": ["spec_fixture_repeat_a", "spec_fixture_repeat_b"], "consequence": "Repeated cost", "uncertainty": ""},
+        {"id": "uncertain", "citations": ["spec_fixture_uncertain"], "uncertainty": "Needs check"}]
+    for name in (("sol", "astra") if legacy else ("sol",)):
+        packet = {"run_id": manifest["run_id"], "candidates": candidates, "retained_stage": name}
+        retro.atomic(root / (name + ".json"), {"packet": packet, "packet_hash": retro.digest(packet),
+            "report": {"report_id": name + "-report"}, "closed": True})
+    before = {p: p.read_bytes() for p in root.glob("*.json")}
+    rpc = Transport()
+    monkeypatch.setattr(retro, "ProducerTransport", lambda settings: rpc)
+    workers = replace(config, memory_root=config.memory_root.parent / "synthetic-workers")
+    asyncio.run(retro.rehearse(config, workers, config.state_root.parent / "rehearsal-evidence"))
+    final = retro.retained_final(root)
+    body, = [row["payload"]["text"] for row in rpc.sent.values()]
+    assert f"hash={final['packet_hash']}" in body and f"report_id={final['report']['report_id']}" in body
+    assert str(retro.retained_final_path(root)) in body
+    assert not rpc.spawns and not rpc.questions
+    assert {p: p.read_bytes() for p in before} == before
+
+
+def test_producers_history_rejects_premature_sol_review(config, monkeypatch):
+    history, baseline = history_fixture(config, count=1)
+    manifest = retro.history_collect(history, baseline, 1)
+    rpc = Transport(); pipeline = retro.Pipeline(history, rpc)
+    sol = asyncio.run(pipeline.worker(manifest, "sol"))
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    with pytest.raises(ValueError, match="exact final packet hash"):
+        asyncio.run(pipeline.record_review(manifest["run_id"], {"packet_hash": sol["packet_hash"], "dispositions": []}))
+    root = history.state_root / "runs" / manifest["run_id"]
+    assert not (root / "review.json").exists() and retro.retained_final(root) is None
+    assert asyncio.run(pipeline.history_run(baseline, 1))["delivered"] == [manifest["run_id"]]
+    assert len(rpc.spawns) == 2 and retro.retained_final_path(root).name == "astra.json"

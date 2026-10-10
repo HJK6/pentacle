@@ -1,8 +1,7 @@
 # Daily retrospective review
 
 The launchd producer runs at 05:00 America/Chicago. It freezes eligible terminal
-and explicitly tagged active retros, commissions one Codex GPT-6 Sol/medium draft and one GPT-6 Astra/high
-finalization, then sends a retained REPORT notice to the current assistant binding.
+and explicitly tagged active retros, commissions one Codex GPT-6 Sol/medium final packet, then sends a retained REPORT notice to the current assistant binding.
 assistant reviews immediately, records dispositions, and uses normal work records for
 decisions and observed outcomes. Quiet ordinary days produce no operator chat message;
 material results and the due weekly account use supported visible delivery.
@@ -10,7 +9,7 @@ Historical backfill is a separate bounded, explicitly approved scope.
 
 The producer reuses `tools/live_window` operator authentication, as the scheduled
 fleet-smoke tool does. Its allowlist permits only owned spawn/await/close and
-current-binding reads plus exact retained REPORT send/receipt operations. Both
+current-binding reads plus exact retained REPORT send/receipt operations. The daily producer and historical
 workers self-close on terminal reports; cleanup passes their recorded generations.
 Each report wait uses calls of at most 900 seconds within one 3,600-second
 deadline. A bounded RPC timeout waits again for the same owned report; it never
@@ -36,6 +35,16 @@ Local JSON configuration (absolute paths; keep credentials outside source):
   "primary_composite": "bart:assistant"
 }
 ```
+
+`producers` defaults to `["sol"]`; only that exact list is valid for new daily
+execution. New collection manifests record the list, but retained manifests lacking
+it stay byte-identical and usable. Historical collection and execution remain
+separate and keep their Sol/Astra/final-Astra stages. Current configuration never
+changes old final selection: a retained final `astra.json` remains authoritative.
+An already-admitted legacy Astra with proven generation may only finish awaiting
+and close; an unadmitted intent cannot create a new or replacement Astra producer.
+New daily packets omit `astra_changes` and `acceptance_audit`, while raw reports and
+old retained packets stay intact. Replay and generation-fenced cleanup remain.
 
 `state_root` must be outside memory. Preserve it across upgrades and rollback.
 Collection manifests commit before their rebuildable enrollment index. Older
@@ -173,7 +182,7 @@ Use a durable service interpreter or the release's own virtual environment;
 record its resolved path, executable hash and dependency versions. Scratch output
 or temporary virtual environments must not appear in the production plist.
 
-assistant reads the retained `astra.json`, verifies evidence and chooses one disposition
+assistant reads the retained `sol.json` for new daily runs, verifies evidence and chooses one disposition
 per candidate. A review result file contains `packet_hash` and `dispositions`, each
 with `id`, `disposition` and `reason`. Allowed dispositions: resolved, duplicate,
 no_change, investigate, authorized, propose, defer. Action/investigation/defer also
@@ -381,12 +390,11 @@ explicit non-7791 endpoint/credentials, and WORKER_C with existing worker transp
 python services/chat-stream-v2/tools/daily_retro.py rehearse --config TEST_C --workers-config WORKER_C --evidence-dir E
 ```
 
-This reads originals through real Sol/Astra reports. A declared fixture mutation
-omits the serious shortlist entry and inserts a small evidence gap in the repeated
-case; the original report and every disposition remain retained. Astra must recover
-the serious insight, group the repeated issue, correct the gap and retain substantial
-uncertainty. Delivery and assistant helper review stay on the isolated Codex/provider
-counterpart. It is distinct from real production first-run delivery and review.
+This reads originals through one real Sol report. The same six fixtures require
+the serious insight, grouped repeated issue, correct evidence and substantial
+uncertainty. There is no second producer or injected analyst/finalizer challenge.
+Delivery and assistant helper review stay on the isolated Codex/provider counterpart.
+It is distinct from real production first-run delivery and review.
 
 Release staging requires a fresh immutable SHA directory:
 

@@ -101,6 +101,7 @@ class Settings:
     primary_archive: Path | None = None
     primary_composite: str = "bart:assistant"
     self_assignment_exclusions: list[str] = field(default_factory=list)
+    producers: list[str] = field(default_factory=lambda: ["sol"])
 
     @classmethod
     def load(cls, path):
@@ -127,11 +128,14 @@ class Settings:
         exclusions = data.get("self_assignment_exclusions", [])
         if not isinstance(exclusions, list) or any(not valid_work_id(value) for value in exclusions):
             raise ValueError("self_assignment_exclusions must be a list of valid work IDs")
+        producers = data.get("producers", ["sol"])
+        if producers != ["sol"]:
+            raise ValueError("producers must be exactly [sol]")
         return cls(memory, state, data["ws_url"], Path(data["token_path"]), data["host"],
                    bool(data.get("isolated")), path,
                    Path(data["primary_store"]) if data.get("primary_store") else None,
                    Path(data["primary_archive"]) if data.get("primary_archive") else None,
-                   data.get("primary_composite", "bart:assistant"), exclusions)
+                   data.get("primary_composite", "bart:assistant"), exclusions, producers)
 
     def rpc(self):
         return Config(self.ws_url, self.token_path.read_text().strip(), self.host,
@@ -577,6 +581,7 @@ def collect(settings, stamp, *, max_sources=40, max_bytes=65536):
         start = datetime.combine(previous, time(), ZONE)
         end = datetime.combine(local.date(), time(), ZONE)
         manifest = {"schema_version": 2, "run_id": run_id, "timezone": ZONE.key, "cutoff": stamp.isoformat(), "collected_at": now_iso(),
+                    "producers": list(settings.producers),
                     "window": {"start": start.isoformat(), "end": end.isoformat()},
                     "sources": selected, "baseline": baseline, "gaps": gaps, "deferred": deferred, "primary": primary,
                     "coverage": {"readable_retros": len(sources), "selected": len(selected),
@@ -1031,6 +1036,8 @@ def worker_prompt(settings, manifest, stage, input_path):
             "Verify current defects rather than treating retros as conclusions. Draft one prioritized packet.") if stage == "sol" else (
             "Read EVERY original and ALL Sol dispositions/draft, including no-action. Detect omitted insights and evidence gaps. "
             "Correct small gaps directly, flag substantial uncertainty without returning to Sol, finalize other decisions.")
+    if daily_manifest(manifest) and stage == "sol":
+        duty = duty.replace("Draft one prioritized packet.", "Return one prioritized final packet; there is no second producer pass.")
     report_id = read(input_path)["report_id"]
     if stage == "final-astra":
         return f"""Final historical relevance/dedupe review; Codex gpt-6-astra/high, READ ONLY.
@@ -1172,6 +1179,18 @@ def weekly_gap_accounting(settings, days):
             "coverage_limit": "Distinct source inventories, not resolved work or fleet health. Missing scans cannot prove resolution. First-observed comparison has an unknown left boundary; stale snapshots are not current scans. Primary gaps have separate sampled denominators."}
 
 
+def retained_final_path(root):
+    """Stored legacy final/ownership decides compatibility, never current config."""
+    manifest = read(root / "collection.json", {"run_id": root.name})
+    legacy = read(root / "astra.json", {})
+    return root / ("astra.json" if not daily_manifest(manifest) or legacy.get("packet") or legacy.get("stream_id") else "sol.json")
+
+
+def retained_final(root):
+    stage = read(retained_final_path(root))
+    return stage if stage and stage.get("packet") is not None else None
+
+
 def observed_outcome(status, baseline):
     """Physical-folder observation only; never proof of shipment or causation."""
     if status is None:
@@ -1272,7 +1291,7 @@ def weekly_summary(settings, end_day):
             result["completion_to_publication_seconds"]["values"].extend(values)
         else:
             result["primary_coverage"]["gaps"] += 1
-        final, review = read(root / "astra.json"), read(root / "review.json")
+        final, review = retained_final(root), read(root / "review.json")
         if final:
             result["candidates_observed"] += len(final["packet"]["candidates"])
             for candidate in final["packet"]["candidates"]:
@@ -1611,8 +1630,16 @@ class Pipeline:
         root = self.settings.state_root / "runs" / manifest["run_id"]
         receipt_path = root / f"{name}.json"
         stage = read(receipt_path, {})
+        daily = daily_manifest(manifest)
+        if daily and self.settings.producers != ["sol"]:
+            raise ValueError("producers must be exactly [sol]")
         if stage.get("packet"):
             return stage
+        if daily and name != "sol":
+            if not stage.get("stream_id") or stage.get("failed"):
+                raise RuntimeError("legacy Astra cannot admit a new or replacement producer")
+            if not stage.get("generation"):
+                raise RuntimeError("owned generation unproven; cleanup and new admission blocked")
         model, effort = ("gpt-6.1-sol", "medium") if name == "sol" else ("gpt-6-astra", "high")
         if not stage:
             attempt = 1
@@ -1686,6 +1713,9 @@ class Pipeline:
                          report=_worker_failure_receipt(response, root, stage["report_id"]))
             atomic(receipt_path, stage)
             raise
+        if daily and name == "sol":
+            packet.pop("astra_changes", None)
+            packet.pop("acceptance_audit", None)
         packet = {**packet, "collection": worker_collection(manifest, root / "collection.json")}
         stage.update(packet=packet, packet_hash=digest(packet), report=report, completed_at=now_iso())
         atomic(receipt_path, stage)
@@ -1800,7 +1830,7 @@ class Pipeline:
                                f"relevant={encoded([{'id': c['id'], 'problem': c['problem'], 'action': c['action'], 'attention': c['bart_attention'], 'citations': c['citations'], 'prior_reviews': c.get('prior_reviews', [])} for c in packet['candidates']]).decode()}. "
                                "Previously reviewed versions retain their work/decision custody; do not recommission them. ")
                 body = (f"REPORT daily-retro ready run={manifest['run_id']} report_id={final['report']['report_id']} "
-                        f"packet_hash={final['packet_hash']} path={root / 'astra.json'}. "
+                        f"packet_hash={final['packet_hash']} path={retained_final_path(root)}. "
                         f"{summary}"
                         f"Ingest once and review now under the accepted daily retro contract. Record every disposition with "
                         f"{Path(__file__).resolve()} record-review --config {self.settings.config_path} --run-id {manifest['run_id']} --result RESULT_JSON. "
@@ -1880,15 +1910,22 @@ class Pipeline:
                 await self.deliver(manifest, failure=True)
             except Exception as notice_error:
                 annotate_failure(root, manifest["run_id"], notice_error=structured_error(notice_error, root))
-        primary = None
+        primary, stage = None, "sol"
         try:
-            sol = await self.worker(manifest, "sol")
-            astra = await self.worker(manifest, "astra", sol["packet"])
-            await self.deliver(manifest, astra)
+            legacy = read(root / "astra.json", {})
+            if legacy.get("packet"):
+                final = legacy
+            else:
+                sol = await self.worker(manifest, "sol")
+                final = sol
+                if not daily_manifest(manifest) or legacy.get("stream_id"):
+                    stage = "astra"
+                    final = await self.worker(manifest, "astra", sol["packet"])
+            stage = "delivery"
+            await self.deliver(manifest, final)
             return True
         except BaseException as exc:
             primary = exc
-            stage = next((n for n in ("sol", "astra") if not read(root / f"{n}.json", {}).get("packet")), "delivery")
             error = structured_error(exc, root)
             seq = record_failure(root, manifest["run_id"], stage=stage, error=error, notice="pending")
             self.queue_failure_notice(manifest, seq=seq, stage=stage, failure=error)
@@ -2072,7 +2109,7 @@ class Pipeline:
             raise ValueError("invalid run ID")
         root = self.settings.state_root / "runs" / run_id
         with locked(root / "review.lock"):
-            final = read(root / "astra.json")
+            final = retained_final(root)
             if not final or result.get("packet_hash") != final.get("packet_hash"):
                 raise ValueError("review must bind exact final packet hash")
             rows = result.get("dispositions", [])
@@ -2482,33 +2519,22 @@ async def rehearse(settings, workers, evidence_dir):
             raise ValueError("rehearsal must use the six pinned analytical fixtures")
         try:
             sol = await pipeline.worker(manifest, "sol")
-            challenge_path = settings.state_root / "runs" / manifest["run_id"] / "challenge.json"
-            challenge = read(challenge_path)
-            if not challenge:
-                draft = json.loads(json.dumps(sol["packet"]))
-                # A declared fixture mutation at the analyst/finalizer seam:
-                # preserve the original report and every source disposition.
-                draft["candidates"] = [c for c in draft["candidates"] if "spec_fixture_serious" not in c["citations"]]
-                for candidate in draft["candidates"]:
-                    if "spec_fixture_repeat_a" in candidate["citations"]:
-                        candidate["consequence"] = "[fixture gap: check original measurable consequence]"
-                challenge = {"sol_original_hash": sol["packet_hash"], "draft": draft,
-                             "scope": "planted shortlist omission and small evidence gap; all dispositions/originals retained"}
-                atomic(challenge_path, challenge)
-            astra = await pipeline.worker(manifest, "astra", challenge["draft"])
-            candidates = astra["packet"]["candidates"]
+            legacy = read(settings.state_root / "runs" / manifest["run_id"] / "astra.json", {})
+            final = legacy if legacy.get("packet") else sol
+            if legacy.get("stream_id") and not legacy.get("packet"):
+                final = await pipeline.worker(manifest, "astra", sol["packet"])
+            candidates = final["packet"]["candidates"]
             serious = [c for c in candidates if "spec_fixture_serious" in c["citations"]]
             repeated = [c for c in candidates if {"spec_fixture_repeat_a", "spec_fixture_repeat_b"} <= set(c["citations"])]
             uncertain = [c for c in candidates if "spec_fixture_uncertain" in c["citations"] and c["uncertainty"]]
             if not serious or not repeated or not uncertain or any("[fixture gap:" in c["consequence"] for c in repeated):
-                raise RuntimeError("Astra analytical fixture acceptance failed; retain exact reports for QA")
-            await pipeline.deliver(manifest, astra)
+                raise RuntimeError("Sol analytical fixture acceptance failed; retain exact report for QA")
+            await pipeline.deliver(manifest, final)
             receipt = {"run_id": manifest["run_id"], "sol_report_id": sol["report"]["report_id"],
-                       "astra_report_id": astra["report"]["report_id"], "challenge_hash": digest(challenge),
                        "tool_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                        "isolated_url": settings.ws_url, "workers_url": workers.ws_url,
                        "review": read(settings.state_root / "runs" / manifest["run_id"] / "review.json"),
-                       "scope": "real Sol/Astra; isolated Codex assistant/provider counterpart, synthetic questions excluded"}
+                       "scope": "real Sol; isolated Codex assistant/provider counterpart, synthetic questions excluded"}
             atomic(Path(evidence_dir) / "rehearsal.json", receipt)
             return receipt
         finally:
