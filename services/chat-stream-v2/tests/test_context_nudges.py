@@ -361,6 +361,7 @@ def test_reopened_source_generation_starts_a_new_episode(monkeypatch):
             await h.sessions.refresh()
             await h.open('child',visibility='hidden',parent_stream_id=f'{HOST}:parent',user_event_count=0)
             await h.observe()
+            now=time.time()
             monkeypatch.setattr('ledger.time.time',lambda:now+2)
             await _read(h,700_000,now+1)
             assert (await h.job.run_pass()).sent==2
