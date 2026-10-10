@@ -265,7 +265,7 @@ def test_loopback_system_hello_never_activates_broadcast_subscription(monkeypatc
             hello = _system_frame("hello", subscribe={"mode": "rpc", "snapshot": False})
             await daemon._serve(peer, json.dumps(hello))
             assert peer.sent == [{
-                "type": "ready", "snapshot": False, "events_mode": "full",
+                "type": "ready", "snapshot": False, "hostedDashboardPolicy": None, "events_mode": "full",
                 "request_id": "req-hello",
             }]
             assert peer not in daemon._host_stats_clients

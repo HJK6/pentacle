@@ -140,7 +140,7 @@ def test_subscribe_rpc_mode_suppresses_the_unsolicited_snapshot_and_excludes_pus
             websocket=client,
         )
         assert replies == [{
-            "type": "ready", "snapshot": False, "events_mode": "summary", "request_id": "rpc-only",
+            "type": "ready", "snapshot": False, "hostedDashboardPolicy": None, "events_mode": "summary", "request_id": "rpc-only",
         }]
         assert server._client_events_mode[client] == "summary"
 

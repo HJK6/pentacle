@@ -349,7 +349,7 @@ def test_loopback_lifecycle_reconnect_and_normal_close(tmp_path, caplog, code):
                 async with _connection(server) as wire:
                     assert not [r for r in _records(caplog)[start:] if r["event"] == "auth_ok"]
                     frames = await wire.hello(subscribe={"snapshot": False, "mode": "rpc"}, build_sha="abcdef123")
-                    assert frames == [{"type": "ready", "snapshot": False, "events_mode": "full"}]
+                    assert frames == [{"type": "ready", "snapshot": False, "hostedDashboardPolicy": None, "events_mode": "full"}]
                     assert (await wire.rpc("ping"))["type"] == "pong"
                     await wire.ws.close(code=code)
                 assert not getattr(server, "_connection_diagnostics", {})
@@ -406,7 +406,7 @@ def test_real_authentication_matrix(tmp_path, caplog, monkeypatch, identity):
                     assert [f["type"] for f in frames] == ["hello", "snapshot"]
                     assert frames[-1]["sessions"] == [] and frames[-1]["hosts"] == {}
                 else:
-                    assert frames == [{"type": "ready", "snapshot": False, "events_mode": "summary"}]
+                    assert frames == [{"type": "ready", "snapshot": False, "hostedDashboardPolicy": None, "events_mode": "summary"}]
                 # A service's existing restrictions are unchanged; a denied
                 # verb is authorization, not failed credential verification.
                 for _ in range(3):
@@ -646,7 +646,7 @@ def test_wire_accounting_capability_filter_summary_and_delivered_dedup(tmp_path,
                         capabilities={"work_lanes_v1": capable},
                         subscribe={"snapshot": False, "events_mode": mode, "exclude_event_types": ["hosts.stats"]},
                     )
-                    assert frames == [{"type": "ready", "snapshot": False, "events_mode": mode}]
+                    assert frames == [{"type": "ready", "snapshot": False, "hostedDashboardPolicy": None, "events_mode": mode}]
                     await wire.send(b"{invalid-json")
                     assert (await wire.recv())["error_code"] == "bad_json"
                 inventory = {"type": "session.inventory", "sessions": [{
@@ -718,7 +718,7 @@ def test_bootstrap_counts_snapshot_once_and_no_auth_on_bad_json(tmp_path, caplog
 
 async def _subscribe(wire):
     frames = await wire.hello(subscribe={"snapshot": False, "exclude_event_types": ["hosts.stats"]})
-    assert frames == [{"type": "ready", "snapshot": False, "events_mode": "full"}]
+    assert frames == [{"type": "ready", "snapshot": False, "hostedDashboardPolicy": None, "events_mode": "full"}]
 
 
 def _chat(index):
