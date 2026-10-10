@@ -276,3 +276,12 @@ test('hosted URL policy rejects unsafe URLs and missing policy at opening', () =
 });
 
 for (const item of cases.hosted_urls) test('shared URL opening: ' + item.name, () => assert.equal(!!api.admitHostedUrl(item.url, cases.hosted_policy), item.allowed));
+
+test('a failed adapter load cannot become ready through its polling wrapper', async () => {
+ const h=harness(),c=full();c.libs=[];c.boards=[c.boards[1]];delete c.boards[0].web.css;delete c.boards[0].web.css_sha256;
+ const append=h.root.document.head.appendChild.bind(h.root.document.head);
+ h.root.fetch=async()=>({status:404});
+ h.root.document.head.appendChild=tag=>{const result=append(tag);queueMicrotask(()=>tag.onerror());return result;};
+ const board=h.loader.merge({catalog:c},[]).boards[0],container=h.root.document.querySelector('main'),refs=board.mount(container,{});
+ const result=await board.pollFn(refs);assert.match(result.error,/failed to load/i);assert.equal(container.dataset.boardState,'error');board.unmount(refs);h.root.close();
+});

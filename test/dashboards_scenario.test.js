@@ -180,11 +180,11 @@ for (const scenarioName of ['web-dashboards-revamp', 'dashboard_catalog']) {
         async click(selector) {
           assert.equal(selector, '#view-dashboards', 'only catalog prerequisites precede the snapshot');
           // Minimal catalog prerequisites, unrelated to the transcript oracle.
-          window.document.getElementById('dashboard-list').innerHTML = hideStatic ? ''
+          window.document.getElementById('dashboard-list').innerHTML = hideStatic || scenarioName === 'dashboard_catalog' ? ''
             : '<button data-dashboard-id="shared-demo"></button><button data-dashboard-id="modeler-3d"></button>';
           const content = window.document.getElementById('dashboard-content');
-          content.dataset.boardState = hideStatic ? 'empty' : 'ready';
-          content.textContent = hideStatic ? 'No dashboards configured' : '';
+          content.dataset.boardState = hideStatic || scenarioName === 'dashboard_catalog' ? 'empty' : 'ready';
+          content.textContent = hideStatic || scenarioName === 'dashboard_catalog' ? 'No dashboards configured' : '';
         },
       };
       const ctx = { session, fixture, modelerFixtureUrl: fixtureUrl, configureModeler: async () => {},
