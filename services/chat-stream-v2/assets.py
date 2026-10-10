@@ -280,6 +280,7 @@ class Assets:
         target = same_spec[0] if same_spec else next((r for r in records
             if r["host"] == fields["host"] and r["session_name"] == fields["session_name"]), None)
         if target is not None and target["content_type"] == "dashboard-catalog":
+            self._catalog_writer(msg)
             # Apply the existing by-ID row authority to the resolved catalog.
             # Wire identity and requested spec tags are never authority.
             owner = self._stream_session_key(_nullable_text(auth.get("stream_id")) or "")
