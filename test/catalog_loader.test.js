@@ -203,7 +203,7 @@ test('N to N+1 to N reruns actual fixture library and adapter source without sta
     });
     const observations = [];
     for (const version of [fixture.versions[0], fixture.versions[1], fixture.versions[0]]) {
-      const adapter = await h.loader.loadAdapter(version.catalog, version.catalog.boards[1]);
+      const adapter = await h.loader.loadAdapter(version.catalog, version.catalog.boards.find(board => board.id === 'example-board'));
       const container = h.root.document.querySelector('main'); container.replaceChildren(); adapter.mount(container);
       observations.push(container.textContent);
       assert.ok(container.textContent.includes(`lib ${version.version}`));
