@@ -93,6 +93,12 @@ For repository R, identified by the folder prefix before `__`:
 - wip_override: 2026-01-01 fixture-ref — a non-empty reason
 ```
 
+Only live declarations within a Tracking heading count. Fenced examples and
+ordered-list prose grant nothing. Nested Tracking subsections remain in scope
+until the next peer or parent heading; Markdown closing hashes and heading
+indentation follow the policy parser. Override declarations use the exact
+line format above, without leading indentation or extra field separators.
+
 The override date must be real, its authority token nonempty, and its reason
 nonempty. Authority references are parsed, not externally verified. Duplicate
 or malformed declarations refuse with
@@ -128,7 +134,7 @@ reservation, history lookup or lock is introduced.
 ## Conformance and validation
 
 `services/chat-stream-v2/tests/fixtures/wip_cap_conformance.json` is schema-1
-JSON data. Its 24 named rows specify explicit active stems, policy, override
+JSON data. Its 54 named rows specify explicit active stems, policy, override
 text, candidate location and exact count/code/message/warning expectations.
 Tests materialize each tree in temporary directories and assert both the
 shared evaluator and the real spawn admission path with synthetic transports.

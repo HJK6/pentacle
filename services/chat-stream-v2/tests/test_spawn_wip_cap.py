@@ -335,12 +335,13 @@ def test_concurrent_key_claim_precedes_later_policy_refusal(tmp_path,monkeypatch
 
 
 @pytest.mark.parametrize('prefix',['1. ','1) '])
-@pytest.mark.parametrize('valid_also',[False,True],ids=['malformed','duplicate'])
-def test_ordered_override_declaration_refuses(tmp_path,monkeypatch,prefix,valid_also):
+@pytest.mark.parametrize('valid_also',[False,True],ids=['ignored','with-live-override'])
+def test_ordered_override_text_matches_policy_parser(tmp_path,monkeypatch,prefix,valid_also):
     row=deepcopy(ROWS[0])
     row['candidate']['tracking']=(VALID_OVERRIDE+'\n' if valid_also else '')+prefix+VALID_OVERRIDE[2:]
-    row['expected']={'E_R':None,'error_code':'wip_override_malformed',
-                     'message':'wip_override_malformed: spec=spec_alpha__candidate','warnings':[]}
+    # Ordered prose is not an override declaration in the policy parser.
+    if valid_also:
+        row['expected']={'E_R':8,'error_code':None,'message':None,'warnings':[]}
     spec_id=materialize(tmp_path,row)
     api=importlib.import_module('_shared.wip_cap')
     actual=api.check_lead_spawn(tmp_path,spec_id)
