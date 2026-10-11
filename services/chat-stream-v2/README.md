@@ -12,6 +12,19 @@ Without peer configuration, the daemon runs locally. To keep specs and QA record
 
 `python services/chat-stream-v2/main.py --help` lists runtime options. `--port 0 --db :memory:` is useful for a temporary probe; ephemeral sessions alone do not isolate every optional service database. The desktop smoke explicitly sets separate session, notification, asset and blob paths and uses its own tmux socket.
 
+## Connecting during startup
+
+The listener binds before startup adoption finishes. A connecting client waits
+for persisted sessions to be adopted and the runtime SHA to be resolved before
+receiving its first welcome or any broadcast. Its first hello snapshot therefore
+includes the adopted inventory. Authentication challenges are created after this
+wait; disconnecting during startup releases the pending handler.
+
+SHA resolution keeps its existing checkout, deploy-stamp and VERSION fallbacks.
+If none provides an identity, the daemon logs that limitation. The desktop's
+five-second welcome timeout can still require a reconnect during an unusually
+slow startup; the existing git lookup timeout is ten seconds.
+
 ## Desktop and mobile credentials
 
 `tools/operator_auth_cli.py issue --client-kind pentacle` issues a desktop credential; `--client-kind pentacle-mobile` issues a separate mobile credential. The JSON output's `code` field is secret. Store desktop credentials in a mode-0600 file under a mode-0700 directory and point `chatStream.tokenPath` at its canonical path. Do not place a v2 credential inline in the desktop config. The CLI's `list`, `revoke` and `rotate` commands manage credentials in the daemon's registry.
