@@ -411,6 +411,7 @@ git -C "$RETRO_CHECKOUT" archive "$RETRO_CANDIDATE" \
   services/chat-stream-v2/tools/daily_retro.py \
   services/chat-stream-v2/message_envelopes.py \
   services/chat-stream-v2/provider_wrappers.py \
+  services/chat-stream-v2/retention.py services/chat-stream-v2/v2_runtime.py \
   services/chat-stream-v2/tools/live_window services/_shared/operator_auth.py \
   services/agent-orch/agent_orch \
   services/chat-stream-v2/deploy/com.pentacle.daily-retro.plist \

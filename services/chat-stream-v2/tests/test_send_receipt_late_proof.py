@@ -265,15 +265,19 @@ def test_concurrent_reconciliation_appends_one_outcome(tmp_path):
     asyncio.run(run())
 
 
-def test_missing_proof_does_not_open_archive(tmp_path, monkeypatch):
+def test_missing_proof_does_not_scan_event_archive(tmp_path, monkeypatch):
     import receipt_proof
     calls = []
     monkeypatch.setattr(receipt_proof, "scan_archive", lambda *_: calls.append(1))
     async def run():
         store, key, _ = await setup_receipt(tmp_path)
         try:
+            # Receipt identity now bootstraps a paired archive. An ordinary
+            # read must still neither scan event proof nor alter that archive.
+            archive = tmp_path / "sessions_archive.db"
+            before = archive.read_bytes()
             assert (await read_receipt(store, key, None))["state"] == "accepted"
-            assert not calls and not (tmp_path / "sessions_archive.db").exists()
+            assert not calls and archive.read_bytes() == before
         finally:
             store.stop()
     asyncio.run(run())

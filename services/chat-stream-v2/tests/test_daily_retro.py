@@ -3661,7 +3661,8 @@ def test_combined_notice_retry_in_packet_run(config, monkeypatch, tmp_path):
         assert not owned.exists()
 
 
-def test_combined_release_archive_collect(config, tmp_path):
+@pytest.mark.parametrize("with_primary", [False, True])
+def test_combined_release_archive_collect(config, tmp_path, with_primary):
     """Archive exact documented paths at one immutable candidate; collect outside checkout."""
     import hashlib
     import io
@@ -3679,6 +3680,7 @@ def test_combined_release_archive_collect(config, tmp_path):
         "services/chat-stream-v2/tools/daily_retro.py",
         "services/chat-stream-v2/message_envelopes.py",
         "services/chat-stream-v2/provider_wrappers.py",
+        "services/chat-stream-v2/retention.py", "services/chat-stream-v2/v2_runtime.py",
         "services/chat-stream-v2/tools/live_window", "services/_shared/operator_auth.py",
         "services/agent-orch/agent_orch",
         "services/chat-stream-v2/deploy/com.pentacle.daily-retro.plist",
@@ -3725,12 +3727,41 @@ def test_combined_release_archive_collect(config, tmp_path):
             "socket.create_connection = denied\n"
             "socket.socket.connect = denied\n")
         source(settings.memory_root, "release", day="2026-10-12")
+        primary_fields = {}
+        if with_primary:
+            from store import Store, SESSIONS_DDL
+            from assistant_composite import AssistantCompositeConfig
+            import retention
+            name = AssistantCompositeConfig().name
+            primary = owned / "primary.db"
+            async def seed_primary():
+                store = Store(str(primary)); store.start()
+                try:
+                    await store.open_session("fixture", "root", created_at="2026-07-01T00:00:00Z")
+                    await store.submit(lambda c: (c.execute(
+                        "INSERT INTO v2_assistant_direct_binding VALUES(?, 'fixture:root', 'generation', 1, '2026-07-01T00:00:00Z')", (name,)), c.commit()))
+                    await store.append_send_receipt(to_stream_id="fixture:retired", from_stream_id="fixture:root",
+                        request_id="archive-release-failure", receipt_id="archive-release-failure", state="not_landed",
+                        wire_text="synthetic", display_text="synthetic", attachments=[], delivery="not_landed",
+                        submission_confirmed=False, created_at="2026-10-12T12:00:00Z")
+                    moved = await store.submit(lambda c: retention.move_history_batch(c, retention.RECEIPT_TABLE,
+                        after=0, cutoff=datetime.fromisoformat("2026-11-13T00:00:00Z")))
+                    assert moved["moved"] == 1
+                    return await store.submit(lambda c: c.history_archive_path)
+                finally: store.stop()
+            archive_path = asyncio.run(seed_primary())
+            with sqlite3.connect(archive_path) as c:
+                c.execute(SESSIONS_DDL)
+                c.execute("INSERT INTO sessions(host,session_name,visibility,created_at,status,closed_at,parent_stream_id) "
+                    "VALUES('fixture','retired','hidden','2026-07-01T00:00:00Z','closed','2026-10-12T11:00:00Z','fixture:root')")
+            primary_fields = {"primary_store": str(primary), "primary_archive": str(archive_path),
+                              "primary_composite": name + ":assistant"}
         retro.atomic(settings.config_path, {
             "timezone": "America/Chicago", "memory_root": str(settings.memory_root),
             "state_root": str(settings.state_root), "ws_url": "ws://127.0.0.1:12345",
             "token_path": str(settings.token_path), "host": "fixture", "isolated": True,
             "producers": ["sol"], "usage_spec_id": "spec_fixture_usage",
-            "self_assignment_exclusions": ["spec_fixture_umbrella"]})
+            "self_assignment_exclusions": ["spec_fixture_umbrella"], **primary_fields})
         env = {key: value for key, value in os.environ.items()
                if key not in {"PYTHONPATH", "PYTHONHOME"} and not key.startswith("PENTACLE_")}
         env.update(PYTHONPATH=str(harness), PYTHONDONTWRITEBYTECODE="1", PENTACLE_HOST_ID="fixture")
@@ -3740,7 +3771,12 @@ def test_combined_release_archive_collect(config, tmp_path):
         assert process.returncode == 0, process.stderr
         manifest = json.loads(process.stdout)
         assert manifest["run_id"] == "2026-10-13" and manifest["producers"] == ["sol"]
-        assert {row["id"] for row in manifest["sources"]} == {"spec_release"}
+        assert {row["id"] for row in manifest["sources"] if row["status"] != "primary"} == {"spec_release"}
+        if with_primary:
+            assert manifest["primary"]["coverage"]["send_receipts"]["scanned"] == 1
+            assert any(row.get("request_id") == "archive-release-failure" and row["kind"] == "delivery_failure"
+                       for row in manifest["primary"]["observations"])
+            assert not any("dependency unavailable" in row["reason"] for row in manifest["primary"]["gaps"])
         collection = settings.state_root / "runs/2026-10-13/collection.json"
         before = collection.read_bytes()
         replay = subprocess.run(command, cwd=outside, env=env, capture_output=True, text=True, timeout=30)
@@ -3749,6 +3785,24 @@ def test_combined_release_archive_collect(config, tmp_path):
         assert not list((settings.state_root / "runs").glob("*/sol.json"))
         assert not list((settings.state_root / "runs").glob("*/astra.json"))
         assert not list((settings.state_root / "runs").glob("*/delivery.json"))
+        if with_primary:
+            # An intentionally incomplete release must retain a gap, not crash
+            # or substitute hot-only receipts for unavailable history.
+            (release / "services/chat-stream-v2/retention.py").rename(
+                release / "services/chat-stream-v2/retention.py.disabled")
+            incomplete_config = json.loads(settings.config_path.read_text())
+            incomplete_config["state_root"] = str(owned / "missing-dependency-state")
+            retro.atomic(settings.config_path, incomplete_config)
+            incomplete = subprocess.run(command, cwd=outside, env=env, capture_output=True, text=True, timeout=30)
+            assert incomplete.returncode == 0, incomplete.stderr
+            partial = json.loads(incomplete.stdout)["primary"]
+            assert partial["coverage"]["send_receipts"] == {"available": False}
+            assert any(row["source"] == "primary_store" and row["reason"] ==
+                "Primary evidence incomplete: required receipt-history dependency unavailable; observations from completed reads retained."
+                for row in partial["gaps"])
+            assert not any(row.get("request_id") == "archive-release-failure" for row in partial["observations"])
+            assert "notices" not in partial["coverage"]  # unread, not an all-clear zero
+            assert partial["binding"]  # completed reads survive the ImportError
         # Return logs may retain these synthetic identities externally; do not
         # create a new public evidence file or alter the release path list.
         assert archive_sha256 and hashlib.sha256((release / paths[0]).read_bytes()).digest() == hashlib.sha256(committed).digest()

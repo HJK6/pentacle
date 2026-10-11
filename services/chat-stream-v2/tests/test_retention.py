@@ -383,25 +383,26 @@ def test_vacuum_is_skipped_while_requests_are_queued(tmp_path: Path) -> None:
     seed(path, open_names=["open-1"], terminal_names=["closed-1"], events_per_session=2000)
     before = path.stat().st_size
 
-    # Threshold of 1 byte makes the reclaim test pass, so the ONLY thing that
-    # can stop the VACUUM is the queue check.
+    # Even aggressive legacy thresholds cannot enable live compaction.
     result = run_pass(path, cfg(vacuum_min_bytes=1), pending=1)
 
     assert result.vacuumed is False
-    assert result.vacuum_skip_reason == "requests_queued"
+    assert result.vacuum_skip_reason == "offline_maintenance_only"
     assert result.reclaimable_bytes > 0
     assert path.stat().st_size >= before  # not rewritten, so not shrunk
 
 
-def test_vacuum_runs_when_idle_and_over_threshold(tmp_path: Path) -> None:
+def test_vacuum_stays_off_when_idle_and_over_threshold(tmp_path: Path) -> None:
     path = tmp_path / "sessions.db"
     seed(path, open_names=["open-1"], terminal_names=["closed-1"], events_per_session=2000)
     before = path.stat().st_size
 
     result = run_pass(path, cfg(vacuum_min_bytes=1), pending=0)
 
-    assert result.vacuumed is True
-    assert path.stat().st_size < before
+    assert result.vacuumed is False
+    assert result.vacuum_skip_reason == "offline_maintenance_only"
+    assert result.reclaimable_bytes > 0
+    assert path.stat().st_size >= before
 
 
 def test_vacuum_is_skipped_when_there_is_little_to_reclaim(db: Path) -> None:
@@ -409,7 +410,7 @@ def test_vacuum_is_skipped_when_there_is_little_to_reclaim(db: Path) -> None:
     result = run_pass(db, cfg(), pending=0)
 
     assert result.vacuumed is False
-    assert result.vacuum_skip_reason == "below_threshold"
+    assert result.vacuum_skip_reason == "offline_maintenance_only"
 
 
 # --------------------------------------------------------------------------- #

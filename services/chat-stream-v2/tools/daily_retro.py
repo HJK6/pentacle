@@ -308,12 +308,12 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
         else:
             packet["gaps"].append({"source": "primary_archive", "reason": "not configured; retired recipients unknown"})
 
-        def query(db, name, columns, table, where="1", args=(), order="1"):
+        def query(db, name, columns, table, where="1", args=(), order="1", prefix=""):
             try:
-                total = db.execute(f"SELECT count(*) FROM {table} WHERE {where}", args).fetchone()[0]
+                total = db.execute(prefix + f"SELECT count(*) FROM {table} WHERE {where}", args).fetchone()[0]
                 packet["coverage"][name] = {"observed": total, "scanned": 0, "overflow": total}
                 rows = [dict(r) for r in db.execute(
-                    f"SELECT {columns} FROM {table} WHERE {where} ORDER BY {order} LIMIT ?", (*args, max_rows))]
+                    prefix + f"SELECT {columns} FROM {table} WHERE {where} ORDER BY {order} LIMIT ?", (*args, max_rows))]
                 packet["coverage"][name] = {"observed": total, "scanned": len(rows), "overflow": total - len(rows)}
                 return rows
             except sqlite3.Error:
@@ -404,11 +404,40 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
             observations.append(entry)
         for pub in publications[:100]:
             observations.append({"kind": "publication", "source": "v2_assistant_composite_publications:" + pub["publication_key"], **pub})
+        # Cutoff, latest-per-key and projection limits apply to the combined
+        # history. In particular, --now may intentionally select an older window.
+        from retention import history_union_sql, _archive_schema, _history_identity_conflict, RetentionError
+        receipt_table, receipt_prefix, receipt_available = "v2_send_receipts", "", True
+        sequence_exists = conn.execute("SELECT 1 FROM sqlite_master WHERE name='v2_send_receipt_sequence'").fetchone()
+        sequence = conn.execute("SELECT * FROM v2_send_receipt_sequence WHERE singleton=1").fetchone() if sequence_exists else None
+        try:
+            archived_receipts = bool(archive and archive.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='v2_send_receipts'").fetchone())
+            if sequence and sequence["archive_ready"] and archive is None:
+                raise RetentionError("required receipt archive unavailable")
+            if archive and (archived_receipts or sequence and sequence["archive_ready"]):
+                if not sequence:
+                    raise RetentionError("unpaired receipt archive")
+                # Pending bootstrap is not permission to adopt a sibling
+                # Store's history. Validate identity/schema before every UNION.
+                _archive_schema(conn, archive, initialize=False, pair_id=sequence["pair_id"])
+            if archived_receipts:
+                attached = {r[1] for r in conn.execute("PRAGMA database_list")}
+                if "retro_archive" not in attached:
+                    conn.execute("ATTACH DATABASE ? AS retro_archive", (settings.primary_archive.resolve().as_uri() + "?mode=ro",))
+                conn.create_function("history_identity_conflict", 0, _history_identity_conflict)
+                receipt_table = "retro_receipts"
+                receipt_prefix = "WITH retro_receipts AS NOT MATERIALIZED (" + history_union_sql(conn, "v2_send_receipts", "retro_archive") + ") "
+        except (sqlite3.Error, RetentionError):
+            packet["gaps"].append({"source": "send_receipts", "reason": "historical receipt coverage unavailable"})
+            packet["coverage"]["send_receipts"] = {"available": False}
+            receipt_available = False
         sends = query(conn, "send_receipts", "receipt_id,request_id,from_stream_id,to_stream_id,state,delivery,submission_confirmed,created_at",
-            "v2_send_receipts r", f"(from_stream_id IN ({scope_sql}) OR to_stream_id IN ({placeholders})) AND {text_window} "
-            "AND r.rowid=(SELECT max(latest.rowid) FROM v2_send_receipts latest WHERE latest.to_stream_id=r.to_stream_id "
+            receipt_table + " r", f"(from_stream_id IN ({scope_sql}) OR to_stream_id IN ({placeholders})) AND {text_window} "
+            f"AND r.rowid=(SELECT max(latest.rowid) FROM {receipt_table} latest WHERE latest.to_stream_id=r.to_stream_id "
             "AND latest.request_id=r.request_id AND julianday(latest.created_at)<=julianday(?))",
-            (*args, *args, *window_args, cutoff.isoformat()), "CASE WHEN state='not_landed' THEN 0 ELSE 1 END,created_at,receipt_id")
+            (*args, *args, *window_args, cutoff.isoformat()), "CASE WHEN state='not_landed' THEN 0 ELSE 1 END,created_at,receipt_id",
+            prefix=receipt_prefix) if receipt_available else []
         # Only the latest retained state per exact request matters; a transient
         # accepted row cannot turn a later landed receipt into a failure.
         latest = {}
@@ -485,6 +514,11 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
                     "plan_provenance": {"source": session.get("plan_source"), "updated_at": session.get("plan_updated_at"),
                         "statuses": statuses}, "waiting_provenance": waiting_provenance,
                     "execution_evidence": "provider_working_flag; specific tool unknown" if lane["working"] is True else "no live-tool proof"})
+    except ImportError:
+        packet["gaps"].append({"source": "primary_store", "reason":
+            "Primary evidence incomplete: required receipt-history dependency unavailable; observations from completed reads retained."})
+        packet["coverage"]["send_receipts"] = {"available": False}
+        # Later reads were not attempted: absent coverage remains unknown.
     except (sqlite3.Error, OSError):
         packet["gaps"].append({"source": "primary_store", "reason": "unavailable"})
     finally:
