@@ -433,6 +433,10 @@ class BlobStore:
         with dest.open("rb") as complete:
             os.fsync(complete.fileno())
         self.voice_uploads._sync_dir(dest.parent)
+        # An existing bucket may have been created by legacy materialization,
+        # which does not fsync its parent. A distinct v2 digest needs that
+        # barrier just as much as exact-digest dedup does.
+        self.voice_uploads._sync_dir(self._root)
         self.voice_uploads._sync_dir(source.parent)
         return sha
 

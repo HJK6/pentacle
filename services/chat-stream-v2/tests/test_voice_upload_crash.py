@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import errno
 import hashlib
 import json
@@ -335,3 +336,225 @@ async def test_repeated_cancellation_still_joins_the_real_checkpoint_writer(voic
         finally:
             release.set()
             await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_new_v2_blob_fsyncs_legacy_created_bucket_parent(voice_harness, monkeypatch):
+    h = voice_harness
+    legacy = b'independent legacy bucket creation'
+    legacy_sha = hashlib.sha256(legacy).hexdigest()
+    for n in range(100000):
+        data = f'independent distinct v2 audio {n}'.encode()
+        sha = hashlib.sha256(data).hexdigest()
+        if sha[:2] == legacy_sha[:2]:
+            break
+    else:
+        raise AssertionError('synthetic hash fixture has no bucket match')
+    assert sha != legacy_sha
+    root_stat = h.blobs._root.stat()
+    root_syncs = []
+    real_fsync = os.fsync
+    def observed_fsync(fd):
+        st = os.fstat(fd)
+        if (st.st_dev, st.st_ino) == (root_stat.st_dev, root_stat.st_ino):
+            root_syncs.append(True)
+        return real_fsync(fd)
+    monkeypatch.setattr(os, 'fsync', observed_fsync)
+    async with h.client() as c:
+        await c.rpc('upload_blob_init', request_id='review-legacy-bucket')
+        reply = await c.rpc('upload_blob_chunk', request_id='review-legacy-bucket',
+                            data_b64=base64.b64encode(legacy).decode(), final=True)
+        assert reply['blob_sha'] == legacy_sha
+        assert not root_syncs  # existing v1 durability behavior is a fixture fact
+        m = metadata(h, data)
+        assert (await init(c, m))['next_offset'] == 0
+        assert (await send_chunk(c, m, data, final=True))['complete'] is True
+        assert h.blobs._path_for(sha).read_bytes() == data
+        assert not (path_for(h, m) / 'audio.part').exists()
+        assert root_syncs, ('v2 ACKed complete after moving its only bytes into a legacy-created '
+                            'bucket without ever fsyncing the blob-root directory entry')
+
+
+
+@pytest.mark.asyncio
+async def test_invalid_checkpoint_operation_is_quarantined_before_chunk_ack(voice_harness):
+    import json
+    from test_voice_upload_resume import checkpoint
+    h = voice_harness
+    m = metadata(h, b'abcdefgh')
+    async with h.client() as c:
+        await init(c, m)
+        assert (await send_chunk(c, m, b'ab'))['next_offset'] == 2
+    state = checkpoint(h, m)
+    del state['voice_operation']['origin_generation']
+    (path_for(h, m) / 'checkpoint.json').write_text(json.dumps(state))
+    await h.restart()
+    async with h.client() as c:
+        result = await send_chunk(c, m, b'cd', offset=2)
+        assert result.get('error_code') == 'upload_conflict', result
+        assert 'next_offset' not in result
+        assert (path_for(h, m) / 'quarantine.json').exists()
+
+
+
+@pytest.mark.asyncio
+async def test_corrupt_operation_id_cannot_reassign_upload_milestone(voice_harness):
+    import json
+    from test_voice_upload_resume import checkpoint
+    h = voice_harness
+    data = b'abcdefgh'
+    m = metadata(h, data)
+    other = metadata(h, b'other recording bytes')
+    async with h.client() as c:
+        await init(c, m)
+        await init(c, other)
+        assert (await send_chunk(c, m, b'ab'))['next_offset'] == 2
+    state = checkpoint(h, m)
+    state['voice_operation']['operation_id'] = other['voice_operation']['operation_id']
+    (path_for(h, m) / 'checkpoint.json').write_text(json.dumps(state))
+    await h.restart()
+    async with h.client() as c:
+        result = await send_chunk(c, m, b'cdefgh', offset=2, final=True)
+        original_op = await h.store.voice_get('operator:' + h.credential_id, m['voice_operation']['operation_id'])
+        other_op = await h.store.voice_get('operator:' + h.credential_id, other['voice_operation']['operation_id'])
+        assert not result.get('complete'), (result, original_op['data'], other_op['data'])
+        assert 'upload_committed' not in other_op['data']
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [
+    (field, None) for field in ("version", "operation_id", "origin_stream_id", "origin_generation", "operation_kind", "client_build")
+] + [
+    ("version", 2), ("operation_id", "not-a-uuid"), ("origin_stream_id", ""),
+    ("origin_generation", ""), ("operation_kind", "not-voice"), ("client_build", {}),
+    ("unrecognized_field", "not-allowed"),
+])
+async def test_every_checkpoint_operation_schema_field_is_validated_at_startup(voice_harness, field, value):
+    h = voice_harness
+    m = metadata(h, b"abcdefgh")
+    async with h.client() as c:
+        await init(c, m)
+        assert (await send_chunk(c, m, b"ab"))["next_offset"] == 2
+    state = checkpoint(h, m)
+    if value is None:
+        state["voice_operation"].pop(field)
+    else:
+        state["voice_operation"][field] = value
+    (path_for(h, m) / "checkpoint.json").write_text(json.dumps(state))
+    await h.restart()
+    # BlobStore.start runs before configure_error_alerts: schema checking cannot
+    # depend on the adapter having already been composed into the server.
+    assert (path_for(h, m) / "quarantine.json").exists()
+    async with h.client() as c:
+        result = await send_chunk(c, m, b"cd", 2)
+        assert result["error_code"] == "upload_conflict"
+        assert "next_offset" not in result and "blob_sha" not in result
+        assert (path_for(h, m) / "audio.part").read_bytes() == b"ab"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [
+    ("operation_id", "44444444-4444-4444-8444-444444444444"),
+    ("origin_stream_id", "fixture:changed-origin"),
+    ("origin_generation", "changed-generation"),
+    ("operation_kind", "voice_answer"),
+    ("client_build", "changed-build"),
+])
+@pytest.mark.parametrize("action", ["resume", "chunk", "final"])
+async def test_schema_valid_checkpoint_tuple_must_match_existing_operation(voice_harness, field, value, action):
+    h = voice_harness
+    m = metadata(h, b"abcdefgh")
+    async with h.client() as c:
+        await init(c, m)
+        await send_chunk(c, m, b"ab")
+    state = checkpoint(h, m)
+    state["voice_operation"][field] = value
+    (path_for(h, m) / "checkpoint.json").write_text(json.dumps(state))
+    await h.restart()
+    async with h.client() as c:
+        if action == "resume":
+            result = await init(c, m)
+        else:
+            result = await send_chunk(c, m, b"cdefgh" if action == "final" else b"cd", 2, action == "final")
+        assert result["error_code"] == "upload_conflict"
+        assert "next_offset" not in result and "blob_sha" not in result
+        assert (path_for(h, m) / "quarantine.json").exists()
+        assert (path_for(h, m) / "audio.part").read_bytes() == b"ab"
+        original = await h.store.voice_get("operator:" + h.credential_id, m["voice_operation"]["operation_id"])
+        assert "upload_committed" not in original["data"]
+        assert not h.blobs._path_for(m["sha256"]).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", [
+    {"upload_protocol": None}, {"upload_protocol": 1}, {"upload_protocol": "2"},
+    {"upload_protocol": True}, {"upload_request_id": None},
+    {"upload_request_id": "55555555-5555-4555-8555-555555555555"},
+    {"upload_protocol": None, "upload_request_id": None},
+])
+async def test_store_protocol_and_stable_upload_binding_are_not_repaired_on_resume(voice_harness, change):
+    h = voice_harness
+    m = metadata(h, b"abcdefgh")
+    principal, operation_id = "operator:" + h.credential_id, m["voice_operation"]["operation_id"]
+    async with h.client() as c:
+        await init(c, m)
+        await send_chunk(c, m, b"ab")
+        row = await h.store.voice_get(principal, operation_id)
+        damaged = dict(row["data"])
+        for key, value in change.items():
+            if value is None:
+                damaged.pop(key)
+            else:
+                damaged[key] = value
+        def damage(conn):
+            conn.execute("UPDATE voice_operations SET data=? WHERE principal=? AND operation_id=?",
+                         (json.dumps(damaged), principal, operation_id))
+            conn.commit()
+        await h.store.submit(damage)
+        result = await init(c, m)
+        assert result["error_code"] == "upload_conflict"
+        assert "next_offset" not in result and "blob_sha" not in result
+        assert (path_for(h, m) / "quarantine.json").exists()
+        assert (await h.store.voice_get(principal, operation_id))["data"] == damaged
+        assert (path_for(h, m) / "audio.part").read_bytes() == b"ab"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["resume", "final-replay"])
+async def test_completed_receipt_also_requires_current_store_binding(voice_harness, action):
+    h = voice_harness
+    data = b"already complete"
+    m = metadata(h, data)
+    principal, operation_id = "operator:" + h.credential_id, m["voice_operation"]["operation_id"]
+    async with h.client() as c:
+        await init(c, m)
+        assert (await send_chunk(c, m, data, final=True))["complete"]
+        def damage(conn):
+            conn.execute("UPDATE voice_operations SET client_build='changed-build' WHERE principal=? AND operation_id=?",
+                         (principal, operation_id))
+            conn.commit()
+        await h.store.submit(damage)
+        result = await init(c, m) if action == "resume" else await send_chunk(c, m, b"", len(data), True)
+        assert result["error_code"] == "upload_conflict"
+        assert "next_offset" not in result and "blob_sha" not in result
+        assert (path_for(h, m) / "quarantine.json").exists()
+        assert h.blobs._path_for(m["sha256"]).read_bytes() == data
+
+
+@pytest.mark.asyncio
+async def test_missing_store_operation_is_not_reregistered_from_checkpoint(voice_harness):
+    h = voice_harness
+    m = metadata(h, b"abcdefgh")
+    principal, operation_id = "operator:" + h.credential_id, m["voice_operation"]["operation_id"]
+    async with h.client() as c:
+        await init(c, m)
+        await send_chunk(c, m, b"ab")
+        def remove(conn):
+            conn.execute("DELETE FROM voice_operations WHERE principal=? AND operation_id=?", (principal, operation_id))
+            conn.commit()
+        await h.store.submit(remove)
+        result = await init(c, m)
+        assert result["error_code"] == "upload_conflict"
+        assert await h.store.voice_get(principal, operation_id) is None
+        assert (path_for(h, m) / "quarantine.json").exists()

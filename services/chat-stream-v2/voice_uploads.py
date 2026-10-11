@@ -141,6 +141,9 @@ class VoiceUploadStore:
                 await self._principal(msg)
                 state = await self.blobs._run_joined(self._load, path, principal, msg["upload_id"])
                 if state is not None:
+                    # Validate the existing registration before register_upload
+                    # can fill in absent fields or create a missing operation.
+                    await self._verify_binding(path, state)
                     if any(state[k] != msg[k] for k in ("total_bytes", "sha256", "mime", "voice_operation")):
                         raise UploadError("upload_conflict")
                 else:
@@ -165,23 +168,43 @@ class VoiceUploadStore:
                 else:
                     state = {**state, "last_activity": time.time()}
                     await self.blobs._run_joined(self._save, path, state)
+                await self._verify_binding(path, state)
                 return state
 
     async def _chunk(self, msg, principal):
         path = self._path(principal, msg["upload_id"])
         async with self._locked(principal, msg["upload_id"]):
             await self._principal(msg)
-            # Entire append + fsync + checkpoint is one joined worker operation.
-            state = await self.blobs._run_joined(self._accept_chunk, path, principal, msg)
+            state = await self.blobs._run_joined(self._load, path, principal, msg["upload_id"])
+            if state is None:
+                raise UploadError("upload_expired")
+            await self._verify_binding(path, state)
+            # Use this validated snapshot under the same upload lock. Entire
+            # append + fsync + checkpoint remains one joined worker operation.
+            state = await self.blobs._run_joined(self._accept_chunk, path, state, msg)
             if state["final_requested"] and not state["complete"]:
                 await self._principal(msg)
                 state = await self._finish_joined(path, state)
+            await self._verify_binding(path, state)
             return state
+
+    async def _verify_binding(self, path, state):
+        """Checkpoint JSON cannot assign or repair authoritative Store identity."""
+        intent = state["voice_operation"]
+        row = await self.blobs.error_alerts.store.voice_get(state["principal"], intent["operation_id"])
+        data = row.get("data") if row else None
+        if (not row or row.get("principal") != state["principal"]
+                or any(row.get(key) != intent[key] for key in (
+                    "operation_id", "origin_stream_id", "origin_generation", "operation_kind", "client_build"))
+                or not isinstance(data, dict) or type(data.get("upload_protocol")) is not int
+                or data["upload_protocol"] != 2 or data.get("upload_request_id") != state["upload_id"]):
+            await self.blobs._run_joined(self._quarantine, path, "upload_conflict")
 
     async def _finish_joined(self, path, state):
         async def finish():
             if self.blobs.attachment_store is None:
                 raise UploadError("upload_forbidden")
+            await self._verify_binding(path, state)
             sha = await self.blobs.attachment_store.complete_unmanaged_upload(
                 root=self.blobs._root, sha=state["sha256"],
                 materialize=partial(self.blobs._materialize_verified, path / "audio.part",
@@ -250,6 +273,9 @@ class VoiceUploadStore:
         raise UploadError(code)
 
     def _load(self, path, principal, upload_id):
+        # The existing schema is available before an alert adapter is configured
+        # at startup; validation must not depend on live server composition.
+        from error_alerts import INTENT_VALIDATOR
         if not path.exists():
             return None
         if (path / "quarantine.json").exists():
@@ -266,7 +292,7 @@ class VoiceUploadStore:
                     or not isinstance(s.get("sha256"), str) or not _SHA.fullmatch(s["sha256"])
                     or not isinstance(s.get("prefix_sha256"), str) or not _SHA.fullmatch(s["prefix_sha256"])
                     or s.get("mime") not in ("audio/mp4", "audio/wav")
-                    or not isinstance(s.get("voice_operation"), dict)
+                    or not INTENT_VALIDATOR.is_valid(s.get("voice_operation"))
                     or type(s.get("complete")) is not bool or type(s.get("final_requested")) is not bool
                     or type(s.get("last_activity")) not in (int, float) or not math.isfinite(s["last_activity"])
                     or (s["complete"] and (not s["final_requested"] or s.get("blob_sha") != s["sha256"]))
@@ -303,10 +329,7 @@ class VoiceUploadStore:
             self._quarantine(path, "digest_mismatch")
         return s
 
-    def _accept_chunk(self, path, principal, msg):
-        s = self._load(path, principal, msg["upload_id"])
-        if s is None:
-            raise UploadError("upload_expired")
+    def _accept_chunk(self, path, s, msg):
         try:
             data = base64.b64decode(msg["data_b64"], validate=True)
         except (ValueError, binascii.Error):
