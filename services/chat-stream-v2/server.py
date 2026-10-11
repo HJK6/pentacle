@@ -777,11 +777,11 @@ class Server:
         #: (ungated), so a Server not driven by `main.py`'s boot sequence (unit
         #: tests) is unaffected; `main.py` clears it before bind and sets it once
         #: `reconcile_spawn_intents()` returns. Port-bind-first (spec constraint
-        #: 1) is untouched — every other verb serves the instant the port binds.
+        #: 1) is untouched — bootstrap readiness separately gates the welcome.
         self.spawn_ready = asyncio.Event()
         self.spawn_ready.set()
         #: `list_sessions` waits on this during the boot window. The port binds
-        #: (spec constraint 1) and serves ping/hello immediately, but the
+        #: (spec constraint 1), but the
         #: in-memory inventory is empty until the first `sessions.refresh()`
         #: re-adopts the persisted open rows
         #: AFTER bind — so a restart could serve an empty `list_sessions` and make
@@ -792,6 +792,10 @@ class Server:
         #: `main.py` clears it before bind and sets it once `refresh()` returns.
         self.inventory_ready = asyncio.Event()
         self.inventory_ready.set()
+        # Main clears this before bind and releases it after adoption and SHA
+        # resolution. Standalone servers retain their existing ready default.
+        self.bootstrap_ready = asyncio.Event()
+        self.bootstrap_ready.set()
         # ONE generic dispatch table. Unknown types fall through to
         # `unsupported_in_v2` — never a per-verb error branch. Keys and reply
         # types are v1's vocabulary verbatim.
@@ -1444,10 +1448,27 @@ class Server:
 
     async def _handle_client(self, websocket: Any) -> None:
         safe_context = _CONN_LOG_SAFE.set(True)
-        self._register_client(websocket)
+        self._register_client(websocket, broadcast=False)
         termination = "welcome_failed"
         error = None
         try:
+            if not self.bootstrap_ready.is_set():
+                ready = asyncio.create_task(self.bootstrap_ready.wait())
+                closed = asyncio.create_task(websocket.wait_closed())
+                try:
+                    await asyncio.wait((ready, closed), return_when=asyncio.FIRST_COMPLETED)
+                    if closed.done():
+                        return
+                finally:
+                    for pending in (ready, closed):
+                        if not pending.done():
+                            pending.cancel()
+                    await asyncio.gather(ready, closed, return_exceptions=True)
+                if getattr(websocket, "close_code", None) is not None:
+                    return
+            # No yield between fanout membership and the welcome send lock.
+            # Pending sockets cannot receive a broadcast ahead of the greeting.
+            self._clients.add(websocket)
             await self._handle_client_inner(websocket)
             state = self._connection_diagnostics.get(websocket)
             if state is not None and state.welcome_complete:
@@ -1665,8 +1686,9 @@ class Server:
         # accumulates pressure and follows the unchanged overflow policy.
         await asyncio.sleep(0)
 
-    def _register_client(self, websocket: Any) -> None:
-        self._clients.add(websocket)
+    def _register_client(self, websocket: Any, *, broadcast: bool = True) -> None:
+        if broadcast:
+            self._clients.add(websocket)
         if websocket not in self._client_send_queues:
             self._client_send_queues[websocket] = asyncio.Queue(maxsize=CLIENT_SEND_QUEUE_MAX)
         self._client_send_locks.setdefault(websocket, asyncio.Lock())

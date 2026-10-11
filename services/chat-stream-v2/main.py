@@ -808,6 +808,8 @@ async def run(args: argparse.Namespace) -> int:
     # (below) rather than serve an empty inventory that would blank the UI of a
     # restarted daemon's live sessions (B10). Set once `refresh()` returns.
     server.inventory_ready.clear()
+    # Listen immediately, but do not greet a client with partial boot state.
+    server.bootstrap_ready.clear()
 
     # 1. BIND FIRST. Nothing above this line may block on I/O.
     port = await server.bind()
@@ -881,6 +883,7 @@ async def run(args: argparse.Namespace) -> int:
     # and reconciler passes.
     event_push.set_daemon_sha(await asyncio.to_thread(_resolve_runtime_sha))
     server.runtime_sha = event_push.daemon_sha
+    server.bootstrap_ready.set()
     if event_push.daemon_sha:
         log.info("event.push boot daemon SHA: %s", event_push.daemon_sha)
     else:
