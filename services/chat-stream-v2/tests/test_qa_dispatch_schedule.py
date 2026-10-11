@@ -205,7 +205,9 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
                     persisted = (await schedule.schedule_get(
                         message("schedule.get", schedule_id=sid)
                     ))["schedule"]
-                    assert persisted["state"] == "failed"
+                    # Match the existing valid-reject fire refusal: the spawn
+                    # reservation makes the scheduler conservatively indeterminate.
+                    assert persisted["state"] == "indeterminate"
                     assert persisted["last_error_code"] == expected
                     assert len((await issue(server, "show"))["commissions"]) == 2
                 assert result.get("error_code") == expected, (

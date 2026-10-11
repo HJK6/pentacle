@@ -3,8 +3,10 @@
 The v2 daemon tracks coordinator-adjudicated QA rejects by canonical spec, stable
 acceptance surface, and cycle. Two valid rejects from different commissions stop
 new QA commissions on that surface until a lead or Nexus records a diagnosis and
-pivot. Candidate SHA changes do not reset the count. This is source support for a
-coordinated rollout; enforcement defaults off.
+pivot. Candidate SHA changes do not reset the count. The adjudication requirement
+and valid-reject limit apply to every commission carrying all three QA fields in
+both modes. `PENTACLE_QA_DISPATCH_MODE=enforce` additionally makes those fields
+mandatory on every QA commission (`qa_scope_required`).
 
 ## Commission a review
 
@@ -46,6 +48,16 @@ schedule-generation retries replay the existing dispatch; rescheduling to a new
 generation is a new admission. A reopened/closed owner cannot authorize that fire.
 
 ## Adjudicate and diagnose
+
+Two open commissions with adjudicatable reject reports in the same
+spec/surface/cycle refuse another commission with `qa_adjudication_required`,
+listing the report ids and exact adjudication commands. Only reject reports with
+the required typed evidence and an unambiguous commission binding count. Marking
+a report `--void` removes its commission from the pending count; marking both
+`--valid` moves them into the valid-reject count, producing
+`qa_dispatch_reject_limit` until `spec-issue diagnose` records a diagnosis and
+pivot. `diagnose` itself is never blocked by either limit and still requires two
+valid rejects before advancing the cycle.
 
 A QA report must be a durable `done` row with top-level `qa_verdict: "reject"`, a
 full `target_sha`, and typed evidence in its existing extras object:
@@ -134,9 +146,9 @@ payloads conflict. Late adjudication in an old cycle never affects the new cycle
 
 ## Activation and rollback
 
-`PENTACLE_QA_DISPATCH_MODE=off` is the default and the admission kill switch.
-Legacy QA without metadata remains compatible while off. Explicit metadata still
-validates and records commissions; spec-issue history remains available. Set
+`PENTACLE_QA_DISPATCH_MODE=off` is the default and permits legacy QA without
+metadata. Explicit metadata still validates, records commissions and applies both
+reject limits; spec-issue history remains available. Set
 `enforce` only in the coordinated daemon release after callers carry the new
 fields. Legacy unscoped immediate/scheduled QA then returns `qa_scope_required`.
 An invalid mode returns `qa_dispatch_mode_invalid` for QA; it does not freeze
