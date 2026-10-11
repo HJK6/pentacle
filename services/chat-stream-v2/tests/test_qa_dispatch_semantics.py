@@ -570,3 +570,134 @@ def test_resolved_legacy_target_alias_uses_canonical_scope(monkeypatch):
             store.stop()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["off", "enforce"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "misfiled_single_open",
+        "misfiled_retry_void_revalidate",
+        "two_open_candidates",
+        "exact_key_wins_over_open_candidates",
+        "superseding_id_conflicts",
+        "no_commission",
+        "old_generation_does_not_cross",
+        "new_generation_binds",
+    ],
+)
+def test_misfiled_report_commission_binding(monkeypatch, mode, case):
+    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", mode)
+
+    async def run():
+        store, sessions, _, comms, ledger, server = await state()
+        try:
+            async def adjudicate(ident="reject-qa1", valid=True):
+                return await issue(
+                    server, "adjudicate", report_id=ident,
+                    adjudicated_valid=valid, reason="in-scope admission defect",
+                )
+
+            async def assert_unwritten(expected_msg_ids):
+                shown = await issue(server, "show")
+                assert shown["report_ids"] == []
+                assert sorted(row["msg_id"] for row in shown["commissions"]) == expected_msg_ids
+                assert all(row["report_id"] is None for row in shown["commissions"])
+                assert await store.submit(lambda conn: conn.execute(
+                    "SELECT COUNT(*) FROM v2_qa_adjudications"
+                ).fetchone()[0]) == 0
+
+            if case == "no_commission":
+                await ledger.ingest(report_msg("qa3"))
+                result = await adjudicate("reject-qa3")
+                assert result["error_code"] == "qa_report_binding_mismatch", result
+                assert result["candidate_msg_ids"] == []
+                await assert_unwritten([])
+                return
+
+            if case in ("old_generation_does_not_cross", "new_generation_binds"):
+                # File the old report without ever commissioning its generation.
+                await ledger.ingest(report_msg("qa1"))
+                old = (await store.fetch_session("localhost", "qa1"))["session_generation"]
+                await store.update_session("localhost", "qa1", status="closed")
+                await sessions.open(
+                    "localhost", "qa1", provider="claude", role="qa",
+                    spec_id=SPEC, parent_stream_id=LEAD,
+                    session_generation="new-generation",
+                )
+                new = (await store.fetch_session("localhost", "qa1"))["session_generation"]
+                assert new != old
+                await comms.send(send_msg("qa1"))
+                result = await adjudicate()
+                assert result["error_code"] == "qa_report_binding_mismatch", result
+                await assert_unwritten([0])
+                shown = await issue(server, "show")
+                assert shown["commissions"][0]["generation"] == new
+                assert (await store.get_report("reject-qa1"))["session_generation"] == old
+                if case == "old_generation_does_not_cross":
+                    return
+                await ledger.ingest(report_msg("qa1", report_id="new-generation-report", msg_id=1))
+                result = await adjudicate("new-generation-report")
+                assert result["type"] == "coordination.spec_issue.adjudicate.ok", result
+                shown = await issue(server, "show")
+                assert shown["report_ids"] == ["new-generation-report"]
+                assert len(shown["commissions"]) == 1
+                assert shown["commissions"][0]["msg_id"] == 0
+                assert shown["commissions"][0]["report_id"] == "new-generation-report"
+                assert (await store.get_report("new-generation-report"))["msg_id"] == 1
+                return
+
+            await comms.send(send_msg("qa1"))
+            if case in ("two_open_candidates", "exact_key_wins_over_open_candidates"):
+                await comms.send(send_msg("qa1", msg_id=1, text="review qa1 again"))
+                if case == "exact_key_wins_over_open_candidates":
+                    await comms.send(send_msg("qa1", msg_id=2, text="review qa1 a third time"))
+                await ledger.ingest(report_msg("qa1", msg_id=5 if case == "two_open_candidates" else 1))
+                result = await adjudicate()
+                if case == "two_open_candidates":
+                    assert result["error_code"] == "qa_report_binding_mismatch", result
+                    assert result["candidate_msg_ids"] == [0, 1]
+                    await assert_unwritten([0, 1])
+                else:
+                    assert result["type"] == "coordination.spec_issue.adjudicate.ok", result
+                    shown = await issue(server, "show")
+                    assert shown["report_ids"] == ["reject-qa1"]
+                    assert {row["msg_id"]: row["report_id"] for row in shown["commissions"]} == {
+                        0: None, 1: "reject-qa1", 2: None,
+                    }
+                return
+
+            await ledger.ingest(report_msg("qa1", msg_id=1))
+            result = await adjudicate()
+            assert result["type"] == "coordination.spec_issue.adjudicate.ok", result
+            shown = await issue(server, "show")
+            assert shown["report_ids"] == ["reject-qa1"]
+            assert len(shown["commissions"]) == 1
+            assert shown["commissions"][0]["msg_id"] == 0
+            assert shown["commissions"][0]["report_id"] == "reject-qa1"
+            assert (await store.get_report("reject-qa1"))["msg_id"] == 1
+
+            if case == "misfiled_retry_void_revalidate":
+                # A later exact-key commission must not steal the representative.
+                await comms.send(send_msg("qa1", msg_id=1, text="review qa1 again"))
+                assert (await adjudicate())["changed"] is False
+                for valid in (False, True):
+                    result = await adjudicate(valid=valid)
+                    assert result["type"] == "coordination.spec_issue.adjudicate.ok", result
+                    assert result["changed"] is True
+                    shown = await issue(server, "show")
+                    assert shown["report_ids"] == (["reject-qa1"] if valid else [])
+                    assert {row["msg_id"]: row["report_id"] for row in shown["commissions"]} == {
+                        0: "reject-qa1", 1: None,
+                    }
+                assert (await store.get_report("reject-qa1"))["msg_id"] == 1
+            elif case == "superseding_id_conflicts":
+                await ledger.ingest(report_msg("qa1", report_id="second", msg_id=2))
+                result = await adjudicate("second")
+                assert result["error_code"] == "qa_commission_report_conflict", result
+                assert result["report_id"] == "reject-qa1"
+                assert (await issue(server, "show"))["report_ids"] == ["reject-qa1"]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
