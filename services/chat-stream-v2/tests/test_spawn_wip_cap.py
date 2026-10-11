@@ -274,3 +274,72 @@ def test_expired_key_eligibility_retains_atomic_contract(tmp_path, monkeypatch, 
             try: await cleanup(store, sessions, tmux)
             finally: store.stop()
     asyncio.run(go())
+
+
+@pytest.mark.parametrize('tree',['over_cap','malformed_policy'])
+@pytest.mark.parametrize('operation',['replay','conflict'])
+def test_concurrent_key_claim_precedes_later_policy_refusal(tmp_path,monkeypatch,tree,operation):
+    import threading
+    import spawnctl
+    spec_id=materialize(tmp_path,next(row for row in ROWS if row['id']=='at_cap'))
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
+    async def go():
+        store=Store(':memory:');store.start()
+        ctl,sessions,tmux=await setup(tmp_path,store,monkeypatch)
+        second_started=threading.Event();claimed=threading.Event();lock=threading.Lock()
+        checks=0
+        original_check=spawnctl.check_lead_spawn
+        original_claim=store.atomic_claim_or_replay
+        async def claim(*args,**kwargs):
+            result=await original_claim(*args,**kwargs)
+            if result['status']=='claimed': claimed.set()
+            return result
+        def check(*args,**kwargs):
+            nonlocal checks
+            with lock:
+                checks+=1
+                ordinal=checks
+            if ordinal==1:
+                result=original_check(*args,**kwargs)
+                assert second_started.wait(5), 'second caller did not reach U2'
+                return result
+            second_started.set()
+            assert claimed.wait(5), 'first caller did not claim'
+            materialize(tmp_path,next(row for row in ROWS if row['id']==tree))
+            return original_check(*args,**kwargs)
+        monkeypatch.setattr(store,'atomic_claim_or_replay',claim)
+        monkeypatch.setattr(spawnctl,'check_lead_spawn',check)
+        first=message(spec_id);second=message(spec_id)
+        if operation=='conflict': second['objective']+=' changed'
+        try:
+            replies=await asyncio.wait_for(asyncio.gather(ctl.spawn(first,HOST),ctl.spawn(second,HOST),
+                                                         return_exceptions=True),10)
+            assert isinstance(replies[0],dict) and replies[0]['type']=='spawn.ok'
+            if operation=='replay':
+                assert isinstance(replies[1],dict), f'recorded operation lost replay precedence: {replies[1]}'
+                assert replies[1]['stream_id']==replies[0]['stream_id']
+            else:
+                assert isinstance(replies[1],VerbError)
+                assert replies[1].code=='idempotency_key_conflict'
+            assert checks==2 and tmux.created==1
+            assert (await store.spawn_record_for_key(HOST,'fixture-key'))['row']['session_name']=='candidate'
+        finally:
+            try:
+                await ctl.drain_background_spawns()
+                await cleanup(store,sessions,tmux)
+            finally: store.stop()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize('prefix',['1. ','1) '])
+@pytest.mark.parametrize('valid_also',[False,True],ids=['malformed','duplicate'])
+def test_ordered_override_declaration_refuses(tmp_path,monkeypatch,prefix,valid_also):
+    row=deepcopy(ROWS[0])
+    row['candidate']['tracking']=(VALID_OVERRIDE+'\n' if valid_also else '')+prefix+VALID_OVERRIDE[2:]
+    row['expected']={'E_R':None,'error_code':'wip_override_malformed',
+                     'message':'wip_override_malformed: spec=spec_alpha__candidate','warnings':[]}
+    spec_id=materialize(tmp_path,row)
+    api=importlib.import_module('_shared.wip_cap')
+    actual=api.check_lead_spawn(tmp_path,spec_id)
+    assert {key:actual[key] for key in row['expected']}==row['expected']
+    test_real_spawn_cells(tmp_path,monkeypatch,row,True)

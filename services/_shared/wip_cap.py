@@ -13,7 +13,7 @@ from .specs_service import SOURCE_READ_ERRORS, _resolve_specs_memory_root
 INSTRUCTION = "Add to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>"
 _DATE = re.compile(r'\d{4}-\d{2}-\d{2}')
 _OVERRIDE = re.compile(r'^- wip_override: (\d{4}-\d{2}-\d{2})\s+(\S+)\s+—\s+(\S.*)$')
-_OVERRIDE_LIKE = re.compile(r'^\s*(?:[-*+]\s+)?wip_override\b')
+_OVERRIDE_LIKE = re.compile(r'^\s*(?:(?:[-*+]|\d+[.)])\s*)?wip_override\b')
 
 
 def _date(value: Any) -> bool:

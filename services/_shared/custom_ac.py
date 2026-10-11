@@ -11,7 +11,7 @@ from .specs_service import SOURCE_READ_ERRORS, SpecsSubsystem, _resolve_specs_me
 
 NONTERMINAL = frozenset({'backlog', 'analysis', 'ready_for_dev', 'in_progress', 'needs_qa', 'blocked'})
 TRACKED_CLASSES = frozenset({'external_event', 'operator_action', 'new_scope'})
-_CHECKBOX = re.compile(r'^\s*[-*+]\s+\[[^\]]*\]')
+_CHECKBOX = re.compile(r'^\s*(?:(?:[-*+]|\d+[.)])\s*)?\[[^\]]*\]')
 _NAMED = re.compile(r'^\s*- \[([ xX])\]\s+\*\*([^*]+)\*\*\s+—\s+(\S.*)$')
 _WAIVER = re.compile(r'\(waived:\s*(.*?)\)\s*$')
 _TRACKED = re.compile(r'\btracked:\s+(\S+)\s+\(([^()]+)\)\s*$')

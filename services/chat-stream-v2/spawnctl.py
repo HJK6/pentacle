@@ -1842,31 +1842,42 @@ class SpawnCtl:
             tmux_transport._ACTIVE_LAUNCH_TMUX.reset(launch_context)
         deferred_launch_plan = resolution.pop("_deferred_launch_plan", None)
 
-        # A recorded operation retains replay/conflict precedence over a new
-        # admission policy. Mirror the store's live/retained eligibility; an
-        # expired empty record is not permission to revive a claim before U2.
-        if idempotency_key:
+        async def recorded_reply() -> dict[str, Any] | None:
+            # Mirror the store's live/retained replay eligibility. A lookup
+            # never creates or revives a claim before new admission passes U2.
+            if not idempotency_key:
+                return None
             recorded = await self.store.spawn_record_for_key(host, idempotency_key)
-            if recorded is not None:
-                prior = recorded["row"]
-                eligible = (recorded["kind"] == "terminal"
-                            or float(prior.get("expires_at") or 0) >= time.time()
-                            or bool(prior.get("tmux_created")) or prior.get("payload") is not None)
-                if eligible:
-                    old_hash = str(prior.get("request_payload_hash") or "")
-                    if old_hash and payload_hash and old_hash != payload_hash:
-                        raise VerbError(
-                            "idempotency_key_conflict",
-                            f"idempotency_key already bound to a different spawn payload on {host}",
-                        )
-                    return await self._reply_from_replay(
-                        host, request_id, recorded["kind"], prior, idempotency_key,
-                    )
+            if recorded is None:
+                return None
+            prior = recorded["row"]
+            eligible = (recorded["kind"] == "terminal"
+                        or float(prior.get("expires_at") or 0) >= time.time()
+                        or bool(prior.get("tmux_created")) or prior.get("payload") is not None)
+            if not eligible:
+                return None
+            old_hash = str(prior.get("request_payload_hash") or "")
+            if old_hash and payload_hash and old_hash != payload_hash:
+                raise VerbError(
+                    "idempotency_key_conflict",
+                    f"idempotency_key already bound to a different spawn payload on {host}",
+                )
+            return await self._reply_from_replay(
+                host, request_id, recorded["kind"], prior, idempotency_key,
+            )
+
+        if replay := await recorded_reply():
+            return replay
         if open_overrides.get("role", msg.get("role")) == "lead" and spec_binding.get("spec_id"):
             decision = await asyncio.to_thread(
                 check_lead_spawn, getattr(self.specs, "memory_root", None), spec_binding["spec_id"],
             )
             if decision["error_code"]:
+                # A same-key caller may have claimed while the tree was read.
+                # Resolve that recorded operation before returning a refusal;
+                # when none exists, this final read is the refusal boundary.
+                if replay := await recorded_reply():
+                    return replay
                 raise VerbError(decision["error_code"], decision["message"], wip=decision)
 
         # Reserve the stream and its creation identity before any pane exists.

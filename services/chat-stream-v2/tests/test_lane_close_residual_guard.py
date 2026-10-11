@@ -467,3 +467,27 @@ def test_refusal_survives_store_restart(tmp_path,monkeypatch,kind):
         assert conn.execute('SELECT work_state FROM v2_assistant_composite_lanes WHERE lane_id=?',
                             (record['lane_id'],)).fetchone()[0]=='active'
         assert conn.execute("SELECT status FROM sessions WHERE host='host-a' AND session_name='lead'").fetchone()[0]=='open'
+
+
+@pytest.mark.parametrize('prefix',['1. ', '1) ', ''])
+@pytest.mark.parametrize('through_lane',[False,True],ids=['parser','lane'])
+def test_checkbox_outside_named_bullet_grammar_refuses(tmp_path,monkeypatch,prefix,through_lane):
+    line=prefix+'[ ] **Finish** — a concrete criterion'
+    path=write_spec(tmp_path,custom=line)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
+    def check(exc):
+        assert exc.code=='custom_ac_unparseable'
+        assert exc.details['items'][0]['spec_id']==MEMBER
+        assert exc.details['items'][0]['line']==path.read_text().splitlines().index(line)+1
+    if not through_lane:
+        api=importlib.import_module('_shared.custom_ac')
+        with pytest.raises(api.CompletionRefusal) as exc: api.check_lane_members(tmp_path,[MEMBER])
+        check(exc.value)
+    else:
+        async def body(env):
+            lane=(await env.adopt(members=[MEMBER]))['lane']
+            with pytest.raises(ValueError) as exc:
+                await env.op('set_state',{'to':'done','outcome':'Incomplete'},lane=lane['lane_id'],version=1)
+            check(exc.value)
+            assert (await env.store.get_work_lane(lane['lane_id']))['lane']['work_state']=='active'
+        run(body)
