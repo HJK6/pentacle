@@ -3678,6 +3678,7 @@ def test_combined_release_archive_collect(config, tmp_path, with_primary):
     release, outside, harness = owned / "release", owned / "outside", owned / "harness"
     paths = (
         "services/chat-stream-v2/tools/daily_retro.py",
+        "services/chat-stream-v2/fd_turn_budget.py",
         "services/chat-stream-v2/message_envelopes.py",
         "services/chat-stream-v2/provider_wrappers.py",
         "services/chat-stream-v2/retention.py", "services/chat-stream-v2/v2_runtime.py",
@@ -3747,6 +3748,13 @@ def test_combined_release_archive_collect(config, tmp_path, with_primary):
                     moved = await store.submit(lambda c: retention.move_history_batch(c, retention.RECEIPT_TABLE,
                         after=0, cutoff=datetime.fromisoformat("2026-11-13T00:00:00Z")))
                     assert moved["moved"] == 1
+                    from fd_turn_budget import turn_key
+                    turn_id = ["fixture:root", "generation", 1]
+                    await store.append_session_event("fixture:root", {
+                        "kind": "fd_turn_budget", "turn_id": turn_id, "stream_id": turn_id[0],
+                        "session_generation": turn_id[1], "calls": 6, "seconds": 5,
+                        "dimension": "calls", "at": "2026-10-12T12:00:00Z",
+                    }, identity=turn_key(*turn_id), limit=100)
                     return await store.submit(lambda c: c.history_archive_path)
                 finally: store.stop()
             archive_path = asyncio.run(seed_primary())
@@ -3774,6 +3782,8 @@ def test_combined_release_archive_collect(config, tmp_path, with_primary):
         assert {row["id"] for row in manifest["sources"] if row["status"] != "primary"} == {"spec_release"}
         if with_primary:
             assert manifest["primary"]["coverage"]["send_receipts"]["scanned"] == 1
+            assert manifest["primary"]["turns_over_budget"]["count"] == 1
+            assert manifest["primary"]["turns_over_budget"]["turn_ids"] == [["fixture:root", "generation", 1]]
             assert any(row.get("request_id") == "archive-release-failure" and row["kind"] == "delivery_failure"
                        for row in manifest["primary"]["observations"])
             assert not any("dependency unavailable" in row["reason"] for row in manifest["primary"]["gaps"])
@@ -3841,3 +3851,206 @@ def test_run_failed_empty_collection_file_counts_presence(config):
     assert summary["runs_total"] == summary["runs_failed"] == 1
     assert summary["runs_collected"] == 0 and "2026-10-13" in summary["missing_runs"]
     assert "2026-10-13" not in {r["run_id"] for r in summary["coverage"]["excluded_runs"]}
+
+
+def budget_primary_fixture(config, *, hot=True, archived=True, overlap=False, count=1):
+    from store import SESSION_EVENT_TAIL_DDL
+    from fd_turn_budget import turn_key
+    settings = primary_fixture(config)
+    for path, include in ((settings.primary_store, hot), (settings.primary_archive, archived)):
+        with sqlite3.connect(path) as conn:
+            conn.execute(SESSION_EVENT_TAIL_DDL)
+            if include:
+                for n in range(1,count+1):
+                    value={"kind":"fd_turn_budget","turn_id":["fixture:fd","g1",n],"stream_id":"fixture:fd",
+                           "session_generation":"g1","calls":6,"seconds":5,"dimension":"calls",
+                           "at":"2026-09-27T12:00:00Z","timestamp":"2026-09-27T12:00:00Z","record_only":False,
+                           "private_fixture":"PRIVATE_SENTINEL"}
+                    key=turn_key(*value["turn_id"])
+                    if not overlap and path == settings.primary_archive and hot:
+                        value["turn_id"][2]+=count;key=turn_key(*value["turn_id"])
+                    conn.execute("INSERT INTO session_event_tail(stream_id,session_created_at,event_key,event_json,event_ts,recorded_at,identity) VALUES (?,?,?,?,?,?,?)",
+                        ("fixture:fd","created",key,json.dumps(value),value["at"],0,key))
+    return settings
+
+
+def budget_primary(settings, **kwargs):
+    return retro.primary_evidence(settings, at("2026-09-27T00:00:00-05:00"), at(), **kwargs)
+
+
+@pytest.mark.parametrize("hot,archived",[(True,False),(False,True),(True,True)])
+def test_fd_budget_hot_archive_overlap_parity(config,hot,archived):
+    settings=budget_primary_fixture(config,hot=hot,archived=archived,overlap=True)
+    packet=budget_primary(settings)
+    rows=[r for r in packet["observations"] if r["kind"]=="fd_turn_budget"]
+    assert len(rows)==1 and rows[0]["turn_id"]==["fixture:fd","g1",1]
+    assert packet["turns_over_budget"]["count"]==1
+    assert packet["turns_over_budget"]["complete"]
+    assert packet["turns_over_budget"]["by_day"]=={"2026-09-27":1}
+    assert "PRIVATE_SENTINEL" not in json.dumps(rows)
+
+
+def test_fd_budget_env_only_root_keeps_primary_observation(config):
+    settings=budget_primary_fixture(config,hot=True,archived=False)
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("DELETE FROM v2_assistant_direct_binding")
+    packet=budget_primary(settings)
+    assert packet["turns_over_budget"]["count"]==1
+    assert [r["kind"] for r in packet["observations"]]==["fd_turn_budget"]
+    assert any(g["source"]=="binding" and g["reason"].startswith("no scoped ") for g in packet["gaps"])
+
+
+def test_fd_budget_missing_archive_and_conflicting_identity_are_gaps(config):
+    settings=budget_primary_fixture(config,hot=True,archived=True,overlap=True)
+    with sqlite3.connect(settings.primary_archive) as conn:
+        conn.execute("UPDATE session_event_tail SET event_json=json_set(event_json,'$.calls',7)")
+    packet=budget_primary(settings)
+    assert packet["turns_over_budget"]["count"]==0 and not packet["turns_over_budget"]["complete"]
+    assert any("conflicting" in g["reason"] for g in packet["gaps"])
+    settings.primary_archive.unlink()
+    packet=budget_primary(settings)
+    assert packet["turns_over_budget"]["count"]==1 and not packet["turns_over_budget"]["complete"]
+
+
+def test_fd_budget_union_before_limit_and_bounded_summary(config):
+    settings=budget_primary_fixture(config,hot=True,archived=True,overlap=True,count=40)
+    packet=budget_primary(settings,max_rows=10,max_bytes=8192)
+    assert packet["coverage"]["fd_turn_budget"]=={"observed":40,"scanned":10,"valid":10,"overflow":30,"complete":False}
+    assert not packet["turns_over_budget"]["complete"]
+    assert len(retro.encoded(packet))<=8192
+
+
+def test_fd_budget_malformed_turn_id_and_json_are_gaps(config):
+    settings=budget_primary_fixture(config,hot=True,archived=False)
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("UPDATE session_event_tail SET event_json=json_set(event_json,'$.turn_id',json('[\"fixture:fd\",\"g1\",0]'))")
+    packet=budget_primary(settings)
+    assert packet["turns_over_budget"]["count"]==0
+    assert not packet["turns_over_budget"]["complete"]
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("UPDATE session_event_tail SET event_json='broken'")
+    packet=budget_primary(settings)
+    assert not packet["turns_over_budget"]["complete"]
+    assert any("malformed events" in g["reason"] for g in packet["gaps"])
+
+
+@pytest.mark.parametrize('damage', ['missing','corrupt','not_configured'])
+def test_fd_budget_archive_survives_unavailable_hot(config, damage):
+    settings = budget_primary_fixture(config,overlap=True)
+    if damage == 'missing':
+        settings.primary_store.unlink()
+    elif damage == 'corrupt':
+        settings.primary_store.write_bytes(b'not sqlite')
+    else:
+        from dataclasses import replace
+        settings = replace(settings, primary_store=None)
+    packet = budget_primary(settings)
+    assert packet['turns_over_budget']['count'] == 1
+    assert not packet['turns_over_budget']['complete']
+    assert len([r for r in packet['observations'] if r['kind'] == 'fd_turn_budget']) == 1
+
+
+@pytest.mark.parametrize('stamp', ['20260901T120000Z','20270101T120000Z','2026-09-01T12:00:00+00:00:30',
+    '2026-09-28T10:00:00.000001Z'])
+def test_fd_budget_exact_window_rejects_outside_dates(config, stamp):
+    settings = budget_primary_fixture(config,hot=True,archived=False)
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("UPDATE session_event_tail SET event_json=json_set(event_json,'$.at',?)",(stamp,))
+    packet = budget_primary(settings)
+    assert packet['turns_over_budget']['count'] == 0
+
+
+@pytest.mark.parametrize('stamp', ['2026-09-27T05:00:00Z','2026-09-28T10:00:00Z','20260927T120000Z'])
+def test_fd_budget_exact_window_includes_endpoints_and_basic_iso(config, stamp):
+    settings = budget_primary_fixture(config,hot=True,archived=False)
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute("UPDATE session_event_tail SET event_json=json_set(event_json,'$.at',?)",(stamp,))
+    assert budget_primary(settings)['turns_over_budget']['count'] == 1
+
+
+@pytest.mark.parametrize('changed', ['kind','missing_kind','null','exponent'])
+@pytest.mark.parametrize('overlap', [False,True])
+def test_fd_budget_invalid_identity_versions_never_disappear(config, changed, overlap):
+    settings = budget_primary_fixture(config,hot=True,archived=overlap,overlap=True)
+    path = settings.primary_archive if overlap else settings.primary_store
+    with sqlite3.connect(path) as conn:
+        if changed == 'kind':
+            conn.execute("UPDATE session_event_tail SET event_json=json_set(event_json,'$.kind','USER')")
+        elif changed == 'missing_kind':
+            conn.execute("UPDATE session_event_tail SET event_json=json_remove(event_json,'$.kind')")
+        elif changed == 'null':
+            conn.execute("UPDATE session_event_tail SET event_json='null'")
+        else:
+            value = conn.execute('SELECT event_json FROM session_event_tail').fetchone()[0]
+            conn.execute('UPDATE session_event_tail SET event_json=?',(value.replace('"seconds": 5','"seconds": 1e309'),))
+    packet = budget_primary(settings)
+    assert packet['turns_over_budget']['count'] == 0
+    assert not packet['turns_over_budget']['complete']
+    assert any('invalid or conflicting' in g['reason'] for g in packet['gaps'])
+    json.dumps(packet,allow_nan=False)
+
+
+def test_fd_budget_invalid_without_binding_respects_packet_bound(config):
+    settings = budget_primary_fixture(config,hot=True,archived=False,count=1000)
+    with sqlite3.connect(settings.primary_store) as conn:
+        conn.execute('DELETE FROM v2_assistant_direct_binding')
+        conn.execute("UPDATE session_event_tail SET event_json=json_set(event_json,'$.dimension','bad')")
+    packet = budget_primary(settings)
+    assert len(retro.encoded(packet)) <= 24576
+    assert packet['turns_over_budget']['count'] == 0 and not packet['turns_over_budget']['complete']
+    assert any(g.get('count') == 1000 for g in packet['gaps'])
+
+
+@pytest.mark.parametrize('field,value', [('calls',True),('calls',False),('seconds',True),('seconds',False)])
+def test_fd_budget_projection_preserves_json_scalar_types(config, field, value):
+    settings = budget_primary_fixture(config,overlap=True)
+    for path in (settings.primary_store,settings.primary_archive):
+        with sqlite3.connect(path) as conn:
+            raw = json.loads(conn.execute('SELECT event_json FROM session_event_tail').fetchone()[0])
+            raw[field] = value
+            conn.execute('UPDATE session_event_tail SET event_json=?',(json.dumps(raw),))
+    packet = budget_primary(settings)
+    assert packet['turns_over_budget']['count'] == 0 and not packet['turns_over_budget']['complete']
+    assert any('invalid or conflicting' in g['reason'] for g in packet['gaps'])
+
+
+@pytest.mark.parametrize('motion', ['append','archive'])
+def test_fd_budget_coordinator_count_and_selection_share_snapshot(config, monkeypatch, motion):
+    from fd_turn_budget import turn_key
+    settings = budget_primary_fixture(config,hot=True,archived=False)
+    original = sqlite3.connect
+    for path in (settings.primary_store,settings.primary_archive):
+        with original(path) as conn:
+            conn.execute('PRAGMA journal_mode=WAL')
+    mutated = []
+    def writer():
+        with original(settings.primary_store) as hot, original(settings.primary_archive) as archive:
+            if motion == 'append':
+                value = json.loads(hot.execute('SELECT event_json FROM session_event_tail').fetchone()[0])
+                value['turn_id'][2] = 2; key = turn_key(*value['turn_id'])
+                hot.execute('INSERT INTO session_event_tail(stream_id,session_created_at,event_key,event_json,event_ts,recorded_at,identity) VALUES (?,?,?,?,?,?,?)',
+                    ('fixture:fd','created',key,json.dumps(value),value['at'],0,key))
+            else:
+                row = hot.execute('SELECT * FROM session_event_tail').fetchone()
+                archive.execute('INSERT INTO session_event_tail VALUES (?,?,?,?,?,?,?,?)', row)
+                archive.commit(); hot.execute('DELETE FROM session_event_tail')
+        mutated.append(motion)
+    class Count:
+        def __init__(self,cursor): self.cursor = cursor
+        def fetchone(self):
+            row = self.cursor.fetchone(); writer(); return row
+    class Coordinator:
+        def __init__(self,conn): object.__setattr__(self,'conn',conn)
+        def __getattr__(self,key): return getattr(self.conn,key)
+        def __setattr__(self,key,value): setattr(self.conn,key,value)
+        def execute(self,sql,*args):
+            cursor = self.conn.execute(sql,*args)
+            return Count(cursor) if sql.startswith('SELECT count(*) FROM (') else cursor
+    def connect(*args,**kwargs):
+        conn = original(*args,**kwargs)
+        return Coordinator(conn) if args and args[0] == ':memory:' else conn
+    monkeypatch.setattr(sqlite3,'connect',connect)
+    packet = budget_primary(settings)
+    assert mutated == [motion]
+    assert packet['turns_over_budget']['count'] == 1 and packet['turns_over_budget']['complete']
+    assert packet['coverage']['fd_turn_budget'] == {'observed':1,'scanned':1,'valid':1,'overflow':0,'complete':True}
