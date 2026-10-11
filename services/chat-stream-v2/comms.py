@@ -2021,6 +2021,21 @@ class Comms:
                 )
         try:
             materialized = await self._materialize_send_plan(plan)
+        except asyncio.CancelledError:
+            # Materialization stages files only; no provider input has begun.
+            try:
+                await self._send_result(
+                    plan, request_id=request_id, receipt_id=receipt_id,
+                    state="not_landed", delivery="not_landed", submission_confirmed=False,
+                    reason="cancelled_before_submission",
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve the original cancellation
+                log.warning(
+                    "subsystem=send bug_ref=restart_materialization_cancel "
+                    "request_id=%s error_type=%s",
+                    request_id, type(exc).__name__,
+                )
+            raise
         except VerbError as exc:
             return await self._send_result(
                 plan, request_id=request_id, receipt_id=receipt_id,

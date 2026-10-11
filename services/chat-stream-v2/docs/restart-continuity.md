@@ -47,6 +47,34 @@ exists, reconcile keeps working on it until `delivered` or `failed`. A same-key 
 replays it as the in-flight `starting` handle, never as a failure and never as a
 second pane.
 
+### Send cancellation during attachment materialization
+
+After a send's acceptance receipt commits, cancellation while fetching or staging
+attachments is known to precede provider input. `Comms.send` attempts to append
+`not_landed` state and delivery, `submission_confirmed=false`, reason
+`cancelled_before_submission`, and no attempt count under the original request
+and receipt IDs. It then propagates cancellation; it does not return a successful
+send response. If that outcome commits, the highest-rowid receipt survives a
+Store reopen and an explicit retry of the unchanged payload with the same
+request ID can submit once. A further identical retry coalesces after landing.
+
+The outcome write uses the existing shutdown time and Store ownership rules.
+There is no shield, detached cleanup task, write retry or extra shutdown budget.
+An ordinary persistence error logs only its type and request ID with
+`subsystem=send bug_ref=restart_materialization_cancel`; cancellation still
+propagates. A second cancellation can interrupt cleanup. An already-admitted
+Store operation may still commit, so only the actual durable receipt establishes
+retryability. A failed or interrupted write is not permission to resend.
+
+This narrow boundary excludes initial claim persistence, held ingress, the later
+materialized wire-update append, provider paste and proof waits. Post-input
+cancellation remains uncertain and same-key retries must not paste again. Abrupt
+process death is unchanged, and startup does not rewrite historical receipts.
+`tests/test_send_restart_materialization.py` covers the real `Server.close`
+five-second drain and file Store reopen with synthetic remote staging and a fake
+provider. It is not subprocess-restart or native-provider exactly-once proof;
+the test's 8.5-second elapsed bound is fixture tolerance, not a production SLA.
+
 ## What clients do
 
 - Retry-eligible verbs (`await`, `await-spawn`, `report`, `tell`, keyed `spawn`, the
