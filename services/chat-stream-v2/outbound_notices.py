@@ -24,6 +24,7 @@ from v2_runtime import env_number
 
 log = logging.getLogger("chat_streamd_v2.outbound_notices")
 
+NOTICE_KIND_FD_TURN_BUDGET = "fd_turn_budget"
 NOTICE_KIND_REPORT = "report"
 NOTICE_KIND_RECONCILER = "reconciler"
 NOTICE_KIND_SPAWN_FAILURE = "spawn_failure"
@@ -45,6 +46,7 @@ NOTICE_KIND_ASSISTANT_LANE_RULING_RESULT = "assistant_lane_ruling_result"
 ASSISTANT_AUTHORITY_REQUEST_TOKEN = object()
 
 _NON_URGENT_KINDS = frozenset({
+    NOTICE_KIND_FD_TURN_BUDGET,
     "error_alert",
     NOTICE_KIND_REPORT,
     NOTICE_KIND_RECONCILER,
@@ -177,6 +179,13 @@ class OutboundNoticeQueue:
         self._terminal_callbacks: dict[str, TerminalCallback] = {}
         self._delivered_callbacks: dict[str, Callable[[dict[str, Any]], Awaitable[None]]] = {}
         self._lock_factories: dict[str, LockFactory] = {}
+        self.register_kind(NOTICE_KIND_FD_TURN_BUDGET, guard=self._fd_turn_budget_guard)
+
+    async def _fd_turn_budget_guard(self, row: dict[str, Any]) -> NoticeDecision | None:
+        valid = getattr(self.store, "fd_turn_budget_notice_valid", None)
+        if not callable(valid) or not await valid(row):
+            return NoticeDecision.terminal("fd_turn_budget_stale_or_disabled", "observation retained; never retarget")
+        return None
 
     def register_kind(
         self,
@@ -346,6 +355,8 @@ class OutboundNoticeQueue:
             if metadata.get('front_desk_digest'):
                 from front_desk_digest import DIGEST_TOKEN
                 message['_front_desk_digest_token'] = DIGEST_TOKEN
+            if kind == NOTICE_KIND_FD_TURN_BUDGET:
+                message["_notification_answer_generation"] = metadata["fd_turn_budget_binding"]["generation"]
             if kind == "error_alert":
                 # Reuse the existing generation-fenced, pre-input proof path.
                 message["_notification_answer_generation"] = metadata["root_generation"]

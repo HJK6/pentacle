@@ -260,6 +260,8 @@ async def run(args: argparse.Namespace) -> int:
     # A malformed value fails startup before anything is opened.
     from assistant_restore import parse_auto_restore_flag
     auto_restore_enabled = parse_auto_restore_flag(os.environ)
+    from fd_turn_budget import FdTurnBudgetConfig
+    fd_budget_config = FdTurnBudgetConfig.from_env()
     store = Store(args.db)
     lifecycle = DaemonLifecycle(store, host=args.local_host)
     tmux = Tmux(args.tmux_bin)
@@ -502,6 +504,24 @@ async def run(args: argparse.Namespace) -> int:
     comms.assistant_ingress_policy = _assistant_ingress_policy
     comms.front_desk_digest = assistant_composite.front_desk_digest
     outbound.front_desk_digest = assistant_composite.front_desk_digest
+    # One observer on the accepted Store event floor, including record-only mode.
+    if assistant_composite.enabled:
+        store.configure_fd_turn_budget(config=fd_budget_config,
+            env_binding=assistant_composite._env_binding(),
+            archive_path=RetentionConfig.from_env().archive_path)
+    from contextlib import asynccontextmanager
+    from outbound_notices import NOTICE_KIND_FD_TURN_BUDGET
+
+    @asynccontextmanager
+    async def _fd_budget_delivery_lock(notice):
+        # Same lock order as direct-primary rebind and existing guarded notices.
+        async with assistant_composite._binding_lock:
+            host, name = sessions.split(str(notice["recipient_stream_id"]))
+            async with sessions._lifecycle_lock(host, name):
+                yield
+
+    outbound.register_kind(NOTICE_KIND_FD_TURN_BUDGET, lock_factory=_fd_budget_delivery_lock)
+
 
     # Cosmo reply push: one Expo push to the scoped CosmoPushTokens audience when
     # a DAFF reply commits.  Wired to the Daff composite ONLY — Bart must never
