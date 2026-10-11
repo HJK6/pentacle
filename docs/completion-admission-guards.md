@@ -1,6 +1,8 @@
 # Lane completion and lead admission guards
 
-These two read-only checks use the existing `PENTACLE_MEMORY_ROOT` work tree.
+U1 runtime completion enforcement is deferred pending resolution of spec-namespace freshness at commit. Lane `done` and current-generation open-lane lead closes do not read member criteria in this release. The U1 contract below is retained as the deferred design; its runtime enforcement and installed-release acceptance remain open. Parser/template behavior remains available for future integration. U2 spawn-WIP admission and the pre-existing close ladder, operator confirmation, actor/binding generation, CAS and replay checks remain active. No configuration switch enables U1 in this release.
+
+The retained U1 design and active U2 check use the existing `PENTACLE_MEMORY_ROOT` work tree.
 They neither edit specs nor activate policy, and add no store schema, service,
 CLI option, reservation counter or fleet lock. A successful fixture run proves
 source behavior, not installation or policy activation.
