@@ -233,14 +233,17 @@ class WorkLanesInventory:
                 loop.call_soon_threadsafe(mark)
             self.specs.changed_callback = changed
             specs = self.specs
-            async def attach_watcher() -> None:
+            epoch = self._epoch
+            def attach_watcher() -> None:
                 try:
-                    await asyncio.to_thread(specs.start)
+                    specs.start()
                 finally:
-                    # stop may run while attachment is still in its worker.
-                    if not self._running or specs is not self.specs:
-                        await asyncio.to_thread(specs.stop)
-            self._watcher_start = asyncio.create_task(attach_watcher(), name="work-index-watcher-start")
+                    # Cleanup stays in the attaching worker: cancelling its
+                    # asyncio await cannot abandon a late native watcher.
+                    if not self._running or epoch != self._epoch or specs is not self.specs:
+                        specs.stop()
+            self._watcher_start = asyncio.create_task(asyncio.to_thread(attach_watcher),
+                                                      name="work-index-watcher-start")
         async def periodic() -> None:
             while True:
                 await asyncio.sleep(min(interval_s, self.sweep_interval_s))

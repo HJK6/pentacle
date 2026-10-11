@@ -186,3 +186,37 @@ def test_without_watcher_periodic_poll_recovers_failed_scan(tmp_path, monkeypatc
         finally:
             await inv.stop(); store.stop()
     asyncio.run(run())
+
+
+def test_cancelled_watcher_await_still_cleans_late_attachment():
+    async def run():
+        entered, release, finished = (threading.Event() for _ in range(3))
+        state = {"active": False}
+        def start():
+            entered.set(); release.wait(3); state["active"] = True
+        def stop():
+            state["active"] = False
+            if release.is_set():
+                finished.set()
+        specs = SimpleNamespace(start=start, stop=stop)
+        async def noop(*args):
+            pass
+        inv = WorkLanesInventory(None, None, noop, specs=specs)
+        inv._drain = noop
+        try:
+            inv.start()
+            assert await asyncio.to_thread(entered.wait, 1)
+            try:
+                await asyncio.wait_for(inv.stop(), .02)
+            except TimeoutError:
+                pass
+            # The bounded runner may cancel the remaining asyncio task after
+            # shutdown's budget. Its attaching thread must retain cleanup.
+            inv._watcher_start.cancel()
+            await asyncio.gather(inv._watcher_start, return_exceptions=True)
+            release.set()
+            assert await asyncio.to_thread(finished.wait, 1)
+            assert state["active"] is False
+        finally:
+            release.set()
+    asyncio.run(run())
