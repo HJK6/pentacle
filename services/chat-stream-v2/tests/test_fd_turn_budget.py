@@ -796,3 +796,41 @@ async def test_archive_replay_preserves_immutable_source_through_receipt_project
     state = await store.fd_turn_budget_status('fixture:fd')
     assert not state['continuity_gap'] and state['ordinal'] == 1
     assert await counts(store) == (0,1)  # One immutable crossing is in the archive.
+
+
+@pytest.mark.parametrize('delivery', ['false', 'true'])
+@pytest.mark.asyncio
+async def test_observer_off_ingest_has_zero_archive_or_provenance_reads(budget_store, monkeypatch, delivery):
+    store, binding = budget_store
+    cfg = FdTurnBudgetConfig.from_env({'PENTACLE_FD_TURN_BUDGET_OBSERVER_ENABLED': 'false',
+                                      'PENTACLE_FD_TURN_BUDGET_ENABLED': delivery})
+    store.configure_fd_turn_budget(config=cfg, env_binding=binding)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('observer-off performed an archive/provenance read')
+    monkeypatch.setattr(store, '_fd_archive_evidence', forbidden)
+    monkeypatch.setattr(store, '_fd_dispatch_conn', forbidden)
+    await turn(store)
+    # Replay and receipt-triggered pending recovery also stay off.
+    await append(store, normalized('USER', 0))
+    await store._fd_retry_pending(binding['stream_id'])
+    assert await store.append_session_event(binding['stream_id'], normalized('USER', 0), limit=100, identity=_identity_key(normalized('USER', 0))) is None
+    assert await counts(store) == (0, 0)
+    assert await store.fd_turn_budget_status(binding['stream_id']) is None
+    assert await store.submit(lambda c: c.execute('SELECT count(*) FROM session_event_tail').fetchone()[0]) == 7
+
+
+@pytest.mark.asyncio
+async def test_observer_on_delivery_off_preserves_record_only(budget_store):
+    store, binding = budget_store
+    cfg = FdTurnBudgetConfig.from_env({'PENTACLE_FD_TURN_BUDGET_OBSERVER_ENABLED': 'true',
+                                      'PENTACLE_FD_TURN_BUDGET_ENABLED': 'false'})
+    store.configure_fd_turn_budget(config=cfg, env_binding=binding)
+    await turn(store)
+    assert await counts(store) == (1, 0)
+
+
+def test_runtime_observer_defaults_off_and_validates_switch():
+    assert FdTurnBudgetConfig.from_env({}).observer_enabled is False
+    assert FdTurnBudgetConfig.from_env({'PENTACLE_FD_TURN_BUDGET_OBSERVER_ENABLED': 'true'}).observer_enabled is True
+    with pytest.raises(ValueError):
+        FdTurnBudgetConfig.from_env({'PENTACLE_FD_TURN_BUDGET_OBSERVER_ENABLED': 'invalid'})
