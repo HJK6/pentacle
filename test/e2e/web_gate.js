@@ -26,7 +26,7 @@ const { spawn, execFileSync } = require('child_process');
 const cdp = require('./lib/cdp');
 const scenarios = require('./lib/web_scenarios');
 const catalogFixtures = require('./lib/dashboard_catalog_fixture');
-const { startModelerFixture } = require('./lib/modeler_fixture_server');
+const { startHostedModelerFixture } = require('./lib/hosted_modeler_fixture');
 const { startFakeCosmo } = require('./lib/fake_cosmo_server');
 const { withRuntimeDirectory, execWithRuntimeDirectory } = require('./lib/runtime_directory');
 const { main: startHost } = require('../../server');
@@ -164,10 +164,9 @@ class Report {
   }
 }
 
-function writeProfile(scratch, daemonPort, modelerFixtureUrl = null, configured = false, catalog = null) {
+function writeProfile(scratch, daemonPort, modelerFixtureUrl = null, catalog = null) {
   const dashboards = {
-    ...(configured && modelerFixtureUrl ? { modeler3d: { url: modelerFixtureUrl } } : {}),
-    // Only the dashboard_catalog scenario turns this on; the default gate
+    // Dashboard scenarios opt in to a seeded catalog; the default gate
     // profile has no catalog (the public empty default).
     ...(catalog ? { catalogSpecId: catalog.specId, catalogRoot: catalog.root } : {}),
   };
@@ -230,7 +229,7 @@ async function startDaemon(args, scratch, runtime, fixtures = [
       // Fixture sessions have no pane; the 60 s reconciler would close them mid-gate.
       '--disable-reconciler',
     ], { cwd: ROOT, stdio: ['ignore', daemonLog, daemonLog],
-      env: { ...process.env, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
+      env: { ...process.env, ...runtime.modelerFixture?.policyEnv, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
     runtime.daemonProc = proc;
     let dead = false;
     proc.once('exit', () => { dead = true; });
@@ -260,6 +259,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
   const chromeLog = [];
   let daemon = null; let host = null; let chrome = null; let session = null;
   const fixture = args.profile ? null : FIXTURE;
+  const hostPort = await freePort();
+  let hostAuthArgs = [];
 
   const cleanup = async () => {
     const registryPath = path.join(scratch, 'operator-auth', 'registry.json');
@@ -307,9 +308,9 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     let profile = args.profile;
     if (!profile) {
       runtime.fakeCosmo = await startFakeCosmo();
+      runtime.modelerFixture = await startHostedModelerFixture(scratch, hostPort);
       daemon = await startDaemon(args, scratch, runtime);
       runtime.fixtureDaemonPort = daemon.port;
-      runtime.modelerFixture = await startModelerFixture();
       profile = writeProfile(scratch, daemon.port, runtime.modelerFixture.url);
       report.note(`seeded loopback daemon on 127.0.0.1:${daemon.port} (${daemon.seed})`);
     } else {
@@ -319,7 +320,6 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     // A FIXED port (not 0), so a restart rebinds the same address and the
     // already-loaded page reconnects to a fresh host process — the scenario the
     // host-restart walk needs (see restartHost below).
-    const hostPort = await freePort();
     host = await startHost(['--profile', profile, '--port', String(hostPort)]);
     const url = `http://127.0.0.1:${host.port}/`;
     report.note(`web host ${url}`);
@@ -337,7 +337,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       let lastErr;
       for (let i = 0; i < 40; i++) {
         const hostLog = fs.openSync(path.join(scratch, 'host.log'), 'a');
-        const proc = spawn(process.execPath, [path.join(ROOT, 'server'), '--profile', profile, '--port', String(hostPort)],
+        const proc = spawn(process.execPath, [path.join(ROOT, 'server'), '--profile', profile, '--port', String(hostPort), ...hostAuthArgs],
           { cwd: ROOT, stdio: ['ignore', hostLog, hostLog], env: { ...process.env, PENTACLE_RUNTIME_DIR: runtimeDir } });
         runtime.hostProc = proc;
         let dead = false;
@@ -355,21 +355,34 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     };
     const startHostSamePort = async () => { await startHostProcess(); return hostPort; };
     const restartHost = async () => { await stopHost(); await startHostSamePort(); return hostPort; };
-    const configureModeler = fixture ? async configured => {
-      // This URL can only be the test-owned loopback server. The external
-      // --profile path has no mutation hook and cannot enter this journey.
-      writeProfile(scratch, daemon.port, runtime.modelerFixture.url, configured);
-      await restartHost();
-    } : null;
     // Dashboard catalog hooks (hermetic runs only): a scratch catalog root
     // (or PENTACLE_TEST_CATALOG_ROOT), and assets seeded into the fixture
     // daemon's own asset DB through the production AssetStore.
     const catalogEnv = { python: args.python, assetsDb: path.join(scratch, 'assets.db'), scratch };
     const catalogFixture = fixture ? catalogFixtures.buildCatalogFixture(scratch, { hostedUrl: runtime.modelerFixture.url }) : null;
+    const configureModeler = fixture ? async configured => {
+      // Membership comes from the real seeded catalog; mode comes from the
+      // real host's auth factory behind a scratch trusted identity proxy.
+      if (configured !== null) {
+        const modelerCatalog = { schema_version: 1, catalog_version: 'modeler-gate',
+          package: { repo: 'example/dashboards', commit: 'a'.repeat(40) }, requires: { host_api: 2 },
+          boards: [{ id: 'foreclosure-pipeline', name: 'Foreclosure Pipeline', kind: 'built-in', visible: false },
+            { id: 'scraper-bot', name: 'Scraper Bot', kind: 'built-in', visible: false },
+            { id: 'modeler-3d', name: '3D Modeler', kind: 'hosted-view', hosted: { url: runtime.modelerFixture.url } }] };
+        const dir = path.join(catalogFixture.root, modelerCatalog.catalog_version);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'catalog.json'), JSON.stringify(modelerCatalog));
+        catalogFixtures.publishBody(catalogFixture, catalogEnv, JSON.stringify(modelerCatalog));
+      }
+      writeProfile(scratch, daemon.port, runtime.modelerFixture.url, configured === null ? null : catalogFixture);
+      hostAuthArgs = configured === true ? ['--auth', 'tailscale', '--allow-login', 'tester@example.test', '--origin', runtime.modelerFixture.origin] : [];
+      await restartHost();
+      await session.send('Page.navigate', { url: configured === true ? runtime.modelerFixture.origin + '/' : url });
+    } : null;
     const catalog = catalogFixture ? {
       fixture: catalogFixture,
       configure: async (enabled) => {
-        writeProfile(scratch, daemon.port, runtime.modelerFixture.url, false, enabled ? catalogFixture : null);
+        writeProfile(scratch, daemon.port, runtime.modelerFixture.url, enabled ? catalogFixture : null);
         await restartHost();
       },
       install: (index) => catalogFixtures.installVersion(catalogFixture, index),
@@ -408,7 +421,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
           // Fixture sessions have no pane; the 60 s reconciler would close them mid-gate.
           '--disable-reconciler',
         ], { cwd: ROOT, stdio: ['ignore', dlog, dlog],
-          env: { ...process.env, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
+          env: { ...process.env, ...runtime.modelerFixture?.policyEnv, PENTACLE_WEB_GATE_COSMO_URL: runtime.fakeCosmo?.url || '' } });
         runtime.daemonProc = proc;
         let dead = false;
         proc.once('exit', () => { dead = true; });
@@ -429,6 +442,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
         '--headless=new', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
         '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
         '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1600,1000', url,
+        ...(runtime.modelerFixture?.chromeArgs || []),
       ], { stdio: ['ignore', 'pipe', 'pipe'] });
       chrome.stdout.on('data', (d) => chromeLog.push(String(d)));
       chrome.stderr.on('data', (d) => chromeLog.push(String(d)));

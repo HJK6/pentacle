@@ -63,12 +63,12 @@ function syntheticVersion(root, version, { hostedUrl }) {
     requires: { host_api: 1 },
     libs: [{ path: 'web/example-lib.js', sha256: sha256(files['web/example-lib.js']) }],
     boards: [
-      { id: 'example-report', name: version === VERSIONS[0] ? 'Example Reports' : 'Example Reports (N+1)',
-        kind: 'report', report: retrieval.descriptor },
       { id: 'example-board', name: 'Example Board', kind: 'web-adapter',
         web: { script: 'web/example-board.js', sha256: sha256(files['web/example-board.js']),
           css: 'web/example-board.css', css_sha256: sha256(files['web/example-board.css']) },
         actions: ['assetList'] },
+      { id: 'example-report', name: version === VERSIONS[0] ? 'Example Reports' : 'Example Reports (N+1)',
+        kind: 'report', report: retrieval.descriptor },
       { id: 'example-broken', name: 'Example Broken', kind: 'web-adapter',
         web: { script: 'web/example-broken.js', sha256: sha256(files['web/example-broken.js']) } },
       { id: 'example-hosted', name: 'Example Hosted', kind: 'hosted-view', hosted: { url: hostedUrl } },
@@ -89,7 +89,7 @@ function syntheticVersion(root, version, { hostedUrl }) {
 // Returns { root, specId, versions: [{version, dir, assetBody, catalog}], override, reportRows }.
 // Synthetic versions are written under `scratch`; only N is installed at
 // first, so a scenario can install N+1 at runtime (no host restart).
-function buildCatalogFixture(scratch, { hostedUrl = 'http://127.0.0.1:9/' } = {}) {
+function buildCatalogFixture(scratch, { hostedUrl = 'https://viewer.example.ts.net/modeler_viewer.html' } = {}) {
   const overrideRoot = process.env.PENTACLE_TEST_CATALOG_ROOT;
   if (overrideRoot) {
     const root = path.resolve(overrideRoot);

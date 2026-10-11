@@ -2006,6 +2006,12 @@ async def repo_once(
     return await _one_shot_rpc(config, payload, prefix="repo", timeout=timeout)
 
 
+async def dashboard_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+    caller = _asset_caller_identity(payload)
+    payload.setdefault("request_id", f"dashboard-{uuid.uuid4()}")
+    return await _one_shot_rpc(config, payload, prefix="dashboard", timeout=timeout, from_stream_id=caller)
+
+
 async def asset_publish_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:

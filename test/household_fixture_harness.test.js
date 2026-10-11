@@ -20,7 +20,7 @@ test('fixture mode owns a 0600 synthetic token and wraps only insecure permissio
 });
 test('web gate starts and stops fake Cosmo only in hermetic path and passes env across restarts', () => {
   const source = fs.readFileSync(path.join(__dirname, 'e2e/web_gate.js'), 'utf8');
-  assert.match(source, /if \(!profile\) \{\s+runtime\.fakeCosmo = await startFakeCosmo\(\);\s+daemon = await startDaemon/);
+  assert.match(source, /if \(!profile\) \{\s+runtime\.fakeCosmo = await startFakeCosmo\(\);\s+runtime\.modelerFixture = await startHostedModelerFixture\(scratch, hostPort\);\s+daemon = await startDaemon/);
   assert.equal((source.match(/PENTACLE_WEB_GATE_COSMO_URL: runtime\.fakeCosmo\?\.url \|\| ''/g) || []).length, 2);
   assert.match(source, /if \(runtime\.fakeCosmo\) await runtime\.fakeCosmo\.close\(\)/);
 });

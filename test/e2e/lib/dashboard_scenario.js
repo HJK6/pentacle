@@ -43,7 +43,7 @@ function viewerChecks(observation, url = null) {
   ];
 }
 function configChecks(actual, expected) {
-  return [['synthetic viewer URL reaches the renderer through its configured profile', actual === expected, { actual }]];
+  return [['synthetic viewer URL reaches the renderer through its hosted catalog entry', actual === expected, { actual }]];
 }
 function chatChecks(observation) {
   return [
@@ -96,12 +96,17 @@ async function webDashboardsRevamp(ctx) {
   if (!fixture) { report.note('no hermetic profile: skipping dashboard fixture journey'); return; }
   if (!configureModeler || !modelerFixtureUrl) throw new Error('Hermetic dashboard fixture hooks are missing');
   const adapters = ['foreclosure.js', 'scraper-bot.js'].map(file => fs.readFileSync(path.join(__dirname, '../../../renderer/dashboards', file), 'utf8'));
+  let retiredRegistered = false;
   async function ready() {
     await reloadDashboardPage(ctx);
     await session.waitFor(`window.cc.getChatStreamState().then(s => s.connected && s.sessions.some(x => x.stream_id === ${JSON.stringify(fixture.streamId)}))`);
     // Real adapter manifests with synthetic profile configuration; without this,
     // retired-absent would pass vacuously because they are not bundled by default.
     for (const source of adapters) await session.eval(source);
+    // Catalog membership replaces the rendered registry on view entry. Prove
+    // the real retired implementations registered before that merge, so their
+    // absence from the list cannot pass through missing adapter setup.
+    retiredRegistered = await session.eval("['foreclosure-pipeline', 'scraper-bot'].every(id => window.DASHBOARDS.some(d => d.id === id && d.retired === true))");
     await session.eval(`window.focusStreamId(${JSON.stringify(fixture.streamId)})`);
     await session.waitFor("!!document.querySelector('[id^=header-] [data-mode=chat]')");
     await session.eval("document.querySelectorAll('[id^=header-] [data-mode=chat]').forEach(button => button.click())");
@@ -143,29 +148,41 @@ async function webDashboardsRevamp(ctx) {
   }
   let configured = false;
   try {
+    configured = true;
+    await configureModeler(false);
     await ready();
     await session.click('#view-dashboards');
-    const retiredRegistered = await session.eval("['foreclosure-pipeline', 'scraper-bot'].every(id => window.DASHBOARDS.some(d => d.id === id && d.retired === true))");
+    await session.waitFor("!!document.querySelector('[data-dashboard-id=\"modeler-3d\"]')");
     reportChecks(report, listChecks(await session.eval(`(${readDashboardObservation.toString()})()`), retiredRegistered));
     await session.click('[data-dashboard-id="modeler-3d"]');
-    reportChecks(report, viewerChecks(await session.eval(`(${readDashboardObservation.toString()})()`)));
+    await session.waitFor("document.querySelector('[data-modeler-state]')?.dataset.modelerState === 'unavailable'");
+    const denied = await session.eval(`(${readDashboardObservation.toString()})()`);
+    reportChecks(report, [
+      ['unknown mode keeps hosted Modeler unavailable without an iframe', denied.state === 'unavailable'
+        && denied.text.includes('require current identity mode') && denied.frameUrl === null, denied],
+      ['modeler always exposes open-window and reload controls', denied.open && denied.reload, denied],
+    ]);
     await returnToChat();
 
     // This rewrites only the scratch hermetic profile and restarts its web host.
     // No DOM/adapter override can substitute for the actual config bridge.
-    configured = true;
     await configureModeler(true);
     await ready();
-    const urlFromBridge = await session.eval('window.cc.getConfig().then(config => config.dashboards?.modeler3d?.url)');
-    reportChecks(report, configChecks(urlFromBridge, modelerFixtureUrl));
     await session.click('#view-dashboards');
+    await session.waitFor("!!document.querySelector('[data-dashboard-id=\"modeler-3d\"]')");
+    const urlFromCatalog = await session.eval("window.DASHBOARDS.find(board => board.id === 'modeler-3d')?.hosted?.url");
+    reportChecks(report, configChecks(urlFromCatalog, modelerFixtureUrl));
+    reportChecks(report, listChecks(await session.eval(`(${readDashboardObservation.toString()})()`), retiredRegistered));
     await session.click('[data-dashboard-id="modeler-3d"]');
     await session.waitFor("document.querySelector('[data-modeler-state]')?.dataset.modelerState === 'loaded'");
     reportChecks(report, viewerChecks(await session.eval(`(${readDashboardObservation.toString()})()`), modelerFixtureUrl));
+    const requests = ctx.runtime.modelerFixture.requests;
+    reportChecks(report, [['hosted viewer receives no Pentacle credentials, identity headers or referrer',
+      requests.length > 0 && requests.every(request => Object.values(request).every(present => !present)), requests]]);
     if (report.dir) await session.screenshot(path.join(report.dir, 'dashboards-synthetic-modeler.png'));
     await returnToChat();
   } finally {
-    if (configured) await configureModeler(false);
+    if (configured) await configureModeler(null);
     await reloadDashboardPage(ctx);
   }
 }

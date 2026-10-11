@@ -139,6 +139,7 @@ const COOKIE_NAME = 'pentacle_web';
 function createAuth(token) {
   const cookieValue = crypto.createHash('sha256').update(token).digest('hex');
   return {
+    mode: 'token',
     isAuthed(req) {
       const cookie = parseCookies(req.headers && req.headers.cookie)[COOKIE_NAME];
       return !!cookie && safeEqual(cookie, cookieValue);
@@ -148,6 +149,10 @@ function createAuth(token) {
       return `${COOKIE_NAME}=${cookieValue}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800`;
     },
   };
+}
+
+function hostedDashboardAuthMode(auth) {
+  return auth?.mode === 'tailscale' ? 'identity' : auth?.mode === 'token' ? 'token' : 'unknown';
 }
 
 // ── Tailscale identity auth ──────────────────────────────────────────────────
@@ -372,6 +377,7 @@ async function main(argv = process.argv.slice(2)) {
   // Freeze the served dist and derive the build id once, before any request.
   const frozen = freezeWebDist(WEB_DIST);
   const ccHandlers = createCcHandlers({ CONFIG, chatStreamClient, configError, configWarnings,
+    hostedDashboardAuthMode: hostedDashboardAuthMode(auth),
     startMicServer: createMicStarter(CONFIG),
     micRequest: createMicRequest(CONFIG),
     buildId: frozen.buildId,
@@ -487,7 +493,7 @@ async function main(argv = process.argv.slice(2)) {
 }
 
 module.exports = { main, parseArgs, resolveProfilePath, serveStatic, WEB_DIST, isLoopbackBind, createAuth, COOKIE_NAME,
-  createTailscaleAuth, isTailnetAddress };
+  createTailscaleAuth, isTailnetAddress, hostedDashboardAuthMode };
 
 if (require.main === module) {
   main().catch((e) => {
