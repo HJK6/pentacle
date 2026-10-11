@@ -163,6 +163,12 @@ class WorkLanesInventory:
         self._dirty = False
         self._task: asyncio.Task[None] | None = None
         self._periodic: asyncio.Task[None] | None = None
+        # Standalone emitters without a file index keep their existing refresh
+        # behavior. A file-index emitter waits for main's core-ready start.
+        self._running = specs is None
+        self._epoch = 0
+        self._index_lock = asyncio.Lock()
+        self._watcher_start: asyncio.Task[None] | None = None
 
     def refresh(self) -> None:
         """Coalesced, non-blocking: reconcile lead loss then emit if changed.
@@ -171,11 +177,11 @@ class WorkLanesInventory:
         drains repeated calls so the session hot path never waits on it.
         """
         self._dirty = True
-        if self._task is None or self._task.done():
+        if (self._running or self.specs is None) and (self._task is None or self._task.done()):
             self._task = asyncio.create_task(self._drain())
 
     async def _drain(self) -> None:
-        while self._dirty:
+        while (self._running or self.specs is None) and self._dirty:
             self._dirty = False
             try:
                 await self.reconcile_index()
@@ -188,33 +194,53 @@ class WorkLanesInventory:
     async def reconcile_index(self, *, force_sweep: bool = False) -> None:
         if self.specs is None:
             return
-        sweep = force_sweep or time.monotonic() - self._last_sweep >= self.sweep_interval_s
-        if not sweep and not self._index_dirty:
-            return
-        self._index_dirty = False
-        startup_phase_started = time.monotonic() if force_sweep else None
-        scan = await asyncio.to_thread(self.specs.scan_work_observations)
-        if startup_phase_started is not None:
-            log.info("startup phase=worktree_sweep duration_s=%.6f", time.monotonic() - startup_phase_started)
-            startup_phase_started = time.monotonic()
-        await self.store.reconcile_work_observations(scan, settle_s=self.settle_s, sweep=sweep)
-        if startup_phase_started is not None:
-            log.info("startup phase=work_observation_apply duration_s=%.6f", time.monotonic() - startup_phase_started)
-        if sweep:
-            self._last_sweep = time.monotonic()
+        async with self._index_lock:
+            sweep = force_sweep or time.monotonic() - self._last_sweep >= self.sweep_interval_s
+            if not sweep and not self._index_dirty:
+                return
+            store, specs, epoch = self.store, self.specs, self._epoch
+            worker = getattr(store, "_thread", None)
+            self._index_dirty = False
+            started = time.monotonic()
+            try:
+                scan = await asyncio.to_thread(specs.scan_work_observations)
+                log.info("work index phase=worktree_sweep duration_s=%.6f", time.monotonic() - started)
+                # A worker cannot be cancelled once scanning. Its late result
+                # belongs only to the Store/lifecycle that requested it.
+                if (store is not self.store or specs is not self.specs or epoch != self._epoch
+                        or worker is not getattr(store, "_thread", None)):
+                    return
+                started = time.monotonic()
+                await store.reconcile_work_observations(scan, settle_s=self.settle_s, sweep=sweep)
+                log.info("work index phase=work_observation_apply duration_s=%.6f", time.monotonic() - started)
+            except BaseException:
+                self._index_dirty = True
+                raise
+            if sweep:
+                self._last_sweep = time.monotonic()
 
     def start(self, interval_s: float = 60.0) -> None:
         if self._periodic is not None:
             return
         loop = asyncio.get_running_loop()
+        self._running = True
         if self.specs is not None:
             def changed(_ids):
                 def mark():
-                    self._index_dirty = True
-                    self.refresh()
+                    if self._running:
+                        self._index_dirty = True
+                        self.refresh()
                 loop.call_soon_threadsafe(mark)
             self.specs.changed_callback = changed
-            self.specs.start()
+            specs = self.specs
+            async def attach_watcher() -> None:
+                try:
+                    await asyncio.to_thread(specs.start)
+                finally:
+                    # stop may run while attachment is still in its worker.
+                    if not self._running or specs is not self.specs:
+                        await asyncio.to_thread(specs.stop)
+            self._watcher_start = asyncio.create_task(attach_watcher(), name="work-index-watcher-start")
         async def periodic() -> None:
             while True:
                 await asyncio.sleep(min(interval_s, self.sweep_interval_s))
@@ -224,13 +250,19 @@ class WorkLanesInventory:
             self.refresh()
 
     async def stop(self) -> None:
-        if self.specs is not None:
-            await asyncio.to_thread(self.specs.stop)
+        self._running = False
+        self._epoch += 1
         tasks = [task for task in (self._periodic, self._task) if task is not None]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        self._periodic = self._task = None
+        if self.specs is not None:
+            await asyncio.to_thread(self.specs.stop)
+        # Attachment owns its final stop if it overlapped shutdown; do not
+        # cancel its to_thread await and abandon a newly attached watcher.
+        if self._watcher_start is not None:
+            await asyncio.shield(self._watcher_start)
+        self._periodic = self._task = self._watcher_start = None
 
     async def current(self) -> dict[str, Any]:
         rows = await self.store.work_lane_rows()
