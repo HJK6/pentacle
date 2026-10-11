@@ -3748,6 +3748,13 @@ def test_combined_release_archive_collect(config, tmp_path, with_primary):
                     moved = await store.submit(lambda c: retention.move_history_batch(c, retention.RECEIPT_TABLE,
                         after=0, cutoff=datetime.fromisoformat("2026-11-13T00:00:00Z")))
                     assert moved["moved"] == 1
+                    from fd_turn_budget import turn_key
+                    turn_id = ["fixture:root", "generation", 1]
+                    await store.append_session_event("fixture:root", {
+                        "kind": "fd_turn_budget", "turn_id": turn_id, "stream_id": turn_id[0],
+                        "session_generation": turn_id[1], "calls": 6, "seconds": 5,
+                        "dimension": "calls", "at": "2026-10-12T12:00:00Z",
+                    }, identity=turn_key(*turn_id), limit=100)
                     return await store.submit(lambda c: c.history_archive_path)
                 finally: store.stop()
             archive_path = asyncio.run(seed_primary())
@@ -3775,6 +3782,8 @@ def test_combined_release_archive_collect(config, tmp_path, with_primary):
         assert {row["id"] for row in manifest["sources"] if row["status"] != "primary"} == {"spec_release"}
         if with_primary:
             assert manifest["primary"]["coverage"]["send_receipts"]["scanned"] == 1
+            assert manifest["primary"]["turns_over_budget"]["count"] == 1
+            assert manifest["primary"]["turns_over_budget"]["turn_ids"] == [["fixture:root", "generation", 1]]
             assert any(row.get("request_id") == "archive-release-failure" and row["kind"] == "delivery_failure"
                        for row in manifest["primary"]["observations"])
             assert not any("dependency unavailable" in row["reason"] for row in manifest["primary"]["gaps"])
