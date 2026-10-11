@@ -314,13 +314,16 @@ def test_concurrent_key_claim_precedes_later_policy_refusal(tmp_path,monkeypatch
         try:
             replies=await asyncio.wait_for(asyncio.gather(ctl.spawn(first,HOST),ctl.spawn(second,HOST),
                                                          return_exceptions=True),10)
-            assert isinstance(replies[0],dict) and replies[0]['type']=='spawn.ok'
+            # Either concurrent caller may win the existing atomic claim.
+            successes=[reply for reply in replies if isinstance(reply,dict)]
+            errors=[reply for reply in replies if isinstance(reply,Exception)]
+            assert all(reply['type']=='spawn.ok' for reply in successes)
             if operation=='replay':
-                assert isinstance(replies[1],dict), f'recorded operation lost replay precedence: {replies[1]}'
-                assert replies[1]['stream_id']==replies[0]['stream_id']
+                assert len(successes)==2 and not errors, f'recorded operation lost replay precedence: {errors}'
+                assert successes[0]['stream_id']==successes[1]['stream_id']
             else:
-                assert isinstance(replies[1],VerbError)
-                assert replies[1].code=='idempotency_key_conflict'
+                assert len(successes)==1 and len(errors)==1
+                assert isinstance(errors[0],VerbError) and errors[0].code=='idempotency_key_conflict'
             assert checks==2 and tmux.created==1
             assert (await store.spawn_record_for_key(HOST,'fixture-key'))['row']['session_name']=='candidate'
         finally:
