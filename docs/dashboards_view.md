@@ -258,13 +258,29 @@ malformed metadata grants no actions.
   or `null` when there is no such session. The callable
   `sigilMarkup(label, size)` returns the host's assistant sigil HTML. Without
   the capability, `assistant` is `undefined`.
-- `actions` always contains exactly the async `assetList(params)` and
-  `assetGet(params)` functions. An allowed call returns the existing bridge's
-  daemon reply and preserves rejection behavior. A disallowed call logs a
-  warning and resolves `{ ok: false, error: 'action_not_allowed' }` without
-  contacting the bridge. An unavailable asset bridge method is denied the same
-  way. `household` and `assistantState` are context gates, not additional callable
+- `actions` always contains exactly the async `assetList(params)`,
+  `assetGet(params)`, `lanes()` and `navigate(params)` functions. An allowed
+  asset call returns the existing bridge's daemon reply and preserves rejection
+  behavior. A disallowed call logs a warning and resolves
+  `{ ok: false, error: 'action_not_allowed' }` without contacting the bridge or
+  the host. An unavailable asset bridge method is denied the same way.
+  `household` and `assistantState` are context gates, not additional callable
   members of `actions`.
+- `lanes()` resolves `{ ok: true, inventory }`, a deep-frozen copy of the
+  host's work-lanes projection (`lanes`, `counts`, `truncated`, `generated_at`,
+  `work_index`; each lane keeps the wire fields including `progress` with
+  `members` and `open_estimate_h`, plus `tap`: `open_chat`, `history` or
+  `unavailable`). It is read-only and never contacts the daemon. Before the
+  first lane frame it resolves `{ ok: false, error: 'lanes_unavailable' }`.
+  Poll it from the board's `pollFn`; `lanes.length` can be below `counts.open`
+  when `truncated` is true.
+- `navigate({ lane_id })` switches to Chats and opens only that lane's
+  daemon-resolved chat through the sidebar lane path: the open chat, a read-only
+  history slot at the lane's generation, or the explicit unavailable card. It
+  resolves `{ ok: true, action }`. Any other input shape is
+  `navigate_invalid`, a lane not in the projection is `unknown_lane`, and an
+  open chat missing from this window is `chat_not_available`. It never opens a
+  stream id, the assistant chat or another generation in place of the lane's chat.
 
 Mounting itself does not load household data; the shell's initial poll owns
 that read. The context seam does not load or register a private adapter by

@@ -140,3 +140,42 @@ test('v1 consumer accepts additive member facts with unchanged state, order and 
       cell.frame.lanes.map((lane: {lane_id: string; state: string}) => [lane.lane_id, lane.state]), cell.name);
   }
 });
+
+// Lanes 3D (spec_pentacle__lanes_3d_web_dashboard_2026_10): the additive progress
+// facts the daemon already sends survive normalization, so web consumers can show
+// member specs and remaining-work estimates.
+test('progress facts and members survive normalization in wire order', () => {
+  for (const cell of fixture.progress_v2) {
+    const inv = applyWorkLanesFrame(emptyWorkLanesInventory(), cell.frame);
+    assert.deepEqual(inv.work_index, cell.frame.work_index ?? null, cell.name);
+    selectWorkLanes(inv).forEach((lane, i) => {
+      const wire = cell.frame.lanes[i];
+      const progress = lane.progress!;
+      assert.ok(progress, `${cell.name}: progress present`);
+      for (const key of ['members_total', 'no_spec_reason', 'items_total', 'items_completed', 'items_dropped', 'items_open',
+        'items_unresolved', 'ac_checked', 'ac_total', 'ac_members', 'open_estimate_h', 'open_estimated', 'estimate_complete', 'freshness_at']) {
+        assert.deepEqual((progress as Record<string, unknown>)[key], wire[key] ?? null, `${cell.name}: ${key}`);
+      }
+      assert.deepEqual(progress.members.map((m) => m.spec_id), wire.members.map((m: { spec_id: string }) => m.spec_id), cell.name);
+      progress.members.forEach((member, j) => {
+        const raw = wire.members[j];
+        for (const key of ['title', 'status', 'terminal', 'ac_checked', 'ac_total', 'estimate', 'status_text', 'next_action_text'])
+          assert.deepEqual((member as Record<string, unknown>)[key], raw[key] ?? null, `${cell.name}: member ${key}`);
+        assert.equal(member.estimate_exempt, raw.estimate_exempt === true);
+        assert.equal(member.observation?.quality ?? null, raw.observation?.quality ?? null);
+      });
+    });
+  }
+});
+
+test('a v1 lane without progress facts normalizes progress to null; malformed members are dropped', () => {
+  const inv = applyWorkLanesFrame(emptyWorkLanesInventory(), fixture.inventory_frame);
+  assert.ok(selectWorkLanes(inv).every((lane) => lane.progress === null));
+  assert.equal(inv.work_index, null);
+  const frame = JSON.parse(JSON.stringify(fixture.progress_v2[0].frame));
+  frame.lanes[0].members = [null, { title: 'no id' }, { spec_id: 'spec_demo__ok', title: 'Ok', terminal: 'bogus', estimate: { p25: 'x' } }];
+  const lane = selectWorkLanes(applyWorkLanesFrame(emptyWorkLanesInventory(), frame))[0];
+  assert.deepEqual(lane.progress!.members.map((m) => m.spec_id), ['spec_demo__ok']);
+  assert.equal(lane.progress!.members[0].terminal, null);
+  assert.equal(lane.progress!.members[0].estimate, null);
+});

@@ -36,6 +36,50 @@ export type WorkLaneVisibleChat = {
   available: WorkLaneVisibleChatAvailability;
 };
 
+export type WorkLaneEstimate = { p25: number; p75: number; median: number; as_of: string | null; provisional: boolean };
+
+export type WorkLaneMember = {
+  spec_id: string;
+  title: string | null;
+  status: string | null;
+  terminal: 'completed' | 'deprecated' | null;
+  ac_checked: number | null;
+  ac_total: number | null;
+  estimate: WorkLaneEstimate | null;
+  estimate_exempt: boolean;
+  status_text: string | null;
+  next_action_text: string | null;
+  source_changed_at: string | null;
+  observation: { quality: string | null; observed_at: string | null; error: string | null } | null;
+};
+
+/** Additive progress facts (work-lanes.md, file-derived work); null for a v1 lane without them. */
+export type WorkLaneProgress = {
+  members: WorkLaneMember[];
+  members_total: number | null;
+  no_spec_reason: string | null;
+  items_total: number | null;
+  items_completed: number | null;
+  items_dropped: number | null;
+  items_open: number | null;
+  items_unresolved: number | null;
+  ac_checked: number | null;
+  ac_total: number | null;
+  ac_members: number | null;
+  open_estimate_h: { p25: number; p75: number; median: number } | null;
+  open_estimated: number | null;
+  estimate_complete: boolean | null;
+  freshness_at: string | null;
+};
+
+export type WorkIndexStatus = {
+  available: boolean;
+  root_configured: boolean;
+  snapshot_at: string | null;
+  last_sweep_at: string | null;
+  error: string | null;
+};
+
 export type WorkLane = {
   lane_id: string;
   title: string;
@@ -51,6 +95,7 @@ export type WorkLane = {
   lead: WorkLaneLead | null;
   visible_chat: WorkLaneVisibleChat;
   last_update: { update_id: string; kind: string; event_id: number | null; ts: string | null } | null;
+  progress: WorkLaneProgress | null;
 };
 
 export type WorkLanesCounts = { open: number; active: number; paused: number; blocked: number };
@@ -60,6 +105,7 @@ export type WorkLanesInventory = {
   counts: WorkLanesCounts;
   truncated: boolean;
   generated_at: string | null;
+  work_index: WorkIndexStatus | null;
 };
 
 export type WorkLaneTapTarget =
@@ -87,7 +133,7 @@ const nonEmpty = (value: unknown): string | null => (typeof value === 'string' &
 const finite = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 
 export function emptyWorkLanesInventory(): WorkLanesInventory {
-  return { lanes: [], counts: { open: 0, active: 0, paused: 0, blocked: 0 }, truncated: false, generated_at: null };
+  return { lanes: [], counts: { open: 0, active: 0, paused: 0, blocked: 0 }, truncated: false, generated_at: null, work_index: null };
 }
 
 function normalizeLead(raw: unknown): WorkLaneLead | null {
@@ -127,6 +173,69 @@ function normalizeVisibleChat(raw: unknown): WorkLaneVisibleChat {
   };
 }
 
+const boolOrNull = (value: unknown): boolean | null => (typeof value === 'boolean' ? value : null);
+
+function normalizeRange(raw: unknown): { p25: number; p75: number; median: number } | null {
+  if (!isRec(raw)) return null;
+  const p25 = finite(raw.p25), p75 = finite(raw.p75), median = finite(raw.median);
+  return p25 === null || p75 === null || median === null ? null : { p25, p75, median };
+}
+
+function normalizeMember(raw: unknown): WorkLaneMember | null {
+  if (!isRec(raw)) return null;
+  const specId = nonEmpty(raw.spec_id);
+  if (!specId) return null;
+  const range = normalizeRange(raw.estimate);
+  const est = isRec(raw.estimate) ? raw.estimate : {};
+  const obs = isRec(raw.observation) ? raw.observation : null;
+  return {
+    spec_id: specId,
+    title: str(raw.title),
+    status: str(raw.status),
+    terminal: raw.terminal === 'completed' || raw.terminal === 'deprecated' ? raw.terminal : null,
+    ac_checked: finite(raw.ac_checked),
+    ac_total: finite(raw.ac_total),
+    estimate: range ? { ...range, as_of: str(est.as_of), provisional: est.provisional === true } : null,
+    estimate_exempt: raw.estimate_exempt === true,
+    status_text: str(raw.status_text),
+    next_action_text: str(raw.next_action_text),
+    source_changed_at: str(raw.source_changed_at),
+    observation: obs ? { quality: str(obs.quality), observed_at: str(obs.observed_at), error: str(obs.error) } : null,
+  };
+}
+
+function normalizeProgress(raw: Rec): WorkLaneProgress | null {
+  if (!Array.isArray(raw.members) && finite(raw.items_total) === null) return null;
+  return {
+    members: (Array.isArray(raw.members) ? raw.members : []).map(normalizeMember).filter((m): m is WorkLaneMember => m !== null),
+    members_total: finite(raw.members_total),
+    no_spec_reason: str(raw.no_spec_reason),
+    items_total: finite(raw.items_total),
+    items_completed: finite(raw.items_completed),
+    items_dropped: finite(raw.items_dropped),
+    items_open: finite(raw.items_open),
+    items_unresolved: finite(raw.items_unresolved),
+    ac_checked: finite(raw.ac_checked),
+    ac_total: finite(raw.ac_total),
+    ac_members: finite(raw.ac_members),
+    open_estimate_h: normalizeRange(raw.open_estimate_h),
+    open_estimated: finite(raw.open_estimated),
+    estimate_complete: boolOrNull(raw.estimate_complete),
+    freshness_at: str(raw.freshness_at),
+  };
+}
+
+function normalizeWorkIndex(raw: unknown): WorkIndexStatus | null {
+  if (!isRec(raw)) return null;
+  return {
+    available: raw.available === true,
+    root_configured: raw.root_configured === true,
+    snapshot_at: str(raw.snapshot_at),
+    last_sweep_at: str(raw.last_sweep_at),
+    error: str(raw.error),
+  };
+}
+
 function normalizeLane(raw: unknown): WorkLane | null {
   if (!isRec(raw)) return null;
   const laneId = nonEmpty(raw.lane_id);
@@ -150,6 +259,7 @@ function normalizeLane(raw: unknown): WorkLane | null {
     last_update: isRec(last) && nonEmpty(last.update_id)
       ? { update_id: last.update_id as string, kind: str(last.kind) ?? '', event_id: finite(last.event_id), ts: str(last.ts) }
       : null,
+    progress: normalizeProgress(raw),
   };
 }
 
@@ -165,7 +275,7 @@ export function normalizeWorkLanesInventory(frame: unknown): WorkLanesInventory 
     blocked: finite(rawCounts?.blocked) ?? tally('blocked'),
     open: finite(rawCounts?.open) ?? lanes.length,
   };
-  return { lanes, counts, truncated: frame.truncated === true, generated_at: str(frame.generated_at) };
+  return { lanes, counts, truncated: frame.truncated === true, generated_at: str(frame.generated_at), work_index: normalizeWorkIndex(frame.work_index) };
 }
 
 /**

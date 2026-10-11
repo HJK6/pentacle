@@ -88,9 +88,10 @@ The host mounts catalog adapters with `{ config, household, assistant, actions }
 Only the loader's validated descriptor grants capabilities:
 
 - `ctx.actions` always has exactly the async `assetList(params)` and
-  `assetGet(params)` bridge wrappers. An action outside the descriptor's allowlist,
-  or an unavailable bridge method, warns and resolves
-  `{ ok: false, error: 'action_not_allowed' }`
+  `assetGet(params)` bridge wrappers and the host's `lanes()` and
+  `navigate({ lane_id })` (see `docs/dashboards_view.md`). An action outside the
+  descriptor's allowlist, or an unavailable bridge or host method, warns and
+  resolves `{ ok: false, error: 'action_not_allowed' }`
 - `ctx.household` is present only for `"household"` and is exactly
   `{ selectors, store }`. The host configures the shared store once. Adapters
   call `load(month)`, `refresh()`, `addItem`, `checkItem`, `removeItem`, `addEvent`,

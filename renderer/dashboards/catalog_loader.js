@@ -109,7 +109,7 @@
         if (own(b.web, 'css') || own(b.web, 'css_sha256')) { match(b.web, 'css', `${q}.web.css`, patterns.path); if (!b.web.css.endsWith('.css')) fail(`${q}.web.css`, 'must be a .css path'); match(b.web, 'css_sha256', `${q}.web.css_sha256`, patterns.hash); }
         if (own(b, 'actions')) {
           if (!Array.isArray(b.actions) || b.actions.some(a => typeof a !== 'string')) fail(`${q}.actions`, 'must be a list of strings');
-          const bad = b.actions.filter(a => !['household', 'assistantState', 'assetList', 'assetGet'].includes(a)); if (bad.length) fail(`${q}.actions`, `unknown host actions: ${bad.join(', ')}`);
+          const bad = b.actions.filter(a => !['household', 'assistantState', 'assetList', 'assetGet', 'lanes', 'navigate'].includes(a)); if (bad.length) fail(`${q}.actions`, `unknown host actions: ${bad.join(', ')}`);
         }
         if (own(b, 'poll_interval_ms')) integer(b.poll_interval_ms, `${q}.poll_interval_ms`, 2000, 600000);
       } else if (b.kind === 'hosted-view') {
@@ -129,11 +129,14 @@
     container.replaceChildren(); container.dataset.boardState = state;
     const card = container.ownerDocument.createElement('p'); card.dataset.testid = testid; card.setAttribute('role', 'alert'); card.textContent = message; container.appendChild(card); return card;
   }
-  function actions(entry, cc, warn = (...args) => console.warn(...args)) {
+  // Asset actions call the daemon bridge; lanes/navigate call the host's own
+  // functions (ctx.actions), never the bridge. Each needs the entry's grant.
+  function actions(entry, cc, warn = (...args) => console.warn(...args), host = {}) {
     const allowed = new Set(entry.actions || []);
-    return Object.fromEntries(['assetList', 'assetGet'].map(action => [action, async params => {
-      if (!allowed.has(action) || typeof cc?.[action] !== 'function') { warn('[dashboards] action_not_allowed', { id: entry.id, action }); return { ok: false, error: 'action_not_allowed' }; }
-      return cc[action](params);
+    const source = { assetList: cc, assetGet: cc, lanes: host, navigate: host };
+    return Object.fromEntries(Object.keys(source).map(action => [action, async params => {
+      if (!allowed.has(action) || typeof source[action]?.[action] !== 'function') { warn('[dashboards] action_not_allowed', { id: entry.id, action }); return { ok: false, error: 'action_not_allowed' }; }
+      return source[action][action](params);
     }]));
   }
   function createLoader(options = {}) {
@@ -235,7 +238,7 @@
         refs.ready = loadAdapter(catalog, entry).then(adapter => {
           if (refs.disposed) return;
           refs.adapter = adapter;
-          refs.inner = adapter.mount(container, { ...ctx, actions: actions(entry, cc) });
+          refs.inner = adapter.mount(container, { ...ctx, actions: actions(entry, cc, undefined, ctx?.actions) });
           container.dataset.boardState = 'ready';
         }).catch(error => { if (!refs.disposed) errorCard(container, `Board failed to load: ${error.message || error}`); });
         return refs;
