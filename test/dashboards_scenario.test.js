@@ -8,6 +8,7 @@ const { JSDOM } = require('jsdom');
 const { SCENARIOS } = require('./e2e/lib/web_scenarios');
 const { readDashboardObservation, listChecks, viewerChecks, configChecks, chatChecks } = require('./e2e/lib/dashboard_scenario');
 const { startModelerFixture } = require('./e2e/lib/modeler_fixture_server');
+const catalogFixtures = require('./e2e/lib/dashboard_catalog_fixture');
 const { writeProfile } = require('./e2e/web_gate');
 const fixtureUrl = 'http://127.0.0.1:9031/modeler_viewer.html';
 function observation() {
@@ -74,20 +75,23 @@ test('real DOM reader observes visible state, actual frame attributes and contro
   assert.equal(readDashboardObservation(dom.window.document).visible, false);
   assert.equal(readDashboardObservation(dom.window.document).frameUrl, null);
 });
-test('hermetic profile enables dashboards and adds viewer URL only when explicitly configured', t => {
+test('hermetic profile enables dashboards and uses catalog membership without a Modeler profile override', t => {
   // require() caches by real path; macOS tmpdir is a symlink, so resolve it before
   // evicting the cache entry or the second read returns the stale profile.
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-profile-')));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  function read(configured) {
-    const profile = writeProfile(dir, 19031, fixtureUrl, configured);
+  function read(catalog) {
+    const profile = writeProfile(dir, 19031, fixtureUrl, catalog);
     delete require.cache[profile]; return require(profile);
   }
-  const off = read(false);
+  const off = read(null);
   assert.equal(off.features.dashboards, true); assert.equal(off.dashboards?.modeler3d?.url, undefined);
   assert.equal(off.dashboardHub.scraperBotUrl, fixtureUrl);
-  assert.equal(read(true).dashboards.modeler3d.url, fixtureUrl);
-  assert.equal(read(false).dashboards?.modeler3d?.url, undefined);
+  const on = read({ specId: 'example__catalog', root: '/scratch/catalog' });
+  assert.equal(on.dashboards.catalogSpecId, 'example__catalog');
+  assert.equal(on.dashboards.catalogRoot, '/scratch/catalog');
+  assert.equal(on.dashboards.modeler3d, undefined);
+  assert.equal(read(null).dashboards?.catalogSpecId, undefined);
 });
 test('viewer server binds loopback and serves only the actual self-contained fixture', async t => {
   const fixture = await startModelerFixture(); t.after(() => fixture.close());
@@ -96,6 +100,20 @@ test('viewer server binds loopback and serves only the actual self-contained fix
   assert.equal(response.status, 200); assert.match(response.headers.get('content-type'), /text\/html/);
   assert.equal(await response.text(), fs.readFileSync(path.join(__dirname, 'fixtures/modeler_viewer.html'), 'utf8'));
   assert.equal((await fetch(new URL('/unknown', url))).status, 404);
+});
+
+test('default gate catalog seeds both versions through the production HTTPS validator', t => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-catalog-seed-'));
+  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+  const fixture = catalogFixtures.buildCatalogFixture(scratch);
+  for (let index = 0; index < fixture.versions.length; index++) {
+    const hosted = fixture.versions[index].catalog.boards.find(board => board.kind === 'hosted-view');
+    assert.equal(new URL(hosted.hosted.url).protocol, 'https:');
+    const result = catalogFixtures.publishCatalog(fixture, {
+      python: process.env.PENTACLE_PYTHON || 'python3', assetsDb: path.join(scratch, 'assets.db'), scratch,
+    }, index);
+    assert.equal(result.asset_id, 'dashboard-catalog');
+  }
 });
 
 test('dashboard oracle rejects a profile URL that never reached the renderer bridge', () => {

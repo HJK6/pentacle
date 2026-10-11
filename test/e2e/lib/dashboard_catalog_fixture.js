@@ -89,7 +89,7 @@ function syntheticVersion(root, version, { hostedUrl }) {
 // Returns { root, specId, versions: [{version, dir, assetBody, catalog}], override, reportRows }.
 // Synthetic versions are written under `scratch`; only N is installed at
 // first, so a scenario can install N+1 at runtime (no host restart).
-function buildCatalogFixture(scratch, { hostedUrl = 'http://127.0.0.1:9/' } = {}) {
+function buildCatalogFixture(scratch, { hostedUrl = 'https://viewer.example.ts.net/modeler_viewer.html' } = {}) {
   const overrideRoot = process.env.PENTACLE_TEST_CATALOG_ROOT;
   if (overrideRoot) {
     const root = path.resolve(overrideRoot);
