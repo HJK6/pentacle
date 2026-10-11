@@ -416,6 +416,10 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
         else:
             packet["gaps"].append({"source": "primary_archive", "reason": "not configured; retired recipients unknown"})
 
+        observations.extend(fd_turn_budget_evidence(conn, archive, packet, start, cutoff, max_rows=max_rows, max_bytes=max_bytes))
+        if conn is None:
+            return finalize_primary_evidence(packet, observations, max_bytes=max_bytes)
+
         def query(db, name, columns, table, where="1", args=(), order="1", prefix=""):
             try:
                 total = db.execute(prefix + f"SELECT count(*) FROM {table} WHERE {where}", args).fetchone()[0]
