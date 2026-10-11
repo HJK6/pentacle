@@ -144,6 +144,7 @@ class WorkLanesInventory:
     def __init__(self, store: Any, sessions: Any,
                  broadcast: Callable[[dict[str, Any]], Awaitable[None]], *, specs: Any = None,
                  sweep_interval_s: float | None = None, settle_s: float | None = None,
+                 refresh_min_s: float | None = None,
                  episode_sink: LaneEpisodeSink | None = None) -> None:
         self.store = store
         self.sessions = sessions
@@ -156,6 +157,13 @@ class WorkLanesInventory:
         if (not math.isfinite(self.sweep_interval_s) or not math.isfinite(self.settle_s)
                 or self.sweep_interval_s <= 0 or self.settle_s < 0):
             raise ValueError("work_index_interval_invalid")
+        # Minimum spacing between drain passes. Each pass rereads current state,
+        # so waiting coalesces a burst into one pass that sees the latest state.
+        self.refresh_min_s = float(refresh_min_s if refresh_min_s is not None else
+                                   os.environ.get("WORK_LANES_REFRESH_MIN_S", "2"))
+        if not math.isfinite(self.refresh_min_s) or self.refresh_min_s < 0:
+            raise ValueError("work_lanes_refresh_interval_invalid")
+        self._last_pass = float("-inf")
         self._last_sweep = float("-inf")
         self._index_dirty = specs is not None
         self._last_signature: str | None = None
@@ -182,7 +190,12 @@ class WorkLanesInventory:
 
     async def _drain(self) -> None:
         while (self._running or self.specs is None) and self._dirty:
+            wait = self._last_pass + self.refresh_min_s - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+                continue
             self._dirty = False
+            self._last_pass = time.monotonic()
             try:
                 await self.reconcile_index()
                 await self.store.reconcile_work_lanes()
