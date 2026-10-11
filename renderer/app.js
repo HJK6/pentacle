@@ -5062,24 +5062,30 @@ function renderSidebar() {
 // lane's generation, `unavailable` an explicit card. Never Bart, a hidden worker
 // or a newer generation as a fallback.
 function openWorkLane(el) {
-  const lane = (state.workLanes?.lanes || []).find((item) => item.lane_id === el.dataset.laneId);
-  if (!lane) return;
+  openWorkLaneById(el.dataset.laneId);
+}
+
+// Returns the resolved tap action, or null when the lane or its open chat is not here.
+function openWorkLaneById(laneId) {
+  const lane = (state.workLanes?.lanes || []).find((item) => item.lane_id === laneId);
+  if (!lane) return null;
   const target = window.PentacleChatCore.workLaneTapTarget(lane);
   if (target.action === 'open_chat') {
     const summary = state.sessions.find((s) => sessionSummaryStreamId(s) === target.stream_id
       && filterSidebarSessions([s]).length === 1);
     if (!summary) {
       showToast('This lane\'s chat is not available in this window', { type: 'error' });
-      return;
+      return null;
     }
     activateSidebarRow({ dataset: {
       name: summary.name, display: summary.display_name || summary.name,
       host: summary.hostId || (IS_CLIENT ? 'remote' : 'local'),
       streamId: target.stream_id, primaryAction: 'status',
     } }, IS_CLIENT ? 'remote' : 'local');
-    return;
+    return target.action;
   }
   openLaneHistorySlot(lane, target);
+  return target.action;
 }
 
 function openLaneHistorySlot(lane, target) {
@@ -6766,6 +6772,38 @@ function selectDashboard(id) {
   mountAndPoll(id);
 }
 
+function deepFreeze(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    Object.values(value).forEach(deepFreeze);
+  }
+  return value;
+}
+
+// Dashboard `lanes` host action: a frozen copy of the daemon lanes projection plus each
+// lane's tap action. Read-only; it never calls the daemon.
+function dashboardLanesSnapshot() {
+  const inventory = state.workLanes;
+  const core = window.PentacleChatCore;
+  if (!inventory || inventory.generated_at === null || !core?.workLaneTapTarget) return { ok: false, error: 'lanes_unavailable' };
+  const copy = JSON.parse(JSON.stringify(inventory));
+  copy.lanes.forEach((lane, index) => { lane.tap = core.workLaneTapTarget(inventory.lanes[index]).action; });
+  return deepFreeze({ ok: true, inventory: copy });
+}
+
+// Dashboard `navigate` host action: `{lane_id}` only. Opens that lane's daemon-resolved
+// chat through the sidebar lane path (open chat, read-only history or the unavailable card).
+function dashboardNavigateToLane(params) {
+  const keys = params && typeof params === 'object' && !Array.isArray(params) ? Object.keys(params) : null;
+  if (!keys || keys.length !== 1 || keys[0] !== 'lane_id' || typeof params.lane_id !== 'string' || !params.lane_id) {
+    return { ok: false, error: 'navigate_invalid' };
+  }
+  if (!(state.workLanes?.lanes || []).some((lane) => lane.lane_id === params.lane_id)) return { ok: false, error: 'unknown_lane' };
+  switchView('chats');
+  const action = openWorkLaneById(params.lane_id);
+  return action ? { ok: true, action } : { ok: false, error: 'chat_not_available' };
+}
+
 function dashboardMountContext(db) {
   // The catalog loader owns this metadata: copy its validated descriptor's
   // actions onto the registered adapter. Missing metadata grants nothing.
@@ -6776,6 +6814,13 @@ function dashboardMountContext(db) {
       return { ok: false, error: 'action_not_allowed' };
     }
     return window.cc[action](params);
+  };
+  const hostAction = (action, fn) => async params => {
+    if (!allowed.has(action)) {
+      console.warn('[dashboards] action_not_allowed', { id: db.id, action });
+      return { ok: false, error: 'action_not_allowed' };
+    }
+    return fn(params);
   };
   let assistant;
   if (allowed.has('assistantState')) {
@@ -6790,7 +6835,8 @@ function dashboardMountContext(db) {
   return { config: CONFIG,
     household: allowed.has('household') ? { selectors: householdSelectors, store: householdStore } : undefined,
     assistant,
-    actions: { assetList: assetAction('assetList'), assetGet: assetAction('assetGet') } };
+    actions: { assetList: assetAction('assetList'), assetGet: assetAction('assetGet'),
+      lanes: hostAction('lanes', () => dashboardLanesSnapshot()), navigate: hostAction('navigate', params => dashboardNavigateToLane(params)) } };
 }
 
 function mountAndPoll(id) {

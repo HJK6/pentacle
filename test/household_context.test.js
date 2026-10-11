@@ -69,7 +69,7 @@ for (let mask = 0; mask < 16; mask++) {
       assert.deepEqual(Object.keys(ctx.assistant).sort(), ['hostId', 'name', 'sigilMarkup']);
       assert.equal(ctx.assistant.name, 'Assistant'); assert.equal(ctx.assistant.hostId, 'fixture-host');
     } else assert.equal(ctx.assistant, undefined);
-    assert.deepEqual(Object.keys(ctx.actions).sort(), ['assetGet', 'assetList']);
+    assert.deepEqual(Object.keys(ctx.actions).sort(), ['assetGet', 'assetList', 'lanes', 'navigate']);
     for (const action of ['assetList', 'assetGet']) {
       const params = { spec_id: 'spec_example' }, pending = ctx.actions[action](params);
       assert.equal(typeof pending.then, 'function');
@@ -84,6 +84,9 @@ for (let mask = 0; mask < 16; mask++) {
     }
     assert.equal(h.calls.length, allowed.filter(action => action.startsWith('asset')).length);
     assert.equal(h.warnings.length, 2 - h.calls.length);
+    // None of these masks grants the lanes actions.
+    for (const action of ['lanes', 'navigate']) assert.equal((await ctx.actions[action]({ lane_id: 'wl-example' })).error, 'action_not_allowed');
+    assert.equal(h.calls.length, allowed.filter(action => action.startsWith('asset')).length);
   });
 }
 

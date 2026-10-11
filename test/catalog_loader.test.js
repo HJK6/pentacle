@@ -127,9 +127,38 @@ test('tag failure preserves integrity and 404 copy; timeout removes failed tag',
   }
   const h = harness({ loadTimeoutMs: 1 }); await assert.rejects(h.loader.loadTag(full(), 'web/example.js', 'a'.repeat(64)), /timed out/);
 });
-test('allowlist has exactly asset actions and denied calls resolve plus warn', async () => {
+test('allowlist has exactly the callable actions and denied calls resolve plus warn', async () => {
   const warnings = [], cc = { assetList: async p => ({ ok: true, p }) }; const actions = api.actions({ id: 'example-board', actions: ['assetList', 'household'] }, cc, (...x) => warnings.push(x));
-  assert.deepEqual(Object.keys(actions), ['assetList', 'assetGet']); assert.equal((await actions.assetList({})).ok, true); assert.deepEqual(await actions.assetGet({}), { ok: false, error: 'action_not_allowed' }); assert.equal(warnings.length, 1);
+  assert.deepEqual(Object.keys(actions), ['assetList', 'assetGet', 'lanes', 'navigate']); assert.equal((await actions.assetList({})).ok, true); assert.deepEqual(await actions.assetGet({}), { ok: false, error: 'action_not_allowed' }); assert.equal(warnings.length, 1);
+});
+test('lanes and navigate delegate to host functions only when listed and supplied', async () => {
+  const calls = [], host = { lanes: async () => (calls.push(['lanes']), { ok: true, inventory: {} }), navigate: async p => (calls.push(['navigate', p]), { ok: true, action: 'history' }) };
+  const cc = { lanes: async () => { throw new Error('the daemon bridge is never used for lanes'); } };
+  const granted = api.actions({ id: 'example-board', actions: ['lanes', 'navigate'] }, cc, () => {}, host);
+  assert.equal((await granted.lanes()).ok, true); assert.deepEqual(await granted.navigate({ lane_id: 'wl-example' }), { ok: true, action: 'history' });
+  assert.deepEqual(calls, [['lanes'], ['navigate', { lane_id: 'wl-example' }]]);
+  for (const [entryActions, hostActions] of [[[], host], [['assetList'], host], [['lanes', 'navigate'], {}], [['lanes', 'navigate'], undefined]]) {
+    const warnings = [], denied = api.actions({ id: 'example-board', actions: entryActions }, cc, (...x) => warnings.push(x), hostActions);
+    assert.deepEqual(await denied.lanes(), { ok: false, error: 'action_not_allowed' }); assert.deepEqual(await denied.navigate({ lane_id: 'wl-example' }), { ok: false, error: 'action_not_allowed' });
+    assert.equal(warnings.length, 2);
+  }
+  assert.equal(calls.length, 2);
+});
+test('web-adapter descriptors may list lanes and navigate; other names still fail the catalog', () => {
+  const c = full(); c.boards[1].actions = ['lanes', 'navigate']; assert.equal(api.validateCatalog(c), c);
+  c.boards[1].actions = ['lanes', 'openChat']; assert.throws(() => api.validateCatalog(c), /unknown host actions: openChat/);
+});
+test('wrapped adapters receive host lanes/navigate through the descriptor grant', async () => {
+  for (const listed of [true, false]) {
+    const h = harness(), c = full(); c.libs = []; c.boards = [c.boards[1]]; delete c.boards[0].web.css; delete c.boards[0].web.css_sha256;
+    c.boards[0].actions = listed ? ['lanes', 'navigate'] : [];
+    let seen; autoTags(h, () => h.root.DASHBOARDS.push({ id: 'example-board', mount(node, ctx) { seen = ctx; return {}; } }));
+    const host = { lanes: async () => ({ ok: true, inventory: { lanes: [] } }), navigate: async () => ({ ok: true, action: 'open_chat' }) };
+    const board = h.loader.merge({ catalog: c }, []).boards[0], refs = board.mount(h.root.document.querySelector('main'), { config: {}, actions: host });
+    await refs.ready;
+    if (listed) { assert.equal((await seen.actions.lanes()).ok, true); assert.equal((await seen.actions.navigate({ lane_id: 'wl-example' })).action, 'open_chat'); }
+    else { assert.equal((await seen.actions.lanes()).error, 'action_not_allowed'); assert.equal((await seen.actions.navigate({ lane_id: 'wl-example' })).error, 'action_not_allowed'); }
+  }
 });
 test('merge resolves built-ins only where the catalog references them', () => {
   const h = harness(), c = full(), builtin = { id: 'example-board', mount() {} };
