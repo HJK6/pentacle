@@ -288,7 +288,7 @@ def fd_turn_budget_evidence(conn, archive, packet, start, cutoff, *, max_rows, m
     import math
     import time
     from fd_turn_budget import timestamp, turn_key
-    coordinator = sqlite3.connect(":memory:")
+    coordinator = sqlite3.connect(":memory:", uri=True)
     coordinator.row_factory = sqlite3.Row
     coordinator.create_function("fd_timestamp", 1, timestamp, deterministic=True)
     deadline = time.monotonic() + 2
