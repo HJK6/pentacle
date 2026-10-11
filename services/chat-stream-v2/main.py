@@ -860,8 +860,7 @@ async def run(args: argparse.Namespace) -> int:
     startup_phase_started = time.monotonic()
     store.start()
     log.info("startup phase=store_start duration_s=%.6f", time.monotonic() - startup_phase_started)
-    await work_lanes.reconcile_index(force_sweep=True)
-    work_lanes.start()
+    await store.mark_work_index_pending()
     startup_phase_started = time.monotonic()
     for _composite in assistant_composites.values():
         if _composite.config.enabled:
@@ -916,6 +915,7 @@ async def run(args: argparse.Namespace) -> int:
     server.runtime_sha = event_push.daemon_sha
     log.info("startup phase=sha_resolution duration_s=%.6f", time.monotonic() - startup_phase_started)
     server.bootstrap_ready.set()
+    work_lanes.start()  # Presentation refresh follows adopted inventory and SHA.
     if event_push.daemon_sha:
         log.info("event.push boot daemon SHA: %s", event_push.daemon_sha)
     else:

@@ -65,6 +65,17 @@ class WorkIndexStoreMixin:
             return {key: state.get(key) for key in INDEX_FIELDS}
         return await self.submit(read)
 
+    async def mark_work_index_pending(self) -> None:
+        """Boot availability only: keep last-good facts, history and clocks intact."""
+        def mark(conn):
+            state = _state_conn(conn)
+            state.update(available=False, error="work_index_unavailable")
+            conn.execute("INSERT INTO v2_work_index_state(singleton,state_json) VALUES (1,?) "
+                         "ON CONFLICT(singleton) DO UPDATE SET state_json=excluded.state_json",
+                         (json.dumps(state, separators=(",", ":")),))
+            conn.commit()
+        await self.submit(mark)
+
     async def reconcile_work_observations(self, scan: dict, *, settle_s: float, sweep: bool) -> dict:
         """A serialized snapshot + history commit; membership is read in this transaction."""
         from store_work_lanes import _insert_event

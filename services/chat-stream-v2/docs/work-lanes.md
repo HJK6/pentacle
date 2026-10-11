@@ -469,3 +469,18 @@ current new-parser numbers/nullness, apply and read back Estimate hashes and
 complete membership, then hold the same freeze through old-code restart and
 live readback. Never restore whole-file preimages. If old code cannot represent
 an exemption/null case, stop for the owner; source rollback alone is unsafe.
+
+### Work index during daemon boot
+
+Core adoption, bindings and runtime SHA complete before the first usable
+welcome. The observation index is marked unavailable with a single metadata
+write; cached lanes, observations, history and prior scan timestamps are kept.
+Nonterminal completion is unknown until the existing full background refresh
+finishes. Done lanes retain their terminal state. Fresh spec ownership checks
+remain independent of these cached presentation facts.
+
+The initial scan and watcher attachment start after core readiness. Changes
+during scanning coalesce into another refresh; watcher failure retains periodic
+polling. Scan and apply durations use `work index phase=...` log labels because
+they no longer belong to the startup critical path. A scan failure keeps work
+data unavailable until the next successful refresh.
