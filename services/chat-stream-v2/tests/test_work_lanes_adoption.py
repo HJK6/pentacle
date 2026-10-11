@@ -211,10 +211,11 @@ def test_typed_wire_error_and_unchanged_value_error_mapping():
     run(body)
 
 
-def test_routing_reopen_does_not_open_done_product_lane():
+def test_routing_reopen_does_not_open_done_product_lane(tmp_path):
     from test_work_lane_progress import A, a1_close
     async def body(env):
-        lane = await a1_close(env, (await env.adopt("stream:history", state="paused", owner="operator", members=[A]))["lane"])
+        lane = await a1_close(env, (await env.adopt("stream:history", state="paused", owner="operator", members=[A]))["lane"],
+                              memory_root=tmp_path / "memory")
         await env.adopt("stream:current", state="paused", owner="operator", members=[A])
         def seed(conn):
             conn.execute("UPDATE v2_assistant_composite_lanes SET phase='completed' WHERE lane_id=?", (lane["lane_id"],))

@@ -44,6 +44,12 @@ disposition records class, receipt reason and receiving owner. This is syntax
 and linkage validation, not a judgment about whether deferral was appropriate.
 Readable specs with no Custom section or no Custom checkboxes pass. Missing or
 unreadable members fail closed; an unconfigured root is not a waiver.
+A real affected lane remains open, and its current lead cannot close through
+these paths until its owner restores the configured tree and readable member
+spec at its correct identity, or corrects obsolete membership through the
+existing authorized lane operation. The owner then disposes any remaining
+Custom criteria and retries completion/close. A missing file cannot be cleared
+by pretending it has an empty Custom section or by using a new bypass flag.
 
 `CompletionRefusal` separates a stable code from its explanation and `items`:
 
