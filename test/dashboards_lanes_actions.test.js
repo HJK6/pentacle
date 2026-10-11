@@ -36,7 +36,7 @@ function laneFrame() {
   return frame;
 }
 
-async function boot(t) {
+async function boot(t, { recordAssign = true } = {}) {
   let onFrame = null;
   const ccCalls = [];
   const sessions = [SESSION('lead-one'), COMPOSITE, SESSION('other')];
@@ -56,7 +56,8 @@ async function boot(t) {
   // Count every daemon-bridge call made while a lanes snapshot is read.
   run(`globalThis.__ccCalls = 0; for (const key of Object.keys(window.cc)) { const fn = window.cc[key];
     if (typeof fn === 'function') window.cc[key] = (...args) => { globalThis.__ccCalls++; return fn(...args); }; }`);
-  run('globalThis.__assigned = []; assignToSlot = (name, display, host) => { globalThis.__assigned.push({ name, host }); return 0; };');
+  // Ordinary sessions open an xterm pane the harness cannot host; record those assignments.
+  if (recordAssign) run('globalThis.__assigned = []; assignToSlot = (name, display, host) => { globalThis.__assigned.push({ name, host }); return 0; };');
   return {
     h, run, ccCalls,
     push: async (frame) => { onFrame(frame); await flush(); },
@@ -171,4 +172,65 @@ test('navigate on an unavailable lane shows the unavailable card and opens no ot
   assert.match(app.h.dom.window.document.getElementById(`cell-${slot}`).textContent, /Chat unavailable/);
   assert.equal(app.ccCalls.length, 0);
   assert.deepEqual(app.assigned(), []);
+});
+
+// Integrated wiring (spec QA note 2): the app's real mount context, through the
+// catalog loader's real wrapAdapter, into a mounted adapter; outcomes are the real
+// slots, with no recorder in the open-chat path.
+const loaderApi = require('../renderer/dashboards/catalog_loader');
+
+async function mountThroughLoader(app, actions) {
+  const win = app.h.dom.window;
+  const catalog = { catalog_version: '0.0.1+example', libs: [], boards: [{ id: 'example-lanes', name: 'Example lanes', kind: 'web-adapter',
+    web: { script: 'web/example-lanes.js', sha256: 'a'.repeat(64) }, actions }] };
+  let seen = null;
+  const append = win.document.head.appendChild.bind(win.document.head);
+  win.document.head.appendChild = (tag) => {
+    append(tag);
+    queueMicrotask(() => { (win.DASHBOARDS || (win.DASHBOARDS = [])).push({ id: 'example-lanes', mount(node, ctx) { seen = ctx; return {}; } }); tag.onload?.(); });
+    return tag;
+  };
+  const loader = loaderApi.createLoader({ root: win, cc: win.cc, storage: null });
+  const board = loader.merge({ catalog }, []).boards[0];
+  app.h.context.__wrapped = board;
+  const ctx = app.run('dashboardMountContext(__wrapped)');
+  const refs = board.mount(win.document.getElementById('dashboard-content'), ctx);
+  await refs.ready;
+  assert.ok(seen, 'adapter mounted through the loader');
+  return seen.actions;
+}
+
+test('integrated: app context through wrapAdapter grants lanes/navigate and opens the real lane chats', async (t) => {
+  const app = await boot(t, { recordAssign: false });
+  await app.push(laneFrame());
+  const actions = await mountThroughLoader(app, ['lanes', 'navigate']);
+  const before = app.ccCount();
+  const snapshot = await actions.lanes();
+  assert.equal(snapshot.ok, true);
+  assert.equal(app.ccCount(), before, 'lanes stays local through the loader');
+  assert.equal(snapshot.inventory.lanes.length, 4);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(await actions.navigate({ lane_id: 'wl-active-0002' }))), { ok: true, action: 'open_chat' });
+  assert.equal(app.run('state.currentView'), 'chats');
+  assert.equal(app.run('state.slots.filter(Boolean).map((s) => s.name).join(",")'), 'assistant', 'the composite lane chat is in a slot');
+
+  assert.deepEqual(JSON.parse(JSON.stringify(await actions.navigate({ lane_id: 'wl-paused-0003' }))), { ok: true, action: 'history' });
+  const history = app.run('state.slots.findIndex((s) => s && s.laneHistory && !s.laneHistory.unavailable)');
+  assert.deepEqual(JSON.parse(app.run(`JSON.stringify(state.slots[${history}].laneHistory)`)),
+    { streamId: 'example-host:lead-three', generation: 'gen-lead-0003', laneId: 'wl-paused-0003' });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(await actions.navigate({ lane_id: 'wl-paused-0004' }))), { ok: true, action: 'unavailable' });
+  const unavailable = app.run('state.slots.findIndex((s) => s && s.laneHistory && s.laneHistory.unavailable)');
+  assert.ok(unavailable >= 0);
+  assert.match(app.h.dom.window.document.getElementById(`cell-${unavailable}`).textContent, /Chat unavailable/);
+  assert.deepEqual(JSON.parse(JSON.stringify(await actions.navigate({ lane_id: 'wl-active-0002', stream_id: 'example-host:other' }))), { ok: false, error: 'navigate_invalid' });
+});
+
+test('integrated: a descriptor without the grants gets denials through wrapAdapter and opens nothing', async (t) => {
+  const app = await boot(t, { recordAssign: false });
+  await app.push(laneFrame());
+  const actions = await mountThroughLoader(app, ['assetList']);
+  assert.deepEqual(JSON.parse(JSON.stringify(await actions.lanes())), { ok: false, error: 'action_not_allowed' });
+  assert.deepEqual(JSON.parse(JSON.stringify(await actions.navigate({ lane_id: 'wl-active-0002' }))), { ok: false, error: 'action_not_allowed' });
+  assert.equal(app.run('state.slots.filter(Boolean).length'), 0);
 });
