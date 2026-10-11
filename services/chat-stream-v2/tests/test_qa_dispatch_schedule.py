@@ -12,7 +12,7 @@ from spawnctl import SpawnCtl
 from window_schedule import WindowSchedule
 from test_spec_binding_provenance import SpawnTmux
 from test_window_schedule_contract import RouteProbeSpecs
-from test_qa_dispatch_counter import SPEC, LEAD, TOKEN, META, state, two_rejects, issue
+from test_qa_dispatch_counter import SPEC, LEAD, TOKEN, META, state, two_rejects, issue, send_msg, report_msg
 
 
 def message(verb, **extra):
@@ -30,6 +30,7 @@ def message(verb, **extra):
     "case",
     [
         "rejects",
+        "scheduled_fire_refuses_pending",
         "stale",
         "owner_generation",
         "replay",
@@ -41,6 +42,8 @@ def message(verb, **extra):
 )
 def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case):
     monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
+    if case == "scheduled_fire_refuses_pending":
+        monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "off")
 
     async def run():
         store, sessions, _, comms, ledger, server = await state(
@@ -147,6 +150,10 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
                 return
             if case in ("rejects", "stale", "rearm", "worker", "off_legacy"):
                 await two_rejects(comms, ledger, server)
+            if case == "scheduled_fire_refuses_pending":
+                for name in ("qa1", "qa2"):
+                    assert (await comms.send(send_msg(name)))["delivery"] == "landed"
+                    await ledger.ingest(report_msg(name))
             if case == "stale":
                 await issue(
                     server,
@@ -178,7 +185,7 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
                 )["schedule"]
                 assert row["generation"] == 2
             run_msg = message("schedule.run", schedule_id=sid)
-            if case in ("rejects", "stale", "rearm", "owner_generation"):
+            if case in ("rejects", "stale", "rearm", "owner_generation", "scheduled_fire_refuses_pending"):
                 with pytest.raises(VerbError) as exc:
                     await schedule._fire_schedule(sid)
                 result = exc.value.extra.get("spawn", {})
@@ -191,6 +198,16 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
                         else "qa_dispatch_reject_limit"
                     )
                 )
+                if case == "scheduled_fire_refuses_pending":
+                    expected = "qa_adjudication_required"
+                    assert result["report_ids"] == ["reject-qa1", "reject-qa2"]
+                    assert len(result["commands"]) == 2
+                    persisted = (await schedule.schedule_get(
+                        message("schedule.get", schedule_id=sid)
+                    ))["schedule"]
+                    assert persisted["state"] == "failed"
+                    assert persisted["last_error_code"] == expected
+                    assert len((await issue(server, "show"))["commissions"]) == 2
                 assert result.get("error_code") == expected, (
                     exc.value.code,
                     exc.value.extra,
