@@ -156,7 +156,7 @@ async def a1_close(env, lane, *, memory_root=None):
     fixture_root = (tempfile.TemporaryDirectory(prefix="lane-member-fixture-")
                     if memory_root is None else nullcontext(str(memory_root)))
     with fixture_root as root, pytest.MonkeyPatch.context() as patch:
-        root = Path(root)
+        root = Path(root).resolve()
         for spec_id in lane["members"]:
             path = root / "work" / "in_progress" / spec_id.removeprefix("spec_") / "spec.md"
             path.parent.mkdir(parents=True, exist_ok=True)
