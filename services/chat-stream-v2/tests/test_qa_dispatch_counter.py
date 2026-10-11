@@ -133,3 +133,74 @@ def test_third_same_surface_spawn_is_refused_before_pane(monkeypatch):
             store.stop()
 
     asyncio.run(run())
+
+
+def test_third_send_requires_adjudication_mode_off(monkeypatch):
+    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'off')
+
+    async def run():
+        store, _, tmux, comms, ledger, server = await state()
+        try:
+            for name in ('qa1', 'qa2'):
+                assert (await comms.send(send_msg(name)))['delivery'] == 'landed'
+                await ledger.ingest(report_msg(name))
+            before = list(tmux.pastes)
+            commissions = (await issue(server, 'show'))['commissions']
+            with pytest.raises(VerbError) as exc:
+                await comms.send(send_msg('qa3'))
+            assert exc.value.code == 'qa_adjudication_required'
+            assert exc.value.extra['report_ids'] == ['reject-qa1', 'reject-qa2']
+            assert exc.value.extra['commands'] == [
+                f"agent-orch spec-issue adjudicate {rid} --spec-id {SPEC} "
+                "--surface admission --cycle 1 --valid|--void --reason '<reason>'"
+                for rid in ('reject-qa1', 'reject-qa2')
+            ]
+            assert tmux.pastes == before
+            assert (await issue(server, 'show'))['commissions'] == commissions
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_third_spawn_requires_adjudication_mode_off(monkeypatch):
+    from test_spec_binding_provenance import SpawnTmux
+    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'off')
+
+    class Catalog:
+        def resolution_for(self, value):
+            return 'resolved' if value == SPEC else 'zero_matches'
+
+        def canonical_spec_identity(self, value):
+            return value if value == SPEC else None
+
+    async def run():
+        store, sessions, sends_tmux, comms, ledger, server = await state()
+        tmux = SpawnTmux()
+        ctl = SpawnCtl(store, sessions, tmux=tmux, specs=Catalog())
+        try:
+            for name in ('qa1', 'qa2'):
+                assert (await comms.send(send_msg(name)))['delivery'] == 'landed'
+                await ledger.ingest(report_msg(name))
+            before = list(sends_tmux.pastes)
+            commissions = (await issue(server, 'show'))['commissions']
+            with pytest.raises(VerbError) as exc:
+                await ctl.spawn({
+                    'objective': 'Review same surface again', 'command': 'provider',
+                    'session_name': 'qa-third-spawn', 'request_id': 'third-spawn',
+                    'parent_stream_id': LEAD, 'from_stream_id': LEAD, 'stream_token': TOKEN,
+                    'role': 'qa', 'spec_id': SPEC, **META,
+                }, 'localhost')
+            assert exc.value.code == 'qa_adjudication_required'
+            assert exc.value.extra['report_ids'] == ['reject-qa1', 'reject-qa2']
+            assert len(exc.value.extra['commands']) == 2
+            assert tmux.live == set()
+            assert sends_tmux.pastes == before
+            assert (await issue(server, 'show'))['commissions'] == commissions
+        finally:
+            await asyncio.gather(*tuple(ctl._background_spawns), return_exceptions=True)
+            for name in tuple(tmux.live):
+                await tmux.kill_session(name)
+            store.stop()
+
+    asyncio.run(run())

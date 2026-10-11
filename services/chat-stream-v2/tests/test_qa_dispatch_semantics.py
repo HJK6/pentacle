@@ -96,6 +96,22 @@ def test_counter_transitions_and_exemptions(monkeypatch, case):
                 return
             elif case == "off":
                 monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "off")
+                with pytest.raises(VerbError) as exc:
+                    await comms.send(send_msg("qa3"))
+                assert exc.value.code == "qa_dispatch_reject_limit"
+                assert exc.value.extra["report_ids"] == ["reject-qa1", "reject-qa2"]
+                result = await issue(
+                    server,
+                    "diagnose",
+                    diagnosis_id="pivot-1",
+                    diagnosis="wrong abstraction",
+                    pivot="different acceptance scope",
+                )
+                assert result["next_cycle"] == 2
+                assert (await comms.send(send_msg("qa3", qa_cycle=2)))[
+                    "delivery"
+                ] == "landed"
+                return
             elif case == "diagnose":
                 params = dict(
                     diagnosis_id="pivot-1",
@@ -566,6 +582,279 @@ def test_resolved_legacy_target_alias_uses_canonical_scope(monkeypatch):
             )
             assert (await comms.send(send_msg("qa3")))["delivery"] == "landed"
             assert (await issue(server, "show"))["commissions"][0]["spec_id"] == SPEC
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["off", "enforce"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "misfiled_single_open",
+        "misfiled_retry_void_revalidate",
+        "two_open_candidates",
+        "exact_key_wins_over_open_candidates",
+        "superseding_id_conflicts",
+        "no_commission",
+        "old_generation_does_not_cross",
+        "new_generation_binds",
+    ],
+)
+def test_misfiled_report_commission_binding(monkeypatch, mode, case):
+    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", mode)
+
+    async def run():
+        store, sessions, _, comms, ledger, server = await state()
+        try:
+            async def adjudicate(ident="reject-qa1", valid=True):
+                return await issue(
+                    server, "adjudicate", report_id=ident,
+                    adjudicated_valid=valid, reason="in-scope admission defect",
+                )
+
+            async def assert_unwritten(expected_msg_ids):
+                shown = await issue(server, "show")
+                assert shown["report_ids"] == []
+                assert sorted(row["msg_id"] for row in shown["commissions"]) == expected_msg_ids
+                assert all(row["report_id"] is None for row in shown["commissions"])
+                assert await store.submit(lambda conn: conn.execute(
+                    "SELECT COUNT(*) FROM v2_qa_adjudications"
+                ).fetchone()[0]) == 0
+
+            if case == "no_commission":
+                await ledger.ingest(report_msg("qa3"))
+                result = await adjudicate("reject-qa3")
+                assert result["error_code"] == "qa_report_binding_mismatch", result
+                assert result["candidate_msg_ids"] == []
+                await assert_unwritten([])
+                return
+
+            if case in ("old_generation_does_not_cross", "new_generation_binds"):
+                # File the old report without ever commissioning its generation.
+                await ledger.ingest(report_msg("qa1"))
+                old = (await store.fetch_session("localhost", "qa1"))["session_generation"]
+                await store.update_session("localhost", "qa1", status="closed")
+                await sessions.open(
+                    "localhost", "qa1", provider="claude", role="qa",
+                    spec_id=SPEC, parent_stream_id=LEAD,
+                    session_generation="new-generation",
+                )
+                new = (await store.fetch_session("localhost", "qa1"))["session_generation"]
+                assert new != old
+                await comms.send(send_msg("qa1"))
+                result = await adjudicate()
+                assert result["error_code"] == "qa_report_binding_mismatch", result
+                # Final-only assertion: added after the base-green generation control.
+                assert result["candidate_msg_ids"] == []
+                await assert_unwritten([0])
+                shown = await issue(server, "show")
+                assert shown["commissions"][0]["generation"] == new
+                assert (await store.get_report("reject-qa1"))["session_generation"] == old
+                if case == "old_generation_does_not_cross":
+                    return
+                await ledger.ingest(report_msg("qa1", report_id="new-generation-report", msg_id=1))
+                result = await adjudicate("new-generation-report")
+                assert result["type"] == "coordination.spec_issue.adjudicate.ok", result
+                shown = await issue(server, "show")
+                assert shown["report_ids"] == ["new-generation-report"]
+                assert len(shown["commissions"]) == 1
+                assert shown["commissions"][0]["msg_id"] == 0
+                assert shown["commissions"][0]["report_id"] == "new-generation-report"
+                assert (await store.get_report("new-generation-report"))["msg_id"] == 1
+                return
+
+            await comms.send(send_msg("qa1"))
+            if case in ("two_open_candidates", "exact_key_wins_over_open_candidates"):
+                await comms.send(send_msg("qa1", msg_id=1, text="review qa1 again"))
+                if case == "exact_key_wins_over_open_candidates":
+                    await comms.send(send_msg("qa1", msg_id=2, text="review qa1 a third time"))
+                await ledger.ingest(report_msg("qa1", msg_id=5 if case == "two_open_candidates" else 1))
+                result = await adjudicate()
+                if case == "two_open_candidates":
+                    assert result["error_code"] == "qa_report_binding_mismatch", result
+                    assert result["candidate_msg_ids"] == [0, 1]
+                    await assert_unwritten([0, 1])
+                else:
+                    assert result["type"] == "coordination.spec_issue.adjudicate.ok", result
+                    shown = await issue(server, "show")
+                    assert shown["report_ids"] == ["reject-qa1"]
+                    assert {row["msg_id"]: row["report_id"] for row in shown["commissions"]} == {
+                        0: None, 1: "reject-qa1", 2: None,
+                    }
+                return
+
+            await ledger.ingest(report_msg("qa1", msg_id=1))
+            result = await adjudicate()
+            assert result["type"] == "coordination.spec_issue.adjudicate.ok", result
+            shown = await issue(server, "show")
+            assert shown["report_ids"] == ["reject-qa1"]
+            assert len(shown["commissions"]) == 1
+            assert shown["commissions"][0]["msg_id"] == 0
+            assert shown["commissions"][0]["report_id"] == "reject-qa1"
+            assert (await store.get_report("reject-qa1"))["msg_id"] == 1
+
+            if case == "misfiled_retry_void_revalidate":
+                # A later exact-key commission must not steal the representative.
+                await comms.send(send_msg("qa1", msg_id=1, text="review qa1 again"))
+                assert (await adjudicate())["changed"] is False
+                for valid in (False, True):
+                    result = await adjudicate(valid=valid)
+                    assert result["type"] == "coordination.spec_issue.adjudicate.ok", result
+                    assert result["changed"] is True
+                    shown = await issue(server, "show")
+                    assert shown["report_ids"] == (["reject-qa1"] if valid else [])
+                    assert {row["msg_id"]: row["report_id"] for row in shown["commissions"]} == {
+                        0: "reject-qa1", 1: None,
+                    }
+                assert (await store.get_report("reject-qa1"))["msg_id"] == 1
+            elif case == "superseding_id_conflicts":
+                await ledger.ingest(report_msg("qa1", report_id="second", msg_id=2))
+                result = await adjudicate("second")
+                assert result["error_code"] == "qa_commission_report_conflict", result
+                assert result["report_id"] == "reject-qa1"
+                assert (await issue(server, "show"))["report_ids"] == ["reject-qa1"]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "case,variant",
+    [
+        ("void_clears", "off"),
+        ("one_pending_admits", "off"),
+        ("misfiled_counts", "off"),
+        ("malformed_never_holds", "missing"),
+        ("malformed_never_holds", "nonhex"),
+        ("malformed_never_holds", "mixed_missing"),
+        ("malformed_never_holds", "mixed_nonhex"),
+        ("check_only_and_validate_only_refuse", "check_only"),
+        ("check_only_and_validate_only_refuse", "validate_only"),
+        ("later_cycle_admits", "off"),
+        ("enforce_mode_same", "void_clears"),
+        ("enforce_mode_same", "valid_rejects"),
+    ],
+)
+def test_adjudication_required_transitions(monkeypatch, case, variant):
+    from spawnctl import SpawnCtl
+    from store_qa import QaError
+    from test_spec_binding_provenance import SpawnTmux
+    from test_window_schedule_contract import RouteProbeSpecs
+
+    monkeypatch.setenv(
+        "PENTACLE_QA_DISPATCH_MODE", "enforce" if case == "enforce_mode_same" else "off"
+    )
+
+    async def run():
+        store, sessions, tmux, comms, ledger, server = await state()
+        expected_ids = ["reject-qa1", "reject-qa2"]
+        expected_extra = {
+            "spec_id": SPEC,
+            "surface": "admission",
+            "cycle": 1,
+            "report_ids": expected_ids,
+            "commands": [
+                f"agent-orch spec-issue adjudicate {rid} --spec-id {SPEC} "
+                "--surface admission --cycle 1 --valid|--void --reason '<reason>'"
+                for rid in expected_ids
+            ],
+        }
+        try:
+            if case == "enforce_mode_same" and variant == "valid_rejects":
+                await two_rejects(comms, ledger, server)
+                with pytest.raises(VerbError) as exc:
+                    await comms.send(send_msg("qa3"))
+                assert exc.value.code == "qa_dispatch_reject_limit"
+                assert exc.value.extra["report_ids"] == expected_ids
+            else:
+                for name in ("qa1", "qa2"):
+                    assert (await comms.send(send_msg(name)))["delivery"] == "landed"
+                if case == "later_cycle_admits":
+                    # Create all commissions before either count reaches two.
+                    for name in ("qa1", "qa2"):
+                        assert (await comms.send(send_msg(name, msg_id=1)))["delivery"] == "landed"
+                    for name in ("qa1", "qa2"):
+                        await ledger.ingest(report_msg(name, msg_id=1, report_id=f"valid-{name}"))
+                        result = await issue(
+                            server, "adjudicate", report_id=f"valid-{name}",
+                            adjudicated_valid=True, reason="in-scope defect",
+                        )
+                        assert result["adjudicated_valid"] is True
+                for name in ("qa1", "qa2"):
+                    if case == "one_pending_admits" and name == "qa2":
+                        continue
+                    changes = {}
+                    if case == "misfiled_counts" and name == "qa1":
+                        changes["msg_id"] = 1
+                    if case == "malformed_never_holds" and not (
+                        variant.startswith("mixed_") and name == "qa1"
+                    ):
+                        changes["extras"] = (
+                            {"qa_review": {
+                                "candidate_identity": SHA,
+                                "reviewed_scope": "admission",
+                                "gate_evidence_digest": "g" * 64,
+                            }} if variant.endswith("nonhex") else {}
+                        )
+                    await ledger.ingest(report_msg(name, **changes))
+
+            if case == "later_cycle_admits" or (
+                case == "enforce_mode_same" and variant == "valid_rejects"
+            ):
+                result = await issue(
+                    server, "diagnose", diagnosis_id="pending-pivot",
+                    diagnosis="wrong abstraction", pivot="different acceptance scope",
+                )
+                assert result["next_cycle"] == 2
+                assert (await comms.send(send_msg("qa3", qa_cycle=2)))["delivery"] == "landed"
+                return
+            if case in ("one_pending_admits", "malformed_never_holds"):
+                assert (await comms.send(send_msg("qa3")))["delivery"] == "landed"
+                return
+
+            before = list(tmux.pastes)
+            commissions = (await issue(server, "show"))["commissions"]
+            if case == "check_only_and_validate_only_refuse":
+                panes = SpawnTmux()
+                ctl = SpawnCtl(store, sessions, tmux=panes, specs=RouteProbeSpecs())
+                if variant == "check_only":
+                    with pytest.raises(VerbError) as exc:
+                        await ctl.admit_schedule({
+                            "objective": "Review admission", "command": "provider",
+                            "provider": "claude", "model": "claude-opus-4-8", "effort": "high",
+                            "parent_stream_id": LEAD, "from_stream_id": LEAD,
+                            "stream_token": TOKEN, "role": "qa", "spec_id": SPEC, **META,
+                        }, "localhost", admission_name="qa-preflight")
+                else:
+                    owner = await store.fetch_session("localhost", "lead")
+                    reviewer = await store.fetch_session("localhost", "qa3")
+                    with pytest.raises(QaError) as exc:
+                        await store.qa_admit(
+                            scope={"spec_id": SPEC, "surface": "admission", "cycle": 1},
+                            actor=LEAD, actor_generation=owner["session_generation"],
+                            reviewer="localhost:qa3", generation=reviewer["session_generation"],
+                            msg_id=0, payload_hash="dry-admission", target_specs=[SPEC],
+                            enforce=False, prepare_only=True,
+                        )
+                assert panes.live == set()
+            else:
+                with pytest.raises(VerbError) as exc:
+                    await comms.send(send_msg("qa3"))
+            assert exc.value.code == "qa_adjudication_required"
+            assert exc.value.extra == expected_extra
+            assert tmux.pastes == before
+            assert (await issue(server, "show"))["commissions"] == commissions
+
+            if case == "void_clears" or case == "enforce_mode_same":
+                result = await issue(
+                    server, "adjudicate", report_id="reject-qa1",
+                    adjudicated_valid=False, reason="finding withdrawn",
+                )
+                assert result["adjudicated_valid"] is False
+                assert (await comms.send(send_msg("qa3")))["delivery"] == "landed"
         finally:
             store.stop()
 

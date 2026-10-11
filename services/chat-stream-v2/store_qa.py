@@ -170,7 +170,34 @@ def _rejects(conn, spec, surface, cycle):
     ]
 
 
-def _check_cycle(conn, spec, surface, cycle, enforce=True):
+def _pending_rejects(conn, spec, surface, cycle):
+    """Select one adjudicatable pending reject per open commission."""
+    pending = {}
+    commissions = conn.execute(
+        "SELECT * FROM v2_qa_commissions WHERE spec_id=? AND surface=? "
+        "AND cycle=? AND report_id IS NULL",
+        (spec, surface, cycle),
+    ).fetchall()
+    for commission in commissions:
+        key = tuple(commission[k] for k in ("reviewer", "generation", "msg_id"))
+        reports = conn.execute(
+            "SELECT * FROM v2_reports WHERE from_stream_id=? AND session_generation=? "
+            "AND status='done' AND qa_verdict='reject' ORDER BY created_at",
+            (commission["reviewer"], commission["generation"]),
+        )
+        for report in reports:
+            if not _adjudicatable(report):
+                continue
+            resolved, _ = _commission_for_report(conn, report)
+            if resolved is not None and tuple(
+                resolved[k] for k in ("reviewer", "generation", "msg_id")
+            ) == key:
+                pending[key] = report["report_id"]
+                break
+    return pending
+
+
+def _check_cycle(conn, spec, surface, cycle, limits=True):
     current = _current(conn, spec, surface)
     if cycle != current:
         raise QaError(
@@ -180,16 +207,33 @@ def _check_cycle(conn, spec, surface, cycle, enforce=True):
             spec_id=spec,
             surface=surface,
         )
-    reports = _rejects(conn, spec, surface, cycle)
-    if enforce and len(reports) >= 2:
-        raise QaError(
-            "qa_dispatch_reject_limit",
-            "record spec-issue diagnose with a diagnosis and pivot before another QA commission",
-            spec_id=spec,
-            surface=surface,
-            cycle=cycle,
-            report_ids=[r["report_id"] for r in reports],
-        )
+    if limits:
+        pending = _pending_rejects(conn, spec, surface, cycle)
+        if len(pending) >= 2:
+            report_ids = sorted(pending.values())
+            raise QaError(
+                "qa_adjudication_required",
+                "adjudicate these reject reports (--valid or --void) before another QA commission",
+                spec_id=spec,
+                surface=surface,
+                cycle=cycle,
+                report_ids=report_ids,
+                commands=[
+                    f"agent-orch spec-issue adjudicate {rid} --spec-id {spec} "
+                    f"--surface {surface} --cycle {cycle} --valid|--void --reason '<reason>'"
+                    for rid in report_ids
+                ],
+            )
+        reports = _rejects(conn, spec, surface, cycle)
+        if len(reports) >= 2:
+            raise QaError(
+                "qa_dispatch_reject_limit",
+                "record spec-issue diagnose with a diagnosis and pivot before another QA commission",
+                spec_id=spec,
+                surface=surface,
+                cycle=cycle,
+                report_ids=[r["report_id"] for r in reports],
+            )
 
 
 def _authorized_lineage(conn, actor, commission):
@@ -227,6 +271,45 @@ def _authorized_lineage(conn, actor, commission):
             )
         cursor = _session(conn, prior)
     return False
+
+
+def _adjudicatable(report):
+    """Whether a durable reject carries the existing typed review evidence."""
+    if not report or report["status"] != "done" or report["qa_verdict"] != "reject":
+        return False
+    evidence = json.loads(report["extras"] or "{}").get("qa_review", {})
+    return not (
+        not isinstance(evidence, dict)
+        or not isinstance(evidence.get("reviewed_scope"), str)
+        or not evidence["reviewed_scope"].strip()
+        or evidence.get("candidate_identity") != report["target_sha"]
+        or re.fullmatch(
+            r"[a-f0-9]{64}", str(evidence.get("gate_evidence_digest") or "")
+        ) is None
+        or re.fullmatch(r"[a-fA-F0-9]{40}", str(report["target_sha"] or "")) is None
+    )
+
+
+def _commission_for_report(conn, report):
+    """Resolve a representative or unambiguous commission within its generation."""
+    commissions = conn.execute(
+        "SELECT * FROM v2_qa_commissions WHERE reviewer=? AND generation=? ORDER BY msg_id",
+        (report["from_stream_id"], report["session_generation"]),
+    ).fetchall()
+    for commission in commissions:
+        if commission["report_id"] == report["report_id"]:
+            return commission, [commission["msg_id"]]
+    for commission in commissions:
+        if commission["msg_id"] == report["msg_id"]:
+            return commission, [commission["msg_id"]]
+    open_commissions = [row for row in commissions if row["report_id"] is None]
+    if len(open_commissions) == 1:
+        commission = open_commissions[0]
+        return commission, [commission["msg_id"]]
+    if not open_commissions and len(commissions) == 1:
+        commission = commissions[0]
+        return commission, [commission["msg_id"]]
+    return None, [row["msg_id"] for row in open_commissions]
 
 
 class QaStoreMixin:
@@ -448,7 +531,7 @@ class QaStoreMixin:
                         if transaction:
                             conn.commit()
                         return dict(prior)
-                _check_cycle(conn, spec, surface, cycle, enforce)
+                _check_cycle(conn, spec, surface, cycle, limits=True)
                 if not check_only and not validate_only:
                     _text(reviewer_generation, "reviewer generation", 256)
                     conn.execute(
@@ -545,52 +628,28 @@ class QaStoreMixin:
                         report = conn.execute(
                             "SELECT * FROM v2_reports WHERE report_id=?", (report_id,)
                         ).fetchone()
-                        if (
-                            not report
-                            or report["status"] != "done"
-                            or report["qa_verdict"] != "reject"
-                        ):
-                            raise QaError(
-                                "qa_report_invalid",
-                                "a durable done reject report is required",
-                            )
-                        evidence = json.loads(report["extras"] or "{}").get(
-                            "qa_review", {}
-                        )
-                        if (
-                            not isinstance(evidence, dict)
-                            or not isinstance(evidence.get("reviewed_scope"), str)
-                            or not evidence["reviewed_scope"].strip()
-                            or evidence.get("candidate_identity")
-                            != report["target_sha"]
-                            or re.fullmatch(
-                                r"[a-f0-9]{64}",
-                                str(evidence.get("gate_evidence_digest") or ""),
-                            )
-                            is None
-                            or re.fullmatch(
-                                r"[a-fA-F0-9]{40}", str(report["target_sha"] or "")
-                            )
-                            is None
-                        ):
+                        if not _adjudicatable(report):
+                            if (
+                                not report
+                                or report["status"] != "done"
+                                or report["qa_verdict"] != "reject"
+                            ):
+                                raise QaError(
+                                    "qa_report_invalid",
+                                    "a durable done reject report is required",
+                                )
                             raise QaError(
                                 "qa_report_invalid",
                                 "report must bind candidate, reviewed scope and gate evidence digest",
                             )
-                        commission = conn.execute(
-                            "SELECT * FROM v2_qa_commissions WHERE reviewer=? AND generation=? AND msg_id=?",
-                            (
-                                report["from_stream_id"],
-                                report["session_generation"],
-                                report["msg_id"],
-                            ),
-                        ).fetchone()
+                        commission, candidate_msg_ids = _commission_for_report(conn, report)
                         if not commission or tuple(
                             commission[k] for k in ("spec_id", "surface", "cycle")
                         ) != (spec, surface, cycle):
                             raise QaError(
                                 "qa_report_binding_mismatch",
                                 "report generation/commission does not match scope",
+                                candidate_msg_ids=candidate_msg_ids,
                             )
                         if report["from_stream_id"] == actor or not _authorized_lineage(
                             conn, caller, commission
