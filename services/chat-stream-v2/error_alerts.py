@@ -143,8 +143,14 @@ def evaluate(operation, now):
             e["code"],
             e["stage"],
         )
+    # An authenticated resumable upload can legitimately wait offline between
+    # stages indefinitely. Only absence is suppressed; explicit evidence above
+    # and actual ASR failures/hangs below retain their established precedence.
+    offline_gap = (d.get("upload_protocol") == 2 and
+                   not d.get("server_send_request_id") and
+                   not d.get("server_send_request_ids"))
     if d.get("transcribe_result") and now >= epoch(d["transcribe_result"]) + 60:
-        return "unknown", "send_unconfirmed", "send"
+        return "unknown", None if offline_gap else "send_unconfirmed", "send"
     if d.get("transcribe_failed_code") in EXPECTED_CODES:
         return "cancelled", d["transcribe_failed_code"], "transcribe"
     if d.get("transcribe_failed") and now >= epoch(d["transcribe_failed"]) + 60:
@@ -158,6 +164,7 @@ def evaluate(operation, now):
         return "unknown", "transcribe_milestone_missing", "transcribe"
     if (
         d.get("upload_committed")
+        and not offline_gap
         and not d.get("transcribe_started")
         and now >= epoch(d["upload_committed"]) + 60
     ):
@@ -328,9 +335,18 @@ class ErrorAlerts:
         intent = msg["voice_operation"]
         if list(INTENT_VALIDATOR.iter_errors(intent)):
             raise ValueError("invalid_request")
-        await self.store.voice_register(
-            principal, intent, upload_request_id=msg["request_id"]
-        )
+        if msg.get("protocol") == 2:
+            upload_id = msg.get("upload_id")
+            if (not isinstance(upload_id, str) or not re.fullmatch(
+                    r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", upload_id)):
+                raise ValueError("invalid_request")
+            await self.store.voice_register(
+                principal, intent, upload_request_id=upload_id, upload_protocol=2
+            )
+        else:
+            await self.store.voice_register(
+                principal, intent, upload_request_id=msg["request_id"]
+            )
         return principal, intent["operation_id"]
 
     async def _implicit(self, msg, kind, origin, generation, *parts):
@@ -442,7 +458,10 @@ class ErrorAlerts:
         op = await self.store.voice_get(principal, intent["operation_id"])
         if op is None:
             raise ValueError("operation_forbidden")
-        for key in ("origin_stream_id", "origin_generation", "operation_kind"):
+        fields = ("origin_stream_id", "origin_generation", "operation_kind")
+        if op["data"].get("upload_protocol") == 2:
+            fields += ("client_build",)
+        for key in fields:
             if op[key] != intent[key]:
                 raise ValueError("origin_mismatch")
         await self.store.voice_milestone(

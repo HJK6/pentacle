@@ -97,21 +97,35 @@ def _save(conn, row, now):
 
 class VoiceOperationsStoreMixin:
     async def voice_register(
-        self, principal, intent, *, upload_request_id=None, now=None
+        self, principal, intent, *, upload_request_id=None, upload_protocol=None, now=None
     ):
+        if upload_protocol is not None and (type(upload_protocol) is not int or upload_protocol != 2):
+            raise ValueError("invalid_request")
         now = now or iso()
 
         def op(conn):
             with conn:
                 row = _register(conn, principal, intent, now)
+                if upload_protocol == 2 and row["client_build"] != intent["client_build"]:
+                    raise ValueError("origin_mismatch")
                 if upload_request_id:
                     prior = row["data"].get("upload_request_id")
+                    if prior and row["data"].get("upload_protocol") != upload_protocol:
+                        raise ValueError("event_conflict")
                     if prior and prior != upload_request_id:
                         raise ValueError("event_conflict")
-                    conflict = conn.execute(
-                        "SELECT principal,operation_id FROM voice_operations WHERE json_extract(data,'$.upload_request_id')=?",
-                        (upload_request_id,),
-                    ).fetchone()
+                    if upload_protocol == 2:
+                        conflict = conn.execute(
+                            "SELECT principal,operation_id FROM voice_operations WHERE principal=? "
+                            "AND json_extract(data,'$.upload_protocol')=2 "
+                            "AND json_extract(data,'$.upload_request_id')=?",
+                            (principal, upload_request_id),
+                        ).fetchone()
+                    else:
+                        conflict = conn.execute(
+                            "SELECT principal,operation_id FROM voice_operations WHERE json_extract(data,'$.upload_request_id')=?",
+                            (upload_request_id,),
+                        ).fetchone()
                     if conflict and (
                         conflict["principal"],
                         conflict["operation_id"],
@@ -119,6 +133,10 @@ class VoiceOperationsStoreMixin:
                         raise ValueError("operation_forbidden")
                     if not prior:
                         row["data"]["upload_request_id"] = upload_request_id
+                        if upload_protocol == 2:
+                            # Only authenticated v2 registration supplies this;
+                            # error.report cannot write server-owned data.
+                            row["data"]["upload_protocol"] = 2
                         row["revision"] += 1
                         _save(conn, row, now)
                 return row

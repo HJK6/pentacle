@@ -1991,6 +1991,16 @@ class Server:
         if websocket is not None:
             dispatch_msg["_auth_context"] = await self._auth_context(websocket, msg)
             service_auth = dispatch_msg["_auth_context"]
+            if verb in {"upload_blob_init", "upload_blob_chunk"} and msg.get("protocol") == 2:
+                # This opt-in surface always requires a current registered v2
+                # operator, including loopback. Refusals use its closed enum.
+                try:
+                    if self.error_alerts is None:
+                        raise ValueError("operator_required")
+                    await self.error_alerts.principal(dispatch_msg)
+                except ValueError:
+                    return [{"type": "upload_blob.error", "request_id": request_id,
+                             "protocol": 2, "error_code": "upload_forbidden"}]
             if service_auth.get("service_attempted"):
                 if not service_auth.get("service_authenticated"):
                     self._diag_auth_failure(websocket, "system_producer_auth_required", "system_token")

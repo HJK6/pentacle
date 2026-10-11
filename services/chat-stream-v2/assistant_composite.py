@@ -618,7 +618,6 @@ class AssistantComposite:
                               "Waiting for you" if self._activity["waiting_for_operator_count"] else None),
             "assistant_activity": self.activity_snapshot(),
             "session_kind": "assistant_composite",
-            "session_generation": COMPOSITE_GENERATION,
             "provider": "composite",
             "role": "assistant_composite",
             "capabilities": {
@@ -628,6 +627,10 @@ class AssistantComposite:
                 "reply_metadata_v1": True,
             },
         })
+        # Store owns composite lifecycle generations too. A projection must
+        # never invent a generation when no authoritative row supplied one.
+        if not isinstance(row.get("session_generation"), str) or not row["session_generation"]:
+            projected.pop("session_generation", None)
         return projected
 
     async def accept_input(self, msg: dict[str, Any], *, operator_principal: str | None = None, scoped_credential_id: str | None = None) -> dict[str, Any]:
