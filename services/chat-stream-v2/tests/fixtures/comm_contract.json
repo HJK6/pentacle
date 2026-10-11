@@ -1,0 +1,2184 @@
+{
+  "schema_version": 1,
+  "synthetic_only": true,
+  "legacy_outreach_scope": "legacy_outreach",
+  "default_voice_token": "as_agent",
+  "contacts": [
+    {
+      "id": "fixture_person_01",
+      "heading": "SMS grant",
+      "email_default": false,
+      "lines": [
+        "- answer topic_01: Synthetic handling 01; preserve this text exactly.",
+        "- answer legacy_outreach: Synthetic handling 02; preserve this text exactly.",
+        "- change topic_03: Synthetic handling 03; preserve this text exactly."
+      ]
+    },
+    {
+      "id": "fixture_person_02",
+      "heading": "SMS grant",
+      "email_default": true,
+      "lines": [
+        "- answer topic_04: Synthetic handling 04; preserve this text exactly.",
+        "- answer topic_05: Synthetic handling 05; preserve this text exactly.",
+        "- answer topic_06: Synthetic handling 06; preserve this text exactly."
+      ]
+    },
+    {
+      "id": "fixture_person_03",
+      "heading": "SMS grant",
+      "email_default": false,
+      "lines": [
+        "- answer topic_07: Synthetic handling 07; preserve this text exactly.",
+        "- answer topic_08: Synthetic handling 08; preserve this text exactly.",
+        "- answer topic_09: Synthetic handling 09; preserve this text exactly."
+      ]
+    },
+    {
+      "id": "fixture_person_04",
+      "heading": "SMS grant",
+      "email_default": false,
+      "lines": [
+        "- answer topic_10: Synthetic handling 10; preserve this text exactly.",
+        "- answer topic_11: Synthetic handling 11; preserve this text exactly."
+      ]
+    },
+    {
+      "id": "fixture_person_05",
+      "heading": "SMS grant",
+      "email_default": false,
+      "lines": [
+        "- answer topic_12: Synthetic handling 12; preserve this text exactly.",
+        "- answer topic_13: Synthetic handling 13; preserve this text exactly."
+      ]
+    },
+    {
+      "id": "fixture_person_06",
+      "heading": "SMS grant",
+      "email_default": false,
+      "lines": [
+        "- answer topic_14: Synthetic handling 14; preserve this text exactly.",
+        "- answer topic_15: Synthetic handling 15; preserve this text exactly."
+      ]
+    },
+    {
+      "id": "fixture_person_07",
+      "heading": "SMS grant",
+      "email_default": true,
+      "lines": [
+        "- answer topic_16: Synthetic handling 16; preserve this text exactly.",
+        "- answer topic_17: Synthetic handling 17; preserve this text exactly."
+      ]
+    },
+    {
+      "id": "fixture_person_08",
+      "heading": "SMS grant",
+      "email_default": false,
+      "lines": [
+        "- answer topic_18: Synthetic handling 18; preserve this text exactly.",
+        "- answer legacy_outreach: Synthetic handling 19; preserve this text exactly.",
+        "- change topic_20: Synthetic handling 20; preserve this text exactly.",
+        "- change topic_21: Synthetic handling 21; preserve this text exactly.",
+        "- change topic_22: Synthetic handling 22; preserve this text exactly."
+      ]
+    },
+    {
+      "id": "fixture_person_09",
+      "heading": "SMS grant",
+      "email_default": false,
+      "lines": [
+        "- answer topic_23: Synthetic handling 23; preserve this text exactly."
+      ]
+    }
+  ],
+  "valid_qualifiers": [
+    "- outreach topic_30 [channels=sms,email,botcomm; voice=as_agent; autonomy=draft]: Synthetic handling.",
+    "- answer topic_31 [channels=email; voice=as_operator; authority=2026-10-10 fixture-authority-1; autonomy=send]: Synthetic handling."
+  ],
+  "invalid_lines": [
+    "- answer topic_40 [unknown=yes]: Synthetic handling.",
+    "- answer topic_41 [channels=google_voice]: Synthetic handling.",
+    "- answer topic_42 [channels=whatsapp]: Synthetic handling.",
+    "- answer topic_43 [channels=imessage]: Synthetic handling.",
+    "- answer topic_44 [channels=voice_call]: Synthetic handling.",
+    "- answer topic_45 [voice=unknown]: Synthetic handling.",
+    "- answer topic_46 [autonomy=unknown]: Synthetic handling.",
+    "- answer topic_47 [channels=sms; channels=email]: Synthetic handling.",
+    "- answer topic_48 [voice=as_operator]: Synthetic handling.",
+    "- answer topic_49 [authority=2026-02-30 fixture-authority-1]: Synthetic handling.",
+    "- answer Topic [channels=sms]: Synthetic handling.",
+    "- answer topic_51 [channels=sms: Synthetic handling.",
+    "- answer topic_52 [channels=sms,]: Synthetic handling."
+  ],
+  "envelope": {
+    "schema_version": 1,
+    "channel": "email",
+    "account_ref": "fixture-account",
+    "sender_ref": "fixture-sender",
+    "recipients": [
+      {
+        "contact_id": "fixture_person_01",
+        "role": "to",
+        "destination": "person01@fixture.invalid"
+      }
+    ],
+    "subject": "Synthetic subject",
+    "body": "Synthetic body\n\nSynthetic assistant",
+    "text": "Synthetic text\n\nSynthetic assistant",
+    "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+    "introduction": "",
+    "mime_parts": [
+      {
+        "content_type": "text/plain",
+        "text": "part one"
+      },
+      {
+        "content_type": "application/octet-stream",
+        "base64": "AAEC"
+      }
+    ],
+    "protected_refs": [
+      "fixture-content"
+    ],
+    "thread_id": "fixture-thread",
+    "reply_id": "fixture-inbound",
+    "references": [
+      "fixture-reference"
+    ],
+    "attachments": [
+      {
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size": 3,
+        "media_type": "text/plain",
+        "name_ref": "fixture-name-1",
+        "content_ref": "fixture-attachment-1"
+      },
+      {
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "size": 4,
+        "media_type": "application/pdf",
+        "name_ref": "fixture-name-2",
+        "content_ref": "fixture-attachment-2"
+      }
+    ],
+    "voice": "as_agent",
+    "voice_config_version": "v1",
+    "voice_authority_ref": null
+  },
+  "evidence_templates": {
+    "request": {
+      "original_utc": "2026-10-10T12:00:00.000000001Z",
+      "request_id": "fixture-request",
+      "send_id": "fixture-send"
+    },
+    "identity": {
+      "account_ref": "fixture-account",
+      "recipients": {
+        "person01@fixture.invalid": {
+          "bot_type": "contact",
+          "channels": [
+            "sms",
+            "email",
+            "botcomm"
+          ],
+          "contact_ids": [
+            "fixture_person_01"
+          ],
+          "recorded_email": true,
+          "status": "active"
+        }
+      },
+      "sender_ref": "fixture-sender"
+    },
+    "source": {
+      "commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "config": {
+        "default_voice_token": "as_agent",
+        "email_default_contacts": [],
+        "legacy_outreach_scope": "legacy_outreach"
+      },
+      "contacts": [
+        {
+          "heading": "SMS grant",
+          "id": "fixture_person_01",
+          "lines": [
+            "- answer topic [channels=sms,email,botcomm]: Synthetic handling."
+          ]
+        }
+      ],
+      "status": "current"
+    },
+    "capability": {
+      "bot_allowed": true,
+      "channels": [
+        "sms",
+        "email",
+        "botcomm"
+      ],
+      "contacts": [],
+      "content_allowed": true,
+      "operator_voice": false,
+      "setup_ref": null
+    },
+    "workflow": {
+      "classification": "ordinary",
+      "dispatch_ref": null,
+      "inbound_contact_ids": [
+        "fixture_person_01"
+      ],
+      "inbound_id": "fixture-inbound",
+      "mode": "answer",
+      "scope": "topic"
+    },
+    "actor": {
+      "account_ref": "fixture-account",
+      "actor_ref": "fixture-actor"
+    },
+    "config": {
+      "default_voice_token": "as_agent"
+    }
+  },
+  "default_line": "- answer topic [channels=sms,email,botcomm]: Synthetic handling.",
+  "envelope_mutations": {
+    "channel": {
+      "schema_version": 1,
+      "channel": "sms",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "account_ref": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account-2",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "sender_ref": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender-2",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "recipient_contact_id": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_02",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "recipient_role": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "cc",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "recipient_destination": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "other@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "subject": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "other",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "body": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "café",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "text": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "other",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "html": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Other</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "newline": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant\r\n",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "whitespace": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant ",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "unicode": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "café",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "introduction": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "Other introduction: ",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "mime_text": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part changed"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "mime_base64": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AwQF"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "mime_content_type": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/html",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "mime_order": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        },
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "protected_refs": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-other-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "thread_id": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread-2",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "reply_id": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound-2",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "references": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference-2"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "attachment_sha256": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "attachment_size": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 5,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "attachment_media_type": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "image/png",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "attachment_name_ref": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-other-name",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "attachment_content_ref": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-other-attachment"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "attachment_order": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        },
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "voice": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_operator",
+      "voice_config_version": "v1",
+      "voice_authority_ref": null
+    },
+    "voice_config_version": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v2",
+      "voice_authority_ref": null
+    },
+    "voice_authority_ref": {
+      "schema_version": 1,
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "sender_ref": "fixture-sender",
+      "recipients": [
+        {
+          "contact_id": "fixture_person_01",
+          "role": "to",
+          "destination": "person01@fixture.invalid"
+        }
+      ],
+      "subject": "Synthetic subject",
+      "body": "Synthetic body\n\nSynthetic assistant",
+      "text": "Synthetic text\n\nSynthetic assistant",
+      "html": "<p>Synthetic</p><p>Synthetic assistant</p>",
+      "introduction": "",
+      "mime_parts": [
+        {
+          "content_type": "text/plain",
+          "text": "part one"
+        },
+        {
+          "content_type": "application/octet-stream",
+          "base64": "AAEC"
+        }
+      ],
+      "protected_refs": [
+        "fixture-content"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-inbound",
+      "references": [
+        "fixture-reference"
+      ],
+      "attachments": [
+        {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 3,
+          "media_type": "text/plain",
+          "name_ref": "fixture-name-1",
+          "content_ref": "fixture-attachment-1"
+        },
+        {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 4,
+          "media_type": "application/pdf",
+          "name_ref": "fixture-name-2",
+          "content_ref": "fixture-attachment-2"
+        }
+      ],
+      "voice": "as_agent",
+      "voice_config_version": "v1",
+      "voice_authority_ref": "fixture-authority"
+    }
+  },
+  "paths": [
+    {
+      "path": "sms_desk",
+      "channel": "sms",
+      "enabled": true,
+      "base_trace": [
+        "prompt:inbound",
+        "provider:send",
+        "receipt:result"
+      ]
+    },
+    {
+      "path": "sms_legacy_primary",
+      "channel": "sms",
+      "enabled": true,
+      "base_trace": [
+        "prompt:inbound",
+        "provider:send",
+        "receipt:result"
+      ]
+    },
+    {
+      "path": "sms_legacy_analytics",
+      "channel": "sms",
+      "enabled": true,
+      "base_trace": [
+        "prompt:inbound",
+        "provider:send",
+        "receipt:result"
+      ]
+    },
+    {
+      "path": "sms_legacy_chat",
+      "channel": "sms",
+      "enabled": true,
+      "base_trace": [
+        "prompt:inbound",
+        "provider:send",
+        "receipt:result"
+      ]
+    },
+    {
+      "path": "email_helper",
+      "channel": "email",
+      "enabled": true,
+      "base_trace": [
+        "prompt:inbound",
+        "provider:send",
+        "receipt:result"
+      ]
+    },
+    {
+      "path": "email_cli",
+      "channel": "email",
+      "enabled": true,
+      "base_trace": [
+        "prompt:inbound",
+        "provider:send",
+        "receipt:result"
+      ]
+    },
+    {
+      "path": "analytics_email",
+      "channel": "email",
+      "enabled": true,
+      "base_trace": [
+        "prompt:inbound",
+        "provider:send",
+        "receipt:result"
+      ]
+    },
+    {
+      "path": "botcomm",
+      "channel": "botcomm",
+      "enabled": true,
+      "base_trace": [
+        "prompt:inbound",
+        "provider:send",
+        "receipt:result"
+      ]
+    },
+    {
+      "path": "bot_direct_handoff",
+      "channel": "botcomm",
+      "enabled": true,
+      "base_trace": [
+        "prompt:inbound",
+        "provider:send",
+        "receipt:result"
+      ]
+    },
+    {
+      "path": "personal_google_voice_direct",
+      "channel": "sms",
+      "enabled": false,
+      "base_trace": [
+        "prompt:inbound",
+        "hold:disabled"
+      ]
+    },
+    {
+      "path": "personal_google_voice_queue",
+      "channel": "sms",
+      "enabled": false,
+      "base_trace": [
+        "prompt:inbound",
+        "hold:disabled"
+      ]
+    },
+    {
+      "path": "whatsapp",
+      "channel": "sms",
+      "enabled": false,
+      "base_trace": [
+        "prompt:inbound",
+        "hold:disabled"
+      ]
+    },
+    {
+      "path": "imessage",
+      "channel": "sms",
+      "enabled": false,
+      "base_trace": [
+        "prompt:inbound",
+        "hold:disabled"
+      ]
+    },
+    {
+      "path": "apple_mail_direct",
+      "channel": "email",
+      "enabled": false,
+      "base_trace": [
+        "prompt:inbound",
+        "hold:disabled"
+      ]
+    },
+    {
+      "path": "voice_call",
+      "channel": "sms",
+      "enabled": false,
+      "base_trace": [
+        "prompt:inbound",
+        "hold:disabled"
+      ]
+    }
+  ],
+  "effect_failures": {
+    "cg1_invalid": "preclaim",
+    "cg1_contact_invalid": "preclaim",
+    "cg2_shared_reader": "preclaim",
+    "cg2_envelope": "preclaim",
+    "cg2_wire": "preclaim",
+    "cg2_untrusted": "preclaim",
+    "cg3_draft_replay": "persistence",
+    "cg3_approval": "cancel",
+    "cg4_external_inputs": "preclaim",
+    "cg4_versions": "preclaim",
+    "cg4_request_concurrency": "preclaim",
+    "cg4_retention_replay": "expired",
+    "cg4_preview_policy": "preclaim",
+    "cg4_crashes_before": "before_claim",
+    "cg4_crashes_after": "claimed_unknown",
+    "cg4_receipts": "receipt_only",
+    "cg4_staging_cleanup": "cleanup_only",
+    "cg5_each_condition": "voice",
+    "cg6_paths": "preclaim",
+    "cg6_exclusion": "exclusion",
+    "cg6_thread": "history",
+    "cg6_retention_preview": "history",
+    "cg6_combined": "combined"
+  },
+  "history_rows": [
+    {
+      "source_type": "sms",
+      "source_record_id": "fixture-sms-1",
+      "stable_id": "fixture-1",
+      "source_version": "v1",
+      "channel": "sms",
+      "account_ref": "fixture-account",
+      "provider_message_id": "fixture-provider-1",
+      "original_utc": "2026-11-01T06:30:00.123456789012345678901Z",
+      "direction": "outbound",
+      "state": "accepted",
+      "delivery_state": "pending",
+      "attachment_count": 1,
+      "grant_line_ids": [
+        "fixture_person_01:answer:topic"
+      ],
+      "thread_id": "fixture-thread",
+      "reply_id": null,
+      "references": [],
+      "content_status": "available",
+      "snapshot_status": "available",
+      "source_expires_at": null,
+      "metadata_expires_at": null,
+      "role": "to",
+      "body": "SYNTHETIC_SECRET_CANARY",
+      "subject": "<script>synthetic()</script>",
+      "address": "person01@fixture.invalid",
+      "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "source_type": "email",
+      "source_record_id": "fixture-email-1",
+      "stable_id": "fixture-2",
+      "source_version": "v1",
+      "channel": "email",
+      "account_ref": "fixture-account",
+      "provider_message_id": "fixture-provider-2",
+      "original_utc": "2026-11-01T07:30:00.123456789012345678902Z",
+      "direction": "inbound",
+      "state": "received",
+      "delivery_state": "not_applicable",
+      "attachment_count": 0,
+      "grant_line_ids": [],
+      "thread_id": "fixture-thread",
+      "reply_id": "fixture-provider-1",
+      "references": [
+        "fixture-provider-1"
+      ],
+      "content_status": "available",
+      "snapshot_status": "available",
+      "source_expires_at": null,
+      "metadata_expires_at": null,
+      "role": "bcc",
+      "body": "SYNTHETIC_SECRET_CANARY",
+      "subject": "<b>hidden</b>",
+      "address": "person02@fixture.invalid",
+      "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "attachment_byte_cases": [
+    "AAEC",
+    "AAED"
+  ]
+}
