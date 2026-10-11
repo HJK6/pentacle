@@ -43,6 +43,7 @@ if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide module, never a
     sys.path.insert(0, SERVICES_ROOT)
 
 from _shared.spawn_objective import objective_error, objective_required_for, resolve_objective
+from _shared.wip_cap import check_lead_spawn
 from _shared.specs_service import spec_resolution_view, SpecResolutionUnavailable  # noqa: E402
 
 import assistant_restore
@@ -1841,7 +1842,35 @@ class SpawnCtl:
             tmux_transport._ACTIVE_LAUNCH_TMUX.reset(launch_context)
         deferred_launch_plan = resolution.pop("_deferred_launch_plan", None)
 
+        # A recorded operation retains replay/conflict precedence over a new
+        # admission policy. Mirror the store's live/retained eligibility; an
+        # expired empty record is not permission to revive a claim before U2.
+        if idempotency_key:
+            recorded = await self.store.spawn_record_for_key(host, idempotency_key)
+            if recorded is not None:
+                prior = recorded["row"]
+                eligible = (recorded["kind"] == "terminal"
+                            or float(prior.get("expires_at") or 0) >= time.time()
+                            or bool(prior.get("tmux_created")) or prior.get("payload") is not None)
+                if eligible:
+                    old_hash = str(prior.get("request_payload_hash") or "")
+                    if old_hash and payload_hash and old_hash != payload_hash:
+                        raise VerbError(
+                            "idempotency_key_conflict",
+                            f"idempotency_key already bound to a different spawn payload on {host}",
+                        )
+                    return await self._reply_from_replay(
+                        host, request_id, recorded["kind"], prior, idempotency_key,
+                    )
+        if open_overrides.get("role", msg.get("role")) == "lead" and spec_binding.get("spec_id"):
+            decision = await asyncio.to_thread(
+                check_lead_spawn, getattr(self.specs, "memory_root", None), spec_binding["spec_id"],
+            )
+            if decision["error_code"]:
+                raise VerbError(decision["error_code"], decision["message"], wip=decision)
+
         # Reserve the stream and its creation identity before any pane exists.
+        # The existing atomic claim still decides concurrent NEW same-key fires.
         nonce = uuid.uuid4().hex
         if idempotency_key:
             # Atomic check+claim: exactly one concurrent same-key caller wins
