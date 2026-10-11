@@ -1,5 +1,11 @@
 # Front-desk turn-budget observation
 
+## Observer containment
+
+Runtime `PENTACLE_FD_TURN_BUDGET_OBSERVER_ENABLED` defaults to false. With it off, ingest and pending-receipt recovery perform no turn-budget archive or provenance reads, cursor writes, crossings or new notices; ordinary source ingestion/replay continues and retained cursors/events are preserved. This is independent of `PENTACLE_FD_TURN_BUDGET_ENABLED`: when the observer is explicitly on and delivery is false, the accepted durable record-only behavior remains. Direct Python config construction preserves its prior observer-on behavior; runtime environment construction ships off. Invalid switch values fail startup.
+
+Do not re-enable the observer until archive identity/event-range indexing and bounded prior-dispatch proof are repaired and scale-tested. Current identity lookup scans the stream/lifecycle cohort and prior-anchor recovery searches historical JSON; per-call interruption bounds do not bound repeated lifetime cost. No index/schema change is included in containment.
+
 The daemon observes only the currently bound direct-primary assistant. Defaults
 are five own tool calls, 60 seconds of own work, and **notice delivery off**.
 This is advisory: it does not interrupt, stop, pause, kill, delegate, change a

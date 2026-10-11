@@ -20,6 +20,7 @@ class FdTurnBudgetConfig:
     calls: int = 5
     seconds: float = 60
     enabled: bool = False
+    observer_enabled: bool = True
 
     def __post_init__(self) -> None:
         if type(self.calls) is not int or not 0 <= self.calls <= 10000:
@@ -27,6 +28,8 @@ class FdTurnBudgetConfig:
         if (isinstance(self.seconds, bool) or not isinstance(self.seconds, (int, float))
                 or not math.isfinite(self.seconds) or self.seconds < 0):
             raise ValueError("fd_turn_budget.seconds must be finite and nonnegative")
+        if type(self.observer_enabled) is not bool:
+            raise ValueError("fd_turn_budget.observer_enabled must be boolean")
         if type(self.enabled) is not bool:
             raise ValueError("fd_turn_budget.enabled must be boolean")
 
@@ -36,9 +39,13 @@ class FdTurnBudgetConfig:
         enabled = values.get("PENTACLE_FD_TURN_BUDGET_ENABLED", "false").lower().strip()
         if enabled not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
             raise ValueError("invalid PENTACLE_FD_TURN_BUDGET_ENABLED")
+        observer = values.get("PENTACLE_FD_TURN_BUDGET_OBSERVER_ENABLED", "false").lower().strip()
+        if observer not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
+            raise ValueError("invalid PENTACLE_FD_TURN_BUDGET_OBSERVER_ENABLED")
         return cls(calls=int(values.get("PENTACLE_FD_TURN_BUDGET_CALLS", "5")),
                    seconds=float(values.get("PENTACLE_FD_TURN_BUDGET_SECONDS", "60")),
-                   enabled=enabled in {"true", "1", "yes", "on"})
+                   enabled=enabled in {"true", "1", "yes", "on"},
+                   observer_enabled=observer in {"true", "1", "yes", "on"})
 
 
 def timestamp(value: Any) -> float | None:

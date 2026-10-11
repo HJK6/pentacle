@@ -2431,11 +2431,11 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
     # -- observation-only front-desk turn budget ---------------------------
 
     def configure_fd_turn_budget(self, *, config, env_binding, archive_path=None) -> None:
-        """Configure the existing event observer; disabled still records crossings."""
+        """Observer-off skips all reads; delivery-off alone remains record-only."""
         from fd_turn_budget import FdTurnBudgetConfig
         if not isinstance(config, FdTurnBudgetConfig):
             raise TypeError("FdTurnBudgetConfig required")
-        self._fd_turn_budget_config = config
+        self._fd_turn_budget_config = config if config.observer_enabled else None
         self._fd_turn_budget_binding = dict(env_binding)
         self._fd_turn_budget_archive = str(archive_path) if archive_path else None
 
