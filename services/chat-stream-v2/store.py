@@ -1456,28 +1456,74 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         self._spec_identities_resolver = batch
 
     def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(target=self._run, name="store", daemon=True)
-        self._thread.start()
+        """Start the worker; idempotent while it runs. A worker that exited
+        (stopped, or failed to initialize) has closed its connection and failed
+        its queued callers, so the Store may start a fresh one. While a timed-out
+        stop's worker is still alive it owns the database: refuse rather than
+        open a second owner (F11)."""
+        with self._lock:
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                if self._closing:
+                    raise RuntimeError("store is still stopping: its worker still owns the database")
+            else:
+                self._closing = False
+                self._ready.clear()
+                self._start_error = None
+                thread = self._thread = threading.Thread(target=self._run, name="store", daemon=True)
+                thread.start()
         self._ready.wait(timeout=10)
         if self._start_error is not None:
             raise self._start_error
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Stop the worker, waiting at most `timeout` s for it to drain (the
-        thread is a daemon thread, so an overrun cannot hold process exit)."""
-        with self._lock:
-            if self._thread is None:
-                return
-            # From here `submit` refuses, so nothing lands after the sentinel.
-            self._closing = True
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Stop the worker, waiting at most `timeout` s in total (one deadline
+        for the transition lock, the stop signal and the join; 0 = signal
+        only). Queued callables still run before the worker exits.
+
+        Returns True once the worker has exited: connection closed and queued
+        callers resolved. False means the deadline expired while it still runs
+        a callable: it keeps owning the connection, `submit` and `start` keep
+        refusing, and the callable's outcome is whatever it actually does. A
+        later stop() observes the exit. The thread is a daemon thread, so an
+        overrun cannot hold process exit."""
+        timeout = float(timeout)
+        if timeout != timeout or abs(timeout) == float("inf"):
+            raise ValueError(f"store stop timeout must be finite, got {timeout!r}")
+        deadline = time.monotonic() + max(0.0, timeout)
+        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            log.warning("store stop deadline (%.2fs) expired before closing; worker still running", timeout)
+            return False
+        try:
             thread = self._thread
-        self._queue.put(None)
-        thread.join(timeout=timeout)
-        with self._lock:
-            self._thread = None
-            self._closing = False
+            if thread is None:
+                return True
+            if not self._closing:
+                # From here `submit` refuses, so nothing lands after the
+                # sentinel. Never block on a full queue: the worker also
+                # exits once it drains the queue while closing (see `_run`).
+                self._closing = True
+                try:
+                    if thread.is_alive():  # an exited worker would never take it
+                        self._queue.put_nowait(None)
+                except queue.Full:
+                    pass
+        finally:
+            self._lock.release()
+        if thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            log.warning("store stop deadline (%.2fs) expired; worker still owns the database, still stopping", timeout)
+            return False
+        if self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            try:
+                if self._thread is thread:
+                    self._thread = None
+                    self._closing = False
+            finally:
+                self._lock.release()
+        log.info("store stopped: worker exited and its connection is closed")
+        return True
 
     def _fail_pending(self, why: str) -> None:
         """Resolve every still-queued callable with an error so no `submit`
@@ -1500,6 +1546,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
     # -- worker thread -----------------------------------------------------
 
     def _run(self) -> None:
+        conn = None
         try:
             # Escape the literal store filename while enabling no-create URI
             # ATTACH for configured retention archives. Memory stores stay local.
@@ -1744,9 +1791,18 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             if self._configured_archive_path is not None:
                 bind_history_archive(conn, Path(self._configured_archive_path))
             self._columns = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
-        except BaseException as exc:  # pragma: no cover - startup failure path
+        except BaseException as exc:
+            # Callers may have queued work while initialization ran; it will
+            # never run, so close admission and fail it before reporting.
+            with self._lock:
+                self._closing = True
             self._start_error = exc
-            self._ready.set()
+            try:
+                if conn is not None:
+                    conn.close()
+            finally:
+                self._fail_pending("store failed to start before this callable ran")
+                self._ready.set()
             return
         self._ready.set()
         try:
@@ -1769,13 +1825,26 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 if timing is not None:
                     loop.call_soon_threadsafe(timing.add, queued, started, finished)
                 loop.call_soon_threadsafe(_set_exception if failed else _set_result, fut, outcome)
+                # A stop that found the queue full queued no sentinel; once
+                # closing, exit when the queue drains. Checked under the lock so
+                # a concurrent stop's sentinel is either queued or not needed.
+                with self._lock:
+                    if self._closing and self._queue.empty():
+                        break
         finally:
-            conn.close()
-            # Belt-and-suspenders (QA #8): resolve anything still queued so no
-            # awaiter hangs forever. With the stop lock nothing should land here
-            # after the sentinel, but a future that never runs must never be
-            # left pending.
-            self._fail_pending("store stopped before this callable ran")
+            # However the worker exits (stop, or an unexpected error), close
+            # admission first: nothing, including a stop sentinel, can be
+            # queued after the drain below, so a restart never inherits one.
+            with self._lock:
+                self._closing = True
+            try:
+                conn.close()
+            finally:
+                # Belt-and-suspenders (QA #8): resolve anything still queued so
+                # no awaiter hangs forever. With the stop lock nothing should
+                # land here after the sentinel, but a future that never runs
+                # must never be left pending.
+                self._fail_pending("store stopped before this callable ran")
 
     # -- async API ---------------------------------------------------------
 

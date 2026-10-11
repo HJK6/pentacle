@@ -1096,7 +1096,19 @@ async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composite
     await budget.step("lifecycle", lifecycle.stop(reason="signal"), cap=2.0)
     if watchdog is not None:
         await budget.step("loop-progress", watchdog.stop(), cap=2.5)
-    store.stop(timeout=budget.remaining(5.0, reserved=False))
+    # Store.stop joins a thread, so it runs off the loop under the same
+    # absolute deadline and the loop stays schedulable. A wait that expires or
+    # is cancelled leaves the worker owning SQLite; Store.stop logs whether its
+    # teardown completed (F11).
+    store_deadline = time.monotonic() + budget.remaining(5.0, reserved=False)
+    stop_task = asyncio.ensure_future(asyncio.to_thread(
+        lambda: store.stop(timeout=max(0.0, store_deadline - time.monotonic()))))
+    done, _ = await asyncio.wait({stop_task}, timeout=max(0.0, store_deadline - time.monotonic()))
+    if not done:
+        stop_task.add_done_callback(lambda task: task.cancelled() or task.exception())
+        log.warning("shutdown store stop exceeded its deadline; worker may still own the database")
+    elif stop_task.exception() is not None:
+        log.error("store stop failed", exc_info=stop_task.exception())
     if budget.abandoned:
         log.warning("shutdown abandoned steps after the budget: %s", ", ".join(budget.abandoned))
 
