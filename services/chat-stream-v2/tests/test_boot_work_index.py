@@ -174,7 +174,7 @@ def test_without_watcher_periodic_poll_recovers_failed_scan(tmp_path, monkeypatc
         specs.scan_work_observations = fail_once
         async def broadcast(frame):
             pass
-        inv = WorkLanesInventory(store, SimpleNamespace(list_open=lambda: []), broadcast, specs=specs, sweep_interval_s=.1)
+        inv = WorkLanesInventory(store, SimpleNamespace(list_open=lambda: []), broadcast, specs=specs, sweep_interval_s=.1, refresh_min_s=0)
         try:
             inv.start(interval_s=.05)
             await inv._task
