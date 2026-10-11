@@ -1488,7 +1488,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         later stop() observes the exit. The thread is a daemon thread, so an
         overrun cannot hold process exit."""
         timeout = float(timeout)
-        if timeout != timeout or timeout == float("inf"):
+        if timeout != timeout or abs(timeout) == float("inf"):
             raise ValueError(f"store stop timeout must be finite, got {timeout!r}")
         deadline = time.monotonic() + max(0.0, timeout)
         if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
@@ -1504,7 +1504,8 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 # exits once it drains the queue while closing (see `_run`).
                 self._closing = True
                 try:
-                    self._queue.put_nowait(None)
+                    if thread.is_alive():  # an exited worker would never take it
+                        self._queue.put_nowait(None)
                 except queue.Full:
                     pass
         finally:
@@ -1831,6 +1832,11 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     if self._closing and self._queue.empty():
                         break
         finally:
+            # However the worker exits (stop, or an unexpected error), close
+            # admission first: nothing, including a stop sentinel, can be
+            # queued after the drain below, so a restart never inherits one.
+            with self._lock:
+                self._closing = True
             try:
                 conn.close()
             finally:

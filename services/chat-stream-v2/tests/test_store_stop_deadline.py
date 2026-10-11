@@ -150,7 +150,7 @@ def test_zero_timeout_signals_without_waiting_and_worker_exits_after_release():
     asyncio.run(go())
 
 
-@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
 def test_non_finite_timeout_is_rejected_not_an_indefinite_wait(bad):
     store = Store(":memory:")
     store.start()
@@ -262,6 +262,50 @@ def test_other_store_unaffected_by_a_timed_out_store():
         assert a.stop(timeout=2) is True and b.stop(timeout=2) is True
 
     asyncio.run(go())
+
+
+def test_worker_that_dies_unexpectedly_leaves_no_stale_sentinel_for_a_restart():
+    """QA reject 1: a worker killed by an unexpected error (here its result is
+    delivered to a closed loop) must close admission before draining, so a
+    later stop queues no sentinel and a restarted worker serves requests."""
+    store = Store(":memory:")
+    store.start()
+    worker = store._thread
+    entered, release = threading.Event(), threading.Event()
+    hook, errors = threading.excepthook, []
+    threading.excepthook = lambda args: errors.append(args.exc_value)
+
+    def held(conn):
+        entered.set()
+        release.wait(SELF_RELEASE_S)
+        return "yes"
+
+    async def submit_then_close_loop():
+        task = asyncio.ensure_future(store.submit(held))
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+
+    try:
+        asyncio.run(submit_then_close_loop())  # the caller's loop is now closed
+        release.set()
+        worker.join(2)
+    finally:
+        threading.excepthook = hook
+    assert not worker.is_alive() and errors, "worker should have died delivering to a closed loop"
+    assert store._closing, "a dead worker must leave admission closed"
+
+    async def refused():
+        with pytest.raises(RuntimeError, match="not running"):
+            await store.submit(lambda conn: None)
+    asyncio.run(refused())
+    assert store.stop(timeout=1) is True and store._queue.empty()
+    store.start()
+
+    async def serve():
+        await asyncio.wait_for(store.put("k", "v"), 2)
+        assert await asyncio.wait_for(store.get("k"), 2) == "v"
+    asyncio.run(serve())
+    assert store._thread.is_alive() and store.stop(timeout=2) is True
 
 
 def test_concurrent_starts_create_exactly_one_worker():
