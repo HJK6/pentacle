@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 import re
 from typing import Any
@@ -11,10 +12,14 @@ from .specs_service import SOURCE_READ_ERRORS, SpecsSubsystem, _resolve_specs_me
 
 NONTERMINAL = frozenset({'backlog', 'analysis', 'ready_for_dev', 'in_progress', 'needs_qa', 'blocked'})
 TRACKED_CLASSES = frozenset({'external_event', 'operator_action', 'new_scope'})
-_CHECKBOX = re.compile(r'^\s*(?:(?:[-*+]|\d+[.)])\s*)?\[[^\]]*\]')
-_NAMED = re.compile(r'^\s*- \[([ xX])\]\s+\*\*([^*]+)\*\*\s+—\s+(\S.*)$')
+_HEADING = re.compile(r'^ {0,3}(#{1,6})(?:[ \t]+(.*))?[ \t]*$')
+_FENCE = re.compile(r'^ {0,3}(`{3,}|~{3,})')
+_CHECKBOX = re.compile(r'^\s*(?:[-*+]|\d+[.)])\s+\[([ xX])\](?:\s+(.*))?$')
+_NAME = re.compile(r'^\*\*([^*]+)\*\*')
+_MARKER = re.compile(r'\(waived:|\btracked:')
 _WAIVER = re.compile(r'\(waived:\s*(.*?)\)\s*$')
 _TRACKED = re.compile(r'\btracked:\s+(\S+)\s+\(([^()]+)\)\s*$')
+
 
 
 class CompletionRefusal(ValueError):
@@ -30,17 +35,95 @@ class CompletionRefusal(ValueError):
         return (self.code + ': ' + json.dumps(self.details['items'], ensure_ascii=False, sort_keys=True))[:2000]
 
 
-def section_lines(text: str, heading: str):
-    """Yield numbered lines within an exact level-two Markdown section."""
-    inside = False
+def _heading(line: str):
+    match = _HEADING.fullmatch(line)
+    if match:
+        title = re.sub(r'[ \t]+#+[ \t]*$', '', match[2] or '').strip(' \t')
+        return len(match[1]), title
+    return None
+
+
+def _visible_lines(text: str):
+    """Keep original line numbers, excluding Markdown fenced examples."""
+    fence = None
     for number, line in enumerate(text.splitlines(), 1):
-        if line.startswith('## '):
+        if fence:
+            if re.fullmatch(rf' {{0,3}}{fence[0]}{{{fence[1]},}}\s*', line):
+                fence = None
+            continue
+        opener = _FENCE.match(line)
+        if opener and not (opener[1][0] == '`' and '`' in line[opener.end():]):
+            fence = opener[1][0], len(opener[1])
+            continue
+        yield number, line
+
+
+def section_lines(text: str, heading: str):
+    """Yield live text in a level-two section, ending at its peer or parent."""
+    inside = False
+    for number, line in _visible_lines(text):
+        parsed = _heading(line)
+        if parsed and parsed[0] <= 2:
             if inside:
                 return
-            inside = line.strip() == '## ' + heading
+            inside = parsed == (2, heading)
             continue
         if inside:
             yield number, line
+
+
+def _escaped(text: str, index: int) -> bool:
+    count = 0
+    while index > 0 and text[index - 1] == "\\":
+        count += 1
+        index -= 1
+    return count % 2 == 1
+
+
+def _example_mask(text: str) -> str:
+    """Mask matched inline-code and quoted examples without shifting offsets."""
+    masked = list(text)
+    index = 0
+    while index < len(text):
+        if text[index] != '`' or _escaped(text, index):
+            index += 1
+            continue
+        end = index
+        while end < len(text) and text[end] == '`':
+            end += 1
+        run = re.compile(r'(?<!`)`{' + str(end - index) + r'}(?!`)')
+        closing = next((m for m in run.finditer(text, end) if not _escaped(text, m.start())), None)
+        if closing:
+            masked[index:closing.end()] = ' ' * (closing.end() - index)
+            index = closing.end()
+        else:
+            index = end
+    code_masked = ''.join(masked)
+    pairs = {"'": "'", '"': '"', '‘': '’', '“': '”'}
+    word = lambda char: char.isalnum() or char == '_'
+    index = 0
+    while index < len(text):
+        char = code_masked[index]
+        if (char not in pairs or _escaped(text, index)
+                or (index > 0 and word(code_masked[index - 1]))):
+            index += 1
+            continue
+        closing = index + 1
+        while closing < len(text):
+            if (code_masked[closing] == pairs[char] and not _escaped(text, closing)
+                    and (closing + 1 == len(text) or not word(code_masked[closing + 1]))):
+                break
+            closing += 1
+        if closing < len(text):
+            masked[index:closing + 1] = ' ' * (closing + 1 - index)
+            index = closing + 1
+        else:
+            index += 1
+    return ''.join(masked)
+
+
+def _normalize(text: str) -> str:
+    return ' '.join(text.split())
 
 
 class SpecReader:
@@ -73,37 +156,44 @@ class SpecReader:
 
 
 def parse_custom(text: str) -> list[dict[str, Any]]:
-    """Parse Custom checkbox syntax without doing any filesystem work."""
+    """Use checkbox state and explicit dispositions, never display typography."""
     custom = False
     items = []
     for number, line in section_lines(text, 'Acceptance Criteria'):
-        if line.strip() == '### Custom':
-            custom = True
+        heading = _heading(line)
+        if heading and heading[0] <= 3:
+            if custom:
+                break
+            custom = heading == (3, 'Custom')
             continue
-        if not custom or not _CHECKBOX.match(line):
+        checkbox = _CHECKBOX.fullmatch(line) if custom else None
+        if checkbox is None:
             continue
-        named = _NAMED.fullmatch(line)
-        if named is None or not named[2].strip():
-            items.append({'line': number, 'criterion': None, 'reason': 'custom_ac_unparseable'})
-            continue
-        mark, criterion, body = named.groups()
-        item = {'line': number, 'criterion': criterion.strip(), 'reason': 'undisposed'}
+        mark, body = checkbox[1], (checkbox[2] or '').strip()
+        markers = list(_MARKER.finditer(_example_mask(body)))
+        label = body[:markers[0].start()].strip() if markers else body
+        named = _NAME.match(label)
+        criterion = _normalize(named[1] if named else label)
+        item = {'line': number, 'criterion': criterion, 'reason': 'undisposed'}
         if mark.lower() == 'x':
             item['disposition'] = 'checked'
-        elif waiver := _WAIVER.search(body):
-            if waiver[1].strip():
+        elif markers:
+            suffix = body[markers[0].start():]
+            if len(markers) != 1 or not criterion:
+                item['reason'] = 'disposition_invalid'
+            elif (waiver := _WAIVER.fullmatch(suffix)) and waiver[1].strip():
                 item.update(disposition='waived', reason=waiver[1].strip())
+            elif tracked := _TRACKED.fullmatch(suffix):
+                item.update(disposition='tracked', target=tracked[1], **{'class': tracked[2].strip()})
             else:
-                item['reason'] = 'custom_ac_unparseable'
-        elif tracked := _TRACKED.search(body):
-            item.update(disposition='tracked', target=tracked[1], **{'class': tracked[2].strip()})
-        elif 'tracked:' in body or '(waived:' in body:
-            item['reason'] = 'custom_ac_unparseable'
+                item['reason'] = 'disposition_invalid'
         items.append(item)
     return items
 
 
-def _tracked(reader: SpecReader, member: str, folder: Path, item: dict[str, Any]) -> dict[str, Any]:
+def _tracked(reader: SpecReader, member: str, folder: Path, item: dict[str, Any], identities: Counter) -> dict[str, Any]:
+    if identities[item['criterion']] > 1:
+        return {'reason': 'criterion_ambiguous'}
     if item['class'] not in TRACKED_CLASSES:
         return {'reason': 'class_invalid'}
     try:
@@ -120,13 +210,21 @@ def _tracked(reader: SpecReader, member: str, folder: Path, item: dict[str, Any]
         owner = None
     if not isinstance(owner, str) or not owner.strip():
         return {'reason': 'follow_up_unowned'}
-    receipt = re.compile(r'^- deferred_from: ' + re.escape(member) + r' — '
-                         + re.escape(item['criterion']) + r':\s*(\S.*)$')
+    prefix = f'- deferred_from: {member} — '
+    ambiguous = False
     for _, line in section_lines(text, 'Tracking'):
-        match = receipt.fullmatch(line.strip())
-        if match and match[1].strip():
-            return {'target': identity, 'owner': owner.strip(), 'reason': match[1].strip()}
-    return {'reason': 'follow_up_unlinked'}
+        line = line.strip()
+        if not line.startswith(prefix):
+            continue
+        tail = _normalize(line[len(prefix):])
+        matches = [identity for identity in identities if identity
+                   and tail.startswith(identity + ': ') and tail[len(identity) + 2:].strip()]
+        if len(matches) > 1:
+            ambiguous = True
+        elif matches == [item['criterion']]:
+            return {'target': identity, 'owner': owner.strip(),
+                    'reason': tail[len(item['criterion']) + 2:].strip()}
+    return dict(reason='follow_up_unlinked', **({'detail': 'receipt_ambiguous'} if ambiguous else {}))
 
 
 def check_lane_members(root: str | Path | None, member_ids) -> dict[str, Any]:
@@ -146,11 +244,13 @@ def check_lane_members(root: str | Path | None, member_ids) -> dict[str, Any]:
         except SOURCE_READ_ERRORS:
             failures.append({'spec_id': member, 'criterion': None, 'reason': 'member_spec_unreadable'})
             continue
-        for parsed in parse_custom(text):
+        parsed_items = parse_custom(text)
+        identities = Counter(item['criterion'] for item in parsed_items)
+        for parsed in parsed_items:
             item = {'spec_id': member, **parsed}
             disposition = item.get('disposition')
             if disposition == 'tracked':
-                item.update(_tracked(reader, identity, folder, item))
+                item.update(_tracked(reader, identity, folder, item, identities))
                 if item.get('owner'):
                     dispositions.append(item)
                 else:
@@ -162,7 +262,6 @@ def check_lane_members(root: str | Path | None, member_ids) -> dict[str, Any]:
     failures.sort(key=lambda item: (item['spec_id'], item.get('line', 0), item.get('criterion') or ''))
     if failures:
         reasons = {item['reason'] for item in failures}
-        code = ('member_spec_unreadable' if 'member_spec_unreadable' in reasons else
-                'custom_ac_unparseable' if 'custom_ac_unparseable' in reasons else 'lane_residuals_undisposed')
+        code = 'member_spec_unreadable' if 'member_spec_unreadable' in reasons else 'lane_residuals_undisposed'
         raise CompletionRefusal(code, failures)
     return {'dispositions': dispositions}

@@ -41,7 +41,7 @@ CASES = [
     ('empty_owner', 'lane_residuals_undisposed', 'follow_up_unowned'),
     ('empty_custom', None, None), ('missing_custom', None, None),
     ('outside_checkbox', None, None),
-    ('unparseable', 'custom_ac_unparseable', 'custom_ac_unparseable'),
+    ('plain_unchecked', 'lane_residuals_undisposed', 'undisposed'),
     ('missing_member', 'member_spec_unreadable', 'member_spec_unreadable'),
     ('unreadable_member', 'member_spec_unreadable', 'member_spec_unreadable'),
     ('two_members', 'lane_residuals_undisposed', 'undisposed'),
@@ -62,7 +62,7 @@ def write_spec(root, spec_id=MEMBER, status='in_progress', custom=UNCHECKED, *, 
 def prepare(root, case, monkeypatch):
     custom = {'checked': CHECKED, 'waived': WAIVED, 'empty_custom': 'No checkboxes.',
               'missing_custom': None, 'outside_checkbox': CHECKED,
-              'unparseable': '- [ ] not a named criterion'}.get(case, UNCHECKED)
+              'plain_unchecked': '- [ ] not a named criterion'}.get(case, UNCHECKED)
     tracking_cases = {'tracked','tracked_external','tracked_operator','terminal','deprecated','self','self_alias',
                       'bad_class','missing_follow','unlinked','empty_reason','wrong_member','wrong_criterion',
                       'receipt_outside','unowned','empty_owner'}
@@ -108,9 +108,9 @@ def assert_refusal(exc, code, reason, case, path):
     expected = [MEMBER, OTHER] if case == 'two_members' else [OTHER] if case == 'one_of_two' else [MEMBER]
     assert [item['spec_id'] for item in items] == expected
     assert all(item['reason'] == reason for item in items)
-    if code == 'lane_residuals_undisposed': assert all(item['criterion'] == 'Finish' for item in items)
-    if code == 'custom_ac_unparseable':
-        assert items[0]['line'] == path.read_text().splitlines().index('- [ ] not a named criterion') + 1
+    if code == 'lane_residuals_undisposed':
+        name = 'not a named criterion' if case == 'plain_unchecked' else 'Finish'
+        assert all(item['criterion'] == name for item in items)
     if code == 'member_spec_unreadable': assert exc.details['retriable'] is True
 
 
@@ -469,15 +469,15 @@ def test_refusal_survives_store_restart(tmp_path,monkeypatch,kind):
         assert conn.execute("SELECT status FROM sessions WHERE host='host-a' AND session_name='lead'").fetchone()[0]=='open'
 
 
-@pytest.mark.parametrize('prefix',['1. ', '1) ', ''])
+@pytest.mark.parametrize('prefix',['1. ', '1) '])
 @pytest.mark.parametrize('through_lane',[False,True],ids=['parser','lane'])
-def test_checkbox_outside_named_bullet_grammar_refuses(tmp_path,monkeypatch,prefix,through_lane):
-    line=prefix+'[ ] **Finish** — a concrete criterion'
+def test_ordered_checkbox_remains_undisposed(tmp_path,monkeypatch,prefix,through_lane):
+    line=prefix+'[ ] Finish the remaining work'
     path=write_spec(tmp_path,custom=line)
     monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
     def check(exc):
-        assert exc.code=='custom_ac_unparseable'
-        assert exc.details['items'][0]['spec_id']==MEMBER
+        assert exc.code=='lane_residuals_undisposed'
+        assert exc.details['items'][0]['criterion']=='Finish the remaining work'
         assert exc.details['items'][0]['line']==path.read_text().splitlines().index(line)+1
     if not through_lane:
         api=importlib.import_module('_shared.custom_ac')
@@ -491,3 +491,146 @@ def test_checkbox_outside_named_bullet_grammar_refuses(tmp_path,monkeypatch,pref
             check(exc.value)
             assert (await env.store.get_work_lane(lane['lane_id']))['lane']['work_state']=='active'
         run(body)
+
+
+LAYOUTS = ['Ship the outcome', '**Ship** with no dash', '**Ship** (evidence) — outcome',
+           '**Ship — west** outcome', 'Ship `tool` output', 'Ship "(waived: example)" output',
+           'Ship `(waived: example)` and `tracked: spec_alpha__follow (new_scope)`']
+
+
+@pytest.mark.parametrize('body', LAYOUTS)
+@pytest.mark.parametrize('mark', [' ', 'x', 'X'])
+def test_plain_and_existing_layout_states(tmp_path, body, mark):
+    api=importlib.import_module('_shared.custom_ac')
+    write_spec(tmp_path,custom=f'- [{mark}] {body}')
+    if mark==' ':
+        with pytest.raises(api.CompletionRefusal) as exc: api.check_lane_members(tmp_path,[MEMBER])
+        assert exc.value.code=='lane_residuals_undisposed'
+        assert len(exc.value.details['items'])==1
+    else:
+        assert api.check_lane_members(tmp_path,[MEMBER])['dispositions'][0]['disposition']=='checked'
+
+
+@pytest.mark.parametrize('prefix',['- ','* ','+ ','1. ','12) ','  - '])
+def test_checked_task_list_variants(tmp_path,prefix):
+    write_spec(tmp_path,custom=prefix+'[x] plain complete')
+    importlib.import_module('_shared.custom_ac').check_lane_members(tmp_path,[MEMBER])
+
+
+@pytest.mark.parametrize('text,allowed',[
+    ('- [ ] Ship (waived: reason)',True),
+    ('- [ ] Ship (waived: )',False),
+    ('- [ ] Ship (waived: reason',False),
+    ('- [ ] Ship (waived: one) (waived: two)',False),
+    ('- [ ] Ship tracked: spec_alpha__follow (new_scope) (waived: reason)',False),
+    ('- [ ]',False),('- [ ] (waived: reason)',False),
+    ('- [ ] Ship `(waived: example)`',False),
+    ('- [ ] Ship ``(waived: example)`` (waived: real)',True),
+    ('- [ ] Ship "(waived: example)"',False),
+    ("- [ ] Ship '(waived: example)' then proceed (waived: authorized)",True),
+    ('- [ ] Ship “(waived: example)” (waived: real)',True),
+    ('- [ ] Ship ‘(waived: example)’ (waived: real)',True),
+    ("- [ ] Don't hide the real suffix (waived: real)",True),
+    ('- [ ] Ship "unmatched example (waived: real)',True),
+    ('- [ ] Ship "example \\"(waived: ignored)\\" text" (waived: real)',True),
+])
+def test_unchecked_dispositions_and_examples(tmp_path,text,allowed):
+    write_spec(tmp_path,custom=text)
+    api=importlib.import_module('_shared.custom_ac')
+    if allowed: api.check_lane_members(tmp_path,[MEMBER])
+    else:
+        with pytest.raises(api.CompletionRefusal) as exc: api.check_lane_members(tmp_path,[MEMBER])
+        assert exc.value.code=='lane_residuals_undisposed'
+        assert len(exc.value.details['items'])==1
+
+
+@pytest.mark.parametrize('custom',[
+    '```text\n- [ ] example\n## Outside\n```\n- [x] Actual',
+    '~~~\n- [ ] example\n~~~\n- [x] Actual',
+    'Prose [ ] is not a task.\n`- [ ] example`\n- prose\n[ ] prose\n- [x] Actual',
+    '- [x] Actual\n### Common\n- [ ] Common task\n#### Closure\n- [ ] closure',
+    '- [x] Actual\n## Other\n- [ ] other task',
+    '- [x] Actual\n# Other\n- [ ] other task',
+])
+def test_only_live_custom_task_criteria(tmp_path,custom):
+    write_spec(tmp_path,custom=custom)
+    importlib.import_module('_shared.custom_ac').check_lane_members(tmp_path,[MEMBER])
+
+
+def test_custom_scope_excludes_common_before_and_keeps_nested_tasks(tmp_path):
+    path=write_spec(tmp_path,custom='#### Nested\n- [ ] Real nested task')
+    path.write_text(path.read_text().replace('### Custom','### Common\n- [ ] Common task\n#### Closure\n- [ ] closure\n   ### Custom ###'))
+    api=importlib.import_module('_shared.custom_ac')
+    with pytest.raises(api.CompletionRefusal) as exc: api.check_lane_members(tmp_path,[MEMBER])
+    assert [x['criterion'] for x in exc.value.details['items']]==['Real nested task']
+
+
+@pytest.mark.parametrize('label,identity',[
+    ('Ship the outcome','Ship the outcome'),('Ship   the outcome','Ship the outcome'),
+    ('**Ship** (proof) — outcome','Ship'),('Ship: west','Ship: west'),
+    ('**Ship: west** outcome','Ship: west'),('Ship `tool` output','Ship `tool` output'),
+])
+def test_named_and_plain_receipt_identity(tmp_path,label,identity):
+    write_spec(tmp_path,custom=f'- [ ] {label} tracked: {FOLLOW} (new_scope)')
+    write_spec(tmp_path,FOLLOW,status='backlog',tracking=f'- deferred_from: {MEMBER} — {identity}: reason: external dependency')
+    result=importlib.import_module('_shared.custom_ac').check_lane_members(tmp_path,[MEMBER])
+    assert result['dispositions'][0]['criterion']==identity
+    assert result['dispositions'][0]['reason']=='reason: external dependency'
+
+
+@pytest.mark.parametrize('custom,receipt,reason',[
+    (f'- [ ] Ship tracked: {FOLLOW} (new_scope)\n- [ ] Ship tracked: {FOLLOW} (new_scope)',
+     f'- deferred_from: {MEMBER} — Ship: reason','criterion_ambiguous'),
+    (f'- [ ] Ship tracked: {FOLLOW} (new_scope)\n- [ ] Ship: west tracked: {FOLLOW} (new_scope)',
+     f'- deferred_from: {MEMBER} — Ship: west: delayed','follow_up_unlinked'),
+    (f'- [x] Ship\n- [ ] Ship: west tracked: {FOLLOW} (new_scope)',
+     f'- deferred_from: {MEMBER} — Ship: west: delayed','follow_up_unlinked'),
+    (f'- [ ] Ship tracked: {FOLLOW} (new_scope)',
+     f'```text\n- deferred_from: {MEMBER} — Ship: reason\n```','follow_up_unlinked'),
+    (f'- [ ] Ship tracked: {FOLLOW} (new_scope)',
+     f'- deferred_from: {MEMBER} — Other: reason','follow_up_unlinked'),
+    ('- [ ] Ship deferred: waiting for external action','', 'undisposed'),
+])
+def test_receipts_never_dispose_ambiguous_or_unlinked_criteria(tmp_path,custom,receipt,reason):
+    write_spec(tmp_path,custom=custom)
+    write_spec(tmp_path,FOLLOW,status='backlog',tracking=receipt)
+    api=importlib.import_module('_shared.custom_ac')
+    with pytest.raises(api.CompletionRefusal) as exc:api.check_lane_members(tmp_path,[MEMBER])
+    assert exc.value.code=='lane_residuals_undisposed'
+    assert all(x['reason']==reason for x in exc.value.details['items'])
+
+
+@pytest.mark.parametrize('route',['lane','local','remote','offline_operator','offline_manager'])
+@pytest.mark.parametrize('case',['plain_checked','plain_unchecked','missing','unreadable'])
+def test_compatible_criteria_and_missing_members_on_completion_paths(tmp_path,monkeypatch,route,case):
+    path=write_spec(tmp_path,custom='- [x] Ship plain outcome' if case=='plain_checked' else '- [ ] Ship plain outcome')
+    if case=='missing':path.unlink()
+    if case=='unreadable':
+        original=Path.read_text
+        def denied(self,*a,**kw):
+            if self==path:raise PermissionError('fixture member read denied')
+            return original(self,*a,**kw)
+        monkeypatch.setattr(Path,'read_text',denied)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
+    expected='member_spec_unreadable' if case in {'missing','unreadable'} else 'lane_residuals_undisposed'
+    async def body(env):
+        lead=await env.seat('lead',role='lead',parent_stream_id=FD)
+        lane=(await env.adopt(lead=lead,members=[MEMBER]))['lane']
+        sessions,tmux=await close_context(env,lead,remote=route in {'remote','offline_operator','offline_manager'},online=not route.startswith('offline'))
+        before=await env.store.get_work_lane(lane['lane_id'])
+        async def action():
+            if route=='lane':return await env.op('set_state',{'to':'done','outcome':'Checked work'},lane=lane['lane_id'],version=1)
+            kw={'operator_confirm':True} if route=='offline_operator' else {'close_kind':'manager_close'} if route=='offline_manager' else {}
+            return await sessions.close(*lead[0].split(':',1),**kw)
+        if case=='plain_checked':
+            result=await action()
+            if route=='lane':assert result['lane']['work_state']=='done'
+            else:assert result['session']['status']=='closed'
+        else:
+            with pytest.raises((ValueError,VerbError)) as exc:await action()
+            assert exc.value.code==expected
+            assert await env.store.get_work_lane(lane['lane_id'])==before
+            assert (await env.store.fetch_session(*lead[0].split(':',1)))['status']=='open'
+            assert tmux.kills==0
+            assert len(await audits(env,close=route!='lane'))==1
+    run(body)

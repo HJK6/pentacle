@@ -20,23 +20,46 @@ already reached by that local or remote route remain first. A route that would
 actually close, including either remote offline logical-close route, must then
 pass completion. Existing liveness probes are not repeated.
 
-Within `## Acceptance Criteria`, the `### Custom` subsection runs through the
-next `## ` heading. Named checkboxes use this syntax:
+Within `## Acceptance Criteria`, only the `### Custom` subsection is checked.
+It ends at its next peer or parent heading; nested headings stay in scope.
+Common and Closure criteria outside Custom are unaffected. ATX headings accept
+ordinary indentation and closing hashes. Fenced code, inline code examples,
+non-task prose and ordinary bullets are not completion criteria.
+
+Ordinary unordered or ordered task checkboxes need no bold title or em dash:
 
 ```text
-- [x] **Criterion** — completed work
-- [ ] **Criterion** — remaining work (waived: a non-empty reason)
-- [ ] **Criterion** — remaining work tracked: spec_alpha__follow (new_scope)
+- [x] Completed outcome
+- [ ] Remaining outcome (waived: a non-empty reason)
+- [ ] Remaining outcome tracked: spec_alpha__follow (new_scope)
 ```
 
-Checked criteria pass. A waiver needs a nonempty reason. A tracked criterion
-needs class `external_event`, `operator_action` or `new_scope`, a distinct
-resolver-proven follow-up, nonempty frontmatter `owner:`, and an exact receipt
-inside that follow-up's `## Tracking` section:
+Checked state is evaluated first, including when the wording quotes disposition
+syntax. An unchecked criterion needs one valid operative suffix at line end:
+a nonempty waiver or a tracked target/class. Matched inline backtick spans and
+paired ASCII or curly quotes are examples, not operative markers; apostrophes
+inside words and escaped quotes do not begin/end quoted spans. An unmatched
+quote does not hide a suffix. Multiple operative markers, empty reasons or
+malformed suffixes leave a criterion undisposed. Empty unchecked criteria are
+also retained as residuals. Formatting alone never causes a parse refusal.
+
+Tracked criteria need class `external_event`, `operator_action` or `new_scope`,
+a distinct resolver-proven follow-up, nonempty frontmatter `owner:`, and a live
+receipt in that follow-up's `## Tracking` section:
 
 ```text
-- deferred_from: spec_alpha__member — Criterion: a concrete non-empty reason
+- deferred_from: spec_alpha__member — Remaining outcome: a concrete reason
 ```
+
+Criterion identity uses a leading bold title when present; otherwise it uses
+the full checkbox body before its operative disposition, with whitespace
+normalized. Other literal Markdown is preserved. The receipt must identify
+exactly one source identity before the reason delimiter. Duplicate identities
+cannot grant tracked completion. Prefix collisions such as `Ship` and
+`Ship: west` make a receipt ending `Ship: west: delayed` ambiguous; neither is
+disposed by that receipt. Colon-bearing identities without a competing source
+prefix and colon-bearing reasons remain valid. Code-example-only receipts and
+bare deferred-with-reason notes grant nothing. No ID registry is introduced.
 
 The follow-up must be in `backlog`, `analysis`, `ready_for_dev`, `in_progress`,
 `needs_qa` or `blocked`; `completed` and `deprecated` are terminal. The returned
@@ -56,9 +79,9 @@ by pretending it has an empty Custom section or by using a new bypass flag.
 - `lane_residuals_undisposed`: all undisposed member/criterion pairs in stable
   member/line order, including per-item `follow_up_not_found`,
   `follow_up_terminal`, `follow_up_is_self`, `class_invalid`,
-  `follow_up_unlinked` or `follow_up_unowned` reasons
-- `custom_ac_unparseable`: member and one-based document line for invalid
-  checkbox grammar
+  `follow_up_unlinked` or `follow_up_unowned` reasons; malformed operative
+  suffixes use `disposition_invalid`, duplicate identities use
+  `criterion_ambiguous`, and an ambiguous receipt adds `receipt_ambiguous` detail
 - `member_spec_unreadable`: member identity and `retriable: true`
 
 Refusal leaves lane state, version, events, publication and confirmation use
