@@ -351,7 +351,13 @@ async def test_archived_replay_and_missing_archive_report_gap(budget_store):
     state=await store.fd_turn_budget_status("fixture:fd")
     assert state["ordinal"]==1 and not state["continuity_gap"] and state["archive_seen"]
     archive.unlink()
-    await turn(store,20)
+    from retention import RetentionError
+    # Ingress now refuses missing paired history before the observer runs.
+    with pytest.raises(RetentionError, match="history archive path unavailable"):
+        await turn(store,20)
+    # Exercise the accepted-event floor independently; it must retain the gap.
+    item = normalized("USER", 20)
+    await store.append_session_event("fixture:fd", item, identity="missing-archive-source", limit=100)
     assert (await store.fd_turn_budget_status("fixture:fd"))["continuity_gap"]=="archive_unavailable"
     assert await counts(store)==(0,1)
 

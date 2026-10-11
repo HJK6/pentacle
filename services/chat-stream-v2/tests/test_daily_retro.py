@@ -3678,6 +3678,7 @@ def test_combined_release_archive_collect(config, tmp_path, with_primary):
     release, outside, harness = owned / "release", owned / "outside", owned / "harness"
     paths = (
         "services/chat-stream-v2/tools/daily_retro.py",
+        "services/chat-stream-v2/fd_turn_budget.py",
         "services/chat-stream-v2/message_envelopes.py",
         "services/chat-stream-v2/provider_wrappers.py",
         "services/chat-stream-v2/retention.py", "services/chat-stream-v2/v2_runtime.py",
