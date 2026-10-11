@@ -1462,34 +1462,6 @@ class Sessions:
             operator_override=operator_override,
         )
 
-    async def _guard_lane_completion(
-        self, row: dict[str, Any] | None, close_kind: str,
-        attribution: dict[str, Any] | None,
-    ) -> None:
-        """Check fresh open-lane bindings only after this route permits close."""
-        from _shared.custom_ac import CompletionRefusal, check_lane_members
-        from store_work_index import member_ids
-
-        if row is None:
-            return
-        sid = f"{row['host']}:{row['session_name']}"
-        generation = self._row_generation(row)
-        members = set()
-        for lane in await self.store.work_lane_rows():
-            if (lane.get("bound_stream_id") == sid
-                    and lane.get("bound_generation") == generation):
-                members.update(member_ids(lane))
-        if not members:
-            return
-        try:
-            await asyncio.to_thread(check_lane_members, None, members)
-        except CompletionRefusal as exc:
-            await self.store.record_close_audit(
-                host=row["host"], session_name=row["session_name"], close_kind=close_kind,
-                disposition="fenced", attribution=attribution, reason=exc.audit_reason(),
-            )
-            raise VerbError(exc.code, str(exc), **exc.details) from exc
-
     async def _close_locked(
         self,
         host: str,
@@ -1595,7 +1567,6 @@ class Sessions:
                 )
                 return await self._reap_fenced(host, session_name, row)
 
-        await self._guard_lane_completion(row, close_kind, attribution)
 
         # No pane at entry is not a process-tree readback. Keep the close
         # unknown so descendants cannot be silently lost behind `reaped, []`.
@@ -1854,7 +1825,6 @@ class Sessions:
     ) -> dict[str, Any]:
         host, name = row["host"], row["session_name"]
         sid = f"{host}:{name}"
-        await self._guard_lane_completion(row, "operator_offline_close", attribution)
         async def _commit() -> dict[str, Any] | None:
             committed = await self.store.mark_closed(
                 host, name, closed_at=iso_now(), pane_status="unknown",
@@ -2044,7 +2014,6 @@ class Sessions:
             if operator_confirm and row is not None:
                 return await self._close_offline_locked(row, reason, expected_generation, attribution)
             return self._close_failed(row, "ssh_unreachable")
-        await self._guard_lane_completion(row, close_kind, attribution)
         tmux = self.hosts.tmux_for(host)
         identity_reader = getattr(tmux, "pane_identity", None)
         pane_lease: dict[str, Any] | None = None

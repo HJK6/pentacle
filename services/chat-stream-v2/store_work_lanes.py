@@ -18,8 +18,6 @@ import uuid
 from typing import Any, Callable
 
 from work_lane_members import validate_members, validate_title
-from _shared.custom_ac import CompletionRefusal, check_lane_members
-from store_lifecycle_authority import audit as lifecycle_audit
 from store_work_index import ensure_work_index_schema, member_ids, members_conn, _state_conn
 from store_work_lane_episodes import ensure_work_lane_episodes_schema, lead_reported_done_conn
 from work_lane_migration import upgrade_events
@@ -473,17 +471,6 @@ class _WorkLanesStoreMixin:
                                      confirmation=confirmation, digest=digest, fault=fault)
                 conn.commit()
                 return result
-            except CompletionRefusal as exc:
-                conn.rollback()
-                lifecycle_audit(
-                    conn, action="work_lane.set_state:done", actor_kind="seat",
-                    actor_identity=actor_stream_id, actor_generation=actor_generation,
-                    target_stream_id=stream_id, old_revision=expected_lane_version,
-                    reason=f"lane={lane_id}; {exc.audit_reason()}", request_id=request_id,
-                    result="refused", refusal_code=exc.code,
-                )
-                conn.commit()
-                raise
             except BaseException:
                 conn.rollback()
                 raise
@@ -725,7 +712,6 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if to == "done":
                 outcome = _text(payload.get("outcome"), UPDATE_TEXT_MAX, "work_lane_outcome_required",
                                 required=True)
-                check_lane_members(None, member_ids(lane))
                 changes["done_at"] = stamp
                 if lane.get("owner_kind") == "operator" and consumed is not None:
                     changes["work_state_reason"] = "operator_confirmed"

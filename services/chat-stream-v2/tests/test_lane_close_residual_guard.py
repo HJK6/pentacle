@@ -131,23 +131,6 @@ def test_parser_cells(tmp_path, monkeypatch, case, code, reason):
             assert disposition['owner'] == 'fixture-receiver'
 
 
-@pytest.mark.parametrize('case,code,reason', CASES, ids=[row[0] for row in CASES])
-def test_real_lane_cells(tmp_path,monkeypatch,case,code,reason):
-    members,path = prepare(tmp_path,case,monkeypatch)
-    async def body(env):
-        lane = (await env.adopt(members=members))['lane']
-        before = await env.store.get_work_lane(lane['lane_id'])
-        if code:
-            with pytest.raises(ValueError) as exc:
-                await env.op('set_state',{'to':'done','outcome':'Fixture complete'},lane=lane['lane_id'],version=1)
-            assert_refusal(exc.value,code,reason,case,path)
-            assert await env.store.get_work_lane(lane['lane_id']) == before
-        else:
-            done = await env.op('set_state',{'to':'done','outcome':'Fixture complete'},lane=lane['lane_id'],version=1)
-            assert done['lane']['work_state'] == 'done'
-    run(body)
-
-
 class QuietTmux:
     def __init__(self): self.kills = 0; self.live = False; self.has_calls = 0; self.capture_calls = 0; self.capture_text = 'ready\n'
     async def has_session(self,name): self.has_calls += 1; return self.live
@@ -187,9 +170,8 @@ def test_other_roles_close_with_residuals(tmp_path,monkeypatch,role,status):
         lane=(await env.adopt(members=[MEMBER]))['lane']
         for stage in ('before','after'):
             if stage=='after':
-                with pytest.raises(ValueError) as exc:
-                    await env.op('set_state',{'to':'done','outcome':'Incomplete'},lane=lane['lane_id'],version=1)
-                assert exc.value.code=='lane_residuals_undisposed'
+                done=await env.op('set_state',{'to':'done','outcome':'U1 tracked separately'},lane=lane['lane_id'],version=1)
+                assert done['lane']['work_state']=='done'
             seat=await env.seat(role+'-'+stage,role=role,spec_id=MEMBER)
             sessions,tmux=await close_context(env,seat)
             result=await sessions.close(*seat[0].split(':',1))
@@ -197,44 +179,9 @@ def test_other_roles_close_with_residuals(tmp_path,monkeypatch,role,status):
     run(body)
 
 
-@pytest.mark.parametrize('remote',[False,True],ids=['local','remote'])
-def test_open_lane_lead_close_refuses_and_audits(tmp_path,monkeypatch,remote):
-    write_spec(tmp_path);monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
-    async def body(env):
-        lead=await env.seat('lead',role='lead',parent_stream_id=FD)
-        lane=(await env.adopt(lead=lead,members=[MEMBER]))['lane']
-        sessions,tmux=await close_context(env,lead,remote=remote)
-        before=await audits(env,close=True)
-        with pytest.raises(VerbError) as exc: await sessions.close(*lead[0].split(':',1))
-        assert exc.value.code=='lane_residuals_undisposed'
-        assert exc.value.extra['items'][0]['spec_id']==MEMBER
-        assert (await env.store.fetch_session(*lead[0].split(':',1)))['status']=='open'
-        rows=await audits(env,close=True)
-        assert len(rows)==len(before)+1
-        assert rows[-1]['disposition']=='fenced' and 'lane_residuals_undisposed' in rows[-1]['reason']
-        assert tmux.kills==0
-    run(body)
-
-
-def test_lane_refusal_audit_is_committed(tmp_path,monkeypatch):
-    write_spec(tmp_path);monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
-    async def body(env):
-        lane=(await env.adopt(members=[MEMBER]))['lane']
-        before=await env.store.get_work_lane(lane['lane_id'])
-        prior=await audits(env)
-        try: await env.op('set_state',{'to':'done','outcome':'Incomplete'},lane=lane['lane_id'],version=1)
-        except ValueError: pass
-        rows=await audits(env)
-        assert len(rows)==len(prior)+1, 'completion refusal audit row missing'
-        assert rows[-1]['refusal_code']=='lane_residuals_undisposed'
-        assert MEMBER in rows[-1]['reason'] and 'Finish' in rows[-1]['reason']
-        assert await env.store.get_work_lane(lane['lane_id'])==before
-    run(body)
-
-
 @pytest.mark.parametrize('option',['requires_hidden','requires_idle','defer_if_working'])
 @pytest.mark.parametrize('remote',[False,True],ids=['local','remote'])
-@pytest.mark.parametrize('allows',[False,True],ids=['preserve_decision','residual_refuses'])
+@pytest.mark.parametrize('allows',[False],ids=['preserve_decision'])
 def test_current_lead_close_decision_order(tmp_path,monkeypatch,option,remote,allows):
     write_spec(tmp_path);monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
     async def body(env):
@@ -263,22 +210,6 @@ def test_current_lead_close_decision_order(tmp_path,monkeypatch,option,remote,al
     run(body)
 
 
-@pytest.mark.parametrize('kind',['operator','manager'])
-def test_remote_offline_logical_close_refuses_residuals(tmp_path,monkeypatch,kind):
-    write_spec(tmp_path);monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
-    async def body(env):
-        lead=await env.seat('lead',role='lead',parent_stream_id=FD)
-        await env.adopt(lead=lead,members=[MEMBER])
-        sessions,tmux=await close_context(env,lead,remote=True,online=False)
-        kwargs={'close_kind':'manager_close'} if kind=='manager' else {'operator_confirm':True}
-        with pytest.raises(VerbError) as exc: await sessions.close(*lead[0].split(':',1),**kwargs)
-        assert exc.value.code=='lane_residuals_undisposed'
-        assert (await env.store.fetch_session(*lead[0].split(':',1)))['status']=='open'
-        assert await env.store.get_deferred_reap(lead[0]) is None
-        assert sessions.hosts.probes==1 and tmux.kills==0
-    run(body)
-
-
 def test_done_lane_lead_closes(tmp_path,monkeypatch):
     write_spec(tmp_path,custom=WAIVED);monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
     async def body(env):
@@ -300,71 +231,6 @@ def test_pause_relead_and_former_lead_close(tmp_path,monkeypatch):
         successor=await env.seat('new',role='lead',parent_stream_id=FD)
         await env.op('set_lead',{'lead':{'stream_id':successor[0],'generation':successor[1]}},lane=lane['lane_id'],version=2)
         sessions,tmux=await close_context(env,lead)
-        assert (await sessions.close(*lead[0].split(':',1)))['session']['status']=='closed'
-    run(body)
-
-
-@pytest.mark.parametrize('method',['confirmation','reason'])
-def test_operator_precedence_and_confirmation_rollback(tmp_path,monkeypatch,method):
-    write_spec(tmp_path);monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
-    async def body(env):
-        lane=(await env.adopt(state='paused',lead=False,owner='operator',members=[MEMBER]))['lane']
-        payload={'to':'done','outcome':'Fixture done'}
-        with pytest.raises(ValueError,match='^work_lane_override_reason_required$'):
-            await env.op('set_state',payload,lane=lane['lane_id'],version=1)
-        if method=='confirmation': payload['operator_confirmation']=env.confirm('fixture-confirm',lane['lane_id'],'set_state:done')
-        else: payload['reason']='Fixture operator decision'
-        before=await env.store.get_work_lane(lane['lane_id'])
-        with pytest.raises(ValueError) as exc:
-            await env.op('set_state',payload,lane=lane['lane_id'],version=1,request_id='completion-retry')
-        assert exc.value.code=='lane_residuals_undisposed'
-        assert await env.store.get_work_lane(lane['lane_id'])==before
-        write_spec(tmp_path,custom=WAIVED)
-        done=await env.op('set_state',payload,lane=lane['lane_id'],version=1,request_id='completion-retry')
-        assert done['lane']['work_state']=='done'
-        assert (await env.op('set_state',payload,lane=lane['lane_id'],version=1,request_id='completion-retry'))['duplicate'] is True
-        if method=='confirmation':
-            events=(await env.store.get_work_lane(lane['lane_id']))['events']
-            assert sum(e.get('consumed_question_id')=='fixture-confirm' for e in events)==1
-    run(body)
-
-
-def test_disposable_two_member_journey(tmp_path,monkeypatch):
-    for member in (MEMBER,OTHER): write_spec(tmp_path,member)
-    monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
-    async def body(env):
-        lane=(await env.adopt(members=[OTHER,MEMBER]))['lane']
-        for stage in ('before','after'):
-            worker=await env.seat('worker-'+stage,role='worker',spec_id=MEMBER)
-            sessions,tmux=await close_context(env,worker)
-            assert (await sessions.close(*worker[0].split(':',1)))['session']['status']=='closed'
-            if stage=='before':
-                with pytest.raises(ValueError) as exc:
-                    await env.op('set_state',{'to':'done','outcome':'Finish'},lane=lane['lane_id'],version=1)
-                assert [item['spec_id'] for item in exc.value.details['items']]==[MEMBER,OTHER]
-                print(json.dumps({'refusal':exc.value.code,'details':exc.value.details,'audit':await audits(env)}))
-                write_spec(tmp_path,MEMBER,custom=TRACKED)
-                write_spec(tmp_path,FOLLOW,status='backlog',custom=CHECKED,tracking=RECEIPT)
-                write_spec(tmp_path,OTHER,custom=WAIVED)
-                success=await env.op('set_state',{'to':'done','outcome':'Dispositions recorded'},lane=lane['lane_id'],version=1)
-                assert success['lane']['work_state']=='done'
-                print(json.dumps({'success':success,'audit':await audits(env)}))
-    run(body)
-
-
-def test_all_matching_lanes_and_only_members(tmp_path,monkeypatch):
-    write_spec(tmp_path,MEMBER,custom=CHECKED);write_spec(tmp_path,OTHER)
-    write_spec(tmp_path,'spec_alpha__unrelated')
-    monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
-    async def body(env):
-        lead=await env.seat('lead',role='lead',parent_stream_id=FD,spec_id='spec_alpha__unrelated')
-        first=(await env.adopt('stream:first',lead=lead,members=[MEMBER]))['lane']
-        second=(await env.adopt('stream:second',lead=lead,members=[OTHER]))['lane']
-        sessions,tmux=await close_context(env,lead)
-        with pytest.raises(VerbError) as exc: await sessions.close(*lead[0].split(':',1))
-        assert exc.value.code=='lane_residuals_undisposed'
-        assert [item['spec_id'] for item in exc.value.extra['items']]==[OTHER]
-        write_spec(tmp_path,OTHER,custom=WAIVED)
         assert (await sessions.close(*lead[0].split(':',1)))['session']['status']=='closed'
     run(body)
 
@@ -394,46 +260,6 @@ def test_seat_without_open_member_lane_closes(tmp_path,monkeypatch):
     run(body)
 
 
-def test_report_driven_refusal_preserves_durable_report(tmp_path,monkeypatch):
-    from ledger import Ledger
-    write_spec(tmp_path);monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
-    async def body(env):
-        lead=await env.seat('lead',role='lead',parent_stream_id=FD)
-        await env.adopt(lead=lead,members=[MEMBER])
-        sessions,tmux=await close_context(env,lead)
-        reply=await Ledger(env.store,sessions=sessions).report({
-            'from_stream_id':lead[0],'report_id':'fixture-durable-report','msg_id':0,'status':'done',
-            'summary':'Fixture report remains durable','findings':[],'next_action':'none','terminate':True})
-        assert reply['durability_ack'] is True
-        assert reply['closed'] is False and 'lane_residuals_undisposed' in reply['close_error']
-        report=await env.store.get_report('fixture-durable-report')
-        assert report is not None and report['summary']=='Fixture report remains durable'
-        assert (await env.store.fetch_session(*lead[0].split(':',1)))['status']=='open'
-        assert tmux.kills==0
-    run(body)
-
-
-def test_server_maps_structured_completion_refusal(tmp_path,monkeypatch):
-    from server import Server
-    write_spec(tmp_path);monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
-    async def body(env):
-        lane=(await env.adopt(members=[MEMBER]))['lane']
-        sessions=Sessions(env.store,tmux=None,local_host='fixture-root')
-        server=Server(store=env.store,sessions=sessions,local_host='fixture-root')
-        server.assistant_composite=env.composite
-        msg={'type':'assistant.operation','request_id':'wire-refusal','composite_stream_id':ASSISTANT,
-             'dispatch_id':'none','operation':'work_lane.set_state','lane_id':lane['lane_id'],
-             'expected_lane_version':1,'payload':{'to':'done','outcome':'Fixture complete'},
-             '_auth_context':{'token_verified':True,'stream_id':FD,'session_generation':env.gen}}
-        try:
-            with pytest.raises(VerbError) as exc: await server._on_assistant_operation(msg)
-            assert exc.value.code=='lane_residuals_undisposed'
-            assert exc.value.extra['items'][0]['spec_id']==MEMBER
-            assert exc.value.extra['items'][0]['criterion']=='Finish'
-        finally: await server.close()
-    run(body)
-
-
 @pytest.mark.parametrize('status',['backlog','analysis','ready_for_dev','in_progress','needs_qa','blocked'])
 def test_each_nonterminal_followup_status(tmp_path,monkeypatch,status):
     write_spec(tmp_path,custom=TRACKED)
@@ -442,35 +268,8 @@ def test_each_nonterminal_followup_status(tmp_path,monkeypatch,status):
     assert api.check_lane_members(tmp_path,[MEMBER])['dispositions'][0]['owner']=='fixture-owner'
 
 
-@pytest.mark.parametrize('kind',['lane','close'])
-def test_refusal_survives_store_restart(tmp_path,monkeypatch,kind):
-    root=tmp_path/'memory';write_spec(root);monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(root))
-    database=tmp_path/'fixture.db'
-    record={}
-    async def body(env):
-        lead=await env.seat('lead',role='lead',parent_stream_id=FD)
-        lane=(await env.adopt(lead=lead,members=[MEMBER]))['lane']
-        record.update(lane_id=lane['lane_id'],lead=lead[0])
-        before={str(p.relative_to(root)):p.read_bytes() for p in root.rglob('*') if p.is_file()}
-        if kind=='lane':
-            with pytest.raises(ValueError) as exc:
-                await env.op('set_state',{'to':'done','outcome':'Incomplete'},lane=lane['lane_id'],version=1)
-        else:
-            sessions,tmux=await close_context(env,lead)
-            with pytest.raises(VerbError) as exc: await sessions.close(*lead[0].split(':',1))
-        assert exc.value.code=='lane_residuals_undisposed'
-        assert {str(p.relative_to(root)):p.read_bytes() for p in root.rglob('*') if p.is_file()}==before
-    run(body,str(database))
-    with sqlite3.connect(database) as conn:
-        table='v2_lifecycle_authority_audit' if kind=='lane' else 'v2_close_audit'
-        assert conn.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]==1
-        assert conn.execute('SELECT work_state FROM v2_assistant_composite_lanes WHERE lane_id=?',
-                            (record['lane_id'],)).fetchone()[0]=='active'
-        assert conn.execute("SELECT status FROM sessions WHERE host='host-a' AND session_name='lead'").fetchone()[0]=='open'
-
-
 @pytest.mark.parametrize('prefix',['1. ', '1) '])
-@pytest.mark.parametrize('through_lane',[False,True],ids=['parser','lane'])
+@pytest.mark.parametrize('through_lane',[False],ids=['parser'])
 def test_ordered_checkbox_remains_undisposed(tmp_path,monkeypatch,prefix,through_lane):
     line=prefix+'[ ] Finish the remaining work'
     path=write_spec(tmp_path,custom=line)
@@ -598,39 +397,3 @@ def test_receipts_never_dispose_ambiguous_or_unlinked_criteria(tmp_path,custom,r
     with pytest.raises(api.CompletionRefusal) as exc:api.check_lane_members(tmp_path,[MEMBER])
     assert exc.value.code=='lane_residuals_undisposed'
     assert all(x['reason']==reason for x in exc.value.details['items'])
-
-
-@pytest.mark.parametrize('route',['lane','local','remote','offline_operator','offline_manager'])
-@pytest.mark.parametrize('case',['plain_checked','plain_unchecked','missing','unreadable'])
-def test_compatible_criteria_and_missing_members_on_completion_paths(tmp_path,monkeypatch,route,case):
-    path=write_spec(tmp_path,custom='- [x] Ship plain outcome' if case=='plain_checked' else '- [ ] Ship plain outcome')
-    if case=='missing':path.unlink()
-    if case=='unreadable':
-        original=Path.read_text
-        def denied(self,*a,**kw):
-            if self==path:raise PermissionError('fixture member read denied')
-            return original(self,*a,**kw)
-        monkeypatch.setattr(Path,'read_text',denied)
-    monkeypatch.setenv('PENTACLE_MEMORY_ROOT',str(tmp_path))
-    expected='member_spec_unreadable' if case in {'missing','unreadable'} else 'lane_residuals_undisposed'
-    async def body(env):
-        lead=await env.seat('lead',role='lead',parent_stream_id=FD)
-        lane=(await env.adopt(lead=lead,members=[MEMBER]))['lane']
-        sessions,tmux=await close_context(env,lead,remote=route in {'remote','offline_operator','offline_manager'},online=not route.startswith('offline'))
-        before=await env.store.get_work_lane(lane['lane_id'])
-        async def action():
-            if route=='lane':return await env.op('set_state',{'to':'done','outcome':'Checked work'},lane=lane['lane_id'],version=1)
-            kw={'operator_confirm':True} if route=='offline_operator' else {'close_kind':'manager_close'} if route=='offline_manager' else {}
-            return await sessions.close(*lead[0].split(':',1),**kw)
-        if case=='plain_checked':
-            result=await action()
-            if route=='lane':assert result['lane']['work_state']=='done'
-            else:assert result['session']['status']=='closed'
-        else:
-            with pytest.raises((ValueError,VerbError)) as exc:await action()
-            assert exc.value.code==expected
-            assert await env.store.get_work_lane(lane['lane_id'])==before
-            assert (await env.store.fetch_session(*lead[0].split(':',1)))['status']=='open'
-            assert tmux.kills==0
-            assert len(await audits(env,close=route!='lane'))==1
-    run(body)
