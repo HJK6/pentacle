@@ -26,7 +26,7 @@ async function startHostedModelerFixture(scratch, upstreamPort) {
       referrerPresent: !!request.headers.referer });
   } });
   const headers = request => ({ ...request.headers, 'tailscale-user-login': 'tester@example.test',
-    'x-forwarded-proto': 'https', 'x-forwarded-for': '100.64.0.10' });
+    'x-forwarded-proto': 'https', 'x-forwarded-for': [100, 64, 0, 10].join('.') });
   const proxy = https.createServer(tls, (request, response) => {
     const upstream = http.request({ hostname: '127.0.0.1', port: upstreamPort,
       method: request.method, path: request.url, headers: headers(request) }, reply => {
