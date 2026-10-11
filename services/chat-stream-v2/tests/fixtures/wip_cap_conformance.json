@@ -1,0 +1,1677 @@
+{
+  "schema_version": 1,
+  "rows": [
+    {
+      "id": "over_cap",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "at_cap",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "move_before_spawn",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007",
+        "alpha__candidate"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "in_progress"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "grandfather_relead",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {
+          "alpha": [
+            "alpha__item_000"
+          ]
+        }
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007",
+        "alpha__item_008",
+        "alpha__item_009"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__item_000",
+        "status": "in_progress"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "moved_grandfather",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {
+          "alpha": [
+            "alpha__candidate"
+          ]
+        }
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007",
+        "alpha__item_008",
+        "alpha__candidate"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "in_progress"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "overlap",
+      "policy": {
+        "schema_version": 1,
+        "cap": 12,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {
+          "alpha": [
+            "alpha__item_000",
+            "alpha__item_001",
+            "alpha__item_002",
+            "alpha__item_003",
+            "alpha__item_004",
+            "alpha__item_005",
+            "alpha__item_006",
+            "alpha__item_007",
+            "alpha__item_008",
+            "alpha__item_009",
+            "alpha__item_010",
+            "alpha__item_011",
+            "alpha__item_012",
+            "alpha__item_013",
+            "alpha__item_014",
+            "alpha__item_015",
+            "alpha__item_016",
+            "alpha__item_017",
+            "alpha__item_018",
+            "alpha__item_019",
+            "alpha__item_020",
+            "alpha__item_021",
+            "alpha__item_022",
+            "alpha__item_023",
+            "alpha__item_024",
+            "alpha__item_025",
+            "alpha__item_026",
+            "alpha__item_027",
+            "alpha__item_028",
+            "alpha__item_029",
+            "alpha__item_030",
+            "alpha__item_031",
+            "alpha__item_032",
+            "alpha__item_033",
+            "alpha__item_034",
+            "alpha__item_035",
+            "alpha__item_036",
+            "alpha__item_037",
+            "alpha__item_038",
+            "alpha__item_039",
+            "alpha__item_040",
+            "alpha__item_041",
+            "alpha__item_042",
+            "alpha__item_043",
+            "alpha__item_044",
+            "alpha__item_045",
+            "alpha__item_046",
+            "alpha__item_047",
+            "alpha__item_048",
+            "alpha__item_049",
+            "alpha__item_050",
+            "alpha__item_051",
+            "alpha__item_052"
+          ]
+        }
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007",
+        "alpha__item_008",
+        "alpha__item_009",
+        "alpha__item_010",
+        "alpha__item_011",
+        "alpha__item_012",
+        "alpha__item_013",
+        "alpha__item_014",
+        "alpha__item_015",
+        "alpha__item_016",
+        "alpha__item_017",
+        "alpha__item_018",
+        "alpha__item_019",
+        "alpha__item_020",
+        "alpha__item_021",
+        "alpha__item_022",
+        "alpha__item_023",
+        "alpha__item_024",
+        "alpha__item_025",
+        "alpha__item_026",
+        "alpha__item_027",
+        "alpha__item_028",
+        "alpha__item_029",
+        "alpha__item_030",
+        "alpha__item_031",
+        "alpha__item_032",
+        "alpha__item_033",
+        "alpha__item_034",
+        "alpha__item_035",
+        "alpha__item_036",
+        "alpha__item_037",
+        "alpha__item_038",
+        "alpha__item_039",
+        "alpha__item_040",
+        "alpha__item_041",
+        "alpha__item_042",
+        "alpha__item_043",
+        "alpha__item_044",
+        "alpha__item_045",
+        "alpha__item_046",
+        "alpha__item_047",
+        "alpha__item_048",
+        "alpha__item_049",
+        "alpha__item_050",
+        "alpha__item_051",
+        "alpha__item_052",
+        "alpha__item_053",
+        "alpha__item_054",
+        "alpha__item_055",
+        "alpha__item_056",
+        "alpha__item_057",
+        "alpha__item_058",
+        "alpha__item_059",
+        "alpha__item_060",
+        "alpha__item_061",
+        "alpha__item_062",
+        "alpha__item_063",
+        "alpha__item_064",
+        "alpha__item_065"
+      ],
+      "overrides": {
+        "alpha__item_000": "- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "candidate": {
+        "stem": "alpha__item_065",
+        "status": "in_progress"
+      },
+      "expected": {
+        "E_R": 13,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=13 cap=12 G_R=53 O_R=1\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "overlap_zero",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {
+          "alpha": [
+            "alpha__item_000",
+            "alpha__item_001"
+          ]
+        }
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001"
+      ],
+      "overrides": {
+        "alpha__item_000": "- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "candidate": {
+        "stem": "alpha__item_001",
+        "status": "in_progress"
+      },
+      "expected": {
+        "E_R": 0,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "override_admits",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007",
+        "alpha__item_008"
+      ],
+      "overrides": {
+        "alpha__item_008": "- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "candidate": {
+        "stem": "alpha__item_008",
+        "status": "in_progress"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "absent_policy",
+      "policy": null,
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "malformed_policy",
+      "policy": {
+        "cap": 0
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_policy_malformed",
+        "message": "wip_policy_malformed",
+        "warnings": []
+      }
+    },
+    {
+      "id": "policy_string_cap",
+      "policy": {
+        "schema_version": 1,
+        "cap": "8",
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_policy_malformed",
+        "message": "wip_policy_malformed",
+        "warnings": []
+      }
+    },
+    {
+      "id": "policy_boolean_cap",
+      "policy": {
+        "schema_version": 1,
+        "cap": true,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_policy_malformed",
+        "message": "wip_policy_malformed",
+        "warnings": []
+      }
+    },
+    {
+      "id": "policy_bad_date",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-02-30",
+        "grandfather": {}
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_policy_malformed",
+        "message": "wip_policy_malformed",
+        "warnings": []
+      }
+    },
+    {
+      "id": "policy_bad_version",
+      "policy": {
+        "schema_version": 2,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_policy_malformed",
+        "message": "wip_policy_malformed",
+        "warnings": []
+      }
+    },
+    {
+      "id": "policy_bad_grandfather",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {
+          "alpha": [
+            4
+          ]
+        }
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_policy_malformed",
+        "message": "wip_policy_malformed",
+        "warnings": []
+      }
+    },
+    {
+      "id": "policy_missing_grandfather",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01"
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_policy_malformed",
+        "message": "wip_policy_malformed",
+        "warnings": []
+      }
+    },
+    {
+      "id": "cap_changes",
+      "policy": {
+        "schema_version": 1,
+        "cap": 9,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "stale_grandfather",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {
+          "alpha": [
+            "alpha__retired"
+          ]
+        }
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": 1,
+        "error_code": null,
+        "message": null,
+        "warnings": [
+          "grandfather_stale"
+        ]
+      }
+    },
+    {
+      "id": "no_grandfather_entry",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": 1,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "beta_isolation",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "beta__item_000",
+        "beta__item_001",
+        "beta__item_002",
+        "beta__item_003",
+        "beta__item_004",
+        "beta__item_005",
+        "beta__item_006",
+        "beta__item_007",
+        "beta__item_008",
+        "beta__item_009"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev"
+      },
+      "expected": {
+        "E_R": 1,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "duplicate_override",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "- wip_override: 2026-01-01 fixture-ref — first\n- wip_override: 2026-01-02 fixture-ref — second"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_override_malformed",
+        "message": "wip_override_malformed: spec=spec_alpha__candidate",
+        "warnings": []
+      }
+    },
+    {
+      "id": "bad_override_date",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "- wip_override: 2026-02-30 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_override_malformed",
+        "message": "wip_override_malformed: spec=spec_alpha__candidate",
+        "warnings": []
+      }
+    },
+    {
+      "id": "empty_override_reason",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "- wip_override: 2026-01-01 fixture-ref —"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_override_malformed",
+        "message": "wip_override_malformed: spec=spec_alpha__candidate",
+        "warnings": []
+      }
+    },
+    {
+      "id": "empty_override_authority",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "- wip_override: 2026-01-01 — fixture reason"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_override_malformed",
+        "message": "wip_override_malformed: spec=spec_alpha__candidate",
+        "warnings": []
+      }
+    },
+    {
+      "id": "fenced_backtick_example",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "```text\n- wip_override: 2026-01-01 fixture-ref — fixture reason\n```"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "fenced_tilde_example",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "~~~text\n- wip_override: 2026-01-01 fixture-ref — fixture reason\n~~~"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "fenced_example_with_live_override",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "```text\n- wip_override: 2026-01-01 fixture-ref — fixture reason\n```\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "unclosed_fence_example",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "```text\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "fence_heading_is_example",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "```text\n## Other\n```\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "short_fence_does_not_close",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "````text\n```\n- wip_override: 2026-01-01 fixture-ref — fixture reason\n````"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "indented_fence_example",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "   ```text\n- wip_override: 2026-01-01 fixture-ref — fixture reason\n   ```"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "ordered_dot_ignored",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "1. wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "ordered_paren_ignored",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "1) wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "ordered_dot_with_live_override",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "- wip_override: 2026-01-01 fixture-ref — fixture reason\n1. wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "ordered_paren_with_live_override",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "- wip_override: 2026-01-01 fixture-ref — fixture reason\n1) wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "indented_override_malformed",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": " - wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_override_malformed",
+        "message": "wip_override_malformed: spec=spec_alpha__candidate",
+        "warnings": []
+      }
+    },
+    {
+      "id": "trailing_spaces_malformed",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "- wip_override: 2026-01-01 fixture-ref — fixture reason  "
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "doubled_field_space_malformed",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "- wip_override: 2026-01-01  fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_override_malformed",
+        "message": "wip_override_malformed: spec=spec_alpha__candidate",
+        "warnings": []
+      }
+    },
+    {
+      "id": "tab_field_separator_malformed",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "- wip_override: 2026-01-01\tfixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": null,
+        "error_code": "wip_override_malformed",
+        "message": "wip_override_malformed: spec=spec_alpha__candidate",
+        "warnings": []
+      }
+    },
+    {
+      "id": "empty_level_two_ends_tracking",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "##\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "empty_level_one_ends_tracking",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "#\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "parent_heading_ends_tracking",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "# Outside\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "empty_level_two_spaces_ends_tracking",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "##   \n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "empty_parent_tab_ends_tracking",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "#\t\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "closed_tracking_heading",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "## Tracking ##\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "tab_tracking_heading",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "##\tTracking\t###\t\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "indented_tracking_heading",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "## Other\n   ## Tracking\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "level_one_tracking_heading",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "# Tracking\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "level_three_tracking_heading",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "## Other\n### Tracking\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "child_tracking_ends_at_peer",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "## Other\n### Tracking\n### Other\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "child_heading_keeps_tracking",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "### Child\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "empty_child_keeps_tracking",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "###\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 8,
+        "error_code": null,
+        "message": null,
+        "warnings": []
+      }
+    },
+    {
+      "id": "malformed_tracking_heading",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "## Tracking#\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    },
+    {
+      "id": "fenced_tracking_does_not_start",
+      "policy": {
+        "schema_version": 1,
+        "cap": 8,
+        "snapshot_at": "2026-01-01",
+        "grandfather": {}
+      },
+      "in_progress": [
+        "alpha__item_000",
+        "alpha__item_001",
+        "alpha__item_002",
+        "alpha__item_003",
+        "alpha__item_004",
+        "alpha__item_005",
+        "alpha__item_006",
+        "alpha__item_007"
+      ],
+      "overrides": {},
+      "candidate": {
+        "stem": "alpha__candidate",
+        "status": "ready_for_dev",
+        "tracking": "## Other\n```text\n## Tracking\n```\n- wip_override: 2026-01-01 fixture-ref — fixture reason"
+      },
+      "expected": {
+        "E_R": 9,
+        "error_code": "wip_cap_exceeded",
+        "message": "wip_cap_exceeded: repo=alpha E_R=9 cap=8 G_R=0 O_R=0\nAdd to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>",
+        "warnings": []
+      }
+    }
+  ]
+}

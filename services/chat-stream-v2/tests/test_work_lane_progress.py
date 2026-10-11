@@ -147,9 +147,25 @@ async def a1_snapshot(env):
     return (await env.store.submit(lambda conn: tuple(conn.iterdump())), list(env.broadcasts))
 
 
-async def a1_close(env, lane):
-    return (await env.op("set_state", {"to": "done", "outcome": "Retained history", "reason": "Fixture decision"},
-                         lane=lane["lane_id"], version=lane["version"]))["lane"]
+async def a1_close(env, lane, *, memory_root=None):
+    # These membership tests keep IDs unresolved until completion setup.
+    # Completion now needs readable synthetic members, without a runtime tree.
+    from contextlib import nullcontext
+    from pathlib import Path
+    import tempfile
+    fixture_root = (tempfile.TemporaryDirectory(prefix="lane-member-fixture-")
+                    if memory_root is None else nullcontext(str(memory_root)))
+    with fixture_root as root, pytest.MonkeyPatch.context() as patch:
+        root = Path(root)
+        for spec_id in lane["members"]:
+            path = root / "work" / "in_progress" / spec_id.removeprefix("spec_") / "spec.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"---\nid: {spec_id}\nowner: fixture-owner\n---\n"
+                            "## Acceptance Criteria\n### Custom\n- [x] **Fixture** — complete\n",
+                            encoding="utf-8")
+        patch.setenv("PENTACLE_MEMORY_ROOT", str(root))
+        return (await env.op("set_state", {"to": "done", "outcome": "Retained history", "reason": "Fixture decision"},
+                             lane=lane["lane_id"], version=lane["version"]))["lane"]
 
 
 async def a1_holder(env, state="paused"):
