@@ -94,6 +94,14 @@ two valid rejects and a pivot advances that surface to cycle 2; the next
 commission then uses cycle 2. A new candidate SHA by itself does not advance
 the cycle.
 
+A verdict report filed at a different message id binds at adjudication to the
+commission already holding its report id, else the exact-key commission, else
+the reviewer's single open commission in that generation, else that generation's
+only commission. Otherwise adjudication returns `qa_report_binding_mismatch`
+with `candidate_msg_ids` listing the open candidate message ids in ascending
+order. Retry, void and revalidate of a bound report keep its commission; the
+stored report row, including its filed message id, is never rewritten.
+
 ```sh
 agent-orch spec-issue adjudicate REPORT_ID --spec-id spec_pentacle__example \
   --surface admission --cycle 1 --valid --reason 'Acceptance criterion violated'

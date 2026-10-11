@@ -630,6 +630,8 @@ def test_misfiled_report_commission_binding(monkeypatch, mode, case):
                 await comms.send(send_msg("qa1"))
                 result = await adjudicate()
                 assert result["error_code"] == "qa_report_binding_mismatch", result
+                # Final-only assertion: added after the base-green generation control.
+                assert result["candidate_msg_ids"] == []
                 await assert_unwritten([0])
                 shown = await issue(server, "show")
                 assert shown["commissions"][0]["generation"] == new
