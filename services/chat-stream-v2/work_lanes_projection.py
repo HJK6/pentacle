@@ -192,8 +192,14 @@ class WorkLanesInventory:
         if not sweep and not self._index_dirty:
             return
         self._index_dirty = False
+        startup_phase_started = time.monotonic() if force_sweep else None
         scan = await asyncio.to_thread(self.specs.scan_work_observations)
+        if startup_phase_started is not None:
+            log.info("startup phase=worktree_sweep duration_s=%.6f", time.monotonic() - startup_phase_started)
+            startup_phase_started = time.monotonic()
         await self.store.reconcile_work_observations(scan, settle_s=self.settle_s, sweep=sweep)
+        if startup_phase_started is not None:
+            log.info("startup phase=work_observation_apply duration_s=%.6f", time.monotonic() - startup_phase_started)
         if sweep:
             self._last_sweep = time.monotonic()
 

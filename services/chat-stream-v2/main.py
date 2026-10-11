@@ -837,17 +837,24 @@ async def run(args: argparse.Namespace) -> int:
     #    Verbs arriving before their store is up park on a bounded readiness gate
     #    (never error); `hello`'s snapshot tolerates an unopened store.
     watchdog.start(asyncio.get_running_loop())
+    startup_phase_started = time.monotonic()
     store.start()
+    log.info("startup phase=store_start duration_s=%.6f", time.monotonic() - startup_phase_started)
     await work_lanes.reconcile_index(force_sweep=True)
     work_lanes.start()
+    startup_phase_started = time.monotonic()
     for _composite in assistant_composites.values():
         if _composite.config.enabled:
             await _composite.load_binding()
+    log.info("startup phase=bindings duration_s=%.6f", time.monotonic() - startup_phase_started)
     if store.schedule_schema_health == "ok":
         window_schedule.mark_store_ready()
     else:
         window_schedule.mark_store_failed()
+    startup_phase_started = time.monotonic()
     await lifecycle.start()
+    log.info("startup phase=lifecycle duration_s=%.6f", time.monotonic() - startup_phase_started)
+    startup_phase_started = time.monotonic()
     for _name, _composite in assistant_composites.items():
         if not _composite.config.enabled:
             continue
@@ -860,11 +867,14 @@ async def run(args: argparse.Namespace) -> int:
             projection.get("session_generation") if projection else "",
             recovery,
         )
+    log.info("startup phase=composite_recovery duration_s=%.6f", time.monotonic() - startup_phase_started)
     # B10 re-adoption FIRST and uncontended: the inventory is rebuilt from the
     # persisted open rows before anything else competes for the loop, so a
     # restarted daemon serves `list_sessions` with its live sessions promptly.
     # Panes are never touched here — a restart must cause zero session deaths.
+    startup_phase_started = time.monotonic()
     adopted = await sessions.refresh()
+    log.info("startup phase=adoption duration_s=%.6f", time.monotonic() - startup_phase_started)
     # Establish the dedup baseline only after boot adoption. Priming when _inv
     # is empty would turn the first periodic no-op into a spurious snapshot.
     inventory_emitter.prime()
@@ -881,8 +891,10 @@ async def run(args: argparse.Namespace) -> int:
     # cannot widen an existing readiness window. The value is captured once and
     # later compared read-only against the deploy-owned kv target on verdicts
     # and reconciler passes.
+    startup_phase_started = time.monotonic()
     event_push.set_daemon_sha(await asyncio.to_thread(_resolve_runtime_sha))
     server.runtime_sha = event_push.daemon_sha
+    log.info("startup phase=sha_resolution duration_s=%.6f", time.monotonic() - startup_phase_started)
     server.bootstrap_ready.set()
     if event_push.daemon_sha:
         log.info("event.push boot daemon SHA: %s", event_push.daemon_sha)
