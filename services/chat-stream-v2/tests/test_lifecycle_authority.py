@@ -1057,9 +1057,20 @@ def test_authority_lock_ordering_has_no_deadlock(monkeypatch):
 
 # -- cancellation after commit: the outcome audit is durable ------------------
 
-def _pause_after(env: Env, method: str, when=lambda *a, **k: True):
+def _pause_after(env: Env, method: str, when=lambda *a, **k: True, *, monkeypatch=None):
     """Pause the named store write after it commits; return (committed, resume)."""
     committed, resume = asyncio.Event(), asyncio.Event()
+    if method == "mark_closed":
+        assert monkeypatch is not None
+        original = type(env.store).mark_closed
+        async def paused_close(owner, *args, **kwargs):
+            result = await original(owner, *args, **kwargs)
+            if getattr(owner, "store", owner) is env.store and when(*args, **kwargs):
+                committed.set()
+                await resume.wait()
+            return result
+        monkeypatch.setattr(type(env.store), method, paused_close)
+        return committed, resume
     original = getattr(env.store, method)
 
     async def paused(*args, **kwargs):
@@ -1090,7 +1101,7 @@ def test_manager_close_cancelled_after_commit_keeps_applied_audit(monkeypatch):
         manager = await _manager(env)
         await env.open("fixture", role="worker")
         await env.report("fixture")
-        committed, resume = _pause_after(env, "mark_closed")
+        committed, resume = _pause_after(env, "mark_closed", monkeypatch=monkeypatch)
         task = asyncio.create_task(env.server._on_close(_close(manager, "fixture")))
         await _cancel_after_commit(task, committed, resume)
         assert (await env.store.fetch_session(HOST, "fixture"))["status"] == "closed"
