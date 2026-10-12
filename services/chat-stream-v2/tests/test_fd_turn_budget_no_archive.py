@@ -201,3 +201,51 @@ async def test_memory_store_recovery_is_spent_unknown():
         assert state['ordinal'] == 0 and await counts(store) == (0,0)
     finally:
         store.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('batch', [False, True])
+async def test_rebind_waits_until_admitted_source_and_observer_commit(budget_store, monkeypatch, batch):
+    import threading
+    from fd_turn_budget import FdTurnBudgetConfig
+    from test_fd_turn_budget import counts
+    store, _ = budget_store
+    for n in range(6):
+        await admit(store, normalized('USER' if n == 0 else 'TOOL_USE', n), batch=batch)
+    reached, release, configured, attempting = (threading.Event() for _ in range(4))
+    original = store._recorded_by_other_lifecycle_conn
+    def paused(*args, **kwargs):
+        reached.set()
+        assert release.wait(2), 'test failed to release Store'
+        return original(*args, **kwargs)
+    monkeypatch.setattr(store, '_recorded_by_other_lifecycle_conn', paused)
+    task = asyncio.create_task(admit(store, normalized('TOOL_USE', 6), batch=batch))
+    config_task = None
+    try:
+        while not reached.is_set():
+            await asyncio.sleep(0)
+        def rebind():
+            attempting.set()
+            store.configure_fd_turn_budget(config=FdTurnBudgetConfig(enabled=True),
+                env_binding={'stream_id':'fixture:elsewhere', 'generation':'replacement'})
+            configured.set()
+        config_task = asyncio.create_task(asyncio.to_thread(rebind))
+        while not attempting.is_set():
+            await asyncio.sleep(0)
+        # The rejected candidate returned from configure here while the old
+        # observer effects were still uncommitted. The repaired fence serializes
+        # reconfiguration after the entire Store transaction instead.
+        await asyncio.sleep(0.01)
+        assert not configured.is_set()
+        release.set()
+        await task
+        await config_task
+        assert configured.is_set()
+        assert await counts(store) == (1, 1)
+        notice = await store.submit(lambda c:dict(c.execute("SELECT * FROM v2_outbound_notices WHERE kind='fd_turn_budget'").fetchone()))
+        assert not await store.fd_turn_budget_notice_valid(notice)
+    finally:
+        release.set()
+        await task
+        if config_task:
+            await config_task

@@ -2438,6 +2438,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         if not hasattr(self, "_fd_config_lock"):
             self._fd_config_lock = threading.RLock()
         with self._fd_config_lock:
+            self._fd_config_revision = getattr(self, "_fd_config_revision", 0) + 1
             self._fd_turn_budget_config = config if config.observer_enabled else None
             self._fd_turn_budget_binding = dict(env_binding)
             self._fd_turn_budget_archive = str(archive_path) if archive_path else None
@@ -2484,7 +2485,8 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         if self._fd_turn_budget_config is None or not isinstance(sid, str):
             return
         from fd_turn_budget import decode_state, RecoveryBudget
-        def claim(conn):
+        expected_revision = self._fd_config_revision
+        def claim_conn(conn):
             row = conn.execute("SELECT v FROM kv WHERE k=?", (self._fd_cursor_key(sid),)).fetchone()
             if row is None:
                 return None
@@ -2524,7 +2526,13 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 raise
             return {"binding": binding, "state": state, "encoded": encoded,
                     "recovery_key": recovery_key, "config": self._fd_turn_budget_config,
+                    "config_revision": self._fd_config_revision,
                     "archive_path": self._fd_turn_budget_archive or str(__import__("pathlib").Path(self.path).with_name("sessions_archive.db"))}
+        def claim(conn):
+            with self._fd_config_lock:
+                if self._fd_turn_budget_config is None or self._fd_config_revision != expected_revision:
+                    return None
+                return claim_conn(conn)
         snapshot = await self.submit(claim)
         if snapshot is None:
             return
@@ -2556,13 +2564,15 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 conn.execute("BEGIN")
                 current = conn.execute("SELECT v=? FROM kv WHERE k=?", (snapshot["encoded"], key)).fetchone()
                 same = (self._fd_turn_budget_config is snapshot["config"]
+                        and self._fd_config_revision == snapshot["config_revision"]
                         and self._fd_binding_conn(conn, sid) == binding and current is not None and current[0])
                 if same and not reason:
                     latest = conn.execute("SELECT event_id FROM session_event_tail WHERE stream_id=? "
                         "AND session_created_at=? ORDER BY event_id DESC LIMIT 1", (sid, binding["lifecycle"])).fetchone()
                     same = bool(latest and latest[0] == snapshot["state"]["cursor"])
                     for proof in result["hot_sources"]:
-                        if conn.execute("SELECT 1 FROM session_event_tail WHERE event_id=? AND identity=? AND event_json=?", proof).fetchone() is None:
+                        if conn.execute("SELECT 1 FROM session_event_tail WHERE event_id=? AND identity=? AND event_json=? "
+                                "AND stream_id=? AND session_created_at=?", (*proof, sid, binding["lifecycle"])).fetchone() is None:
                             same = False
                             break
                     # Receipt facts are revalidated too. This remains fixed-row,
@@ -5869,6 +5879,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             return []
 
         def _op(conn: sqlite3.Connection) -> list[int | None | _EntryDropped] | None:
+            budget_lock = None
             conn.execute("BEGIN")
             try:
                 inserted: list[int | None | _EntryDropped] = []
@@ -5942,6 +5953,9 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     )
                     source_id = int(cur.lastrowid) if cur.rowcount > 0 else None
                     if source_id is not None and self._fd_turn_budget_config is not None:
+                        if budget_lock is None:
+                            budget_lock = self._fd_config_lock
+                            budget_lock.acquire()
                         self._fd_observe_conn(conn, stream_id=stream_id, event=json.loads(event_json),
                             identity=identity, event_id=source_id)
                     if source_id is not None and self._recorded_by_other_lifecycle_conn(
@@ -5973,6 +5987,9 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             except BaseException:
                 conn.rollback()
                 raise
+            finally:
+                if budget_lock is not None:
+                    budget_lock.release()
 
         return await self.submit(_op)
 
@@ -6626,6 +6643,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         event_json = json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
         event_key = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
         recorded_at = time.time()
+        budget_locks = []
 
         def _op(conn: sqlite3.Connection) -> int | None:
             conn.execute("BEGIN")
@@ -6651,6 +6669,9 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             # IGNORE'd duplicate leaves it stale, so gate on rowcount.
             event_id = int(cur.lastrowid) if cur.rowcount > 0 else None
             if event_id is not None and self._fd_turn_budget_config is not None:
+                budget_lock = self._fd_config_lock
+                budget_lock.acquire()
+                budget_locks.append(budget_lock)
                 self._fd_observe_conn(conn, stream_id=stream_id, event=event,
                     identity=identity, event_id=event_id)
             if event_id is not None and self._recorded_by_other_lifecycle_conn(
@@ -6665,6 +6686,9 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             except BaseException:
                 conn.rollback()
                 raise
+            finally:
+                if budget_locks:
+                    budget_locks.pop().release()
         return await self.submit(transaction)
 
     async def tell_event_identity(

@@ -966,3 +966,60 @@ async def test_recovery_effect_failure_rolls_back_and_preserves_spent_claim(budg
     assert not await store.submit(lambda c:c.in_transaction)
     await peer_receipt(store)
     assert await counts(store) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_disabling_observer_before_queued_claim_does_no_observer_work(budget_store, monkeypatch):
+    store, binding = budget_store
+    await pending_turn(store)
+    retry = store._fd_retry_pending
+    async def no_retry(_sid):
+        pass
+    monkeypatch.setattr(store, '_fd_retry_pending', no_retry)
+    await peer_receipt(store)
+    monkeypatch.setattr(store, '_fd_retry_pending', retry)
+    entered, release = threading.Event(), threading.Event()
+    def block(_conn):
+        entered.set()
+        assert release.wait(2), 'test failed to release Store'
+    blocker = asyncio.create_task(store.submit(block))
+    while not entered.is_set():
+        await asyncio.sleep(0)
+    calls = spy_reader(store, monkeypatch)
+    queued = asyncio.create_task(store._fd_retry_pending(SID))
+    try:
+        await asyncio.sleep(0.01)
+        store.configure_fd_turn_budget(config=FdTurnBudgetConfig(observer_enabled=False), env_binding=binding)
+        release.set()
+        await blocker
+        await queued
+        state = await store.fd_turn_budget_status(SID)
+        assert calls == [] and 'recovery' not in state
+        assert state['continuity_gap'] == 'peer_provenance_pending'
+        assert await counts(store) == (0, 0)
+    finally:
+        release.set()
+        await blocker
+        await queued
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,replacement', [('stream_id','fixture:other'), ('session_created_at','replacement-lifecycle')])
+async def test_recovery_commit_fences_source_stream_and_lifecycle(budget_store, monkeypatch, field, replacement):
+    store, _ = budget_store
+    old = await pending_turn(store)
+    changed_id = old['pending_proofs'][0][0]
+    reader = store._fd_archive_evidence
+    connect = sqlite3.connect
+    def raced(snapshot):
+        result = reader(snapshot)
+        assert not result.get('reason')
+        with connect(store.path) as conn:
+            conn.execute(f'UPDATE session_event_tail SET {field}=? WHERE event_id=?', (replacement, changed_id))
+        return result
+    monkeypatch.setattr(store, '_fd_archive_evidence', raced)
+    await peer_receipt(store)
+    state = await store.fd_turn_budget_status(SID)
+    assert state['continuity_gap'] and state['ordinal'] == 0
+    assert recovery_state(state, status='failed')['reason'] == 'recovery_stale'
+    assert await counts(store) == (0, 0)
