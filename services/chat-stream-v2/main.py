@@ -79,6 +79,7 @@ from submission_events import DurableUserEventProof
 from uiverbs import UIVerbs
 from usage_publisher import UsageStatePublisher
 from voice_answers import dispatch_block as voice_answers_dispatch_block
+from send_metadata import voice_context_from_route, voice_context_dispatch_block
 from window_schedule import WindowSchedule
 
 log = logging.getLogger("chat_streamd_v2")
@@ -382,6 +383,7 @@ async def run(args: argparse.Namespace) -> int:
                 or envelope.get("target_stream_id") != target
                 or envelope.get("target_generation") != target_generation
                 or envelope.get("original_input") != {"text": body, "attachments": attachments}
+                or envelope.get("context_v1") != voice_context_from_route(route)
                 or not isinstance(envelope.get("wire_body"), str)
                 or not isinstance(envelope.get("publish_command"), str)
                 or envelope["publish_command"] not in envelope["wire_body"]
@@ -443,7 +445,7 @@ async def run(args: argparse.Namespace) -> int:
                 "</assistant-original-input>"
             ) + voice_answers_dispatch_block(await store.get_voice_answer_binding_for_input(
                 stream_id=route_stream_id, input_identity=source_message_id,
-            ))
+            )) + voice_context_dispatch_block(voice_context_from_route(route))
         return await comms.send_assistant_backend({
             "host": host,
             "session_name": session_name,

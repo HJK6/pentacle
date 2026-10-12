@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from claude_jsonl_norm import strip_peer_delivery_envelope
-from send_metadata import normalize_send_meta
+from send_metadata import normalize_send_meta, voice_context_dispatch_block
 from boot_ready import (
     CODEX_RESET_BLOCKED,
     DRAFT_PREDICATES,
@@ -1515,15 +1515,22 @@ class Comms:
         # Stamp wire_text only; display_text stays the operator-visible payload.
         # Attachments re-derive wire_text in _materialize_send_plan (re-stamped there).
         send_anchor = str(msg.get("request_id") or msg.get("msg_id") or "send")
+        meta = normalize_send_meta(msg.get("meta"))
+        context = meta.get("voice", {}).get("context_v1")
+        if context is not None:
+            log.info("subsystem=voice bug_ref=voice_everywhere_context stage=send_prepared visits=%d truncated=%s",
+                     len(context["visits"]), context.get("truncated", False))
+        wire_body = body + voice_context_dispatch_block(context)
+        assert_injectable(wire_body)
         return SendPlan(
             message=msg,
             route=route,
             body=body,
             display_text=display_text,
             attachments=attachments,
-            wire_text=self._peer_delivery_wire(msg, "send", send_anchor, body),
+            wire_text=self._peer_delivery_wire(msg, "send", send_anchor, wire_body),
             optimistic_id=str(msg.get("optimistic_id") or "") or None,
-            meta=normalize_send_meta(msg.get("meta")),
+            meta=meta,
         )
 
     async def _materialize_send_plan(self, plan: SendPlan) -> SendPlan:
@@ -1546,6 +1553,7 @@ class Comms:
         except AttachmentFetchError as exc:
             raise VerbError("attachment_fetch_failed", str(exc)) from exc
         wire_text = build_attachment_inject_text(paths, plan.display_text)
+        wire_text += voice_context_dispatch_block(plan.meta.get("voice", {}).get("context_v1"))
         send_anchor = str(plan.message.get("request_id") or plan.message.get("msg_id") or "send")
         wire_text = self._peer_delivery_wire(plan.message, "send", send_anchor, wire_text)
         assert_injectable(wire_text)

@@ -265,7 +265,12 @@ def _production_dispatcher(comms):
     tree = ast.parse((Path(__file__).parents[1] / 'main.py').read_text())
     node = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
                 and n.name == '_dispatch_assistant_route')
-    namespace = {'comms': comms, 'json': json}
+    from send_metadata import voice_context_from_route, voice_context_dispatch_block
+    from voice_answers import dispatch_block
+    namespace = {'comms': comms, 'store': comms.store, 'json': json,
+                 'voice_context_from_route': voice_context_from_route,
+                 'voice_context_dispatch_block': voice_context_dispatch_block,
+                 'voice_answers_dispatch_block': dispatch_block}
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'main.py', 'exec'), namespace)
     return namespace[node.name]
 
