@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { renderTranscriptItemHtml } from '../renderer/src/shared_transcript_view';
+import { formatAssistantActivity } from '../pentacle-chat-core/src/services/pentacleChatModel';
 
 // Canonical Bart chat shows only actionable status under a user message:
 // progress and latency chrome is redundant with the slot working indicator.
@@ -49,4 +50,12 @@ test('Bart assistant messages have no Reply control; user messages keep theirs',
   assert.doesNotMatch(renderTranscriptItemHtml(assistant, undefined, { allowReplies: true }), /slot-chat-reply-btn|>Reply</);
   assert.match(renderTranscriptItemHtml(user, undefined, { allowReplies: true }), /class="slot-chat-reply-btn" data-reply-message-id="user-1"/);
   assert.doesNotMatch(renderTranscriptItemHtml(user, undefined, { allowReplies: false }), /slot-chat-reply-btn/);
+});
+
+
+test('legacy pending labels describe replies without imposing an assistant name', () => {
+  for (const response_state of ['queued', 'routing', 'awaiting_reply'] as const) {
+    const activity = { response_state, accepted_at: '2026-01-01T00:00:00.000Z' } as any;
+    assert.equal(formatAssistantActivity(activity, Date.parse('2026-01-01T00:00:02.000Z')), 'Waiting for reply · 2s');
+  }
 });

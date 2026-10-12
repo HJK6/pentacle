@@ -1933,7 +1933,7 @@ export function applyPentacleWorkingState(
       session.stream_id === workingState.stream_id && session.session_kind === 'assistant_composite'
         ? { ...session, assistant_activity: assistantActivity,
             working: assistantActivity.pending_count > 0,
-            working_label: assistantActivity.pending_count > 0 ? 'Waiting for Bart'
+            working_label: assistantActivity.pending_count > 0 ? 'Waiting for reply'
               : assistantActivity.waiting_for_operator_count > 0 ? 'Waiting for you' : undefined }
         : session) : state.sessions,
     workingStates: {

@@ -796,7 +796,7 @@ class AlwaysOnListener:
             return
         if self.wake.enabled and (self.state == "LISTENING" or self.capture_origin == 'followup'):
             # Fresh wake preempts a direct answer, including a partial answer capture.
-            match = re.match(r"^\s*hey(?:[^\w]+)" + re.escape(ASSISTANT_NAME) + r"\b(?!['’]\w)", text, re.IGNORECASE)
+            match = re.match(r"^\s*hey(?:[^\w]+)" + re.escape(ASSISTANT_NAME) + r"(?!\w|['’]\w)", text, re.IGNORECASE)
             local_match = re.match(r"^\s*hey(?:[^\w]+)pentacle\b(?!['’]\w)", text, re.IGNORECASE) if self.voice_actions.enabled and self.voice_actions.policy == 'separate' else None
             if local_match:
                 match = local_match

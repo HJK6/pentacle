@@ -278,7 +278,7 @@ def validate_decision(data, text):
         return dict(route=route, symbols=symbols)
     if route == 'clarify':
         reply = data['reply'].strip()
-        if not reply or re.match(r'^hey\W+' + re.escape(ASSISTANT_NAME) + r'\b', reply, re.I):
+        if not reply or re.match(r'^hey\W+' + re.escape(ASSISTANT_NAME) + r'(?!\w|[\x27’]\w)', reply, re.I):
             raise ValueError('Please repeat the complete request with the missing details.')
         if 'repeat' not in reply.casefold():
             reply = reply[:210].rstrip()+' Repeat the full request.'

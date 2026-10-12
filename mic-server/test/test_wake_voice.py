@@ -185,7 +185,7 @@ def test_name_hint_only_applies_to_opted_in_wake_recognition(monkeypatch, enable
     assert calls[0]['condition_on_previous_text'] is False
 
 
-@pytest.mark.parametrize('configured, expected', [(None, 'Zephyr'), ('  ', 'Zephyr'), ('  Aster  ', 'Aster')])
+@pytest.mark.parametrize('configured, expected', [(None, 'Zephyr'), ('  ', 'Zephyr'), ('  Aster  ', 'Aster'), (' Aster. ', 'Aster.')])
 def test_configured_wake_name_controls_matching_and_hints(monkeypatch, configured, expected):
     if configured is None:
         monkeypatch.delenv('MIC_ASSISTANT_NAME', raising=False)
@@ -210,6 +210,13 @@ def test_configured_wake_name_controls_matching_and_hints(monkeypatch, configure
     assert listener.capture_origin == 'wake'
     hear(listener, 'Over')
     assert listener.wake.claim()['text'] == 'please help'
+    import local_actions
+    decision = {key: '' for key in local_actions.SCHEMA['required']}
+    decision.update(route='clarify', assets=[], reply=f'Hey {expected} please repeat the request')
+    with pytest.raises(ValueError, match='Please repeat the complete request'):
+        local_actions.validate_decision(decision, 'Missing details')
+    hear(listener, f'Hey {expected}extra must not capture')
+    assert listener.state == 'LISTENING'
     if expected != 'Zephyr':
         hear(listener, 'Hey Zephyr must not capture')
         assert listener.state == 'LISTENING'

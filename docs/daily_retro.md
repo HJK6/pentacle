@@ -54,7 +54,7 @@ reuses immutable inputs, worker/report identities and frozen delivery keys.
 
 ## Continuing the assistant and DOT work
 
-The capture owner adds the exact `continuous-retro` tag to the existing the assistant
+The capture owner adds the exact `continuous-retro` tag to the existing assistant
 portfolio and each DOT-owning spec. Other active work remains excluded. Keep the
 lesson in the existing `## Retro`, with one dated capture-window marker:
 
@@ -453,7 +453,7 @@ cleanup path. Its `history-<digest16>-<batch4>` identity and separate state root
 keep worker/report/delivery keys distinct from daily runs. The current assistant
 records its actual packet review with the same `record-review` helper and run ID.
 Reviewed batches are no-ops; no next batch is automatically admitted and no
-per-batch the assistant review barrier is added.
+per-batch assistant review barrier is added.
 
 Source landing and ONE installed pilot need separate parent gates. Pin the
 baseline, config, interpreter, source and release hashes before execution; use

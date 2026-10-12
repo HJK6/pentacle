@@ -39,8 +39,9 @@ class ApplyCorrectionsTest(unittest.TestCase):
         self.assertEqual(fv.apply_corrections("that is a tot", m), "that is a tot")
 
     def test_longest_variant_wins(self):
-        m = {"zephyr": "Zephyr", "zephyr's memo": "Zephyr's memo"}
-        self.assertEqual(fv.apply_corrections("read zephyr's memo", m), "read Zephyr's memo")
+        m = {"zephyr": "Zephyr", "zephyr's memo": "Aster's notes"}
+        self.assertEqual(fv.apply_corrections("read zephyr's memo", m), "read Aster's notes")
+        self.assertNotEqual(fv.apply_corrections("read zephyr's memo", {"zephyr": "Zephyr"}), "read Aster's notes")
 
     def test_empty_inputs(self):
         self.assertEqual(fv.apply_corrections("", {"a": "b"}), "")
