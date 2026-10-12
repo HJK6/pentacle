@@ -187,3 +187,342 @@ def test_split_admission_receipt_is_correlated_without_route_json_pointer():
         await complete(env, lane, lead, dispatch)
         assert (await projected(env.store, lane["lane_id"]))["lead_reported_done"] is True
     run(body)
+
+
+@pytest.mark.parametrize('route', ['lane', 'local', 'remote', 'offline_operator', 'offline_manager'])
+def test_completion_preparation_barrier_releases_store_and_event_loop(tmp_path, monkeypatch, route):
+    import threading
+    from _shared import custom_ac
+    from _shared.specs_service import SpecsSubsystem
+    from test_lane_close_residual_guard import MEMBER, OTHER, CHECKED, write_spec, close_context
+    root = tmp_path.resolve(); path = write_spec(root, custom=CHECKED)
+    write_spec(root, OTHER, custom=CHECKED)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(root))
+    async def body(env):
+        lead = await env.seat('barrier-lead', role='lead', parent_stream_id=FD)
+        lane = (await env.adopt(lead=lead, members=[MEMBER]))['lane']
+        loop = asyncio.get_running_loop()
+        entered, release = asyncio.Event(), threading.Event()
+        parse_threads, scan_threads, worker_files = [], [], []
+        parser, scan, fingerprint = custom_ac.parse_custom, SpecsSubsystem._scan_folders_by_id, SpecsSubsystem._identity_fingerprint
+        def parse(text):
+            parse_threads.append(threading.get_ident())
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5), 'HARNESS_ERROR: preparation barrier not released'
+            return parser(text)
+        def scanning(*args, **kwargs):
+            scan_threads.append(threading.get_ident())
+            assert threading.get_ident() not in {threading.main_thread().ident, env.store._thread.ident}
+            return scan(*args, **kwargs)
+        def metadata(file):
+            if threading.get_ident() == env.store._thread.ident:
+                worker_files.append(str(file))
+                assert file == path, 'Store worker statted an identity-only namespace file'
+            return fingerprint(file)
+        monkeypatch.setattr(custom_ac, 'parse_custom', parse)
+        monkeypatch.setattr(SpecsSubsystem, '_scan_folders_by_id', scanning)
+        monkeypatch.setattr(SpecsSubsystem, '_identity_fingerprint', staticmethod(metadata))
+        if route == 'lane':
+            request = env.op('set_state', {'to': 'done', 'outcome': 'Barrier completion'},
+                             lane=lane['lane_id'], version=1)
+        else:
+            sessions, _ = await close_context(env, lead, remote=route != 'local', online=not route.startswith('offline'))
+            kwargs = ({'operator_confirm': True} if route == 'offline_operator' else
+                      {'close_kind': 'manager_close'} if route == 'offline_manager' else {})
+            request = sessions.close(*lead[0].split(':', 1), **kwargs)
+        task = asyncio.create_task(request)
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            await asyncio.wait_for(env.store.put('unrelated-progress', 'committed'), 2)
+            assert await asyncio.wait_for(env.store.get('unrelated-progress'), 2) == 'committed'
+            progressed = loop.create_future()
+            loop.call_soon(progressed.set_result, True)
+            assert await asyncio.wait_for(progressed, 2)
+            assert not task.done()
+        finally:
+            release.set()
+        result = await asyncio.wait_for(task, 5)
+        assert (result['lane']['work_state'] == 'done') if route == 'lane' else (result['session']['status'] == 'closed')
+        assert len(parse_threads) == len(scan_threads) == 1
+        assert set(parse_threads + scan_threads).isdisjoint({threading.main_thread().ident, env.store._thread.ident})
+        assert worker_files  # Consumed metadata is rechecked; identity-only files are not.
+        print('THREAD_RECEIPT', json.dumps({'route': route, 'main': threading.main_thread().ident,
+              'store': env.store._thread.ident, 'parse': parse_threads, 'scan': scan_threads,
+              'worker_metadata_files': worker_files, 'unrelated_store_committed_while_preparing': True}))
+    run(body)
+
+
+@pytest.mark.parametrize('route', ['lane', 'local', 'remote', 'offline_operator', 'offline_manager'])
+def test_cancel_during_preparation_never_enqueues_completion(tmp_path, monkeypatch, route):
+    import threading
+    from _shared import custom_ac
+    from test_lane_close_residual_guard import MEMBER, CHECKED, write_spec, close_context, LANE_CALLBACK, CLOSE_CALLBACK
+    root = tmp_path.resolve(); write_spec(root, custom=CHECKED)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(root))
+    async def body(env):
+        lead = await env.seat('cancel-preparation', role='lead', parent_stream_id=FD)
+        lane = (await env.adopt(lead=lead, members=[MEMBER]))['lane']
+        before = await env.store.get_work_lane(lane['lane_id'])
+        loop = asyncio.get_running_loop()
+        entered, finished, release = asyncio.Event(), asyncio.Event(), threading.Event()
+        parser, submit = custom_ac.parse_custom, env.store.submit
+        calls = []
+        def parse(text):
+            loop.call_soon_threadsafe(entered.set)
+            try:
+                assert release.wait(5), 'HARNESS_ERROR: cancellation preparation not released'
+                return parser(text)
+            finally:
+                loop.call_soon_threadsafe(finished.set)
+        async def submission(callback):
+            if callback.__qualname__ in {LANE_CALLBACK, CLOSE_CALLBACK}:
+                calls.append(callback.__qualname__)
+            return await submit(callback)
+        monkeypatch.setattr(custom_ac, 'parse_custom', parse)
+        monkeypatch.setattr(env.store, 'submit', submission)
+        if route == 'lane':
+            request = env.op('set_state', {'to': 'done', 'outcome': 'Cancelled'}, lane=lane['lane_id'], version=1)
+        else:
+            sessions, _ = await close_context(env, lead, remote=route != 'local', online=not route.startswith('offline'))
+            kwargs = ({'operator_confirm': True} if route == 'offline_operator' else
+                      {'close_kind': 'manager_close'} if route == 'offline_manager' else {})
+            request = sessions.close(*lead[0].split(':', 1), **kwargs)
+        task = asyncio.create_task(request)
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+        await asyncio.wait_for(finished.wait(), 5)
+        assert calls == []
+        assert await env.store.get_work_lane(lane['lane_id']) == before
+        assert (await env.store.fetch_session(*lead[0].split(':', 1)))['status'] == 'open'
+        print('CANCELLATION_RECEIPT', json.dumps({'route': route, 'stage': 'preparation', 'enqueues': calls}))
+    run(body)
+
+
+def test_lane_cancel_after_enqueue_has_unknown_outcome_until_readback(tmp_path, monkeypatch):
+    import threading
+    import functools
+    from test_lane_close_residual_guard import MEMBER, CHECKED, write_spec, LANE_CALLBACK
+    root = tmp_path.resolve(); write_spec(root, custom=CHECKED)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(root))
+    async def body(env):
+        lane = (await env.adopt(state='paused', owner='operator', members=[MEMBER]))['lane']
+        payload = {'to': 'done', 'outcome': 'Already queued',
+                   'operator_confirmation': env.confirm('cancel-confirm', lane['lane_id'], 'set_state:done')}
+        loop = asyncio.get_running_loop()
+        entered, finished, release = asyncio.Event(), asyncio.Event(), threading.Event()
+        submit, calls = env.store.submit, []
+        async def submission(callback):
+            if callback.__qualname__ != LANE_CALLBACK:
+                return await submit(callback)
+            calls.append(callback.__qualname__)
+            @functools.wraps(callback)
+            def held(conn):
+                loop.call_soon_threadsafe(entered.set)
+                try:
+                    assert release.wait(5), 'HARNESS_ERROR: queued callback not released'
+                    return callback(conn)
+                finally:
+                    loop.call_soon_threadsafe(finished.set)
+            return await submit(held)
+        monkeypatch.setattr(env.store, 'submit', submission)
+        task = asyncio.create_task(env.op('set_state', payload, lane=lane['lane_id'], version=1, request_id='cancel-done'))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert not finished.is_set()  # Cancellation is not a refusal or proof of rollback.
+        finally:
+            release.set()
+        await asyncio.wait_for(finished.wait(), 5)
+        after = await env.store.get_work_lane(lane['lane_id'])
+        assert after['lane']['work_state'] == 'done'
+        assert sum(e.get('consumed_question_id') == 'cancel-confirm' for e in after['events']) == 1
+        assert calls == [LANE_CALLBACK]  # No automatic retry.
+        print('CANCELLATION_RECEIPT', json.dumps({'route': 'lane', 'stage': 'after_enqueue',
+              'reported': 'CancelledError; outcome unknown until durable readback', 'readback': 'done', 'enqueues': len(calls)}))
+    run(body)
+
+
+@pytest.mark.parametrize('route', ['local', 'offline_operator', 'offline_manager'])
+def test_close_cancel_waiting_for_store_lifecycle_lock_cannot_later_enqueue(tmp_path, monkeypatch, route):
+    from test_lane_close_residual_guard import MEMBER, CHECKED, write_spec, close_context, CLOSE_ENVELOPE
+    root = tmp_path.resolve(); write_spec(root, custom=CHECKED)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(root))
+    async def body(env):
+        lead = await env.seat('cancel-lock', role='lead', parent_stream_id=FD)
+        await env.adopt(lead=lead, members=[MEMBER])
+        sessions, _ = await close_context(env, lead, remote=route != 'local', online=False)
+        kwargs = ({'operator_confirm': True} if route == 'offline_operator' else
+                  {'close_kind': 'manager_close'} if route == 'offline_manager' else {})
+        get_lock = env.store.routing_integrity_lifecycle_lock
+        held_lock = get_lock(lead[0])
+        await held_lock.__aenter__()
+        attempted = asyncio.Event()
+        class Lock:
+            def __init__(self):
+                self.inner = get_lock(lead[0])
+            async def __aenter__(self):
+                attempted.set()
+                return await self.inner.__aenter__()
+            async def __aexit__(self, *args):
+                return await self.inner.__aexit__(*args)
+        monkeypatch.setattr(env.store, 'routing_integrity_lifecycle_lock', lambda stream_id: Lock())
+        submit, calls = env.store.submit, []
+        async def submission(callback):
+            if callback.__qualname__ == CLOSE_ENVELOPE:
+                calls.append(callback.__qualname__)
+            return await submit(callback)
+        monkeypatch.setattr(env.store, 'submit', submission)
+        task = asyncio.create_task(sessions.close(*lead[0].split(':', 1), **kwargs))
+        try:
+            await asyncio.wait_for(attempted.wait(), 5)
+            task.cancel()
+        finally:
+            await held_lock.__aexit__(None, None, None)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert calls == []
+        assert (await env.store.fetch_session(*lead[0].split(':', 1)))['status'] == 'open'
+        assert await env.store.latest_close_audit(lead[0]) is None
+    run(body)
+
+
+@pytest.mark.parametrize('route', ['local', 'remote'])
+def test_confirmed_dead_close_finishes_after_cancellation_before_enqueue(tmp_path, monkeypatch, route):
+    from test_lane_close_residual_guard import (MEMBER, CHECKED, write_spec, PreparedRace,
+                                               ordered_close_context)
+    root = tmp_path.resolve(); path = write_spec(root, custom=CHECKED)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(root))
+    async def body(env):
+        lead = await env.seat('cancel-dead', role='lead', parent_stream_id=FD)
+        await env.adopt(lead=lead, members=[MEMBER])
+        def mutate(prepared):
+            assert any(name == 'confirmed_dead' for _, name in seam.order)
+            path.write_bytes(path.read_bytes().replace(b'[x]', b'[ ]'))
+        seam = PreparedRace(env, monkeypatch, path, mutate, route=route)
+        sessions, tmux, kwargs = await ordered_close_context(env, lead, seam, monkeypatch, route)
+        get_lock = env.store.routing_integrity_lifecycle_lock
+        held_lock = get_lock(lead[0]); await held_lock.__aenter__()
+        attempted = asyncio.Event()
+        class Lock:
+            def __init__(self): self.inner = get_lock(lead[0])
+            async def __aenter__(self):
+                attempted.set()
+                return await self.inner.__aenter__()
+            async def __aexit__(self, *args): return await self.inner.__aexit__(*args)
+        monkeypatch.setattr(env.store, 'routing_integrity_lifecycle_lock', lambda sid: Lock())
+        task = asyncio.create_task(sessions.close(*lead[0].split(':', 1), **kwargs))
+        try:
+            await asyncio.wait_for(attempted.wait(), 5)
+            assert tmux.kills == 1 and tmux.recorded_death
+            task.cancel()
+        finally:
+            await held_lock.__aexit__(None, None, None)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        seam.verify('confirmed-dead-cancel:' + route)
+        assert (await env.store.fetch_session(*lead[0].split(':', 1)))['status'] == 'closed'
+        audit = await env.store.latest_close_audit(lead[0])
+        assert audit['disposition'] == 'closed' and 'u1_source_changed_after_termination:' in audit['reason']
+    run(body)
+
+
+def test_concurrent_close_source_flags_are_request_local_and_durable(tmp_path, monkeypatch):
+    import functools
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from test_lane_close_residual_guard import (MEMBER, OTHER, CHECKED, write_spec,
+        OrderedTmux, close_context, ADMISSION_CALLBACK, CLOSE_CALLBACK, CLOSE_ENVELOPE)
+    from store import Store
+    root = (tmp_path / 'memory').resolve()
+    paths = {MEMBER: write_spec(root, custom=CHECKED), OTHER: write_spec(root, OTHER, custom=CHECKED)}
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(root))
+    database = str(tmp_path / 'durable-audit.db')
+    identities, observed_audits = {}, {}
+    async def body(env):
+        ready = asyncio.Event()
+        preparation = env.store.prepare_lead_lane_completion
+        submit = env.store.submit
+        records, preparations, transports, calls = {}, {}, {}, []
+        for spec_id in paths:
+            lead = await env.seat('parallel-' + spec_id, role='lead', parent_stream_id=FD)
+            identities[spec_id] = lead
+            await env.adopt('stream:parallel-' + str(len(identities)), lead=lead, members=[spec_id])
+            events = []
+            records[lead[0]] = SimpleNamespace(order=events, mark=lambda name, rows=events: rows.append((len(rows) + 1, name)))
+        async def prepare(sid, generation):
+            result = await preparation(sid, generation)
+            preparations[sid] = result
+            records[sid].mark('prepared')
+            if len(preparations) == 2: ready.set()
+            await asyncio.wait_for(ready.wait(), 5)
+            return result
+        async def submission(callback):
+            name = callback.__qualname__
+            if name not in {ADMISSION_CALLBACK, CLOSE_ENVELOPE}:
+                return await submit(callback)
+            closure = dict(zip(callback.__code__.co_freevars,
+                               [cell.cell_contents for cell in callback.__closure__]))
+            sid = closure['stream_id'] if name == ADMISSION_CALLBACK else closure['self'].stream_id
+            if name == CLOSE_ENVELOPE:
+                assert closure['transaction'].__qualname__ == CLOSE_CALLBACK
+                assert sid in calls
+            @functools.wraps(callback)
+            def observed(conn):
+                result = callback(conn)
+                records[sid].mark('admitted' if name == ADMISSION_CALLBACK else 'committed')
+                return result
+            return await submit(observed)
+        from store_work_lanes import _PreparedLaneCloseStore
+        close_submit = _PreparedLaneCloseStore.submit
+        async def close_submission(view, transaction):
+            assert transaction.__qualname__ == CLOSE_CALLBACK
+            sid = view.stream_id
+            assert transports[sid].recorded_death
+            assert view.prepared is preparations[sid]
+            assert sid not in calls
+            if sid == identities[MEMBER][0]:
+                paths[MEMBER].write_bytes(paths[MEMBER].read_bytes().replace(b'[x]', b'[ ]'))
+            records[sid].mark('mutation' if sid == identities[MEMBER][0] else 'unchanged')
+            calls.append(sid)
+            return await close_submit(view, transaction)
+        monkeypatch.setattr(_PreparedLaneCloseStore, 'submit', close_submission)
+        monkeypatch.setattr(env.store, 'prepare_lead_lane_completion', prepare)
+        monkeypatch.setattr(env.store, 'submit', submission)
+        monkeypatch.setattr(__import__('sessions').prockill, 'process_records', AsyncMock(return_value={}))
+        requests = []
+        for spec_id, lead in identities.items():
+            sessions, _ = await close_context(env, lead)
+            transports[lead[0]] = OrderedTmux(records[lead[0]])
+            sessions.tmux = transports[lead[0]]
+            requests.append(sessions.close(*lead[0].split(':', 1), reason='parallel:' + spec_id))
+        results = await asyncio.gather(*requests)
+        assert all(result['session']['status'] == 'closed' for result in results)
+        assert len(calls) == 2 and set(calls) == {lead[0] for lead in identities.values()}
+        for spec_id, lead in identities.items():
+            audit = await env.store.latest_close_audit(lead[0])
+            observed_audits[spec_id] = audit
+            assert ('u1_source_changed_after_termination:' in audit['reason']) is (spec_id == MEMBER)
+            assert ('completion_source_changed' in next(result['session'] for result in results
+                    if result['session']['session_name'] == lead[0].split(':', 1)[1])) is (spec_id == MEMBER)
+            sequence = {name: seq for seq, name in records[lead[0]].order}
+            assert sequence['prepared'] < sequence['admitted'] < sequence['terminate'] < sequence['confirmed_dead'] < sequence['committed']
+            print('CONCURRENT_CLOSE_RECEIPT', json.dumps({'spec_id': spec_id, 'order': records[lead[0]].order,
+                                                        'audit_reason': audit['reason']}))
+    run(body, database)
+    async def restart():
+        store = Store(database); store.start()
+        try:
+            for spec_id, lead in identities.items():
+                assert await store.latest_close_audit(lead[0]) == observed_audits[spec_id]
+                row = await store.fetch_session(*lead[0].split(':', 1))
+                assert row['status'] == 'closed' and row['session_generation'] == lead[1]
+        finally:
+            store.stop()
+    asyncio.run(restart())
