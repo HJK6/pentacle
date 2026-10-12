@@ -116,6 +116,8 @@ class ArchiveProbe:
     def __init__(self, monkeypatch, archive):
         self.archive = archive.resolve()
         self.lane = contextvars.ContextVar("fd_scale_lane", default=("setup", "setup"))
+        self.commit_queries = Counter()
+        self.active_phase = "setup"
         self.opens = Counter()
         self.queries = Counter()
         self.handoffs = Counter()
@@ -131,7 +133,7 @@ class ArchiveProbe:
                 if getattr(conn, "_scale_archive", False):
                     probe.queries[(phase, lane)] += 1
                 if lane == "recovery" and sql.lstrip().upper().startswith("SELECT"):
-                    key = (conn._scale_database, sql)
+                    key = ("reader", conn._scale_database, sql)
                     probe.recovery_queries.setdefault(key, tuple(parameters))
                 return super().execute(sql, parameters)
 
@@ -157,16 +159,40 @@ class ArchiveProbe:
                 return await probe._to_thread(run)
             return await probe._to_thread(func, *args, **kwargs)
 
+        # Keep the same regression driver runnable on the pinned pre-fix base,
+        # which did not yet have a separate recovery-commit hook.
+        original_commit = getattr(Store, "_fd_commit_recovery", None)
+
+        def commit(owner, conn, snapshot, result):
+            # The fixture owns this Store connection and installs no other trace
+            # callback. Capture only observer commit reads, not surrounding tell
+            # writes or their unrelated receipt-projection queries. EXPLAIN runs
+            # later so instrumentation adds no SQLite work to the allowance.
+            def trace(sql):
+                if sql.lstrip().upper().startswith("SELECT"):
+                    probe.commit_queries[probe.active_phase] += 1
+                    key = ("commit", str(Path(owner.path).resolve()), sql)
+                    probe.recovery_queries.setdefault(key, ())
+            conn.set_trace_callback(trace)
+            try:
+                return original_commit(owner, conn, snapshot, result)
+            finally:
+                conn.set_trace_callback(None)
+
+        if original_commit is not None:
+            monkeypatch.setattr(Store, "_fd_commit_recovery", commit)
         monkeypatch.setattr(store_module.sqlite3, "connect", connect)
         monkeypatch.setattr(store_module.asyncio, "to_thread", to_thread)
 
     @contextmanager
     def during(self, phase, lane):
         token = self.lane.set((phase, lane))
+        previous_phase, self.active_phase = self.active_phase, phase
         try:
             yield
         finally:
             self.lane.reset(token)
+            self.active_phase = previous_phase
 
     def phase(self, name):
         return {"ingest_archive_opens": self.opens[(name, "ingest")],
@@ -174,15 +200,17 @@ class ArchiveProbe:
                 "ingest_reader_handoffs": self.handoffs[(name, "ingest")],
                 "recovery_archive_opens": self.opens[(name, "recovery")],
                 "recovery_archive_queries": self.queries[(name, "recovery")],
-                "recovery_reader_handoffs": self.handoffs[(name, "recovery")]}
+                "recovery_reader_handoffs": self.handoffs[(name, "recovery")],
+                "recovery_commit_queries": self.commit_queries[name]}
 
     def query_plans(self):
         """EXPLAIN captured recovery SQL afterward, outside the charged reader."""
         plans = []
-        for (database, sql), parameters in sorted(self.recovery_queries.items()):
+        for (stage, database, sql), parameters in sorted(self.recovery_queries.items()):
             with self._connect(Path(database).as_uri() + "?mode=ro", uri=True) as conn:
                 plan = [list(row) for row in conn.execute("EXPLAIN QUERY PLAN " + sql, parameters)]
-            plans.append({"database": "archive" if Path(database) == self.archive else "hot",
+            plans.append({"stage": stage,
+                          "database": "archive" if Path(database) == self.archive else "hot",
                           "sql": sql, "plan": plan})
         return plans
 
@@ -258,6 +286,11 @@ class ScaleWorkload:
         self.current["elapsed_seconds_measured_small_run"] = time.monotonic() - self.started
         state = await self.store.fd_turn_budget_status(STREAM)
         self.current["state"] = state
+        admitted = self.current["recovery_reader_handoffs"]
+        recovery = (state or {}).get("recovery") or {}
+        self.current["archive_fence_refusals"] = int(bool(admitted) and
+            recovery.get("reason") == "recovery_archive_fence_unavailable")
+        self.current["eligible_recovery_attempts"] = admitted
         self.current["key"] = [STREAM, self.lifecycle["generation"], self.lifecycle["session_created_at"]]
         self.phases.append(self.current)
         return state
@@ -356,6 +389,10 @@ async def test_generated_archive_six_phase_workload(budget_store, tmp_path, monk
         facts["reader_thread_count"] = len(probe.reader_threads)
         facts["parameters"] = {"attempts_per_phase": attempts, "rate_per_second": rate}
         facts["phases"] = driver.phases
+        facts["archive_fence_refusal_measurement"] = {
+            "refusals": sum(p["archive_fence_refusals"] for p in driver.phases),
+            "eligible_recoveries": sum(p["eligible_recovery_attempts"] for p in driver.phases),
+            "scope": "this generated workload only; no fleet frequency estimate"}
         facts["scope"] = "generated correctness run; no fleet performance acceptance"
         facts["default_small_size"] = target == 32 * 1024 * 1024
         report = json.dumps(facts, sort_keys=True, indent=2)
@@ -379,12 +416,20 @@ async def test_generated_archive_six_phase_workload(budget_store, tmp_path, monk
         assert recovery and recovery["spent"] == 100000
         assert 0 <= recovery["used"] <= 100000
         assert recovery["status"] in {"succeeded", "failed"}
+        # This fixture intentionally archives one exact pending source. Separate
+        # archive facts lack a commit fence, so the accepted narrower contract
+        # spends once and refuses rather than promoting that proof.
+        assert recovery["status"] == "failed"
+        assert recovery["reason"] == "recovery_archive_fence_unavailable"
+        assert facts["archive_fence_refusal_measurement"]["refusals"] == 1
+        assert facts["archive_fence_refusal_measurement"]["eligible_recoveries"] == 1
         if recovery["status"] == "failed":
             assert before_restart["continuity_gap"]
             assert after_restart["continuity_gap"]
         assert after_restart.get("recovery") == recovery
         assert driver.phases[4]["key"] == driver.phases[5]["key"]
         assert sum(phase["recovery_reader_handoffs"] for phase in driver.phases) == 1
+        assert {query["stage"] for query in facts["recovery_query_plans"]} == {"reader", "commit"}
         for query in facts["recovery_query_plans"]:
             assert "json_" not in query["sql"].lower()
             if query["database"] == "archive":

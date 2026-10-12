@@ -320,7 +320,7 @@ async def test_cancelled_recovery_claim_is_never_renewed(budget_store, monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("changed", ["binding", "generation", "lifecycle", "cursor", "source"])
+@pytest.mark.parametrize("changed", ["binding", "generation", "lifecycle", "cursor", "source", "source_disappears"])
 async def test_recovery_commit_revalidates_all_original_evidence(budget_store, monkeypatch, changed):
     store, binding = budget_store
     make_archive(store)
@@ -348,6 +348,9 @@ async def test_recovery_commit_revalidates_all_original_evidence(budget_store, m
                     value = json.loads(row[0])
                     value["commit_fence_marker"] = "changed after reader"
                     conn.execute("UPDATE kv SET v=? WHERE k=?", (json.dumps(value), store._fd_cursor_key(SID)))
+                elif changed == "source_disappears":
+                    conn.execute("DELETE FROM session_event_tail WHERE event_id=(SELECT max(event_id) "
+                                 "FROM session_event_tail WHERE stream_id=?)", (SID,))
                 else:
                     row = conn.execute("SELECT event_id,event_json FROM session_event_tail "
                                        "WHERE stream_id=? ORDER BY event_id DESC LIMIT 1", (SID,)).fetchone()
@@ -370,8 +373,8 @@ async def test_recovery_commit_revalidates_all_original_evidence(budget_store, m
 
 
 @pytest.mark.asyncio
-async def test_recovery_reads_archived_sources_only_by_primary_key(budget_store, monkeypatch):
-    store, _ = budget_store
+async def test_mixed_hot_archive_recovery_uses_pk_then_refuses_unfenced_sources(budget_store, monkeypatch):
+    store, binding = budget_store
     archive = make_archive(store)
     state = await pending_turn(store)
     moved_id = state["pending_proofs"][1][0]
@@ -388,9 +391,11 @@ async def test_recovery_reads_archived_sources_only_by_primary_key(budget_store,
     calls = spy_reader(store, monkeypatch)
     await peer_receipt(store)
     state = await store.fd_turn_budget_status(SID)
-    recovery_state(state, status="succeeded")
-    assert not state["continuity_gap"]
-    assert await counts(store) == (1, 1)
+    claim = dict(recovery_state(state, status="failed"))
+    assert claim["reason"] == "recovery_archive_fence_unavailable"
+    assert 0 < claim["used"] <= LIMIT
+    assert state["continuity_gap"] == "recovery_archive_fence_unavailable"
+    assert state["ordinal"] == 0 and await counts(store) == (0, 0)
     assert len(calls) == 1
     archive_queries = [(target, query) for target, query in sql.event_queries() if str(archive) in target]
     assert archive_queries, "generated archived source must actually be consulted"
@@ -401,6 +406,23 @@ async def test_recovery_reads_archived_sources_only_by_primary_key(budget_store,
             plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + query)]
         assert any("INTEGER PRIMARY KEY" in detail for detail in plan), plan
         assert not any("SCAN session_event_tail" in detail for detail in plan), plan
+
+    path = store.path
+    store.stop()
+    reopened = Store(path)
+    reopened.start()
+    try:
+        reopened.configure_fd_turn_budget(config=FdTurnBudgetConfig(enabled=True), env_binding=binding)
+        replayed = spy_reader(reopened, monkeypatch)
+        await peer_receipt(reopened)
+        await append(reopened, normalized("TOOL_USE", 8))
+        assert replayed == []
+        current = await reopened.fd_turn_budget_status(SID)
+        assert current["continuity_gap"] == "recovery_archive_fence_unavailable"
+        assert recovery_state(current) == claim
+        assert current["ordinal"] == 0 and await counts(reopened) == (0, 0)
+    finally:
+        reopened.stop()
 
 
 @pytest.mark.asyncio
@@ -729,6 +751,218 @@ async def test_archived_source_change_after_read_rejects_recovery_commit(budget_
     await peer_receipt(store)
     assert calls == [True]
     state = await store.fd_turn_budget_status(SID)
+    assert state["continuity_gap"] == "recovery_archive_fence_unavailable"
+    assert state["ordinal"] == 0
+    assert recovery_state(state, status="failed")["reason"] == "recovery_archive_fence_unavailable"
+    assert await counts(store) == (0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remaining_for_commit", [None, 5])
+async def test_store_owned_commit_shares_reader_vm_and_byte_allowance(
+        budget_store, monkeypatch, remaining_for_commit):
+    store, _ = budget_store
+    make_archive(store)
+    await pending_turn(store)
+    main_thread = threading.get_ident()
+    store_thread = await store.submit(lambda _conn: threading.get_ident())
+    reader = store._fd_archive_evidence
+    effects = store._fd_effects_conn
+    charge = fd_turn_budget.RecoveryBudget.charge
+    watched = []
+    charges = []
+    effect_threads = []
+    reader_used = []
+
+    def charged(budget, amount):
+        result = charge(budget, amount)
+        if watched and budget is watched[0]:
+            charges.append((threading.get_ident(), amount))
+        return result
+
+    def tracked(snapshot, *args, **kwargs):
+        watched.append(snapshot["budget"])
+        result = reader(snapshot, *args, **kwargs)
+        if remaining_for_commit is not None:
+            budget = snapshot["budget"]
+            budget.charge(budget.limit - budget.used - remaining_for_commit)
+        reader_used.append(snapshot["budget"].used)
+        return result
+
+    def committed(conn, *args, **kwargs):
+        effect_threads.append(threading.get_ident())
+        return effects(conn, *args, **kwargs)
+
+    monkeypatch.setattr(fd_turn_budget.RecoveryBudget, "charge", charged)
+    monkeypatch.setattr(store, "_fd_archive_evidence", tracked)
+    monkeypatch.setattr(store, "_fd_effects_conn", committed)
+    await peer_receipt(store)
+    state = await store.fd_turn_budget_status(SID)
+    claim = recovery_state(state)
+    assert len(watched) == len(reader_used) == 1
+    assert claim["used"] == sum(amount for _thread, amount in charges)
+    assert reader_used[0] < claim["used"] <= LIMIT
+    assert any(thread not in {main_thread, store_thread} and amount == 1
+               for thread, amount in charges), "reader VM work was not charged"
+    assert any(thread == store_thread and amount == 1
+               for thread, amount in charges), "commit VM work was not charged"
+    assert not any(thread == main_thread for thread, _amount in charges)
+    if remaining_for_commit is None:
+        assert all(amount == 1 for thread, amount in charges if thread == store_thread), \
+            "commit must compare retained scalar/raw facts without decoding or hashing bodies"
+        assert any(thread not in {main_thread, store_thread} and amount > 1
+                   for thread, amount in charges), "reader body bytes were not charged"
+        assert effect_threads == [store_thread]
+        assert claim["status"] == "succeeded" and not state["continuity_gap"]
+        assert await counts(store) == (1, 1)
+    else:
+        assert effect_threads == []
+        assert claim["status"] == "failed"
+        assert claim["reason"] == "recovery_allowance_exhausted"
+        assert state["continuity_gap"] and state["ordinal"] == 0
+        assert await counts(store) == (0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", ["body", "sender", "anchor", "digest", "malformed"])
+async def test_present_inexact_tell_receipt_spends_once_and_stays_unknown(budget_store, monkeypatch, mismatch):
+    from comms import Comms, payload_digest
+    store, _ = budget_store
+    make_archive(store)
+    await pending_turn(store)
+    calls = spy_reader(store, monkeypatch)
+    sender = "fixture:other-peer" if mismatch == "sender" else "fixture:peer"
+    anchor = "wrong-anchor" if mismatch == "anchor" else "peer-1"
+    body = "Wrong synthetic body" if mismatch == "body" else "Peer one"
+    wire = Comms._peer_delivery_wire(
+        {"from_stream_id": sender,
+         "_auth_context": {"token_verified": True, "stream_id": sender}},
+        "tell", anchor, body)
+    envelope = {
+        "payload_digest": "0" * 64 if mismatch == "digest" else payload_digest(SID, "Peer one"),
+        "reply": {"tell_id": "peer-1", "to_stream_id": SID, "delivery_status": "delivered"},
+        "delivery": {"tell_id": "peer-1", "to_stream_id": SID, "text": wire, "delivery_status": "delivered"},
+    }
+    if mismatch == "malformed":
+        encoded = '{"delivery": broken synthetic JSON'
+        await store.submit(lambda conn: (
+            conn.execute("INSERT INTO v2_tell_deliveries(tell_id,reply,created_at) VALUES (?,?,0)",
+                         ("peer-1", encoded)), conn.commit()))
+        await store._fd_retry_pending(SID)
+    else:
+        await store.put_tell_delivery("peer-1", envelope)
+    assert len(calls) == 1
+    recovery_state(calls[0]["claim"], status="claimed")
+    state = await store.fd_turn_budget_status(SID)
+    claim = dict(recovery_state(state, status="failed"))
+    assert claim["used"] > 0 and claim["reason"]
     assert state["continuity_gap"] and state["ordinal"] == 0
-    assert recovery_state(state)["status"] != "succeeded"
+    assert await counts(store) == (0, 0)
+    for _ in range(3):
+        await store._fd_retry_pending(SID)
+    assert len(calls) == 1
+    assert recovery_state(await store.fd_turn_budget_status(SID)) == claim
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence", ["missing", "oversized_ascii", "oversized_utf8"])
+async def test_missing_or_byte_oversized_exact_tell_never_schedules_or_spends(
+        budget_store, monkeypatch, evidence):
+    store, _ = budget_store
+    make_archive(store)
+    await pending_turn(store)
+    calls = spy_reader(store, monkeypatch)
+    if evidence != "missing":
+        padding = "x" * 66_000 if evidence == "oversized_ascii" else "雪" * 23_000
+        encoded = json.dumps({"synthetic_padding": padding}, ensure_ascii=False)
+        assert len(encoded.encode("utf-8")) > 65_536
+        if evidence == "oversized_utf8":
+            assert len(encoded) < 65_536
+        await store.submit(lambda conn: (
+            conn.execute("INSERT INTO v2_tell_deliveries(tell_id,reply,created_at) VALUES (?,?,0)",
+                         ("peer-1", encoded)), conn.commit()))
+    statements = []
+    await store.submit(lambda conn: conn.set_trace_callback(statements.append))
+    try:
+        await store._fd_retry_pending(SID)
+    finally:
+        await store.submit(lambda conn: conn.set_trace_callback(None))
+    assert calls == []
+    state = await store.fd_turn_budget_status(SID)
+    assert state["continuity_gap"] == "peer_provenance_pending" and not state.get("recovery")
+    assert state["ordinal"] == 0 and await counts(store) == (0, 0)
+    for query in statements:
+        if query.lstrip().upper().startswith("SELECT") and "v2_tell_deliveries" in query:
+            projection = query[:query.upper().index(" FROM ")]
+            assert re.search(r"length\s*\(\s*CAST\s*\(\s*reply\s+AS\s+BLOB", projection, re.I)
+            without_size = re.sub(r"length\s*\(\s*CAST\s*\(\s*reply\s+AS\s+BLOB\s*\)\s*\)",
+                                  "", projection, flags=re.I)
+            assert not re.search(r"\breply\b|SELECT\s+\*", without_size, re.I)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["before_reader", "after_reader"])
+@pytest.mark.parametrize("receipt_kind", ["tell", "send"])
+async def test_receipt_change_after_claim_is_refused_without_retry(
+        budget_store, monkeypatch, phase, receipt_kind):
+    store, _ = budget_store
+    make_archive(store)
+    await pending_turn(store)
+    connect = sqlite3.connect
+
+    def mutate():
+        with connect(store.path) as conn:
+            if receipt_kind == "tell":
+                conn.execute("UPDATE v2_tell_deliveries SET reply='{}' WHERE tell_id='peer-1'")
+            else:
+                conn.execute("UPDATE v2_send_receipts SET actor_trusted=0 WHERE to_stream_id=? AND request_id='peer-1'",
+                             (SID,))
+
+    def race(reader, *args, **kwargs):
+        if phase == "before_reader":
+            mutate()
+        result = reader(*args, **kwargs)
+        if phase == "after_reader":
+            mutate()
+        return result
+
+    calls = spy_reader(store, monkeypatch, replacement=race)
+    if receipt_kind == "tell":
+        await peer_receipt(store)
+    else:
+        await store.append_send_receipt(
+            to_stream_id=SID, request_id="peer-1", receipt_id="synthetic-send-proof",
+            state="landed", wire_text=peer_wire(), display_text="Peer one",
+            attachments=[], delivery="landed", submission_confirmed=True,
+            from_stream_id="fixture:peer", actor_stream_id="fixture:peer", actor_trusted=True)
+    assert len(calls) == 1
+    recovery_state(calls[0]["claim"], status="claimed")
+    state = await store.fd_turn_budget_status(SID)
+    claim = dict(recovery_state(state, status="failed"))
+    assert state["continuity_gap"] and state["ordinal"] == 0
+    assert await counts(store) == (0, 0)
+    await store._fd_retry_pending(SID)
+    assert len(calls) == 1
+    assert recovery_state(await store.fd_turn_budget_status(SID)) == claim
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('after_effects', [False, True])
+async def test_recovery_effect_failure_rolls_back_and_preserves_spent_claim(budget_store, monkeypatch, after_effects):
+    store, _ = budget_store
+    await pending_turn(store)
+    original = store._fd_effects_conn
+    def fail(conn, **kwargs):
+        if after_effects:
+            original(conn, **kwargs)
+        raise RuntimeError('synthetic recovery effect failure')
+    monkeypatch.setattr(store, '_fd_effects_conn', fail)
+    await peer_receipt(store)
+    state = await store.fd_turn_budget_status(SID)
+    assert state['continuity_gap'] and state['ordinal'] == 0
+    recovery_state(state, status='failed')
+    assert await counts(store) == (0, 0)
+    assert await store.submit(lambda c:c.execute('SELECT count(*) FROM session_event_tail').fetchone()[0]) == 7
+    assert not await store.submit(lambda c:c.in_transaction)
+    await peer_receipt(store)
     assert await counts(store) == (0, 0)

@@ -219,7 +219,8 @@ async def test_store_restart_preserves_current_turn_and_ordinal(budget_store):
 async def test_actual_new_generation_counts_same_source_again(budget_store):
     store,binding = budget_store
     await turn(store)
-    row = await store.open_session("fixture","fd",provider="claude",pane_status="pane_alive")
+    row = await store.open_session("fixture","fd",provider="claude",pane_status="pane_alive",
+                                   created_at="2026-10-10T00:00:00.000001Z")
     assert row["session_generation"] != binding["generation"]
     store.configure_fd_turn_budget(config=FdTurnBudgetConfig(enabled=True), env_binding={"stream_id":"fixture:fd","generation":row["session_generation"]})
     await turn(store)
@@ -349,7 +350,7 @@ async def test_archived_replay_and_missing_archive_report_gap(budget_store):
     await turn(store)
     assert await counts(store)==(0,1)
     state=await store.fd_turn_budget_status("fixture:fd")
-    assert state["ordinal"]==1 and not state["continuity_gap"] and state["archive_seen"]
+    assert state["ordinal"]==1 and state["continuity_gap"] == "cursor_evidence_unavailable"
     archive.unlink()
     from retention import RetentionError
     # Ingress now refuses missing paired history before the observer runs.
@@ -358,7 +359,7 @@ async def test_archived_replay_and_missing_archive_report_gap(budget_store):
     # Exercise the accepted-event floor independently; it must retain the gap.
     item = normalized("USER", 20)
     await store.append_session_event("fixture:fd", item, identity="missing-archive-source", limit=100)
-    assert (await store.fd_turn_budget_status("fixture:fd"))["continuity_gap"]=="archive_unavailable"
+    assert (await store.fd_turn_budget_status("fixture:fd"))["continuity_gap"]=="cursor_evidence_unavailable"
     assert await counts(store)==(0,1)
 
 
@@ -438,12 +439,13 @@ async def test_binding_changes_across_prepare_await_cannot_enqueue(budget_store,
     store,binding=budget_store
     await append(store,normalized("USER",0))
     for n in range(1,6):await append(store,normalized("TOOL_USE",n))
-    original=store._fd_prepare
-    async def change(entries):
-        result=await original(entries)
+    # Admission and preparation now share one transaction, without an await.
+    original=store._fd_prepare_conn
+    def change(conn, sid):
+        result=original(conn, sid)
         store.configure_fd_turn_budget(config=FdTurnBudgetConfig(enabled=True),env_binding={"stream_id":"fixture:elsewhere","generation":"other"})
         return result
-    monkeypatch.setattr(store,"_fd_prepare",change)
+    monkeypatch.setattr(store,"_fd_prepare_conn",change)
     await append(store,normalized("TOOL_USE",6))
     assert await counts(store)==(0,0)
 
@@ -569,8 +571,14 @@ async def test_pending_history_loss_never_recovers_healthy(budget_store, damage)
     await peer_receipt(store)
     for n in range(3,9):
         await append(store, normalized('TOOL_USE',n))
-    assert (await store.fd_turn_budget_status('fixture:fd'))['continuity_gap']
-    assert await counts(store) == (0,0)
+    state = await store.fd_turn_budget_status('fixture:fd')
+    if damage == 'archive':
+        # An unused archive is no longer part of hot-only recovery proof.
+        assert not state['continuity_gap']
+        assert await counts(store) == (1,1)
+    else:
+        assert state['continuity_gap']
+        assert await counts(store) == (0,0)
 
 
 @pytest.mark.asyncio
@@ -627,14 +635,9 @@ async def test_archive_cursor_snapshot_must_match_committing_cursor(budget_store
     store, _ = budget_store
     await append(store, normalized('USER',0))
     await archive_sources(store)
-    original = store._fd_prepare
-    async def race(entries):
-        prepared = await original(entries)
-        monkeypatch.setattr(store, '_fd_prepare', original)
-        await append(store, normalized('TOOL_USE',1))
-        await store.submit(lambda c: (c.execute('DELETE FROM session_event_tail'), c.commit()))
-        return prepared
-    monkeypatch.setattr(store, '_fd_prepare', race)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("ingest must not prepare archived cursor evidence")
+    monkeypatch.setattr(store, '_fd_archive_evidence', forbidden)
     await append(store, normalized('TOOL_USE',2))
     assert (await store.fd_turn_budget_status('fixture:fd'))['continuity_gap'] == 'cursor_evidence_unavailable'
 
@@ -746,8 +749,8 @@ async def test_pending_retry_uses_current_transaction_interval(budget_store, mon
     await peer_receipt(store)
     for n in range(2,7):
         await append(store, normalized('TOOL_USE',n))
-    assert not (await store.fd_turn_budget_status('fixture:fd'))['continuity_gap']
-    assert await counts(store) == (1,1)
+    assert (await store.fd_turn_budget_status('fixture:fd'))['continuity_gap']
+    assert await counts(store) == (0,0)
 
 
 @pytest.mark.asyncio
@@ -794,7 +797,7 @@ async def test_archive_replay_preserves_immutable_source_through_receipt_project
     await archive_sources(store)
     await append(store,incoming)
     state = await store.fd_turn_budget_status('fixture:fd')
-    assert not state['continuity_gap'] and state['ordinal'] == 1
+    assert state['continuity_gap'] == 'cursor_evidence_unavailable' and state['ordinal'] == 1
     assert await counts(store) == (0,1)  # One immutable crossing is in the archive.
 
 

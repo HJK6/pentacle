@@ -65,6 +65,10 @@ async def test_ignored_insert_has_no_observer_preparation_or_cursor_write(budget
     def prepare(*args, **kwargs):
         calls.append('prepare'); return original(*args, **kwargs)
     monkeypatch.setattr(store, '_fd_prepare', prepare)
+    observer = store._fd_observe_conn
+    def observe(*args, **kwargs):
+        calls.append('observe'); return observer(*args, **kwargs)
+    monkeypatch.setattr(store, '_fd_observe_conn', observe)
     statements = []
     await store.submit(lambda c: c.set_trace_callback(statements.append))
     try:
@@ -109,6 +113,10 @@ async def test_receipt_replay_does_not_prepare_or_rewrite_cursor(budget_store, m
     def prepare(*args, **kwargs):
         calls.append('prepare'); return original(*args, **kwargs)
     monkeypatch.setattr(store, '_fd_prepare', prepare)
+    observer = store._fd_observe_conn
+    def observe(*args, **kwargs):
+        calls.append('observe'); return observer(*args, **kwargs)
+    monkeypatch.setattr(store, '_fd_observe_conn', observe)
     statements = []
     await store.submit(lambda c: c.set_trace_callback(statements.append))
     try:
@@ -119,3 +127,77 @@ async def test_receipt_replay_does_not_prepare_or_rewrite_cursor(budget_store, m
     assert calls == []
     assert not any(('INSERT' in sql.upper() or 'UPDATE' in sql.upper()) and 'kv' in sql.lower() for sql in statements)
     assert await store.get(store._fd_cursor_key('fixture:fd')) == before
+
+
+@pytest.mark.asyncio
+async def test_generation_change_cannot_override_same_lifecycle_hot_dedup(budget_store, monkeypatch):
+    from fd_turn_budget import FdTurnBudgetConfig
+    from test_fd_turn_budget import counts
+    store, old_binding = budget_store
+    for n in range(7):
+        await admit(store, normalized('USER' if n == 0 else 'TOOL_USE', n))
+    assert await counts(store) == (1, 1)
+    old = await store.fetch_session('fixture', 'fd')
+    new = await store.open_session('fixture', 'fd', provider='claude', pane_status='pane_alive',
+                                  pane_pid='123', created_at=old['created_at'])
+    binding = {'stream_id':'fixture:fd', 'generation':new['session_generation']}
+    assert binding['generation'] != old_binding['generation']
+    store.configure_fd_turn_budget(config=FdTurnBudgetConfig(enabled=True), env_binding=binding)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('ignored new-generation replay performed observer work')
+    original = store._fd_prepare_conn
+    monkeypatch.setattr(store, '_fd_prepare_conn', forbidden)
+    monkeypatch.setattr(store, '_fd_archive_evidence', forbidden)
+    for n in range(7):
+        assert await admit(store, normalized('USER' if n == 0 else 'TOOL_USE', n)) is None
+    state = await store.fd_turn_budget_status('fixture:fd')
+    assert state['generation'] == binding['generation'] and state['ordinal'] == 0
+    assert 'recovery' not in state and await counts(store) == (1, 1)
+    monkeypatch.setattr(store, '_fd_prepare_conn', original)
+    assert await admit(store, normalized('USER', 20))
+    state = await store.fd_turn_budget_status('fixture:fd')
+    assert state['ordinal'] == 0 and state['continuity_gap'] == 'ordinal_history_unproven'
+    assert 'recovery' not in state and await counts(store) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_harmless_work_has_no_generation_length_cutoff(budget_store):
+    from test_fd_turn_budget import counts
+    store, _ = budget_store
+    for n in range(7):
+        await admit(store, normalized('USER' if n == 0 else 'TOOL_USE', n))
+    for n in range(7,145):
+        item = normalized('TOOL_USE', n)
+        if n % 3 == 0:
+            item['kind'] = 'SYSTEM'
+        elif n % 3 == 1:
+            item['kind'] = 'THINKING'
+        await admit(store, item)
+    state = await store.fd_turn_budget_status('fixture:fd')
+    assert state['ordinal'] == 1 and state['crossed'] and not state['continuity_gap']
+    assert state['history_truncated'] and len(state['history_proofs']) == 128
+    assert await counts(store) == (1,1)
+    await admit(store, normalized('USER', 145))
+    state = await store.fd_turn_budget_status('fixture:fd')
+    assert state['ordinal'] == 1 and state['continuity_gap'] == 'dispatch_proof_delta_exceeds_bound'
+    assert await counts(store) == (1,1)
+
+
+@pytest.mark.asyncio
+async def test_memory_store_recovery_is_spent_unknown():
+    from fd_turn_budget import FdTurnBudgetConfig
+    from store import Store
+    from test_fd_turn_budget import counts
+    store = Store(':memory:'); store.start()
+    try:
+        row = await store.open_session('fixture', 'fd', provider='claude', pane_status='pane_alive')
+        store.configure_fd_turn_budget(config=FdTurnBudgetConfig(enabled=True),
+            env_binding={'stream_id':'fixture:fd', 'generation':row['session_generation']})
+        await admit(store, normalized('USER', 0, body=peer_wire()))
+        await peer_receipt(store)
+        state = await store.fd_turn_budget_status('fixture:fd')
+        assert state['continuity_gap'] == 'recovery_unavailable'
+        assert state['recovery']['spent'] == 100000 and state['recovery']['status'] == 'failed'
+        assert state['ordinal'] == 0 and await counts(store) == (0,0)
+    finally:
+        store.stop()
