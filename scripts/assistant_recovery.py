@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shlex
 import sqlite3
 import stat
@@ -123,8 +124,11 @@ def snapshot(inputs):
             n.delivered_at,n.terminal_at,n.terminal_reason FROM v2_watch_facts f
             LEFT JOIN v2_outbound_notices n USING(notice_id)
             WHERE f.owner=? AND f.owner_generation=?""", (old, generation))]
+        ownership_table=inputs["authority_membership_table"]
+        if not isinstance(ownership_table,str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*",ownership_table):
+            raise Refused("invalid_authority_membership_table")
         tracked = [dict(row) for row in conn.execute("SELECT target_stream_id,target_generation "
-            "FROM v2_assistant_bart_lanes WHERE target_stream_id=?", (old,))]
+            f"FROM {ownership_table} WHERE target_stream_id=?", (old,))]
         pending_spawns = [dict(row) for row in conn.execute("SELECT host,session_name,request_id,expires_at "
             "FROM v2_stream_reservations WHERE json_extract(payload,'$.open_fields.parent_stream_id')=?", (old,))]
         lanes = [dict(row) for row in conn.execute("SELECT lane_id,phase,bound_stream_id,bound_generation,"

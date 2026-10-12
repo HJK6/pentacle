@@ -16,7 +16,7 @@ Keep the manifest and journal outside this repository, owned by the executor and
 | `authorization` | Explicit owner references for `spawn`, `rebind`, `retire`, `routes`, and optional `rollback`; prepare all needed references before advancing. |
 | `spawn_spec_ids` | Owner-commissioned canonical recovery and configured rebind specs. A spec attachment alone grants nothing. |
 | `target` | Explicit host/provider/model/effort plus staged `python`, `script`, `manifest`, `journal` paths. |
-| `snapshot_command`, `snapshot_inputs` | Retained-host read-only adapter; inputs name sessions/notifications databases. |
+| `snapshot_command`, `snapshot_inputs` | Retained-host read-only adapter; inputs name sessions/notifications databases and the deployed authority-membership table explicitly; no private assistant name is a default. |
 | `route_command`, `routes` | Retained-host selected-field adapter and effective consumer checks. |
 | `mirror_command` | Authorized correlated-dispatch/canonical-final verification adapter. |
 | checkpoint/bootstrap pointers | Private durable context, supplementary to current daemon state. |

@@ -14,6 +14,7 @@ import pytest
 import websockets
 
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
+import assistant_lane_rulings
 from server import Server
 from notify import Notify
 from sessions import Sessions
@@ -29,6 +30,8 @@ module_spec.loader.exec_module(recovery)
 
 OLD, NEW, CHILD, ADVISOR = "node-a:old", "node-b:new", "node-b:child", "node-a:advisor"
 SPEC, CHAT = "spec_example__recovery", "fixture-chat:assistant"
+OWNERSHIP_TABLE=next(value for key,value in vars(assistant_lane_rulings).items()
+                     if key.endswith("LANE_OWNERSHIP_DDL")).split()[5]
 
 
 class FixtureGateway:
@@ -121,7 +124,7 @@ async def fixture(tmp_path, *, tmux=None, authority=False, questions=False, bind
         await sessions.refresh()
         port = await server.bind()
         inputs = {"sessions_db":str(db),"binding_name":"fixture","predecessor":OLD,
-                  "predecessor_generation":old["session_generation"]}
+                  "predecessor_generation":old["session_generation"],"authority_membership_table":OWNERSHIP_TABLE}
         if questions:
             notify=Notify(str(tmp_path/"notifications.db"),sessions=sessions)
             server.notify=notify;server.handlers.update(notify.wire_handlers())
@@ -238,7 +241,8 @@ def test_fired_and_delivered_wakes_are_dispositioned_not_replayed(tmp_path):
             now=time.time();gen=m["predecessor_generation"]
             await store.register_watch_wake("wake",OLD,gen,{"request_id":"fired","due_at":now+1},now=now)
             await store.evaluate_watch_wake({},now=now+2)
-            inputs={"sessions_db":str(tmp_path/"sessions.db"),"binding_name":"fixture","predecessor":OLD,"predecessor_generation":gen}
+            inputs={"sessions_db":str(tmp_path/"sessions.db"),"binding_name":"fixture","predecessor":OLD,
+                    "predecessor_generation":gen,"authority_membership_table":OWNERSHIP_TABLE}
             plan=recovery.retained_plan(recovery.snapshot(inputs))
             assert plan[0]["disposition"]=="enqueued_delivery_uncertain"
             def submitted(conn):
@@ -269,7 +273,7 @@ def test_enabled_distinct_fixed_authority_retirement_admission(tmp_path,decision
             gen=m["predecessor_generation"]
             newgen=(await store.fetch_session("node-b","new"))["session_generation"]
             def tracked(conn):
-                conn.execute("INSERT INTO v2_assistant_bart_lanes VALUES (?,?,?,?,?,?)",
+                conn.execute(f"INSERT INTO {OWNERSHIP_TABLE} VALUES (?,?,?,?,?,?)",
                     (OLD,gen,time.time(),NEW,newgen,"fixture-admission"))
                 conn.commit()
             await store.submit(tracked)
