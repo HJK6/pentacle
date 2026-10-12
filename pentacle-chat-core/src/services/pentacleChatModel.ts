@@ -2291,7 +2291,7 @@ export function formatAssistantActivity(activity: AssistantInputActivity, now = 
   const elapsed = Math.max(0, now - Date.parse(activity.accepted_at));
   switch (activity.response_state) {
     case 'queued': case 'routing': case 'awaiting_reply':
-      return `Waiting for Bart${Number.isFinite(elapsed) ? ` · ${duration(elapsed)}` : ''}`;
+      return `Waiting for reply${Number.isFinite(elapsed) ? ` · ${duration(elapsed)}` : ''}`;
     case 'acknowledged': return `Follow-up pending${first ? ` · ${first}` : ''}`;
     case 'answered': return `${first}${first ? ' · ' : ''}Answer complete${typeof activity.final_latency_ms === 'number' ? ` ${duration(activity.final_latency_ms)}` : ''}`;
     case 'reply_received': return `${first || 'Reply received'} · Completion not recorded`;

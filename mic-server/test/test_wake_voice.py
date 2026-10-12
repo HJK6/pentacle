@@ -23,7 +23,7 @@ def test_natural_wake_tail_over_and_no_clipboard(monkeypatch):
     module, listener = wake_listener(monkeypatch)
     copied = []
     monkeypatch.setattr(module, 'copy_to_clipboard', copied.append)
-    hear(listener, 'HEY, Bart! Please help me plan today.')
+    hear(listener, 'HEY, Zephyr! Please help me plan today.')
     assert listener.state == 'CAPTURING'
     assert listener.capture_origin == 'wake'
     hear(listener, 'Go over this carefully.')
@@ -34,7 +34,7 @@ def test_natural_wake_tail_over_and_no_clipboard(monkeypatch):
     assert listener.wake.claim() is None
 
 
-@pytest.mark.parametrize('text', ['noise in the room', 'I said Hey Bart yesterday', 'hey bar', 'Hey Bartender', 'Hey, Bort!', 'Bart start copying'])
+@pytest.mark.parametrize('text', ['noise in the room', 'I said Hey Zephyr yesterday', 'hey bar', 'Hey Zephyrender', 'Hey, Bort!', 'Zephyr start copying'])
 def test_room_speech_is_not_captured_or_logged(monkeypatch, text):
     _, listener = wake_listener(monkeypatch)
     events = []
@@ -48,7 +48,7 @@ def test_manual_capture_is_separate_and_cannot_replace_wake(monkeypatch):
     module, listener = wake_listener(monkeypatch)
     copied = []
     monkeypatch.setattr(module, 'copy_to_clipboard', copied.append)
-    hear(listener, 'Hey Bart first message')
+    hear(listener, 'Hey Zephyr first message')
     with pytest.raises(ValueError, match='wake'):
         listener._execute_command('start_copy')
     hear(listener, 'over')
@@ -62,9 +62,9 @@ def test_manual_capture_is_separate_and_cannot_replace_wake(monkeypatch):
 def test_full_queue_refuses_capture_and_claims_are_atomic(monkeypatch):
     _, listener = wake_listener(monkeypatch)
     for i in range(8):
-        hear(listener, f'Hey Bart message {i}')
+        hear(listener, f'Hey Zephyr message {i}')
         hear(listener, 'over')
-    hear(listener, 'Hey Bart ninth message')
+    hear(listener, 'Hey Zephyr ninth message')
     assert listener.state == 'LISTENING'
     assert listener.wake.snapshot()['error']
     with ThreadPoolExecutor(max_workers=12) as pool:
@@ -78,14 +78,14 @@ def test_full_queue_refuses_capture_and_claims_are_atomic(monkeypatch):
 
 def test_off_invalidates_pending_and_delayed_asr_across_on(monkeypatch):
     _, listener = wake_listener(monkeypatch)
-    hear(listener, 'Hey Bart queued')
+    hear(listener, 'Hey Zephyr queued')
     hear(listener, 'over')
     generation = listener.wake.snapshot()['generation']
     entered, release = threading.Event(), threading.Event()
     def delayed(audio):
         entered.set()
         assert release.wait(3)
-        return 'Hey Bart stale speech'
+        return 'Hey Zephyr stale speech'
     listener._transcribe = delayed
     worker = threading.Thread(target=listener._handle_utterance, args=(np.ones(8000),))
     worker.start()
@@ -101,7 +101,7 @@ def test_off_invalidates_pending_and_delayed_asr_across_on(monkeypatch):
 
 def test_empty_capture_has_no_delivery(monkeypatch):
     _, listener = wake_listener(monkeypatch)
-    hear(listener, 'Hey Bart')
+    hear(listener, 'Hey Zephyr')
     hear(listener, 'over')
     assert listener.wake.claim() is None
 
@@ -121,7 +121,7 @@ def test_http_claim_off_and_manual_completion_isolation(monkeypatch):
         listener._execute_command('start_copy')
         hear(listener, 'manual words')
         hear(listener, 'over')
-        hear(listener, 'Hey Bart wake words')
+        hear(listener, 'Hey Zephyr wake words')
         assert case.post('/copy/start')[0] == 409
         assert case.post('/copy/stop')[1]['copied'] == 'manual words'
         assert listener.state == 'CAPTURING'
@@ -132,7 +132,7 @@ def test_http_claim_off_and_manual_completion_isolation(monkeypatch):
         assert sum(bool(body.get('claim')) for _, body in responses) == 1
         review = case.get('/wake/last-claim')[1]['claim']
         assert review['text'] == 'wake words'
-        hear(listener, 'Hey Bart clear me')
+        hear(listener, 'Hey Zephyr clear me')
         hear(listener, 'over')
         old_generation = listener.wake.generation
         assert case.post('/mode/off')[0] == 200
@@ -160,8 +160,8 @@ def test_stop_then_start_generates_fresh_lifecycle(monkeypatch):
 
 
 @pytest.mark.parametrize('enabled,state,group,expected', [
-    (True, 'LISTENING', None, 'Hey Bart'),
-    (True, 'CALIBRATING', 'wake', 'Hey Bart'),
+    (True, 'LISTENING', None, 'Hey Zephyr'),
+    (True, 'CALIBRATING', 'wake', 'Hey Zephyr'),
     (True, 'CALIBRATING', 'end_copy', None),
     (True, 'CAPTURING', None, None),
     (True, 'MEETING', None, None),
@@ -183,3 +183,40 @@ def test_name_hint_only_applies_to_opted_in_wake_recognition(monkeypatch, enable
     assert calls[0].get('hotwords') == expected
     assert calls[0]['beam_size'] == 1
     assert calls[0]['condition_on_previous_text'] is False
+
+
+@pytest.mark.parametrize('configured, expected', [(None, 'Zephyr'), ('  ', 'Zephyr'), ('  Aster  ', 'Aster'), (' Aster. ', 'Aster.')])
+def test_configured_wake_name_controls_matching_and_hints(monkeypatch, configured, expected):
+    if configured is None:
+        monkeypatch.delenv('MIC_ASSISTANT_NAME', raising=False)
+    else:
+        monkeypatch.setenv('MIC_ASSISTANT_NAME', configured)
+    # The setting is read once per service process, including the local-action module.
+    import sys
+    monkeypatch.delitem(sys.modules, 'local_actions', raising=False)
+    module, listener = wake_listener(monkeypatch)
+    assert module.ASSISTANT_NAME == expected
+    assert f'hey {expected.lower()}' in module.DEFAULT_WAKE
+    from types import SimpleNamespace
+    calls = []
+    listener.whisper_model = SimpleNamespace(transcribe=lambda path, **kwargs: (calls.append(kwargs) or [SimpleNamespace(text='recognized')], None))
+    assert listener._transcribe(np.ones(8000)) == 'recognized'
+    assert calls[-1]['hotwords'] == f'Hey {expected}'
+    listener.voice_actions.enabled = True
+    listener.voice_actions.policy = 'separate'
+    assert listener._transcribe(np.ones(8000)) == 'recognized'
+    assert calls[-1]['hotwords'] == f'Hey {expected}, Hey Pentacle'
+    hear(listener, f'Hey {expected} please help')
+    assert listener.capture_origin == 'wake'
+    hear(listener, 'Over')
+    assert listener.wake.claim()['text'] == 'please help'
+    import local_actions
+    decision = {key: '' for key in local_actions.SCHEMA['required']}
+    decision.update(route='clarify', assets=[], reply=f'Hey {expected} please repeat the request')
+    with pytest.raises(ValueError, match='Please repeat the complete request'):
+        local_actions.validate_decision(decision, 'Missing details')
+    hear(listener, f'Hey {expected}extra must not capture')
+    assert listener.state == 'LISTENING'
+    if expected != 'Zephyr':
+        hear(listener, 'Hey Zephyr must not capture')
+        assert listener.state == 'LISTENING'

@@ -58,7 +58,7 @@ def test_lapsed_window_falls_back_to_fresh_request(monkeypatch):
 def test_fresh_wake_closes_the_window_and_starts_new_request(monkeypatch):
     _, listener, stub = wired(monkeypatch, {'conversation_id': 'C', 'answer_to': 'L'})
     stub.ready = True
-    hear(listener, 'Hey Bart what is the time')
+    hear(listener, 'Hey Zephyr what is the time')
     assert stub.cancelled == 1
     assert listener.capture_origin == 'wake'
     assert stub.captured == 0

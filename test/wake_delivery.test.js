@@ -195,8 +195,28 @@ test('an answer claim delivers a header carrying answer_to',async()=>{
 test('mic status surfaces the answer window and silent mode',async()=>{
   const f=fixture();
   const base={mode:'on',wake:{enabled:true,generation:'one'}};
-  assert.equal(f.helper.message({...base,speaker:{answer_window:{waiting:true,ready:true}}}),'Ready for Bart’s answer — say over.');
-  assert.equal(f.helper.message({...base,speaker:{answer_window:{waiting:true,ready:false}}}),'Getting ready for Bart’s answer…');
-  assert.equal(f.helper.message({...base,capture_origin:'answer'}),'Recording your answer for Bart — say over.');
-  assert.equal(f.helper.message({...base,speaker:{silent:true}}),'Silent mode is on — Bart answers in chat. Say “Hey Bart” to speak.');
+  assert.equal(f.helper.message({...base,speaker:{answer_window:{waiting:true,ready:true}}}),'Ready for Zephyr’s answer — say over.');
+  assert.equal(f.helper.message({...base,speaker:{answer_window:{waiting:true,ready:false}}}),'Getting ready for Zephyr’s answer…');
+  assert.equal(f.helper.message({...base,capture_origin:'answer'}),'Recording your answer for Zephyr — say over.');
+  assert.equal(f.helper.message({...base,speaker:{silent:true}}),'Silent mode is on — Zephyr answers in chat. Say “Hey Zephyr” to speak.');
 });
+
+
+for (const [supplied, name] of [[undefined, 'Zephyr'], ['   ', 'Zephyr'], [' Aster ', 'Aster']]) {
+  test(`voice guidance uses effective mic name ${name}`, () => {
+    const f = fixture();
+    f.status.assistant_name = supplied;
+    f.status.wake.pending_count = 0;
+    assert.equal(f.helper.message(f.status), `Say “Hey ${name}” to speak; “over” to send.`);
+    f.status.local_actions = { enabled: true, wake_policy: 'separate' };
+    assert.equal(f.helper.message(f.status), `Hey ${name} for chat; Hey Pentacle for actions. Say over to finish.`);
+    f.status.local_actions.wake_policy = 'shared';
+    assert.equal(f.helper.message(f.status), `Hey ${name} for chat or local actions. Say over to finish.`);
+    f.status.speaker = { answer_window: { waiting: true, ready: true } };
+    assert.equal(f.helper.message(f.status), `Ready for ${name}’s answer — say over.`);
+    const { computeMicPanelView } = require('../renderer/mic-state');
+    assert.equal(computeMicPanelView({ status: f.status }).answerWindow.text, `Ready for ${name}’s answer — say over.`);
+    f.status.speaker = { silent: true };
+    assert.equal(f.helper.message(f.status), `Silent mode is on — ${name} answers in chat. Say “Hey ${name}” to speak.`);
+  });
+}

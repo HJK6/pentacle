@@ -8,7 +8,7 @@ test/daemon can prove the fleet profile was applied.
 Config (env), applied ONLY to the upload route so the live wake/content path keeps
 its no-content-bias rule:
 - ``MIC_VOCABULARY_FILE``: a text file whose contents become the ``initial_prompt``
-  (the fleet names, e.g. "Bartimaeus, Bart, Samplehost, Thirdhost, Otherhost, Pentacle,
+  (the fleet names, e.g. "Zephyr, Samplehost, Thirdhost, Otherhost, Pentacle,
   Altum, ExampleClient, Triforce, Nexus, Astra, Luna, Sol, Opus, Fable").
 - ``MIC_NAME_CORRECTIONS``: a JSON object mapping a known mis-transcription variant
   to its canonical fleet name. Replacement is whole-word and case-insensitive and

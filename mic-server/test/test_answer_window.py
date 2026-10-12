@@ -1,4 +1,4 @@
-"""No-device acceptance for the Bart answer window on the speaker service."""
+"""No-device acceptance for the Zephyr answer window on the speaker service."""
 import json
 from .test_speaker_service import service, opened, line
 from voice_rules import Rules, DEFAULTS

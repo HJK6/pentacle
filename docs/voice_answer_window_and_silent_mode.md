@@ -1,15 +1,15 @@
 # Answer window and silent mode
 
-Two additions to the room-microphone voice stack: an **answer window** so Bart can
+Two additions to the room-microphone voice stack: an **answer window** so Zephyr can
 ask a question and listen for the reply without a fresh wake word, and a **silent
-mode** that stops Bart's audio while the microphone keeps listening. Both are proven
+mode** that stops Zephyr's audio while the microphone keeps listening. Both are proven
 without an audio device (null sink); live activation on the running service is a
 separate owner-controlled step. See [room microphone conversation](room_mic_conversation.md)
 and [local spoken conversations](voice_speaker.md) for the surrounding contract.
 
 ## Answer window after a spoken question
 
-A spoken line may declare that it is a question Bart needs answered to proceed:
+A spoken line may declare that it is a question Zephyr needs answered to proceed:
 
 ```sh
 printf '%s' 'Should I deploy the release now?' |
@@ -22,7 +22,7 @@ printf '%s' 'Should I deploy the release now?' |
 - Every accepted line's response includes a `line_id` unique within the conversation.
 - When a question finishes playing, the service plays the **listening tone** (when
   `replies.listening_tone` is on) and opens the microphone for an answer. The window
-  opens only after the recognition fence for that playback has passed, so Bart's own
+  opens only after the recognition fence for that playback has passed, so Zephyr's own
   question is never captured.
 - The operator speaks the answer and ends with **"over"**, with no wake word. The answer
   is delivered as a room-microphone turn whose machine header carries exactly `origin`
@@ -30,9 +30,9 @@ printf '%s' 'Should I deploy the release now?' |
   A turn that is not an answer carries no `answer_to`.
 - An acknowledgement plays for the answer as for any routed request, on the same conversation.
 - No speech inside the window closes it silently; the conversation stays open and the
-  operator can still say "Hey Bart". A fresh wake word during the window starts a new
+  operator can still say "Hey Zephyr". A fresh wake word during the window starts a new
   request and closes the window. A suppressed question (silent mode) opens no window.
-- One window at a time: a Bart answer window never overlaps a local-action answer window.
+- One window at a time: a Zephyr answer window never overlaps a local-action answer window.
 
 ### Line allowance
 
@@ -69,14 +69,14 @@ delivered and answered in chat. The flag survives a service restart (persisted t
 - **Endpoint.** `POST /mode/silent {"on": <bool>, "source": "web"|"mobile"|"voice"}` sets the
   flag and returns `{silent, source, changed_at}`. Turning it **off** plays the `silent_off`
   confirmation clip; turning it **on** plays nothing.
-- **Voice.** "Hey Bart, silent mode on, over" / "... silent mode off, over" are matched inside
+- **Voice.** "Hey Zephyr, silent mode on, over" / "... silent mode off, over" are matched inside
   the mic service from the rules `modes.silent` phrases when the wake line completes, before any
-  routing to Bart, and are never delivered to the assistant. Near misses ("silent movie",
+  routing to Zephyr, and are never delivered to the assistant. Near misses ("silent movie",
   "meeting notes") are ordinary room-mic lines.
 - **Meeting by voice.** "start meeting" / "end meeting" are matched the same way from
   `modes.meeting` and start/stop the meeting recorder. The listener stays in `LISTENING` during a
-  meeting, so "Hey Bart ... over" still reaches Bart and can end the meeting. (Before this change,
-  with the wake-capture path those phrases were delivered to Bart as text rather than executed.)
+  meeting, so "Hey Zephyr ... over" still reaches Zephyr and can end the meeting. (Before this change,
+  with the wake-capture path those phrases were delivered to Zephyr as text rather than executed.)
 - `/status` reports `speaker.silent`, `speaker.silent_source` and `speaker.silent_changed_at`;
   the renderer helper `mic-state.computeSilentState` renders the state. The web and mobile toggles
   post to `/mode/silent`.

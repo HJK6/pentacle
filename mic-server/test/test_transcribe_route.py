@@ -63,7 +63,7 @@ class TranscribeRouteTest(unittest.TestCase):
         vf = os.path.join(self.dir, "vocab.txt")
         cf = os.path.join(self.dir, "corr.json")
         with open(vf, "w", encoding="utf-8") as h:
-            h.write("Bartimaeus, Samplehost, Thirdhost")
+            h.write("Zephyr, Samplehost, Thirdhost")
         with open(cf, "w", encoding="utf-8") as h:
             h.write(json.dumps({"toth": "Thirdhost"}))
         self.env = mock.patch.dict(os.environ, {
@@ -102,6 +102,13 @@ class TranscribeRouteTest(unittest.TestCase):
             body = e.read().decode()
             return e.code, (json.loads(body) if body else {})
 
+    def test_status_carries_the_configured_microphone_name(self):
+        # Existing HTTP status transports the same value recognition consumes.
+        with mock.patch.object(mic_server, "ASSISTANT_NAME", "Aster"):
+            with urllib.request.urlopen(self.base + "/status", timeout=5) as response:
+                status = json.loads(response.read().decode())
+        self.assertEqual(status["assistant_name"], "Aster")
+
     def test_missing_fleet_vocabulary_fails_before_model(self):
         os.unlink(os.environ['MIC_VOCABULARY_FILE'])
         status, _ = self.post_audio('/transcribe?prompt_profile=fleet')
@@ -127,7 +134,7 @@ class TranscribeRouteTest(unittest.TestCase):
         call = self.model.calls[-1]
         self.assertEqual(call["beam_size"], 1)
         self.assertFalse(call["vad_filter"])
-        self.assertEqual(call["initial_prompt"], "Bartimaeus, Samplehost, Thirdhost")
+        self.assertEqual(call["initial_prompt"], "Zephyr, Samplehost, Thirdhost")
 
     def test_missing_profile_is_400(self):
         status, body = self.post_audio("/transcribe")

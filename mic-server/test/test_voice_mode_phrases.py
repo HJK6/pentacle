@@ -17,7 +17,7 @@ def wired(monkeypatch, modes=None):
 
 
 def say(listener, line):
-    hear(listener, 'Hey Bart ' + line)
+    hear(listener, 'Hey Zephyr ' + line)
     hear(listener, 'over')
 
 
@@ -25,7 +25,7 @@ def test_silent_on_and_off_phrases_handled_in_service(monkeypatch):
     _, listener, silent, _ = wired(monkeypatch)
     say(listener, 'silent mode on')
     assert silent == [True]
-    # Handled in-service: nothing is delivered to Bart.
+    # Handled in-service: nothing is delivered to Zephyr.
     assert listener.wake.claim() is None
     say(listener, 'silent mode off')
     assert silent == [True, False]
@@ -47,13 +47,13 @@ def test_near_misses_do_not_switch_modes_and_reach_bart(monkeypatch, line):
     _, listener, silent, meeting = wired(monkeypatch)
     say(listener, line)
     assert silent == [] and meeting == {'start': 0, 'stop': 0}
-    # A near miss is an ordinary room-mic line delivered to Bart.
+    # A near miss is an ordinary room-mic line delivered to Zephyr.
     assert listener.wake.claim()['text'] == line
 
 
 def test_without_wiring_meeting_phrase_is_sent_to_bart(monkeypatch):
     # Step-2 classification: with the wake-capture path and no in-service mode matching,
-    # a meeting phrase is NOT executed locally -- it is delivered to Bart as text (the defect
+    # a meeting phrase is NOT executed locally -- it is delivered to Zephyr as text (the defect
     # this spec fixes by sourcing mode phrases from the rules Modes section).
     _, listener = wake_listener(monkeypatch)
     say(listener, 'start meeting')

@@ -51,7 +51,7 @@ def test_direct_answer_requires_open_window_and_over(monkeypatch):
     actions.speaker = lambda *args: {'stopped': True}
     clock = [100.]
     monkeypatch.setattr('time.monotonic', lambda: clock[0])
-    hear(listener, 'Hey Bart spawn an agent')
+    hear(listener, 'Hey Zephyr spawn an agent')
     hear(listener, 'over')
     item = actions.queue.get_nowait()
     actions._process(item)
@@ -87,7 +87,7 @@ def dialogue(monkeypatch):
     actions.speaker = lambda *args: {'stopped': True}
     def open_request(text='Spawn an agent', **fields):
         actions.classifier = lambda actual: validate_decision(proposal(**fields), actual)
-        hear(listener, 'Hey Bart '+text); hear(listener, 'over')
+        hear(listener, 'Hey Zephyr '+text); hear(listener, 'over')
         item = actions.queue.get_nowait(); actions._process(item)
         clock[0] += 2
         return item
@@ -151,7 +151,7 @@ def test_pending_partial_answer_cleared_on_boundaries(dialogue, operation):
         assert actions.snapshot()['pending'] is None
     elif operation == 'cancel': hear(listener, 'cancel')
     elif operation == 'off': listener.stop()
-    else: hear(listener, 'Hey Bart what is Bitcoin worth?')
+    else: hear(listener, 'Hey Zephyr what is Bitcoin worth?')
     assert actions.pending is None
     if operation == 'fresh_wake':
         assert listener.captured_texts == ['what is Bitcoin worth?']
@@ -177,7 +177,7 @@ def test_fresh_wake_invalidates_inference_without_changing_mic_generation(dialog
     listener, actions, clock, start, answer, hear = dialogue
     start(); generation = listener.wake.generation
     def classifier(text, pending):
-        hear(listener, 'Hey Bart what is Bitcoin worth?')
+        hear(listener, 'Hey Zephyr what is Bitcoin worth?')
         return answer_decision(text, pending, model='astra')
     actions.followup_classifier = classifier
     hear(listener, 'Astra'); hear(listener, 'over')
@@ -320,9 +320,9 @@ def test_missing_model_reply_alone_opens_idle_agent(dialogue):
 def test_fresh_wake_preserves_earlier_independent_request(dialogue):
     listener, actions, clock, start, answer, hear = dialogue
     actions.classifier = lambda text: {'route':'bart','text':text}
-    hear(listener, 'Hey Bart first message'); hear(listener, 'over')
+    hear(listener, 'Hey Zephyr first message'); hear(listener, 'over')
     first = actions.queue.get_nowait()
-    hear(listener, 'Hey Bart second message'); hear(listener, 'over')
+    hear(listener, 'Hey Zephyr second message'); hear(listener, 'over')
     second = actions.queue.get_nowait()
     actions._process(first); actions._process(second)
     assert [listener.wake.claim()['text'], listener.wake.claim()['text']] == ['first message', 'second message']
@@ -363,7 +363,7 @@ def test_expired_nonprogress_question_is_not_spoken(dialogue):
 def test_fresh_wake_cancels_question_being_prepared(dialogue):
     listener, actions, clock, start, answer, hear = dialogue
     def say(item, text):
-        hear(listener, 'Hey Bart new message')
+        hear(listener, 'Hey Zephyr new message')
         return True
     actions._say = say
     start()

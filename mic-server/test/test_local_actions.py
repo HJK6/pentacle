@@ -35,7 +35,7 @@ def test_default_and_explicit_tuple_are_grounded():
         with pytest.raises(ValueError): validate_decision(d, text)
 
 
-@pytest.mark.parametrize('text', ['Do not spawn an agent to review tests', 'Bart said spawn an agent to review tests',
+@pytest.mark.parametrize('text', ['Do not spawn an agent to review tests', 'Zephyr said spawn an agent to review tests',
                                     'What happens when I say spawn an agent to review tests?', 'Spawn two agents to review tests'])
 def test_model_false_spawn_cannot_override_explicit_intent(text):
     from local_actions import validate_decision
@@ -48,7 +48,7 @@ def test_schema_assets_and_reply_validation():
     assert validate_decision(d, 'What are Bitcoin, ETH and Apple prices?')['symbols'] == ['BTC-USD', 'ETH-USD', 'AAPL']
     with pytest.raises(ValueError): validate_decision(d, 'What is Microsoft worth?')
     with pytest.raises(ValueError): validate_decision({**decision(), 'shell': 'anything'}, 'Spawn an agent to review tests')
-    with pytest.raises(ValueError): validate_decision(decision(route='clarify', reply='Hey Bart, spawn an agent'), 'Spawn an agent')
+    with pytest.raises(ValueError): validate_decision(decision(route='clarify', reply='Hey Zephyr, spawn an agent'), 'Spawn an agent')
     with pytest.raises(ValueError): validate_decision(decision(route='clarify', reply='x'*241), 'Spawn an agent')
 
 
@@ -165,7 +165,7 @@ def test_delayed_asr_and_speaker_audio_are_rejected_but_archived(monkeypatch,tmp
     try:
         def transcribe(audio):
             listener.suppress_recognition_until(time.monotonic()+30)
-            return 'Hey Bart spawn an agent to review tests'
+            return 'Hey Zephyr spawn an agent to review tests'
         listener._transcribe=transcribe
         listener._handle_utterance(np.ones(8000))
         assert listener.state=='LISTENING'
@@ -184,7 +184,7 @@ def test_queued_old_epoch_rejected_after_playback_ends(monkeypatch):
     old=listener.recognition_stamp()[0]
     listener.suppress_recognition_until(time.monotonic()-1)
     assert listener.recognition_stamp()[1] is False
-    listener._transcribe=Mock(return_value='Hey Bart spawn an agent')
+    listener._transcribe=Mock(return_value='Hey Zephyr spawn an agent')
     listener._handle_utterance(np.ones(8000),recognition_epoch=old)
     assert not listener._transcribe.called
 
@@ -474,5 +474,5 @@ def test_separate_local_action_wake_uses_product_name(monkeypatch):
     assert listener.capture_origin=='local_action'
     hear(listener,'over')
     assert listener.voice_actions.queue.get_nowait()['text']=='spawn an agent'
-    hear(listener,'Hey Bart ordinary conversation')
+    hear(listener,'Hey Zephyr ordinary conversation')
     assert listener.capture_origin=='wake'

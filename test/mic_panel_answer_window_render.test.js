@@ -17,7 +17,7 @@ const IDS = ['mic-status-dot', 'mic-info', 'mic-btn-toggle', 'mic-btn-copy', 'mi
 function render(status) {
   const dom = new JSDOM(IDS.map(id => `<button id="${id}"></button>`).join(''));
   const ctx = {
-    document: dom.window.document, window: {}, CONFIG: { mic: { alwaysOnEnabled: true }, wakeWord: 'Hey Bart' },
+    document: dom.window.document, window: {}, CONFIG: { mic: { alwaysOnEnabled: true }, wakeWord: 'Hey Zephyr' },
     micState: {}, voiceState: {}, wakeDelivery: null,
     alwaysOnVisible: () => true, shouldRenderAlwaysOnUi: () => true, resolveLocalMicCaller: () => 'local',
     computeBusyBannerState: () => ({ visible: false }), computeMicPanelView, stopRemoteClipboardPoller: () => {}, esc: String,

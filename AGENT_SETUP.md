@@ -24,7 +24,7 @@ not tasks the agent should pretend it completed.
 Early in setup, ask the owner these simple questions and apply the answers:
 
 - Do you want the **always-on assistant**? If so, what **name** and **icon**
-  should it use? (Default name in this kit is **Bart**.)
+  should it use? (Default name in this kit is **Zephyr**.)
 - Do you want to connect a **ChatGPT "Dot"** agent for large assignments?
 - Do you want to change the app **icons or colours** from the shipped defaults?
 - What do you want to **call your machines** (display names)?

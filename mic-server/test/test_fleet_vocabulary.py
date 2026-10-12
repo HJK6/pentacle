@@ -39,8 +39,9 @@ class ApplyCorrectionsTest(unittest.TestCase):
         self.assertEqual(fv.apply_corrections("that is a tot", m), "that is a tot")
 
     def test_longest_variant_wins(self):
-        m = {"bart": "Bart", "bart's memo": "Bartimaeus's memo"}
-        self.assertEqual(fv.apply_corrections("read bart's memo", m), "read Bartimaeus's memo")
+        m = {"zephyr": "Zephyr", "zephyr's memo": "Aster's notes"}
+        self.assertEqual(fv.apply_corrections("read zephyr's memo", m), "read Aster's notes")
+        self.assertNotEqual(fv.apply_corrections("read zephyr's memo", {"zephyr": "Zephyr"}), "read Aster's notes")
 
     def test_empty_inputs(self):
         self.assertEqual(fv.apply_corrections("", {"a": "b"}), "")
@@ -61,10 +62,10 @@ class LoadVocabularyTest(unittest.TestCase):
         return path
 
     def test_loads_prompt_and_corrections(self):
-        vf = self._write("vocab.txt", "Bartimaeus, Samplehost, Thirdhost\n")
+        vf = self._write("vocab.txt", "Zephyr, Samplehost, Thirdhost\n")
         cf = self._write("corr.json", json.dumps({"lumah": "Thirdhost"}))
         prompt, corrections, version = fv.load_vocabulary(vocabulary_file=vf, corrections_file=cf)
-        self.assertEqual(prompt, "Bartimaeus, Samplehost, Thirdhost")
+        self.assertEqual(prompt, "Zephyr, Samplehost, Thirdhost")
         self.assertEqual(corrections, {"lumah": "Thirdhost"})
         self.assertTrue(version.startswith("fleet-"))
 

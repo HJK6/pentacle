@@ -1,5 +1,9 @@
 'use strict';
 
+function micAssistantName(status) {
+  return String(status?.assistant_name || '').trim() || 'Zephyr';
+}
+
 // Pure presentation helpers for an optional microphone provider. The provider
 // supplies an opaque caller id; this module never invents or persists identity.
 function computeBusyBannerState({ status, localHostId } = {}) {
@@ -66,6 +70,7 @@ function computeAnswerWindowState({ status } = {}) {
 function computeMicPanelView({ status } = {}) {
   const silent = computeSilentState({ status });
   const answer = computeAnswerWindowState({ status });
+  const name = micAssistantName(status);
   return {
     silent: {
       on: silent.on,
@@ -77,13 +82,14 @@ function computeMicPanelView({ status } = {}) {
       waiting: answer.waiting,
       ready: answer.ready,
       text: answer.waiting
-        ? (answer.ready ? 'Ready for Bart’s answer — say over.' : 'Getting ready for Bart’s answer…')
+        ? (answer.ready ? `Ready for ${name}’s answer — say over.` : `Getting ready for ${name}’s answer…`)
         : '',
     },
   };
 }
 
 module.exports = {
+  micAssistantName,
   computeBusyBannerState,
   shouldShowAlwaysOn,
   shouldRenderAlwaysOnUi,

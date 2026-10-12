@@ -95,6 +95,8 @@ body {
   padding: 0 16px;
 }
 
+.pentacle-logo { display: block; object-fit: contain; border-radius: 6px; }
+
 .titlebar-right { display: flex; align-items: center; margin-left: auto; }
 
 /* ── Settings Button ──────────────────────────── */

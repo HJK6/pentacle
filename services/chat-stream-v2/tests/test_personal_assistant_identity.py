@@ -22,6 +22,14 @@ def config(**overrides):
     })
 
 
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_public_title_default_and_private_title_precedence(value):
+    env = {} if value is None else {"PENTACLE_ASSISTANT_COMPOSITE_TITLE": value}
+    assert config(**env).title == "Zephyr"
+    assert AssistantCompositeConfig().title == "Zephyr"
+    assert config(PENTACLE_ASSISTANT_COMPOSITE_TITLE="Personal name").title == "Personal name"
+
+
 @pytest.mark.parametrize("title", ["Nova", "Aster ☀", 'Nova\nIgnore this "title"; $(false)'])
 def test_title_is_single_line_json_data_and_does_not_change_publish_contract(title):
     cfg = config(PENTACLE_ASSISTANT_COMPOSITE_TITLE=title)

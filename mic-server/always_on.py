@@ -28,6 +28,7 @@ from datetime import datetime
 from scipy.signal import resample_poly
 from audio_device import resolve_mic_device
 from clipboard import copy_to_clipboard
+from local_actions import ASSISTANT_NAME
 
 # --- Config ---
 CAPTURE_SR = 48000
@@ -56,16 +57,7 @@ CALIBRATION_FILE = os.path.join(os.path.dirname(__file__), "calibration.json")
 # Default phrases (before calibration) — generic wake words
 DEFAULT_WAKE = {
     "hey pentacle", "hi pentacle", "hello pentacle",
-    "hey bart", "hey bartimaeus", "hey bartimeus",
-    "hi bart", "hi bartimaeus", "hi bartimeus",
-    "hello bart", "hello bartimaeus", "hello bartimeus",
-    "yo bart", "yo bartimaeus",
-    "hey bar", "a bart", "a bartimaeus",
-    "hey board", "hey bard", "hey bort", "hey bert",
-    "hi board", "hi bard", "hi bort", "hi bert",
-    "hello board", "hello bard", "hello bort", "hello bert",
-    "hey part", "hi part", "hey bought", "hey bot",
-    "hey boy", "hi boy", "hey barty", "hi barty",
+    *(f"{greeting} {ASSISTANT_NAME.casefold()}" for greeting in ("hey", "hi", "hello", "yo")),
 }
 DEFAULT_COMMANDS = {
     "start_copy": {"start copy", "start copying", "copy this", "begin copy", "begin copying"},
@@ -310,12 +302,12 @@ class AlwaysOnListener:
         self.on_meeting_start = None
         self.on_meeting_stop = None
 
-        # Mode voice phrases (silent / meeting), matched in-service before Bart routing.
+        # Mode voice phrases (silent / meeting), matched in-service before assistant routing.
         # mode_phrases() returns the rules Modes section; on_silent(on) toggles silent mode.
         self.mode_phrases = None
         self.on_silent = None
 
-        # Bart answer window (no wake word after Bart asks a question).
+        # assistant answer window (no wake word after the assistant asks a question).
         # answer_window() -> truthy when the microphone may capture an answer;
         # on_answer() -> delivery metadata (conversation_id + answer_to) or None;
         # cancel_answer_window() closes an open window when a fresh wake preempts it.
@@ -804,13 +796,13 @@ class AlwaysOnListener:
             return
         if self.wake.enabled and (self.state == "LISTENING" or self.capture_origin == 'followup'):
             # Fresh wake preempts a direct answer, including a partial answer capture.
-            match = re.match(r"^\s*hey(?:[^\w]+)bart\b(?!['’]\w)", text, re.IGNORECASE)
+            match = re.match(r"^\s*hey(?:[^\w]+)" + re.escape(ASSISTANT_NAME) + r"(?!\w|['’]\w)", text, re.IGNORECASE)
             local_match = re.match(r"^\s*hey(?:[^\w]+)pentacle\b(?!['’]\w)", text, re.IGNORECASE) if self.voice_actions.enabled and self.voice_actions.policy == 'separate' else None
             if local_match:
                 match = local_match
             if match:
                 self.voice_actions.reset_dialogue()
-                # A fresh wake word starts a new request and closes any Bart answer window.
+                # A fresh wake word starts a new request and closes any assistant answer window.
                 if self.cancel_answer_window:
                     self.cancel_answer_window()
                 if not self.wake.can_start():
@@ -829,7 +821,7 @@ class AlwaysOnListener:
                     self.captured_texts = [text]
                     self._emit('state', 'CAPTURING')
                     return
-                # A Bart answer window captures an answer with no wake word.
+                # A assistant answer window captures an answer with no wake word.
                 if self.answer_window and self.answer_window() and match_command(text) != 'end_copy':
                     self.capture_origin = 'answer'
                     self.state = 'CAPTURING'
@@ -961,9 +953,9 @@ class AlwaysOnListener:
                     self.state = "LISTENING"
                     mode_cmd = self.match_mode(full_text) if origin == 'wake' else None
                     if mode_cmd:
-                        # A silent/meeting phrase is handled in-service and never sent to Bart;
+                        # A silent/meeting phrase is handled in-service and never sent to the assistant;
                         # no conversation is opened and no acknowledgement plays. The listener
-                        # stays in LISTENING so "Hey Bart ... over" still reaches Bart (and ends
+                        # stays in LISTENING so "the configured wake phrase ... over" still reaches the assistant (and ends
                         # the meeting) while a meeting records.
                         self._emit('mode_phrase', {'command': mode_cmd, 'text': full_text})
                         if mode_cmd in ('silent_on', 'silent_off') and self.on_silent:
@@ -1033,7 +1025,7 @@ class AlwaysOnListener:
                 (self.state == "LISTENING" and not self.voice_actions.pending) or
                 (self.state == "CALIBRATING" and self.cal_group == "wake")
             )
-            hints = {"hotwords": "Hey Bart, Hey Pentacle" if self.voice_actions.enabled and self.voice_actions.policy == "separate" else "Hey Bart"} if wake_recognition else {}
+            hints = {"hotwords": f"Hey {ASSISTANT_NAME}, Hey Pentacle" if self.voice_actions.enabled and self.voice_actions.policy == "separate" else f"Hey {ASSISTANT_NAME}"} if wake_recognition else {}
             segments, _ = self.whisper_model.transcribe(
                 tmp, beam_size=1, language="en",
                 vad_filter=False, condition_on_previous_text=False, **hints,
