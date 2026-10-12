@@ -351,7 +351,7 @@ def test_lane_cancel_after_enqueue_has_unknown_outcome_until_readback(tmp_path, 
 
 @pytest.mark.parametrize('route', ['local', 'offline_operator', 'offline_manager'])
 def test_close_cancel_waiting_for_store_lifecycle_lock_cannot_later_enqueue(tmp_path, monkeypatch, route):
-    from test_lane_close_residual_guard import MEMBER, CHECKED, write_spec, close_context, CLOSE_CALLBACK
+    from test_lane_close_residual_guard import MEMBER, CHECKED, write_spec, close_context, CLOSE_ENVELOPE
     root = tmp_path.resolve(); write_spec(root, custom=CHECKED)
     monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(root))
     async def body(env):
@@ -375,7 +375,7 @@ def test_close_cancel_waiting_for_store_lifecycle_lock_cannot_later_enqueue(tmp_
         monkeypatch.setattr(env.store, 'routing_integrity_lifecycle_lock', lambda stream_id: Lock())
         submit, calls = env.store.submit, []
         async def submission(callback):
-            if callback.__qualname__ == CLOSE_CALLBACK:
+            if callback.__qualname__ == CLOSE_ENVELOPE:
                 calls.append(callback.__qualname__)
             return await submit(callback)
         monkeypatch.setattr(env.store, 'submit', submission)
@@ -429,7 +429,7 @@ def test_confirmed_dead_close_finishes_after_cancellation_before_enqueue(tmp_pat
         seam.verify('confirmed-dead-cancel:' + route)
         assert (await env.store.fetch_session(*lead[0].split(':', 1)))['status'] == 'closed'
         audit = await env.store.latest_close_audit(lead[0])
-        assert audit['disposition'] == 'closed' and 'source_changed:' in audit['reason']
+        assert audit['disposition'] == 'closed' and 'u1_source_changed_after_termination:' in audit['reason']
     run(body)
 
 
@@ -438,7 +438,7 @@ def test_concurrent_close_source_flags_are_request_local_and_durable(tmp_path, m
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from test_lane_close_residual_guard import (MEMBER, OTHER, CHECKED, write_spec,
-        OrderedTmux, close_context, ADMISSION_CALLBACK, CLOSE_CALLBACK)
+        OrderedTmux, close_context, ADMISSION_CALLBACK, CLOSE_CALLBACK, CLOSE_ENVELOPE)
     from store import Store
     root = (tmp_path / 'memory').resolve()
     paths = {MEMBER: write_spec(root, custom=CHECKED), OTHER: write_spec(root, OTHER, custom=CHECKED)}
@@ -465,25 +465,34 @@ def test_concurrent_close_source_flags_are_request_local_and_durable(tmp_path, m
             return result
         async def submission(callback):
             name = callback.__qualname__
-            if name not in {ADMISSION_CALLBACK, CLOSE_CALLBACK}:
+            if name not in {ADMISSION_CALLBACK, CLOSE_ENVELOPE}:
                 return await submit(callback)
             closure = dict(zip(callback.__code__.co_freevars,
                                [cell.cell_contents for cell in callback.__closure__]))
             sid = closure['stream_id'] if name == ADMISSION_CALLBACK else closure['self'].stream_id
-            if name == CLOSE_CALLBACK:
-                assert closure['transaction'].__qualname__ == 'Store.mark_closed.<locals>.transaction'
-                assert transports[sid].recorded_death
-                assert closure['self'].prepared is preparations[sid]
-                if sid == identities[MEMBER][0]:
-                    paths[MEMBER].write_bytes(paths[MEMBER].read_bytes().replace(b'[x]', b'[ ]'))
-                records[sid].mark('mutation' if sid == identities[MEMBER][0] else 'unchanged')
-                calls.append(sid)
+            if name == CLOSE_ENVELOPE:
+                assert closure['transaction'].__qualname__ == CLOSE_CALLBACK
+                assert sid in calls
             @functools.wraps(callback)
             def observed(conn):
                 result = callback(conn)
                 records[sid].mark('admitted' if name == ADMISSION_CALLBACK else 'committed')
                 return result
             return await submit(observed)
+        from store_work_lanes import _PreparedLaneCloseStore
+        close_submit = _PreparedLaneCloseStore.submit
+        async def close_submission(view, transaction):
+            assert transaction.__qualname__ == CLOSE_CALLBACK
+            sid = view.stream_id
+            assert transports[sid].recorded_death
+            assert view.prepared is preparations[sid]
+            assert sid not in calls
+            if sid == identities[MEMBER][0]:
+                paths[MEMBER].write_bytes(paths[MEMBER].read_bytes().replace(b'[x]', b'[ ]'))
+            records[sid].mark('mutation' if sid == identities[MEMBER][0] else 'unchanged')
+            calls.append(sid)
+            return await close_submit(view, transaction)
+        monkeypatch.setattr(_PreparedLaneCloseStore, 'submit', close_submission)
         monkeypatch.setattr(env.store, 'prepare_lead_lane_completion', prepare)
         monkeypatch.setattr(env.store, 'submit', submission)
         monkeypatch.setattr(__import__('sessions').prockill, 'process_records', AsyncMock(return_value={}))
@@ -499,7 +508,7 @@ def test_concurrent_close_source_flags_are_request_local_and_durable(tmp_path, m
         for spec_id, lead in identities.items():
             audit = await env.store.latest_close_audit(lead[0])
             observed_audits[spec_id] = audit
-            assert ('source_changed:' in audit['reason']) is (spec_id == MEMBER)
+            assert ('u1_source_changed_after_termination:' in audit['reason']) is (spec_id == MEMBER)
             assert ('completion_source_changed' in next(result['session'] for result in results
                     if result['session']['session_name'] == lead[0].split(':', 1)[1])) is (spec_id == MEMBER)
             sequence = {name: seq for seq, name in records[lead[0]].order}

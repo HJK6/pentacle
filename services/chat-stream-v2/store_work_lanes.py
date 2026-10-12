@@ -480,16 +480,32 @@ class _LaneCloseAuditReason:
     def __str__(self):
         if self.source_changed is None:
             return self.reason
-        flag = f"source_changed: generation={self.generation}; {self.source_changed}"
+        flag = (f"u1_source_changed_after_termination: generation={self.generation}; "
+                f"{_canonical(self.source_changed)}")
         return f"{self.reason}; {flag}" if self.reason else flag
+
+
+def _post_termination_source_warning(inputs):
+    """One metadata-only check off MAIN/Store; never veto confirmed death."""
+    try:
+        inputs.revalidate()
+    except Exception as exc:
+        root = inputs.directories[0][0] if inputs.directories else None
+        paths = getattr(exc, 'source_paths', tuple(item.path for item in inputs.files))
+        return {'members': list(inputs.members),
+                'paths': sorted({str(path.relative_to(root)) for path in paths}) if root else [],
+                'reason': exc.audit_reason() if isinstance(exc, custom_ac.CompletionRefusal)
+                          else 'source_metadata_unverified'}
+    return None
 
 
 class _PreparedLaneCloseStore:
     """Per-request view of the existing close implementation, never shared state.
 
     Store.mark_closed owns its SQL, audit and lifecycle lock. Only this call's
-    submission is wrapped so its original transaction follows the prepared
-    guard on the same connection and under the same BEGIN IMMEDIATE.
+    submission runs post-death source metadata checking off-thread before enqueue.
+    Its original transaction follows only the prepared lane-identity guard
+    on the same connection and under the same BEGIN IMMEDIATE.
     """
     def __init__(self, store, prepared, host, name, generation, audit_reason, death_confirmed, admission_only):
         self.store, self.prepared = store, prepared
@@ -508,6 +524,9 @@ class _PreparedLaneCloseStore:
         if (not self.death_confirmed and self.prepared.request_task is not None
                 and self.prepared.request_task.cancelling()):
             raise asyncio.CancelledError
+        if self.death_confirmed and not self.admission_only:
+            self.audit_reason.source_changed = await asyncio.to_thread(
+                _post_termination_source_warning, self.prepared.inputs)
         def _op(conn):
             conn.execute('BEGIN IMMEDIATE')
             try:
@@ -519,16 +538,8 @@ class _PreparedLaneCloseStore:
                              if lane.get('bound_stream_id') == self.stream_id
                              and lane.get('bound_generation') == row.get('session_generation')]
                     self.prepared.revalidate_lanes(lanes)
-                    try:
-                        if not self.admission_only:
-                            self.prepared.inputs.revalidate()
-                    except custom_ac.CompletionRefusal as exc:
-                        if not self.death_confirmed:
-                            raise
-                        # A confirmed-dead generation must be recorded closed.
-                        # Only source freshness is advisory here; CAS, authority
-                        # and lane-identity failures are never swallowed.
-                        self.audit_reason.source_changed = exc.audit_reason()
+                    if not self.admission_only and not self.death_confirmed:
+                        self.prepared.inputs.revalidate()
                 return transaction(conn)
             except BaseException:
                 conn.rollback()

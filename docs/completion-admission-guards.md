@@ -56,8 +56,11 @@ attempt. Changes detected there refuse without terminating. The existing
 terminate, confirm, then generation-fenced mark-closed ordering is unchanged.
 Once that route has confirmed termination/death, a later consumed-source
 freshness failure does not veto recording the same generation as closed. The
-existing closed audit's reason instead includes `source_changed`, the target
-generation and the source refusal. This flag is atomic with close persistence,
+captured metadata is revalidated once off the main thread and Store worker,
+outside the write transaction, before enqueueing the original close callback.
+This check neither parses nor rescans the namespace. The existing closed audit's
+reason includes `u1_source_changed_after_termination`, the target generation,
+member IDs, affected relative paths and the source refusal. This flag is atomic with close persistence,
 readable through `inspect_stream`'s `close_audit.reason`, and also returned on the
 successful session as `completion_source_changed` and
 `completion_source_warning`. It is a recorded limitation, not an undo or a fix

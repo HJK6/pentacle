@@ -213,14 +213,23 @@ class PreparedCompletion:
         # Metadata only. Never resolve, parse, enumerate or read content here.
         if self.refusal is not None:
             raise self.refusal
-        try:
-            if any(_directory_fingerprint(path) != before for path, before in self.directories):
-                raise ValueError('spec_directory_changed')
-            if any(SpecsSubsystem._identity_fingerprint(item.path) != item.fingerprint
-                   for item in self.files):
-                raise ValueError('spec_changed')
-        except SOURCE_READ_ERRORS:
-            raise _unreadable(self.members) from None
+        changed = []
+        for path, before in self.directories:
+            try:
+                if _directory_fingerprint(path) != before:
+                    changed.append(path)
+            except SOURCE_READ_ERRORS:
+                changed.append(path)
+        for item in self.files:
+            try:
+                if SpecsSubsystem._identity_fingerprint(item.path) != item.fingerprint:
+                    changed.append(item.path)
+            except SOURCE_READ_ERRORS:
+                changed.append(item.path)
+        if changed:
+            refusal = _unreadable(self.members)
+            refusal.source_paths = tuple(changed)
+            raise refusal
 
 
 def _unreadable(members) -> CompletionRefusal:

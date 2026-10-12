@@ -467,7 +467,8 @@ def test_generic_operation_hook_is_harness_error(tmp_path, monkeypatch):
 
 LANE_CALLBACK = '_WorkLanesStoreMixin.apply_work_lane_operation.<locals>._op'
 ADMISSION_CALLBACK = '_WorkLanesStoreMixin.revalidate_lead_lane_completion.<locals>._op'
-CLOSE_CALLBACK = '_PreparedLaneCloseStore.submit.<locals>._op'
+CLOSE_CALLBACK = 'Store.mark_closed.<locals>.transaction'
+CLOSE_ENVELOPE = '_PreparedLaneCloseStore.submit.<locals>._op'
 
 
 class PreparedRace:
@@ -488,16 +489,8 @@ class PreparedRace:
             self.prepared = result
             self.mark('prepared')
             return result
-        async def submit(call):
-            if call.__qualname__ != self.callback:
-                if call.__qualname__ == ADMISSION_CALLBACK:
-                    @functools.wraps(call)
-                    def admitted(conn):
-                        result = call(conn)
-                        self.mark('admitted')
-                        return result
-                    return await self.original_submit(admitted)
-                return await self.original_submit(call)
+        def mutate_before_submission(call):
+            assert call.__qualname__ == self.callback, 'HARNESS_ERROR: wrong completion callback'
             assert self.prepared is not None, 'HARNESS_ERROR: mutation before preparation'
             assert not any(name == 'mutation' for _, name in self.order), 'HARNESS_ERROR: repeated callback'
             consumed = {item.path: item for item in self.prepared.inputs.files}
@@ -507,20 +500,55 @@ class PreparedRace:
                        for item in self.prepared.inputs.dispositions)
             from _shared.specs_service import SpecsSubsystem
             self.fingerprints['before'] = consumed[path].fingerprint
-            if self.callback == CLOSE_CALLBACK:
-                closure = dict(zip(call.__code__.co_freevars, [cell.cell_contents for cell in call.__closure__]))
-                assert closure['transaction'].__qualname__ == 'Store.mark_closed.<locals>.transaction'
-            changed = mutate(self.prepared)
-            if hasattr(changed, '__await__'):
-                await changed
+            return mutate(self.prepared)
+
+        def mutated():
+            from _shared.specs_service import SpecsSubsystem
             self.mark('mutation')
             self.fingerprints['after'] = SpecsSubsystem._identity_fingerprint(path)
+
+        async def enqueue(call):
             self.mark('enqueue')
             @functools.wraps(call)
             def callback(conn):
                 self.mark('callback')
                 return call(conn)
             return await self.original_submit(callback)
+
+        async def submit(call):
+            if self.callback == CLOSE_CALLBACK and call.__qualname__ == CLOSE_ENVELOPE:
+                closure = dict(zip(call.__code__.co_freevars, [cell.cell_contents for cell in call.__closure__]))
+                assert closure['transaction'].__qualname__ == CLOSE_CALLBACK
+                assert sum(name == 'mutation' for _, name in self.order) == 1
+                return await enqueue(call)
+            if call.__qualname__ != self.callback:
+                if call.__qualname__ == ADMISSION_CALLBACK:
+                    @functools.wraps(call)
+                    def admitted(conn):
+                        result = call(conn)
+                        self.mark('admitted')
+                        return result
+                    return await self.original_submit(admitted)
+                return await self.original_submit(call)
+            changed = mutate_before_submission(call)
+            if hasattr(changed, '__await__'):
+                await changed
+            mutated()
+            return await enqueue(call)
+
+        self.original_close_submit = None
+        if self.callback == CLOSE_CALLBACK:
+            from store_work_lanes import _PreparedLaneCloseStore
+            self.original_close_submit = _PreparedLaneCloseStore.submit
+            async def close_submission(view, transaction):
+                if view.store is not env.store or view.prepared is not self.prepared:
+                    return await self.original_close_submit(view, transaction)
+                changed = mutate_before_submission(transaction)
+                if hasattr(changed, '__await__'):
+                    await changed
+                mutated()
+                return await self.original_close_submit(view, transaction)
+            monkeypatch.setattr(_PreparedLaneCloseStore, 'submit', close_submission)
         monkeypatch.setattr(env.store, self.prepare_name, preparation)
         monkeypatch.setattr(env.store, 'submit', submit)
         self.monkeypatch = monkeypatch
@@ -544,6 +572,9 @@ class PreparedRace:
         }, sort_keys=True))
         self.monkeypatch.setattr(self.env.store, 'submit', self.original_submit)
         self.monkeypatch.setattr(self.env.store, self.prepare_name, self.prepare_call)
+        if self.original_close_submit is not None:
+            from store_work_lanes import _PreparedLaneCloseStore
+            self.monkeypatch.setattr(_PreparedLaneCloseStore, 'submit', self.original_close_submit)
 
 
 @pytest.mark.parametrize('mutation', ['criterion', 'follow_up', 'none', 'accepted_duplicate_gap'])
@@ -750,9 +781,11 @@ def test_close_prepared_race_order_and_late_source_flag(tmp_path, monkeypatch, r
         assert await env.store.get_work_lane(lane['lane_id']) == before  # A killed seat never marks its lane done.
         audit = await env.store.latest_close_audit(lead[0])
         assert audit['disposition'] == ('fenced' if refused else 'closed')
-        assert ('source_changed:' in audit['reason']) is flagged
+        assert ('u1_source_changed_after_termination:' in audit['reason']) is flagged
         if flagged:
             assert 'Synthetic close reason' in audit['reason'] and lead[1] in audit['reason']
+            assert MEMBER in audit['reason']
+            assert str(path.relative_to(root)) in audit['reason']
             from server import Server
             server = Server(store=env.store, sessions=sessions, local_host=sessions.local_host)
             inspected = await server._on_inspect_stream({'stream_id': lead[0], 'event_tail': 0})
@@ -853,3 +886,47 @@ def test_confirmation_validation_still_precedes_prepared_refusal(tmp_path, monke
         assert await env.store.get_work_lane(lane['lane_id']) == before
         assert await audits(env) == []
     run(body)
+
+
+@pytest.mark.parametrize('route',['local','remote'])
+@pytest.mark.parametrize('criterion',['placement','flag_marker','flag_path'])
+def test_post_termination_metadata_and_warning_contract(tmp_path,monkeypatch,route,criterion):
+ import functools,threading
+ from _shared.custom_ac import PreparedCompletion
+ from store import Store
+ trace=[]; audits=[]; workers=set(); local=threading.local(); main=threading.get_ident()
+ original_submit=Store.submit; original_revalidate=PreparedCompletion.revalidate; original_audit=Store.latest_close_audit
+ async def submit(owner,call):
+  workers.add(owner._thread.ident)
+  if call.__qualname__ not in {ADMISSION_CALLBACK, '_PreparedLaneCloseStore.submit.<locals>._op'}:
+   return await original_submit(owner,call)
+  @functools.wraps(call)
+  def invoke(conn):
+   local.conn=conn;local.worker=owner._thread.ident
+   try:return call(conn)
+   finally:del local.conn;del local.worker
+  return await original_submit(owner,invoke)
+ def revalidate(owner):
+  trace.append({'thread':threading.get_ident(),'store_workers':sorted(workers),'main_thread':main,'in_transaction':local.conn.in_transaction if hasattr(local,'conn') else False,'files':[str(item.path) for item in owner.files]})
+  return original_revalidate(owner)
+ async def latest_audit(owner,*a,**kw):
+  value=await original_audit(owner,*a,**kw)
+  if value:audits.append(value)
+  return value
+ monkeypatch.setattr(Store,'submit',submit);monkeypatch.setattr(PreparedCompletion,'revalidate',revalidate);monkeypatch.setattr(Store,'latest_close_audit',latest_audit)
+ test_close_prepared_race_order_and_late_source_flag(tmp_path,monkeypatch,route,'commit')
+ assert len(trace)==3,'HARNESS_ERROR: expected preparation, admission and exactly one post-death validation'
+ post=trace[-1]
+ row={'route':route,'criterion':criterion,'trace':trace,'audits':audits,'matched_callback':CLOSE_CALLBACK,'inner_callback':'Store.mark_closed.<locals>.transaction','real_fixture_passed':True}
+ print('POST_TERMINATION_METADATA_RECEIPT',json.dumps(row,sort_keys=True))
+ if criterion=='placement':
+  assert post['thread'] not in post['store_workers'] and post['thread'] != main, 'Post-death source revalidation ran on Store worker'
+  assert not post['in_transaction'], 'Post-death source revalidation ran inside write transaction'
+ else:
+  reason=audits[0]['reason']
+  if criterion=='flag_marker':
+   assert 'u1_source_changed_after_termination' in reason,'Published audit flag absent'
+  else:
+   relative_path=str(Path(post['files'][0]).relative_to(tmp_path))
+   assert relative_path.startswith('work/'),'HARNESS_ERROR: consumed path not fixture-relative'
+   assert relative_path in reason,'Affected source relative path absent'
