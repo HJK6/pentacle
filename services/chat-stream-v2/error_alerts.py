@@ -915,6 +915,18 @@ class ErrorAlerts:
                 ).fetchone()
                 if existing:
                     return dict(existing)  # immutable bytes win after recovery/crash
+                if ctx["family"] == WORK_LANE and ctx["code"] == "lane_estimate_missing":
+                    # Resolve the structured opening; never trust producer text
+                    # or treat a pending historical opening as a current defect.
+                    opening = conn.execute("SELECT lane_id,cleared_at FROM v2_work_lane_episodes "
+                                           "WHERE episode_id=? AND kind='estimate_missing'",
+                                           (ctx["episode_id"],)).fetchone()
+                    if opening is not None:
+                        state = "historical opening; condition cleared" if opening["cleared_at"] else "recorded opening"
+                        spec["body"] = (f"Work update lane_estimate_missing lane={opening['lane_id']} "
+                                        f"episode={ctx['episode_id']} {state}: remaining estimate missing at opening. "
+                                        f"Current members/state: agent-orch work-lane show {opening['lane_id']} --members. "
+                                        "Awareness only; FLAG, no admission block.")
                 meta = spec["metadata"]
                 since = iso(now - 900)
                 # A superseded never-submitted predecessor was not an immediate

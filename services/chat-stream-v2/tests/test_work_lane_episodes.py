@@ -16,7 +16,8 @@ OLD = "2026-01-01T00:00:00.000Z"
 def member(status="completed", quality="fresh"):
     return {"spec_id": "spec_demo__span", "status": status,
             "terminal": status if status in ("completed", "deprecated") else None,
-            "ac_checked": None, "ac_total": None, "estimate": None,
+            "ac_checked": None, "ac_total": None,
+            "estimate": ({"p25": 2, "p75": 4, "median": 3} if status == "in_progress" else None),
             "source_changed_at": OLD, "observation": {"quality": quality}, "obs_rev": 1}
 
 

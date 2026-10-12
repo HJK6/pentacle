@@ -215,7 +215,7 @@ periodic pass still call the synchronous, non-blocking `refresh()` method. No
 new loop, wake cadence, transport engine or agent duty is introduced.
 
 `v2_work_lane_episodes` is additive and stores each lane/kind episode with
-`episode_id = <lane_id>:<completed|stale>:<n>`, sequence starting at 1, `opened_at`,
+`episode_id = <lane_id>:<completed|stale|estimate_missing>:<n>`, sequence starting at 1, `opened_at`,
 `cleared_at`, `emitted_ref` and an immutable serialized opening fact. A unique
 partial index permits at most one open episode per lane and kind. Episode and
 correlation maintenance never changes the lane's lifecycle version or timestamps;
@@ -282,7 +282,7 @@ separate fleet acceptance.
 
 The daemon constructs `WorkLaneAlertSink` with its existing `Alerts(store)`
 instance and supplies it to `WorkLanesInventory`. The adapter awaits
-`alerts.error(ErrorFact(family="work_lane.v1", code="lane_completed" | "lane_stale",
+`alerts.error(ErrorFact(family="work_lane.v1", code="lane_completed" | "lane_stale" | "lane_estimate_missing",
 episode_id=..., condition="active"), principal="system:work-lanes")` outside
 every Store transaction. The returned notification ID is latched by the existing
 guarded episode write. No core file, schema, episode ID or clear/recur rule changes.
@@ -484,3 +484,40 @@ during scanning coalesce into another refresh; watcher failure retains periodic
 polling. Scan and apply durations use `work index phase=...` log labels because
 they no longer belong to the startup critical path. A scan failure keeps work
 data unavailable until the next successful refresh.
+
+### Missing remaining estimates (FLAG)
+
+The existing reconciliation opens one `estimate_missing` episode for a non-done
+lane when every indexed member observation is fresh and uniquely resolved and
+any unfinished, non-exempt member has no parseable `remaining_work_h`. Partial
+coverage, paused lanes and lanes without a lead qualify. A done lane clears
+regardless of index availability. Empty, all-terminal, all-exempt and fully
+estimated fresh memberships are quiet. Unavailable indexes and stale, error,
+missing or ambiguous observations hold the prior episode, without opening or
+clearing it. `estimate_complete` alone cannot establish this predicate.
+
+The condition is a FLAG through the existing `work_lane.v1` work-update digest,
+with code `lane_estimate_missing`, lane id and
+`agent-orch work-lane show <lane_id> --members` for current deficient members and
+state. It never blocks admission, edits, spawn, lane completion or session close.
+The notice describes the recorded opening; a pending opening still delivers if
+the condition clears first. Current details come from the lane projection.
+Membership edits, numeric changes that leave a deficiency, pause/resume, lead
+replacement, restart and FD handoff retain the same episode. Correcting all
+members clears silently; a later recurrence opens the next sequence. Completed
+membership reset semantics remain unchanged. No timer, scan or delivery channel
+is added.
+
+Parsing is unchanged: the last physical declaration wins, including an invalid
+one. A numeric line ends after its real `as_of YYYY-MM-DD` date or optional
+`provisional`. Trailing explanatory prose invalidates it; put explanation on a
+separate line. Historical delivery hours and lead ETAs do not supply estimates.
+
+Startup atomically widens the existing episode kind CHECK in place, preserving
+all rows, ids, sequences, timestamps, facts, refs and explicit indexes/triggers.
+Reopen is idempotent; older fact payloads retain their reader defaults. A rollback
+must retain this compatible schema, reader and adapter vocabulary. The supported
+rollback artifact removes only the `estimate_missing` entry from the production
+reconciliation tuple, retaining pending delivery and proofs. Do not run an older
+binary that rejects this kind, narrow the CHECK, delete rows or restore the whole
+DB. Review the concrete rollback artifact before activation.

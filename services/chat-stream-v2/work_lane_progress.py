@@ -47,6 +47,20 @@ def _epoch(stamp: str) -> float:
     return parsed.replace(tzinfo=timezone.utc).timestamp() if parsed.tzinfo is None else parsed.timestamp()
 
 
+def lane_estimate_missing(lane: dict[str, Any], *, index_available: bool | None = None) -> bool | None:
+    """Internal episode predicate; preserve the existing lane wire projection."""
+    members = lane.get("_members") or []
+    available = lane.get("_work_index_available", False) if index_available is None else index_available
+    if lane.get("work_state") == "done":
+        return False
+    if not available or any(m.get("observation", {}).get("quality") != "fresh"
+                            or m.get("status") in ("missing", "ambiguous") for m in members):
+        return None
+    return any(m.get("terminal") not in ("completed", "deprecated")
+               and not m.get("estimate_exempt", False)
+               and m.get("estimate") is None for m in members)
+
+
 def lane_progress(lane: dict[str, Any], *, all_members: bool = False,
                   now_iso: str | None = None, index_available: bool | None = None) -> dict[str, Any]:
     members = lane.get("_members") or []

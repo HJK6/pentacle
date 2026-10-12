@@ -89,3 +89,16 @@ FROM v2_assistant_lane_rulings WHERE ruling_request_id = :ruling_request_id;
 
 `agent-orch inspect <target>` shows only the latest ruling for that target. Check
 its request id before using it as detail for a notice about an earlier ruling.
+
+## Missing lane estimates
+
+`lane_estimate_missing` joins the existing work-update digest as a FLAG for
+freshly observed incomplete remaining-work coverage. Paused and leadless lanes
+are included. One lane-owned episode survives unchanged sweeps, membership
+changes that remain deficient, restart and FD handoff. Unknown observations hold
+state, correction clears silently, and recurrence gets a new sequence. The
+recorded opening names the lane and its current `work-lane show --members`
+lookup. Pending historical openings use the existing durable delivery path.
+Admission and actionable GATE/BLOCKER, operator and child-report paths retain
+their behavior. See [work lanes](../services/chat-stream-v2/docs/work-lanes.md#missing-remaining-estimates-flag)
+for predicate, parser and compatible rollback details.
