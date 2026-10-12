@@ -398,6 +398,37 @@ def test_watch_registration_generation_race_is_cancelled(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("committed", [False, True])
+def test_uncertain_raced_watch_cancel_replays_before_inventory_fence(tmp_path,committed):
+    async def run():
+        async with fixture(tmp_path) as (store,_,_,g,m,r):
+            await store.register_watch_wake("watch",OLD,m["predecessor_generation"],
+                {"request_id":"retry-race","child_stream_id":CHILD,"triggers":["quiet=5"],"repeat":False})
+            await r.advance();await g.approve(r.j)
+            rpc=g.rpc;submitted=[]
+            async def race_drop(payload):
+                if payload["type"]=="watch.register":
+                    await store.update_session("node-b","child",status="closed",pane_status="pane_dead")
+                    await store.open_session("node-b","child",provider="codex",role="lead",visibility="default",
+                        pane_status="pane_alive",bootstrap_state="ready",parent_stream_id=NEW)
+                if payload["type"]=="watch.cancel":
+                    submitted.append(payload)
+                    if len(submitted)==1:
+                        if committed:await rpc(payload)
+                        raise TimeoutError("uncertain cancellation")
+                return await rpc(payload)
+            g.rpc=race_drop
+            with pytest.raises(TimeoutError):await r.advance()
+            with pytest.raises(recovery.Refused,match="restored_watch_generation_changed"):
+                await recovery.Recovery(m,g,r.path).advance()
+            assert submitted[0]==submitted[1]
+            gen=(await store.fetch_session("node-b","new"))["session_generation"]
+            custom=[w for w in await store.list_watch_wake("watch",NEW,gen) if not w["default"]]
+            assert custom and all(w["state"]=="cancelled" for w in custom)
+            assert recovery.private_read(r.path).get("state")!="verified"
+    asyncio.run(run())
+
+
 def test_start_uses_one_stable_authenticated_top_level_intent(tmp_path,monkeypatch):
     calls=[]
     response={"state":"ready","admitted_count":1,"stream_id":NEW,

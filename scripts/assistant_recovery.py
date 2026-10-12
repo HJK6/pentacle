@@ -423,6 +423,12 @@ class Recovery:
         if self.j.get("state") in ("recovered_pending_mirror_verification","verified"):
             return {"state":self.j["state"],"binding":state["binding"],"lifecycle_ready":True,
                     "duplicate":True,"routes":self.j["routes"]}
+        # A saved registration may require cancellation after an uncertain
+        # transport result. Reconcile it before a changed inventory can fence
+        # this invocation; the cancellation retains its exact operation id.
+        for row in self.j.get("transfer", []):
+            if row["kind"] == "watch" and "watch:"+row["id"] in self.j["receipts"]:
+                await self.check_watch_receipt(row)
         self.require("retire")
         if "sealed" not in self.j:
             self.j["sealed"] = state
