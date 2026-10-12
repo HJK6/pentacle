@@ -88,9 +88,15 @@ def generate_archive(path: Path, *, target_bytes: int, seed: int) -> dict:
                              "(event_id,stream_id,session_created_at,event_key,event_json,event_ts,recorded_at,identity) "
                              "VALUES (?,?,?,?,?,?,?,?)", batch)
             conn.commit()
+        table_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' "
+                                 "AND name='session_event_tail'").fetchone()[0]
+        table_columns = [list(row) for row in conn.execute("PRAGMA table_info(session_event_tail)")]
         indexes = [dict(name=row[1], unique=bool(row[2]), origin=row[3],
                         columns=[col[2] for col in conn.execute(f'PRAGMA index_info("{row[1]}")')])
                    for row in conn.execute("PRAGMA index_list(session_event_tail)")]
+    assert indexes == [{"name": "sqlite_autoindex_session_event_tail_1", "unique": True,
+                        "origin": "u", "columns": ["stream_id", "session_created_at", "event_key"]}]
+    assert table_columns[0][1:3] == ["event_id", "INTEGER"] and table_columns[0][5] == 1
     assert rows == sum(body_counts.values()) == sum(stream_counts.values())
     assert len(stream_counts) > 32 and stream_counts[STREAM] > rows // 2
     return {"generated_only": True, "seed": seed, "target_bytes": target_bytes,
@@ -99,7 +105,8 @@ def generate_archive(path: Path, *, target_bytes: int, seed: int) -> dict:
             "stream_cohort_rows": dict(sorted(stream_counts.items())),
             "body_payload_size_counts": dict(sorted(body_counts.items())),
             "encoded_body_bytes": {"min": body_min, "max": body_max, "total": body_sum},
-            "distinct_identities": rows, "indexes": indexes,
+            "distinct_identities": rows, "table_sql": table_sql,
+            "table_columns": table_columns, "indexes": indexes,
             "identity_examples": {"present": f"synthetic-identity-{seed}-1",
                                   "absent": f"synthetic-identity-{seed}-absent"}}
 
@@ -349,7 +356,8 @@ async def test_generated_archive_six_phase_workload(budget_store, tmp_path, monk
         facts["reader_thread_count"] = len(probe.reader_threads)
         facts["parameters"] = {"attempts_per_phase": attempts, "rate_per_second": rate}
         facts["phases"] = driver.phases
-        facts["scope"] = "small generated correctness run; no fleet performance acceptance"
+        facts["scope"] = "generated correctness run; no fleet performance acceptance"
+        facts["default_small_size"] = target == 32 * 1024 * 1024
         report = json.dumps(facts, sort_keys=True, indent=2)
         report_path = Path(os.environ.get("PENTACLE_FD_SCALE_REPORT", str(tmp_path / "scale-facts.json")))
         report_path.write_text(report + "\n")
