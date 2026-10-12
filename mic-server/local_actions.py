@@ -95,7 +95,7 @@ PROMPT = '''Classify addressed operator speech into a configured action, returni
 spawn_agent: affirmative instruction to create/start/spawn ONE AI agent. A named model alone is sufficient; task is optional.
 Missing model or unsupported option -> clarify, retaining any stated task and options. Never ask for a task. Discussion, negations, quotations and hypothetical requests -> bart.
 market_quote: current price of Bitcoin, Ethereum or stocks; extract asset names/tickers literally, never a price. Unmapped company names need a ticker; do not invent one.
-bart: ordinary conversation or a message to the personal assistant. Unsupported local actions (lights, direct reports) -> clarify.
+__CONVERSATION_ROUTE__: ordinary conversation or a message to the personal assistant. Unsupported local actions (lights, direct reports) -> clarify.
 Extract task as a contiguous phrase from the input, never invent one. Task means concrete WORK AFTER the spawn instruction, not the words spawn/start/agent or a model name. With no stated work, task MUST be empty. model, effort, host contain only stated launch options; empty if absent. Names within the task are task content, not launch options. An explicit ticker is sufficient for a quote; you do not need to know its company.
 Supported models: Astra, Sol, Terra, Luna, Opus, Sonnet, Fable. Configured hosts: __CONFIGURED_HOSTS__.
 Efforts: low, medium, high, xhigh, max. Only model is required. Task is optional. Leave omitted effort/host empty; validated model-guidance defaults fill effort; a host default exists only when explicitly configured.
@@ -110,16 +110,17 @@ Start an agent to review microphone tests -> route clarify, task "review microph
 Start a Sol agent on __EXAMPLE_HOST__ with medium effort to review tests -> spawn_agent, task "review tests", model "sol", host "__EXAMPLE_HOST__", effort "medium".
 Start an agent to review the __EXAMPLE_HOST__ and Sol documentation -> clarify, task "review the __EXAMPLE_HOST__ and Sol documentation", model "", effort "", host "".
 Do not spawn an agent -> bart.
-The assistant said spawn an agent yesterday -> bart.
+The assistant said spawn an agent yesterday -> __CONVERSATION_ROUTE__.
 What happens when I say spawn an agent? -> bart.
 What is Bitcoin trading at? -> market_quote, assets ["Bitcoin"].
 What are Bitcoin and Ethereum worth? -> market_quote, assets ["Bitcoin", "Ethereum"].
 Tell me the Apple stock price -> market_quote, assets ["Apple"].
 What is ticker F worth? -> market_quote, assets ["F"].
 Turn off the lights -> clarify, reply "Lights are not configured yet. I can spawn agents or look up prices."
-Tell the assistant I am going to lunch -> bart.
+Tell the assistant I am going to lunch -> __CONVERSATION_ROUTE__.
 '''.replace('__CONFIGURED_HOSTS__', ', '.join(sorted(HOSTS)) or '(none)')\
-    .replace('__EXAMPLE_HOST__', next(iter(sorted(HOSTS)), 'configuredhost'))
+    .replace('__EXAMPLE_HOST__', next(iter(sorted(HOSTS)), 'configuredhost'))\
+    .replace('__CONVERSATION_ROUTE__', SCHEMA['properties']['route']['enum'][-1])
 
 
 def normalized(text):

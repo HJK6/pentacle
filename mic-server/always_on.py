@@ -302,12 +302,12 @@ class AlwaysOnListener:
         self.on_meeting_start = None
         self.on_meeting_stop = None
 
-        # Mode voice phrases (silent / meeting), matched in-service before Bart routing.
+        # Mode voice phrases (silent / meeting), matched in-service before assistant routing.
         # mode_phrases() returns the rules Modes section; on_silent(on) toggles silent mode.
         self.mode_phrases = None
         self.on_silent = None
 
-        # Bart answer window (no wake word after Bart asks a question).
+        # assistant answer window (no wake word after Bart asks a question).
         # answer_window() -> truthy when the microphone may capture an answer;
         # on_answer() -> delivery metadata (conversation_id + answer_to) or None;
         # cancel_answer_window() closes an open window when a fresh wake preempts it.
@@ -802,7 +802,7 @@ class AlwaysOnListener:
                 match = local_match
             if match:
                 self.voice_actions.reset_dialogue()
-                # A fresh wake word starts a new request and closes any Bart answer window.
+                # A fresh wake word starts a new request and closes any assistant answer window.
                 if self.cancel_answer_window:
                     self.cancel_answer_window()
                 if not self.wake.can_start():
@@ -821,7 +821,7 @@ class AlwaysOnListener:
                     self.captured_texts = [text]
                     self._emit('state', 'CAPTURING')
                     return
-                # A Bart answer window captures an answer with no wake word.
+                # A assistant answer window captures an answer with no wake word.
                 if self.answer_window and self.answer_window() and match_command(text) != 'end_copy':
                     self.capture_origin = 'answer'
                     self.state = 'CAPTURING'
@@ -953,9 +953,9 @@ class AlwaysOnListener:
                     self.state = "LISTENING"
                     mode_cmd = self.match_mode(full_text) if origin == 'wake' else None
                     if mode_cmd:
-                        # A silent/meeting phrase is handled in-service and never sent to Bart;
+                        # A silent/meeting phrase is handled in-service and never sent to the assistant;
                         # no conversation is opened and no acknowledgement plays. The listener
-                        # stays in LISTENING so "Hey Bart ... over" still reaches Bart (and ends
+                        # stays in LISTENING so "the configured wake phrase ... over" still reaches the assistant (and ends
                         # the meeting) while a meeting records.
                         self._emit('mode_phrase', {'command': mode_cmd, 'text': full_text})
                         if mode_cmd in ('silent_on', 'silent_off') and self.on_silent:

@@ -16,7 +16,7 @@ const RETAINED: Record<string, string> = {
 function userItem(responseState: string) {
   return {
     id: `user-${responseState}`, messageId: `message-${responseState}`, isUser: true, displayRule: 'bubble:user',
-    text: 'Hello Bart', timestamp: '2026-09-27T04:00:00Z',
+    text: 'Hello Zephyr', timestamp: '2026-09-27T04:00:00Z',
     assistantActivity: {
       message_id: `message-${responseState}`, accepted_at: '2026-09-27T04:00:00Z',
       first_visible_at: '2026-09-27T04:00:03Z', final_visible_at: '2026-09-27T04:00:09Z',
@@ -28,7 +28,7 @@ function userItem(responseState: string) {
 test('progress and latency labels are not rendered under Bart user messages', () => {
   for (const responseState of REMOVED) {
     const html = renderTranscriptItemHtml(userItem(responseState), undefined, { allowReplies: false });
-    assert.match(html, /Hello Bart/, responseState);
+    assert.match(html, /Hello Zephyr/, responseState);
     assert.doesNotMatch(html, /slot-chat-assistant-activity|data-assistant-waiting-at/, responseState);
     assert.doesNotMatch(html, /Waiting for Bart|First reply|Answer complete|Follow-up pending|Reply received/, responseState);
   }
