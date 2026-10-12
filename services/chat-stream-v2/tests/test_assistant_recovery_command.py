@@ -315,6 +315,89 @@ def test_question_expiry_recreates_obligation_and_preserves_options(tmp_path):
     asyncio.run(run())
 
 
+def test_question_created_after_busy_retirement_is_retained(tmp_path):
+    async def run():
+        tmux=IdleTmux(working={"old"})
+        async with fixture(tmp_path,tmux=tmux,questions=True) as (_,server,_,g,m,r):
+            await r.advance();await g.approve(r.j)
+            with pytest.raises(recovery.Refused,match="retire"):
+                await r.advance()
+            request=_ask("q-late",producer=OLD,body="Late work remains required",
+                options=[{"label":"Done","value":"done"},{"label":"Not yet","value":"notyet"}])
+            assert (await server.notify.prompt(request))["type"]=="prompt.ask.ok"
+            tmux.working.clear()
+            resumed=recovery.Recovery(m,g,r.path)
+            assert (await resumed.advance())["lifecycle_ready"]
+            assert resumed.j["question_dispositions"]["question:q-late"]=="recreated"
+            questions=await server.notify._db.call("list_agent_questions",producer_stream_id=NEW)
+            assert len(questions)==1 and questions[0]["envelope"]["body"]==request["envelope"]["body"]
+    asyncio.run(run())
+
+
+def test_recreated_question_lost_response_replays_exact_envelope(tmp_path):
+    async def run():
+        async with fixture(tmp_path,questions=True) as (_,server,_,g,m,r):
+            request=_ask("q-retry",producer=OLD,body="Retry work",
+                options=[{"label":"Done","value":"done"},{"label":"Not yet","value":"notyet"}])
+            assert (await server.notify.prompt(request))["type"]=="prompt.ask.ok"
+            await r.advance();await g.approve(r.j)
+            rpc=g.rpc;submitted=[]
+            async def lose_reply(payload):
+                reply=await rpc(payload)
+                if payload["type"]=="prompt.ask":
+                    submitted.append(payload)
+                    if len(submitted)==1:raise TimeoutError("committed response lost")
+                return reply
+            g.rpc=lose_reply
+            with pytest.raises(TimeoutError):await r.advance()
+            assert (await recovery.Recovery(m,g,r.path).advance())["lifecycle_ready"]
+            assert submitted[0]==submitted[1]
+            assert len(await server.notify._db.call("list_agent_questions",producer_stream_id=NEW))==1
+    asyncio.run(run())
+
+
+def test_reopened_watched_child_refuses_before_adoption(tmp_path):
+    async def run():
+        async with fixture(tmp_path) as (store,_,_,g,m,r):
+            await store.register_watch_wake("watch",OLD,m["predecessor_generation"],
+                {"request_id":"original-watch","child_stream_id":CHILD,"triggers":["quiet=5"],"repeat":False})
+            await r.advance()
+            await store.update_session("node-b","child",status="closed",pane_status="pane_dead")
+            await store.open_session("node-b","child",provider="codex",role="lead",visibility="default",
+                pane_status="pane_alive",bootstrap_state="ready",parent_stream_id=OLD)
+            await g.approve(r.j)
+            with pytest.raises(recovery.Refused,match="watched_child_generation_changed"):
+                await recovery.Recovery(m,g,r.path).advance()
+            assert (await store.fetch_session("node-b","child"))["parent_stream_id"]==OLD
+            assert (await store.fetch_session("node-a","old"))["status"]=="open"
+            gen=(await store.fetch_session("node-b","new"))["session_generation"]
+            assert not [w for w in await store.list_watch_wake("watch",NEW,gen) if not w["default"]]
+    asyncio.run(run())
+
+
+def test_watch_registration_generation_race_is_cancelled(tmp_path):
+    async def run():
+        async with fixture(tmp_path) as (store,_,_,g,m,r):
+            await store.register_watch_wake("watch",OLD,m["predecessor_generation"],
+                {"request_id":"race-watch","child_stream_id":CHILD,"triggers":["quiet=5"],"repeat":False})
+            await r.advance();await g.approve(r.j)
+            rpc=g.rpc
+            async def race(payload):
+                if payload["type"]=="watch.register":
+                    await store.update_session("node-b","child",status="closed",pane_status="pane_dead")
+                    await store.open_session("node-b","child",provider="codex",role="lead",visibility="default",
+                        pane_status="pane_alive",bootstrap_state="ready",parent_stream_id=NEW)
+                return await rpc(payload)
+            g.rpc=race
+            with pytest.raises(recovery.Refused,match="restored_watch_generation_changed"):
+                await r.advance()
+            gen=(await store.fetch_session("node-b","new"))["session_generation"]
+            custom=[w for w in await store.list_watch_wake("watch",NEW,gen) if not w["default"]]
+            assert custom and all(w["state"]=="cancelled" for w in custom)
+            assert "watch.cancel" in g.calls
+    asyncio.run(run())
+
+
 def test_start_uses_one_stable_authenticated_top_level_intent(tmp_path,monkeypatch):
     calls=[]
     response={"state":"ready","admitted_count":1,"stream_id":NEW,

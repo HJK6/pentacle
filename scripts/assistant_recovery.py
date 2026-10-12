@@ -429,6 +429,7 @@ class Recovery:
             self.j["transfer"] = retained_plan(state)
             self.commit()
         sealed = self.j["sealed"]
+        self.fence_watches(state)
         children = [s for s in sealed["seats"] if s["parent_stream_id"] == self.m["predecessor"] and s["status"] == "open"]
         for child in children:
             current = next((s for s in state["seats"] if s["stream_id"] == child["stream_id"]), None)
@@ -463,6 +464,7 @@ class Recovery:
             if row["id"] in state["explicit_cancellations"]:
                 self.j.setdefault("cancelled_after_seal",[]).append(row["id"])
         self.j["before_close"] = state
+        self.retain_questions(state)
         self.commit()
         old = state["predecessor"]
         if old["status"] != "closed":
@@ -473,9 +475,13 @@ class Recovery:
         state = await self.g.snapshot()
         if state["predecessor"]["status"] != "closed" or any(r["state"] == "active" for r in state["subscriptions"]):
             raise Refused("retirement_readback_pending")
+        self.retain_questions(state)
+        self.commit()
         # Final old-owner consumption/answer receipts win over sealed copies.
         latest = {r["id"]:r for r in retained_plan(state)}
         for row in self.j["transfer"]:
+            if row["kind"] == "watch" and "watch:"+row["id"] in self.j["receipts"]:
+                await self.check_watch_receipt(row)
             if any(key+row["id"] in self.j["receipts"] for key in ("wake:","watch:","obligation:")):
                 continue
             if row["id"] in self.j.get("cancelled_after_seal",[]) or row["id"] in state["explicit_cancellations"]:
@@ -493,8 +499,10 @@ class Recovery:
                     "at":datetime.fromtimestamp(data["due_at"],timezone.utc).isoformat(),
                     "note":data.get("note", ""),"urgent":data.get("urgent",False)})
             else:
+                self.fence_watches(await self.g.snapshot(), [row])
                 await self.effect("watch:"+row["id"], {"type":"watch.register", "child_stream_id":row["child"],
                     "on":row.get("remaining_triggers",data["triggers"]),"repeat":data.get("repeat",False)})
+                await self.check_watch_receipt(row)
         await self.questions(state)
         self.require("routes")
         routes = self.m["routes"]
@@ -576,9 +584,33 @@ class Recovery:
         self.commit()
         return self.j["spawn"]
 
+    def fence_watches(self, state, rows=None):
+        seats = {s["stream_id"]:s for s in state["seats"]}
+        for row in self.j["transfer"] if rows is None else rows:
+            if row["kind"] != "watch" or row["id"] in state["explicit_cancellations"]:
+                continue
+            child = seats.get(row["child"])
+            if not child or child["session_generation"] != row["child_generation"]:
+                raise Refused("watched_child_generation_changed")
+
+    async def check_watch_receipt(self, row):
+        receipt = self.j["receipts"]["watch:"+row["id"]]["watch"]
+        if receipt.get("child_generation") != row["child_generation"]:
+            # Existing registration has no expected-child-generation argument.
+            # Cancel a raced registration, retain the mismatch, and stop.
+            await self.effect("cancel-raced-watch:"+row["id"],
+                {"type":"watch.cancel","id":receipt["id"]})
+            raise Refused("restored_watch_generation_changed")
+
+    def retain_questions(self, state):
+        obligations = self.j.setdefault("question_obligations", {})
+        for source in (self.j["sealed"], state):
+            for question in source["questions"]:
+                obligations.setdefault(question["question_id"], question)
+
     async def questions(self, state):
         latest = {q["question_id"]:q for q in state["questions"]}
-        for prior in self.j["sealed"]["questions"]:
+        for prior in self.j["question_obligations"].values():
             q = latest.get(prior["question_id"],prior)
             key = "question:"+q["question_id"]
             context = prior["envelope"].get("context")
@@ -600,12 +632,17 @@ class Recovery:
             elif (prior["state"] in ("open","pending")
                     or (prior.get("resolution") or {}).get("reason") == "asker_closed"
                     or self.m.get("recover_expired_questions",False)):
-                envelope = dict(prior["envelope"])
-                envelope.pop("producer_session_generation",None)
-                envelope.update(question_id="q-"+digest([self.m["operation_id"],q["question_id"]])[:16],
-                    producer_stream_id=self.j["successor"],producer_provider=self.m["target"]["provider"],
-                    dedup_key=self.identity(key),answer=None,answered_at=None,
-                    created_at=datetime.now(timezone.utc).isoformat(),updated_at=datetime.now(timezone.utc).isoformat())
+                requests = self.j.setdefault("question_requests", {})
+                if key not in requests:
+                    envelope = dict(prior["envelope"])
+                    envelope.pop("producer_session_generation",None)
+                    envelope.update(question_id="q-"+digest([self.m["operation_id"],q["question_id"]])[:16],
+                        producer_stream_id=self.j["successor"],producer_provider=self.m["target"]["provider"],
+                        dedup_key=self.identity(key),answer=None,answered_at=None,
+                        created_at=datetime.now(timezone.utc).isoformat(),updated_at=datetime.now(timezone.utc).isoformat())
+                    requests[key] = envelope
+                    self.commit()
+                envelope = requests[key]
                 from agent_orch.prompt_protocol import notification_actions
                 await self.effect(key,{"type":"prompt.ask","envelope":envelope,"actions":notification_actions(envelope)})
                 self.j.setdefault("question_dispositions",{})[key] = "recreated"
