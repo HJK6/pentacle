@@ -111,12 +111,37 @@ def decode_state(value: str, stream_id: str, generation: str, lifecycle: str) ->
         raise ValueError("cursor_invariant_invalid")
     if "cursor_hash" in state and (not isinstance(state["cursor_hash"], str) or len(state["cursor_hash"]) != 64):
         raise ValueError("cursor_hash_invalid")
+    def valid_proofs(proofs, *, allow_empty=False):
+        return (isinstance(proofs, list) and (0 if allow_empty else 1) <= len(proofs) <= 128
+                and all(isinstance(p, list) and len(p) == 4 and type(p[0]) is int
+                        and 0 < p[0] <= 2**63 - 1 and isinstance(p[1], str) and 0 < len(p[1]) <= 2048
+                        and isinstance(p[2], str) and len(p[2]) == 64
+                        and all(c in "0123456789abcdef" for c in p[2]) and type(p[3]) is bool for p in proofs)
+                and all(left[0] < right[0] for left, right in zip(proofs, proofs[1:])))
+    if "history_proofs" in state and not valid_proofs(state["history_proofs"], allow_empty=True):
+        raise ValueError("history_proof_invalid")
+    if "history_truncated" in state and type(state["history_truncated"]) is not bool:
+        raise ValueError("history_proof_invalid")
+    if "recovery" in state:
+        recovery = state["recovery"]
+        if (not isinstance(recovery, dict) or recovery.get("spent") != 100000
+                or type(recovery.get("used")) is not int or not 0 <= recovery["used"] <= 100000
+                or recovery.get("status") not in {"claimed", "succeeded", "failed"}
+                or type(recovery.get("usage_complete")) is not bool
+                or ("reason" in recovery and (not isinstance(recovery["reason"], str) or len(recovery["reason"]) > 128))):
+            raise ValueError("recovery_claim_invalid")
+    if "pending_receipts" in state:
+        facts = state["pending_receipts"]
+        if (not isinstance(facts, list) or not 1 <= len(facts) <= 128
+                or any(not isinstance(f, dict) or not isinstance(f.get("anchor"), str)
+                       or not 0 < len(f["anchor"]) <= 2048
+                       or not isinstance(f.get("sender"), str) or not 0 < len(f["sender"]) <= 2048
+                       or any(not isinstance(f.get(k), str) or len(f[k]) != 64 for k in
+                              ("wire_digest", "body_digest", "payload_digest")) for f in facts)):
+            raise ValueError("pending_receipt_invalid")
     if "pending_state" in state:
         proofs = state.get("pending_proofs")
-        if (not isinstance(state["pending_state"], dict) or not isinstance(proofs, list) or not 1 <= len(proofs) <= 128
-                or any(not isinstance(p, list) or len(p) != 4 or type(p[0]) is not int
-                       or not isinstance(p[1], str) or not isinstance(p[2], str) or len(p[2]) != 64
-                       or type(p[3]) is not bool for p in proofs)):
+        if not isinstance(state["pending_state"], dict) or not valid_proofs(proofs):
             raise ValueError("pending_proof_invalid")
         if "pending_state" in state["pending_state"]:
             raise ValueError("pending_checkpoint_nested")
@@ -221,3 +246,43 @@ def crossings(events: list[dict[str, Any]], *, state: dict[str, Any], config: Fd
         if crossing is not None:
             found.append(crossing)
     return state, found
+
+
+class RecoveryBudgetExceeded(ValueError):
+    """The one durable recovery allowance cannot admit another unit."""
+
+
+class RecoveryBudget:
+    """One job's non-renewable VM/byte counter, shared by every reader.
+
+    A one-instruction progress period avoids an uncharged final partial period.
+    The next instruction is reserved before SQLite is allowed to execute it.
+    Bytes are reserved before fetching, decoding or hashing an evidence body.
+    """
+    def __init__(self, limit=100_000, *, seconds=0.1):
+        import time
+        if type(limit) is not int or not 0 <= limit <= 100000:
+            raise ValueError("invalid recovery allowance")
+        self.limit = limit
+        self.used = 0
+        self.deadline = time.monotonic() + seconds
+        self.exhausted = False
+
+    def charge(self, units):
+        import time
+        if type(units) is not int or units < 0:
+            raise ValueError("invalid recovery charge")
+        if time.monotonic() > self.deadline or units > self.limit - self.used:
+            self.exhausted = True
+            raise RecoveryBudgetExceeded("recovery_allowance_exhausted")
+        self.used += units
+
+    def attach(self, conn):
+        self.charge(1)
+        def progress():
+            try:
+                self.charge(1)
+                return 0
+            except RecoveryBudgetExceeded:
+                return 1
+        conn.set_progress_handler(progress, 1)
