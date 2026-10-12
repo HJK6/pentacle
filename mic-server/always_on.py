@@ -307,7 +307,7 @@ class AlwaysOnListener:
         self.mode_phrases = None
         self.on_silent = None
 
-        # assistant answer window (no wake word after Bart asks a question).
+        # assistant answer window (no wake word after the assistant asks a question).
         # answer_window() -> truthy when the microphone may capture an answer;
         # on_answer() -> delivery metadata (conversation_id + answer_to) or None;
         # cancel_answer_window() closes an open window when a fresh wake preempts it.
