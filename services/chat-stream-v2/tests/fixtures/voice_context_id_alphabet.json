@@ -1,0 +1,24 @@
+{
+  "pattern": "[A-Za-z0-9][A-Za-z0-9._:-]{0,95}",
+  "match": "Full string only; reject controls and trailing newlines.",
+  "assistant_page_id": "assistant",
+  "accept": [
+    "q-example-1",
+    "q:one",
+    "item_2.3",
+    "A0"
+  ],
+  "reject": [
+    "q/one",
+    "q one",
+    "é",
+    "_prefix",
+    "q\nline",
+    "q-example-1\n",
+    "q-example-1\r",
+    "q\u0000line",
+    "q\tline",
+    "q-example-1‮",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ]
+}

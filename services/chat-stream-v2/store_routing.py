@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from store_specs import _row, _session_row
+from send_metadata import normalize_send_meta
 from voice_answers import insert_binding_conn, status as voice_answers_status
 
 # v2-only. One current routing episode per stream. The sessions row carries the
@@ -901,7 +902,10 @@ class _RoutingStoreMixin:
         if (not isinstance(duration, bool) and isinstance(duration, (int, float))
                 and 0 < duration <= 600 and math.isfinite(duration)
                 and round(float(duration), 3) > 0):
-            voice_meta = {"voice": {"duration_s": round(float(duration), 3)}}
+            voice_meta = normalize_send_meta(meta)
+        admission_payload = {"admission_mode": "direct_primary"} if direct_primary else {}
+        if voice_meta.get("voice", {}).get("context_v1") is not None:
+            admission_payload["input_meta"] = voice_meta
         canonical_attachments = json.dumps(attachments, sort_keys=True, separators=(",", ":"))
         material = json.dumps({
             "body": body,
@@ -917,7 +921,7 @@ class _RoutingStoreMixin:
         if not separator or not host or not session_name:
             raise ValueError("assistant_composite_invalid_stream_id")
 
-        def _ensure_receipt(conn: sqlite3.Connection, stamp: str) -> str:
+        def _ensure_receipt(conn: sqlite3.Connection, stamp: str, frozen_meta: dict | None = None) -> str:
             # The canonical USER admission is landed even while its answer is
             # pending. Keep the mobile/desktop transport attempt in the same
             # transaction as the USER row, including a rotated-request retry.
@@ -944,7 +948,7 @@ class _RoutingStoreMixin:
                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (next_receipt_rowid(conn), stream_id, input_request_id, receipt_id, "landed", input_identity,
                  _send_wire_digest(body), body, kind, canonical_attachments, "landed", 1,
-                 stamp, actor_stream_id, 1, json.dumps({"assistant_composite": True, **voice_meta}, sort_keys=True)),
+                 stamp, actor_stream_id, 1, json.dumps({"assistant_composite": True, **(voice_meta if frozen_meta is None else frozen_meta)}, sort_keys=True)),
             )
             return receipt_id
 
@@ -988,7 +992,12 @@ class _RoutingStoreMixin:
                         raise ValueError("assistant_request_owner_conflict")
                     if record["payload_digest"] != digest:
                         raise ValueError("assistant_input_idempotency_conflict")
-                    record["receipt_id"] = _ensure_receipt(conn, _routing_iso_now()) if direct_primary else None
+                    prior_payload = json.loads(record["route_json"] or "{}")
+                    frozen_meta = prior_payload.get("input_meta")
+                    if frozen_meta is None:
+                        # Legacy/no-context admission cannot acquire later page visits.
+                        frozen_meta = {"voice": {"duration_s": voice_meta["voice"]["duration_s"]}} if voice_meta else {}
+                    record["receipt_id"] = _ensure_receipt(conn, _routing_iso_now(), frozen_meta) if direct_primary else None
                     record["duplicate"] = True
                     conn.commit()
                     return record
@@ -1073,7 +1082,7 @@ class _RoutingStoreMixin:
                         route_id, stream_id, input_identity, digest, input_request_id, event_id, body,
                         canonical_attachments, reply_to_message_id, reply_to_question_id, actor_stream_id,
                         "queued", None,
-                        json.dumps({"admission_mode": "direct_primary"}, sort_keys=True) if direct_primary else None,
+                        json.dumps(admission_payload, sort_keys=True, ensure_ascii=False) if admission_payload else None,
                         timestamp, timestamp,
                     ),
                 )
@@ -1220,6 +1229,11 @@ class _RoutingStoreMixin:
                 stamp = _routing_iso_now()
                 prior_payload = json.loads(row["route_json"] or "{}")
                 merged_payload = dict(route_payload) if route_payload is not None else prior_payload
+                # Admission owns this input; classifier/rebind/retry cannot replace it.
+                if "input_meta" in prior_payload:
+                    merged_payload["input_meta"] = prior_payload["input_meta"]
+                else:
+                    merged_payload.pop("input_meta", None)
                 timings = dict(prior_payload.get("timings", {}))
                 if routing_state in {"resolved", "fallback_dispatched", "deferred", "routing_failed"}:
                     timings.setdefault("routed_at", stamp)

@@ -1,0 +1,31 @@
+{
+  "voice": {
+    "duration_s": 15,
+    "context_v1": {
+      "visits": [
+        {
+          "offset_ms": 0,
+          "page_id": "personal",
+          "title": "Personal"
+        },
+        {
+          "offset_ms": 3100,
+          "page_id": "calendar",
+          "title": "Calendar"
+        },
+        {
+          "offset_ms": 7200,
+          "page_id": "questions",
+          "title": "Questions",
+          "question_id": "q-example-1"
+        },
+        {
+          "offset_ms": 11000,
+          "page_id": "questions",
+          "title": "Questions",
+          "question_id": "q-example-2"
+        }
+      ]
+    }
+  }
+}

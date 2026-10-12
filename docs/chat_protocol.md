@@ -228,9 +228,71 @@ Receipt history remains immutable, and identical transcript text in another
 request or stream cannot replace the metadata of a request-stamped USER event.
 
 Composite sends whitelist only finite numeric `voice.duration_s` with
-`0 < duration_s <= 600`, normalized to milliseconds (a value that rounds to 0 is dropped). Other metadata is dropped;
+`0 < duration_s <= 600`, normalized to milliseconds (a value that rounds to 0 is dropped),
+plus the optional bounded context below. Other metadata is dropped;
 the receipt retains its internal `assistant_composite` marker. Ordinary-stream
-metadata validation is unchanged. Voice metadata does not alter send identity.
+voice durations must also be finite. Voice metadata does not alter send identity.
+
+### Captured page context
+
+An existing voice send may add `meta.voice.context_v1` beside `duration_s`:
+
+```json
+{"voice":{"duration_s":15,"context_v1":{"visits":[{"offset_ms":0,"page_id":"personal","title":"Personal"},{"offset_ms":7200,"page_id":"questions","title":"Questions","question_id":"q-example-1"}]}}}
+```
+
+One recording carries one trail, without audio segmentation or automatic
+question answers. Only IDs and short titles are carried, never page contents,
+question bodies or credentials. Older daemons may ignore this optional field;
+voice still sends, but context visibility is not implied.
+
+The daemon accepts 1–24 visits and at most 2048 bytes of compact UTF-8
+normalized context JSON. Titles have at most 48 Unicode code points;
+controls/format characters are removed and whitespace is normalized. Empty
+titles are valid. The optional boolean `truncated` is emitted only when true.
+Unknown fields are dropped. Integer `offset_ms` starts at 0, never decreases,
+and cannot exceed the recording's duration or 300000 ms. Clients measure
+captured sound, excluding paused/background dwell. Consecutive equal
+page/entity/question IDs coalesce; revisits after another identity remain.
+
+`page_id` is one of `assistant`, `chat`, `personal`, `calendar`, `lists`, `list`,
+`dashboards`, `settings`, `agents`, `sessions`, `status`, `updates`, `lanes`,
+`lane`, `lane_history`, `questions`, `report`, `image`, `other`. Optional
+`entity_id` and `question_id` require a full-string ASCII match against
+`[A-Za-z0-9][A-Za-z0-9._:-]{0,95}`. Invalid optional IDs are omitted;
+`question_id` is retained only on `questions`. Slashes, Unicode, whitespace,
+controls and trailing newlines are forbidden in IDs. Other malformed context
+is dropped without rejecting valid voice text/duration. Clients cap overflow
+by retaining early visits plus the latest and setting `truncated`; the server
+drops over-cap context rather than inventing visits.
+
+Normalized metadata appears on the canonical USER event and receipt.
+Composite admission freezes it in existing route JSON, so routing, rebind,
+restart and retry cannot replace it with later screen visits. Direct and
+routed assistant dispatch append it beside existing voice-answer data;
+ordinary chat includes the same block in its materialized send. The visible
+event text remains the transcript. The receiving pane gets one
+`<voice-context-v1>` JSON block labeled untrusted observed UI data. Its JSON
+escapes delimiter characters in titles. Context cannot change recipient,
+generation, send identity or instruction authority; recipients look up IDs
+only when needed.
+
+The four-visit fixture is 306 UTF-8 bytes (roughly 77 tokens at four bytes per
+token; tokenization and dispatch framing vary). Context is sent once per
+logical input, without a new verb, table, recorder, capture-time lookup or
+extra model turn. Logs tagged
+`subsystem=voice bug_ref=voice_everywhere_context` contain only visit counts
+and truncation, never titles or IDs.
+
+From the repository root, run
+`python -m pytest services/chat-stream-v2/tests/test_voice_context.py -q`.
+Shared conformance fixtures are `tests/fixtures/voice_context_v1.json` and
+`voice_context_id_alphabet.json` under the service. Coverage includes an
+authenticated isolated loopback send, real Store/receipt readback, the
+source-derived dispatcher that `main.run` installs, existing Comms
+materialization, and a synthetic receiving pane with a correlated answer.
+No external model, microphone or deployed daemon is exercised. Run the
+existing serial merge gate on the final clean committed candidate.
 
 ### Web composer recording
 

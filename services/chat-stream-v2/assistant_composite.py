@@ -24,6 +24,7 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from assistant_router import AssistantRouterProcessError
 import voice_answers as voice_answers_v1
+from send_metadata import voice_context_from_route, voice_context_dispatch_block
 from store_work_lanes import PRODUCT_OPERATIONS as WORK_LANE_PRODUCT_OPERATIONS
 
 
@@ -210,6 +211,7 @@ def direct_dispatch_envelope(
     input_id = str(route.get("input_identity") or "")
     question_id = str(route.get("reply_to_question_id") or "")
     original_input = {"text": str(route.get("body") or ""), "attachments": attachments}
+    context = voice_context_from_route(route)
     question_arg = f"--reply-to-question-id {question_id} " if question_id else ""
     command = (
         "agent-orch assistant publish "
@@ -241,12 +243,14 @@ def direct_dispatch_envelope(
         f"{original_json}\n"
         "</assistant-original-input-json>"
         f"{voice_answers_v1.dispatch_block(voice_answers)}"
+        f"{voice_context_dispatch_block(context)}"
     )
     return {
         "origin": config.stream_id, "dispatch_id": dispatch_id,
         "reply_to_message_id": input_id, "reply_to_question_id": question_id or None,
         "target_stream_id": target, "target_generation": generation,
         "original_input": original_input, "publish_command": command, "wire_body": wire_body,
+        **({"context_v1": context} if context is not None else {}),
     }
 
 
