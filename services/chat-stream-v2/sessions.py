@@ -1555,7 +1555,14 @@ class Sessions:
         sid = f"{host}:{session_name}"
         # The durable row is authoritative here. The in-memory mirror may still
         # carry the predecessor while a close/reopen happened in another task.
-        row = await self.store.fetch_session(host, session_name) or self._inv.get(sid)
+        durable_row = await self.store.fetch_session(host, session_name)
+        row = durable_row or self._inv.get(sid)
+        if durable_row is None and row is not None:
+            # Retention may remove an already-closed durable generation while
+            # its inventory mirror remains. Preserve the existing stale-close
+            # eviction before admission; there is no live row to complete.
+            await self._evict_durably_closed_generation(sid, self._row_generation(row), None)
+            return await self._stale_close_result(sid, row)
         if row is not None and str(row.get("status") or "open") != "open":
             await self._evict_durably_closed_generation(sid, self._row_generation(row), row)
             reap = await self.store.get_session_reap(sid)
@@ -2003,7 +2010,14 @@ class Sessions:
         sid = f"{host}:{session_name}"
         if not self.hosts.known(host):
             raise VerbError("unsupported_host", f"v2 close does not know host {host}")
-        row = await self.store.fetch_session(host, session_name) or self._inv.get(sid)
+        durable_row = await self.store.fetch_session(host, session_name)
+        row = durable_row or self._inv.get(sid)
+        if durable_row is None and row is not None:
+            # Retention may remove an already-closed durable generation while
+            # its inventory mirror remains. Preserve the existing stale-close
+            # eviction before admission; there is no live row to complete.
+            await self._evict_durably_closed_generation(sid, self._row_generation(row), None)
+            return await self._stale_close_result(sid, row)
         if row is not None and str(row.get("status") or "open") != "open":
             await self._evict_durably_closed_generation(sid, self._row_generation(row), row)
             deferred = await self.store.get_deferred_reap(sid)

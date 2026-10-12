@@ -49,7 +49,7 @@ def _open_in_inventory(sessions: Sessions, sid: str) -> bool:
     return row is not None and str(row.get("status") or "open") == "open"
 
 
-def test_close_cancelled_after_durable_commit_still_evicts_inventory() -> None:
+def test_close_cancelled_after_durable_commit_still_evicts_inventory(monkeypatch) -> None:
     """The migration-driver ghost: commit landed, the caller vanished, the row stayed."""
 
     async def go() -> None:
@@ -57,11 +57,13 @@ def test_close_cancelled_after_durable_commit_still_evicts_inventory() -> None:
         sid = f"{HOST}:{name}"
         store, sessions, _row = await _fixture(name)
         committed = asyncio.Event()
-        original = store.mark_closed
+        original = type(store).mark_closed
         request: list[asyncio.Task] = []
 
-        async def commit_then_requester_disconnects(*args, **kwargs):
-            row = await original(*args, **kwargs)
+        async def commit_then_requester_disconnects(owner, *args, **kwargs):
+            row = await original(owner, *args, **kwargs)
+            if getattr(owner, "store", owner) is not store:
+                return row
             committed.set()
             # The server's disconnect cleanup cancels the request task after the
             # store thread already committed, before the close resumes.
@@ -69,7 +71,7 @@ def test_close_cancelled_after_durable_commit_still_evicts_inventory() -> None:
             await asyncio.sleep(0)
             return row
 
-        store.mark_closed = commit_then_requester_disconnects  # type: ignore[method-assign]
+        monkeypatch.setattr(type(store), "mark_closed", commit_then_requester_disconnects)
         try:
             assert _open_in_inventory(sessions, sid)
             request.append(asyncio.create_task(sessions.close(HOST, name, "handed over")))

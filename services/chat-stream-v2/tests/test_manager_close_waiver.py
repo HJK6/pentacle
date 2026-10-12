@@ -83,11 +83,11 @@ def test_pre_effect_audit_failure_preserves_live_and_offline_targets(action, rem
     scenario(check)
 
 
-def test_unreported_cancelled_close_finishes_waiver_and_outcome():
+def test_unreported_cancelled_close_finishes_waiver_and_outcome(monkeypatch):
     async def check(env):
         manager = await _manager(env)
         await env.open("target")
-        committed, resume = _pause_after(env, "mark_closed")
+        committed, resume = _pause_after(env, "mark_closed", monkeypatch=monkeypatch)
         task = asyncio.create_task(env.server._on_close(_close(manager, "target")))
         await _cancel_after_commit(task, committed, resume)
         rows = [r for r in await env.audit() if r["action"].startswith("manager_close")]
