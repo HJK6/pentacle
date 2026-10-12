@@ -14,7 +14,7 @@ def test_capture_end_acknowledges_before_claim(monkeypatch, service):
     listener.running = True
     # Runtime's callback contract is installed here, not an acknowledgement mock.
     listener.on_capture_end = lambda: service.capture_ended('room_mic', listener)
-    hear(listener, 'Hey Bart say hello')
+    hear(listener, 'Hey Zephyr say hello')
     hear(listener, 'over')
     until = time.monotonic()+1
     while not service.last and time.monotonic()<until:
@@ -62,7 +62,7 @@ def test_capture_ack_respects_silence_and_precedes_router(monkeypatch,service,lo
     listener.on_capture_end=lambda:service.capture_ended('room_mic',listener)
     routed=[]
     listener.voice_actions.classifier=lambda text:routed.append(text)
-    hear(listener,'Hey Bart hello')
+    hear(listener,'Hey Zephyr hello')
     hear(listener,'over')
     deadline=time.monotonic()+1
     while service.last is None and time.monotonic()<deadline:

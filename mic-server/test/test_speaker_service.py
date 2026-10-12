@@ -9,7 +9,7 @@ from . import test_mic_server_coordination as harness
 def test_claim_opens_conversation_and_speak_journey(monkeypatch, service):
     _, listener = wake_listener(monkeypatch)
     listener.running = True
-    hear(listener, 'Hey Bart please check my day')
+    hear(listener, 'Hey Zephyr please check my day')
     hear(listener, 'Over.')
     case = harness.MicServerTestCase(methodName='runTest')
     case.setUp()

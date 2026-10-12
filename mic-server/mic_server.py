@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from audio_buffer import get_audio_buffer
 from speaker_service import get_service
+from local_actions import ASSISTANT_NAME
 
 def audio_duration_s(path):
     """Probe container duration before upload inference; never load another model."""
@@ -732,6 +733,7 @@ class MicHandler(BaseHTTPRequestHandler):
                     "on_last_copied": state["on_last_copied"],
                     "on_captured_texts": state.get("on_captured_texts", []),
                     "capture_origin": getattr(always_on_listener, "capture_origin", None),
+                    "assistant_name": ASSISTANT_NAME,
                     "wake": always_on_listener.wake.snapshot() if getattr(always_on_listener, "wake", None) else {"enabled": False},
                     "audio": audio,
                     "local_actions": always_on_listener.voice_actions.snapshot() if getattr(always_on_listener, "voice_actions", None) else {"enabled": False},

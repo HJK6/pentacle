@@ -28,6 +28,7 @@ from datetime import datetime
 from scipy.signal import resample_poly
 from audio_device import resolve_mic_device
 from clipboard import copy_to_clipboard
+from local_actions import ASSISTANT_NAME
 
 # --- Config ---
 CAPTURE_SR = 48000
@@ -56,16 +57,7 @@ CALIBRATION_FILE = os.path.join(os.path.dirname(__file__), "calibration.json")
 # Default phrases (before calibration) — generic wake words
 DEFAULT_WAKE = {
     "hey pentacle", "hi pentacle", "hello pentacle",
-    "hey bart", "hey bartimaeus", "hey bartimeus",
-    "hi bart", "hi bartimaeus", "hi bartimeus",
-    "hello bart", "hello bartimaeus", "hello bartimeus",
-    "yo bart", "yo bartimaeus",
-    "hey bar", "a bart", "a bartimaeus",
-    "hey board", "hey bard", "hey bort", "hey bert",
-    "hi board", "hi bard", "hi bort", "hi bert",
-    "hello board", "hello bard", "hello bort", "hello bert",
-    "hey part", "hi part", "hey bought", "hey bot",
-    "hey boy", "hi boy", "hey barty", "hi barty",
+    *(f"{greeting} {ASSISTANT_NAME.casefold()}" for greeting in ("hey", "hi", "hello", "yo")),
 }
 DEFAULT_COMMANDS = {
     "start_copy": {"start copy", "start copying", "copy this", "begin copy", "begin copying"},
@@ -804,7 +796,7 @@ class AlwaysOnListener:
             return
         if self.wake.enabled and (self.state == "LISTENING" or self.capture_origin == 'followup'):
             # Fresh wake preempts a direct answer, including a partial answer capture.
-            match = re.match(r"^\s*hey(?:[^\w]+)bart\b(?!['’]\w)", text, re.IGNORECASE)
+            match = re.match(r"^\s*hey(?:[^\w]+)" + re.escape(ASSISTANT_NAME) + r"\b(?!['’]\w)", text, re.IGNORECASE)
             local_match = re.match(r"^\s*hey(?:[^\w]+)pentacle\b(?!['’]\w)", text, re.IGNORECASE) if self.voice_actions.enabled and self.voice_actions.policy == 'separate' else None
             if local_match:
                 match = local_match
@@ -1033,7 +1025,7 @@ class AlwaysOnListener:
                 (self.state == "LISTENING" and not self.voice_actions.pending) or
                 (self.state == "CALIBRATING" and self.cal_group == "wake")
             )
-            hints = {"hotwords": "Hey Bart, Hey Pentacle" if self.voice_actions.enabled and self.voice_actions.policy == "separate" else "Hey Bart"} if wake_recognition else {}
+            hints = {"hotwords": f"Hey {ASSISTANT_NAME}, Hey Pentacle" if self.voice_actions.enabled and self.voice_actions.policy == "separate" else f"Hey {ASSISTANT_NAME}"} if wake_recognition else {}
             segments, _ = self.whisper_model.transcribe(
                 tmp, beam_size=1, language="en",
                 vad_filter=False, condition_on_previous_text=False, **hints,

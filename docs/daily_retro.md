@@ -52,9 +52,9 @@ first-run history is explicitly **not reviewed**; unreadable sources and whole
 originals exceeding 40 sources/64 KiB stay explicit pending coverage. Daily retry
 reuses immutable inputs, worker/report identities and frozen delivery keys.
 
-## Continuing Bart and DOT work
+## Continuing the assistant and DOT work
 
-The capture owner adds the exact `continuous-retro` tag to the existing Bart
+The capture owner adds the exact `continuous-retro` tag to the existing the assistant
 portfolio and each DOT-owning spec. Other active work remains excluded. Keep the
 lesson in the existing `## Retro`, with one dated capture-window marker:
 
@@ -89,13 +89,13 @@ previous local midnight through exact collection cutoff; the terminal date
 window remains separately labelled.
 
 The packet reads metadata from the current binding, successful rebind audit,
-retained session/archived-session states, terminal reports addressed to Bart,
+retained session/archived-session states, terminal reports addressed to the assistant,
 canonical publication references, send receipts, outbound notices and structured
 lane digests. It projects identifiers, timestamps, typed states, plan statuses
 and checkpoint fields. Report/publication/status step/send text, provider/tool
 logs and credential fields are excluded. A report is correlated with operator
 delivery only by an exact report-ID publication reference; otherwise publication
-is **unknown**. Transport delivery to Bart and operator publication remain
+is **unknown**. Transport delivery to the assistant and operator publication remain
 different observations. Current badges do not reconstruct historical state.
 The provider `working` flag distinguishes active execution; the specific tool
 remains unknown. Only the exact routine suppression codes `persisted_suppressed`
@@ -304,7 +304,7 @@ existing authority; only a missing decision uses the versioned question path.
 
 `record-review` saves a rolling seven-day summary and, on Sunday or the next
 review catching up that week, one immutable ISO-week receipt. It returns
-`weekly_summary.due` for Bart to publish the compact account once through its
+`weekly_summary.due` for the assistant to publish the compact account once through its
 supported completion path. Use its stable `publication_key` and frozen summary
 bytes for identical retries. Replay creates no second weekly receipt. No extra
 model call, timer or question is used.
@@ -448,12 +448,12 @@ digest and all batch boundaries. Replay uses this snapshot, refuses conflicting
 baseline bytes, and checks the full collection manifest before worker admission.
 
 `history-run` with the same arguments processes only that selected batch through
-the existing Sol/medium, Astra/high, durable current-Bart report and fenced
+the existing Sol/medium, Astra/high, durable current assistant report and fenced
 cleanup path. Its `history-<digest16>-<batch4>` identity and separate state root
 keep worker/report/delivery keys distinct from daily runs. The current assistant
 records its actual packet review with the same `record-review` helper and run ID.
 Reviewed batches are no-ops; no next batch is automatically admitted and no
-per-batch Bart review barrier is added.
+per-batch the assistant review barrier is added.
 
 Source landing and ONE installed pilot need separate parent gates. Pin the
 baseline, config, interpreter, source and release hashes before execution; use

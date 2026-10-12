@@ -93,7 +93,7 @@ def test_silent_is_independent_of_meeting(service):
 
 
 def test_silent_still_accepts_room_request_and_suppresses_ack(service):
-    # Silent stops Bart's audio but the microphone keeps working: a room-mic request is
+    # Silent stops Zephyr's audio but the microphone keeps working: a room-mic request is
     # still accepted (delivered to the assistant, answered in chat); its acknowledgement
     # clip is suppressed and nothing renders.
     service.set_silent(True, 'web')

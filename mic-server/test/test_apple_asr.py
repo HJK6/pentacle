@@ -21,10 +21,10 @@ def test_apple_backend_warms_once_and_keeps_hints_explicit(monkeypatch):
     assert len(calls) == 1
     assert 'initial_prompt' not in calls[0][1]
     segments, info = model.transcribe('wake.wav', beam_size=1, language='en',
-        vad_filter=False, condition_on_previous_text=False, hotwords='Hey Bart')
+        vad_filter=False, condition_on_previous_text=False, hotwords='Hey Zephyr')
     assert [segment.text for segment in segments] == ['Recognized words.']
     assert info.language == 'en'
-    assert calls[-1][1]['initial_prompt'] == 'Hey Bart'
+    assert calls[-1][1]['initial_prompt'] == 'Hey Zephyr'
     model.transcribe('message.wav', beam_size=1, language='en',
         vad_filter=False, condition_on_previous_text=False)
     assert 'initial_prompt' not in calls[-1][1]

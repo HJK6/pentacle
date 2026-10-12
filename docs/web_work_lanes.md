@@ -21,7 +21,7 @@ The sidebar lanes view (the header lane count and the **Lanes (N)** section) is 
   - `history`: a read-only slot for the closed chat. The transcript is read with `request_stream_events {stream_id, generation}` using the lane's generation, shown under a "Read-only history" banner, with no composer, no send and no terminal. The slot is named `lane-history:<lane_id>`, so an open session of the same name (a newer generation) is never mistaken for it. A failed or empty read says so ("Messages could not be loaded." / "No retained messages.").
   - `unavailable`: a slot with an explicit "Chat unavailable" card. No chat is read or opened, and the lane stays in the panel.
 - **Ordering.** Lane pushes and the `work_lanes` field of a snapshot go through the same connection state-version gate as the rest of the daemon state, so a stale frame never rolls the panel back. The lane generation is passed only by the lane-history slot's own reads (initial, paging, retry, reconnect refetch); another slot reading the same stream id never sends it.
-- **Lane update cards.** Bart's chat renders a typed card for every `publish_kind: "lane_update"` publication (`lane_started`, `lane_completed`, `lane_blocked`, `lane_unblocked`, `major_decision`, `milestone`) from `raw.lane_update`. A client that does not branch on the kind shows the summary as ordinary assistant text.
+- **Lane update cards.** the assistant's chat renders a typed card for every `publish_kind: "lane_update"` publication (`lane_started`, `lane_completed`, `lane_blocked`, `lane_unblocked`, `major_decision`, `milestone`) from `raw.lane_update`. A client that does not branch on the kind shows the summary as ordinary assistant text.
 
 ## Where it lives
 

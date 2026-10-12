@@ -2253,7 +2253,7 @@ function syncSlotAssistantIcon(slot) {
   if (header.querySelector('.cell-assistant-icon')) return;
   const icon = document.createElement('span');
   icon.className = 'cell-assistant-icon color-forest-green';
-  const assistantName = session.displayName || 'Assistant';
+  const assistantName = session.displayName || 'Zephyr';
   const assistantLabel = `${assistantName} assistant`;
   icon.title = assistantLabel;
   icon.setAttribute('aria-label', assistantLabel);

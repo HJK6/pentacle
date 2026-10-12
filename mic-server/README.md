@@ -6,7 +6,7 @@ The default bind is loopback `127.0.0.1:7780`. `MIC_BIND_HOST` is configurable, 
 
 `GET /status` reports mode, recognition and audio health. `POST /mode/on` and `/mode/off` change capture state; calibration and meeting operations use their existing handlers. Meeting mode writes transcripts under the local `transcripts/` directory. Calibration, recordings, vocabulary, transcripts and launcher receipts are local data and remain ignored. Rolling audio retention is disabled unless `MIC_AUDIO_BUFFER_DIR` is explicitly configured; its keep operation preserves selected audio and feedback locally.
 
-Local host-directed actions require comma-separated single-word host labels in `MIC_LOCAL_ACTIONS_HOSTS`. `MIC_LOCAL_ACTIONS_DEFAULT_HOST`, when set, must belong to that list. Missing host configuration cannot silently select a machine. `MIC_LOCAL_ACTIONS` enables the optional router; `MIC_LOCAL_ACTIONS_WAKE=shared` shares Bart's wake, while `separate` uses the product wake “Hey Pentacle”. Bart/Bartimaeus remains the assistant identity.
+Local host-directed actions require comma-separated single-word host labels in `MIC_LOCAL_ACTIONS_HOSTS`. `MIC_LOCAL_ACTIONS_DEFAULT_HOST`, when set, must belong to that list. Missing host configuration cannot silently select a machine. `MIC_LOCAL_ACTIONS` enables the optional router; `MIC_LOCAL_ACTIONS_WAKE=shared` shares Zephyr's wake, while `separate` uses the product wake “Hey Pentacle”. Zephyr remains the assistant identity.
 
 Legacy `local` and `ssh` speech modes require an absolute `MIC_VOICE_SPEAKER_SCRIPT`. `MIC_VOICE_SPEAKER_MODE=local` also requires an executable local file. SSH mode requires `MIC_VOICE_SPEAKER_SSH` and uses remote `python3`; the caller provisions the script/interpreter. Text travels as stdin JSON, with bounded deadlines and a matching completion receipt. No private script or interpreter fallback is shipped. The default resident mode uses the `MIC_KOKORO_*`, clip and output settings documented below.
 
@@ -16,4 +16,16 @@ Always-on capture detects missing callbacks from its existing idle processing lo
 
 Resident speech, conversation capabilities, policy reload, captured clips and null-sink validation are documented in [local spoken conversations](../docs/voice_speaker.md). `MIC_VOICE_SPEAKER_MODE=resident` is the default for local-action speech; explicitly configured script/SSH consumers retain their existing contract.
 
-The answer window (Bart asks, then listens without a fresh wake word) and silent mode (`POST /mode/silent`, voice phrases, restart-persistent flag) are documented in [answer window and silent mode](../docs/voice_answer_window_and_silent_mode.md).
+The answer window (Zephyr asks, then listens without a fresh wake word) and silent mode (`POST /mode/silent`, voice phrases, restart-persistent flag) are documented in [answer window and silent mode](../docs/voice_answer_window_and_silent_mode.md).
+
+## Assistant name
+
+The public wake name is **Zephyr**: say “Hey Zephyr” to start a request. Set
+`MIC_ASSISTANT_NAME` in the microphone service’s private launch environment to
+keep your own wake name before activating updated code. Whitespace-only or
+omitted values fall back to Zephyr; a nonempty value is trimmed. This one value
+drives wake recognition, ASR hints, local-reply wake rejection and the existing
+`/status` field `assistant_name`, which the web voice guidance also uses. Shared
+local actions use this wake; separate actions retain “Hey Pentacle”. The daemon’s
+private `PENTACLE_ASSISTANT_COMPOSITE_TITLE` controls the chat display name
+independently. No private configuration belongs in the public repository.

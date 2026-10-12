@@ -99,7 +99,7 @@ class AssistantCompositeConfig:
     authority_stream_id: str = ""
     rebind_authorized_spec_ids: frozenset[str] = frozenset()
     mirror_enabled_default: bool = True
-    title: str = "Assistant"
+    title: str = "Zephyr"
 
     @property
     def direct_primary(self) -> bool:
@@ -177,7 +177,7 @@ class AssistantCompositeConfig:
             authority_stream_id=authority_stream,
             rebind_authorized_spec_ids=frozenset(authorized_specs),
             mirror_enabled_default=_env_bool(values, _k("MIRROR_ENABLED"), True),
-            title=str(values.get(_k("COMPOSITE_TITLE")) or "Assistant").strip()[:120] or "Assistant",
+            title=str(values.get(_k("COMPOSITE_TITLE")) or "Zephyr").strip()[:120] or "Zephyr",
         )
 
     @staticmethod
