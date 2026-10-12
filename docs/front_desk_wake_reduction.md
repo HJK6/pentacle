@@ -14,7 +14,7 @@ reported. The daemon does not rebind the authority; requests keep being
 released without a ruling until you rebind or replace it. The chat line and the
 deadline notice for a request that went unruled state what the release did:
 `admitted unruled`, or `not released, blocked (<code>)` when nothing launched. The
-requester's structured result notice is unchanged and still follows. Successful unchanged-scope spawn
+requester's structured result notice still follows. Successful unchanged-scope spawn
 approvals produce no front-desk tell. Tree-idle and child context-advisory notices
 are dropped; their facts remain available through `agent-orch list` and `inspect`.
 The daemon's own [external-work reminder](../services/chat-stream-v2/docs/external-work.md)
@@ -28,6 +28,13 @@ one `lane_digest` notice through the existing outbound queue. No empty digest is
 sent. Wake inputs arrive alone and do not flush held items. The queue's normal
 five-second sweep bounds scheduling precision; its existing transport and proof
 recovery govern the resulting notice. Held inputs survive daemon restarts.
+
+Internally queued lane digests, including fleet snapshots, bypass holding using
+the existing private digest token. The token survives both notice and tell ingress
+checks; a digest is never held as text for a later digest. Peer messages that copy
+a digest header or token-shaped value retain ordinary admission. Existing held
+payloads from an older daemon remain immutable and drain on their original
+deadline; record that legacy boundary before claiming no recurring nesting.
 
 `PENTACLE_FRONT_DESK_DIGEST_ENABLED` defaults to on. Set it to `0`, `false`,
 `no`, or `off` in the daemon environment to disable ingress holding and dropping:
@@ -60,3 +67,25 @@ The accepted spec in shared memory,
 and live acceptance. Dot's email and pace contract lives in
 `docs/reference/dot_work_delivery.md` there. Runtime activation and the one-time
 Dot message remain with the accepting parent.
+
+## Compact ruling results
+
+The structured result retains the request id, action, target, ruling, release
+state, complete reason and conditions. Its outcome carries only operational
+facts: admitted stream ids/count/scope, prompt delivery state, actual close
+result, and failure codes/reasons. Admission is not readiness; approval is not
+closure. Session JSON, usage, observer binding and prompt staging are omitted.
+Long conditions and failure reasons are not truncated. Existing queued result
+payloads retain their original identity and bytes through retries.
+
+`detail_ref` names the exact row in `v2_assistant_lane_rulings` by
+`ruling_request_id`. The full outcome remains in that durable row. An authorized
+reader can use the daemon's configured sessions database for an exact lookup:
+
+```sql
+SELECT action, state, ruling, reason, conditions, outcome_json
+FROM v2_assistant_lane_rulings WHERE ruling_request_id = :ruling_request_id;
+```
+
+`agent-orch inspect <target>` shows only the latest ruling for that target. Check
+its request id before using it as detail for a notice about an earlier ruling.

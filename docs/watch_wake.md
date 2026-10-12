@@ -25,3 +25,19 @@ Without repeat, a selected trigger consumes once. A single immutable outbox noti
 Timers are evaluated after the ordinary reconciliation pass. A slow pass may delay enqueue; restart should enqueue an overdue active wake once for its live generation. Compare trigger, creation, and delivery timestamps to distinguish evaluation latency from delivery latency.
 
 Tests should use synthetic ids, fixed clocks, and a disposable store. They should not depend on a private stream id, remote host, or deployment rollback command.
+
+## Fleet lane digests
+
+The root assistant receives a snapshot when durable lane facts change, evaluated
+at `PENTACLE_LANE_DIGEST_S` intervals (1800 seconds by default). Membership and
+generation, title/role, status update time, descendant/report counts, ETA times
+and the 50% overrun threshold participate in change identity. Transient working
+state and elapsed ages are rendered in a changed snapshot but do not cause one.
+Child reports and decision notices retain their own prompt delivery paths.
+
+The digest baseline is a durable enqueue, not proof of delivery. An equal pending
+snapshot keeps its original outbox id and retries; an equal delivered snapshot
+stays quiet. An absent or terminal-undelivered snapshot gets a fresh sequence
+under the current root binding. Restart preserves the same-generation baseline;
+a different recipient or generation gets its own baseline and cannot receive
+the predecessor's notices. Insertion and baseline advancement are atomic.

@@ -979,3 +979,77 @@ def test_authority_seat_that_does_not_exist_is_told_once():
         finally:
             store.stop()
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("action,state,outcome", [
+    ("spawn", "done", {"type": "spawn.ok", "ok": True, "state": "ready", "stream_id": "fixture:new",
+                       "admitted_count": 1, "admitted_sessions": ["fixture:new"],
+                       "admitted_scope": "idempotency_key", "admitted_set_authoritative": True,
+                       "initial_prompt_delivery": {"state": "delivered", "stage_path": "/synthetic/staging"}}),
+    ("spawn", "release_blocked", {"type": "spawn.error", "ok": False, "error_code": "fixture_failure", "reason": "Entire failure reason"}),
+    ("session_close", "approved_but_not_closed", {"type": "close.error", "ok": False, "error": "target_generation_changed"}),
+    ("session_close", "done", {"type": "close.already_closed", "ok": True, "already_closed": True}),
+    ("spawn", "denied", None),
+    ("spawn", "revised", None),
+])
+def test_notice_trim_ruling_result_keeps_truth_without_session(action, state, outcome):
+    from types import SimpleNamespace
+    from assistant_lane_rulings import AssistantLaneRulings
+    async def run():
+        class Capture:
+            async def enqueue_outbound_notice(self, **kw): self.notice = kw
+        capture = Capture()
+        payload = None if outcome is None else {**outcome, "session": {
+            "usage": {"input_total": 999}, "observer_binding": {"path": "/synthetic/observer"},
+            "prompt_staging": "x" * 4000}}
+        request = {"ruling_request_id": "fixture-ruling", "action": action, "state": state,
+                   "target_stream_id": "fixture:new", "requester_stream_id": "fixture:lead",
+                   "requester_generation": "fixture-generation", "authority_stream_id": "fixture:authority",
+                   "ruling": "approve" if state not in {"denied", "revised"} else state,
+                   "reason": "Entire ruling reason", "conditions": "Preserve every condition",
+                   "outcome_json": json.dumps(payload) if payload is not None else None}
+        await AssistantLaneRulings(SimpleNamespace(store=capture))._result_notice(request)
+        body = capture.notice["body"]
+        assert len(body.encode()) <= 1024
+        notice = json.loads(body.split("] ", 1)[1])
+        for key in ("ruling", "state", "action", "reason", "conditions"):
+            assert notice[key] == request[key]
+        assert notice["detail_ref"] == {"table": "v2_assistant_lane_rulings", "ruling_request_id": "fixture-ruling"}
+        assert "session" not in (notice["outcome"] or {})
+        if outcome is not None:
+            for key in ("type", "ok", "state", "stream_id", "error", "error_code", "reason", "already_closed"):
+                if key in outcome: assert notice["outcome"][key] == outcome[key]
+            if action == "spawn" and state == "done":
+                assert notice["outcome"]["initial_prompt_delivery"] == {"state": "delivered"}
+                assert notice["outcome"]["admitted_sessions"] == ["fixture:new"]
+    asyncio.run(run())
+
+
+def test_notice_trim_ruling_detail_is_exact_and_conditions_are_not_truncated():
+    from types import SimpleNamespace
+    from assistant_lane_rulings import AssistantLaneRulings
+    async def run():
+        store = Store(":memory:"); store.start()
+        try:
+            rulings = AssistantLaneRulings(SimpleNamespace(store=store))
+            conditions = "retain this condition; " * 120
+            outcome = json.dumps({"type": "spawn.ok", "stream_id": "fixture:new",
+                                  "session": {"usage": {"input_total": 456}, "observer_binding": {"fixture": True}}})
+            def seed(c):
+                with c:
+                    for rid, created in (("fixture-first", 1), ("fixture-later", 2)):
+                        c.execute("INSERT INTO v2_assistant_lane_rulings (ruling_request_id,request_key,action,intent_digest,intent_json,requester_stream_id,requester_generation,authority_stream_id,authority_generation,created_at,deadline,state,target_stream_id,ruling,reason,conditions,outcome_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                  (rid, rid, "spawn", "fixture-hash", "{}", "fixture:lead", "g", "fixture:authority", "g", created, 3, "done", "fixture:new", "approve", "reason", conditions, outcome))
+            await store.submit(seed)
+            original = await rulings._fetch("fixture-first")
+            await rulings._result_notice(original)
+            body = await store.submit(lambda c: c.execute(
+                "SELECT body FROM v2_outbound_notices WHERE notice_id='assistant-lane-ruling-result:fixture-first'").fetchone()[0])
+            notice = json.loads(body.split("] ", 1)[1])
+            assert notice["conditions"] == conditions
+            exact = await rulings._fetch(notice["detail_ref"]["ruling_request_id"])
+            assert exact["outcome_json"] == outcome and exact["conditions"] == conditions
+            assert (await rulings.latest_for_target("fixture:new"))["ruling_request_id"] == "fixture-later"
+            assert "session" not in notice["outcome"]
+        finally: store.stop()
+    asyncio.run(run())

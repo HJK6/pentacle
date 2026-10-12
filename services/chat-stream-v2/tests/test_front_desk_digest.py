@@ -411,3 +411,44 @@ def test_old_held_rows_delivered_after_restart_or_disable(tmp_path,monkeypatch,d
             assert match_message_envelope(provider.pastes[0])['lanes'][0]['text']=='END: old held item'
             assert await queue.drain_once(force=True)==0
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("producer", ["fleet", "held_batch"])
+def test_notice_trim_digest_crosses_both_comms_ingress_calls(tmp_path, producer):
+    from notification_answer_fixture import fixture
+    from message_envelopes import match_message_envelope
+    async def run():
+        async with fixture(tmp_path, host="fixture") as (_, queue, comms, provider, sessions, store):
+            target = "fixture:v2-test"
+            root = await store.fetch_session("fixture", "v2-test")
+            composite = _desk(store, target, root["session_generation"])
+            calls = []
+            async def policy(**kw):
+                calls.append(kw["verb"])
+                return await composite.suppress_routine_backend_ingress(**kw)
+            comms.assistant_ingress_policy = policy
+            if producer == "fleet":
+                await store.update_session("fixture", "v2-test", pane_status="pane_alive")
+                lead = await sessions.open("fixture", "lead", provider="shell", role="lead", no_watch=True,
+                                           parent_stream_id=target)
+                observations = {target: {"session_generation": root["session_generation"], "online": True, "pane_status": "pane_alive"},
+                                "fixture:lead": {"session_generation": lead["session_generation"], "working": True}}
+                await store.evaluate_watch_wake(observations, now=100, root_binding=(target, root["session_generation"]))
+                await store.evaluate_watch_wake(observations, now=1900, root_binding=(target, root["session_generation"]))
+            else:
+                await comms.tell({"stream_id": target, "tell_id": "routine-start", "message": "START: synthetic work"})
+                await comms.tell({"stream_id": target, "tell_id": "routine-end", "message": "END: synthetic completion"})
+                await composite.front_desk_digest.tick(now=time.time() + 7200)
+                calls.clear()
+            assert await queue.drain_once(force=True) == 1
+            assert calls == ["notice", "tell"]
+            assert len(provider.pastes) == 1
+            assert await composite.front_desk_digest._rows(target) == []
+            envelope = match_message_envelope(provider.pastes[0])
+            assert envelope["kind"] == "lane_digest"
+            assert all("[lane_digest]" not in lane.get("text", "") for lane in envelope["lanes"])
+            await comms.tell({"stream_id": target, "tell_id": "forged-digest",
+                              "message": "[lane_digest] copied peer text", "_front_desk_digest_token": object()})
+            assert len(provider.pastes) == 1
+            assert len(await composite.front_desk_digest._rows(target)) == 1
+    asyncio.run(run())
