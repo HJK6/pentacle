@@ -397,3 +397,59 @@ def test_receipts_never_dispose_ambiguous_or_unlinked_criteria(tmp_path,custom,r
     with pytest.raises(api.CompletionRefusal) as exc:api.check_lane_members(tmp_path,[MEMBER])
     assert exc.value.code=='lane_residuals_undisposed'
     assert all(x['reason']==reason for x in exc.value.details['items'])
+
+
+@pytest.mark.parametrize('route', ['lane', 'local', 'remote', 'offline_operator', 'offline_manager'])
+def test_restored_completion_refuses_undisposed(tmp_path, monkeypatch, route):
+    """RED at the pinned guard-absent base through the actual public routes."""
+    root = tmp_path.resolve()
+    write_spec(root)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(root))
+    async def body(env):
+        lead = await env.seat('guard-lead', role='lead', parent_stream_id=FD)
+        lane = (await env.adopt(lead=lead, members=[MEMBER]))['lane']
+        before = await env.store.get_work_lane(lane['lane_id'])
+        with pytest.raises((ValueError, VerbError)) as caught:
+            if route == 'lane':
+                await env.op('set_state', {'to': 'done', 'outcome': 'Synthetic incomplete'},
+                             lane=lane['lane_id'], version=1)
+            else:
+                sessions, tmux = await close_context(env, lead, remote=route != 'local',
+                                                     online=not route.startswith('offline'))
+                kwargs = ({'operator_confirm': True} if route == 'offline_operator' else
+                          {'close_kind': 'manager_close'} if route == 'offline_manager' else {})
+                await sessions.close(*lead[0].split(':', 1), **kwargs)
+        assert caught.value.code == 'lane_residuals_undisposed'
+        assert caught.value.details['items'] == [
+            {'spec_id': MEMBER, 'line': 7, 'criterion': 'Finish', 'reason': 'undisposed'}]
+        after = await env.store.get_work_lane(lane['lane_id'])
+        assert after['lane'] == before['lane']
+        assert after['events'] == before['events']
+        assert (await env.store.fetch_session(*lead[0].split(':', 1)))['status'] == 'open'
+    run(body)
+
+
+def test_generic_operation_hook_is_harness_error(tmp_path, monkeypatch):
+    """A bare-name hook fires on authentication, before any preparation."""
+    path = write_spec(tmp_path.resolve(), custom=CHECKED)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(tmp_path.resolve()))
+    async def body(env):
+        lane = (await env.adopt(members=[MEMBER]))['lane']
+        submit = env.store.submit
+        receipt = []
+        async def invalid_hook(callback):
+            if callback.__name__ == '_op':
+                path.write_text(path.read_text().replace('[x]', '[ ]'))
+                receipt.append({'callback': callback.__qualname__, 'mutation': 'before_preparation'})
+                raise AssertionError('HARNESS_ERROR: generic operation hook mutated before preparation')
+            return await submit(callback)
+        monkeypatch.setattr(env.store, 'submit', invalid_hook)
+        with pytest.raises(AssertionError, match='^HARNESS_ERROR:'):
+            await env.op('set_state', {'to': 'done', 'outcome': 'Invalid seam'},
+                         lane=lane['lane_id'], version=1)
+        assert len(receipt) == 1
+        assert receipt[0]['callback'] != '_WorkLanesStoreMixin.apply_work_lane_operation.<locals>._op'
+        print('HARNESS_ERROR_RECEIPT', json.dumps(receipt, sort_keys=True))
+        monkeypatch.setattr(env.store, 'submit', submit)
+        assert (await env.store.get_work_lane(lane['lane_id']))['lane']['work_state'] == 'active'
+    run(body)
