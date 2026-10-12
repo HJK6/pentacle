@@ -1,16 +1,21 @@
 # Lane completion and lead admission guards
 
-U1 runtime completion enforcement is deferred pending resolution of spec-namespace freshness at commit. Lane `done` and current-generation open-lane lead closes do not read member criteria in this release. The U1 contract below is retained as the deferred design; its runtime enforcement and installed-release acceptance remain open. Parser/template behavior remains available for future integration. U2 spawn-WIP admission and the pre-existing close ladder, operator confirmation, actor/binding generation, CAS and replay checks remain active. No configuration switch enables U1 in this release.
+U1 completion enforcement checks a fresh preparation of member Custom criteria
+for lane `done` and current-generation open-lane lead closes. Preparation runs
+off the main/event-loop thread and off the Store worker. U2 spawn-WIP admission
+and the existing authority, confirmation, lifecycle, CAS and replay checks stay
+active.
 
-The retained U1 design and active U2 check use the existing `PENTACLE_MEMORY_ROOT` work tree.
-They neither edit specs nor activate policy, and add no store schema, service,
-CLI option, reservation counter or fleet lock. A successful fixture run proves
-source behavior, not installation or policy activation.
+Both checks use the existing `PENTACLE_MEMORY_ROOT` work tree. They neither edit
+specs nor activate policy, and add no store schema, service, CLI option, identity
+registry, reservation counter or fleet lock. A passing fixture run proves
+source behavior, not installation or activation.
 
 ## Lane completion
 
-A lane transition to `done` reads exactly its member specs. Closing a session
-reads members of every open (`active`, `paused`, `blocked`) first-class lane
+A lane transition to `done` evaluates the Custom criteria of exactly its member
+specs, plus required follow-up receipts; fresh identity resolution observes the
+namespace. Closing a session evaluates members of every open (`active`, `paused`, `blocked`) first-class lane
 whose bound stream **and generation** identify that session as current lead.
 Worker, QA, planner, helper, unbound, former-generation and done-lane closes do
 not acquire a completion obligation from attached specs alone. Pausing and
@@ -21,6 +26,73 @@ remain first. On session close, visibility and the idle/deferred decisions
 already reached by that local or remote route remain first. A route that would
 actually close, including either remote offline logical-close route, must then
 pass completion. Existing liveness probes are not repeated.
+
+### Preparation and commit boundaries
+
+Each completion request with member obligations has exactly one fresh namespace
+preparation. It resolves identities, rejects ambiguity, parses only the consumed
+members' criteria and reads required follow-ups. The preparation retains the
+bytes, identity fingerprints and directory metadata it observed. This is not an
+atomic filesystem snapshot. There is no hidden retry or second namespace scan.
+An empty member set needs no filesystem scan.
+
+For lane `done`, the short Store transaction preserves the existing actor and
+binding generation, replay, conflict, lane-version and confirmation ordering.
+It compares the exact prepared lane identity, state, version and members, and
+checks metadata only for consumed member/follow-up files and captured directory
+paths. It does not parse, walk or stat the whole namespace, or wait for an
+off-thread scan. Producer, lane, action, answer and single-use confirmation
+checks stay in that transaction; completion and confirmation use commit together.
+
+Already missing, unreadable, ambiguous or unresolved input fails closed at
+preparation. A detected consumed-input change before lane commit also refuses
+with `member_spec_unreadable`, leaving the confirmation unspent. The caller can
+restore the source and submit a new request. An already committed replay still
+returns its original committed result, even if a new preparation finds a problem.
+
+For session close, preparation and consumed-input revalidation are admission
+checks under the existing lifecycle and graph fences, before any termination
+attempt. Changes detected there refuse without terminating. The existing
+terminate, confirm, then generation-fenced mark-closed ordering is unchanged.
+Once that route has confirmed termination/death, a later consumed-source
+freshness failure does not veto recording the same generation as closed. The
+existing closed audit's reason instead includes `source_changed`, the target
+generation and the source refusal. This flag is atomic with close persistence,
+readable through `inspect_stream`'s `close_audit.reason`, and also returned on the
+successful session as `completion_source_changed` and
+`completion_source_warning`. It is a recorded limitation, not an undo or a fix
+of the namespace gap below.
+
+Only that late source check is advisory after confirmed death. Authority,
+target-generation, child-preservation, idle, visibility and process-death checks
+remain mandatory. Failed or uncertain termination never becomes confirmed death;
+a replacement generation is never closed. A killed seat does not mark its lane
+done. Offline operator/manager closes record deferred intent, not confirmed
+death: their source guard is admission-only, with no post-admission source check
+or source-changed flag. A later source edit therefore does not undo their admitted
+intent; the existing target-generation CAS still applies. The existing close confirmation and replay behavior is unchanged; the
+flag creates no new confirmation, retry, send or compensation mechanism.
+
+Cancellation during preparation never enqueues completion. Cancellation after
+lane enqueue is not proof of rollback: its outcome is unknown until the durable
+result is read back, and no automatic retry is issued. Session finalization
+continues once death is confirmed, including if the original caller cancels.
+Before that irreversible point, cancellation while waiting to enqueue a logical
+close cannot later cause a hidden close.
+
+### Accepted remaining namespace gap
+
+An unrelated existing spec's declared id can be rewritten in place to duplicate
+a member's id after preparation, leaving the captured directory metadata
+unchanged. Completion can then commit and spend the confirmation. The
+consumed-input checks do not cover every identity-only file, and metadata checks
+do not promise to detect every content edit. A later fresh check can refuse the
+ambiguity but cannot undo the completion. There is no automatic undo. Ordinary
+edits can reach this gap; there is no time-bound guarantee. The conformance test
+expects this completion to succeed, then a fresh evaluation to refuse it. This
+is an accepted limitation, not a fixed race.
+
+### Criteria and refusal details
 
 Within `## Acceptance Criteria`, only the `### Custom` subsection is checked.
 It ends at its next peer or parent heading; nested headings stay in scope.
@@ -88,9 +160,11 @@ by pretending it has an empty Custom section or by using a new bypass flag.
 
 Refusal leaves lane state, version, events, publication and confirmation use
 unchanged. A separate committed existing lifecycle audit records a refused
-lane completion. A refused session close writes one existing close audit with
-`fenced` disposition and does not terminate or close the session. The report
-ledger retains an already durable report if its later requested close refuses.
+lane completion. A session source-admission refusal writes one existing close
+audit with `fenced` disposition and does not terminate or close the session.
+Late source drift after confirmed death is instead recorded on the closed audit
+as described above. The report ledger retains an already durable report if its
+later requested close refuses.
 
 ## Lead admission
 
@@ -166,30 +240,28 @@ shared evaluator and the real spawn admission path with synthetic transports.
 The same data is suitable for a separately owned memory-validator adapter;
 that adapter and policy activation are outside this change.
 
-From the repository root, with Python 3.13, service requirements, editable
-`services/agent-orch`, and the public workflow's standard prerequisites:
+From the repository root, use one isolated Python 3.13 environment consistently
+for the source-only completion checks. The `python3` below must be Python 3.13;
+missing declared dependencies are environment errors, not skips:
 
 ```sh
+python3 -m venv /tmp/pentacle-lane-guard-venv
+/tmp/pentacle-lane-guard-venv/bin/python -m pip install -r services/chat-stream-v2/requirements.txt -e services/agent-orch
 export PYTHONPATH="$PWD/services:$PWD/services/agent-orch"
-unset TMUX
-export PENTACLE_SSH_CONTROL_DIR="$(mktemp -d /tmp/completion-ssh.XXXXXX)"
-python -m pytest services/chat-stream-v2/tests/test_lane_close_residual_guard.py services/chat-stream-v2/tests/test_spawn_wip_cap.py -q -rs
-(cd services/chat-stream-v2 && python -m pytest tests --ignore=tests/smoke --ignore=tests/soak -m 'not soak' -q -rs --collect-only)
-(cd services/chat-stream-v2 && python -m pytest tests/smoke -q -rs --maxfail=1 --collect-only)
+env -u TMUX /tmp/pentacle-lane-guard-venv/bin/python -m pytest services/chat-stream-v2/tests/test_lane_close_residual_guard.py services/chat-stream-v2/tests/test_lane_completion_deferred.py services/chat-stream-v2/tests/test_work_lane_completion.py services/chat-stream-v2/tests/test_work_lane_progress.py services/chat-stream-v2/tests/test_assistant_composite.py -q -rs
+/tmp/pentacle-lane-guard-venv/bin/python -m compileall -q services/_shared/custom_ac.py services/chat-stream-v2/store_work_lanes.py services/chat-stream-v2/sessions.py services/chat-stream-v2/assistant_composite.py services/chat-stream-v2/tests
 ```
 
-After committing the candidate, run the canonical serial daemon/CLI gate with
-its evidence directory outside the checkout:
+These are direct synthetic pytest checks using invented specs and owned canonical
+temporary roots. They run no tmux, Unix-socket or live-daemon tests and no gate
+wrapper. Race cells verify the exact qualified callback, retain checked bytes
+and fingerprints, and assert preparation, mutation, enqueue and callback order.
+An early mutation or unmatched callback is `HARNESS_ERROR`.
 
-```sh
-python services/chat-stream-v2/tools/source_integrity.py --root "$PWD"
-python services/chat-stream-v2/tools/run_gate.py merge
-python -m pytest services/agent-orch/tests
-python services/chat-stream-v2/tools/source_integrity.py --root "$PWD"
-```
-
-The gate retains its own preflight, timeout, selectors and cleanup. Remove
-only the owned temporary SSH directory after all test children finish. A
-sandbox-denied required test remains authored/collected and assigned to fleet
-intake with its exact error; it is not a pass or a reason to weaken assertions.
-Both guards should be accepted together before operator-owned deployment.
+Fleet runs at intake own the canonical merge gate on supported platforms, the
+command-line, smoke and web gates, preserved spawn-admission controls,
+independent final review of the exact candidate, and activation proof. A denied
+required environment test stays authored/collected with its exact denial and
+is labelled "fleet runs at intake"; it is not a pass or a reason to weaken an
+assertion. A passing fixture run proves source behavior, not installation or
+activation.

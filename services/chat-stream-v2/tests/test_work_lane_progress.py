@@ -139,6 +139,13 @@ import pytest
 from test_work_lanes import FD
 from test_assistant_prose_mirror import ASSISTANT
 
+
+@pytest.fixture
+def tmp_path(tmp_path):
+    """Canonicalize this module's owned temporary roots, including macOS aliases."""
+    return tmp_path.resolve()
+
+
 A = "spec_demo__shared"
 B = "spec_demo__other"
 

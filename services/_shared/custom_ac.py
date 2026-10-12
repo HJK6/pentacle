@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
+from dataclasses import dataclass
 from collections import Counter
 from pathlib import Path
 import re
 from typing import Any
 
 from .specs_parser import load_frontmatter
-from .specs_service import SOURCE_READ_ERRORS, SpecsSubsystem, _resolve_specs_memory_root
+from .specs_service import SOURCE_READ_ERRORS, SpecsSubsystem, _resolve_specs_memory_root, _bounded_directory
 
 NONTERMINAL = frozenset({'backlog', 'analysis', 'ready_for_dev', 'in_progress', 'needs_qa', 'blocked'})
 TRACKED_CLASSES = frozenset({'external_event', 'operator_action', 'new_scope'})
@@ -133,7 +136,13 @@ class SpecReader:
         if self.root is None or not (self.root / 'work').is_dir():
             raise ValueError('spec_root_unavailable')
         self.service = SpecsSubsystem(memory_root=self.root, session_summaries=lambda: [], changed_callback=lambda _: None)
-        self.index = self.service._scan_folders_by_id(strict=True)
+        # Capture directory metadata around exactly one fresh identity scan.
+        # Identity-only files are deliberately not consumed-input commit fences.
+        status_dirs = self.service._work_dirs()
+        self.directories = {path: _directory_fingerprint(path)
+                            for path in (self.root, self.root / 'work', *status_dirs)}
+        self.index = self.service._scan_folders_by_id(status_dirs=status_dirs, strict=True)
+        self.consumed: dict[Path, ConsumedSpec] = {}
 
     def resolve(self, spec_id: str) -> tuple[str, Path, str]:
         matches = self.service._matches_from_index(self.index, spec_id)
@@ -147,12 +156,102 @@ class SpecReader:
         status, folder, identity = self.resolve(spec_id)
         path = folder / 'spec.md'
         before = self.service._identity_fingerprint(path)
-        if before is None:
-            raise ValueError('spec_unreadable')
-        text = path.read_text(encoding='utf-8')
-        if self.service._identity_fingerprint(path) != before:
+        scanned = self.service._identity_cache.get(path)
+        if before is None or scanned is None or scanned[0] != before:
             raise ValueError('spec_changed')
+        directory_before = _directory_fingerprint(folder)
+        # Neither the file nor any ancestor may redirect the consumed read.
+        with _bounded_directory(folder) as directory:
+            fd = os.open('spec.md', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+            with os.fdopen(fd, 'rb') as source:
+                value = os.fstat(source.fileno())
+                opened = (str(path), value.st_dev, value.st_ino, value.st_size,
+                          value.st_mtime_ns, value.st_ctime_ns)
+                if not stat.S_ISREG(value.st_mode) or opened != before:
+                    raise ValueError('spec_changed')
+                content = source.read()
+        if (self.service._identity_fingerprint(path) != before
+                or _directory_fingerprint(folder) != directory_before):
+            raise ValueError('spec_changed')
+        text = content.decode('utf-8')
+        previous = self.consumed.get(path)
+        current = ConsumedSpec(path, before, content)
+        if previous is not None and previous != current:
+            raise ValueError('spec_changed')
+        self.consumed[path] = current
+        self.directories[folder] = directory_before
         return status, folder, identity, text
+
+
+def _directory_fingerprint(path: Path):
+    try:
+        value = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(value.st_mode):
+        raise ValueError('spec_directory_changed')
+    return value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns
+
+
+@dataclass(frozen=True)
+class ConsumedSpec:
+    path: Path
+    fingerprint: tuple
+    content: bytes
+
+
+@dataclass(frozen=True)
+class PreparedCompletion:
+    """Observed inputs, not an atomic snapshot or a namespace-wide commit fence."""
+    members: tuple[str, ...]
+    files: tuple[ConsumedSpec, ...] = ()
+    directories: tuple[tuple[Path, tuple | None], ...] = ()
+    dispositions: tuple[dict[str, Any], ...] = ()
+    refusal: CompletionRefusal | None = None
+
+    def revalidate(self) -> None:
+        # Metadata only. Never resolve, parse, enumerate or read content here.
+        if self.refusal is not None:
+            raise self.refusal
+        try:
+            if any(_directory_fingerprint(path) != before for path, before in self.directories):
+                raise ValueError('spec_directory_changed')
+            if any(SpecsSubsystem._identity_fingerprint(item.path) != item.fingerprint
+                   for item in self.files):
+                raise ValueError('spec_changed')
+        except SOURCE_READ_ERRORS:
+            raise _unreadable(self.members) from None
+
+
+def _unreadable(members) -> CompletionRefusal:
+    return CompletionRefusal('member_spec_unreadable', [
+        {'spec_id': member, 'criterion': None, 'reason': 'member_spec_unreadable'} for member in members])
+
+
+def prepare_lane_completion(root: str | Path | None, member_ids) -> PreparedCompletion:
+    """One off-thread fresh preparation; defer refusal to the old guard position."""
+    members = tuple(sorted(set(member_ids)))
+    if not members:
+        return PreparedCompletion(members)
+    reader = None
+    dispositions, refusal = (), None
+    try:
+        reader = SpecReader(root)
+        dispositions = tuple(_check_reader_members(reader, members)['dispositions'])
+    except CompletionRefusal as exc:
+        refusal = exc
+    except SOURCE_READ_ERRORS:
+        refusal = _unreadable(members)
+    prepared = PreparedCompletion(
+        members, tuple(reader.consumed.values()) if reader else (),
+        tuple(reader.directories.items()) if reader else (), dispositions, refusal)
+    # Detect changes during consumption without a second namespace scan.
+    if refusal is None:
+        try:
+            prepared.revalidate()
+        except CompletionRefusal as exc:
+            prepared = PreparedCompletion(members, prepared.files, prepared.directories, dispositions, exc)
+    return prepared
 
 
 def parse_custom(text: str) -> list[dict[str, Any]]:
@@ -228,15 +327,14 @@ def _tracked(reader: SpecReader, member: str, folder: Path, item: dict[str, Any]
 
 
 def check_lane_members(root: str | Path | None, member_ids) -> dict[str, Any]:
-    """Allow only readable members whose custom criteria all have dispositions."""
-    members = sorted(set(member_ids))
-    if not members:
-        return {'dispositions': []}
-    try:
-        reader = SpecReader(root)
-    except SOURCE_READ_ERRORS:
-        raise CompletionRefusal('member_spec_unreadable', [
-            {'spec_id': member, 'criterion': None, 'reason': 'member_spec_unreadable'} for member in members]) from None
+    """Standalone fresh evaluator, also used by spawn-independent parser callers."""
+    prepared = prepare_lane_completion(root, member_ids)
+    if prepared.refusal is not None:
+        raise prepared.refusal
+    return {'dispositions': list(prepared.dispositions)}
+
+
+def _check_reader_members(reader: SpecReader, members) -> dict[str, Any]:
     failures, dispositions = [], []
     for member in members:
         try:

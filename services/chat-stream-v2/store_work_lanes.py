@@ -9,7 +9,9 @@ kind, one ``lane_update`` publication into the composite timeline, in the same
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
+from dataclasses import dataclass, replace
 import json
 import re
 import sqlite3
@@ -18,6 +20,8 @@ import uuid
 from typing import Any, Callable
 
 from work_lane_members import validate_members, validate_title
+from _shared import custom_ac
+from store_lifecycle_authority import audit as lifecycle_audit
 from store_work_index import ensure_work_index_schema, member_ids, members_conn, _state_conn
 from store_work_lane_episodes import ensure_work_lane_episodes_schema, lead_reported_done_conn
 from work_lane_migration import upgrade_events
@@ -438,17 +442,151 @@ def work_lane_rows_conn(conn, *, include_done: bool = False) -> list[dict[str, A
     return lanes
 
 
+def _completion_lane_identity(lane):
+    return (lane['lane_id'], lane['stream_id'], lane['work_state'], lane['version'],
+            tuple(member_ids(lane)), lane.get('bound_stream_id'), lane.get('bound_generation'))
+
+
+@dataclass(frozen=True)
+class PreparedLaneCompletion:
+    lanes: tuple[tuple, ...]
+    inputs: custom_ac.PreparedCompletion
+    request_task: asyncio.Task | None = None
+
+    def revalidate_lanes(self, lanes) -> None:
+        current = tuple(sorted(_completion_lane_identity(lane) for lane in lanes))
+        if current != self.lanes:
+            raise ValueError('assistant_lane_version_conflict')
+
+    def revalidate(self, lanes) -> None:
+        self.revalidate_lanes(lanes)
+        self.inputs.revalidate()
+
+
+def _prepare_completion(lanes):
+    """Invoked only in asyncio.to_thread, once per completion request."""
+    basis = tuple(sorted(_completion_lane_identity(lane) for lane in lanes))
+    members = {member for lane in lanes for member in member_ids(lane)}
+    return PreparedLaneCompletion(basis, custom_ac.prepare_lane_completion(None, members))
+
+
+class _LaneCloseAuditReason:
+    """Request-local reason string, finalized before the original audit insert."""
+    def __init__(self, reason, generation):
+        self.reason = str(reason or '')
+        self.generation = generation
+        self.source_changed = None
+
+    def __str__(self):
+        if self.source_changed is None:
+            return self.reason
+        flag = f"source_changed: generation={self.generation}; {self.source_changed}"
+        return f"{self.reason}; {flag}" if self.reason else flag
+
+
+class _PreparedLaneCloseStore:
+    """Per-request view of the existing close implementation, never shared state.
+
+    Store.mark_closed owns its SQL, audit and lifecycle lock. Only this call's
+    submission is wrapped so its original transaction follows the prepared
+    guard on the same connection and under the same BEGIN IMMEDIATE.
+    """
+    def __init__(self, store, prepared, host, name, generation, audit_reason, death_confirmed, admission_only):
+        self.store, self.prepared = store, prepared
+        self.stream_id, self.generation = f'{host}:{name}', generation
+        self.audit_reason, self.death_confirmed = audit_reason, death_confirmed
+        self.admission_only = admission_only
+
+    def __getattr__(self, name):
+        return getattr(self.store, name)
+
+    async def submit(self, transaction):
+        if transaction.__qualname__ != 'Store.mark_closed.<locals>.transaction':
+            raise RuntimeError('lane_completion_close_callback_unexpected')
+        # The close's shield starts before the existing lifecycle lock. A
+        # cancelled original request must not enqueue after waiting on it.
+        if (not self.death_confirmed and self.prepared.request_task is not None
+                and self.prepared.request_task.cancelling()):
+            raise asyncio.CancelledError
+        def _op(conn):
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                row = _session_conn(conn, self.stream_id)
+                # Preserve mark_closed's stale/already-closed CAS result first.
+                if (row and row.get('status') == 'open'
+                        and (not self.generation or row.get('session_generation') == self.generation)):
+                    lanes = [lane for lane in work_lane_rows_conn(conn)
+                             if lane.get('bound_stream_id') == self.stream_id
+                             and lane.get('bound_generation') == row.get('session_generation')]
+                    self.prepared.revalidate_lanes(lanes)
+                    try:
+                        if not self.admission_only:
+                            self.prepared.inputs.revalidate()
+                    except custom_ac.CompletionRefusal as exc:
+                        if not self.death_confirmed:
+                            raise
+                        # A confirmed-dead generation must be recorded closed.
+                        # Only source freshness is advisory here; CAS, authority
+                        # and lane-identity failures are never swallowed.
+                        self.audit_reason.source_changed = exc.audit_reason()
+                return transaction(conn)
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.store.submit(_op)
+
+
 class _WorkLanesStoreMixin:
     """Store methods for first-class work lanes (mixed into ``Store``)."""
 
     # Test hook: raised after the lane UPDATE and before the publication insert.
     _work_lane_fault: Callable[[str], None] | None = None
 
+    async def prepare_work_lane_completion(self, lane_id: str) -> PreparedLaneCompletion:
+        lane = await self.submit(lambda conn: lane_row_conn(conn, lane_id))
+        prepared = await asyncio.to_thread(_prepare_completion, [lane] if lane else [])
+        return replace(prepared, request_task=asyncio.current_task())
+
+    async def prepare_lead_lane_completion(self, stream_id: str, generation: str) -> PreparedLaneCompletion:
+        lanes = await self.submit(lambda conn: [lane for lane in work_lane_rows_conn(conn)
+                                  if lane.get('bound_stream_id') == stream_id
+                                  and lane.get('bound_generation') == generation])
+        prepared = await asyncio.to_thread(_prepare_completion, lanes)
+        return replace(prepared, request_task=asyncio.current_task())
+
+    async def revalidate_lead_lane_completion(self, stream_id, generation, prepared):
+        def _op(conn):
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                row = _session_conn(conn, stream_id)
+                if not row or row.get('status') != 'open' or row.get('session_generation') != generation:
+                    raise ValueError('session_generation_changed')
+                lanes = [lane for lane in work_lane_rows_conn(conn)
+                         if lane.get('bound_stream_id') == stream_id
+                         and lane.get('bound_generation') == generation]
+                prepared.revalidate(lanes)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
+    async def mark_closed_with_lane_completion(self, host, session_name, *, prepared,
+                                              death_confirmed=False, admission_only=False, **kwargs):
+        reason = _LaneCloseAuditReason(kwargs.get('reason'), kwargs.get('expected_generation'))
+        view = _PreparedLaneCloseStore(self, prepared, host, session_name,
+                                       kwargs.get('expected_generation'), reason, death_confirmed, admission_only)
+        closed = await type(self).mark_closed(view, host, session_name, **dict(kwargs, reason=reason))
+        if closed is not None and reason.source_changed is not None:
+            closed = dict(closed, completion_source_changed=True, completion_source_warning=str(reason))
+        return closed
+
     async def apply_work_lane_operation(
         self, *, stream_id: str, request_id: str, operation: str, lane_id: str | None,
         expected_lane_version: int | None, payload: dict[str, Any], actor_stream_id: str,
         actor_generation: str, binding_name: str, env_binding: dict[str, str] | None,
         confirmation: dict[str, Any] | None = None,
+        prepared: PreparedLaneCompletion | None = None,
     ) -> dict[str, Any]:
         if operation not in PRODUCT_OPERATIONS or not request_id or not isinstance(payload, dict):
             raise ValueError("work_lane_operation_invalid")
@@ -460,6 +598,8 @@ class _WorkLanesStoreMixin:
                     "actor_stream_id": actor_stream_id}
         digest = _digest(identity)
         fault = self._work_lane_fault
+        if operation == 'set_state' and payload.get('to') == 'done' and prepared is None:
+            prepared = await self.prepare_work_lane_completion(lane_id)
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
             conn.execute("BEGIN IMMEDIATE")
@@ -468,9 +608,20 @@ class _WorkLanesStoreMixin:
                                      lane_id=lane_id, expected=expected_lane_version, payload=payload,
                                      actor=actor_stream_id, generation=actor_generation,
                                      binding_name=binding_name, env_binding=env_binding,
-                                     confirmation=confirmation, digest=digest, fault=fault)
+                                     confirmation=confirmation, digest=digest, fault=fault, prepared=prepared)
                 conn.commit()
                 return result
+            except custom_ac.CompletionRefusal as exc:
+                conn.rollback()
+                lifecycle_audit(
+                    conn, action="work_lane.set_state:done", actor_kind="seat",
+                    actor_identity=actor_stream_id, actor_generation=actor_generation,
+                    target_stream_id=stream_id, old_revision=expected_lane_version,
+                    reason=f"lane={lane_id}; {exc.audit_reason()}", request_id=request_id,
+                    result="refused", refusal_code=exc.code,
+                )
+                conn.commit()
+                raise
             except BaseException:
                 conn.rollback()
                 raise
@@ -638,7 +789,7 @@ def _override_audit(actor: str, generation: str, action: str, prior: str, nxt: s
 
 
 def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, payload, actor, generation,
-                binding_name, env_binding, confirmation, digest, fault) -> dict[str, Any]:
+                binding_name, env_binding, confirmation, digest, fault, prepared=None) -> dict[str, Any]:
     from store_assistant_binding import _binding_conn
     binding = _binding_conn(conn, env_binding or {}, name=binding_name, include_target=False)
     if (not actor or not generation or binding.get("stream_id") != actor
@@ -712,6 +863,9 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if to == "done":
                 outcome = _text(payload.get("outcome"), UPDATE_TEXT_MAX, "work_lane_outcome_required",
                                 required=True)
+                if prepared is None:
+                    raise RuntimeError('lane_completion_preparation_missing')
+                prepared.revalidate([lane])
                 changes["done_at"] = stamp
                 if lane.get("owner_kind") == "operator" and consumed is not None:
                     changes["work_state_reason"] = "operator_confirmed"

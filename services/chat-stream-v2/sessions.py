@@ -1231,9 +1231,11 @@ class Sessions:
         expected_generation: str | None = None,
         close_kind: str = "session_close",
         attribution: dict[str, Any] | None = None,
+        prepared: Any = None,
+        death_confirmed: bool = False,
     ) -> dict[str, Any] | None:
-        row = await self.store.mark_closed(
-            host, session_name,
+        row = await self._commit_lane_close(
+            host, session_name, prepared=prepared, death_confirmed=death_confirmed,
             closed_at=iso_now(), pane_status="pane_dead",
             expected_generation=expected_generation,
             close_kind=close_kind, reason=reason,
@@ -1462,6 +1464,46 @@ class Sessions:
             operator_override=operator_override,
         )
 
+    async def _guard_lane_completion(self, row, close_kind, attribution):
+        """Prepare once after this route's earlier decisions, before termination."""
+        if row is None:
+            return None
+        prepared = await self.store.prepare_lead_lane_completion(
+            f"{row['host']}:{row['session_name']}", self._row_generation(row))
+        from _shared.custom_ac import CompletionRefusal
+        try:
+            await self.store.revalidate_lead_lane_completion(
+                f"{row['host']}:{row['session_name']}", self._row_generation(row), prepared)
+        except CompletionRefusal as exc:
+            await self._refuse_lane_completion(row, close_kind, attribution, exc)
+        except ValueError as exc:
+            raise VerbError(str(exc), str(exc)) from exc
+        return prepared
+
+    async def _refuse_lane_completion(self, row, close_kind, attribution, exc):
+        await self.store.record_close_audit(
+            host=row['host'], session_name=row['session_name'], close_kind=close_kind,
+            disposition='fenced', attribution=attribution, reason=exc.audit_reason())
+        raise VerbError(exc.code, str(exc), **exc.details) from exc
+
+    async def _commit_lane_close(self, host, session_name, *, prepared=None, death_confirmed=False,
+                                 admission_only=False, **kwargs):
+        from _shared.custom_ac import CompletionRefusal
+        try:
+            if prepared is None:
+                return await self.store.mark_closed(host, session_name, **kwargs)
+            return await self.store.mark_closed_with_lane_completion(
+                host, session_name, prepared=prepared, death_confirmed=death_confirmed,
+                admission_only=admission_only, **kwargs)
+        except CompletionRefusal as exc:
+            await self._refuse_lane_completion(
+                {'host': host, 'session_name': session_name}, kwargs.get('close_kind'),
+                kwargs.get('attribution'), exc)
+        except ValueError as exc:
+            if str(exc) == 'assistant_lane_version_conflict':
+                raise VerbError(str(exc), str(exc)) from exc
+            raise
+
     async def _close_locked(
         self,
         host: str,
@@ -1567,6 +1609,7 @@ class Sessions:
                 )
                 return await self._reap_fenced(host, session_name, row)
 
+        prepared = await self._guard_lane_completion(row, close_kind, attribution)
 
         # No pane at entry is not a process-tree readback. Keep the close
         # unknown so descendants cannot be silently lost behind `reaped, []`.
@@ -1596,6 +1639,8 @@ class Sessions:
             host,
             session_name,
             reason,
+            prepared=prepared,
+            death_confirmed=pane_live or manager_gone,
             reap_status=str(reap.get("reap_status") or "unknown"),
             survivors=reap.get("survivors") if isinstance(reap.get("survivors"), list) else [],
             expected_generation=expected_generation,
@@ -1825,9 +1870,10 @@ class Sessions:
     ) -> dict[str, Any]:
         host, name = row["host"], row["session_name"]
         sid = f"{host}:{name}"
+        prepared = await self._guard_lane_completion(row, 'operator_offline_close', attribution)
         async def _commit() -> dict[str, Any] | None:
-            committed = await self.store.mark_closed(
-                host, name, closed_at=iso_now(), pane_status="unknown",
+            committed = await self._commit_lane_close(
+                host, name, prepared=prepared, admission_only=True, closed_at=iso_now(), pane_status="unknown",
                 expected_generation=generation, close_kind="operator_offline_close",
                 attribution=attribution, reason=reason or "operator_confirmed_host_offline",
             )
@@ -2014,6 +2060,7 @@ class Sessions:
             if operator_confirm and row is not None:
                 return await self._close_offline_locked(row, reason, expected_generation, attribution)
             return self._close_failed(row, "ssh_unreachable")
+        prepared = await self._guard_lane_completion(row, close_kind, attribution)
         tmux = self.hosts.tmux_for(host)
         identity_reader = getattr(tmux, "pane_identity", None)
         pane_lease: dict[str, Any] | None = None
@@ -2079,6 +2126,8 @@ class Sessions:
             host,
             session_name,
             reason,
+            prepared=prepared,
+            death_confirmed=confirmed_gone,
             reap_status="unknown",
             survivors=[],
             expected_generation=expected_generation,
