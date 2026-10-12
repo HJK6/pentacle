@@ -352,7 +352,7 @@ class OutboundNoticeQueue:
             import json
             metadata = row.get('metadata') or '{}'
             metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
-            if metadata.get('front_desk_digest'):
+            if kind == NOTICE_KIND_LANE_DIGEST or metadata.get('front_desk_digest'):
                 from front_desk_digest import DIGEST_TOKEN
                 message['_front_desk_digest_token'] = DIGEST_TOKEN
             if kind == NOTICE_KIND_FD_TURN_BUDGET:

@@ -710,7 +710,6 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
             "stream_id": lane_sid, "generation": lane["session_generation"],
             "title": lane.get("title"), "role": lane.get("role"),
             "status_updated_at": card.get("updated_at"),
-            "working": working if working in (True, False) else None,
             "open_descendants": len(subtree) - 1,
             "open_terminal_reports": report_count,
             "eta_at": card.get("eta_at"), "eta_set_at": card.get("eta_set_at"),
@@ -719,6 +718,7 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
         digest_lanes.append(facts)
         render_lanes.append({
             **facts,
+            "working": working if working in (True, False) else None,
             "status_age_s": _fleet_age(card.get("updated_at"), now),
             "idle_age_s": int(now - seat_states[lane_sid][0]) if seat_states[lane_sid][0] is not None else None,
             "eta_overrun_pct": round(overrun, 1) if overrun is not None else None,
@@ -770,7 +770,16 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
     facts = _json(digest_lanes)
     digest = hashlib.sha256(facts.encode()).hexdigest()
     sequence = state["sequence"]
-    if digest != state["last_hash"]:
+    # Equality refers to the last durable enqueue, not provider delivery. A
+    # pending row retains its retries; only a delivered row certifies silence.
+    previous_id = _id("lane_digest", epochs["lane_digest"], root_sid, root_gen, sequence)
+    previous = conn.execute(
+        "SELECT delivered_at,terminal_at FROM v2_outbound_notices WHERE notice_id=?",
+        (previous_id,),
+    ).fetchone() if digest == state["last_hash"] else None
+    recover = digest == state["last_hash"] and (
+        previous is None or (previous["terminal_at"] and not previous["delivered_at"]))
+    if digest != state["last_hash"] or recover:
         sequence += 1
         nid = _id("lane_digest", epochs["lane_digest"], root_sid, root_gen, sequence)
         body = build_message_envelope(
@@ -783,6 +792,10 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
             body=body, created_at=_stamp(now), metadata={"root_generation": root_gen},
         )
         count += 1
+        logging.getLogger(__name__).info(
+            "subsystem=fleet_digest bug_ref=fd_notice_trim action=enqueue recovery=%s notice_id=%s",
+            bool(recover), nid,
+        )
     conn.execute(
         "UPDATE v2_fleet_digest_state SET next_due=?,last_hash=?,sequence=? WHERE root=? AND root_generation=?",
         (now + digest_s, digest if digest != state["last_hash"] else state["last_hash"],

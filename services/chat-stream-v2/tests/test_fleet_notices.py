@@ -677,3 +677,94 @@ def test_root_offline_gap_restarts_unfired_idle_interval():
             store.stop()
 
     asyncio.run(run())
+
+
+async def _notice_trim_fleet(store):
+    sessions = Sessions(store, local_host="fixture")
+    root = await sessions.open("fixture", "root", provider="shell", role="assistant", no_watch=True)
+    await store.update_session("fixture", "root", pane_status="pane_alive")
+    lead = await sessions.open("fixture", "lead", provider="shell", role="lead", no_watch=True,
+                               parent_stream_id="fixture:root")
+    obs = {"fixture:root": _live_root(root),
+           "fixture:lead": {"session_generation": lead["session_generation"], "working": True}}
+    binding = ("fixture:root", root["session_generation"])
+    await store.evaluate_watch_wake(obs, now=100, root_binding=binding)
+    await store.evaluate_watch_wake(obs, now=1900, root_binding=binding)
+    return obs, binding
+
+
+def test_notice_trim_working_only_does_not_repeat(monkeypatch):
+    async def run():
+        store = Store(":memory:"); store.start()
+        try:
+            obs, binding = await _notice_trim_fleet(store)
+            for now, working in ((3700, False), (5500, None), (7300, True)):
+                obs["fixture:lead"]["working"] = working
+                await store.evaluate_watch_wake(obs, now=now, root_binding=binding)
+            rows = await store.submit(lambda c: list(c.execute(
+                "SELECT body FROM v2_outbound_notices WHERE kind='lane_digest'")))
+            assert len(rows) == 1
+            assert match_message_envelope(rows[0][0])["lanes"][0]["working"] is True
+            await store.update_session("fixture", "lead", title="Changed durable status")
+            obs["fixture:lead"]["working"] = False
+            await store.evaluate_watch_wake(obs, now=9100, root_binding=binding)
+            rows = await store.submit(lambda c: list(c.execute(
+                "SELECT body FROM v2_outbound_notices WHERE kind='lane_digest' ORDER BY created_at")))
+            assert len(rows) == 2
+            assert match_message_envelope(rows[-1][0])["lanes"][0]["working"] is False
+        finally: store.stop()
+    monkeypatch.setenv("PENTACLE_TREE_IDLE_S", "0")
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("disposition", ["pending", "delivered", "terminal", "absent"])
+def test_notice_trim_restart_recovers_only_undelivered_terminal(tmp_path, monkeypatch, disposition):
+    async def run():
+        store = Store(str(tmp_path / "fleet.db")); store.start()
+        try:
+            obs, binding = await _notice_trim_fleet(store)
+            def dispose(c):
+                with c:
+                    if disposition == "delivered":
+                        c.execute("UPDATE v2_outbound_notices SET delivered_at='2026-10-12T00:00:00Z' WHERE kind='lane_digest'")
+                    elif disposition == "terminal":
+                        c.execute("UPDATE v2_outbound_notices SET terminal_at='2026-10-12T00:00:00Z',terminal_reason='persisted_suppressed' WHERE kind='lane_digest'")
+                    elif disposition == "absent":
+                        c.execute("DELETE FROM v2_outbound_notices WHERE kind='lane_digest'")
+            await store.submit(dispose)
+            store.stop(); store.start()
+            await store.evaluate_watch_wake(obs, now=3700, root_binding=binding)
+            sequence = await store.submit(lambda c: c.execute(
+                "SELECT sequence FROM v2_fleet_digest_state WHERE root=? AND root_generation=?", binding).fetchone()[0])
+            assert sequence == (2 if disposition in {"terminal", "absent"} else 1)
+            pending = await store.submit(lambda c: c.execute(
+                "SELECT COUNT(*) FROM v2_outbound_notices WHERE kind='lane_digest' AND terminal_at IS NULL AND delivered_at IS NULL").fetchone()[0])
+            assert pending == (0 if disposition == "delivered" else 1)
+        finally: store.stop()
+    monkeypatch.setenv("PENTACLE_TREE_IDLE_S", "0")
+    asyncio.run(run())
+
+
+def test_notice_trim_enqueue_failure_does_not_advance_digest(monkeypatch):
+    import store_watch_wake
+    async def run():
+        store = Store(":memory:"); store.start()
+        try:
+            obs, binding = await _notice_trim_fleet(store)
+            await store.update_session("fixture", "lead", title="New material")
+            before = await store.submit(lambda c: tuple(c.execute(
+                "SELECT next_due,last_hash,sequence FROM v2_fleet_digest_state").fetchone()))
+            insert = store_watch_wake._insert_outbound_notice_conn
+            def fail(*args, **kwargs): raise RuntimeError("synthetic insert failure")
+            monkeypatch.setattr(store_watch_wake, "_insert_outbound_notice_conn", fail)
+            await store.evaluate_watch_wake(obs, now=3700, root_binding=binding)
+            after = await store.submit(lambda c: tuple(c.execute(
+                "SELECT next_due,last_hash,sequence FROM v2_fleet_digest_state").fetchone()))
+            assert after == before
+            monkeypatch.setattr(store_watch_wake, "_insert_outbound_notice_conn", insert)
+            await store.evaluate_watch_wake(obs, now=3700, root_binding=binding)
+            assert await store.submit(lambda c: c.execute(
+                "SELECT sequence FROM v2_fleet_digest_state").fetchone()[0]) == 2
+        finally: store.stop()
+    monkeypatch.setenv("PENTACLE_TREE_IDLE_S", "0")
+    asyncio.run(run())

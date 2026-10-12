@@ -82,6 +82,28 @@ _AUTHORITY_LOSS_KEY = "assistant.authority.loss_notice"
 log = logging.getLogger("chat_streamd_v2.assistant_lane_rulings")
 
 
+def _compact_outcome(outcome: Any) -> dict[str, Any] | None:
+    """Keep release facts in the notice; full detail stays on the ruling row."""
+    if not isinstance(outcome, dict):
+        return None
+    fields = ("type", "ok", "state", "stream_id", "error", "error_code", "reason",
+              "already_closed", "admitted_count", "admitted_scope", "admitted_set_authoritative")
+    compact = {key: outcome[key] for key in fields if key in outcome}
+    if isinstance(outcome.get("admitted_sessions"), list):
+        compact["admitted_sessions"] = [
+            seat if isinstance(seat, str) else seat["stream_id"]
+            for seat in outcome["admitted_sessions"]
+            if isinstance(seat, str) or (isinstance(seat, dict) and isinstance(seat.get("stream_id"), str))
+        ]
+    delivery = outcome.get("initial_prompt_delivery")
+    if isinstance(delivery, dict):
+        compact["initial_prompt_delivery"] = {
+            key: delivery[key] for key in ("state", "delivery_status", "error", "error_code", "reason")
+            if key in delivery
+        }
+    return compact
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -611,7 +633,8 @@ class AssistantLaneRulings:
                 "target": request["target_stream_id"], "ruling": request["ruling"],
                 "state": request["state"], "reason": request["reason"],
                 "conditions": request["conditions"],
-                "outcome": json.loads(request["outcome_json"]) if request.get("outcome_json") else None,
+                "outcome": _compact_outcome(json.loads(request["outcome_json"])) if request.get("outcome_json") else None,
+                "detail_ref": {"table": "v2_assistant_lane_rulings", "ruling_request_id": rid},
             }),
             metadata={"authority_generation": request["requester_generation"]},
         )
