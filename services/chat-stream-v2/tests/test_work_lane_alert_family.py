@@ -14,13 +14,13 @@ from test_error_alerts import subject  # noqa: F401
 
 
 def test_lane_family_registered():
-    assert error_adapters.FAMILY_CODES.get("work_lane.v1") == frozenset({"lane_stale", "lane_completed"})
+    assert error_adapters.FAMILY_CODES.get("work_lane.v1") == frozenset({"lane_stale", "lane_completed", "lane_estimate_missing"})
 
 
 @pytest.fixture
 def lane_registry(monkeypatch):
     # Isolate downstream RED predicates from the missing registration.
-    monkeypatch.setitem(error_adapters.FAMILY_CODES, "work_lane.v1", frozenset({"lane_stale", "lane_completed"}))
+    monkeypatch.setitem(error_adapters.FAMILY_CODES, "work_lane.v1", frozenset({"lane_stale", "lane_completed", "lane_estimate_missing"}))
 
 
 async def open_lane(s, code="lane_stale", episode="lane:stale:1"):
@@ -29,7 +29,7 @@ async def open_lane(s, code="lane_stale", episode="lane:stale:1"):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["off", "record-only", "on"])
-@pytest.mark.parametrize("code", ["lane_stale", "lane_completed"])
+@pytest.mark.parametrize("code", ["lane_stale", "lane_completed", "lane_estimate_missing"])
 async def test_lane_digest_only_mode_independent(subject, lane_registry, monkeypatch, mode, code):
     s = subject
     monkeypatch.setenv("PENTACLE_ERROR_ALERTS_MODE", mode)

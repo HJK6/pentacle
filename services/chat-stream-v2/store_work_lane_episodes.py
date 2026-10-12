@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Literal, Protocol
 
-from work_lane_progress import lane_progress
+from work_lane_progress import lane_progress, lane_estimate_missing
 
 log = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ DDL = """
 CREATE TABLE IF NOT EXISTS v2_work_lane_episodes (
     episode_id TEXT PRIMARY KEY,
     lane_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('completed','stale')),
+    kind TEXT NOT NULL CHECK(kind IN ('completed','stale','estimate_missing')),
     sequence INTEGER NOT NULL CHECK(sequence >= 1),
     opened_at TEXT NOT NULL,
     cleared_at TEXT,
@@ -26,15 +26,40 @@ CREATE TABLE IF NOT EXISTS v2_work_lane_episodes (
 
 
 def ensure_work_lane_episodes_schema(conn) -> None:
-    conn.execute(DDL)
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_work_lane_episodes_open "
-                 "ON v2_work_lane_episodes(lane_id,kind) WHERE cleared_at IS NULL")
+    # Widen only this CHECK, preserving immutable openings and delivery proofs.
+    # A savepoint is atomic both at Store startup and inside a caller transaction.
+    conn.execute("SAVEPOINT work_lane_episode_constraint")
+    try:
+        table = "v2_work_lane_episodes"
+        existing = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                                (table,)).fetchone()
+        if existing and "'estimate_missing'" not in existing[0]:
+            indexes = [r[0] for r in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL",
+                (table,))]
+            columns = ",".join('"' + r[1] + '"' for r in conn.execute(f"PRAGMA table_info({table})"))
+            replacement = table + "_replacement"
+            conn.execute(DDL.replace("CREATE TABLE IF NOT EXISTS " + table, "CREATE TABLE " + replacement))
+            conn.execute(f"INSERT INTO {replacement} ({columns}) SELECT {columns} FROM {table} ORDER BY rowid")
+            conn.execute(f"DROP TABLE {table}")
+            conn.execute(f"ALTER TABLE {replacement} RENAME TO {table}")
+            for statement in indexes:
+                conn.execute(statement)
+        else:
+            conn.execute(DDL)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_work_lane_episodes_open "
+                     "ON v2_work_lane_episodes(lane_id,kind) WHERE cleared_at IS NULL")
+        conn.execute("RELEASE work_lane_episode_constraint")
+    except BaseException:
+        conn.execute("ROLLBACK TO work_lane_episode_constraint")
+        conn.execute("RELEASE work_lane_episode_constraint")
+        raise
 
 
 @dataclass(frozen=True)
 class LaneEpisodeFact:
     lane_id: str
-    kind: Literal["completed", "stale"]
+    kind: Literal["completed", "stale", "estimate_missing"]
     episode_id: str
     opened_at: str
     family: str = "work_lane.v1"
@@ -104,7 +129,8 @@ class WorkLaneEpisodesStoreMixin:
                     conn.execute("UPDATE v2_assistant_composite_lanes SET lead_reported_done=? WHERE lane_id=?",
                                  (lane["_lead_reported_done"], lane["lane_id"]))
                     facts = lane_progress(lane, now_iso=stamp)
-                    for kind, condition in (("completed", facts["completion_pending"]), ("stale", facts["stale"])):
+                    for kind, condition in (("completed", facts["completion_pending"]), ("stale", facts["stale"]),
+                                            ("estimate_missing", lane_estimate_missing(lane))):
                         current = conn.execute("SELECT * FROM v2_work_lane_episodes "
                                                "WHERE lane_id=? AND kind=? AND cleared_at IS NULL",
                                                (lane["lane_id"], kind)).fetchone()

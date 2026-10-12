@@ -67,7 +67,7 @@ async def subject(root, *, configured=True):
             await composite.stop()
 
 
-async def adopt(s, *, kind="completed"):
+async def adopt(s, *, kind="completed", members=None):
     lead = None
     if kind == "stale":
         row = await s.server.sessions.open("fixture", "v2-lead", provider="codex", role="lead", visibility="visible")
@@ -75,7 +75,7 @@ async def adopt(s, *, kind="completed"):
     payload = {"adoption_key": "stream:synthetic-lane", "title": "Build paper bridges",
                "owner_kind": "operator", "work_state": "active" if lead else "paused",
                "visible_chat": {"stream_id": "fixture:assistant"},
-               "members": ["spec_demo__span"]}
+               "members": members or ["spec_demo__span"]}
     if lead:
         payload["lead"] = lead
     result = await s.store.apply_work_lane_operation(
@@ -83,8 +83,15 @@ async def adopt(s, *, kind="completed"):
         lane_id=None, expected_lane_version=None, payload=payload, actor_stream_id="fixture:v2-test",
         actor_generation=s.origin["session_generation"], binding_name=s.composite.config.name,
         env_binding=s.composite._env_binding())
-    await seed_observations(s.store, [member("completed" if kind == "completed" else "in_progress")])
+    await seed_observations(s.store, [lane_member(kind)])
     return result["lane"]
+
+
+def lane_member(kind):
+    item = member("completed" if kind == "completed" else "in_progress")
+    if kind == "estimate_missing":
+        item["estimate"] = None
+    return item
 
 
 async def drain(s):
@@ -103,7 +110,7 @@ async def notices(s):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["off", "record-only", "on"])
-@pytest.mark.parametrize("kind", ["completed", "stale"])
+@pytest.mark.parametrize("kind", ["completed", "stale", "estimate_missing"])
 async def test_inventory_emits_one_neutral_digest_line_per_episode(tmp_path, monkeypatch, mode, kind):
     monkeypatch.setenv("PENTACLE_ERROR_ALERTS_MODE", mode)
     monkeypatch.setenv("PENTACLE_VOICE_MODE", "off")
@@ -198,11 +205,12 @@ async def test_completion_settles_only_after_delivery_proof_and_clear_is_silent(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("deliver_before_restart", [False, True])
-async def test_restart_after_real_sink_commit_before_ref_latch_is_idempotent(tmp_path, monkeypatch, deliver_before_restart):
+@pytest.mark.parametrize("kind", ["completed", "estimate_missing"])
+async def test_restart_after_real_sink_commit_before_ref_latch_is_idempotent(tmp_path, monkeypatch, deliver_before_restart, kind):
     monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_ENABLED", "0")
     first_ref = None
     async with subject(tmp_path) as s:
-        await adopt(s)
+        await adopt(s, kind=kind)
         submit = s.store.submit
         async def crash_latch(fn):
             if fn.__name__ == "latch":
@@ -241,17 +249,18 @@ async def test_restart_after_real_sink_commit_before_ref_latch_is_idempotent(tmp
 
 
 @pytest.mark.asyncio
-async def test_clear_then_recur_uses_new_fact_and_digest(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["completed", "estimate_missing"])
+async def test_clear_then_recur_uses_new_fact_and_digest(tmp_path, monkeypatch, kind):
     monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_ENABLED", "0")
     async with subject(tmp_path) as s:
-        await adopt(s)
+        await adopt(s, kind=kind)
         await drain(s)
         await s.queue.drain_once()
         await seed_observations(s.store, [member("in_progress")])
         await drain(s)
         await s.queue.drain_once()
         assert len(s.provider.pastes) == 1
-        await seed_observations(s.store, [member()])
+        await seed_observations(s.store, [lane_member(kind)])
         await drain(s)
         await s.queue.drain_once()
         assert len(s.provider.pastes) == 2
@@ -262,14 +271,19 @@ async def test_clear_then_recur_uses_new_fact_and_digest(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_held_across_fd_rebind_delivers_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["completed", "estimate_missing"])
+@pytest.mark.parametrize("already_delivered", [False, True])
+async def test_held_across_fd_rebind_delivers_once(tmp_path, monkeypatch, kind, already_delivered):
     monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_ENABLED", "0")
     async with subject(tmp_path) as s:
-        await adopt(s)
+        await adopt(s, kind=kind)
         await drain(s)
         (episode,) = await episodes(s.store)
         await s.server.error_alerts.reconcile()
         await s.queue.front_desk_digest.tick()
+        if already_delivered:
+            await s.queue.drain_once()
+            assert len(s.provider.pastes) == 1
         new = await s.server.sessions.open("fixture", "v2-next", provider="codex", visibility="visible")
         def bind(conn):
             with conn:
@@ -295,16 +309,17 @@ async def test_held_across_fd_rebind_delivers_once(tmp_path, monkeypatch):
         rows = {r["notice_id"]: r for r in await notices(s)}
         delivered = [r for r in rows.values() if json.loads(r["metadata"]).get("typed_digest")
                      and s.server.error_alerts.delivery(r, rows)["state"] == "delivered"]
-        assert len(delivered) == 1 and delivered[0]["recipient_stream_id"] == "fixture:v2-next"
+        assert len(delivered) == 1 and delivered[0]["recipient_stream_id"] == ("fixture:v2-test" if already_delivered else "fixture:v2-next")
         proof = s.server.error_alerts.delivery(delivered[0], rows)
-        assert proof["recipient_generation"] == new["session_generation"] and proof["proof_at"]
+        assert proof["recipient_generation"] == (s.origin["session_generation"] if already_delivered else new["session_generation"]) and proof["proof_at"]
 
 
 @pytest.mark.asyncio
-async def test_real_core_commit_survives_clear_recur_during_sink_await(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["completed", "estimate_missing"])
+async def test_real_core_commit_survives_clear_recur_during_sink_await(tmp_path, monkeypatch, kind):
     monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_ENABLED", "0")
     async with subject(tmp_path) as s:
-        await adopt(s)
+        await adopt(s, kind=kind)
         entered, release = asyncio.Event(), asyncio.Event()
         emit = s.inventory.episode_sink.emit
         async def held_return(fact):
@@ -319,7 +334,7 @@ async def test_real_core_commit_survives_clear_recur_during_sink_await(tmp_path,
             await asyncio.wait_for(entered.wait(), 3)
             await seed_observations(s.store, [member("in_progress")])
             await s.store.reconcile_work_lane_episodes(None)
-            await seed_observations(s.store, [member()])
+            await seed_observations(s.store, [lane_member(kind)])
             await s.store.reconcile_work_lane_episodes(None)
             rows = await episodes(s.store)
             assert len(rows) == 2 and all(r["emitted_ref"] is None for r in rows)
