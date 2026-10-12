@@ -28,6 +28,42 @@ SID = "fixture:fd"
 pytestmark = pytest.mark.timeout(20)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["disable", "revision"])
+async def test_configuration_change_after_reader_skips_commit_evidence(budget_store, monkeypatch, change):
+    store, binding = budget_store
+    await pending_turn(store)
+    reader, commit = store._fd_archive_evidence, store._fd_commit_recovery
+    captured = {}
+
+    def reconfigure(snapshot):
+        result = reader(snapshot)
+        assert not result.get("reason"), result
+        captured["reader_used"] = snapshot["budget"].used
+        assert snapshot["state"]["recovery"]["spent"] == LIMIT
+        store.configure_fd_turn_budget(config=FdTurnBudgetConfig(
+            observer_enabled=change != "disable"), env_binding=binding)
+        return result
+
+    def traced(conn, snapshot, result):
+        statements = []
+        conn.set_trace_callback(statements.append)
+        try:
+            return commit(conn, snapshot, result)
+        finally:
+            conn.set_trace_callback(None)
+            captured.update(statements=statements, commit_used=snapshot["budget"].used)
+
+    monkeypatch.setattr(store, "_fd_archive_evidence", reconfigure)
+    monkeypatch.setattr(store, "_fd_commit_recovery", traced)
+    await peer_receipt(store)
+    assert await counts(store) == (0, 0)
+    claim = recovery_state(await store.fd_turn_budget_status(SID), status="failed")
+    assert claim["spent"] == LIMIT
+    assert not any(sql.lstrip().upper().startswith("SELECT") for sql in captured["statements"]), captured["statements"]
+    assert captured["commit_used"] == captured["reader_used"] == claim["used"]
+
+
 def make_archive(store):
     archive = Path(store.path).with_name("sessions_archive.db")
     with sqlite3.connect(archive) as conn:

@@ -2560,12 +2560,14 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         state = None
         with self._fd_config_lock:
             try:
-                budget.attach(conn)
-                conn.execute("BEGIN")
-                current = conn.execute("SELECT v=? FROM kv WHERE k=?", (snapshot["encoded"], key)).fetchone()
                 same = (self._fd_turn_budget_config is snapshot["config"]
-                        and self._fd_config_revision == snapshot["config_revision"]
-                        and self._fd_binding_conn(conn, sid) == binding and current is not None and current[0])
+                        and self._fd_config_revision == snapshot["config_revision"])
+                if same:
+                    budget.attach(conn)
+                    conn.execute("BEGIN")
+                    current = conn.execute("SELECT v=? FROM kv WHERE k=?", (snapshot["encoded"], key)).fetchone()
+                    same = (self._fd_binding_conn(conn, sid) == binding
+                            and current is not None and current[0])
                 if same and not reason:
                     latest = conn.execute("SELECT event_id FROM session_event_tail WHERE stream_id=? "
                         "AND session_created_at=? ORDER BY event_id DESC LIMIT 1", (sid, binding["lifecycle"])).fetchone()
