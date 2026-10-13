@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -218,8 +219,23 @@ async def test_single_recovery_claim_is_durable_before_offthread_work(
 
 
 @pytest.mark.asyncio
-async def test_one_allowance_survives_restart_receipt_replay_and_later_gap(budget_store, monkeypatch):
+@pytest.mark.parametrize("reader_delay", [0, 0.12])
+async def test_one_allowance_survives_restart_receipt_replay_and_later_gap(
+        budget_store, monkeypatch, reader_delay):
+    # This checks the durable allowance contract independently of scheduling.
+    # Keep asyncio timers live while the real budget/reader use controlled time.
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", real_monotonic)
+    now = real_monotonic()
+    monkeypatch.setattr(time, "monotonic", lambda: now)
     store, binding = budget_store
+    reader = store._fd_archive_evidence
+
+    def delayed_reader(snapshot):
+        time.sleep(reader_delay)
+        return reader(snapshot)
+
+    monkeypatch.setattr(store, "_fd_archive_evidence", delayed_reader)
     make_archive(store)
     await pending_turn(store)
     calls = spy_reader(store, monkeypatch)
@@ -492,6 +508,44 @@ async def test_oversized_source_is_not_fetched_or_decoded_by_recovery(budget_sto
                 r"length\s*\(\s*CAST\s*\(\s*event_json\s+AS\s+BLOB\s*\)\s*\)",
                 "", projection, flags=re.I)
             assert not re.search(r"\bevent_json\b|(?:SELECT|,)\s*\*", without_sizes, re.I), query
+    assert await counts(store) == (0, 0)
+
+
+
+def test_recovery_budget_real_deadline_exhausts_before_first_charge():
+    before = time.monotonic()
+    budget = fd_turn_budget.RecoveryBudget()
+    after = time.monotonic()
+    assert before + 0.1 <= budget.deadline <= after + 0.1
+    time.sleep(0.12)
+    with pytest.raises(fd_turn_budget.RecoveryBudgetExceeded, match="recovery_allowance_exhausted"):
+        budget.charge(1)
+    assert budget.used == 0
+    assert budget.exhausted
+
+
+@pytest.mark.asyncio
+async def test_recovery_real_scheduling_delay_persists_exhaustion(budget_store, monkeypatch):
+    store, _ = budget_store
+    make_archive(store)
+    await pending_turn(store)
+
+    def delayed(reader, snapshot):
+        time.sleep(0.12)
+        return reader(snapshot)
+
+    calls = spy_reader(store, monkeypatch, replacement=delayed)
+    await peer_receipt(store)
+    state = await store.fd_turn_budget_status(SID)
+    claim = dict(recovery_state(state, status="failed"))
+    assert claim["reason"] == "recovery_allowance_exhausted"
+    assert claim["used"] == 0
+    assert state["continuity_gap"]
+    assert len(calls) == 1
+    await peer_receipt(store)
+    await append(store, normalized("TOOL_USE", 8))
+    assert recovery_state(await store.fd_turn_budget_status(SID)) == claim
+    assert len(calls) == 1
     assert await counts(store) == (0, 0)
 
 
