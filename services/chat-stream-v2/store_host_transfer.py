@@ -233,7 +233,8 @@ def claim(conn,msg,auth,*,name,composite,env_binding,advisor,helpers,trusted_hos
             raise TransferError('transfer_member_authority_unknown')
         # Preserve source metadata, not credentials or transcript fields.
         row['sources'][sid]={k:source.get(k) for k in (*SOURCE_FIELDS,'visibility','phase','objective',
-            'spec_id','qualified_spec_ids','spec_binding_provenance','self_close_on_completion','no_watch')}
+            'objective_source','spec_id','spec_ids','spec_resolution','qualified_spec_ids',
+            'spec_binding_provenance','self_close_on_completion','no_watch')}
     if conn.execute('SELECT 1 FROM v2_host_transfers WHERE composite=? AND input_identity=?',
                     (composite,route['input_identity'])).fetchone():
         raise TransferError('transfer_input_consumed')
@@ -322,6 +323,13 @@ def _pending_effects(conn, sources):
         if payload.get('parent_stream_id') in sources or payload.get('handoff_from_stream_id') in sources:
             raise TransferError('transfer_pending_spawn')
     for sid in sources:
+        # Claims increment attempts before releasing the Store transaction.
+        # Even an expired lease can represent a delayed external paste. Refuse
+        # unresolved attempted notices until their existing queue settles them.
+        if conn.execute("""SELECT 1 FROM v2_outbound_notices WHERE recipient_stream_id=?
+            AND delivered_at IS NULL AND terminal_at IS NULL
+            AND (attempts>0 OR lease_owner IS NOT NULL)""",(sid,)).fetchone():
+            raise TransferError('transfer_uncertain_notice')
         if conn.execute('''SELECT 1 FROM v2_schedules WHERE
             (owner_stream_id=? OR parent_stream_id=? OR handoff_from_stream_id=?)
             AND state IN ('firing','indeterminate')''',(sid,sid,sid)).fetchone():
@@ -359,8 +367,8 @@ def commit(conn,cid,registry,*,now=None):
         sid,gen,target,tgen=part['source'],part['source_generation'],part['target'],part['target_generation']
         source=row['sources'][sid]
         host,name=target.split(':',1)
-        fields={k:source[k] for k in ('role','visibility','phase','objective','spec_id',
-                                    'qualified_spec_ids','spec_binding_provenance','self_close_on_completion')}
+        fields={k:source[k] for k in ('role','visibility','phase','objective','objective_source','spec_id','spec_ids','spec_resolution',
+                                    'qualified_spec_ids','spec_binding_provenance','self_close_on_completion','no_watch')}
         fields['parent_stream_id']=mapping.get(source['parent_stream_id'],(source['parent_stream_id'],None))[0]
         fields['handoff_from_stream_id']=sid
         conn.execute('UPDATE sessions SET '+','.join(k+'=?' for k in fields)+' WHERE host=? AND session_name=?',
@@ -445,14 +453,19 @@ def _move_custody(conn,cid,sid,gen,target,tgen):
     # Undelivered durable notices keep ids/deduplication and delivery history.
     # Generation-bearing notification metadata is handled by the question
     # resolver/projection; watch facts use the exact transferred owner above.
-    for notice in conn.execute('SELECT notice_id,metadata FROM v2_outbound_notices WHERE recipient_stream_id=? AND delivered_at IS NULL AND terminal_at IS NULL',(sid,)).fetchall():
+    for notice in conn.execute('SELECT * FROM v2_outbound_notices WHERE recipient_stream_id=? AND delivered_at IS NULL AND terminal_at IS NULL',(sid,)).fetchall():
         metadata=json.loads(notice['metadata'] or '{}')
         if metadata.get('owner_generation') not in (None,gen): continue
-        if 'owner_generation' in metadata: metadata['owner_generation']=tgen
+        for key in ('owner_generation','authority_generation','root_generation'):
+            if metadata.get(key)==gen: metadata[key]=tgen
         if (metadata.get('producer_stream_id'),metadata.get('producer_session_generation')) == (sid,gen):
             metadata.update(producer_stream_id=target,producer_session_generation=tgen)
-        conn.execute('UPDATE v2_outbound_notices SET recipient_stream_id=?,metadata=? WHERE notice_id=?',
-                     (target,canonical(metadata),notice['notice_id']))
+        from store_routing import _outbound_notice_digest
+        metadata_json=json.dumps(metadata,sort_keys=True,separators=(',',':'))
+        projected_digest=_outbound_notice_digest(notice['kind'],notice['dedupe_key'],target,
+            notice['tell_id'],notice['body'],metadata_json,notice['source_stream_id'] or '',notice['episode_id'] or '')
+        conn.execute('UPDATE v2_outbound_notices SET recipient_stream_id=?,metadata=?,payload_digest=? WHERE notice_id=?',
+                     (target,metadata_json,projected_digest,notice['notice_id']))
 
 
 def effective_ruling(conn,row):

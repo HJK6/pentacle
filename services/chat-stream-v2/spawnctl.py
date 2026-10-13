@@ -1435,7 +1435,7 @@ class SpawnCtl:
                 raise TransferError('authority_' + state)
             context = actor_context.set((auth.get('stream_id'), auth.get('session_generation')))
         try:
-            task = asyncio.create_task(self._spawn_guarded(msg, local_host, admission=admission))
+            task = asyncio.create_task(self._spawn_effect_guarded(msg, local_host, admission=admission))
         finally:
             if context is not None:
                 actor_context.reset(context)
@@ -1461,6 +1461,25 @@ class SpawnCtl:
             host = str(msg.get("host") or local_host).strip()
             reply.update(await self._admitted_for_key(host, idempotency_key))
         return reply
+
+    async def _spawn_effect_guarded(self, msg, local_host, *, admission=None):
+        """The detached obligation owns the lease through outcome and cleanup.
+
+        Its waiting RPC must not hold this same lock: losing that request does
+        not cancel the durable launch, and retirement must drain the launch.
+        """
+        from store_host_transfer import actor_context
+        actor = actor_context.get()
+        lock_factory = getattr(self.sessions, 'actor_effect_lock', None)
+        reset = actor_context.set(actor)
+        try:
+            if actor and all(actor) and lock_factory is not None:
+                async with lock_factory(actor):
+                    await self.store.require_current_actor(*actor)
+                    return await self._spawn_guarded(msg, local_host, admission=admission)
+            return await self._spawn_guarded(msg, local_host, admission=admission)
+        finally:
+            actor_context.reset(reset)
 
     async def _spawn_guarded(
         self,
@@ -1755,14 +1774,14 @@ class SpawnCtl:
         raw_resume_session_id = msg.get("resume_session_id")
         if raw_resume_session_id is None:
             name = str(msg.get("session_name") or "").strip() or f"v2-{uuid.uuid4().hex[:8]}"
-            from store_host_transfer import reserved_target
-            reserved = await self.store.submit(lambda c: reserved_target(c, f'{host}:{name}'))
-            if reserved and (msg.get('_auth_context') or {}).get('service_actor') != 'daemon:host-transfer':
-                raise VerbError('transfer_target_reserved', 'migration owns this destination identity')
             # Preserve the fresh-spawn rejection point: reserved actors fail
             # before transport or controller state is consulted.
             if f"{host}:{name}" in RESERVED_LIFECYCLE_ACTORS:
                 raise VerbError("reserved_actor", "daemon lifecycle actor ids cannot be registered")
+            from store_host_transfer import reserved_target
+            reserved = await self.store.submit(lambda c: reserved_target(c, f'{host}:{name}'))
+            if reserved and (msg.get('_auth_context') or {}).get('service_actor') != 'daemon:host-transfer':
+                raise VerbError('transfer_target_reserved', 'migration owns this destination identity')
         # Remote spawn is fenced BEFORE anything is reserved or created: an
         # offline peer fails fast (`host_offline`) via one bounded SSH probe, so
         # a dead host costs nothing and never stalls (spec item 2). Without a
@@ -2183,6 +2202,10 @@ class SpawnCtl:
                 return reply
             raise RuntimeError("prompt spawn retry loop exhausted without an outcome")
         except Exception as exc:
+            # Daemon settlement is scoped below to this intent/request and its
+            # created generation. A retired initiator cannot disable rollback.
+            from store_host_transfer import actor_context
+            actor_context.set(None)
             if isinstance(exc, SpecInputsUnavailable):
                 exc = VerbError("spec_source_changed", "source lifecycle or spec binding changed")
             reason = getattr(exc, "code", None) or "spawn_failed"

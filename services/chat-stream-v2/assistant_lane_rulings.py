@@ -531,6 +531,14 @@ class AssistantLaneRulings:
 
     async def _enqueue_notice(self, request: dict[str, Any]) -> None:
         rid = request["ruling_request_id"]
+        # The ruling intent is immutable. Its notice already owns the original
+        # body/source and delivery history; transfer projects only undelivered
+        # recipient custody. Rebuilding from an effective ruling would rewrite
+        # that provenance or replay a delivered request.
+        if await self.store.submit(lambda c: c.execute(
+                "SELECT 1 FROM v2_outbound_notices WHERE notice_id=?",
+                ("assistant-lane-ruling:" + rid,)).fetchone() is not None):
+            return
         intent = json.loads(request["intent_json"])
         fields = {key: intent.get(key) for key in ("objective", "provider", "model", "effort", "spec_id", "role", "budget", "eta", "_ruling_report", "_ruling_report_waiver")
                   if intent.get(key) is not None}

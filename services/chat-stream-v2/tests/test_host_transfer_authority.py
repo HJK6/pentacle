@@ -422,3 +422,155 @@ def test_concurrent_transfer_and_emergency_revoke_has_one_winner(tmp_path,winner
                 assert grant['stream_id'] is None
             assert await store.transfer_authority_state(OLD,auth['session_generation'])=='retired'
     asyncio.run(run())
+
+
+def test_successor_preserves_full_spec_and_watch_metadata(tmp_path):
+    async def run():
+        async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):
+            def seed(c):
+                c.execute("UPDATE sessions SET spec_ids=?,spec_id=?,spec_resolution=?,objective=?,objective_source=?,no_watch=? WHERE host='node-a' AND session_name='old'",
+                    (json.dumps(['spec_one','spec_two']),'spec_one','resolved','Synthetic retained objective','explicit',0))
+            await store.submit(lambda c:transfer.transaction(c,seed))
+            row,_,_,_=await claim_bundle(store,server,gateway,composite)
+            parts=await prepare_bundle(store,server,row)
+            await server.host_transfer.commit(row)
+            fd=next(p for p in parts if p['source']==OLD)
+            source=await store.fetch_session('node-a','old')
+            target=await store.fetch_session(*fd['target'].split(':',1))
+            for field in ('spec_ids','spec_id','spec_resolution','objective','objective_source','no_watch'):
+                assert target[field]==source[field],field
+    asyncio.run(run())
+
+
+def test_emergency_retirement_drains_detached_spawn_effect(tmp_path):
+    from spawnctl import SpawnCtl
+    from test_lifecycle_continuity import Panes
+    async def run():
+        panes = Panes()
+        async with fixture(tmp_path, authority=True, tmux=panes) as (store, server, composite, gateway, _, __):
+            row, _, auth, _ = await claim_bundle(store, server, gateway, composite)
+            ctl = SpawnCtl(store, server.sessions, tmux=panes)
+            server.spawnctl = ctl
+            reached, release = asyncio.Event(), asyncio.Event()
+            original = panes.new_session
+            async def paused(*args, **kwargs):
+                reached.set()
+                await release.wait()
+                await original(*args, **kwargs)
+            panes.new_session = paused
+            request = asyncio.create_task(ctl.spawn({'command':'run', 'session_name':'detached',
+                'request_id':'detached-spawn', 'objective':'Synthetic spawn race', '_auth_context':auth}, 'node-a'))
+            revoke = None
+            try:
+                await asyncio.wait_for(reached.wait(), 3)
+                request.cancel()
+                await asyncio.gather(request, return_exceptions=True)
+                revoke = asyncio.create_task(server._on_assistant_lifecycle(emergency_message(row, auth)))
+                await asyncio.sleep(.05)
+                assert not revoke.done(), 'retirement crossed an unsettled detached physical spawn'
+                release.set()
+                await asyncio.wait_for(asyncio.gather(*ctl._background_spawns), 5)
+                assert (await asyncio.wait_for(revoke, 3))['type']=='assistant.lifecycle.ok'
+                assert await store.transfer_authority_state(OLD, auth['session_generation'])=='retired'
+                assert not await store.reservations(include_expired=True)
+            finally:
+                release.set()
+                await asyncio.gather(request, *ctl._background_spawns, *([revoke] if revoke else []), return_exceptions=True)
+    asyncio.run(run())
+
+
+def test_retired_parent_does_not_rollback_unrelated_due_wake(tmp_path):
+    async def run():
+        async with fixture(tmp_path, authority=True) as (store, server, composite, gateway, _, __):
+            row, _, auth, _ = await claim_bundle(store, server, gateway, composite)
+            unrelated = await store.open_session('node-a','unrelated',no_watch=True)
+            wake = await store.register_watch_wake('wake','node-a:unrelated',unrelated['session_generation'],
+                {'request_id':'unrelated-due','due_at':110,'note':'fixture','urgent':False},now=100)
+            await store.evaluate_watch_wake({},now=100)
+            await server._on_assistant_lifecycle(emergency_message(row,auth))
+            assert await store.evaluate_watch_wake({},now=110)==1
+            saved = await store.list_watch_wake('wake','node-a:unrelated',unrelated['session_generation'])
+            assert next(w for w in saved if w['id']==wake['id'])['state']=='consumed'
+            assert (await store.fetch_session('node-a','old'))['status']=='open'
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('claimed',[False,True])
+def test_pending_notices_keep_generation_digest_and_uncertain_effect_fence(tmp_path,claimed):
+    async def run():
+        async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):
+            row,_,_,_=await claim_bundle(store,server,gateway,composite)
+            parts=await prepare_bundle(store,server,row)
+            source=row['sources'][ADVISOR]
+            args={'notice_id':'pending-advisor','kind':'assistant_lane_ruling_request','dedupe_key':'pending-advisor',
+                  'recipient_stream_id':ADVISOR,'tell_id':'pending-advisor','body':'Synthetic ruling',
+                  'metadata':{'authority_generation':source['session_generation'],'ruling_request_id':'pending-ruling'}}
+            await store.enqueue_outbound_notice(**args)
+            if claimed:
+                await store.claim_outbound_notice('pending-advisor',owner='fixture-delivery',lease_s=30,force=True)
+                with pytest.raises(transfer.TransferError,match='transfer_uncertain_notice'):
+                    await server.host_transfer.commit(row)
+                assert (await store.lifecycle_authority_current())['stream_id']==OLD
+            else:
+                await server.host_transfer.commit(row)
+                target=next(p for p in parts if p['source']==ADVISOR)
+                replay=await store.enqueue_outbound_notice(**{**args,'recipient_stream_id':target['target'],
+                    'metadata':{**args['metadata'],'authority_generation':target['target_generation']}})
+                assert replay['created'] is False
+    asyncio.run(run())
+
+
+def test_commit_never_waits_for_second_actor_while_holding_first(tmp_path):
+    async def run():
+        async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):
+            row,_,_,_=await claim_bundle(store,server,gateway,composite)
+            await prepare_bundle(store,server,row)
+            first=row['actor']
+            second=next(sid for sid in row['sources'] if sid!=first)
+            first_lock=server.host_transfer.actor_lock((first,row['sources'][first]['session_generation']))
+            second_lock=server.host_transfer.actor_lock((second,row['sources'][second]['session_generation']))
+            async with second_lock:
+                with pytest.raises(transfer.TransferError,match='transfer_effect_busy'):
+                    await asyncio.wait_for(server.host_transfer.commit(row),.2)
+            assert not first_lock.locked()
+            assert (await server.host_transfer.commit(row))['state']=='committed'
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('already_delivered',[False,True])
+def test_pending_ruling_delivery_resolves_successor_and_preserves_identity(tmp_path,already_delivered):
+    from comms import Comms
+    from outbound_notices import ASSISTANT_AUTHORITY_REQUEST_TOKEN
+    async def run():
+        async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):
+            row,_,_,_=await claim_bundle(store,server,gateway,composite)
+            rulings=server.lane_rulings
+            request=await rulings._create(action='session_close',key='pending-close',intent={'reason':'fixture'},
+                requester=OLD,requester_generation=row['sources'][OLD]['session_generation'],
+                binding=await rulings.binding(),target=ADVISOR,target_generation=row['sources'][ADVISOR]['session_generation'])
+            await rulings._enqueue_notice(request)
+            notice_id='assistant-lane-ruling:'+request['ruling_request_id']
+            if already_delivered:
+                await store.claim_outbound_notice(notice_id,owner='fixture',lease_s=30,force=True)
+                assert await store.complete_outbound_notice(notice_id,owner='fixture')
+            before=await store.submit(lambda c:dict(c.execute('SELECT * FROM v2_outbound_notices WHERE notice_id=?',(notice_id,)).fetchone()))
+            parts=await prepare_bundle(store,server,row)
+            await server.host_transfer.commit(row)
+            effective=await rulings._fetch(request['ruling_request_id'])
+            await rulings._enqueue_notice(effective)
+            after=await store.submit(lambda c:dict(c.execute('SELECT * FROM v2_outbound_notices WHERE notice_id=?',(notice_id,)).fetchone()))
+            for key in ('notice_id','tell_id','body','source_stream_id','attempts','delivered_at'):
+                assert after[key]==before[key]
+            if already_delivered:
+                assert after==before
+            else:
+                advisor=next(p for p in parts if p['source']==ADVISOR)
+                transport=Comms.__new__(Comms);transport.store=store;transport.sessions=server.sessions
+                await transport._validate_assistant_request_target({
+                    '_assistant_authority_request_token':ASSISTANT_AUTHORITY_REQUEST_TOKEN,
+                    '_assistant_authority_request_generation':json.loads(after['metadata'])['authority_generation'],
+                    '_assistant_lane_ruling_request_id':request['ruling_request_id'],
+                    'stream_id':after['recipient_stream_id']},{'final_target':advisor['target']})
+                original=await store.submit(lambda c:dict(c.execute('SELECT * FROM v2_assistant_lane_rulings WHERE ruling_request_id=?',(request['ruling_request_id'],)).fetchone()))
+                assert original['authority_stream_id']==ADVISOR
+    asyncio.run(run())

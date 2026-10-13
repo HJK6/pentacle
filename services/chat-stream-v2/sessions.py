@@ -984,7 +984,11 @@ class Sessions:
             raise VerbError("stream_ownership_unverified", "reparent requires a verified stream-token owner")
         from store_host_transfer import TransferError
         try:
-            await self.store.require_current_actor(caller, auth.get('session_generation'))
+            generation = auth.get('session_generation')
+            if not generation:  # legacy internal ownership calls; wire auth binds it
+                current = await self.store.fetch_session(*caller.split(':', 1))
+                generation = (current or {}).get('session_generation')
+            await self.store.require_current_actor(caller, generation)
         except TransferError as exc:
             raise VerbError(exc.code, str(exc)) from exc
         # Only the owner moves a worker: a top-level stream (including a

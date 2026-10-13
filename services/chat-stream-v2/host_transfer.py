@@ -166,12 +166,21 @@ class HostTransfer:
         # Drain producers before locks their effect paths acquire. Never wait
         # for a ruling release while holding authority/lifecycle/graph locks.
         async with AsyncExitStack() as stack:
-            for sid in sorted(row['sources']):
-                await stack.enter_async_context(self.actor_lock((sid,row['sources'][sid]['session_generation'])))
+            for index,sid in enumerate([row['actor'], *sorted(set(row['sources'])-{row['actor']})]):
+                lock=self.actor_lock((sid,row['sources'][sid]['session_generation']))
+                # A ruling can own one actor while a detached release needs
+                # another. Never wait on a second actor with the first held.
+                # Refusal releases this partial drain and retains the source.
+                if index and lock.locked():
+                    raise journal.TransferError('transfer_effect_busy')
+                await stack.enter_async_context(lock)
             rulings=self.server.lane_rulings
             if rulings is not None:
                 for key in sorted(rulings._release_locks):
-                    await stack.enter_async_context(rulings._release_locks[key])
+                    lock=rulings._release_locks[key]
+                    if lock.locked():
+                        raise journal.TransferError('transfer_effect_busy')
+                    await stack.enter_async_context(lock)
             if self.server.notify is not None:
                 await stack.enter_async_context(self.server.notify._host_transfer_lock)
             await stack.enter_async_context(composite._binding_lock)

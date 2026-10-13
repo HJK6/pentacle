@@ -849,6 +849,8 @@ class Server:
         self.local_host = local_host
         from host_transfer import HostTransfer
         self.host_transfer = HostTransfer(self)
+        if self.sessions is not None:
+            self.sessions.actor_effect_lock = self.host_transfer.actor_lock
         self.handlers['assistant.transfer'] = self.host_transfer.operation
         from watch_wake import WatchWake
         self.watch_wake = WatchWake(getattr(self.sessions, "store", None), self.sessions)
@@ -2139,11 +2141,12 @@ class Server:
         actor_reset = None
         try:
             auth = dispatch_msg.get('_auth_context') or {}
-            if auth.get('token_verified') and verb not in {'assistant.transfer','hello','ping'}:
+            if (auth.get('token_verified') and auth.get('session_generation')
+                    and not auth.get('dot_principal') and verb not in {'assistant.transfer','hello','ping'}):
                 actor = (auth.get('stream_id'), auth.get('session_generation'))
                 await self.store.require_current_actor(*actor)
                 actor_reset = host_transfer.actor_context.set(actor)
-            if actor_reset is not None and verb not in {'await_report','notification.await','request_stream_events'}:
+            if actor_reset is not None and verb not in {'spawn','await_report','notification.await','request_stream_events'}:
                 async with self.host_transfer.actor_lock(actor):
                     await self.store.require_current_actor(*actor)
                     reply = await handler(dispatch_msg)
@@ -4929,8 +4932,14 @@ class Server:
     async def _seat_close_admission(self, auth, caller, target, row):
         # Runs after acquiring the target lifecycle and graph locks, directly
         # before termination. Admission-time parentage is only an observation.
+        if (row or {}).get('status') == 'closed':
+            return  # Receipt-only repeat; no termination or authority effect.
         try:
-            await self.store.require_current_actor(caller, auth.get('session_generation'))
+            generation = auth.get('session_generation')
+            if not generation:  # legacy daemon-internal calls have no socket generation
+                current = await self.store.fetch_session(*caller.split(':', 1))
+                generation = (current or {}).get('session_generation')
+            await self.store.require_current_actor(caller, generation)
         except host_transfer.TransferError as exc:
             raise VerbError(exc.code, str(exc)) from exc
         if caller != target and (row or {}).get('parent_stream_id') != caller:
@@ -5048,9 +5057,12 @@ class Server:
                     await stack.enter_async_context(self.host_transfer.actor_lock((msg.get('target_stream_id'),msg.get('target_generation'))))
                     await stack.enter_async_context(self.sessions.assistant.authority_lock)
                     await stack.enter_async_context(self.sessions._graph_lock)
-                    receipt = await _finish_despite_cancel(self.store.lifecycle_authority_mutate(msg,
-                        {**auth,'operator_authenticated':True,'operator_principal':'operator:local-admin',
-                         'token_verified':False,'_emergency_verified':True}, self.sessions.assistant.role))
+                    try:
+                        receipt = await _finish_despite_cancel(self.store.lifecycle_authority_mutate(msg,
+                            {**auth,'operator_authenticated':True,'operator_principal':'operator:local-admin',
+                             'token_verified':False,'_emergency_verified':True}, self.sessions.assistant.role))
+                    except lifecycle_authority.AuthorityError as exc:
+                        raise VerbError(exc.code, str(exc)) from exc
                 return {'type':'assistant.lifecycle.ok','action':action,'receipt':receipt}
             try:
                 async with self.sessions.assistant.authority_lock:
