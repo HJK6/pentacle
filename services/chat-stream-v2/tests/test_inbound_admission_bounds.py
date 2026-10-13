@@ -378,3 +378,87 @@ def test_bootstrap_waiting_connections_are_bounded(monkeypatch):
             await asyncio.gather(*tasks)
         assert daemon._admission_connections == 0
     asyncio.run(run())
+
+
+def test_valid_cancel_has_reserved_admission_while_store_is_held(tmp_path, monkeypatch):
+    import threading
+    from store import Store
+    from sessions import Sessions
+    from spawnctl import SpawnCtl
+
+    monkeypatch.setenv("PENTACLE_ADMIT_ORDINARY", "1")
+
+    async def run():
+        store = Store(str(tmp_path / "cancel.db"))
+        store.start()
+        release = threading.Event()
+        entered = threading.Event()
+        blocker = None
+        try:
+            sessions = Sessions(store, local_host="synthetic")
+            spawnctl = SpawnCtl(store, sessions)
+            daemon = Server(store=store, sessions=sessions, spawnctl=spawnctl,
+                            local_host="synthetic")
+            assert await store.reserve_stream_id("synthetic", "pending", ttl_s=60,
+                                                 request_id="pending-request")
+
+            def barrier(conn):
+                entered.set()
+                assert release.wait(5)
+
+            blocker = asyncio.create_task(store.submit(barrier))
+            await eventually(entered.is_set)
+            async with clients(daemon, 2) as (ordinary, control):
+                ordinary.request("list_sessions", "held-ordinary")
+                await eventually(lambda: daemon._admission_pools["ordinary"].total[0] == 1)
+                ordinary.request("list_sessions", "refused-ordinary")
+                await eventually(lambda: len(refusals(ordinary)) == 1)
+                control.request("spawn_cancel", "cancel", target="pending-request")
+                # Valid target resolution is admitted and waits on Store; it
+                # cannot complete until release and is not a latency claim.
+                await eventually(lambda: daemon._admission_pools["control"].total[0] == 1
+                                 and store._queue.qsize() >= 2)
+                assert not any(f.get("request_id") == "cancel" for f in control.sent)
+                release.set()
+                await eventually(lambda: any(f.get("request_id") == "cancel" for f in control.sent))
+                result = next(f for f in control.sent if f.get("request_id") == "cancel")
+                assert result["type"] == "spawn_cancel.ok"
+                assert result["state"] == "cancelled"
+                assert (await store.spawn_cancellations("synthetic", "pending-request"))[0]["state"] == "cancelled"
+        finally:
+            release.set()
+            if blocker:
+                await blocker
+            assert store.stop(timeout=5)
+    asyncio.run(run())
+
+
+def test_repeated_bursts_return_all_accounting_to_baseline(monkeypatch):
+    monkeypatch.setenv("PENTACLE_ADMIT_ORDINARY", "4")
+
+    async def run():
+        daemon = Server()
+        release = asyncio.Event()
+        entered = []
+
+        async def hold(msg):
+            entered.append(msg["request_id"])
+            await release.wait()
+            return {"type": "hold.ok"}
+
+        daemon.handlers["hold"] = hold
+        for cycle in range(12):
+            release.clear()
+            entered.clear()
+            async with clients(daemon, 1, ["seat:reconnect"]) as (ws,):
+                for i in range(32):
+                    ws.request("hold", f"{cycle}-{i}")
+                await eventually(lambda: len(refusals(ws)) == 28)
+                assert len(entered) == len(request_tasks()) == 4
+                release.set()
+                await eventually(lambda: not request_tasks())
+            assert daemon._admission_connections == 0
+            assert not daemon._client_writer_tasks
+            assert all(pool.total == [0, 0] and not pool.connections and not pool.principals
+                       for pool in daemon._admission_pools.values())
+    asyncio.run(run())
