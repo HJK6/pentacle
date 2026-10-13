@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from claude_jsonl_norm import normalize_claude_jsonl_records
-from codex_rollout_norm import codex_session_identity, normalize_codex_rollout_record
+from codex_rollout_norm import codex_is_guardian_review, codex_session_identity, normalize_codex_rollout_record
 from context_adapters import parse_codex_context_reading
 from message_envelopes import annotate_message_envelope
 from prockill import canonical_start, process_tree, process_record
@@ -596,16 +596,17 @@ class Ingest:
             st.offset = 0
             st.file_id = None
             return 0
-        if provider == "codex" and st.session_id:
+        if provider == "codex":
             current_session_id = await asyncio.to_thread(
                 _codex_session_identity_from_fd, st.fd
             )
-            if current_session_id != st.session_id:
+            if not current_session_id or (st.session_id and current_session_id != st.session_id):
                 _close_stream(st)
                 st.path = ""
                 st.offset = 0
                 st.file_id = None
                 return 0
+            st.session_id = current_session_id
         # Consume only up to the last complete line; a partial trailing line is
         # left for the next pass (advance offset by the consumed byte count).
         last_nl = chunk.rfind(b"\n")
@@ -1104,6 +1105,8 @@ def _codex_session_identity_from_fd(fd: int) -> str | None:
         except json.JSONDecodeError:
             continue
         if isinstance(record, dict) and record.get("type") == "session_meta":
+            if codex_is_guardian_review(record):
+                return None
             session_id = codex_session_identity(record)
             return session_id or None
     return None
@@ -1170,5 +1173,17 @@ async def _open_writable_transcripts(root_pid: str) -> list[tuple[str, tuple[int
                 return []
             if not stat_module.S_ISREG(info.st_mode) or identity != (info.st_dev, info.st_ino):
                 return []
+            if "/.codex/sessions/" in value:
+                fd = _open_descriptor(value)
+                if fd is None:
+                    return []
+                try:
+                    opened = os.fstat(fd)
+                    if (opened.st_dev, opened.st_ino) != identity:
+                        return []
+                    if not _codex_session_identity_from_fd(fd):
+                        continue
+                finally:
+                    os.close(fd)
             files.setdefault(identity, value)
     return sorted((path, identity) for identity, path in files.items())

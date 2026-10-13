@@ -21,6 +21,7 @@ __all__ = [
     "normalize_codex_rollout_record",
     "normalize_codex_rollout_records",
     "codex_session_identity",
+    "codex_is_guardian_review",
 ]
 
 # `response_item` payload types carrying a tool invocation / its output. Codex
@@ -28,6 +29,24 @@ __all__ = [
 # for the freeform ones); both mean the same thing on the wire.
 _TOOL_CALL_TYPES = ("function_call", "custom_tool_call")
 _TOOL_OUTPUT_TYPES = ("function_call_output", "custom_tool_call_output")
+
+
+def codex_is_guardian_review(record: dict) -> bool:
+    """Recognize an internal review thread from its session header only.
+
+    Guardian requests/verdicts use ordinary user/assistant message envelopes.
+    Their bodies cannot distinguish them from genuine conversation content.
+    """
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return False
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("thread_source") == "guardian_review":
+        return True
+    source = payload.get("source")
+    subagent = source.get("subagent") if isinstance(source, dict) else None
+    return isinstance(subagent, dict) and subagent.get("other") == "guardian"
 
 
 def codex_session_identity(record: dict) -> str:
@@ -283,10 +302,16 @@ def normalize_codex_rollout_records_grouped(
     to advance past exactly the records it consumed.
     """
     groups: list[list[dict]] = []
+    internal_review = False
     for record in records:
+        if isinstance(record, dict) and record.get("type") == "session_meta":
+            internal_review = codex_is_guardian_review(record)
         found = codex_session_identity(record)
         if found:
             session_id = found
+            groups.append([])
+            continue
+        if internal_review:
             groups.append([])
             continue
         groups.append(normalize_codex_rollout_record(

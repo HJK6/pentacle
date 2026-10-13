@@ -67,7 +67,7 @@ from pathlib import Path
 import websockets
 
 from claude_jsonl_norm import normalize_claude_jsonl_records_grouped
-from codex_rollout_norm import codex_session_identity, normalize_codex_rollout_records_grouped
+from codex_rollout_norm import codex_is_guardian_review, codex_session_identity, normalize_codex_rollout_records_grouped
 from machine_stats import STATS_INTERVAL_S, WIRE_VERSION as STATS_WIRE_VERSION, sample_machine_stats
 from mirror import _provider_from_session_name
 from logging_config import configure_logging
@@ -380,6 +380,7 @@ def _codex_transcript_for_pid(pane_pid: int) -> str:
         line[1:]
         for line in result.stdout.splitlines()
         if line.startswith("n") and _is_codex_rollout_path(line[1:])
+        and _codex_session_identity_from_bound_path(line[1:])
     }
     return max(paths, key=_mtime, default="")
 
@@ -456,6 +457,8 @@ def _codex_session_identity_from_bound_path(path: str) -> str:
             record = json.loads(line)
         except ValueError:
             continue
+        if codex_is_guardian_review(record):
+            return ""  # Internal thread, never a seat's conversation source.
         found = codex_session_identity(record) if isinstance(record, dict) else ""
         if found:
             return found
