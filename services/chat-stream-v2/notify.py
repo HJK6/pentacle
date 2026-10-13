@@ -1850,11 +1850,18 @@ class Notify:
         the session close/replacement hook so a departing asker cannot leave an
         actionable question behind. Broadcasts the terminal cards."""
         await self._await_ready()
+        # Lifecycle close holds the source lock: a committed migration may
+        # already own these questions even before the notifications projection.
+        # Do not take the transfer lock here (transfer takes lifecycle locks).
+        closed_generation = _nullable_text(generation) or None
+        if closed_generation and await self._effective_host_owner(
+                producer_stream_id, closed_generation) != (producer_stream_id, closed_generation):
+            return []
         # Scope to the closed generation (+ generationless rows) so a handoff
         # successor already open at a newer generation keeps its own questions.
         nids = await self._db.call(
             "expire_open_questions_for_producer", producer_stream_id,
-            only_generation=_nullable_text(generation) or None, reason="asker_closed",
+            only_generation=closed_generation, reason="asker_closed",
         )
         for nid in nids:
             await self._broadcast_notification_by_id(nid)

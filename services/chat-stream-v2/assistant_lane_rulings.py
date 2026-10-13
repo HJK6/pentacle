@@ -282,10 +282,21 @@ class AssistantLaneRulings:
                             target_generation: str, auth: dict[str, Any]) -> dict[str, Any] | None:
         if msg.get("_ruling_release") is self:
             return None
-        owned = await self.store.submit(lambda conn: effective_ruling(conn, conn.execute(
-            "SELECT * FROM v2_assistant_bart_lanes WHERE target_stream_id=? AND target_generation=?",
-            (target_stream_id, target_generation),
-        ).fetchone()))
+        def effective_ownership(conn):
+            row = conn.execute(
+                "SELECT * FROM v2_assistant_bart_lanes WHERE target_stream_id=? AND target_generation=?",
+                (target_stream_id, target_generation),
+            ).fetchone()
+            if row is not None:
+                return effective_ruling(conn, row)
+            # Admission provenance stays immutable. Locate moved custody by
+            # exact committed succession, never by a reused seat name.
+            for row in conn.execute("SELECT * FROM v2_assistant_bart_lanes"):
+                owned = effective_ruling(conn, row)
+                if (owned['target_stream_id'], owned['target_generation']) == (target_stream_id, target_generation):
+                    return owned
+            return None
+        owned = await self.store.submit(effective_ownership)
         if owned is None:
             return None
         if auth.get("operator_authenticated"):
@@ -877,8 +888,10 @@ class AssistantLaneRulings:
                 elif current["action"] == "session_close":
                     target_host, _, target_name = current["target_stream_id"].partition(":")
                     target = await self.store.fetch_session(target_host, target_name)
-                    expected = intent.get("expected_generation", current["target_generation"])
-                    if (expected != current["target_generation"] or target is None
+                    admitted = original.get('target', {'stream_id': current['target_stream_id'],
+                                                       'generation': current['target_generation']})
+                    expected = current["target_generation"]
+                    if (intent.get("expected_generation", admitted['generation']) != admitted['generation'] or target is None
                             or target.get("session_generation") != expected):
                         await self._mark(rid, "approved_but_not_closed", {"error": "target_generation_changed"})
                         return
@@ -890,13 +903,15 @@ class AssistantLaneRulings:
                             return
                     else:
                         report = await self.store.find_report(
-                            current["target_stream_id"], statuses=("done", "error", "aborted"),
-                            session_generation=current["target_generation"],
+                            admitted['stream_id'], statuses=("done", "error", "aborted"),
+                            session_generation=admitted['generation'],
                         )
                         if report is None or report.get("report_id") != intent.get("_ruling_report", {}).get("report_id"):
                             await self._mark(rid, "approved_but_not_closed", {"error": "report_fence_moved"})
                             return
-                    intent.setdefault("expected_generation", expected)
+                    # Project only this release invocation. Keep the durable
+                    # original intent, digest and report provenance unchanged.
+                    intent.update(host=target_host, session_name=target_name, expected_generation=expected)
                     intent["_ruling_release"] = self
                     result = await self.server._on_close(intent)
                     if result.get("type") == "close.deferred":

@@ -574,3 +574,97 @@ def test_pending_ruling_delivery_resolves_successor_and_preserves_identity(tmp_p
                 original=await store.submit(lambda c:dict(c.execute('SELECT * FROM v2_assistant_lane_rulings WHERE ruling_request_id=?',(request['ruling_request_id'],)).fetchone()))
                 assert original['authority_stream_id']==ADVISOR
     asyncio.run(run())
+
+
+def test_close_hook_before_question_projection_keeps_committed_successor_question(tmp_path):
+    from test_question_contract_d3 import _ask
+    async def run():
+        async with fixture(tmp_path,authority=True,questions=True) as (store,server,composite,gateway,_,__):
+            assert (await server.notify.prompt(_ask('close-gap',producer=OLD)))['type']=='prompt.ask.ok'
+            row,_,_,_=await claim_bundle(store,server,gateway,composite)
+            parts=await prepare_bundle(store,server,row)
+            await server.host_transfer.commit(row)
+            before=await server.notify._db.call('get_agent_question','close-gap')
+            assert before['state']=='open' and before['producer_stream_id']==OLD
+            result=await server.sessions.close('node-a','old',reason='Synthetic death before projection',
+                expected_generation=row['actor_generation'],operator_confirm=True)
+            assert result['closed']
+            await server.notify.project_host_transfer(parts)
+            after=await server.notify._db.call('get_agent_question','close-gap')
+            fd=next(p for p in parts if p['source']==OLD)
+            assert after['state']=='open'
+            assert (after['producer_stream_id'],after['producer_session_generation'])==(fd['target'],fd['target_generation'])
+    asyncio.run(run())
+
+
+async def governed_close(store,server,row,auth,*,report=False):
+    from types import SimpleNamespace
+    import time
+    async def probe(host):
+        return host == 'node-b'
+    async def state(name):
+        return 'alive' if name in server.sessions.tmux.live else 'gone'
+    async def identity(name):
+        return {'pane_id':name,'pane_pid':'synthetic-owned-process','pane_started_at':'synthetic-start'}
+    server.sessions.tmux.session_state=state
+    server.sessions.tmux.pane_identity=identity
+    server.sessions.hosts=SimpleNamespace(known=lambda h:h in {'node-a','node-b'},
+        is_local=lambda h:h=='node-a',probe_once=probe,tmux_for=lambda h:server.sessions.tmux)
+    rulings=server.lane_rulings
+    gen=row['sources'][ADVISOR]['session_generation']
+    await rulings._record_ownership({'requester_stream_id':OLD,'requester_generation':row['actor_generation'],
+        'ruling_request_id':'original-governed-admission'},ADVISOR,gen)
+    if report:
+        from routing_integrity import RoutingIntegrity
+        snapshot=await RoutingIntegrity(store,server.sessions).report_write_snapshot(ADVISOR)
+        await store.put_report({'report_id':'governed-report','from_stream_id':ADVISOR,'msg_id':0,'status':'done','ingested_at':time.time(),
+            'summary':'Synthetic retained completion','findings':[],'next_action':'Parent disposition'},
+            routing_snapshot=snapshot,announce=False)
+    msg={'type':'close','host':'node-a','session_name':'advisor','request_id':'governed-close',
+        'reason':'Synthetic manager closure','expected_generation':gen,'operator_confirm':True}
+    return msg,await rulings.request_close(msg,target_stream_id=ADVISOR,target_generation=gen,auth=auth)
+
+
+@pytest.mark.parametrize('report',[False,True])
+def test_pending_close_executes_exact_successor_and_preserves_original_intent(tmp_path,report):
+    async def run():
+        async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):
+            row,_,auth,_=await claim_bundle(store,server,gateway,composite)
+            _,pending=await governed_close(store,server,row,auth,report=report)
+            assert pending['type']=='close.pending_ruling'
+            rid=pending['ruling_request_id'];rulings=server.lane_rulings
+            original=(await rulings._fetch(rid))['intent_json']
+            parts=await prepare_bundle(store,server,row)
+            await server.host_transfer.commit(row)
+            advisor=next(p for p in parts if p['source']==ADVISOR)
+            reply=await rulings.ruling({'ruling_request_id':rid,'ruling':'approve','request_id':'approve-after-transfer'},
+                actor_stream_id=advisor['target'],actor_generation=advisor['target_generation'])
+            saved=await rulings._fetch(rid)
+            assert saved['state']=='done',reply
+            assert saved['intent_json']==original
+            assert (await store.fetch_session(*advisor['target'].split(':',1)))['status']=='closed'
+            assert (await store.fetch_session(*ADVISOR.split(':',1)))['status']=='open'
+    asyncio.run(run())
+
+
+def test_new_close_for_successor_retains_advisor_gate_with_exact_generation(tmp_path):
+    async def run():
+        async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):
+            row,_,auth,_=await claim_bundle(store,server,gateway,composite)
+            msg,_=await governed_close(store,server,row,auth)
+            parts=await prepare_bundle(store,server,row)
+            await server.host_transfer.commit(row)
+            advisor=next(p for p in parts if p['source']==ADVISOR);fd=next(p for p in parts if p['source']==OLD)
+            host,name=advisor['target'].split(':',1)
+            auth={'token_verified':True,'stream_id':fd['target'],'session_generation':fd['target_generation']}
+            pending=await server.lane_rulings.request_close({**msg,'host':host,'session_name':name,
+                'request_id':'new-governed-close','expected_generation':advisor['target_generation']},
+                target_stream_id=advisor['target'],target_generation=advisor['target_generation'],auth=auth)
+            assert pending and pending['type']=='close.pending_ruling'
+            # An unrelated generation of the same name is not succession.
+            unrelated_generation='unrelated-generation'
+            unrelated=await server.lane_rulings.request_close({**msg,'host':host,'session_name':name,
+                'request_id':'unrelated-reopened-close','expected_generation':unrelated_generation},
+                target_stream_id=advisor['target'],target_generation=unrelated_generation,auth=auth)
+            assert unrelated is None
+    asyncio.run(run())
