@@ -4285,7 +4285,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
     async def record_spawn_intent(
         self, host: str, session_name: str, payload: dict[str, Any], *,
         request_id: str | None = None, nonce: str | None = None,
-        expected_spec_sources=(), prepared_qa=None,
+        expected_spec_sources=(), prepared_qa=None, require_work_lane: bool = False,
     ) -> bool:
         """Persist what it would take to finish this spawn's row, BEFORE the
         pane exists. Written to the reservation the spawn already holds."""
@@ -4310,6 +4310,9 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             # and record_spawn_intent runs before payload exists.
             if res.get("payload") is None and float(res.get("expires_at") or 0.0) < time.time():
                 return False
+            if require_work_lane and res.get("payload") is None:
+                from work_lane_admission import require_work_lane_membership
+                require_work_lane_membership(conn, payload.get("open_fields") or {})
             prior_intent = json.loads(res.get("payload") or "{}")
             if "exchange_binding" in prior_intent:
                 prior_intent = {**payload, "exchange_binding": prior_intent["exchange_binding"]}

@@ -37,6 +37,7 @@ os.environ["PENTACLE_HOST_ID"] = "test-host"
 # passes it explicitly to Server(), which overrides the (now-absent) env.
 for _server_opt_in_env in (
     "PENTACLE_SEAT_OPERATOR_AUTHORITY",
+    "PENTACLE_WORK_LANE_ADMISSION_ENFORCE",
     "PENTACLE_DOT_PRINCIPAL_STREAM_IDS",
     "PENTACLE_DOT_READ_ENABLED",
     "PENTACLE_DOT_TLS_PORT",
