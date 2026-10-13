@@ -1948,6 +1948,10 @@ class NudgeJob:
                 if not basis.get("active") or basis.get("generation") != row.get("created_at"):
                     continue
                 prior_pending = basis.get("pending_prior_attempt")
+                # Late proof for carried input consumes this crossing as well.
+                # Store discards submitted prior state on a genuine new crossing.
+                if isinstance(prior_pending, dict) and prior_pending.get("outcome") == "submitted":
+                    continue
                 if (isinstance(prior_pending, dict)
                         and prior_pending.get("outcome") == "pending_input"):
                     saved = prior_pending.get("watermark")
@@ -1965,13 +1969,11 @@ class NudgeJob:
                     if prior_pending.get("outcome") == "pending_input":
                         if not self._compact_unproven_expired(prior_pending, now):
                             continue  # give the saved proof one cooldown to land
-                        # Still over the line after the cooldown: the earlier
-                        # command did not hold. Release the fence and retry.
-                        prior_pending["outcome"] = "unproven_expired"
-                        await self.store.record_nudge(
-                            sid, NUDGE_KIND_CONTEXT_COMPACT, now,
-                            json.dumps(basis, sort_keys=True),
-                        )
+                        # A native queued command may still be waiting on this
+                        # turn. Keep its proof fence until an idle retry actually
+                        # reaches before_input under the pane lock.
+                        if row.get("working") is not False:
+                            continue
                     else:
                         continue
                 attempt = basis.get("attempt")
@@ -1994,6 +1996,8 @@ class NudgeJob:
                                 continue
                         if not self._compact_unproven_expired(attempt, now):
                             continue
+                        if row.get("working") is not False:
+                            continue
                         # Unproven and still compact-level after the cooldown:
                         # retry under the same idle and empty-composer guards
                         # rather than leaving the seat to grow to its window.
@@ -2001,6 +2005,13 @@ class NudgeJob:
                         continue
                     elif now - float(attempt.get("at") or 0) < self.config.compact_cooldown_s:
                         continue
+                possible_input_retry = (
+                    isinstance(attempt, dict)
+                    and attempt.get("outcome") == "pending_input"
+                ) or (
+                    isinstance(prior_pending, dict)
+                    and prior_pending.get("outcome") in {"pending_input", "unproven_expired"}
+                )
                 result.candidates += 1
                 if result.attempted >= self.config.max_per_pass:
                     result._capped = True
@@ -2017,15 +2028,27 @@ class NudgeJob:
                     current = self.sessions.get(sid) or {}
                     if (current.get("context_level") != "compact"
                             or not self._context_fresh(current, time.time())
-                            or current.get("working") is not False):
+                            or not (current.get("working") is False
+                                    or (not possible_input_retry and current.get("working") is True))):
                         raise VerbError(
                             "context_compact_not_idle",
                             "context or turn changed before pane input",
                             phase="not_started",
                         )
+                    proof_watermark = watermark.daemon_seq
+                    if possible_input_retry:
+                        # Either the old queued command or this retry can prove
+                        # submission. Do not lose an old USER receipt that lands
+                        # between reconciliation and acquiring the pane lock.
+                        for previous in (attempt, prior_pending):
+                            saved = previous.get("watermark") if isinstance(previous, dict) else None
+                            if isinstance(saved, int) and isinstance(proof_watermark, int):
+                                proof_watermark = min(saved, proof_watermark)
+                    if isinstance(prior_pending, dict) and prior_pending.get("outcome") == "pending_input":
+                        prior_pending["outcome"] = "unproven_expired"
                     basis["attempt"] = {
                         "id": attempt_id, "ordinal": ordinal, "at": now,
-                        "watermark": watermark.daemon_seq,
+                        "watermark": proof_watermark,
                         "outcome": "pending_input",
                     }
                     await self.store.record_nudge(
@@ -2037,7 +2060,7 @@ class NudgeJob:
                 try:
                     reply = await self.comms.submit_context_compact(
                         sid, command, expected_generation=str(row["created_at"]),
-                        before_input=before_input,
+                        before_input=before_input, allow_busy=not possible_input_retry,
                     )
                 except asyncio.CancelledError:
                     raise  # persisted pending_input fences a restarted pass
@@ -2067,10 +2090,16 @@ class NudgeJob:
                             "deferred stream=%s generation=%s reason=%s",
                             sid, row.get("created_at"), reason,
                         )
+                    await self._alert_compact_deferred(sid, basis, now, reason)
                     continue
                 self._compact_skip_logged.pop(sid, None)
                 result.attempted += 1
                 basis["attempt"].update(reply)
+                if reply["outcome"] == "no_input" and possible_input_retry:
+                    # This retry touched no input, but the earlier command is
+                    # still uncertain. Keep the existing pending form so Store
+                    # also carries that proof debt through a new crossing.
+                    basis["attempt"].update(outcome="pending_input", last_retry_outcome="no_input")
                 await self.store.record_nudge(
                     sid, NUDGE_KIND_CONTEXT_COMPACT, now,
                     json.dumps(basis, sort_keys=True),
@@ -2092,6 +2121,32 @@ class NudgeJob:
                         "pending_input stream=%s attempt_id=%s", sid, attempt_id,
                     )
                     await self._alert_compact_pending(sid, attempt_id)
+
+    async def _alert_compact_deferred(
+        self, sid: str, basis: dict[str, Any], now: float, reason: str,
+    ) -> None:
+        """Surface a persistent safe-input hold once per durable crossing."""
+        crossed = _nudge_epoch((basis.get("crossing") or {}).get("observed_at"))
+        if (self.notify is None or basis.get("defer_alerted") or crossed is None
+                or now - crossed < self.config.compact_cooldown_s):
+            return
+        identity = [sid, basis.get("generation"), basis.get("epoch")]
+        key = "context-compact-deferred:" + hashlib.sha256(
+            json.dumps(identity, separators=(",", ":")).encode(),
+        ).hexdigest()
+        try:
+            await self.notify.create_internal_notification(
+                producer="context_compact", title="Compaction remains deferred",
+                body=(f"{sid} remains above the compact threshold without safe command input "
+                      f"after the compact cooldown: {reason}. Review the seat's input state."),
+                dedup_key=key, severity="warning",
+            )
+            basis["defer_alerted"] = True
+            await self.store.record_nudge(
+                sid, NUDGE_KIND_CONTEXT_COMPACT, now, json.dumps(basis, sort_keys=True),
+            )
+        except Exception:
+            log.exception("subsystem=context_compact deferred_alert_failed stream=%s", sid)
 
     def _compact_unproven_expired(self, attempt: dict[str, Any], now: float) -> bool:
         """Whether an unconfirmed command has had its cooldown to prove itself."""

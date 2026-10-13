@@ -240,17 +240,30 @@ source generation. Restart preserves the episode and its input outcome; close
 prunes its state. Advisory keeps its one-delivery-per-recipient episode.
 
 With `PENTACLE_CONTEXT_COMPACT_ENABLED=1` (the default), a fresh compact
-reading can submit one daemon-owned `/compact` command after the Claude seat
-is idle with a proven empty composer. The source lifecycle lock and Comms pane
-input lock serialize this with observations and other input. A durable attempt
-ID and USER-event watermark are recorded before possible pane input.
-Only a matching current-generation USER event proves submission. Ambiguous
-input stays `pending_input` for `PENTACLE_CONTEXT_COMPACT_COOLDOWN_S=600`;
-after that, a seat still at compact level is retried under the same idle and
-empty-composer guards, as is a proved pre-input failure. An unproven attempt
-never blocks compaction permanently. Disabling the action leaves the
-advisory and pending-input state intact. A confirmed submission consumes the
-episode, so continued high context does not repeat the command.
+reading can submit one daemon-owned `/compact` command with a proven empty
+Claude composer, including while working: Claude queues the initial command.
+The source lifecycle lock and Comms pane input lock serialize this with
+observations and cooperating daemon input. They do not exclude independent
+terminal typing. A durable attempt ID and USER-event watermark are recorded
+before possible pane input. Only a matching current-generation USER event
+proves submission; native queue visibility alone is not a receipt.
+
+Ambiguous input stays `pending_input` for at least
+`PENTACLE_CONTEXT_COMPACT_COOLDOWN_S=600`. After that, a seat still at compact
+level can retry only while idle with an empty composer; busy or unknown turn
+state retains the possible-input fence, including across restart and crossing
+changes. A proven pre-input failure can retry after the same cooldown while
+working only when no earlier command remains uncertain. A confirmed submission
+consumes the episode, so continued high context does not repeat the command. Disabling the action leaves advisory and
+pending-input state intact and suppresses compaction defer alerts.
+
+The empty-composer predicate recognizes the provider's exact update banner
+variants and main-selected agent roster below the composer rule and permission
+footer. Drafts, unknown chrome and the ambiguous queued-message placeholder
+remain refusals. A persistent pre-input hold after the compact cooldown from
+crossing observation raises one content-free notification per episode; it never
+forces input through a draft. Ordinary messages and slash commands have no
+promised cross-type FIFO order.
 
 Only valid readings no older than 1800 seconds and no earlier than session
 creation qualify. Future/malformed readings, offline/dead sources and routing

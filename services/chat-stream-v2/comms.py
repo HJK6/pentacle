@@ -395,7 +395,7 @@ class Comms:
 
     async def submit_context_compact(
         self, stream_id: str, command: str, *, expected_generation: str,
-        before_input: Any,
+        before_input: Any, allow_busy: bool = False,
     ) -> dict[str, Any]:
         """Submit one daemon-owned Claude slash command under the shared pane lock.
 
@@ -425,7 +425,8 @@ class Comms:
                 or durable.get("context_level") != "compact"
                 or live.get("created_at") != expected_generation
                 or not session_generation
-                or live.get("working") is not False
+                or not (live.get("working") is False
+                        or (allow_busy and live.get("working") is True))
                 or not (local_mirror or fresh_capture)
                 or live.get("capture_liveness") not in {None, "idle"}
                 or live.get("pane_status") != "pane_alive"
@@ -444,7 +445,7 @@ class Comms:
             if (
                 not claude_prompt_ready(pane)
                 or not claude_composer_empty(pane)
-                or _extract_live_state(pane, "claude")["working"] is True
+                or (not allow_busy and _extract_live_state(pane, "claude")["working"] is True)
             ):
                 return {"outcome": "deferred", "reason": "composer_not_proven_empty"}
             watermark = await self._watermark_before_action(stream_id)
