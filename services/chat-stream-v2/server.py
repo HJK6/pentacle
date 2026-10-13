@@ -1852,6 +1852,7 @@ class Server:
         await asyncio.sleep(0)
 
     def _register_client(self, websocket: Any, *, broadcast: bool = True) -> None:
+        websocket._pentacle_registration_live = True
         if broadcast:
             self._clients.add(websocket)
         if websocket not in self._client_send_queues:
@@ -1869,6 +1870,8 @@ class Server:
         self._host_stats_clients.add(websocket)
 
     def _unregister_client(self, websocket: Any) -> None:
+        if hasattr(websocket, "_pentacle_registration_live"):
+            websocket._pentacle_registration_live = False
         self._diag_snapshot(websocket)
         self._clients.discard(websocket)
         self._client_identities.pop(websocket, None)
@@ -2583,8 +2586,10 @@ class Server:
                 owner = None
             else:
                 owner = str(owner)
-                self._client_authenticated_streams[websocket] = owner
-                self._client_token_hashes[websocket] = token_hash
+                # Detached requests retain verified context, not departed bindings.
+                if getattr(websocket, "_pentacle_registration_live", True):
+                    self._client_authenticated_streams[websocket] = owner
+                    self._client_token_hashes[websocket] = token_hash
 
         if reason_code == TOKEN_REASON_VERIFIED:
             self.token_telemetry.record_verification(
@@ -2614,7 +2619,7 @@ class Server:
                 ),
             }
         )
-        if context["dot_principal"]:
+        if context["dot_principal"] and getattr(websocket, "_pentacle_registration_live", True):
             # Sticky: once a Dot, enforced as a Dot for the connection's life.
             self._client_dot_connections.add(websocket)
         if retired_owner is not None and reason_code == TOKEN_REASON_EXPIRED:
