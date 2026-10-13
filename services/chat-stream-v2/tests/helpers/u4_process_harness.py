@@ -300,6 +300,15 @@ async def run(source, output):
                     else:
                         released={'event':'process_released','mono_s':release_at,'wall_s':time.time(),'explicit_release':True}
                         os.kill(daemon.pid,signal.SIGCONT);process_stopped=False
+                        # One outstanding control request per connection: drain the
+                        # held probe before sending a distinct post-release probe.
+                        async with asyncio.timeout(2):
+                            while True:
+                                reply=json.loads(await ws.recv())
+                                if reply.get('request_id')=='process-held':
+                                    if reply.get('type')!='pong':
+                                        raise RuntimeError('held_probe_not_pong')
+                                    break
                     await request(ws,'after-freeze',2)
                     result['cells'].append({'name':'held_'+SCENARIO,'held':held,'release':released,'duration_s':released['mono_s']-held['mono_s'],
                         'pings_while_held':pings,'store_reads_while_held':reads,'main_ping_responded_while_held':main_responded,
