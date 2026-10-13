@@ -363,6 +363,8 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
     elif actor_generation is not None:
         _assistant_actor_conn(conn, actor_stream_id, actor_generation)
     if direct_single_final:
+        from store_host_transfer import successor
+        direct_target_stream_id, direct_target_generation = successor(conn, direct_target_stream_id, direct_target_generation)
         if (not direct_target_stream_id or not direct_target_generation
                 or actor_stream_id != direct_target_stream_id
                 or actor_generation != direct_target_generation):
@@ -372,8 +374,9 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
             "reply_to_question_id FROM v2_assistant_composite_routes "
             "WHERE stream_id=? AND dispatch_id=?", (stream_id, dispatch_id),
         ).fetchone()
-        if (direct_route is None or direct_route["route_target"] != direct_target_stream_id
-                or direct_route["route_target_generation"] != direct_target_generation
+        from store_host_transfer import successor
+        current_route_target = successor(conn, direct_route['route_target'], direct_route['route_target_generation']) if direct_route else None
+        if (direct_route is None or current_route_target != (direct_target_stream_id, direct_target_generation)
                 or direct_route["routing_state"] != "resolved"):
             raise ValueError("assistant_direct_dispatch_unverified")
         if (reply_to_message_id != direct_route["input_identity"]
@@ -504,6 +507,8 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
 
 
 def _assistant_actor_conn(conn, actor, generation):
+    from store_host_transfer import require_active
+    require_active(conn, actor, generation)
     host, _, name = str(actor or "").partition(":")
     row = conn.execute(
         "SELECT s.status,s.handoff_from_stream_id,s.role,s.parent_stream_id,g.generation FROM sessions s "
@@ -567,6 +572,9 @@ def _assistant_dispatch_conn(conn, stream_id, dispatch_id, actor, generation, *,
     if authority and actor == authority:
         if route["routing_state"] != "resolved" or not str(route["actor_stream_id"] or "").startswith("operator:"):
             raise ValueError("assistant_authority_input_unverified")
+        return route
+    from store_host_transfer import successor
+    if successor(conn, route['route_target'], route['route_target_generation']) == (actor, generation):
         return route
     target = route["route_target"]
     if actor == target:

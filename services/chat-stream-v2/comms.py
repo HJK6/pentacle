@@ -1223,11 +1223,16 @@ class Comms:
             raise VerbError("unknown_session", "bound assistant authority generation is gone")
         ruling_id = str(msg.get("_assistant_lane_ruling_request_id") or "")
         if ruling_id:
-            valid = await self.store.submit(lambda conn: conn.execute(
-                "SELECT 1 FROM v2_assistant_lane_rulings WHERE ruling_request_id=? "
-                "AND state='pending' AND authority_stream_id=? AND authority_generation=?",
-                (ruling_id, target, current["session_generation"]),
-            ).fetchone() is not None)
+            def effective_pending(conn):
+                from store_host_transfer import effective_ruling
+                row = effective_ruling(conn, conn.execute(
+                    "SELECT * FROM v2_assistant_lane_rulings WHERE ruling_request_id=?",
+                    (ruling_id,),
+                ).fetchone())
+                return bool(row and row['state']=='pending'
+                    and (row['authority_stream_id'],row['authority_generation'])
+                        == (target,current['session_generation']))
+            valid = await self.store.submit(effective_pending)
             if not valid:
                 raise VerbError("unknown_session", "ruling request no longer pending")
 

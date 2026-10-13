@@ -77,6 +77,9 @@ def _session(conn, sid):
 
 
 def _live(conn, sid, generation):
+    from store_host_transfer import authority_state
+    if authority_state(conn, sid, generation):
+        return None
     row = _session(conn, sid)
     return row if row and row["status"] == "open" and row["session_generation"] == generation else None
 
@@ -275,7 +278,7 @@ def _register_conn(conn, kind, owner, generation, payload, now, *, default=False
 
 def install_default_conn(conn, child_sid, now):
     child = _session(conn, child_sid)
-    if not child or child["status"] != "open":
+    if not child or not _live(conn, child_sid, child["session_generation"]):
         return
     parent = _session(conn, child.get("parent_stream_id"))
     parent_gen = parent["session_generation"] if parent and parent["status"] == "open" else None
@@ -287,7 +290,7 @@ def install_default_conn(conn, child_sid, now):
         conn.execute("INSERT OR REPLACE INTO v2_watch_pairs VALUES (?,?,?,?,?)", (child_sid, *binding, epoch))
     if child.get("no_watch"):
         return
-    if not parent or parent["status"] != "open":
+    if not parent or not _live(conn, child["parent_stream_id"], parent["session_generation"]):
         return
     _register_conn(conn, "watch", child["parent_stream_id"], parent["session_generation"],
         {"request_id": "default:" + _id(child_sid, child["session_generation"], epoch),

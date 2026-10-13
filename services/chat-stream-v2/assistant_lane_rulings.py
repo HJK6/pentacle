@@ -6,6 +6,7 @@ An approved intent still passes through the ordinary spawn/close path.
 
 from __future__ import annotations
 
+from store_host_transfer import effective_ruling
 import asyncio
 import hashlib
 import json
@@ -281,10 +282,22 @@ class AssistantLaneRulings:
                             target_generation: str, auth: dict[str, Any]) -> dict[str, Any] | None:
         if msg.get("_ruling_release") is self:
             return None
-        owned = await self.store.submit(lambda conn: _row(conn.execute(
+        # One canonical SELECT for direct lookup and historical custody scan.
+        query, = (
             "SELECT * FROM v2_assistant_bart_lanes WHERE target_stream_id=? AND target_generation=?",
-            (target_stream_id, target_generation),
-        ).fetchone()))
+        )
+        def effective_ownership(conn):
+            row = conn.execute(query, (target_stream_id, target_generation)).fetchone()
+            if row is not None:
+                return effective_ruling(conn, row)
+            # Admission provenance stays immutable. Locate moved custody by
+            # exact committed succession, never by a reused seat name.
+            for row in conn.execute(query.partition(" WHERE ")[0]):
+                owned = effective_ruling(conn, row)
+                if (owned['target_stream_id'], owned['target_generation']) == (target_stream_id, target_generation):
+                    return owned
+            return None
+        owned = await self.store.submit(effective_ownership)
         if owned is None:
             return None
         if auth.get("operator_authenticated"):
@@ -309,7 +322,7 @@ class AssistantLaneRulings:
             raise ValueError("assistant_ruling_close_key_required")
         policy = self.server.sessions.assistant
         async with policy.authority_lock:
-            prior = await self.store.submit(lambda conn: _row(conn.execute(
+            prior = await self.store.submit(lambda conn: effective_ruling(conn, conn.execute(
                 "SELECT * FROM v2_assistant_lane_rulings WHERE request_key=?",
                 ("session_close:" + key,),
             ).fetchone()))
@@ -438,7 +451,7 @@ class AssistantLaneRulings:
         now = time.time()
         def op(conn: sqlite3.Connection) -> dict[str, Any]:
             with conn:
-                existing = _row(conn.execute(
+                existing = effective_ruling(conn, conn.execute(
                     "SELECT * FROM v2_assistant_lane_rulings WHERE request_key=?", (key,)
                 ).fetchone())
                 if existing:
@@ -480,12 +493,13 @@ class AssistantLaneRulings:
             return request
 
     async def _fetch(self, request_id: str) -> dict[str, Any] | None:
-        return await self.store.submit(lambda conn: _row(conn.execute(
+        from store_host_transfer import effective_ruling
+        return await self.store.submit(lambda conn: effective_ruling(conn, conn.execute(
             "SELECT * FROM v2_assistant_lane_rulings WHERE ruling_request_id=?", (request_id,)
         ).fetchone()))
 
     async def latest_for_target(self, target_stream_id: str) -> dict[str, Any] | None:
-        row = await self.store.submit(lambda conn: _row(conn.execute(
+        row = await self.store.submit(lambda conn: effective_ruling(conn, conn.execute(
             "SELECT * FROM v2_assistant_lane_rulings WHERE target_stream_id=? "
             "ORDER BY created_at DESC LIMIT 1", (target_stream_id,),
         ).fetchone()))
@@ -529,6 +543,14 @@ class AssistantLaneRulings:
 
     async def _enqueue_notice(self, request: dict[str, Any]) -> None:
         rid = request["ruling_request_id"]
+        # The ruling intent is immutable. Its notice already owns the original
+        # body/source and delivery history; transfer projects only undelivered
+        # recipient custody. Rebuilding from an effective ruling would rewrite
+        # that provenance or replay a delivered request.
+        if await self.store.submit(lambda c: c.execute(
+                "SELECT 1 FROM v2_outbound_notices WHERE notice_id=?",
+                ("assistant-lane-ruling:" + rid,)).fetchone() is not None):
+            return
         intent = json.loads(request["intent_json"])
         fields = {key: intent.get(key) for key in ("objective", "provider", "model", "effort", "spec_id", "role", "budget", "eta", "_ruling_report", "_ruling_report_waiver")
                   if intent.get(key) is not None}
@@ -565,11 +587,13 @@ class AssistantLaneRulings:
         now = time.time()
         def op(conn: sqlite3.Connection) -> dict[str, Any]:
             with conn:
-                request = _row(conn.execute(
+                request = effective_ruling(conn, conn.execute(
                     "SELECT * FROM v2_assistant_lane_rulings WHERE ruling_request_id=?", (rid,)
                 ).fetchone())
                 if request is None:
                     raise ValueError("assistant_ruling_unknown_request")
+                from store_host_transfer import require_active
+                require_active(conn, actor_stream_id, actor_generation)
                 if (actor_stream_id, actor_generation) != (
                     request["authority_stream_id"], request["authority_generation"],
                 ):
@@ -651,7 +675,7 @@ class AssistantLaneRulings:
                     actor = conn.execute("SELECT authority_stream_id,authority_generation FROM "
                                          "v2_assistant_lane_rulings WHERE ruling_request_id=?", (rid,)).fetchone()
                     self._audit_conn(conn, rid, "timeout", actor[0], actor[1], reason)
-                return _row(conn.execute(
+                return effective_ruling(conn, conn.execute(
                     "SELECT * FROM v2_assistant_lane_rulings WHERE ruling_request_id=?", (rid,)
                 ).fetchone())
         request = await self.store.submit(op)
@@ -837,6 +861,11 @@ class AssistantLaneRulings:
             if current is None or current["state"] not in {"approved", "unruled", "unruled_disabled"}:
                 return
             intent = json.loads(current["intent_json"])
+            original = current.get('_original_custody', {})
+            for key in ('parent_stream_id','handoff_from_stream_id','from_stream_id'):
+                for who in ('requester','target'):
+                    if intent.get(key) and intent[key] == original.get(who, {}).get('stream_id'):
+                        intent[key] = current[who + '_stream_id']
             intent["_auth_context"] = {
                 "token_verified": True, "stream_id": current["requester_stream_id"],
                 "session_generation": current["requester_generation"],
@@ -860,8 +889,10 @@ class AssistantLaneRulings:
                 elif current["action"] == "session_close":
                     target_host, _, target_name = current["target_stream_id"].partition(":")
                     target = await self.store.fetch_session(target_host, target_name)
-                    expected = intent.get("expected_generation", current["target_generation"])
-                    if (expected != current["target_generation"] or target is None
+                    admitted = original.get('target', {'stream_id': current['target_stream_id'],
+                                                       'generation': current['target_generation']})
+                    expected = current["target_generation"]
+                    if (intent.get("expected_generation", admitted['generation']) != admitted['generation'] or target is None
                             or target.get("session_generation") != expected):
                         await self._mark(rid, "approved_but_not_closed", {"error": "target_generation_changed"})
                         return
@@ -873,13 +904,15 @@ class AssistantLaneRulings:
                             return
                     else:
                         report = await self.store.find_report(
-                            current["target_stream_id"], statuses=("done", "error", "aborted"),
-                            session_generation=current["target_generation"],
+                            admitted['stream_id'], statuses=("done", "error", "aborted"),
+                            session_generation=admitted['generation'],
                         )
                         if report is None or report.get("report_id") != intent.get("_ruling_report", {}).get("report_id"):
                             await self._mark(rid, "approved_but_not_closed", {"error": "report_fence_moved"})
                             return
-                    intent.setdefault("expected_generation", expected)
+                    # Project only this release invocation. Keep the durable
+                    # original intent, digest and report provenance unchanged.
+                    intent.update(host=target_host, session_name=target_name, expected_generation=expected)
                     intent["_ruling_release"] = self
                     result = await self.server._on_close(intent)
                     if result.get("type") == "close.deferred":
@@ -898,7 +931,7 @@ class AssistantLaneRulings:
                 else:  # pragma: no cover
                     raise ValueError("assistant_ruling_action_invalid")
             except Exception as exc:
-                if getattr(exc, "code", "") == "spawn_frozen":
+                if getattr(exc, "code", "") in {"spawn_frozen", "authority_retired", "authority_prepared"}:
                     return
                 failed_state = ("approved_but_not_closed" if current["action"] in {"session_close", "composite_close"}
                                 and current["state"] == "approved" else "release_blocked")
@@ -943,7 +976,7 @@ class AssistantLaneRulings:
                              "WHERE state='pending'")
                 for rid, stream_id, generation in pending:
                     self._audit_conn(conn, rid, "disabled", stream_id, generation)
-                return [dict(row) for row in conn.execute(
+                return [effective_ruling(conn, row) for row in conn.execute(
                     "SELECT * FROM v2_assistant_lane_rulings WHERE state='unruled_disabled'")]
         for request in await self.store.submit(op):
             await self._release(request)
@@ -957,7 +990,7 @@ class AssistantLaneRulings:
         now = time.time()
         # The last clause re-reports an unruled request whose release is final but
         # whose outcome line was not written yet (a crash between the two).
-        rows = await self.store.submit(lambda conn: [dict(row) for row in conn.execute(
+        rows = await self.store.submit(lambda conn: [effective_ruling(conn, row) for row in conn.execute(
             "SELECT * FROM v2_assistant_lane_rulings WHERE state='pending' "
             "OR state IN ('approved','unruled','unruled_disabled') "
             "OR (mirror_sent=0 AND ruling IS NULL AND reason IN (?,?,?) "
