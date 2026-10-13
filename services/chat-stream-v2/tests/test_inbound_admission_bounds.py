@@ -462,3 +462,239 @@ def test_repeated_bursts_return_all_accounting_to_baseline(monkeypatch):
             assert all(pool.total == [0, 0] and not pool.connections and not pool.principals
                        for pool in daemon._admission_pools.values())
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("shared_full", [False, True])
+def test_detached_known_credit_survives_binding_removal(shared_full):
+    async def run():
+        daemon = Server()
+        ws = Socket()
+        ws.remote_address = ("192.0.2.1", 12345)
+        principal = ("seat", "seat:captured")
+        pool = daemon._admission_pools["durable"]
+        credit = pool.acquire(ws, principal, 12)
+        assert credit is not None
+        daemon._client_authenticated_streams[ws] = principal[1]
+        barrier = asyncio.create_task(asyncio.sleep(0))
+        await barrier
+        other = []
+        if shared_full:
+            for _ in range(8):
+                held = pool.acquire(Socket(), ("shared", "preauth"), 1)
+                assert held is not None
+                other.append(held)
+        daemon._unregister_client(ws)
+        seen = []
+
+        async def serve(socket, raw):
+            seen.append(raw)
+            assert credit.principal == principal
+            assert pool.principals[principal] == [1, 12]
+
+        daemon._serve = serve
+        try:
+            await daemon._serve_after_hello(ws, '{"type":"send"}', barrier, credit)
+            assert seen == ['{"type":"send"}']
+            assert credit.principal == principal
+        finally:
+            credit.release()
+            credit.release()  # terminal accounting is exactly once
+            for held in other:
+                held.release()
+        assert pool.total == [0, 0] and not pool.principals and not pool.connections
+    asyncio.run(run())
+
+
+def test_refusal_bounds_utf8_correlation_and_known_verb_bytes():
+    daemon = Server()
+    frames = []
+    daemon._enqueue = lambda ws, kind, raw: frames.append(json.loads(raw))
+    long_verb = "synthetic_" + "v" * 100_000
+    daemon.handlers[long_verb] = lambda msg: None
+    daemon._refuse_request(Socket(), {"type": long_verb, "request_id": "😀" * 128})
+    frame = frames[-1]
+    assert len(frame["request_id"].encode("utf-8")) <= 128
+    assert len(frame["type"].encode("utf-8")) <= 80
+    assert frame["error_code"] == "server_overloaded"
+    assert frame["retryable"] is True
+
+
+def test_refusal_preserves_small_numeric_request_id():
+    daemon = Server()
+    frames = []
+    daemon._enqueue = lambda ws, kind, raw: frames.append(json.loads(raw))
+    daemon._refuse_request(Socket(), {"type": "ping", "request_id": 7})
+    assert frames[-1]["type"] == "ping.error"
+    assert frames[-1]["request_id"] == 7
+
+
+def test_hello_transfer_moves_only_principal_task_and_byte_charge():
+    async def run():
+        daemon = Server()
+        ws = Socket()
+        pool = daemon._admission_pools["ordinary"]
+        credit = pool.acquire(ws, ("shared", "preauth"), 123)
+        assert credit is not None
+        async def hello():
+            daemon._client_authenticated_streams[ws] = "seat:hello"
+        barrier = asyncio.create_task(hello())
+        seen = []
+        async def serve(socket, raw):
+            seen.append(raw)
+            assert pool.total == [1, 123]
+            assert pool.connections[ws] == [1, 123]
+            assert pool.principals == {("seat", "seat:hello"): [1, 123]}
+        daemon._serve = serve
+        try:
+            await daemon._serve_after_hello(ws, "{}", barrier, credit)
+            assert seen == ["{}"]
+        finally:
+            credit.release()
+        assert pool.total == [0, 0] and not pool.connections and not pool.principals
+    asyncio.run(run())
+
+
+def test_hello_transfer_byte_refusal_precedes_handler():
+    async def run():
+        daemon = Server()
+        ws, other = Socket(), Socket()
+        pool = daemon._admission_pools["parked"]
+        held = pool.acquire(other, ("seat", "seat:full"), 256 << 10)
+        credit = pool.acquire(ws, ("shared", "preauth"), 1)
+        assert held is not None and credit is not None
+        async def hello():
+            daemon._client_authenticated_streams[ws] = "seat:full"
+        barrier = asyncio.create_task(hello())
+        frames = []
+        daemon._enqueue = lambda socket, kind, raw: frames.append(json.loads(raw))
+        async def forbidden(socket, raw):
+            raise AssertionError("refused request reached handler")
+        daemon._serve = forbidden
+        try:
+            await daemon._serve_after_hello(ws, '{"type":"await_report","request_id":"full"}', barrier, credit)
+            assert frames[-1]["request_id"] == "full"
+            assert frames[-1]["error_code"] == "server_overloaded"
+            assert credit.principal == ("shared", "preauth")
+        finally:
+            credit.release(); held.release()
+        assert pool.total == [0, 0] and not pool.principals
+    asyncio.run(run())
+
+
+def test_direct_first_request_keeps_preauth_credit_after_binding():
+    async def run():
+        daemon = Server()
+        ws = Socket()
+        pool = daemon._admission_pools["durable"]
+        credit = pool.acquire(ws, ("shared", "preauth"), 42)
+        assert credit is not None
+        async def serve(socket, raw):
+            daemon._client_authenticated_streams[socket] = "seat:new"
+            assert credit.principal == ("shared", "preauth")
+            assert pool.principals == {("shared", "preauth"): [1, 42]}
+        daemon._serve = serve
+        try:
+            await daemon._serve_after_hello(ws, '{"type":"send"}', None, credit)
+            assert credit.principal == ("shared", "preauth")
+        finally:
+            credit.release()
+    asyncio.run(run())
+
+
+def test_detached_send_outlives_cancelled_hello_barrier():
+    async def run():
+        daemon = Server()
+        hello_entered = asyncio.Event()
+        release = asyncio.Event()
+        effects = []
+        async def hello(msg):
+            hello_entered.set()
+            await release.wait()
+            return {"type": "ready"}
+        async def send(msg):
+            effects.append(msg["request_id"])
+            return {"type": "send.result", "delivery": "landed"}
+        daemon.handlers["hello"] = hello
+        daemon.handlers["send"] = send
+        async with clients(daemon, 1) as (ws,):
+            ws.request("hello", "pending-hello")
+            await hello_entered.wait()
+            ws.request("send", "pipelined-send")
+            await eventually(lambda: len(daemon._detached_send_tasks) == 1)
+            detached = list(daemon._detached_send_tasks)
+        await asyncio.gather(*detached, return_exceptions=True)
+        assert not detached[0].cancelled()
+        assert effects == ["pipelined-send"]
+        await eventually(lambda: daemon._admission_pools["durable"].total == [0, 0])
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("proof", ["none", "bad_token", "wrong_seat", "closed_seat", "valid"])
+def test_cancelled_hello_follower_still_requires_real_auth(tmp_path, proof):
+    import hashlib
+    from store import Store, STREAM_TOKEN_HASH_VERSION
+    async def run():
+        store = Store(str(tmp_path / "barrier-auth.db")); store.start()
+        daemon = Server(store=store)
+        ws = Socket(); ws.remote_address = ("192.0.2.1", 12345)
+        token = "synthetic-barrier-proof"
+        effects, replies = [], []
+        dispatch = daemon._dispatch
+        async def observe_dispatch(*args, **kwargs):
+            result = await dispatch(*args, **kwargs)
+            replies.extend(result)
+            return result
+        daemon._dispatch = observe_dispatch
+        try:
+            await store.open_session("synthetic", "seat")
+            await store.grant_stream_token("synthetic", "seat", hashlib.sha256(token.encode()).hexdigest(), STREAM_TOKEN_HASH_VERSION)
+            if proof == "closed_seat":
+                await store.mark_closed("synthetic", "seat", closed_at="2026-01-01T00:00:00Z", pane_status="missing")
+            async def send(msg):
+                assert msg["_auth_context"]["token_verified"] is True
+                effects.append(msg["request_id"])
+                return {"type": "send.ok"}
+            daemon.handlers["send"] = send
+            barrier = asyncio.create_task(asyncio.sleep(60)); barrier.cancel()
+            await asyncio.gather(barrier, return_exceptions=True)
+            request = {"type": "send", "request_id": "proof", "from_stream_id": "synthetic:seat"}
+            if proof != "none": request["stream_token"] = "wrong" if proof == "bad_token" else token
+            if proof == "wrong_seat": request["from_stream_id"] = "synthetic:other"
+            raw = json.dumps(request)
+            credit = daemon._admission_pools["durable"].acquire(ws, ("shared", "preauth"), len(raw))
+            assert credit is not None
+            try:
+                await daemon._serve_after_hello(ws, raw, barrier, credit)
+                if proof == "valid":
+                    assert effects == ["proof"] and replies[-1]["type"] == "send.ok"
+                else:
+                    assert effects == []
+                    assert replies[-1]["error_code"] == "authentication_required"
+            finally: credit.release()
+        finally:
+            daemon._unregister_client(ws)
+            assert store.stop(timeout=5)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("durable,cancel_request", [(False, False), (True, True)])
+def test_barrier_repair_preserves_ordinary_and_explicit_cancellation(durable, cancel_request):
+    async def run():
+        daemon = Server(); ws = Socket()
+        barrier = asyncio.create_task(asyncio.sleep(60))
+        pool = daemon._admission_pools["durable" if durable else "ordinary"]
+        credit = pool.acquire(ws, ("shared", "local"), 1)
+        assert credit is not None
+        async def forbidden(socket, raw):
+            raise AssertionError("cancelled request reached dispatch")
+        daemon._serve = forbidden
+        task = asyncio.create_task(daemon._serve_after_hello(ws, json.dumps({"type": "send" if durable else "ping"}), barrier, credit))
+        task.add_done_callback(credit.release)
+        await asyncio.sleep(0)
+        barrier.cancel()
+        if cancel_request: task.cancel()
+        await asyncio.gather(task, barrier, return_exceptions=True)
+        assert task.cancelled()
+        await asyncio.sleep(0)
+        assert pool.total == [0, 0] and not pool.connections and not pool.principals
+    asyncio.run(run())

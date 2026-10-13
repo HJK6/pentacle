@@ -1602,10 +1602,14 @@ class Server:
 
     def _refuse_request(self, websocket: Any, request: dict) -> None:
         verb = request.get("type")
-        known = isinstance(verb, str) and verb in self.handlers
+        known = (isinstance(verb, str) and verb in self.handlers
+                 and len(verb.encode("utf-8", errors="replace")) <= 64)
         rid = request.get("request_id")
         # Bound the encoded response even for hostile correlation fields.
-        rid = rid[:128] if isinstance(rid, str) else None
+        if isinstance(rid, str):
+            rid = rid.encode("utf-8", errors="replace")[:128].decode("utf-8", errors="ignore")
+        elif len(json.dumps(rid, ensure_ascii=False).encode("utf-8", errors="replace")) > 128:
+            rid = None
         if request.get("protocol") == 2 and isinstance(verb, str) and verb in {"upload_blob_init", "upload_blob_chunk"}:
             frame = {"type": "upload_blob.error", "request_id": rid,
                      "protocol": 2, "error_code": "upload_quota"}
@@ -1694,8 +1698,19 @@ class Server:
         # CLI callers may send the RPC immediately after hello. Authenticate
         # that hello first, without serializing long-running ordinary RPCs.
         if barrier is not None:
-            await asyncio.shield(barrier)
-            if not credit.transfer(self._admission_principal(websocket)):
+            try:
+                await asyncio.shield(barrier)
+            except asyncio.CancelledError:
+                # Disconnect cancels hello, not its admitted durable followers.
+                # Explicit cancellation of this request must still propagate.
+                if (not _is_send_frame(raw) or not barrier.cancelled()
+                        or asyncio.current_task().cancelling()):
+                    raise
+            # Only an unbound charge moves to an identity established by hello.
+            # A captured known-principal charge survives disconnect/map removal.
+            principal = self._admission_principal(websocket)
+            if (credit.principal[0] == "shared" and principal[0] != "shared"
+                    and not credit.transfer(principal)):
                 try:
                     request = json.loads(raw)
                 except (ValueError, TypeError):
