@@ -992,7 +992,9 @@ class Server:
             elif tasks:
                 await asyncio.wait(tasks, timeout=within(cap))
 
-        await self.host_transfer.stop()
+        transfer = getattr(self, 'host_transfer', None)
+        if transfer is not None:
+            await settle((asyncio.create_task(transfer.stop()),), cap=1.0)
         if self._consent_expiry_task is not None:
             self._consent_expiry_task.cancel()
             await settle((self._consent_expiry_task,), cap=1.0)

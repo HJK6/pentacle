@@ -796,11 +796,17 @@ class Notify:
         async with self._host_transfer_lock:
             await self.project_host_transfer()
             auth = msg.get('_auth_context') or {}
-            if auth.get('token_verified') and self._sessions is not None:
+            store = getattr(self._sessions, 'store', None)
+            if auth.get('token_verified') and store is not None:
                 sid = auth.get('stream_id')
-                row = await self._sessions.store.fetch_session(*sid.split(':',1)) if sid and ':' in sid else None
+                row = await store.fetch_session(*sid.split(':',1)) if sid and ':' in sid else None
                 generation = auth.get('session_generation') or (row or {}).get('session_generation')
-                await self._sessions.store.require_current_actor(sid, generation)
+                from store_host_transfer import TransferError
+                try:
+                    await store.require_current_actor(sid, generation)
+                except TransferError as exc:
+                    code = 'stream_ownership_unverified' if exc.code == 'actor_generation_changed' else exc.code
+                    return self._prompt_error(str(msg.get('request_id') or ''), code)
             return await self._prompt_locked(msg)
 
     async def _prompt_locked(self, msg: dict[str, Any]) -> dict[str, Any]:
