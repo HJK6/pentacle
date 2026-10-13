@@ -46,7 +46,8 @@ from claude_jsonl_norm import normalize_claude_jsonl_records
 from codex_rollout_norm import codex_session_identity, normalize_codex_rollout_record
 from context_adapters import parse_codex_context_reading
 from message_envelopes import annotate_message_envelope
-from prockill import process_tree, process_record
+from prockill import canonical_start, process_tree, process_record
+from error_adapters import ErrorFact
 from store import ENTRY_DROPPED
 from tmux_transport import TRANSCRIPT_DIRS, _exec
 from usage_accounting import native_provenance
@@ -127,6 +128,7 @@ class _StreamIngest:
     next_attempt_monotonic: float = 0.0  # earliest retry time (per-stream backoff)
     #: Cross-span provenance context (Codex identity, turn models); reset on rebind.
     provenance_state: dict = field(default_factory=dict)
+    identity_incident_id: str | None = None
 
 
 def _jsonl_event_identity(payload: dict) -> tuple:
@@ -268,12 +270,14 @@ class Ingest:
         routing_integrity: Any = None,
         inventory_emitter: Any = None,
         provenance: Any = None,
+        alerts: Any = None,
     ) -> None:
         self.store = store
         self.sessions = sessions
         self.tmux = tmux
         #: `usage_provenance.ProvenanceSink` shared with event.push (metadata only).
         self.provenance = provenance
+        self.alerts = alerts
         self.broadcast = broadcast
         self.local_host = local_host
         self.recent_limit = recent_limit
@@ -405,6 +409,29 @@ class Ingest:
     # -- per-stream ingest -------------------------------------------------
 
     async def _ingest_stream(self, row: dict[str, Any], st: _StreamIngest, budget: int) -> int:
+        appended = await self._ingest_stream_events(row, st, budget)
+        # A strict discovery/pre-append check can fail after entry was proven.
+        # Surface that refusal at this pass's end, without consuming any bytes
+        # after a late recovery; ordinary replay resumes on the next pass.
+        if (appended == 0 and st.identity_incident_id is None
+                and isinstance(row.get("observer_binding"), dict)):
+            current = self.sessions.get(row["stream_id"]) or row
+            if (current.get("status") == "open"
+                    and current.get("session_generation") == row.get("session_generation")
+                    and isinstance(current.get("observer_binding"), dict)):
+                _, name = self.sessions.split(row["stream_id"])
+                if await self._provider_root(current, name) is None:
+                    observation = {"start": "", "reason": "proof_unavailable"}
+                    try:
+                        current = await self._maybe_rebind_observer_pane(current, name, observation=observation)
+                    except Exception:  # noqa: BLE001 - missing proof stays a refusal
+                        observation["reason"] = "proof_unavailable"
+                    if await self._provider_root(current, name, observation=observation) is None:
+                        _close_stream(st)
+                        await self._record_identity_blocked(current, st, observation)
+        return appended
+
+    async def _ingest_stream_events(self, row: dict[str, Any], st: _StreamIngest, budget: int) -> int:
         """Tail one LOCAL stream's transcript for new events. Returns the count
         newly appended (0 when nothing changed). Off-loop file reads; store-thread
         writes; broadcast iff the durable append inserted (v1 accept_event order)."""
@@ -420,11 +447,20 @@ class Ingest:
                 # An in-place provider replacement leaves the binding PID stale
                 # within the same generation; repair it against an independently
                 # proven same-rollout pane before giving up, then re-run the proof.
-                row = await self._maybe_rebind_observer_pane(row, name)
+                observation = {"start": "", "reason": "proof_unavailable"}
+                try:
+                    row = await self._maybe_rebind_observer_pane(row, name, observation=observation)
+                except Exception:  # noqa: BLE001 - unavailable proof never authorizes a binding
+                    observation["reason"] = "proof_unavailable"
                 binding = row.get("observer_binding")
-                if await self._provider_root(row, name) is None:
+                if await self._provider_root(row, name, observation=observation) is None:
                     _close_stream(st)
+                    await self._record_identity_blocked(row, st, observation)
                     return 0
+            if st.identity_incident_id:
+                log.info("ingest strict root restored incident=%s", st.identity_incident_id,
+                         extra={"subsystem": "ingest", "bug_ref": "issue_201"})
+                st.identity_incident_id = None
         if not st.activity_restored:
             restore = getattr(self.sessions, "restore_genuine_activity", None)
             if callable(restore):
@@ -508,6 +544,8 @@ class Ingest:
                 _close_stream(st)
                 return 0
             if prior is None:
+                if await self._provider_root(row, name) is None:
+                    return 0  # A first-bind probe cannot seed recovery during a mismatch.
                 if not await self.store.bind_observer_transcript(
                     sid, generation=generation, pane_pid=str(row.get("pane_pid") or ""),
                     expected=binding, transcript=transcript,
@@ -788,26 +826,38 @@ class Ingest:
             await self.inventory_emitter.emit_if_changed()
         return appended
 
-    async def _provider_root(self, row: dict[str, Any], name: str) -> tuple[str, str] | None:
+    async def _provider_root(self, row: dict[str, Any], name: str, *, observation: dict | None = None) -> tuple[str, str] | None:
         binding = row.get("observer_binding")
-        if not isinstance(binding, dict) or binding.get("generation") != row.get("session_generation"):
+        if (not isinstance(binding, dict) or not row.get("session_generation")
+                or binding.get("generation") != row.get("session_generation")
+                or row.get("provider") not in {"codex", "claude"}):
             return None
         pid = codex_source_pane_pid(row.get("pane_pid"))
-        if not pid or binding.get("pane_pid") != pid or not binding.get("pane_started_at"):
+        started = canonical_start(binding.get("pane_started_at"))
+        if not pid or binding.get("pane_pid") != pid or not started:
             return None
-        if self.tmux is None or str(await self.tmux.pane_pid(name)) != pid:
+        try:
+            live_pid = str(await self.tmux.pane_pid(name)) if self.tmux is not None else ""
+        except Exception:  # noqa: BLE001 - a missing pane probe is no identity proof
+            return None
+        if live_pid != pid:
             return None
         record = await process_record(pid)
+        if observation is not None:
+            observation["start"] = canonical_start(record.get("start_id")) if record else ""
         if (not record or record["uid"] != os.getuid()
-                or record["start_id"] != " ".join(str(binding["pane_started_at"]).split())
+                or canonical_start(record["start_id"]) != started
                 or not _provider_command_matches(record["command"], str(binding.get("executable") or ""))):
             return None
-        return pid, record["start_id"]
+        return pid, canonical_start(record["start_id"])
 
-    async def _maybe_rebind_observer_pane(self, row: dict[str, Any], name: str) -> dict[str, Any]:
+    async def _maybe_rebind_observer_pane(
+        self, row: dict[str, Any], name: str, *, observation: dict | None = None,
+    ) -> dict[str, Any]:
         """Repair a stale observer binding after an in-place provider replacement
         (`tmux respawn-pane -k` → `codex resume`): same tmux session, SAME
-        generation, SAME rollout, but a NEW pane process. The reconciler refreshes
+        generation, SAME rollout, but a different pane PID or printed start.
+        The reconciler refreshes
         `sessions.pane_pid`, yet `observer_binding.pane_pid` (minted at spawn, only
         rewritten on a generation change) stays stale, so the strict
         `_provider_root` proof rejects the still-open rollout every pass and server
@@ -821,22 +871,38 @@ class Ingest:
         the rebound binding on success, otherwise the row unchanged. This never
         widens `_provider_root`; the caller re-runs that proof against the result."""
         binding = row.get("observer_binding")
+        observation = observation if observation is not None else {}
+        observation.update(start="", reason="proof_unavailable")
         generation = row.get("session_generation")
-        if not isinstance(binding, dict) or binding.get("generation") != generation:
+        if (row.get("status") != "open" or not generation or not isinstance(binding, dict)
+                or binding.get("generation") != generation):
             return row
         transcript = binding.get("transcript")
-        if not isinstance(transcript, dict):
-            return row  # no proven rollout anchor → only the strict first-bind path may bind
         pid = codex_source_pane_pid(row.get("pane_pid"))
-        if not pid or binding.get("pane_pid") == pid:
-            return row  # not a pane change (a reused/identical pid is the strict path's job)
+        if not pid:
+            return row
         if self.tmux is None or str(await self.tmux.pane_pid(name)) != pid:
             return row  # the live pane must already BE the replacement process
         record = await process_record(pid)
+        started = canonical_start(record.get("start_id")) if record else ""
+        observation["start"] = started
         if (not record or record["uid"] != os.getuid()
                 or not _provider_command_matches(record["command"], str(binding.get("executable") or ""))):
+            if record:
+                observation["reason"] = "foreign_identity"
             return row
-        provider = str(row.get("provider") or _provider_from_session_name(name) or "claude")
+        prior_start = canonical_start(binding.get("pane_started_at"))
+        if not started or not prior_start:
+            return row
+        if binding.get("pane_pid") == pid and started == prior_start:
+            return row  # presentation equality cannot repair another failed predicate
+        if not isinstance(transcript, dict):
+            observation["reason"] = "start_mismatch" if started != prior_start else "proof_unavailable"
+            return row  # recorded/first-bind paths cannot seed recovery authority
+        provider = row.get("provider")
+        if provider not in {"codex", "claude"} or transcript.get("provider") != provider:
+            observation["reason"] = "foreign_identity"
+            return row
         fragment = "/.codex/sessions/" if provider == "codex" else "/.claude/"
         candidates = [c for c in await _open_writable_transcripts(pid) if fragment in c[0]]
         if len(candidates) != 1:
@@ -844,6 +910,7 @@ class Ingest:
         path, identity = candidates[0]
         expected_id = transcript.get("file_id")
         if not isinstance(expected_id, (list, tuple)) or list(identity) != list(expected_id):
+            observation["reason"] = "foreign_identity"
             return row  # a different rollout — never cross-bind another session
         fd = await asyncio.to_thread(_open_descriptor, path)
         if fd is None:
@@ -851,25 +918,73 @@ class Ingest:
         try:
             opened = await asyncio.to_thread(os.fstat, fd)
             if (opened.st_dev, opened.st_ino) != identity:
+                observation["reason"] = "foreign_identity"
                 return row  # replaced between lsof proof and open (TOCTOU)
             native = await asyncio.to_thread(_native_session_identity_from_fd, fd, provider)
         finally:
             await asyncio.to_thread(os.close, fd)
         if not native or native != transcript.get("session_id"):
+            observation["reason"] = "foreign_identity" if native else "proof_unavailable"
             return row  # same path/inode but a different session identity — refuse
+        # Observation fence: all OS/filesystem probes precede the Store CAS.
+        if str(await self.tmux.pane_pid(name)) != pid:
+            return row
+        current = await process_record(pid)
+        if (not current or current.get("pid") != record.get("pid")
+                or current.get("pid") != int(pid) or current.get("uid") != record.get("uid")
+                or canonical_start(current.get("start_id")) != started
+                or not _provider_command_matches(current.get("command", ""), str(binding.get("executable") or ""))):
+            return row
         rebound = await self.store.rebind_observer_pane(
             row["stream_id"], generation=str(generation or ""), pane_pid=pid,
-            pane_started_at=record["start_id"], expected=binding,
+            pane_started_at=started, expected=binding,
         )
         if not rebound:
+            observation["reason"] = "cas_changed"
             return row  # CAS lost to a concurrent binding change — retry next pass
         self.sessions.apply_durable(row["stream_id"], observer_binding=rebound)
         log.info("observer pane rebound sid=%s generation=%s pid=%s<-%s",
                  row["stream_id"], generation, pid, binding.get("pane_pid"), extra={
                      "subsystem": "ingest",
-                     "bug_ref": "bart_recovered_chat_visibility_2026_09",
+                     "bug_ref": "issue_201",
                  })
         return {**row, "observer_binding": rebound}
+
+    async def _record_identity_blocked(self, row: dict, st: _StreamIngest, observation: dict) -> None:
+        """Historical refusal at normal ingest cadence; never an activity claim."""
+        binding = row.get("observer_binding")
+        generation = row.get("session_generation")
+        if not generation or not isinstance(binding, dict) or binding.get("generation") != generation:
+            return
+        try:
+            current = await self.store.fetch_session(row["host"], row["session_name"])
+            if (not current or current.get("status") != "open"
+                    or current.get("session_generation") != generation
+                    or current.get("observer_binding") != binding
+                    or current.get("pane_pid") != row.get("pane_pid")):
+                return  # stale diagnostic; next normal pass observes the new tuple
+            digest = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            started = canonical_start(observation.get("start")) or "unavailable"
+            episode = "ingest_identity_blocked:" + hashlib.sha256(json.dumps(
+                [row["stream_id"], generation, digest, started], separators=(",", ":"),
+            ).encode()).hexdigest()
+            reason = observation.get("reason", "proof_unavailable")
+            st.identity_incident_id = episode
+            log.warning("ingest identity blocked incident=%s stream=%s generation=%s binding_digest=%s stored_pid=%s current_pid=%s stored_start=%s current_start=%s reason=%s",
+                        episode, row["stream_id"], generation, digest, binding.get("pane_pid"),
+                        row.get("pane_pid"), canonical_start(binding.get("pane_started_at")), started, reason,
+                        extra={"subsystem": "ingest", "bug_ref": "issue_201", "incident_id": episode,
+                               "stream_id": row["stream_id"], "generation": generation,
+                               "expected_binding_digest": digest, "stored_pid": binding.get("pane_pid"),
+                               "observed_pid": row.get("pane_pid"), "stored_start": canonical_start(binding.get("pane_started_at")),
+                               "observed_start": started, "reason": reason})
+            fact = ErrorFact("integrity", "ingest_identity_blocked", episode, stage=reason)
+            ref = await self.alerts.error(fact) if self.alerts is not None else None
+            if not ref:
+                log.warning("ingest identity incident=%s action=sink_unavailable", episode,
+                            extra={"subsystem": "ingest", "bug_ref": "issue_201"})
+        except Exception:  # noqa: BLE001 - retry at normal cadence, never fail the pump
+            log.warning("ingest identity action=sink_failed", extra={"subsystem": "ingest", "bug_ref": "issue_201"})
 
     async def _discover_path(self, row: dict[str, Any], host: str, name: str, *, state: _StreamIngest | None = None) -> str:
         """Launch-recorded path, or a unique writable file of the proven root."""

@@ -208,6 +208,8 @@ class ErrorAlerts:
         async with self._facts_lock:
             prior = await self.notify._db.call("error_get", nid)
             ctx = prior and prior["error_context"]
+            if fact.code == "ingest_identity_blocked" and prior:
+                return nid  # Historical incident: first durable fact wins, including after acknowledgement.
             if fact.family == WORK_LANE:
                 # Lane-owned clears are silent; retain the durable opening fact.
                 # Replayed two-step sink calls return the canonical ref unchanged.
