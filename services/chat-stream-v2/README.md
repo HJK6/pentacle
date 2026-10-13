@@ -111,6 +111,11 @@ python services/chat-stream-v2/tools/run_gate.py merge
 
 Run tests in a harness-owned tmux session on an explicit `tmux -L <test-socket>` namespace, with `env -u TMUX` before Python. The gate runner and preflight refuse an inherited `TMUX`; daemon fixtures clear it and use their own explicit socket. Never run bare `tmux kill-server` against ambient operator state.
 
+Codex guardian review rollouts are internal bookkeeping. Local and satellite
+ingest exclude them by their `session_meta` provenance before selecting a seat's
+conversation transcript; genuine messages and operator approval prompts remain
+unchanged. Previously stored events are retained without rewriting history.
+
 Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the real desktop smoke. Fixtures must use invented content and valid public wire identifiers.
 
 Broadcast queues replace pending `session.inventory` and `hosts.stats` snapshots,
