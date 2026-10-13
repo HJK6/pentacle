@@ -282,16 +282,17 @@ class AssistantLaneRulings:
                             target_generation: str, auth: dict[str, Any]) -> dict[str, Any] | None:
         if msg.get("_ruling_release") is self:
             return None
+        # One canonical SELECT for direct lookup and historical custody scan.
+        query, = (
+            "SELECT * FROM v2_assistant_bart_lanes WHERE target_stream_id=? AND target_generation=?",
+        )
         def effective_ownership(conn):
-            row = conn.execute(
-                "SELECT * FROM v2_assistant_bart_lanes WHERE target_stream_id=? AND target_generation=?",
-                (target_stream_id, target_generation),
-            ).fetchone()
+            row = conn.execute(query, (target_stream_id, target_generation)).fetchone()
             if row is not None:
                 return effective_ruling(conn, row)
             # Admission provenance stays immutable. Locate moved custody by
             # exact committed succession, never by a reused seat name.
-            for row in conn.execute("SELECT * FROM v2_assistant_bart_lanes"):
+            for row in conn.execute(query.partition(" WHERE ")[0]):
                 owned = effective_ruling(conn, row)
                 if (owned['target_stream_id'], owned['target_generation']) == (target_stream_id, target_generation):
                     return owned
