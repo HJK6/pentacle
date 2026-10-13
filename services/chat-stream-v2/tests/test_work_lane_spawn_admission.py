@@ -403,3 +403,75 @@ def test_crash_adoption_preserves_pre_activation_spec_bound_intent(tmp_path, mon
         asyncio.run(go())
     finally:
         transcript.close()
+
+
+@pytest.mark.parametrize("existing_stage", [False, True])
+def test_lane_refusal_never_stages_or_overwrites_token(tmp_path, monkeypatch, existing_stage):
+    import launch
+    from tmux_transport import Tmux
+    token_path = tmp_path / "owned-staging" / "fixture-token"
+    if existing_stage:
+        token_path.parent.mkdir()
+        token_path.write_bytes(b"retained-fixture-token")
+    before = (token_path.read_bytes(), token_path.stat().st_mtime_ns) if existing_stage else None
+    async def go():
+        async with environment(tmp_path, monkeypatch) as (env, ctl, tmux):
+            plan = launch.LaunchPlan(command="fixture-command", session_id="", jsonl_path="",
+                stream_token="new-fixture-token", stream_token_file=str(token_path))
+            async def resolve(*args):
+                return plan.command, {"_deferred_launch_plan": plan}, {}
+            stages = []
+            async def stage(path, data):
+                stages.append(path)
+                await Tmux().stage_text(path, data)
+            monkeypatch.setattr(ctl, "_resolve_launch", resolve)
+            monkeypatch.setattr(tmux, "stage_text", stage, raising=False)
+            with pytest.raises(VerbError) as error:
+                await ctl.spawn(message(SPEC), "fixture")
+            assert error.value.code == "work_lane_required"
+            assert stages == [] and tmux.created == 0
+            assert await env.store.reservations(include_expired=True) == []
+            if existing_stage:
+                assert (token_path.read_bytes(), token_path.stat().st_mtime_ns) == before
+            else:
+                assert not token_path.exists()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("stage_fails", [False, True])
+def test_enabled_token_stage_follows_intent_and_precedes_pane(tmp_path, monkeypatch, stage_fails):
+    import launch
+    from tmux_transport import Tmux
+    token_path = tmp_path / "owned-staging" / "fixture-token"
+    async def go():
+        async with environment(tmp_path, monkeypatch) as (env, ctl, tmux):
+            original = await lane(env)
+            plan = launch.LaunchPlan(command="fixture-command", session_id="", jsonl_path="",
+                stream_token="new-fixture-token", stream_token_file=str(token_path))
+            async def resolve(*args):
+                return plan.command, {"_deferred_launch_plan": plan}, {}
+            stages = []
+            async def stage(path, data):
+                reservations = await env.store.reservations(include_expired=True)
+                assert len(reservations) == 1 and reservations[0]["payload"] is not None
+                assert tmux.created == 0
+                stages.append(path)
+                if stage_fails:
+                    raise OSError("fixture staging failure")
+                await Tmux().stage_text(path, data)
+            monkeypatch.setattr(ctl, "_resolve_launch", resolve)
+            monkeypatch.setattr(tmux, "stage_text", stage, raising=False)
+            if stage_fails:
+                with pytest.raises(VerbError) as error:
+                    await ctl.spawn(message(SPEC), "fixture")
+                assert error.value.code == "token_stage_failed"
+                assert tmux.created == 0
+                assert await env.store.reservations(include_expired=True) == []
+                assert await env.store.fetch_session("fixture", "candidate") is None
+            else:
+                assert (await ctl.spawn(message(SPEC), "fixture"))["type"] == "spawn.ok"
+                assert token_path.read_bytes() == b"new-fixture-token"
+                assert tmux.created == 1
+            assert stages == [str(token_path)]
+            assert (await env.store.get_work_lane(original["lane_id"]))["lane"] == original
+    asyncio.run(go())

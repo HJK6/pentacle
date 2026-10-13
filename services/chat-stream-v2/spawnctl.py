@@ -1974,7 +1974,7 @@ class SpawnCtl:
                     f"{host}:{name} already has a live tmux session with no open row; "
                     "v2 never kills a pane it did not create",
                 )
-            if isinstance(deferred_launch_plan, launch.LaunchPlan):
+            if isinstance(deferred_launch_plan, launch.LaunchPlan) and not self.work_lane_admission_enforce:
                 await self._stage_launch_token(
                     deferred_launch_plan,
                     host=host,
@@ -2033,6 +2033,17 @@ class SpawnCtl:
             # recovery handle a mid-spawn crash or cancellation is settled from
             # (INV-3). It must never be blind-released on a teardown.
             intent_recorded = True
+            # Lane refusal must not create or overwrite a token stage. Keep
+            # existing disabled-mode ordering; enabled admission stages only
+            # after its durable intent and still before any pane creation.
+            if isinstance(deferred_launch_plan, launch.LaunchPlan) and self.work_lane_admission_enforce:
+                await self._stage_launch_token(
+                    deferred_launch_plan,
+                    host=host,
+                    name=name,
+                    provider=provider,
+                    transport=tmux,
+                )
             total_attempts = (
                 1 if native_initial_prompt
                 else (PROMPT_SPAWN_RETRY_ATTEMPTS if full_brief else 1)
