@@ -19,7 +19,7 @@ FAMILY_CODES: dict[str, frozenset[str]] = {
     "daemon_runtime.v1": frozenset({"loop_stalled"}),
     "work_lane.v1": frozenset({"lane_stale", "lane_completed", "lane_estimate_missing"}),
     "session_lifecycle": frozenset({"session_dead", "close_failed", "close_carcass", "reap_exhausted", "reap_fenced"}),
-    "integrity": frozenset({"pin_drift", "close_claim_mismatch"}),
+    "integrity": frozenset({"pin_drift", "close_claim_mismatch", "ingest_identity_blocked"}),
     "system_deploy": frozenset({"deploy_failed"}),
     "system_backup": frozenset({"backup_failed"}),
     "bot_messaging": frozenset({"registration_failed", "delivery_failed"}),

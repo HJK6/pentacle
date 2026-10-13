@@ -91,7 +91,8 @@ def _parse_iso(value: object) -> datetime | None:
 
 
 def _normalize_start(value: object) -> str:
-    return " ".join(str(value or "").split())
+    from prockill import canonical_start
+    return canonical_start(value)
 
 
 async def run_ps(pid: str, *, ps_bin: str = "ps", timeout_s: float = PS_TIMEOUT_S) -> tuple[int, str, str]:
@@ -127,6 +128,8 @@ def classify_ps(rc: int, stdout: str, stderr: str, recorded_start: str) -> str:
         try:
             datetime.strptime(_normalize_start(lines[0]), "%a %b %d %H:%M:%S %Y")
         except ValueError:
+            return "unknown"
+        if not _normalize_start(recorded_start):
             return "unknown"
         return "alive" if _normalize_start(lines[0]) == _normalize_start(recorded_start) else "gone"
     return "unknown"
@@ -409,7 +412,7 @@ class AssistantRestore:
             except ValueError:
                 binding = None
         pid = str((binding or {}).get("pane_pid") or "").strip() if isinstance(binding, dict) else ""
-        started = str((binding or {}).get("pane_started_at") or "").strip() if isinstance(binding, dict) else ""
+        started = _normalize_start(binding.get("pane_started_at")) if isinstance(binding, dict) else ""
         recorded = str((binding or {}).get("generation") or "") if isinstance(binding, dict) else ""
         if not pid or not started or not pid.isdigit() or recorded != expected_generation:
             if own_rollback and episode is not None and await self._attempt_recorded_failed(row, episode):

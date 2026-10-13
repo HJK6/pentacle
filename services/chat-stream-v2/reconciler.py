@@ -654,7 +654,7 @@ class SessionReconciler:
                 pid, ppid, uid, pgid, sid = (int(parts[index]) for index in range(5))
             except (TypeError, ValueError):
                 continue
-            start_id = " ".join(parts[5:10])
+            start_id = prockill.canonical_start(" ".join(parts[5:10]))
             command = parts[10] if len(parts) > 10 else ""
             if pid > 0 and ppid >= 0 and uid >= 0 and pgid >= 0 and sid >= 0 and start_id:
                 processes[pid] = {
@@ -824,7 +824,8 @@ class SessionReconciler:
                 or proof_pgid != current_pgid
                 or proof_sid != current_sid
                 or proof.get("boot_id") != boot
-                or proof.get("start_id") != current.get("start_id")
+                or not prockill.canonical_start(proof.get("start_id"))
+                or prockill.canonical_start(proof.get("start_id")) != prockill.canonical_start(current.get("start_id"))
                 or proof.get("command_fingerprint") != prockill.command_fingerprint(str(current.get("command") or ""))
                 or not all(str(proof.get(field) or "") for field in ("tmux_socket", "tmux_session", "tmux_pane", "tty"))
             ):

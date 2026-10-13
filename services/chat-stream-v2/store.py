@@ -42,6 +42,7 @@ from retention import (HistoryConnection, prepare_history_schema, history_query,
                        next_receipt_rowid, bind_history_archive, default_archive_path)
 from send_metadata import normalize_send_meta
 from loop_watchdog import StoreProgress, request_timing
+from prockill import canonical_start
 
 import store_exchange
 import store_attachments
@@ -6875,6 +6876,9 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         the reconciler, never lead it), or if the binding has no proven transcript
         anchor. Same-rollout identity is the caller's proof (see
         ``Ingest._maybe_rebind_observer_pane``)."""
+        pane_started_at = canonical_start(pane_started_at)
+        if not pane_started_at:
+            return None
         host, _, name = stream_id.partition(":")
         def op(conn: sqlite3.Connection) -> dict[str, Any] | None:
             row = _session_row(conn, conn.execute(
@@ -6888,7 +6892,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 return None
             if not isinstance(binding.get("transcript"), dict):
                 return None
-            if binding.get("pane_pid") == pane_pid and binding.get("pane_started_at") == pane_started_at:
+            if binding.get("pane_pid") == pane_pid and canonical_start(binding.get("pane_started_at")) == pane_started_at:
                 return None
             updated = {**binding, "pane_pid": pane_pid, "pane_started_at": pane_started_at}
             conn.execute("UPDATE sessions SET observer_binding=? WHERE host=? AND session_name=?",

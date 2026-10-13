@@ -69,7 +69,7 @@ from boot_ready import (
     codex_reset_interstitial_visible,
     codex_tui_readiness,
 )
-from prockill import process_records, process_tree
+from prockill import canonical_start, process_records, process_tree
 from session_names import is_ephemeral_probe_session
 from sessions import VerbError
 from seat_token_telemetry import SeatTokenTelemetry
@@ -3382,8 +3382,8 @@ class SpawnCtl:
     # -- reservation identity probes (spec §D1) ------------------------------
 
     async def _pane_started_at(self, pane_pid: str, *, host: str = "") -> str:
-        """A pane's process start identity (lstart-based, stable across PID
-        reuse on macOS and Linux). Corroborates `pane_pid` at adoption (spec
+        """A pane's printed process start (not a portable birth token).
+        Corroborates `pane_pid` at adoption (spec
         §D1). Empty when unreadable — the match then rests on `pane_pid` alone."""
         if not pane_pid or not str(pane_pid).isdigit():
             return ""
@@ -3394,10 +3394,10 @@ class SpawnCtl:
                 )
             except Exception:  # noqa: BLE001 - remote identity is best-effort
                 return ""
-            return out.strip() if rc == 0 else ""
+            return canonical_start(out) if rc == 0 else ""
         from prockill import process_record
         record = await process_record(str(pane_pid))
-        return str(record.get("start_id") or "") if record else ""
+        return canonical_start(record.get("start_id")) if record else ""
 
     async def _commit_pane_bound(
         self, host: str, name: str, request_id: str, tmux: tmux_transport.Tmux,
@@ -3717,8 +3717,8 @@ class SpawnCtl:
                 pid = str(res.get("pane_pid") or "")
                 if not pid or pid != str(await tmux.pane_pid(name)):
                     return "deferred"
-                started = str(res.get("pane_started_at") or "")
-                if started and started != await self._pane_started_at(pid, host=host):
+                started = canonical_start(res.get("pane_started_at"))
+                if res.get("pane_started_at") and (not started or started != await self._pane_started_at(pid, host=host)):
                     return "deferred"
             if not await self._kill_uncommitted_pane(host, name, tmux, nonce=nonce):
                 return "deferred"

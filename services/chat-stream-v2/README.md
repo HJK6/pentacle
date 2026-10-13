@@ -298,3 +298,38 @@ proof and the Comms event-proof reader use this shared digest; a caption match
 alone cannot confirm an image prompt. Ingress discards producer-supplied digests,
 and malformed proof metadata cannot fall back to caption equality. Existing
 stream, generation, event-kind and post-watermark proof fences still apply.
+
+### Observer start presentation and rollout recovery
+
+The public `prockill.canonical_start` helper collapses only whitespace in printed
+`ps lstart` strings. Missing, non-string and empty values are invalid; dates,
+locale/timezone tokens and case are not transformed. Printed starts are not
+portable process-birth tokens and a mismatch alone does not establish clock
+movement or PID reuse.
+
+Local ingestion keeps its strict generation, observer/live pane PID, UID,
+provider executable and nonempty canonical-start check at entry, discovery and
+pre-append. After root failure, an anchored rollout may recover either a changed
+pane PID or a same-PID changed start. Recovery requires one distinct current
+writable transcript in the legitimate provider tree, matching the prior
+anchor's device/inode and native provider session ID parsed from an opened,
+fstat-checked descriptor. A pane/process re-read fences that proof before the
+exact expected-binding Store CAS; only observer PID/start can change. Ingestion
+then reruns the strict check and keeps the ordinary lifecycle/native-ID checks
+and durable event dedup. A recorded path or first bind cannot seed recovery.
+An unchanged strict identity still tolerates an ordinary writer gap/restart.
+
+Refused identities produce [historical integrity incidents](../../docs/contracts/error-alerts-v1.md#historical-ingest-identity-incidents),
+not idle-timeout claims. This detector belongs to local `Ingest`; satellite
+`event.push` ownership must be inspected separately when investigating a remote
+session.
+
+The start-field consumer audit covers process-record/table capture and reap
+proof capture (`prockill`), remote spawn capture and cancelled-spawn cleanup
+(`spawnctl`), strict/recovery ingest checks, reconciler remote table capture and
+reap proof comparison, Store rebind no-op detection, and assistant-restore ps
+classification. Exact JSON binding CAS snapshots and unrelated timestamps are
+unchanged. Gate ownership uses Linux start ticks or its existing platform
+fallback; orphan-reaper date parsing is an elapsed-age input, not observer
+presentation equality. Private cache/delivery validators are maintained by
+their owner outside this public source tree.

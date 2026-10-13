@@ -141,7 +141,7 @@ def test_codex_native_child_descriptor_is_admitted(tmp_path,monkeypatch):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("change",["birth","native","inode","generation"])
+@pytest.mark.parametrize("change",["unproven_start","native","inode","generation"])
 def test_binding_revokes_on_identity_change(tmp_path,monkeypatch,change):
     async def run():
         store=Store(":memory:");store.start();state=_StreamIngest()
@@ -149,7 +149,9 @@ def test_binding_revokes_on_identity_change(tmp_path,monkeypatch,change):
             path=tmp_path/".codex"/"sessions"/"a.jsonl";write_log(path)
             h=Harness(store,monkeypatch,path);await h.open();ingest=h.ingest()
             assert await h.run(ingest,state)==1
-            if change=="birth":h.birth="Wed Sep 9 11:00:01 2026"
+            if change=="unproven_start":
+                h.birth="Wed Sep 9 11:00:01 2026"
+                h.descriptors=[]  # Changed start needs current writer proof even with an anchor.
             if change=="native":write_log(path,"native-b","foreign")
             if change=="inode":
                 other=path.with_name("replacement");write_log(other,"native-b","foreign");os.replace(other,path)

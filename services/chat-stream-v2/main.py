@@ -986,7 +986,7 @@ async def run(args: argparse.Namespace) -> int:
                         local_host=args.local_host, recent_limit=RECENT_LIMIT, config=icfg,
                         routing_integrity=routing_integrity,
                         inventory_emitter=inventory_emitter,
-                        provenance=provenance_sink)
+                        provenance=provenance_sink, alerts=alerts)
         tasks.append(asyncio.create_task(ingest.run_forever(), name="ingest"))
         log.info("ingest: every %.1fs, cap %d events/pass", icfg.interval_s, icfg.max_events_per_pass)
 

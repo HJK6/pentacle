@@ -78,6 +78,11 @@ async def _ps() -> str:
     return (out or b"").decode("utf-8", "replace")
 
 
+def canonical_start(value: object) -> str:
+    """Canonical ps lstart presentation; an unavailable value stays invalid."""
+    return " ".join(value.split()) if isinstance(value, str) else ""
+
+
 async def process_record(pid: str) -> dict[str, Any] | None:
     """Read one provider root with fields supported by Darwin and Linux."""
     if not str(pid).isdecimal() or int(pid) <= 0:
@@ -96,7 +101,7 @@ async def process_record(pid: str) -> dict[str, Any] | None:
         if len(fields) != 8 or int(fields[0]) != int(pid):
             return None
         return {"pid": int(fields[0]), "uid": int(fields[1]),
-                "start_id": " ".join(fields[2:7]), "command": fields[7]}
+                "start_id": canonical_start(" ".join(fields[2:7])), "command": fields[7]}
     except asyncio.CancelledError:
         await terminate_and_reap(proc)
         raise
@@ -108,7 +113,7 @@ async def process_record(pid: str) -> dict[str, Any] | None:
 async def process_records() -> dict[int, dict[str, Any]]:
     """Return identity-bearing local process records for close readback.
 
-    ``lstart`` is stable across PID reuse and works on both macOS and Linux;
+    ``lstart`` is a printed start value, not a portable process-birth token;
     the reconciler additionally binds the record to boot id and tmux pane proof.
     """
     try:
@@ -132,7 +137,7 @@ async def process_records() -> dict[int, dict[str, Any]]:
         # lstart is five whitespace-separated fields after sid.  Some ps
         # implementations omit command for a kernel process; retain an empty
         # command but never invent identity fields.
-        start_id = " ".join(parts[5:10])
+        start_id = canonical_start(" ".join(parts[5:10]))
         command = parts[10] if len(parts) > 10 else ""
         if pid > 0 and ppid >= 0 and uid >= 0 and pgid >= 0 and sid >= 0 and start_id:
             records[pid] = {
@@ -174,6 +179,9 @@ def identity_proof(
     required = ("pid", "ppid", "uid", "pgid", "sid", "start_id", "command")
     if not boot or any(key not in record for key in required):
         return None
+    started = canonical_start(record["start_id"])
+    if not started:
+        return None
     captured = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     return {
         "version": 2,
@@ -181,7 +189,7 @@ def identity_proof(
         "uid": int(record["uid"]),
         "boot_id": boot,
         "pid": int(record["pid"]),
-        "start_id": str(record["start_id"]),
+        "start_id": started,
         "ppid": int(record["ppid"]),
         "pgid": int(record["pgid"]),
         "sid": int(record["sid"]),
