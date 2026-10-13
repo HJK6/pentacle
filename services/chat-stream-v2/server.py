@@ -328,6 +328,87 @@ SEAT_OPERATOR_AUTHORITY_ENV = "PENTACLE_SEAT_OPERATOR_AUTHORITY"
 #: one legal chunk with margin while still rejecting absurd frames at the wire.
 WS_MAX_SIZE = 4 * 1024 * 1024
 
+# Request credits cover authentication, hello barriers, handlers and replies.
+# Byte credits count retained raw UTF-8 payloads, not transport/decoded buffers.
+_ADMISSION_LIMITS = {
+    # global tasks, connection tasks, principal tasks, corresponding byte caps
+    "ordinary": (64, 8, 16, 32 << 20, 8 << 20, 16 << 20),
+    "parked": (16, 4, 4, 1 << 20, 256 << 10, 256 << 10),
+    "durable": (32, 8, 8, 32 << 20, 8 << 20, 8 << 20),
+    "control": (4, 1, 1, 64 << 10, 16 << 10, 16 << 10),
+}
+
+
+class _RequestPool:
+    """Synchronous admission: no queue, semaphore waiter or admission task."""
+
+    def __init__(self, name: str, limits: tuple[int, ...]) -> None:
+        self.limits = (max(1, int(os.environ.get(
+            f"PENTACLE_ADMIT_{name.upper()}", limits[0]))), *limits[1:])
+        self.total = [0, 0]
+        self.connections: dict[Any, list[int]] = {}
+        self.principals: dict[tuple[str, str], list[int]] = {}
+
+    @staticmethod
+    def _fits(usage: list[int], count: int, size: int, raw_size: int) -> bool:
+        return usage[0] < count and usage[1] + raw_size <= size
+
+    def acquire(self, websocket: Any, principal: tuple[str, str], size: int):
+        g, c, p, gb, cb, pb = self.limits
+        connection = self.connections.get(websocket, [0, 0])
+        identity = self.principals.get(principal, [0, 0])
+        if not (self._fits(self.total, g, gb, size)
+                and self._fits(connection, c, cb, size)
+                and self._fits(identity, p, pb, size)):
+            return None
+        self.connections[websocket] = connection
+        self.principals[principal] = identity
+        for usage in (self.total, connection, identity):
+            usage[0] += 1
+            usage[1] += size
+        return _RequestCredit(self, websocket, principal, size)
+
+    @staticmethod
+    def _return(mapping, key, size):
+        usage = mapping[key]
+        usage[0] -= 1
+        usage[1] -= size
+        if not usage[0]:
+            del mapping[key]
+
+
+@dataclass
+class _RequestCredit:
+    pool: _RequestPool
+    websocket: Any
+    principal: tuple[str, str]
+    size: int
+    released: bool = False
+
+    def transfer(self, principal: tuple[str, str]) -> bool:
+        if principal == self.principal:
+            return True
+        usage = self.pool.principals.get(principal, [0, 0])
+        if not self.pool._fits(usage, self.pool.limits[2], self.pool.limits[5], self.size):
+            return False
+        self.pool._return(self.pool.principals, self.principal, self.size)
+        self.pool.principals[principal] = usage
+        usage[0] += 1
+        usage[1] += self.size
+        self.principal = principal
+        return True
+
+    def release(self, _task=None) -> None:
+        # Done callbacks also cover cancellation before the coroutine starts.
+        if self.released:
+            return
+        self.released = True
+        self.pool.total[0] -= 1
+        self.pool.total[1] -= self.size
+        self.pool._return(self.pool.connections, self.websocket, self.size)
+        self.pool._return(self.pool.principals, self.principal, self.size)
+
+
 Handler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 # Each client has a bounded broadcast queue drained by one writer task. Overflow
@@ -648,6 +729,10 @@ class Server:
         #: gone client). Durable receipt queryability is supplied separately by
         #: the append-only receipt log, never by this task registry.
         self._detached_send_tasks: set[asyncio.Task] = set()
+        self._admission_connections = 0
+        self._admission_connection_limit = max(1, int(os.environ.get("PENTACLE_ADMIT_CONNECTIONS", 32)))
+        self._admission_pools = {name: _RequestPool(name, limits)
+                                 for name, limits in _ADMISSION_LIMITS.items()}
         self._client_identities: dict[Any, str] = {}
         self._consent_sent: dict[Any, dict[str, str]] = {}
         # Per-client hello.subscribe state drives projection of broadcasts and
@@ -1456,11 +1541,16 @@ class Server:
     # -- connection --------------------------------------------------------
 
     async def _handle_client(self, websocket: Any) -> None:
+        # Reserve before allocating a writer, queue, diagnostics or bootstrap waits.
+        if self._admission_connections >= self._admission_connection_limit:
+            await websocket.close(code=1013, reason="server_overloaded")
+            return
+        self._admission_connections += 1
         safe_context = _CONN_LOG_SAFE.set(True)
-        self._register_client(websocket, broadcast=False)
         termination = "welcome_failed"
         error = None
         try:
+            self._register_client(websocket, broadcast=False)
             if not self.bootstrap_ready.is_set():
                 ready = asyncio.create_task(self.bootstrap_ready.wait())
                 closed = asyncio.create_task(websocket.wait_closed())
@@ -1495,7 +1585,38 @@ class Server:
             # This also releases maps after the old welcome-failure early return.
             self._unregister_client(websocket)
             self._diag_finalize(websocket, termination, error)
+            self._admission_connections -= 1
             _CONN_LOG_SAFE.reset(safe_context)
+
+    def _admission_principal(self, websocket: Any) -> tuple[str, str]:
+        seat = self._client_authenticated_streams.get(websocket)
+        if seat:
+            return ("seat", seat)
+        service = self._client_system_producers.get(websocket)
+        if service:
+            return ("service", service)
+        trust = self._connection_trust.get(websocket)
+        if trust is not None and trust.credential_id:
+            return ("credential", trust.credential_id)
+        return ("shared", "local" if self._is_loopback_client(websocket) else "preauth")
+
+    def _refuse_request(self, websocket: Any, request: dict) -> None:
+        verb = request.get("type")
+        known = (isinstance(verb, str) and verb in self.handlers
+                 and len(verb.encode("utf-8", errors="replace")) <= 64)
+        rid = request.get("request_id")
+        # Bound the encoded response even for hostile correlation fields.
+        if isinstance(rid, str):
+            rid = rid.encode("utf-8", errors="replace")[:128].decode("utf-8", errors="ignore")
+        elif len(json.dumps(rid, ensure_ascii=False).encode("utf-8", errors="replace")) > 128:
+            rid = None
+        if request.get("protocol") == 2 and isinstance(verb, str) and verb in {"upload_blob_init", "upload_blob_chunk"}:
+            frame = {"type": "upload_blob.error", "request_id": rid,
+                     "protocol": 2, "error_code": "upload_quota"}
+        else:
+            frame = {"type": f"{verb}.error" if known else "protocol.error",
+                     "request_id": rid, "error_code": "server_overloaded", "retryable": True}
+        self._enqueue(websocket, frame["type"], json.dumps(frame))
 
     async def _handle_client_inner(self, websocket: Any) -> None:
         # v1 parity: speak first. It uses the same send lock as RPC results, so
@@ -1518,17 +1639,33 @@ class Server:
                 # not hold up the requests behind it. Replies correlate by
                 # `request_id`, so out-of-order completion is expected.
                 try:
-                    is_hello = json.loads(raw).get("type") == "hello"
-                except (ValueError, TypeError, AttributeError):
-                    is_hello = False
-                task = asyncio.create_task(self._serve_after_hello(websocket, raw, hello_barrier))
+                    request = json.loads(raw)
+                except (ValueError, TypeError):
+                    request = None
+                request = request if isinstance(request, dict) else {}
+                verb = request.get("type")
+                is_hello = verb == "hello"
+                principal = self._admission_principal(websocket)
+                durable = _is_send_frame(raw)
+                pool = "durable" if durable else "ordinary"
+                if isinstance(verb, str) and verb in {"await_report", "await_spawn"}:
+                    pool = "parked"
+                elif isinstance(verb, str) and verb in {"ping", "spawn_cancel"} and principal != ("shared", "preauth"):
+                    pool = "control"
+                raw_size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
+                credit = self._admission_pools[pool].acquire(websocket, principal, raw_size)
+                if credit is None:
+                    self._refuse_request(websocket, request)
+                    continue
+                task = asyncio.create_task(self._serve_after_hello(websocket, raw, hello_barrier, credit))
+                task.add_done_callback(credit.release)
                 if is_hello:
                     hello_barrier = task
                 # spec_example_2026_01:
                 # an accepted send or answer must NOT be aborted when this
                 # submitter disconnects, so track send tasks at daemon level
                 # instead of in `inflight` (which the finally below cancels).
-                if _is_send_frame(raw):
+                if durable:
                     self._detached_send_tasks.add(task)
                     task.add_done_callback(self._detached_send_tasks.discard)
                 else:
@@ -1556,11 +1693,30 @@ class Server:
             if self.blobs is not None:
                 await self.blobs.abort_connection(websocket)
 
-    async def _serve_after_hello(self, websocket: Any, raw: Any, barrier: asyncio.Task | None) -> None:
+    async def _serve_after_hello(self, websocket: Any, raw: Any, barrier: asyncio.Task | None,
+                                 credit: _RequestCredit) -> None:
         # CLI callers may send the RPC immediately after hello. Authenticate
         # that hello first, without serializing long-running ordinary RPCs.
         if barrier is not None:
-            await asyncio.shield(barrier)
+            try:
+                await asyncio.shield(barrier)
+            except asyncio.CancelledError:
+                # Disconnect cancels hello, not its admitted durable followers.
+                # Explicit cancellation of this request must still propagate.
+                if (not _is_send_frame(raw) or not barrier.cancelled()
+                        or asyncio.current_task().cancelling()):
+                    raise
+            # Only an unbound charge moves to an identity established by hello.
+            # A captured known-principal charge survives disconnect/map removal.
+            principal = self._admission_principal(websocket)
+            if (credit.principal[0] == "shared" and principal[0] != "shared"
+                    and not credit.transfer(principal)):
+                try:
+                    request = json.loads(raw)
+                except (ValueError, TypeError):
+                    request = None
+                self._refuse_request(websocket, request if isinstance(request, dict) else {})
+                return
         await self._serve(websocket, raw)
 
     async def _serve(self, websocket: Any, raw: Any) -> None:
@@ -1696,6 +1852,7 @@ class Server:
         await asyncio.sleep(0)
 
     def _register_client(self, websocket: Any, *, broadcast: bool = True) -> None:
+        websocket._pentacle_registration_live = True
         if broadcast:
             self._clients.add(websocket)
         if websocket not in self._client_send_queues:
@@ -1713,6 +1870,8 @@ class Server:
         self._host_stats_clients.add(websocket)
 
     def _unregister_client(self, websocket: Any) -> None:
+        if hasattr(websocket, "_pentacle_registration_live"):
+            websocket._pentacle_registration_live = False
         self._diag_snapshot(websocket)
         self._clients.discard(websocket)
         self._client_identities.pop(websocket, None)
@@ -2427,8 +2586,10 @@ class Server:
                 owner = None
             else:
                 owner = str(owner)
-                self._client_authenticated_streams[websocket] = owner
-                self._client_token_hashes[websocket] = token_hash
+                # Detached requests retain verified context, not departed bindings.
+                if getattr(websocket, "_pentacle_registration_live", True):
+                    self._client_authenticated_streams[websocket] = owner
+                    self._client_token_hashes[websocket] = token_hash
 
         if reason_code == TOKEN_REASON_VERIFIED:
             self.token_telemetry.record_verification(
@@ -2458,7 +2619,7 @@ class Server:
                 ),
             }
         )
-        if context["dot_principal"]:
+        if context["dot_principal"] and getattr(websocket, "_pentacle_registration_live", True):
             # Sticky: once a Dot, enforced as a Dot for the connection's life.
             self._client_dot_connections.add(websocket)
         if retired_owner is not None and reason_code == TOKEN_REASON_EXPIRED:
