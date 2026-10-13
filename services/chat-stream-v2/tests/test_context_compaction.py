@@ -153,7 +153,18 @@ def test_pending_input_fences_new_episode_until_saved_proof_reconciles():
 
             h.tmux.set_capture("child", h.tmux.IDLE)
             await h.job.run_pass()
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
+            assert "attempt" not in json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+
+            # Proven carried input consumes this crossing; only a genuinely new
+            # below-advisory/compact crossing may submit another command.
+            await read(399_999, -4)
+            await read(500_000, -3)
+            await h.job.run_pass()  # advisory occupies the synthetic composer
+            h.tmux.set_capture("child", h.tmux.IDLE)
+            await h.job.run_pass()
             third = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
+            assert third["epoch"] != second["epoch"]
             assert third["attempt"]["id"] != first["attempt"]["id"]
             assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 2
         finally:
@@ -430,7 +441,7 @@ def test_pre_input_failure_retries_only_after_compact_cooldown(monkeypatch):
     asyncio.run(run())
 
 
-def test_turn_becoming_busy_while_pane_lock_waits_defers_input():
+def test_turn_becoming_busy_while_pane_lock_waits_queues_initial_input():
     from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig
 
     async def run():
@@ -461,9 +472,9 @@ def test_turn_becoming_busy_while_pane_lock_waits_defers_input():
             h.sessions.apply_live(sid, working=True)
             lock.release()
             await task
-            assert CONTEXT_COMPACT_COMMAND not in h.tmux.pasted
+            assert h.tmux.pasted.count(CONTEXT_COMPACT_COMMAND) == 1
             basis = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
-            assert "attempt" not in basis
+            assert basis["attempt"]["outcome"] == "pending_input"
         finally:
             store.stop()
 
@@ -620,7 +631,9 @@ def test_mode_entered_after_paste_blocks_enter_recovery():
     asyncio.run(run())
 
 
-def test_idle_compaction_has_durable_user_proof_and_no_duplicate(tmp_path):
+@pytest.mark.parametrize("working", [False, True])
+@pytest.mark.parametrize("roster", [False, True])
+def test_compaction_has_durable_user_proof_and_no_duplicate(tmp_path, working, roster):
     from ledger import CONTEXT_COMPACT_COMMAND, NudgeConfig, NudgeJob
 
     async def run():
@@ -631,8 +644,15 @@ def test_idle_compaction_has_durable_user_proof_and_no_duplicate(tmp_path):
             )
             sid = f"{HOST}:child"
             original_paste = h.tmux.paste
+            pane = MAIN_ROSTER if roster else IDLE_CAPTURED_LAYOUT
+            if working:
+                pane = "✻ Thinking… (5s · esc to interrupt)\n" + pane
+                from mirror import _extract_live_state
+                assert _extract_live_state(pane, "claude")["working"] is True
 
             async def paste(name, text):
+                if text == CONTEXT_COMPACT_COMMAND:
+                    assert await h.tmux.capture(name) == pane
                 await original_paste(name, text)
                 h.tmux.set_capture(
                     name, h.tmux._panes[name] + "⏵⏵ bypass permissions on (bypass)\n",
@@ -647,15 +667,20 @@ def test_idle_compaction_has_durable_user_proof_and_no_duplicate(tmp_path):
 
             h.tmux.paste = paste
             now = time.time()
-            await RoutingIntegrity(store, h.sessions).observe_context(
+            observer = RoutingIntegrity(store, h.sessions)
+            await observer.observe_context(
+                HOST, "child", provider="claude",
+                reading=ContextReading(450_000, model="claude-fable-5-1"),
+                observed_at=_iso(now - 6),
+            )
+            await h.job.run_pass()
+            await observer.observe_context(
                 HOST, "child", provider="claude",
                 reading=ContextReading(500_000, model="claude-fable-5-1"),
                 observed_at=_iso(now - 5),
             )
-            h.sessions.apply_live(sid, working=True)
-            await h.job.run_pass()
-            assert CONTEXT_COMPACT_COMMAND not in h.tmux.pasted
-            h.sessions.apply_live(sid, working=False)
+            h.sessions.apply_live(sid, working=working)
+            h.tmux.set_capture("child", pane)
             await h.job.run_pass()
             basis = json.loads((await store.nudge_state(sid, "context_compact"))["basis"])
             assert basis["attempt"]["outcome"] == "submitted"
@@ -910,3 +935,40 @@ def test_expired_unproven_attempt_preserves_draft_or_accepts_late_proof(late_pro
         finally:
             store.stop()
     asyncio.run(run())
+
+
+# Synthetic provider chrome: no production agent descriptions or pane text.
+MAIN_ROSTER = IDLE_CAPTURED_LAYOUT + "⏺ main\n◯ researcher Synthetic task (12m 3s)\n"
+
+
+@pytest.mark.parametrize("pane", [
+    IDLE_WITH_UPDATE_FOOTER.replace("Restart to update", "Restart to apply"),
+    IDLE_WITH_UPDATE_FOOTER.replace("Restart to update", "/restart to apply"),
+    MAIN_ROSTER + _UPDATE_FOOTER.replace("Restart to update", "/restart to apply"),
+    MAIN_ROSTER,
+    MAIN_ROSTER + "◯ tester Another synthetic task (2s)\n" + _UPDATE_FOOTER,
+    MAIN_ROSTER.replace(_PERM_FOOTER, _PERM_FOOTER + " · ✔ Update installed · Restart to apply"),
+])
+def test_main_roster_and_apply_banner_are_empty_chrome(pane):
+    from boot_ready import claude_composer_empty
+    assert claude_composer_empty(pane)
+
+
+@pytest.mark.parametrize("pane", [
+    MAIN_ROSTER.replace("⏺ main", "⏺ researcher"),
+    MAIN_ROSTER.replace("⏺ main\n", ""),
+    IDLE_CAPTURED_LAYOUT + "⏺ main\n",
+    IDLE_CAPTURED_LAYOUT + "⏺ main\n◯ \n",
+    MAIN_ROSTER + "unknown trailing content\n",
+    MAIN_ROSTER.replace("⏺ main", "● main"),
+    MAIN_ROSTER.replace("◯ researcher", "○ researcher"),
+    MAIN_ROSTER.replace("❯ ", "❯ ✔ Update installed · /restart to apply"),
+    MAIN_ROSTER.replace("❯ ", "❯ ⏺ main"),
+    MAIN_ROSTER.replace("❯ ", "❯ Press up to edit queued messages"),
+    "❯\n" + _PERM_FOOTER + "\n⏺ main\n◯ worker synthetic\n",
+    "❯\n⏺ main\n◯ worker synthetic\n" + _DIV + "\n" + _PERM_FOOTER,
+    "❯\nactual multiline draft\n" + _DIV + "\n" + _PERM_FOOTER + "\n⏺ main\n◯ worker synthetic",
+])
+def test_roster_recognition_preserves_drafts_and_unknown_chrome(pane):
+    from boot_ready import claude_composer_empty
+    assert not claude_composer_empty(pane)

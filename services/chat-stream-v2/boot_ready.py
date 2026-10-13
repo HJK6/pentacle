@@ -95,17 +95,21 @@ def claude_prompt_ready(pane_text: str) -> bool:
 
 # The Claude CLI, after an in-place self-update, renders a persistent banner
 # line below the permission footer until the process restarts (observed:
-# "✔ Update installed · Restart to update"). It is daemon chrome, not a draft.
+# "✔ Update installed · Restart to update/apply"). It is provider chrome, not a draft.
 # It must be recognised ONLY in that structural position — below the permission
 # footer — so the same text typed into the composer, or wrapped above the
 # footer, is still treated as a draft and fails closed.
-_CLAUDE_UPDATE_FOOTER = "Update installed · Restart to update"
+_CLAUDE_UPDATE_FOOTERS = {
+    "Update installed · Restart to update",
+    "Update installed · Restart to apply",
+    "Update installed · /restart to apply",
+}
 
 
 def _is_claude_update_footer(content: str) -> bool:
     # Tolerate the leading status glyph (✔/✓) and the spacing the TUI uses to
     # right-align the banner; require the exact banner text otherwise.
-    return content.lstrip("✔✓ ").strip() == _CLAUDE_UPDATE_FOOTER
+    return content.lstrip("✔✓ ").strip() in _CLAUDE_UPDATE_FOOTERS
 
 
 def claude_composer_empty(pane_text: str) -> bool:
@@ -113,7 +117,7 @@ def claude_composer_empty(pane_text: str) -> bool:
 
     The prompt marker may appear in history, so inspect the last one and allow
     only the persistent divider and permission footer below it, plus the CLI
-    self-update banner in its structural position below that footer. Unknown
+    self-update banner and main-selected agent roster below that footer. Unknown
     chrome fails closed rather than risking a slash command appended to a user
     draft.
     """
@@ -121,18 +125,35 @@ def claude_composer_empty(pane_text: str) -> bool:
     start = _last_claude_input_start(lines)
     if start is None or lines[start].strip() != "❯":
         return False
+    seen_lower_divider = False
     seen_permission_footer = False
+    seen_main = False
+    agent_rows = 0
     for line in lines[start + 1:]:
         content = line.strip()
-        if not content or set(content) == {"─"}:
+        if not content:
             continue
-        if content.startswith(("⏵⏵ bypass permissions", "⏸ manual mode on")):
+        if set(content) == {"─"} and not seen_permission_footer:
+            seen_lower_divider = True
+            continue
+        if (not seen_main
+                and content.startswith(("⏵⏵ bypass permissions", "⏸ manual mode on"))):
             seen_permission_footer = True
             continue
         if seen_permission_footer and _is_claude_update_footer(content):
             continue
+        # Native background-agent chrome lives below the composer box and
+        # footer. Never accept these same glyphs inside the composer, a partial
+        # panel, or a panel with another thread selected. Descriptions are opaque.
+        if seen_lower_divider and seen_permission_footer:
+            if content == "⏺ main" and not seen_main:
+                seen_main = True
+                continue
+            if seen_main and content.startswith("◯ ") and content[2:].strip():
+                agent_rows += 1
+                continue
         return False
-    return True
+    return not seen_main or agent_rows > 0
 
 
 def _codex_input_line(line: str) -> bool:
