@@ -1760,6 +1760,56 @@ class NotificationStore(ErrorNotificationMixin):
                 raise
         return moved
 
+    def project_host_transfers(self, parts: list[dict]) -> int:
+        """Idempotent projection of committed exact-generation custody.
+
+        Ordinary questions retain their id, state and accepted answer. Consent
+        and proxy questions carry separate authority and are never transferred.
+        The session journal, not this projection, is the authority record.
+        """
+        changed = 0
+        with self._lock:
+            self._require_open()
+            self._conn.execute('BEGIN IMMEDIATE')
+            try:
+                for part in parts:
+                    rows = self._conn.execute(
+                        'SELECT q.*,n.answer_to_stream_id,n.resolution FROM agent_questions q '
+                        'JOIN notifications n USING(notification_id) '
+                        'WHERE q.producer_stream_id=? AND q.producer_session_generation=?',
+                        (part['source'],part['source_generation'])).fetchall()
+                    for row in rows:
+                        envelope = json.loads(row['envelope'])
+                        context = envelope.get('context')
+                        if isinstance(context,str):
+                            try: context=json.loads(context)
+                            except ValueError: context=None
+                        if (envelope.get('_assistant_composite_question_proxy') is True
+                            or isinstance(context,dict) and context.get('schema')=='HandoffModelChangeApprovalV1'):
+                            continue
+                        if row['answer_to_stream_id'] != part['source']:
+                            raise InvalidNotification('migration question owner mismatch')
+                        envelope.setdefault('_handoff_origin',{
+                            'producer_stream_id':part['source'],
+                            'producer_session_generation':part['source_generation']})
+                        envelope.update(producer_stream_id=part['target'],producer_session_generation=part['target_generation'])
+                        resolution=json.loads(row['resolution'] or '{}')
+                        delivery=resolution.get('v2_answer_delivery')
+                        if isinstance(delivery,dict):
+                            if (delivery.get('producer_stream_id'),delivery.get('producer_session_generation')) != (part['source'],part['source_generation']):
+                                raise InvalidNotification('migration answer owner mismatch')
+                            delivery.update(producer_stream_id=part['target'],producer_session_generation=part['target_generation'])
+                        self._conn.execute('UPDATE agent_questions SET producer_stream_id=?,producer_session_generation=?,envelope=? WHERE question_id=?',
+                            (part['target'],part['target_generation'],json.dumps(envelope),row['question_id']))
+                        self._conn.execute('UPDATE notifications SET answer_to_stream_id=?,resolution=? WHERE notification_id=?',
+                            (part['target'],json.dumps(resolution) if row['resolution'] else row['resolution'],row['notification_id']))
+                        changed += 1
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        return changed
+
     def expire_open_questions_for_producer(
         self,
         producer_stream_id: str,

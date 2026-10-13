@@ -49,6 +49,7 @@ import store_attachments
 import store_usage
 import store_qa
 import store_lifecycle_authority as lifecycle_authority
+import store_host_transfer as host_transfer
 from store_assistant_binding import (
     ASSISTANT_BINDING_DDL, ASSISTANT_REBIND_AUDIT_DDL,
     ASSISTANT_REBIND_AUDIT_INDEX_DDL, ASSISTANT_HANDOFF_PROOF_DDL,
@@ -1770,6 +1771,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN objective TEXT")
             store_qa.initialize(conn)
             lifecycle_authority.initialize(conn)
+            host_transfer.initialize(conn)
             consent.initialize(conn)
             store_exchange.initialize(conn)
             if "objective_source" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
@@ -1851,6 +1853,12 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
 
     async def submit(self, fn: Callable[[sqlite3.Connection], Any]) -> Any:
         """Run `fn(conn)` on the store thread; await its result."""
+        actor = host_transfer.actor_context.get()
+        if actor is not None:
+            operation = fn
+            def fn(conn):
+                host_transfer.require_active(conn, *actor)
+                return operation(conn)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         with self._lock:
@@ -1868,6 +1876,20 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             except queue.Full as exc:
                 raise RuntimeError("store overloaded: pending write queue is full") from exc
         return await fut
+
+    async def transfer_authority_state(self, stream_id, generation):
+        return await self.submit(lambda conn: host_transfer.authority_state(conn, stream_id, generation))
+
+    async def transfer_successor(self, stream_id, generation):
+        return await self.submit(lambda conn: host_transfer.successor(conn, stream_id, generation))
+
+    async def require_current_actor(self, stream_id, generation):
+        def op(conn):
+            host_transfer.require_active(conn, stream_id, generation)
+            row = host_transfer._seat_conn(conn, stream_id)
+            if not row or row['status'] != 'open' or row['session_generation'] != generation:
+                raise host_transfer.TransferError('actor_generation_changed')
+        return await self.submit(op)
 
     async def put(self, key: str, value: str) -> None:
         def _op(conn: sqlite3.Connection) -> None:
@@ -3170,6 +3192,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         cols["closed_at"] = None
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            host_transfer.preparation_may_open(conn, f'{host}:{session_name}')
             if conn.execute(
                 "SELECT 1 FROM v2_deferred_reap WHERE stream_id=? AND done_at IS NULL",
                 (f"{host}:{session_name}",),
@@ -4173,6 +4196,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         reservation ever exists without its identity."""
 
         def _op(conn: sqlite3.Connection) -> bool:
+            host_transfer.preparation_may_open(conn, f'{host}:{session_name}')
             now = time.time()
             # The keyless path is always a NEW admission (no replay), so a live
             # hold refuses it in this same serialized txn.
@@ -4291,6 +4315,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         pane exists. Written to the reservation the spawn already holds."""
 
         def _op(conn: sqlite3.Connection) -> bool:
+            host_transfer.preparation_may_open(conn, f'{host}:{session_name}')
             for stream_id, expected in expected_spec_sources:
                 if spec_binding_source(_session_for_stream_conn(conn, stream_id)) != expected:
                     raise SpecInputsUnavailable("spec_inputs_changed")
@@ -5140,6 +5165,16 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
     ) -> dict[str, Any]:
         """Atomic designate/transfer/revoke; a refusal commits only its audit row."""
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            if msg.get('retire_fd_generation') is True:
+                try:
+                    return host_transfer.transaction(conn, lambda c: host_transfer.emergency_revoke(c,msg,auth,protected_role))
+                except (host_transfer.TransferError, lifecycle_authority.AuthorityError) as exc:
+                    host_transfer.audit(conn,None,'fd_revoke_refused',code=exc.code)
+                    conn.commit()
+                    raise
+            if auth.get('_emergency_verified') and conn.execute(
+                    'SELECT 1 FROM v2_host_transfer_revoke_receipts WHERE request_id=?',(msg.get('request_id'),)).fetchone():
+                raise lifecycle_authority.AuthorityError('authority_request_conflict')
             try:
                 receipt = lifecycle_authority.mutate(conn, msg, auth, protected_role)
             except lifecycle_authority.AuthorityError:

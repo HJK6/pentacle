@@ -982,6 +982,11 @@ class Sessions:
         caller = str(auth.get("stream_id") or "").strip()
         if not caller:
             raise VerbError("stream_ownership_unverified", "reparent requires a verified stream-token owner")
+        from store_host_transfer import TransferError
+        try:
+            await self.store.require_current_actor(caller, auth.get('session_generation'))
+        except TransferError as exc:
+            raise VerbError(exc.code, str(exc)) from exc
         # Only the owner moves a worker: a top-level stream (including a
         # protected assistant) has none, and adopting oneself confers nothing.
         allowed = old_parent_stream_id is not None and caller == old_parent_stream_id
@@ -1430,6 +1435,7 @@ class Sessions:
             # and child intent recording. Stale/closed targets keep their existing
             # outcomes; a child guard never authorizes killing a newer generation.
             async with self._graph_lock:
+                row = await self.store.fetch_session(host, session_name)
                 if admission_guard is not None:
                     await admission_guard(row)
                 if row and row.get("status") == "open":

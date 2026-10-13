@@ -340,6 +340,9 @@ class AssistantComposite:
             env_binding=self._env_binding(), name=self.env_config.name,
         )
         self._apply_binding(binding)
+        helpers = await self.store.get('assistant.transfer.helpers.' + self.env_config.name)
+        if helpers:
+            self.config = replace(self.config, **json.loads(helpers))
         return binding
 
     async def binding(self) -> dict[str, Any]:
@@ -1320,6 +1323,8 @@ class AssistantComposite:
         generation = str(row.get("session_generation") or "")
         if not generation:
             raise ValueError("assistant_backend_generation_unavailable")
+        if await self.store.transfer_authority_state(target,generation):
+            raise _DirectTargetUnbound('assistant_direct_target_unbound')
         return generation
 
     async def _direct_target_generation(self) -> str:
@@ -1861,7 +1866,8 @@ class AssistantComposite:
             route_payload = json.loads(str(route.get("route_json") or "{}"))
         except (TypeError, ValueError):
             route_payload = {}
-        if route_payload.get("admission_mode") == "direct_primary" and actor != target:
+        effective, _ = await self.store.transfer_successor(target, expected_generation)
+        if route_payload.get("admission_mode") == "direct_primary" and actor != effective:
             return False
         host, separator, session_name = actor.partition(":")
         if not separator or not host or not session_name:

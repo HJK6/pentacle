@@ -77,6 +77,9 @@ def _session(conn, sid):
 
 
 def _live(conn, sid, generation):
+    from store_host_transfer import authority_state
+    if authority_state(conn, sid, generation):
+        return None
     row = _session(conn, sid)
     return row if row and row["status"] == "open" and row["session_generation"] == generation else None
 

@@ -315,6 +315,7 @@ class Notify:
         self._comms = comms
         self._broadcast = broadcast
         self._sessions = sessions
+        self._host_transfer_lock = asyncio.Lock()
         self._notice_store = notice_store
         self._outbound = outbound
         self._assistant_binding = assistant_binding
@@ -455,7 +456,7 @@ class Notify:
             if self._sessions is not None and record.get("producer") == "agent_question.v1":
                 question = await self._agent_question_for_notification(record)
                 if (question is not None and question.get("state") == "open"
-                        and not self._producer_is_current(question)):
+                        and not await self._producer_is_current(question)):
                     continue
             serialized.append(await self._serialize(record))
         return serialized
@@ -593,7 +594,7 @@ class Notify:
 
     # -- post-resolution fan-out ------------------------------------------
 
-    def _answer_owner(self, question: dict | None) -> dict | None:
+    async def _answer_owner(self, question: dict | None) -> dict | None:
         # The accepted composite USER route is delivered to the current lane
         # binding. Never queue a second answer tell to historical provenance.
         if _is_assistant_composite_question(question):
@@ -607,6 +608,7 @@ class Notify:
         generation = self._stored_generation(question) or (row or {}).get("session_generation")
         if not generation:
             return None
+        producer, generation = await self._effective_host_owner(producer, generation)
         return {"schema": "v2_notification_answer_v1", "producer_stream_id": producer,
                 "producer_session_generation": generation,
                 "notification_id": question["notification_id"], "question_id": question["question_id"]}
@@ -619,15 +621,16 @@ class Notify:
         question = await self._agent_question_for_notification(record)
         if (question is None or owner.get("notification_id") != record.get("notification_id")
                 or owner.get("question_id") != question.get("question_id")
-                or owner.get("producer_stream_id") != question.get("producer_stream_id")
-                or owner.get("producer_stream_id") != record.get("answer_to_stream_id")
                 or not owner.get("producer_session_generation")
                 or owner.get("canonical_intent") != resolution.get("canonical_intent")):
             return None
         stored = self._stored_generation(question)
-        if stored and stored != owner["producer_session_generation"]:
+        effective = await self._effective_host_owner(owner['producer_stream_id'], owner['producer_session_generation'])
+        question_owner = await self._effective_host_owner(question.get('producer_stream_id'), stored or owner['producer_session_generation'])
+        record_owner = await self._effective_host_owner(record.get('answer_to_stream_id'), owner['producer_session_generation'])
+        if effective != question_owner or effective != record_owner:
             return None
-        return owner
+        return {**owner,'producer_stream_id':effective[0],'producer_session_generation':effective[1]}
 
     @staticmethod
     def _notice_metadata(row: dict) -> dict:
@@ -642,6 +645,9 @@ class Notify:
         metadata = self._notice_metadata(row)
         record = await self._db.call("get_notification", metadata["notification_id"])
         owner = await self._owned_answer(record) if record else None
+        effective = await self._effective_host_owner(metadata.get('producer_stream_id'), metadata.get('producer_session_generation'))
+        if effective != (metadata.get('producer_stream_id'), metadata.get('producer_session_generation')):
+            return NoticeDecision.retry('answer_owner_transferred', 'retry the durable successor recipient')
         if owner != metadata:
             return NoticeDecision.terminal("answer_ownership_invalid", "inspect the original answer")
         prior = await self._comms.reconcile_notification_answer(
@@ -787,6 +793,17 @@ class Notify:
     # -- prompt.* dispatch (lifted) ---------------------------------------
 
     async def prompt(self, msg: dict[str, Any]) -> dict[str, Any]:
+        async with self._host_transfer_lock:
+            await self.project_host_transfer()
+            auth = msg.get('_auth_context') or {}
+            if auth.get('token_verified') and self._sessions is not None:
+                sid = auth.get('stream_id')
+                row = await self._sessions.store.fetch_session(*sid.split(':',1)) if sid and ':' in sid else None
+                generation = auth.get('session_generation') or (row or {}).get('session_generation')
+                await self._sessions.store.require_current_actor(sid, generation)
+            return await self._prompt_locked(msg)
+
+    async def _prompt_locked(self, msg: dict[str, Any]) -> dict[str, Any]:
         request_id = str(msg.get("request_id") or "")
         verb = str(msg.get("type") or "")
         try:
@@ -1013,7 +1030,7 @@ class Notify:
         # Recheck producer liveness/generation before answering so recovery cannot
         # expose an actionable stale question and an answer cannot be delivered to
         # a replacement generation that reused the producer stream id.
-        if question.get("state") == "open" and not self._producer_is_current(question):
+        if question.get("state") == "open" and not await self._producer_is_current(question):
             expired = await self._expire_stale_question(question)
             return error(request_id, "question_producer_gone", question_id=qid,
                          question=expired,
@@ -1069,7 +1086,7 @@ class Notify:
                 reason = "surface_mismatch"
             if reason is not None:
                 return voice_answers_v1.status("dropped", reason=reason), binding
-            stale = question.get("state") != "open" or not self._producer_is_current(question)
+            stale = question.get("state") != "open" or not await self._producer_is_current(question)
             if stale:
                 stale_keys.append(item["key"])
             items.append({**item, "stale": stale})
@@ -1300,7 +1317,7 @@ class Notify:
         try:
             record = await self._db.call("resolve_notification", nid, action_kind="resolved",
                                          by=actor_provenance["by"], actor_provenance=actor_provenance,
-                                         selections=[], text=text, note=note, v2_answer_delivery=self._answer_owner(question),
+                                         selections=[], text=text, note=note, v2_answer_delivery=await self._answer_owner(question),
                                          expected_question_owner=(question["producer_stream_id"], question.get("producer_session_generation")))
         except NotificationTerminalState:
             return await self._db.call("get_agent_question", qid), None, True
@@ -1335,7 +1352,7 @@ class Notify:
             raise InvalidNotification("selections must be option values for the question")
         qid = str(question.get("question_id") or "")
         nid = str(question.get("notification_id") or "")
-        owner = self._answer_owner(question)
+        owner = await self._answer_owner(question)
         notification = await self._db.call("get_notification", nid)
         if notification is None:
             raise NotificationNotFound(nid)
@@ -1392,6 +1409,11 @@ class Notify:
     # -- notification.* dispatch (lifted) ---------------------------------
 
     async def notification(self, msg: dict[str, Any]) -> dict[str, Any]:
+        async with self._host_transfer_lock:
+            await self.project_host_transfer()
+            return await self._notification_locked(msg)
+
+    async def _notification_locked(self, msg: dict[str, Any]) -> dict[str, Any]:
         verb = str(msg.get("type") or "")
         reply = await self._dispatch_notification(msg)
         # Cutover diagnostic (forward-moving, no behavior change): a rejected
@@ -1566,12 +1588,12 @@ class Notify:
         # through this route too, so a stale asker's card cannot be answered and
         # an answer cannot be delivered to a replacement generation.
         if (question is not None and question.get("state") == "open"
-                and not self._producer_is_current(question)):
+                and not await self._producer_is_current(question)):
             await self._expire_stale_question(question)
             return self._notif_error(request_id, "question_producer_gone",
                                      notification_id=nid,
                                      message="the asking session is gone; the question expired")
-        owner = self._answer_owner(question)
+        owner = await self._answer_owner(question)
         action_kind = str(msg.get("action_kind") or "")
         # v2 supports the question-answering resolution kinds mobile sends (ack /
         # yes_no) plus generic `resolved`. spawn_worker/run_command resolutions
@@ -1727,7 +1749,7 @@ class Notify:
         envelope = question.get("envelope") if isinstance(question.get("envelope"), dict) else {}
         return _nullable_text(envelope.get("producer_session_generation")) or None
 
-    def _producer_is_current(self, question: dict) -> bool:
+    async def _producer_is_current(self, question: dict) -> bool:
         """Whether the question's asker is still open at its stored generation.
 
         With no sessions registry (unit tests) the answer is 'current' — the
@@ -1743,10 +1765,14 @@ class Notify:
         producer = _nullable_text(question.get("producer_stream_id"))
         if not producer:
             return True
+        stored = self._stored_generation(question)
+        original = producer
+        producer, stored = await self._effective_host_owner(producer, stored)
         row = self._sessions.get(producer)
+        if producer != original:
+            row = await self._sessions.store.fetch_session(*producer.split(':',1))
         if not isinstance(row, dict) or str(row.get("status") or "open") != "open":
             return False
-        stored = self._stored_generation(question)
         if not stored:
             return True
         return _nullable_text(row.get("session_generation")) == stored
@@ -1828,6 +1854,24 @@ class Notify:
             await self._broadcast_notification_by_id(nid)
         return nids
 
+    async def _effective_host_owner(self, sid, generation):
+        store = getattr(self._sessions, 'store', None)
+        if generation and store is not None:
+            return await store.transfer_successor(sid, generation)
+        return sid, generation
+
+    async def project_host_transfer(self, parts=None):
+        store = getattr(self._sessions, 'store', None)
+        if store is None:
+            return
+        await self._await_ready()
+        if parts is None:
+            parts = await store.submit(lambda c: [dict(r) for r in c.execute(
+                "SELECT s.* FROM v2_host_transfer_seats s JOIN v2_host_transfers t USING(command_id) "
+                "WHERE t.state IN ('committed','complete') ORDER BY t.rowid")])
+        if parts:
+            await self._db.call('project_host_transfers', parts)
+
     async def transfer_questions_for_handoff(self, source: dict, successor: dict) -> int:
         """Caller retains the source/successor lifecycle locks through close."""
         await self._await_ready()
@@ -1843,7 +1887,7 @@ class Notify:
         return the refreshed terminal row; otherwise return it unchanged. Used on
         the read path so status/list never serve an actionable stale question."""
         if (question is None or question.get("state") != "open"
-                or self._producer_is_current(question)):
+                or await self._producer_is_current(question)):
             return question
         return await self._expire_stale_question(question)
 
@@ -1852,7 +1896,7 @@ class Notify:
             return questions
         stale_producers: set[str] = set()
         for question in questions:
-            if question.get("state") == "open" and not self._producer_is_current(question):
+            if question.get("state") == "open" and not await self._producer_is_current(question):
                 producer = _nullable_text(question.get("producer_stream_id"))
                 if producer and producer not in stale_producers:
                     stale_producers.add(producer)
@@ -1884,7 +1928,7 @@ class Notify:
             producer = _nullable_text(question.get("producer_stream_id"))
             if not producer or producer in seen:
                 continue
-            if self._producer_is_current(question):
+            if await self._producer_is_current(question):
                 continue
             seen.add(producer)
             nids = await self._db.call(

@@ -1666,6 +1666,26 @@ def assistant_rebind(args: argparse.Namespace) -> int:
     return _assistant_call(args, payload)
 
 
+def assistant_transfer(args: argparse.Namespace) -> int:
+    payload: dict[str, object] = {
+        'type':'assistant.transfer', 'action':args.action,
+        'command_id':args.command_id, 'request_id':args.request_id or str(uuid.uuid4()),
+    }
+    if args.composite_stream_id:
+        payload['composite_stream_id'] = args.composite_stream_id
+    if args.action == 'request':
+        if not args.dispatch_id or not args.destination or not args.member:
+            raise SystemExit('transfer request requires --dispatch-id, --destination and --member for each seat')
+        payload.update(dispatch_id=args.dispatch_id,destination=args.destination,members=args.member)
+        if args.pointers_file:
+            payload['pointers'] = json.loads(Path(args.pointers_file).read_text())
+    elif args.action == 'ready':
+        if not args.pointer_digest:
+            raise SystemExit('transfer ready requires --pointer-digest')
+        payload['pointer_digest'] = args.pointer_digest
+    return _assistant_call(args,payload)
+
+
 def assistant_authority(args: argparse.Namespace) -> int:
     value = "disabled" if args.disable else args.set
     payload: dict[str, object] = {
@@ -3427,9 +3447,16 @@ def lifecycle(args: argparse.Namespace) -> int:
             if inspected.get("type") != "assistant.lifecycle.ok":
                 _print_response(inspected)
                 return 1
+            retirement = {}
+            if getattr(args, "retire_fd_generation", False):
+                if not all((args.target, args.generation, args.request_id, args.composite_stream_id)) or args.expected_revision is None:
+                    raise ValueError("FD retirement requires target, generation, expected revision, request id and composite")
+                retirement = {"retire_fd_generation": True, "target_stream_id": args.target,
+                    "target_generation": args.generation, "expected_revision": args.expected_revision,
+                    "request_id": args.request_id, "composite_stream_id": args.composite_stream_id}
             response = asyncio.run(consent_once(config, "assistant.lifecycle", {
                 "action": "revoke", "emergency": True, "local_admin_token": local_token,
-                "expected_revision": inspected["grant"]["revision"], "reason": args.reason,
+                "expected_revision": inspected["grant"]["revision"], "reason": args.reason, **retirement,
                 "caller_claims": {"os_user": str(os.getuid()), "pid": os.getpid(), "executable": sys.executable}},
                 timeout=timeout, local_admin=True))
             _print_response(response)
@@ -5279,6 +5306,18 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_rebind_parser.add_argument("--expected-revision", type=int)
     assistant_rebind_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_rebind_parser.set_defaults(func=assistant_rebind)
+    transfer_parser = assistant_sub.add_parser('transfer', help='Request/read/cancel a daemon-owned full host transfer')
+    transfer_parser.add_argument('action', choices=('request','status','cancel','ready'))
+    transfer_parser.add_argument('--command-id', required=True)
+    transfer_parser.add_argument('--request-id')
+    transfer_parser.add_argument('--composite-stream-id')
+    transfer_parser.add_argument('--dispatch-id')
+    transfer_parser.add_argument('--destination')
+    transfer_parser.add_argument('--member', action='append')
+    transfer_parser.add_argument('--pointers-file')
+    transfer_parser.add_argument('--pointer-digest')
+    transfer_parser.add_argument('--timeout', type=float, default=30.0)
+    transfer_parser.set_defaults(func=assistant_transfer)
     assistant_authority_parser = assistant_sub.add_parser(
         "authority", help="read or hot-rebind the independent assistant lane ruling authority",
     )
@@ -5777,6 +5816,12 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle_revoke = lifecycle_sub.add_parser("revoke", help="loopback emergency reduction of authority")
     lifecycle_revoke.add_argument("--emergency", action="store_true", required=True)
     lifecycle_revoke.add_argument("--reason", required=True)
+    lifecycle_revoke.add_argument("--retire-fd-generation", action="store_true")
+    lifecycle_revoke.add_argument("--target")
+    lifecycle_revoke.add_argument("--generation")
+    lifecycle_revoke.add_argument("--expected-revision", type=int)
+    lifecycle_revoke.add_argument("--request-id")
+    lifecycle_revoke.add_argument("--composite-stream-id")
     for sub in (lifecycle_inspect, lifecycle_transfer, lifecycle_revoke):
         sub.add_argument("--from-stream-id", dest="from_stream_id", default=None)
         sub.add_argument("--timeout", type=float, default=30.0)

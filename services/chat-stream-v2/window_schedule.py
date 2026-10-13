@@ -871,9 +871,11 @@ class WindowSchedule:
         if (admission_receipt and admission_receipt["surface"] == "schedule"
                 and admission_receipt["verb"] == "schedule.insert"
                 and admission_receipt["actor_kind"] == "seat"
-                and admission_receipt["actor_id"] == schedule.get("owner_stream_id")
                 and admission_receipt["target_id"] == schedule_id):
-            owner_generation = _decode(admission_receipt.get("measured_state_json"), {}).get("owner_session_generation")
+            original_generation = _decode(admission_receipt.get("measured_state_json"), {}).get("owner_session_generation")
+            effective_owner, effective_generation = await self.store.transfer_successor(admission_receipt['actor_id'], original_generation)
+            if effective_owner == schedule.get('owner_stream_id'):
+                owner_generation = effective_generation
         source_id = str(schedule.get("handoff_from_stream_id") or "")
         policy = getattr(self.sessions, "assistant", None)
         source = (await self.store.fetch_session(*source_id.split(":", 1))

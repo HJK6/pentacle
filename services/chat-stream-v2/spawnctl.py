@@ -1425,7 +1425,20 @@ class SpawnCtl:
         if "no_watch" in msg and not isinstance(msg["no_watch"], bool):
             raise VerbError("invalid_request", "no_watch must be boolean")
         admission: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-        task = asyncio.create_task(self._spawn_guarded(msg, local_host, admission=admission))
+        from store_host_transfer import actor_context
+        auth = msg.get('_auth_context') or {}
+        context = None
+        if auth.get('token_verified'):
+            from store_host_transfer import TransferError
+            state = await self.store.transfer_authority_state(auth.get('stream_id'), auth.get('session_generation'))
+            if state:
+                raise TransferError('authority_' + state)
+            context = actor_context.set((auth.get('stream_id'), auth.get('session_generation')))
+        try:
+            task = asyncio.create_task(self._spawn_guarded(msg, local_host, admission=admission))
+        finally:
+            if context is not None:
+                actor_context.reset(context)
         self._background_spawns.add(task)
         def finish(done: asyncio.Task[Any]) -> None:
             self._finish_background_spawn(done, self._background_spawns)
@@ -1742,6 +1755,10 @@ class SpawnCtl:
         raw_resume_session_id = msg.get("resume_session_id")
         if raw_resume_session_id is None:
             name = str(msg.get("session_name") or "").strip() or f"v2-{uuid.uuid4().hex[:8]}"
+            from store_host_transfer import reserved_target
+            reserved = await self.store.submit(lambda c: reserved_target(c, f'{host}:{name}'))
+            if reserved and (msg.get('_auth_context') or {}).get('service_actor') != 'daemon:host-transfer':
+                raise VerbError('transfer_target_reserved', 'migration owns this destination identity')
             # Preserve the fresh-spawn rejection point: reserved actors fail
             # before transport or controller state is consulted.
             if f"{host}:{name}" in RESERVED_LIFECYCLE_ACTORS:

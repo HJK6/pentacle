@@ -19,6 +19,7 @@ from `serve_forever()` so the ordering is enforceable, not aspirational.
 
 from __future__ import annotations
 
+import store_host_transfer as host_transfer
 import qa_dispatch
 
 import asyncio
@@ -846,6 +847,9 @@ class Server:
             "reconcile.status": self._on_reconcile_status,
         }
         self.local_host = local_host
+        from host_transfer import HostTransfer
+        self.host_transfer = HostTransfer(self)
+        self.handlers['assistant.transfer'] = self.host_transfer.operation
         from watch_wake import WatchWake
         self.watch_wake = WatchWake(getattr(self.sessions, "store", None), self.sessions)
         self.handlers.update(self.watch_wake.wire_handlers())
@@ -986,6 +990,7 @@ class Server:
             elif tasks:
                 await asyncio.wait(tasks, timeout=within(cap))
 
+        await self.host_transfer.stop()
         if self._consent_expiry_task is not None:
             self._consent_expiry_task.cancel()
             await settle((self._consent_expiry_task,), cap=1.0)
@@ -2063,7 +2068,7 @@ class Server:
                 if not any(auth.get(key) for key in (
                     "operator_authenticated", "token_verified", "service_authenticated",
                     "scoped_principal",
-                )):
+                )) and not (verb == 'assistant.transfer' and auth.get('retired_transfer_owner')):
                     code = "authentication_required"
                 elif verb in {"grant_token", "spawn_freeze", "spawn_unfreeze"} and not (
                     auth.get("operator_authenticated") or auth.get("service_authenticated")
@@ -2131,14 +2136,28 @@ class Server:
             decision = _CONN_AUTH.get()
             if decision is not None and decision.websocket is websocket:
                 self._diag_auth_finish(decision)
+        actor_reset = None
         try:
-            reply = await handler(dispatch_msg)
-        except (VerbError, StatusCardError) as exc:  # expected business failures
+            auth = dispatch_msg.get('_auth_context') or {}
+            if auth.get('token_verified') and verb not in {'assistant.transfer','hello','ping'}:
+                actor = (auth.get('stream_id'), auth.get('session_generation'))
+                await self.store.require_current_actor(*actor)
+                actor_reset = host_transfer.actor_context.set(actor)
+            if actor_reset is not None and verb not in {'await_report','notification.await','request_stream_events'}:
+                async with self.host_transfer.actor_lock(actor):
+                    await self.store.require_current_actor(*actor)
+                    reply = await handler(dispatch_msg)
+            else:
+                reply = await handler(dispatch_msg)
+        except (VerbError, StatusCardError, host_transfer.TransferError) as exc:  # expected business failures
             reply = {"type": f"{verb}.error", "error_code": exc.code, "error": str(exc),
                      **getattr(exc, "extra", {})}
         except Exception as exc:  # noqa: BLE001 - one generic error boundary
             log.error("handler failed")
             reply = {"type": f"{verb}.error", "error_code": "internal_error", "error": str(exc)}
+        finally:
+            if actor_reset is not None:
+                host_transfer.actor_context.reset(actor_reset)
         # A streaming handler returns an async iterator; it sets `request_id` on
         # every frame itself (v1 echoes it on each blob frame), so it is passed
         # through untouched rather than list-wrapped and correlated here.
@@ -2364,6 +2383,12 @@ class Server:
                         reason_code = TOKEN_REASON_INTERNAL_ERROR
                     elif state.get("status") != "open":
                         reason_code = TOKEN_REASON_EXPIRED
+                        if (msg.get('type') == 'assistant.transfer' and msg.get('action') in {'status','request'}
+                                and (not claim or claim == state.get('stream_id'))):
+                            # Identity authenticates only a stored migration receipt;
+                            # it never becomes token_verified or admits a new move.
+                            context['retired_transfer_owner'] = {
+                                'stream_id':state['stream_id'],'session_generation':state['session_generation']}
                         # Narrow read-back identity for a retired protected
                         # assistant's own handoff receipt. Never token_verified;
                         # SpawnCtl serves only the stored receipt with it.
@@ -4852,7 +4877,9 @@ class Server:
             defer_if_working=defer_if_working,
             attribution=attribution,
             admission_guard=(
-                None if manager_generation is None
+                (lambda row: self._seat_close_admission(auth, caller_stream_id, target_stream_id, row))
+                if manager_generation is None and auth.get('token_verified')
+                else None if manager_generation is None
                 else lambda row: self._manager_close_admission(msg, host, name, row, manager_generation, auth)
             ),
         )
@@ -4898,6 +4925,16 @@ class Server:
             "reap_status": result.get("reap_status", "unknown"),
             **_claim_wire_fields(claim_verified, claim_mismatch),
         }
+
+    async def _seat_close_admission(self, auth, caller, target, row):
+        # Runs after acquiring the target lifecycle and graph locks, directly
+        # before termination. Admission-time parentage is only an observation.
+        try:
+            await self.store.require_current_actor(caller, auth.get('session_generation'))
+        except host_transfer.TransferError as exc:
+            raise VerbError(exc.code, str(exc)) from exc
+        if caller != target and (row or {}).get('parent_stream_id') != caller:
+            raise VerbError('close_unauthorized', 'caller no longer owns this child')
 
     async def _manager_close_locked(
         self, close: Callable[[], Awaitable[dict[str, Any]]], msg: dict[str, Any], auth: dict[str, Any],
@@ -4999,6 +5036,22 @@ class Server:
         if msg.get("emergency"):
             if action != "revoke" or not auth.get("peer_loopback") or not auth.get("local_admin_verified"):
                 raise VerbError("emergency_local_only", "Emergency revoke requires the local admin token on loopback")
+            if msg.get('retire_fd_generation') is True:
+                if auth.get('token_verified'):
+                    raise VerbError('emergency_local_only','Use the independently authenticated local-admin channel')
+                composite = self._composite_for_message(msg)
+                if composite is None:
+                    raise VerbError('transfer_composite_unavailable','FD composite is required')
+                msg = {**msg,'_transfer_binding':{'name':composite.env_config.name,'env_binding':composite._env_binding()}}
+                from contextlib import AsyncExitStack
+                async with AsyncExitStack() as stack:
+                    await stack.enter_async_context(self.host_transfer.actor_lock((msg.get('target_stream_id'),msg.get('target_generation'))))
+                    await stack.enter_async_context(self.sessions.assistant.authority_lock)
+                    await stack.enter_async_context(self.sessions._graph_lock)
+                    receipt = await _finish_despite_cancel(self.store.lifecycle_authority_mutate(msg,
+                        {**auth,'operator_authenticated':True,'operator_principal':'operator:local-admin',
+                         'token_verified':False,'_emergency_verified':True}, self.sessions.assistant.role))
+                return {'type':'assistant.lifecycle.ok','action':action,'receipt':receipt}
             try:
                 async with self.sessions.assistant.authority_lock:
                     receipt = await _finish_despite_cancel(self.store.lifecycle_authority_mutate(
@@ -5008,6 +5061,8 @@ class Server:
             except lifecycle_authority.AuthorityError as exc:
                 raise VerbError(exc.code, str(exc)) from exc
             return {"type": "assistant.lifecycle.ok", "action": action, "receipt": receipt}
+        if msg.get('retire_fd_generation') is True:
+            raise VerbError('emergency_local_only','FD retirement requires authenticated local-admin emergency revoke')
         # Cached socket trust never authorizes a lifecycle effect.
         result = await self._on_consent({**msg, "type": "consent.request", "action": f"lifecycle.{action}"})
         return {**result, "type": "assistant.lifecycle.ok", "action": action}

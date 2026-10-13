@@ -868,6 +868,7 @@ async def run(args: argparse.Namespace) -> int:
         if _composite.config.enabled:
             await _composite.load_binding()
     log.info("startup phase=bindings duration_s=%.6f", time.monotonic() - startup_phase_started)
+    await server.host_transfer.start()
     if store.schedule_schema_health == "ok":
         window_schedule.mark_store_ready()
     else:
