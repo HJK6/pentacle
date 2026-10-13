@@ -299,6 +299,7 @@ class AssistantComposite:
         # that races the worker's exit (worker-exit wake race) is never lost.
         self._worker_rewake = False
         self._binding_lock = asyncio.Lock()
+        self.input_death_proof: Callable[..., Awaitable[Any]] | None = None
         self.ruling_hook: Callable[..., Awaitable[dict[str, Any] | None]] | None = None
         self.work_lane_confirmation_reader: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None
         self.work_lanes_changed: Callable[[], Awaitable[Any]] | None = None
@@ -677,6 +678,10 @@ class AssistantComposite:
         existing = await self.store.get_assistant_composite_route(
             stream_id=self.config.stream_id, input_identity=input_identity,
         )
+        direct_binding = None
+        if self.config.direct_primary:
+            binding = await self.load_binding()
+            direct_binding = {"name": self.config.name, **{k: binding[k] for k in ("stream_id", "generation", "revision")}}
         if existing is None and self.config.direct_primary:
             # Reject only a genuine live generation conflict at admit time.  A
             # dead/preserved-dead target (awaiting the recovery rebind) must still
@@ -709,6 +714,8 @@ class AssistantComposite:
             direct_target_stream_id=self.config.direct_primary_stream_id if self.config.direct_primary else None,
             direct_target_generation=self.config.direct_primary_generation if self.config.direct_primary else None,
             voice_answers=voice_answers,
+            direct_binding=direct_binding,
+            binding_env=self._env_binding(),
         )
         receipt_id = record.get("receipt_id")
         await self.refresh_activity()
@@ -753,12 +760,9 @@ class AssistantComposite:
                             lane_id=str(lane["lane_id"]), question_id=None,
                         )
                 target, generation, reply_lane_id = explicit_target
-                if self.config.direct_primary and generation is None:
-                    # Dead-window correlated input: the answer lifecycle above has
-                    # completed durably, but the bound pane is unbound.  Leave the
-                    # admitted route queued (do NOT pin the dead generation) and
-                    # wake the worker so it replays the body to the live successor
-                    # after the (re)bind — the worker re-queues/pauses until then.
+                if self.config.direct_primary:
+                    # Correlated direct input uses the same origin and recovery
+                    # fence as other inputs after its question lifecycle commits.
                     self._wake_worker()
                 else:
                     dispatch_id = "assistant-reply-" + uuid.uuid4().hex
@@ -1006,6 +1010,33 @@ class AssistantComposite:
                     )
                     return
                 try:
+                    binding = await self.load_binding()
+                    guard = {"name": self.config.name, **{k: binding[k] for k in ("stream_id", "generation", "revision")}}
+                    origin = admission.get("direct_binding_origin")
+                    continuation = None
+                    if origin:
+                        lookup = getattr(self.store, "transfer_successor", None)
+                        if callable(lookup):
+                            continuation = await lookup(origin["stream_id"], origin["generation"])
+                            if tuple(continuation) == (origin["stream_id"], origin["generation"]):
+                                continuation = None
+                        authority = getattr(self.store, "transfer_authority_state", None)
+                        if callable(authority):
+                            if await authority(guard["stream_id"], guard["generation"]):
+                                raise ValueError("assistant_target_authority_unavailable")
+                            if not continuation and await authority(origin["stream_id"], origin["generation"]):
+                                raise ValueError("assistant_origin_authority_revoked")
+                        if self.input_death_proof is not None:
+                            proven, health, reason, observed = await self.input_death_proof(guard["stream_id"], guard["generation"])
+                            if proven and all(origin[k] == guard[k] for k in ("stream_id", "generation", "revision")):
+                                await self._update_route(
+                                    str(route["route_id"]), routing_state="queued",
+                                    error_code="assistant_awaiting_recovery", binding_guard=guard,
+                                    binding_env=self._env_binding(), recovery_observation=observed,
+                                )
+                                raise _DirectTargetUnbound("assistant_awaiting_recovery")
+                            if health != "healthy" and reason != "remote_holder":
+                                raise ValueError("assistant_recovery_" + str(reason or "successor_unavailable"))
                     generation = await self._direct_target_generation()
                     dispatch_id = "assistant-direct-" + uuid.uuid4().hex
                     direct_envelope = direct_dispatch_envelope(
@@ -1022,10 +1053,12 @@ class AssistantComposite:
                                        "disposition": "conversation", "lane_id": None,
                                        "depends_on_message_id": None, "reason": "configured_direct_primary",
                                        "direct_envelope": direct_envelope},
+                        binding_guard=guard, binding_env=self._env_binding(),
+                        transfer_successor=continuation,
                     )
                     if updated is not None:
                         pending_direct = updated
-                except _DirectTargetUnbound:
+                except _DirectTargetUnbound as exc:
                     # The bound pane is dead/preserved-dead (awaiting the recovery
                     # owner's rebind).  Re-queue this input unchanged (lease
                     # cleared) so it replays IN ORDER to the live successor, then
@@ -1033,7 +1066,7 @@ class AssistantComposite:
                     # it.  Do NOT fail or dispatch to the stale generation.
                     await self._update_route(
                         str(route["route_id"]), routing_state="queued",
-                        error_code="assistant_direct_target_unbound",
+                        error_code=str(exc),
                     )
                     raise
                 except ValueError as exc:

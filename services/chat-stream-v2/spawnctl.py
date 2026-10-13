@@ -1353,6 +1353,24 @@ class SpawnCtl:
                 await emit_if_changed(immediate=True)
 
     @staticmethod
+    def _unknown_prompt_fields(receipt: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(receipt, dict) or receipt.get("failure_code") != "spawn_delivery_unknown" or receipt.get("state") != "indeterminate":
+            return {}
+        return {
+            "seat_admission_committed": True,
+            "prompt_submission_status": "unknown",
+            "action_status": "unknown",
+            "confirmation_status": "pending",
+            "confirmation_pending": True,
+            "do_not_respawn": True,
+            "retry_guidance": (
+                "Prompt submission is unknown. Inspect or await the original seat; do not retry the prompt. "
+                "Use the existing authorized close flow before explicitly requesting a new seat. "
+                "Closing does not undo provider work."
+            ),
+        }
+
+    @staticmethod
     def _starting_spawn_reply(
         host: str, name: str, request_id: str, reason: str,
         delivery_receipt: dict[str, Any] | None = None,
@@ -1369,6 +1387,7 @@ class SpawnCtl:
                 "bootstrap_state": receipt.get("bootstrap_state", "starting"),
             },
             "initial_prompt_delivery": receipt,
+            **SpawnCtl._unknown_prompt_fields(receipt),
         }
 
     async def _replay_retired_handoff(self, msg: dict[str, Any], local_host: str,
@@ -3849,7 +3868,12 @@ class SpawnCtl:
         if state == "gone":
             await self.store.set_spawn_outcome(
                 host, name, "failed", request_id=request_id,
-                reason=objective_error((intent.get("open_fields") or {}).get("objective")) or "spawn_interrupted: daemon restarted before the session row was persisted",
+                reason=(
+                    "spawn_interrupted: daemon restarted before spawn intent was persisted"
+                    if res.get("payload") is None else
+                    objective_error((intent.get("open_fields") or {}).get("objective"))
+                    or "spawn_interrupted: daemon restarted before the session row was persisted"
+                ),
                 **outcome_identity,
             )
             await self.store.release_stream_id_fenced(host, name, request_id)
@@ -3891,6 +3915,21 @@ class SpawnCtl:
             log.info("skipping adoption for reset-blocked pane %s:%s", host, name)
             return "deferred"
         row = await self.store.fetch_session(host, name)
+        expected_generation = str((intent.get("open_fields") or {}).get("session_generation") or "")
+        invalidated = None
+        if row and expected_generation and row.get("session_generation") != expected_generation:
+            invalidated = "spawn_generation_changed"
+        elif row and row.get("status") == "closed" and row.get("close_kind"):
+            invalidated = "spawn_target_closed"
+        if invalidated:
+            await self.store.set_spawn_outcome(
+                host, name, "failed", request_id=request_id, reason=invalidated,
+                idempotency_key=idempotency_key, request_payload_hash=request_payload_hash,
+            )
+            return "adopted"  # Retire this stale intent; never touch the current pane.
+        authority = getattr(self.store, "transfer_authority_state", None)
+        if expected_generation and callable(authority) and await authority(f"{host}:{name}", expected_generation):
+            return "deferred"
         if row is None or str(row.get("status") or "") != "open":
             try:
                 # `"open_fields" not in intent` means the persisted intent
@@ -4003,6 +4042,10 @@ class SpawnCtl:
             # only durable handle while the remote pane is still live.
             log.exception("adoption reconcile failed for %s", name)
             return "deferred"
+        current = await self.store.fetch_session(host, name)
+        if (current is None or current.get("status") != "open"
+                or (expected_generation and current.get("session_generation") != expected_generation)):
+            return "deferred"
         if state == "delivered" and brief:
             async with self.sessions._lifecycle_lock(host, name):
                 current = await self.store.fetch_session(host, name)
@@ -4037,8 +4080,8 @@ class SpawnCtl:
                 "proof_watermark_state": receipt.get("proof_watermark_state"),
                 "proof_watermark_reason": receipt.get("proof_watermark_reason"),
                 "failure_code": (
-                    receipt.get("failure_code")
-                    or "native_initial_prompt_delivery_unproven"
+                    "spawn_delivery_unknown" if reason.startswith("spawn_delivery_unknown")
+                    else receipt.get("failure_code") or "native_initial_prompt_delivery_unproven"
                 ),
                 "failure_reason": receipt.get("failure_reason") or reason,
                 "delivery_failed_at": receipt.get("delivery_failed_at") or iso_now(),
@@ -4207,7 +4250,10 @@ class SpawnCtl:
         """QA #16 FINAL reconcile for an adopted LIVE pane. Returns
         `(state, delivery_evidence, reason)`; state is `delivered`, `failed`, or
         `indeterminate`. Claude's unavailable authoritative Store is
-        indeterminate, not proof of no submission:
+        indeterminate, not proof of no submission. A saved direct/staged
+        pre-paste watermark also makes missing proof indeterminate: neither an
+        absent transcript nor a deadline proves the physical input did not happen.
+        Legacy intents without this watermark retain their historical outcomes:
 
           generation-fenced USER event after the saved watermark
                                       -> delivered/event_store
@@ -4253,7 +4299,12 @@ class SpawnCtl:
                 "native_initial_prompt_delivery_failed: "
                 f"{observed.reason or observed.state}",
             )
-        if provider == "codex":
+        watermark_unknown = bool(
+            isinstance(delivery_receipt, dict)
+            and delivery_receipt.get("transport") in {"direct", "staged"}
+            and delivery_receipt.get("proof_watermark_state") == "reachable"
+        )
+        if provider == "codex" and not watermark_unknown:
             # Existing staged Codex intents predate the native route. They may
             # never be re-pasted or Enter-recovered after a restart.
             return (
@@ -4324,6 +4375,14 @@ class SpawnCtl:
                 event_proof = final_proof
             if status == "found":
                 return "delivered", "transcript", "adopted_after_restart: brief present in provider transcript"
+            if watermark_unknown and (status == "absent" or time.monotonic() >= deadline
+                                      or (event_proof is not None and event_proof.state != "pending")):
+                if not await tmux.has_session(name):
+                    return "failed", "pane_died_during_boot", "adopted pane died before delivery was proved"
+                return (
+                    "indeterminate", "live_pane_unproven",
+                    "spawn_delivery_unknown: saved pre-paste watermark; no affirmative prompt delivery proof",
+                )
             if event_proof is not None and event_proof.state != "pending":
                 if not await tmux.has_session(name):
                     return "failed", "pane_died_during_boot", "adopted pane died before its transcript appeared"
@@ -4675,6 +4734,7 @@ class SpawnCtl:
                 "request_payload_hash": oc.get("request_payload_hash"),
                 "updated_at": oc.get("updated_at"),
                 **self._public_outcome_failure(oc),
+                **self._unknown_prompt_fields(oc.get("delivery_receipt")),
                 **({"handoff": oc["delivery_receipt"]["handoff"]}
                    if isinstance(oc.get("delivery_receipt"), dict) and "handoff" in oc["delivery_receipt"] else {}),
             }
@@ -4789,7 +4849,7 @@ class SpawnCtl:
                 "pending_reconcile": True,
                 "action_status": "committed",
                 "confirmation_status": "pending",
-                "action_committed": True,
+                **({} if self._unknown_prompt_fields(outcome.get("delivery_receipt")) else {"action_committed": True}),
                 "confirmation_pending": True,
                 "do_not_respawn": True,
                 "reconcile": "await_spawn",
@@ -4802,6 +4862,7 @@ class SpawnCtl:
                     "Action is committed; confirmation is pending. DO NOT RESPAWN; "
                     "reconcile through await_spawn."
                 ),
+                **self._unknown_prompt_fields(outcome.get("delivery_receipt")),
             }
         error_code = str(outcome.get("reason") or "").split(":", 1)[0]
         if error_code not in {"spawn_queue_timeout", "spawn_queue_evicted"}:

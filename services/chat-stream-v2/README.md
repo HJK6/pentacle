@@ -25,6 +25,25 @@ If none provides an identity, the daemon logs that limitation. The desktop's
 five-second welcome timeout can still require a reconnect during an unusually
 slow startup; the existing git lookup timeout is ten seconds.
 
+## Interrupted input and spawn recovery
+
+Accepted direct-assistant input retains its original binding identity. When fresh
+local pane and process checks prove the holder died unintentionally, the daemon
+keeps input queued before dispatch. It releases that input only to a recorded
+restore, generation handoff, or committed host-transfer successor. An unrelated
+rebind does not inherit the old input; new input uses the current binding.
+
+An interrupted spawn with a saved pre-paste watermark and a live owned pane stays
+`indeterminate` with `spawn_delivery_unknown` until positive delivery evidence
+arrives. Status, await and same-key retry retain the original handle and report
+prompt submission as unknown. They never repaste. Inspect or await that seat; an
+authorized close does not undo provider work. A NULL intent with no pane reports
+`spawn_interrupted`, rather than an objective validation error.
+
+Before downgrading to an older daemon, retain or explicitly disposition queued
+recovery inputs and unresolved spawn handles without replay: older binaries do
+not enforce the new route-origin fence.
+
 ## Desktop and mobile credentials
 
 `tools/operator_auth_cli.py issue --client-kind pentacle` issues a desktop credential; `--client-kind pentacle-mobile` issues a separate mobile credential. The JSON output's `code` field is secret. Store desktop credentials in a mode-0600 file under a mode-0700 directory and point `chatStream.tokenPath` at its canonical path. Do not place a v2 credential inline in the desktop config. The CLI's `list`, `revoke` and `rotate` commands manage credentials in the daemon's registry.

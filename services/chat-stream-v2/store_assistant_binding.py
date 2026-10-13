@@ -318,6 +318,52 @@ def _seat_conn(conn: sqlite3.Connection, stream_id: str) -> dict[str, Any] | Non
     return dict(row) if row else None
 
 
+
+def _route_binding_conn(conn, expected, env_binding):
+    """Admission/dispatch CAS against the daemon's observed named binding."""
+    current = _binding_conn(conn, env_binding, name=expected["name"], include_target=False)
+    if any(current[k] != expected[k] for k in ("stream_id", "generation", "revision")):
+        raise ValueError("assistant_route_binding_changed")
+
+
+def _route_continuation_conn(conn, origin, target, *, transfer_successor=None):
+    """Exact existing lineage only; an ordinary rebind grants no old input."""
+    pair = (target["stream_id"], target["generation"])
+    old = (origin["stream_id"], origin["generation"])
+    if pair == old:
+        return False
+    original_row = _seat_conn(conn, old[0])
+    if (original_row and original_row["session_generation"] == old[1]
+            and original_row.get("close_kind") not in (None, "", "handed_off")):
+        return False
+    if transfer_successor is not None and tuple(transfer_successor) == pair:
+        return True  # Read-only Store.transfer_successor result, committed and immutable.
+    if conn.execute(
+        "SELECT 1 FROM v2_assistant_restore_episode WHERE name=? AND stream_id=? AND generation=? "
+        "AND expected_revision=? AND last_generation=? AND state IN ('bound','restored')",
+        (origin["name"], old[0], old[1], origin["revision"], pair[1]),
+    ).fetchone() and pair[0] == old[0]:
+        return True
+    return bool(conn.execute(
+        "SELECT 1 FROM v2_assistant_direct_handoff_proofs WHERE predecessor_stream_id=? "
+        "AND predecessor_generation=? AND successor_stream_id=? AND successor_generation=?",
+        (*old, *pair),
+    ).fetchone())
+
+
+def _route_death_snapshot_conn(conn, origin, observed):
+    row = _seat_conn(conn, origin["stream_id"])
+    keys = ("session_generation", "status", "closed_at", "close_kind", "presumed_dead_at",
+            "dead_open_closed_at")
+    def observer(value):
+        return json.loads(value) if isinstance(value, str) and value else value
+    if (row is None or any(row.get(k) != observed.get(k) for k in keys)
+            or observer(row.get("observer_binding")) != observer(observed.get("observer_binding"))):
+        raise ValueError("assistant_recovery_observation_changed")
+    if row["session_generation"] != origin["generation"]:
+        raise ValueError("assistant_recovery_generation_changed")
+
+
 def _live_seat(row: dict[str, Any] | None, *, target: bool = False) -> None:
     if row is None:
         raise ValueError("assistant_rebind_target_unknown" if target else "assistant_rebind_actor_unknown")
@@ -998,6 +1044,17 @@ class AssistantBindingStoreMixin:
                     "AND (p.publish_kind='result' OR json_extract(p.canonical_payload_json,'$.response_state')='final'))",
                     (_stamp(), stream_id, target_stream_id, target_generation),
                 ).rowcount
+                target = _seat_conn(conn, target_stream_id)
+                if (target and target["session_generation"] == target_generation
+                        and target.get("close_kind") not in (None, "", "handed_off")):
+                    changed += conn.execute(
+                        "UPDATE v2_assistant_composite_routes SET routing_state='routing_failed',"
+                        "delivery_state='failed',error_code='assistant_target_closed',updated_at=? "
+                        "WHERE stream_id=? AND routing_state IN ('queued','classifying') AND dispatch_id IS NULL "
+                        "AND json_extract(route_json,'$.direct_binding_origin.stream_id')=? "
+                        "AND json_extract(route_json,'$.direct_binding_origin.generation')=?",
+                        (_stamp(), stream_id, target_stream_id, target_generation),
+                    ).rowcount
                 conn.commit()
                 return changed
             except BaseException:

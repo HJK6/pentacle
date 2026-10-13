@@ -109,9 +109,13 @@ async def inspect_case(root, variant):
         ctl._open_transcripts = paths
         original_deadline = spawnctl.ADOPTION_BOOT_DEADLINE_S
         spawnctl.ADOPTION_BOOT_DEADLINE_S = 0.1
-        (root / "provider.jsonl").write_text(json.dumps({"text": BRIEF if variant == "found" else "provider initialized; no brief"}) + "\n")
+        (root / "provider.jsonl").write_text(json.dumps({"text": BRIEF if variant in {"found", "stale_generation"} else "provider initialized; no brief"}) + "\n")
         before = await store.reservations(include_expired=True)
         before_row = await store.fetch_session(HOST, NAME)
+        if variant == "stale_generation":
+            await store.open_session(HOST, NAME, provider="claude", objective=MSG["objective"], session_generation="unrelated-generation")
+        elif variant == "closed_bound":
+            await sessions.mark_closed(HOST, NAME, reason="synthetic intentional close", expected_generation=before_row["session_generation"])
         pre_cancel = await ctl.spawn_cancel({"target": KEY}, HOST) if variant == "cancel_null" else None
         try:
             reconciled = await ctl.reconcile_spawn_intents()
@@ -143,7 +147,7 @@ async def inspect_case(root, variant):
 def observations(tmp_path_factory):
     run = tmp_path_factory.mktemp("restart-input-residuals")
     records = {}
-    for variant in ("absent", "no_transcript", "found", "null", "cancel_null"):
+    for variant in ("absent", "no_transcript", "found", "null", "cancel_null", "stale_generation", "closed_bound"):
         root = run / variant; root.mkdir()
         mode = "null" if "null" in variant else "watermark"
         proc = subprocess.run([sys.executable, str(Path(__file__)), "--child", str(root), mode],
@@ -200,13 +204,20 @@ def test_later_proof_settles_original_unknown_without_repaste(observations):
     assert after["pane_after"]["creates"] == 1
 
 
-if __name__ == "__main__":
-    assert sys.argv[1] == "--child"
-    asyncio.run(child(Path(sys.argv[2]), sys.argv[3]))
+def test_stale_spawn_does_not_adopt_replacement_generation(observations):
+    rec = observations["stale_generation"]
+    assert rec["outcome"]["state"] != "delivered", rec["outcome"]
+    assert rec["row_after"]["session_generation"] == "unrelated-generation"
+    assert rec["pane_after"]["pastes"] == [] and rec["pane_after"]["kills"] == 0
+
+
+def test_bound_spawn_intent_does_not_reopen_intentionally_closed_row(observations):
+    rec = observations["closed_bound"]
+    assert rec["row_after"]["status"] == "closed", rec["row_after"]
+    assert rec["pane_after"]["pastes"] == [] and rec["pane_after"]["kills"] == 0
 
 
 @pytest.mark.soak
-@pytest.mark.live_daemon
 @pytest.mark.timeout(240)
 def test_private_daemon_pre_reconcile_input_survives_restore(tmp_path):
     """Actual daemon/Store, private tmux and fake provider; no production input."""
@@ -246,6 +257,10 @@ def test_private_daemon_pre_reconcile_input_survives_restore(tmp_path):
         time.sleep(1)
         record["held"] = dict(route())
         record["inputs_before_restore"] = fd.delivered("fd", original)
+        cell.daemon.stop(signal.SIGTERM)
+        cell.daemon.start()
+        record["retry_after_restart"] = fd.op(send)
+        record["held_after_restart"] = dict(route())
         release.write_text("go")
         rm.wait_for(lambda: (fd.binding().get("restore") or {}).get("state") == "restored", 120, .25)
         delivered = bool(rm.wait_for(lambda: fd.delivered("fd", original) == 1, 15, .1))
@@ -263,6 +278,233 @@ def test_private_daemon_pre_reconcile_input_survives_restore(tmp_path):
     assert record["inputs_before_restore"] == 0
     assert record["retry"]["assistant_composite"]["duplicate"] is True
     assert record["route_count"] == 1
+    assert record["retry_after_restart"]["assistant_composite"]["duplicate"] is True
+    assert record["held_after_restart"]["dispatch_id"] is None
     assert delivered and record["delivered"] == 1, record
     assert record["after"]["route_target_generation"] == record["binding_after"]["generation"]
     assert record["binding_after"]["generation"] != before["generation"]
+
+
+async def _route(rig, identity="recovery-input"):
+    if rig.composite._worker:
+        await rig.composite._worker
+    return await rig.store.get_assistant_composite_route(stream_id=rig.composite.config.stream_id, input_identity=identity)
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+@pytest.mark.parametrize("transition", ["unrelated", "handoff", "same_name", "intentional_close", "binding_race"])
+def test_recovery_origin_fences(tmp_path, monkeypatch, provider, transition):
+    from tests.test_assistant_restore import Rig, LOCAL, SEAT, OTHER, G0
+    from assistant_composite import AssistantComposite
+
+    async def run():
+        rig = Rig(tmp_path, monkeypatch, auto=False)
+        sent = []
+        async def dispatch(route):
+            sent.append(route)
+            return {"delivery": "landed"}
+        try:
+            await rig.start(provider=provider)
+            rig.composite.input_death_proof = rig.restore.input_death_proof
+            rig.composite.dispatch = dispatch
+            message = {"optimistic_id": "recovery-input", "text": "original synthetic input"}
+            first = await rig.composite.accept_input(message)
+            held = await _route(rig)
+            assert held["routing_state"] == "queued" and held["dispatch_id"] is None
+            assert held["error_code"] == "assistant_awaiting_recovery"
+            origin = json.loads(held["route_json"])["direct_binding_origin"]
+            assert origin == {"name": "bart", "stream_id": SEAT, "generation": G0, "revision": 0}
+            duplicate = await rig.composite.accept_input({**message, "meta": {"direct_binding_origin": {"stream_id": OTHER}}})
+            assert duplicate["duplicate"] is True and duplicate["event_id"] == first["event_id"]
+            assert sent == []
+            # Reconstruct the consumer against the same Store: the original tuple
+            # and recovery observation survive the process-local owner's lifetime.
+            await rig.composite.stop()
+            config = rig.composite.env_config
+            rig.composite = AssistantComposite(rig.store, config=config, dispatch=dispatch)
+            rig.composite.input_death_proof = rig.restore.input_death_proof
+            await rig.composite.recover()
+            again = await _route(rig)
+            assert again["route_id"] == held["route_id"] and again["dispatch_id"] is None
+            if transition == "intentional_close":
+                await rig.sessions.mark_closed(LOCAL, "fd", reason="operator requested closure", expected_generation=G0)
+                await rig.composite.target_closed(SEAT, G0)
+                failed = await _route(rig)
+                assert failed["routing_state"] == "routing_failed"
+                assert failed["error_code"] == "assistant_target_closed" and sent == []
+                return
+            target = SEAT if transition == "same_name" else OTHER
+            name = target.split(":", 1)[1]
+            new_generation = "successor-generation"
+            await rig.store.open_session(LOCAL, name, provider="codex" if provider == "claude" else "claude",
+                pane_status="pane_alive", session_generation=new_generation)
+            rig.tmux.states[name] = "alive"
+            if transition == "handoff":
+                def record(conn):
+                    conn.execute("INSERT INTO v2_assistant_direct_handoff_proofs VALUES(?,?,?,?,?)",
+                                 (target, new_generation, SEAT, G0, "synthetic-proof"))
+                    conn.commit()
+                await rig.store.submit(record)
+            if transition == "binding_race":
+                original_probe = rig.restore.input_death_proof
+                async def race(*args):
+                    proof = await original_probe(*args)
+                    await rig.move_binding(target, new_generation, 1)
+                    return proof
+                rig.composite.input_death_proof = race
+            else:
+                await rig.move_binding(target, new_generation, 1)
+            await rig.composite.recover()
+            final = await _route(rig)
+            assert json.loads(final["route_json"])["direct_binding_origin"] == origin
+            if transition == "handoff":
+                assert len(sent) == 1 and final["route_target_generation"] == new_generation
+            else:
+                assert final["routing_state"] == "routing_failed" and sent == []
+            # Inputs newly accepted at the new binding are a separate authority.
+            rig.composite.input_death_proof = rig.restore.input_death_proof
+            await rig.composite.accept_input({"optimistic_id": "new-input", "text": "new synthetic input"})
+            fresh = await _route(rig, "new-input")
+            assert fresh["route_target_generation"] == new_generation
+            assert len(sent) == (2 if transition == "handoff" else 1)
+        finally:
+            if hasattr(rig, "composite"):
+                await rig.composite.stop()
+            rig.store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("condition", ["missing_identity", "unknown_process", "live_process", "intentional_close", "revived"])
+def test_input_preservation_requires_positive_absence(tmp_path, monkeypatch, condition):
+    from tests.test_assistant_restore import Rig, LOCAL, SEAT, G0, PS_SAME
+    async def run():
+        rig = Rig(tmp_path, monkeypatch, auto=False)
+        try:
+            await rig.start(observer=condition != "missing_identity")
+            if condition == "unknown_process":
+                rig.ps = (2, "", "permission denied")
+            elif condition == "live_process":
+                rig.ps = PS_SAME
+            elif condition in {"intentional_close", "revived"}:
+                await rig.sessions.mark_closed(LOCAL, "fd", expected_generation=G0)
+                if condition == "revived":
+                    rig.tmux.states["fd"] = "alive"
+            rig.composite.input_death_proof = rig.restore.input_death_proof
+            sent = []
+            async def dispatch(route):
+                sent.append(route)
+                return {"delivery": "landed"}
+            rig.composite.dispatch = dispatch
+            await rig.composite.accept_input({"optimistic_id": "recovery-input", "text": "synthetic input"})
+            route = await _route(rig)
+            assert route["routing_state"] == "routing_failed"
+            assert route["dispatch_id"] is None and sent == []
+            assert "recovery_origin" not in json.loads(route["route_json"])
+        finally:
+            if hasattr(rig, "composite"):
+                await rig.composite.stop()
+            rig.store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_protected_holder_preservation_does_not_grant_restore(tmp_path, monkeypatch, provider):
+    from tests.test_assistant_restore import Rig, SEAT, G0
+    async def run():
+        rig = Rig(tmp_path, monkeypatch, role="lead")
+        try:
+            await rig.start(provider=provider)
+            proof = await rig.restore.input_death_proof(SEAT, G0)
+            assert proof[0] is True
+            restore = await rig.restore.death_proof(SEAT, G0)
+            assert restore[0] is False
+            assert restore[2] in {"protected_row", "not_resumable"}
+        finally:
+            rig.store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.soak
+@pytest.mark.timeout(180)
+def test_private_daemon_watermark_gap_stays_unknown(tmp_path, monkeypatch):
+    import shlex
+    import threading
+    from tests.soak import restart_matrix as rm, fd_resume_matrix as fm
+    original = rm.tmux_blocking_wrapper
+    def wrapper(root, socket, real_tmux, control):
+        path = original(root, socket, real_tmux, control)
+        blocked = shlex.quote(str(control / "block_paste"))
+        marker = shlex.quote(str(control / "paste_blocked"))
+        path.write_text(path.read_text().replace('case " $* " in\n',
+            'case " $* " in\n  *" paste-buffer "*) if [ -e ' + blocked + ' ]; then\n'
+            '    echo $$ > ' + marker + '\n    while [ -e ' + blocked + ' ]; do sleep 0.05; done\n  fi ;;\n'))
+        return path
+    monkeypatch.setattr(rm, "tmux_blocking_wrapper", wrapper)
+    with rm.cell_env(tmp_path / "env", tmp_path / "evidence") as cell:
+        fd = fm.FdCell(cell, assistant_role=None)
+        cell.daemon.extra_env["PENTACLE_FORCE_LIVE_DAEMON"] = "1"
+        cell.daemon.start()
+        (cell.control / "block_paste").write_text("1")
+        message = rm.spawn_payload("gap-seat", "Synthetic restart watermark gap prompt", "gap-key", "gap-request")
+        reply = {}
+        def send():
+            try:
+                reply["value"] = fd.op(message, timeout=90)
+            except Exception as exc:
+                reply["exception"] = repr(exc)
+        thread = threading.Thread(target=send, daemon=True)
+        thread.start()
+        assert rm.wait_for(lambda: (cell.control / "paste_blocked").exists(), 45, .05)
+        before = cell.snapshot("watermark-before-kill", "gap-seat")
+        cell.daemon.stop(signal.SIGKILL)
+        thread.join(5)
+        (cell.control / "block_paste").unlink(missing_ok=True)
+        cell.daemon.start()
+        assert rm.wait_for(lambda: bool(cell.outcomes("gap-seat")), 35, .1)
+        after = cell.snapshot("after-startup-reconcile", "gap-seat")
+        write(tmp_path / "evidence/result.json", {"before": before, "after": after, "rpc": reply})
+        fd.keep_db()
+        outcome = cell.outcomes("gap-seat")[0]
+        assert outcome["state"] == "indeterminate", outcome
+        assert outcome["reason"].startswith("spawn_delivery_unknown")
+        assert cell.reservations("gap-seat") and cell.panes("gap-seat")
+        assert fd.delivered("gap-seat", message["initial_prompt"]) == 0
+
+
+async def daemon_null_claim(root, host):
+    store = Store(str(root / "sessions.db"))
+    store.start()
+    result = await store.atomic_claim_or_replay(host, "null-seat", idempotency_key="null-key",
+        request_payload_hash="synthetic-original-hash", ttl_s=600, request_id="null-request",
+        nonce="null-nonce", owner_instance_id="dead-owner")
+    assert result["status"] == "claimed"
+    os.kill(os.getpid(), signal.SIGKILL)
+
+
+@pytest.mark.soak
+@pytest.mark.timeout(60)
+def test_private_daemon_null_intent_is_interruption(tmp_path):
+    from tests.soak import restart_matrix as rm
+    with rm.cell_env(tmp_path / "env", tmp_path / "evidence") as cell:
+        child = subprocess.run([sys.executable, __file__, "--daemon-null", str(cell.root), rm.LOCAL_HOST],
+                               capture_output=True, text=True, timeout=20)
+        assert child.returncode == -signal.SIGKILL, child.stderr
+        before = cell.reservations("null-seat")
+        assert before[0]["payload"] is None
+        cell.daemon.extra_env["PENTACLE_FORCE_LIVE_DAEMON"] = "1"
+        cell.daemon.start()
+        assert rm.wait_for(lambda: bool(cell.outcomes("null-seat")), 10, .05)
+        outcome = cell.outcomes("null-seat")[0]
+        write(tmp_path / "evidence/result.json", {"before": before, "outcome": outcome})
+        assert outcome["reason"] == "spawn_interrupted: daemon restarted before spawn intent was persisted"
+        assert outcome["request_id"] == before[0]["request_id"]
+        assert outcome["request_payload_hash"] == before[0]["request_payload_hash"]
+        assert cell.reservations("null-seat") == [] and cell.panes("null-seat") == []
+
+
+if __name__ == "__main__":
+    if sys.argv[1] == "--daemon-null":
+        asyncio.run(daemon_null_claim(Path(sys.argv[2]), sys.argv[3]))
+    else:
+        assert sys.argv[1] == "--child"
+        asyncio.run(child(Path(sys.argv[2]), sys.argv[3]))

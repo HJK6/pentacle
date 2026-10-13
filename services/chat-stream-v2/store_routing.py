@@ -881,6 +881,8 @@ class _RoutingStoreMixin:
         direct_primary: bool = False,
         direct_target_stream_id: str | None = None,
         direct_target_generation: str | None = None,
+        direct_binding: dict[str, Any] | None = None,
+        binding_env: dict[str, str] | None = None,
         voice_answers: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically append the visible USER event and its routing receipt.
@@ -1002,6 +1004,12 @@ class _RoutingStoreMixin:
                     conn.commit()
                     return record
                 if direct_primary:
+                    if direct_binding is not None:
+                        from store_assistant_binding import _route_binding_conn
+                        _route_binding_conn(conn, direct_binding, binding_env or {})
+                        if (direct_target_stream_id, direct_target_generation) != (direct_binding["stream_id"], direct_binding["generation"]):
+                            raise ValueError("assistant_route_binding_changed")
+                        admission_payload["direct_binding_origin"] = dict(direct_binding)
                     if not direct_target_stream_id or not direct_target_generation:
                         raise ValueError("assistant_direct_binding_invalid")
                     try:
@@ -1202,6 +1210,10 @@ class _RoutingStoreMixin:
         expected_dispatch_id: str | None = None,
         expected_routing_state: str | None = None,
         expected_delivery_state: str | None = None,
+        binding_guard: dict[str, Any] | None = None,
+        binding_env: dict[str, str] | None = None,
+        recovery_observation: dict[str, Any] | None = None,
+        transfer_successor: tuple[str, str] | None = None,
     ) -> dict[str, Any] | None:
         allowed_routing = {
             "queued", "classifying", "fallback_dispatched", "deferred", "resolved", "routing_failed",
@@ -1228,7 +1240,31 @@ class _RoutingStoreMixin:
                 existing = dict(row)
                 stamp = _routing_iso_now()
                 prior_payload = json.loads(row["route_json"] or "{}")
-                merged_payload = dict(route_payload) if route_payload is not None else prior_payload
+                merged_payload = dict(route_payload) if route_payload is not None else dict(prior_payload)
+                origin = prior_payload.get("direct_binding_origin")
+                if binding_guard is not None:
+                    if row["routing_state"] == "routing_failed" or row["delivery_state"] == "failed":
+                        conn.commit()
+                        return None
+                    from store_assistant_binding import (_route_binding_conn, _route_continuation_conn,
+                                                        _route_death_snapshot_conn)
+                    _route_binding_conn(conn, binding_guard, binding_env or {})
+                    if recovery_observation is not None:
+                        if not origin or row["dispatch_id"] or row["delivery_state"]:
+                            raise ValueError("assistant_recovery_not_predispatch")
+                        _route_death_snapshot_conn(conn, origin, recovery_observation)
+                        merged_payload["recovery_origin"] = {**origin, "observed_at": stamp}
+                    if dispatch_id and origin:
+                        if (route_target, route_target_generation) != (binding_guard["stream_id"], binding_guard["generation"]):
+                            raise ValueError("assistant_route_binding_changed")
+                        same = all(origin[k] == binding_guard[k] for k in ("stream_id", "generation", "revision"))
+                        if not same or prior_payload.get("recovery_origin"):
+                            if not _route_continuation_conn(conn, origin, binding_guard, transfer_successor=transfer_successor):
+                                raise ValueError("assistant_recovery_successor_unverified")
+                        _assistant_actor_conn(conn, binding_guard["stream_id"], binding_guard["generation"])
+                for key in ("direct_binding_origin", "recovery_origin"):
+                    if key in prior_payload:
+                        merged_payload[key] = prior_payload[key]
                 # Admission owns this input; classifier/rebind/retry cannot replace it.
                 if "input_meta" in prior_payload:
                     merged_payload["input_meta"] = prior_payload["input_meta"]
