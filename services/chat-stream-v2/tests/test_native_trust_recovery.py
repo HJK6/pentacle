@@ -24,7 +24,7 @@ def test_native_dialog_script_receives_one_enter_and_proof_continues(tmp_path, c
     monkeypatch.setattr(spawnctl_mod, 'SPAWN_SUBMISSION_PROOF_BOUND_S', .5)
     monkeypatch.setattr(spawnctl_mod, 'NATIVE_TRUST_POLL_S', .01, raising=False)
     script = tmp_path / 'fake_codex.py'
-    script.write_text('import sys, time\nprint(sys.argv[1], flush=True)\ninput()\nprint("USER", flush=True)\ntime.sleep(2)\n')
+    script.write_text('import sys, time\nprint(sys.argv[1], flush=True)\ninput()\ntime.sleep(.1)\nprint("USER", flush=True)\ntime.sleep(2)\n')
     async def run():
         proc = await asyncio.create_subprocess_exec(sys.executable, str(script), dialog,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)

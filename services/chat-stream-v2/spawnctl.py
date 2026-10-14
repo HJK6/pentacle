@@ -2819,6 +2819,9 @@ class SpawnCtl:
             machine = self._launch_machine(host, provider)
             if machine is not None:
                 await tmux.pretrust_codex_cwd(str(msg.get("cwd") or machine.codex_cwd))
+        if provider == "codex":
+            # An explicitly reused name is a fresh pane, with its own Enter budget.
+            self._native_trust_entered.discard(f"{host}:{name}")
         try:
             # Inject the creation nonce into the pane's environment (spec §D1) so
             # the pane is born carrying its identity — adoptable by a restart

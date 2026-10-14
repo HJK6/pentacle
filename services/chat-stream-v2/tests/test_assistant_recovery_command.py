@@ -82,9 +82,16 @@ class FixtureGateway:
 
 
 @asynccontextmanager
-async def fixture(tmp_path, *, tmux=None, authority=False, questions=False, bind_host="127.0.0.1"):
+async def fixture(tmp_path, *, tmux=None, authority=False, questions=False, bind_host="127.0.0.1", legacy_watch_custody=False):
     db = tmp_path / "sessions.db"
     store = Store(str(db)); store.start()
+    if legacy_watch_custody:
+        # Exercise manual restoration against a daemon predating custody transfer.
+        update = store.update_session
+        async def legacy_update(host, name, **fields):
+            fields.pop("transfer_child_watch_custody", None)
+            return await update(host, name, **fields)
+        store.update_session = legacy_update
     tmux = tmux or IdleTmux()
     sessions = Sessions(store,tmux=tmux,local_host="node-a")
     server = Server(host=bind_host,port=0,store=store,sessions=sessions,local_host="node-a")
@@ -179,7 +186,7 @@ def test_recovery_restores_custom_watch_and_cold_wakes_without_old_token(tmp_pat
             gen=(await store.fetch_session("node-b","new"))["session_generation"]
             watches=await store.list_watch_wake("watch",NEW,gen)
             wakes=await store.list_watch_wake("wake",NEW,gen)
-            assert any("quiet=5" in w["triggers"] and not w["default"] for w in watches)
+            assert any("quiet=5" in w["triggers"] and not w["default"] and w["state"] == "active" for w in watches)
             assert len(wakes)==1 and wakes[0]["due_at"]==pytest.approx(now+3600,abs=0.000001,rel=0) and wakes[0]["urgent"] is True
             repeated=await recovery.Recovery(m,g,r.path).advance()
             assert repeated["lifecycle_ready"] and len(await store.list_watch_wake("wake",NEW,gen))==1
@@ -377,7 +384,7 @@ def test_reopened_watched_child_refuses_before_adoption(tmp_path):
 
 def test_watch_registration_generation_race_is_cancelled(tmp_path):
     async def run():
-        async with fixture(tmp_path) as (store,_,_,g,m,r):
+        async with fixture(tmp_path,legacy_watch_custody=True) as (store,_,_,g,m,r):
             await store.register_watch_wake("watch",OLD,m["predecessor_generation"],
                 {"request_id":"race-watch","child_stream_id":CHILD,"triggers":["quiet=5"],"repeat":False})
             await r.advance();await g.approve(r.j)
@@ -401,7 +408,7 @@ def test_watch_registration_generation_race_is_cancelled(tmp_path):
 @pytest.mark.parametrize("committed", [False, True])
 def test_uncertain_raced_watch_cancel_replays_before_inventory_fence(tmp_path,committed):
     async def run():
-        async with fixture(tmp_path) as (store,_,_,g,m,r):
+        async with fixture(tmp_path,legacy_watch_custody=True) as (store,_,_,g,m,r):
             await store.register_watch_wake("watch",OLD,m["predecessor_generation"],
                 {"request_id":"retry-race","child_stream_id":CHILD,"triggers":["quiet=5"],"repeat":False})
             await r.advance();await g.approve(r.j)
