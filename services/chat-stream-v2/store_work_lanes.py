@@ -472,8 +472,17 @@ def _prepare_completion(lanes):
 
 class _LaneCloseAuditReason:
     """Request-local reason string, finalized before the original audit insert."""
-    def __init__(self, reason, generation):
-        self.reason = str(reason or '')
+    def __init__(self, reason, generation, dispositions=()):
+        clauses = []
+        parked = {}
+        for item in dispositions:
+            if item.get('disposition') == 'parked':
+                parked.setdefault(item['spec_id'], []).append(item)
+        for member, items in sorted(parked.items()):
+            park = items[0]
+            clauses.append(f"parked: {member} criteria={len(items)} date={park['date']} "
+                           f"authority={park['authority']} reason={park['reason']}")
+        self.reason = '; '.join(filter(None, [str(reason or ''), *clauses]))
         self.generation = generation
         self.source_changed = None
 
@@ -584,7 +593,8 @@ class _WorkLanesStoreMixin:
 
     async def mark_closed_with_lane_completion(self, host, session_name, *, prepared,
                                               death_confirmed=False, admission_only=False, **kwargs):
-        reason = _LaneCloseAuditReason(kwargs.get('reason'), kwargs.get('expected_generation'))
+        reason = _LaneCloseAuditReason(kwargs.get('reason'), kwargs.get('expected_generation'),
+                                       prepared.inputs.dispositions)
         view = _PreparedLaneCloseStore(self, prepared, host, session_name,
                                        kwargs.get('expected_generation'), reason, death_confirmed, admission_only)
         closed = await type(self).mark_closed(view, host, session_name, **dict(kwargs, reason=reason))

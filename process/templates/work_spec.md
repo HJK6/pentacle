@@ -29,6 +29,8 @@ Drafted {{date}}. Scope: <single-user | multi-user>, <big-bang | phased>.
 
 ## Tracking
 
+<!-- In blocked, park unmarked custom criteria with: - parked: YYYY-MM-DD <authority-ref> — <reason>. The last unfenced Tracking declaration governs; leaving blocked ends the park. -->
+
 - Lookup title: {{title}}
 - Status: {{status}} (frontmatter `status:` must always equal the parent folder name)
 - Development checkout/toplevel: <absolute private checkout path; read back with `git rev-parse --show-toplevel`>

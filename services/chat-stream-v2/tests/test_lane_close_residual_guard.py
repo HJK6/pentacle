@@ -496,7 +496,7 @@ class PreparedRace:
             consumed = {item.path: item for item in self.prepared.inputs.files}
             assert path in consumed and consumed[path].content == self.before_bytes
             assert self.prepared.inputs.refusal is None
-            assert any(item['disposition'] in {'checked', 'tracked'}
+            assert any(item['disposition'] in {'checked', 'tracked', 'parked'}
                        for item in self.prepared.inputs.dispositions)
             from _shared.specs_service import SpecsSubsystem
             self.fingerprints['before'] = consumed[path].fingerprint
