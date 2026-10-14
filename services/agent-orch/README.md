@@ -1393,3 +1393,8 @@ Reserved SYSTEM submissions keep delivery receipts: only a post-watermark
 current-stream record with the exact reserved body and matching provider digest
 (if present) settles proof. Duplicate SYSTEM matches fail closed. This proof
 does not change stored USER kinds or native USER/TELL wire matching.
+
+Queued records carrying those reserved setup openers also remain SYSTEM; existing
+queued peer and synthetic-tag handling is unchanged. Reserved SYSTEM notices
+retain their envelope and send-receipt metadata through local and satellite
+ingress, while their kind continues to exclude them from inbound turn counts.

@@ -380,7 +380,8 @@ def normalize_claude_jsonl_record(
         # synthetic prompts remain USER; the shared interpreter handles them.
         peer_tell = None if queued else _parse_peer_tell(content)
         if queued:
-            event = make("USER", content, {"subtype": "queued-command", "queued_at": timestamp})
+            kind = "SYSTEM" if is_reserved_seat_injection(content) else "USER"
+            event = make(kind, content, {"subtype": "queued-command", "queued_at": timestamp})
         elif peer_tell is not None:
             event = make("TELL", peer_tell["payload"], {
                 "sender": peer_tell["sender"],

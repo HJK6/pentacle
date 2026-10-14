@@ -1625,7 +1625,7 @@ async def _assert_remote_envelope_parity(
         assert row["raw"] == local_row["raw"]
         assert row["raw"]["provider_content"] == payload["raw"]["provider_content"]
         assert row["raw"]["envelope_source"] == payload["raw"]["provider_content"]
-        assert row["kind"] == "USER" and row["text"] == (receipt_display or payload["text"])
+        assert row["kind"] == payload["kind"] and row["text"] == (receipt_display or payload["text"])
         assert row["timestamp"] == payload["timestamp"]
         assert _identity_key(row) == identity
         if record.get("sessionId"):
@@ -1740,7 +1740,8 @@ def test_satellite_operator_text_and_negative_lookalikes_remain_untagged(text) -
             }], host="hostc", session_name="v2-controls")[0]
             assert (await ep.handle_push(_push(ep, [payload])))["inserted"] == 1
             event = casts[0]["event"]
-            assert event["text"] == text and event["kind"] == "USER"
+            expected_kind = "SYSTEM" if text.startswith("[pentacle-notice:") else "USER"
+            assert event["text"] == text and event["kind"] == expected_kind
             assert "message_envelope" not in event and "provider_wrapper" not in event
         finally:
             store.stop()

@@ -272,3 +272,12 @@ def test_spawn_admission_delivers_composed_cli_bytes(provider, native, large, mo
                 await tmux.kill_session(name)
             store.stop()
     asyncio.run(run())
+
+@pytest.mark.parametrize('text', OPENERS)
+def test_queued_reserved_injection_is_system(text):
+    record = {'type': 'attachment', 'attachment': {'type': 'queued_command',
+              'origin': {'kind': 'human'}, 'prompt': text + '\ncontext',
+              'timestamp': '2026-10-01T00:00:00Z'}}
+    event = normalize_claude_jsonl_records([record], host='hosta', session_name='v2-child')[0]
+    assert event['kind'] == 'SYSTEM'
+    assert event['text'] == text + '\ncontext'
