@@ -25,8 +25,28 @@ def _proactive(generation: str, key: str, text: str) -> dict:
             "_auth_context": {"token_verified": True, "stream_id": ROOT, "session_generation": generation}}
 
 
+async def _tool_use_event(store, *, command: str, identity: str, session="turn-session"):
+    """A Claude tool_use row (the seat's own publish call) normalized like live ingest."""
+    from claude_jsonl_norm import normalize_claude_jsonl_record
+    from datetime import datetime, timezone
+    record = {"type": "assistant", "uuid": identity, "sessionId": session,
+              "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "isSidechain": False,
+              "message": {"role": "assistant", "id": identity, "stop_reason": "tool_use",
+                          "content": [{"type": "tool_use", "id": identity, "name": "Bash", "input": {"command": command}}]}}
+    event = normalize_claude_jsonl_record(record, host="fixture-root", session_name="visible")[0]
+    return (await store.append_session_events_lifecycle_cas([
+        {"stream_id": ROOT, "event": event, "identity": identity,
+         "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}], limit=100))[0]
+
+
 def test_proactive_publication_turn_final_is_not_mirrored():
-    """A structured final in a turn that already published proactively is not re-projected."""
+    """A structured final in a turn that already published proactively is not re-projected.
+
+    Turn 1 stores the publication BEFORE any row of the turn is ingested (delayed ingestion); the
+    seat's own tool row carries the literal request id, so transcript correlation suppresses the
+    final. Turn 2 uses a dynamic key (no literal id in the tool row) and is suppressed by the
+    daemon-clock window after the previous final. Turn 3 has no publication and mirrors.
+    """
 
     async def _go():
         store = Store(":memory:")
@@ -36,23 +56,22 @@ def test_proactive_publication_turn_final_is_not_mirrored():
             generation = root["session_generation"]
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
-            # Turn 1: an unknown (mirror-eligible) trigger, a proactive publish, then the
-            # seat's own turn-final repeating the published text byte-for-byte.
-            await _normalized_turn_event(store, provider="claude", kind="USER", text="typed directly", identity="u1")
-            first = await composite.publish(_proactive(generation, "publish:proactive-1", "Card reissued."), actor_stream_id=ROOT)
+            # Turn 1: publication first, then the delayed transcript rows (trigger, tool row, final).
+            first = await composite.publish(_proactive(generation, "publish:fd-card-reissue-1", "Card reissued."), actor_stream_id=ROOT)
             assert first["duplicate"] is False
+            await _normalized_turn_event(store, provider="claude", kind="USER", text="typed directly", identity="u1")
+            await _tool_use_event(store, command="agent-orch assistant publish --request-id publish:fd-card-reissue-1 --proactive --message 'Card reissued.'", identity="t1")
             await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Card reissued.", identity="f1", final=True)
             rows = await _answer_rows(store)
             assert [r["text"] for r in rows] == ["Card reissued."], [r["message_id"] for r in rows]
-            # Turn 2: same shape, but the final differs from the publication only in
-            # Markdown. The turn is correlated, not the bytes.
+            # Turn 2: dynamic key (not literal in the tool row); the final differs only in Markdown.
             await _normalized_turn_event(store, provider="claude", kind="USER", text="typed directly again", identity="u2")
-            await composite.publish(_proactive(generation, "publish:proactive-2", "Domain **bought**."), actor_stream_id=ROOT)
+            await _tool_use_event(store, command="K=publish:fd-domain-$(date +%s); agent-orch assistant publish --request-id $K --proactive --message \"$(cat reply.md)\"", identity="t2")
+            await composite.publish(_proactive(generation, "publish:fd-domain-1791990000", "Domain **bought**."), actor_stream_id=ROOT)
             await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Domain bought.", identity="f2", final=True)
             rows = await _answer_rows(store)
             assert [r["text"] for r in rows] == ["Card reissued.", "Domain **bought**."], [r["message_id"] for r in rows]
-            # Control: the next ordinary turn without a proactive publication still mirrors,
-            # even when its text equals an earlier publication.
+            # Turn 3 (control): no proactive publication; the final mirrors even with equal text.
             await _normalized_turn_event(store, provider="claude", kind="USER", text="typed directly once more", identity="u3")
             await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Card reissued.", identity="f3", final=True)
             rows = await _answer_rows(store)
