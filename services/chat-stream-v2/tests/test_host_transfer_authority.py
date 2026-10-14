@@ -201,7 +201,9 @@ def test_unfinished_direct_dispatch_finishes_once_after_succession(tmp_path):
                 'attachment_ids':[],'evidence_refs':[]})
             assert reply['type']=='assistant.publish.ok',reply
             route=await store.get_assistant_composite_route(stream_id=CHAT,input_identity='operator-move')
-            assert (route['route_target'],route['route_target_generation'])==(OLD,auth['session_generation'])
+            # Commit moves CURRENT custody to the successor (route continuity); original ids are kept.
+            assert (route['route_target'],route['route_target_generation'])==(fd['target'],fd['target_generation'])
+            assert (route['dispatch_id'],route['input_identity'])==('dispatch-move','operator-move')
             assert (await store.fetch_session_event_tail(CHAT,limit=20))[-1]['text']=='The isolated move completed.'
     asyncio.run(run())
 

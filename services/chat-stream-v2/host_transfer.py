@@ -309,6 +309,8 @@ class HostTransfer:
                 result=await self.mutate(commit_current,credential=True)
                 await composite.load_binding()
                 await sessions.refresh()
+                # Queued input paused on the old binding resolves against the new one now.
+                composite.wake_route_worker()
                 return result
             # Cancellation cannot leave a committed grant paired with a stale
             # routing cache in this running daemon. Restart reads durable state.
@@ -404,6 +406,21 @@ class HostTransfer:
         await self.mutate(record)
         if not complete: self.retry(row['command_id'])
 
+    async def redeliver_carried(self,row,parts):
+        """Deliver every route carried by this commit to its successor, at least once.
+
+        Runs on every drive of a committed command (including after restart), so a
+        route may be delivered again; its envelope carries the predecessor warning.
+        Receipts are applied through the ordinary fenced path; nothing here retries
+        beyond that and nothing is silently dropped.
+        """
+        composite=self.server._composite_for(row['composite'])
+        if composite is None: return
+        for part in parts:
+            pending=await self.store.submit(lambda c,p=part: journal.carried_routes_pending(c,row['command_id'],p['target'],p['target_generation']))
+            for route in pending:
+                await composite.redeliver_carried(route)
+
     async def project_and_cleanup(self,row):
         # Implemented with exact-generation committed succession; no adoption
         # prompt and no inferred authority from an old process's liveness.
@@ -415,6 +432,7 @@ class HostTransfer:
                 reason='committed host transfer',expected_generation=part['source_generation'],operator_confirm=True)
             if result.get('failed') or result.get('deferred') or result.get('stale_generation'):
                 raise journal.TransferError('transfer_cleanup_incomplete')
+        await self.redeliver_carried(row,parts)
         def complete(c):
             current=journal.load(c,row['command_id']);current['state']='complete';current['cleanup_complete']=True;journal.save(c,current)
             journal.audit(c,row['command_id'],'complete')

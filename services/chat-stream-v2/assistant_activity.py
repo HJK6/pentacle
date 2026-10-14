@@ -37,7 +37,11 @@ def project_input(route, publications, lanes):
     # Durable delivery uncertainty and explicit cancellation are safety states:
     # a contradictory publication marker must never make an unverified route
     # look answered.  The order is part of the public projection contract.
-    if route["routing_state"] == "routing_failed" or route["delivery_state"] == "failed":
+    # A final/result publication under the original dispatch id outranks a
+    # recorded delivery failure: the input WAS answered (route continuity after
+    # a host transfer). Uncertainty and cancellation keep their safety rank.
+    answered_after_failure = bool(final) and route["delivery_state"] == "failed" and route["routing_state"] != "routing_failed"
+    if route["routing_state"] == "routing_failed" or (route["delivery_state"] == "failed" and not final):
         state = "failed"
     elif route["delivery_state"] == "uncertain":
         state = "uncertain"
@@ -82,7 +86,7 @@ def project_input(route, publications, lanes):
         "delivery_recorded_at": timing.get("delivery_recorded_at"),
         "queue_latency_ms": _elapsed(accepted, timing.get("routing_started_at")),
         "routing_latency_ms": _elapsed(timing.get("routing_started_at"), timing.get("routed_at")),
-        "response_state": state, "work_state": work, "error_code": route["error_code"],
+        "response_state": state, "work_state": work, "error_code": None if answered_after_failure else route["error_code"],
         "dispatch_id": route["dispatch_id"],
         "lane_ids": [lane["lane_id"] for lane in lanes],
         "publication_ids": [p["publication_key"] for p in publications],

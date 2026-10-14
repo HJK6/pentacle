@@ -499,6 +499,65 @@ def _move_custody(conn,cid,sid,gen,target,tgen):
             notice['tell_id'],notice['body'],metadata_json,notice['source_stream_id'] or '',notice['episode_id'] or '')
         conn.execute('UPDATE v2_outbound_notices SET recipient_stream_id=?,metadata=?,payload_digest=? WHERE notice_id=?',
                      (target,metadata_json,projected_digest,notice['notice_id']))
+    _carry_routes(conn,cid,sid,gen,target,tgen)
+
+
+# Unanswered direct operator routes whose CURRENT custody is a seat: resolved,
+# direct-primary, physically in flight or landed, and without a final/result
+# publication. A route already `failed` is terminal to the operator and stays.
+_UNANSWERED_ROUTES_SQL='''SELECT * FROM v2_assistant_composite_routes r
+    WHERE r.stream_id=? AND r.route_target=? AND r.route_target_generation=?
+      AND r.routing_state='resolved'
+      AND COALESCE(r.delivery_state,'') IN ('intent','committed_pending','uncertain','landed')
+      AND json_extract(r.route_json,'$.admission_mode')='direct_primary'
+      AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p
+          WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity
+          AND (p.publish_kind='result' OR json_extract(p.canonical_payload_json,'$.response_state')='final'))
+    ORDER BY r.created_at, r.rowid'''
+
+
+def _carry_routes(conn,cid,sid,gen,target,tgen):
+    """Move custody of every unanswered route from the outgoing seat to its successor.
+
+    Current target/generation are mutable custody; route_id, dispatch_id,
+    input_identity, body digest and the original input are never rewritten.
+    Each commit appends one `carry` entry so a chained transfer A->B->C repoints
+    the same rows again by construction. Delivery restarts at `intent`; the
+    driver redelivers after commit (at least once per commit).
+    """
+    from assistant_composite import carry_direct_envelope
+    composite=load(conn,cid)['composite']
+    carried=[]
+    for route in conn.execute(_UNANSWERED_ROUTES_SQL,(composite,sid,gen)).fetchall():
+        payload=json.loads(route['route_json'] or '{}')
+        envelope=payload.get('direct_envelope')
+        if isinstance(envelope,dict):
+            payload['direct_envelope']=carry_direct_envelope(envelope,target=target,generation=tgen,
+                                                             predecessor=sid,predecessor_generation=gen)
+        payload.setdefault('carry',[]).append({'command_id':cid,'from_stream_id':sid,'from_generation':gen,
+            'prior_delivery_state':route['delivery_state'],'carried_at':stamp()})
+        conn.execute('''UPDATE v2_assistant_composite_routes SET route_target=?,route_target_generation=?,
+            delivery_state='intent',error_code=NULL,route_json=?,lease_owner=NULL,lease_until=NULL,updated_at=?
+            WHERE route_id=?''',(target,tgen,json.dumps(payload,sort_keys=True,separators=(',',':')),stamp(),route['route_id']))
+        carried.append({'route_id':route['route_id'],'dispatch_id':route['dispatch_id'],
+                        'prior_delivery_state':route['delivery_state']})
+    if carried:
+        audit(conn,cid,'routes_carried',sid,gen,target=target,target_generation=tgen,routes=carried)
+    return carried
+
+
+def carried_routes_pending(conn,cid,target,tgen):
+    """Carried routes of one commit still owed a physical delivery by the driver."""
+    composite=load(conn,cid)['composite']
+    rows=[]
+    for route in conn.execute('''SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND route_target=?
+            AND route_target_generation=? AND routing_state='resolved'
+            AND (delivery_state='intent' OR (delivery_state='uncertain' AND error_code='recovery_delivery_evidence_required'))
+            ORDER BY created_at, rowid''',(composite,target,tgen)).fetchall():
+        carry=json.loads(route['route_json'] or '{}').get('carry') or []
+        if carry and carry[-1].get('command_id')==cid:
+            rows.append(dict(route))
+    return rows
 
 
 def effective_ruling(conn,row):

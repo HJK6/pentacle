@@ -285,6 +285,47 @@ def direct_dispatch_envelope(
     }
 
 
+_ORIGINAL_INPUT_ANCHOR = "<assistant-original-input-json>\n"
+CARRY_WARNING_TEMPLATE = (
+    "[inherited dispatch] First delivered to {predecessor} (generation {generation}) "
+    "which may have started this. Check children, lanes, receipts and existing "
+    "publications before acting. Answer once under this same dispatch id.\n"
+)
+_CARRY_WARNING_RE = re.compile(
+    r"\[inherited dispatch\] First delivered to \S+ \(generation [^)]*\) which may have started this\. "
+    r"Check children, lanes, receipts and existing publications before acting\. "
+    r"Answer once under this same dispatch id\.\n"
+)
+
+
+def carry_direct_envelope(
+    envelope: dict[str, Any], *, target: str, generation: str,
+    predecessor: str, predecessor_generation: str,
+) -> dict[str, Any]:
+    """Re-address a frozen direct envelope to the committed successor.
+
+    The original input JSON, dispatch id, reply ids and publication contract are
+    kept byte-for-byte; only the target header lines change and the predecessor
+    warning is inserted immediately before the original-input block. A missing
+    or repeated anchor is refused rather than guessed.
+    """
+    wire_body = str(envelope.get("wire_body") or "")
+    if wire_body.count(_ORIGINAL_INPUT_ANCHOR) != 1:
+        raise ValueError("assistant_carry_envelope_anchor_missing")
+    old_target = str(envelope.get("target_stream_id") or "")
+    old_generation = str(envelope.get("target_generation") or "")
+    header_old = f"target_stream_id: {old_target}\ntarget_generation: {old_generation}\n"
+    if wire_body.count(header_old) != 1:
+        raise ValueError("assistant_carry_envelope_header_missing")
+    wire_body = wire_body.replace(header_old, f"target_stream_id: {target}\ntarget_generation: {generation}\n")
+    # The block names the most recent predecessor only (chained transfers).
+    wire_body = _CARRY_WARNING_RE.sub("", wire_body)
+    warning = CARRY_WARNING_TEMPLATE.format(predecessor=predecessor, generation=predecessor_generation)
+    wire_body = wire_body.replace(_ORIGINAL_INPUT_ANCHOR, warning + _ORIGINAL_INPUT_ANCHOR)
+    return {**envelope, "target_stream_id": target, "target_generation": generation, "wire_body": wire_body,
+            "carried_from": {"stream_id": predecessor, "generation": predecessor_generation}}
+
+
 class Router(Protocol):
     async def classify(self, route: dict[str, Any]) -> dict[str, Any]: ...
 
@@ -1433,15 +1474,27 @@ class AssistantComposite:
         self._dispatch_tasks.add(task)
         task.add_done_callback(self._dispatch_tasks.discard)
 
-    async def _dispatch_one(self, route: dict[str, Any]) -> None:
+    async def redeliver_carried(self, route: dict[str, Any]) -> None:
+        """Driver entry: deliver a carried route to its successor through the ordinary path."""
+        await self._dispatch_one(route, expected_delivery_state=str(route.get("delivery_state") or "intent"))
+
+    async def _dispatch_one(self, route: dict[str, Any], *, expected_delivery_state: str = "intent") -> None:
         # `intent` was persisted before this task exists.  Any crash after the
         # downstream action but before a receipt stays uncertain, never blindly
-        # reinjected or claimed exactly-once.
+        # reinjected or claimed exactly-once.  Every receipt write is fenced to
+        # the custody that started this physical attempt: a receipt resumed
+        # after a transfer commit cannot touch the successor's row.
+        fence = {
+            "expected_dispatch_id": str(route["dispatch_id"]),
+            "expected_routing_state": str(route["routing_state"]),
+            "expected_delivery_state": expected_delivery_state,
+            "expected_route_target": str(route.get("route_target") or ""),
+            "expected_route_target_generation": str(route.get("route_target_generation") or ""),
+        }
         if self.dispatch is None:
             await self._update_route(
                 str(route["route_id"]), routing_state=str(route["routing_state"]),
-                expected_dispatch_id=str(route["dispatch_id"]), expected_routing_state=str(route["routing_state"]),
-                expected_delivery_state="intent",
+                **fence,
                 delivery_state="uncertain", error_code="assistant_dispatch_unconfigured",
             )
             return
@@ -1450,8 +1503,7 @@ class AssistantComposite:
         except Exception as exc:  # physical boundary is ambiguous
             await self._update_route(
                 str(route["route_id"]), routing_state=str(route["routing_state"]),
-                expected_dispatch_id=str(route["dispatch_id"]), expected_routing_state=str(route["routing_state"]),
-                expected_delivery_state="intent",
+                **fence,
                 delivery_state="uncertain", error_code=f"dispatch_exception:{type(exc).__name__}",
             )
             return
@@ -1472,13 +1524,15 @@ class AssistantComposite:
         reason = str(result.get("reason") or "")
         failure_code = (reason if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reason)
                         else "assistant_dispatch_failed") if state == "failed" else None
-        await self._update_route(
+        applied = await self._update_route(
             str(route["route_id"]), routing_state=str(route["routing_state"]),
-            expected_dispatch_id=str(route["dispatch_id"]), expected_routing_state=str(route["routing_state"]),
-            expected_delivery_state="intent",
+            **fence,
             delivery_state=state,
             error_code=failure_code if state == "failed" else "dispatch_receipt_ambiguous" if state == "uncertain" else None,
         )
+        if applied is None:
+            log.info("assistant dispatch receipt stale custody route=%s dispatch=%s target=%s receipt=%s",
+                     route.get("route_id"), route.get("dispatch_id"), route.get("route_target"), state)
 
     async def _authenticated_generation(self, msg, actor):
         current = await self._target_generation(str(actor or ""))
