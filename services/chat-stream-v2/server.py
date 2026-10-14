@@ -2547,7 +2547,7 @@ class Server:
                         reason_code = TOKEN_REASON_INTERNAL_ERROR
                     elif state.get("status") != "open":
                         reason_code = TOKEN_REASON_EXPIRED
-                        if (msg.get('type') == 'assistant.transfer' and msg.get('action') in {'status','request'}
+                        if (msg.get('type') == 'assistant.transfer' and msg.get('action') in {'status','request','authorization-status'}
                                 and (not claim or claim == state.get('stream_id'))):
                             # Identity authenticates only a stored migration receipt;
                             # it never becomes token_verified or admits a new move.
