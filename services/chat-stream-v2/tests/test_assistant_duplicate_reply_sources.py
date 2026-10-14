@@ -662,3 +662,37 @@ def test_dynamic_key_outside_the_window_mirrors_and_logs_the_miss(caplog):
             store.stop()
 
     asyncio.run(_go())
+
+
+def test_ordinary_final_ingested_after_a_later_proactive_publication_stays_visible():
+    """RED (Astra advisory 3f5bd4bd, FD ruling 2b79b111): turn N finishes at the provider, turn N+1
+    publishes proactively before N's transcript rows arrive. N's ordinary final has no publication of
+    its own and must stay visible; only N+1's final, whose tool row names the key, is suppressed."""
+    from datetime import datetime, timezone
+
+    async def _go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            generation = root["session_generation"]
+            composite = AssistantComposite(store, config=_config(generation))
+            await composite.ensure_projection()
+            turn = lambda **kw: _turn_row(store, ROOT, "4242", provider="claude", **kw)
+            await turn(kind="USER", identity="d-u0", text="Initial input")
+            await turn(kind="ASSIST_TEXT", identity="d-f0", text="Initial answer", final=True)
+            prior_final_ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            await asyncio.sleep(0.01)
+            await composite.publish(_proactive(generation, "publish:future-turn", "Novel proactive update"), actor_stream_id=ROOT)
+            await turn(kind="USER", identity="d-u1", text="Independent question", timestamp=prior_final_ts)
+            await turn(kind="ASSIST_TEXT", identity="d-f1", text="Independent answer must be visible", final=True, timestamp=prior_final_ts)
+            await turn(kind="USER", identity="d-u2", text="Proactive trigger")
+            await turn(kind="TOOL_USE", identity="d-t2", command="agent-orch assistant publish --request-id publish:future-turn --proactive")
+            await turn(kind="ASSIST_TEXT", identity="d-f2", text="Novel proactive update", final=True)
+            assert [r["text"] for r in await _answer_rows(store)] == [
+                "Initial answer", "Novel proactive update", "Independent answer must be visible"]
+            await composite.stop()
+        finally:
+            store.stop()
+
+    asyncio.run(_go())
