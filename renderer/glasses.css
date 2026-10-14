@@ -1,0 +1,83 @@
+@font-face{font-family:Rajdhani;src:url('/assets/fonts/Rajdhani_500Medium.ttf') format('truetype');font-weight:500;font-display:swap}
+
+@font-face{font-family:Rajdhani;src:url('/assets/fonts/Rajdhani_700Bold.ttf') format('truetype');font-weight:700;font-display:swap}
+
+@font-face{font-family:'JetBrains Mono';src:url('/assets/fonts/JetBrainsMono_400Regular.ttf') format('truetype');font-weight:400;font-display:swap}
+
+@font-face{font-family:Cinzel;src:url('/assets/fonts/Cinzel_600SemiBold.ttf') format('truetype');font-weight:600;font-display:swap}
+
+:root{--text:#e6fff2;--dim:#9dc4b3;--muted:#7fa896;--green:#3dff66;--amber:#ffb53d;--red:#ff2e3e}
+
+*{box-sizing:border-box}
+html,body,#glasses-root{margin:0;width:600px;height:600px;overflow:hidden}
+body{background:#000;color:var(--text);font:500 22px Rajdhani,sans-serif}
+button,textarea{font:inherit;color:inherit}
+button{cursor:pointer;background:transparent;border:0;text-align:left}
+button:disabled{opacity:.5;cursor:default}
+button[hidden]{display:none}
+.glasses{position:relative;width:600px;height:600px;overflow:hidden;display:flex;flex-direction:column}
+.stars{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.stars i{position:absolute;background:#bdffe0;border-radius:50%}
+main{position:relative;z-index:1;flex:1 1 0;min-height:0;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:12px;padding:22px 30px 12px;flex-shrink:0}
+header>b{font-size:24px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.sigil{border:2px solid var(--green);border-radius:50%;width:38px;height:38px;flex-shrink:0;display:grid;place-items:center}
+.sigil svg{width:26px;height:26px;fill:none;stroke:var(--green);stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+header .sigil{width:30px;height:30px}
+.list{flex:1 1 0;min-height:0;overflow:hidden;padding:4px 20px 24px;display:flex;flex-direction:column;gap:4px;position:relative}
+.home{padding-top:26px}
+.row{display:flex;align-items:center;gap:16px;padding:14px 16px;border:2px solid transparent;border-radius:14px;flex-shrink:0;min-height:76px;width:100%}
+.row:focus-visible,.row:focus{outline:none;border-color:var(--accent,var(--green));background:color-mix(in srgb,var(--accent,var(--green)) 8%,transparent)}
+.row-body{flex:1;min-width:0;display:flex;flex-direction:column}
+.row b{font-size:25px;font-weight:700}
+.row small{font-size:20px;color:var(--muted)}
+.home .row b,.home .row small,.list:not(.amber) .row-body>*{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.state-dot{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;flex-shrink:0;color:var(--muted);font:700 18px 'JetBrains Mono',monospace}
+.state-dot.working{border:3px solid #3dff6644;border-top-color:var(--green);border-radius:50%;animation:spin 1.2s linear infinite}
+.state-dot.blocked{border:2px solid var(--amber);border-radius:50%;color:var(--amber);font-size:16px}
+.thread{flex:1 1 0;min-height:0;overflow:hidden;padding:6px 30px 10px;overflow-wrap:anywhere}
+.slot-chat-row{margin:0 0 16px;color:var(--dim);font-size:26px;line-height:1.35}
+.slot-chat-row p{margin:0}
+.slot-chat-row.is-user{display:flex;justify-content:flex-end}
+.slot-chat-user-bubble{max-width:84%;background:#3dff6616;border:1.5px solid #3dff6655;clip-path:polygon(0 0,calc(100% - 16px) 0,100% 16px,100% 100%,16px 100%,0 calc(100% - 16px));padding:14px 20px;font:400 21px/1.45 'JetBrains Mono',monospace;color:var(--text)}
+.slot-chat-message-copy,.slot-chat-timestamp{display:none}
+.slot-chat-assistant-card>*{max-width:100%}
+.thread a{color:var(--green)}
+.thread pre{white-space:pre-wrap;font-size:21px}
+.chat-bar{display:flex;align-items:center;gap:14px;padding:10px 30px 18px;min-height:60px;flex-shrink:0}
+.status{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:20px;flex:1}
+.compose-button{font-size:20px;color:var(--muted)}
+.questions-button{font-size:22px;font-weight:700;color:var(--amber)}
+button:focus-visible,textarea:focus-visible{outline:2px solid var(--green);outline-offset:3px}
+.pager{display:flex;gap:8px;max-width:160px;flex-wrap:wrap}
+.pager>span{height:10px;width:10px;border-radius:50%;border:2px solid var(--muted)}
+.pager .current{background:var(--amber);border-color:var(--amber)}
+.pager .answered{background:var(--green);border-color:var(--green)}
+.question-text{padding:4px 36px 12px;font-size:28px;font-weight:700;line-height:1.22;max-height:185px;overflow:hidden;overflow-wrap:anywhere}
+.amber .row:focus{border-color:var(--amber);background:#ffb53d14}
+.option-dot{width:22px;height:22px;border:2.5px solid var(--muted);border-radius:50%;flex-shrink:0}
+.amber .row:focus .option-dot{border-color:var(--amber)}
+.custom{color:var(--muted)}
+.voice{position:absolute;z-index:3;bottom:32px;left:20px;right:20px;max-height:500px;overflow:hidden;padding:12px 20px;background:rgba(0,0,0,.96);border:1.5px solid #3dff6655;clip-path:polygon(0 0,calc(100% - 14px) 0,100% 14px,100% 100%,14px 100%,0 calc(100% - 14px))}
+.voice-status{display:flex;gap:14px;align-items:center;min-height:42px}
+.voice-status b{font-size:22px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.voice-status small{font-size:19px;color:var(--muted)}
+.wave{display:flex;gap:5px;align-items:center;height:34px}
+.wave i{width:5px;height:34px;border-radius:3px;background:var(--green);animation:wave .8s ease-in-out infinite alternate}
+.voice textarea{display:block;width:100%;height:74px;margin:12px 0;background:#07110b;border:1px solid var(--muted);border-radius:5px;padding:10px;font-size:22px;resize:none}
+.send-button{width:100%;padding:8px;color:var(--green)}
+.quick-replies{display:flex;flex-direction:column;gap:2px}
+.quick-replies small{font-size:18px;color:var(--muted);margin:8px}
+.quick-replies button{font-size:21px;padding:8px;border:1px solid #3dff6622;border-radius:6px;flex-shrink:0}
+.sent-check{color:var(--green);font-size:30px}
+.empty{font-size:24px;color:var(--muted)}
+.error{position:relative;z-index:4;font-size:20px;color:var(--red);margin:6px 30px;max-height:70px;overflow:hidden;overflow-wrap:anywhere}
+footer{position:relative;z-index:1;flex-shrink:0;padding:5px 12px;font-size:16px;text-align:center;color:var(--muted);height:32px}
+@keyframes spin{to{transform:rotate(360deg)}
+}
+@keyframes wave{to{transform:scaleY(.3)}
+}
+
+
+.read-only{font-size:20px;color:var(--amber);margin:4px 36px;flex-shrink:0}
+

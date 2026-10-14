@@ -287,7 +287,7 @@ function resolveProfilePath(profile) {
 }
 
 function serveStatic(res, urlPath, configJson, frozen) {
-  const rel = urlPath === '/' ? 'web.html' : urlPath.replace(/^\/+/, '');
+  const rel = urlPath === '/' ? 'web.html' : urlPath === '/glasses' || urlPath === '/glasses/' ? 'glasses.html' : urlPath.replace(/^\/+/, '');
   // Path traversal guard — a request must not escape the frozen bundle.
   if (path.isAbsolute(rel) || rel.split('/').includes('..')) {
     res.writeHead(403).end('forbidden');
