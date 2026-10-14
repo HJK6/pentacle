@@ -1392,7 +1392,8 @@ Daemon notices starting `[pentacle-notice:` retain their existing USER
 classification and metadata, including queued records.
 
 Reserved SYSTEM submissions keep delivery receipts: only a post-watermark
-current-stream record with the exact reserved body and matching provider digest
+current-stream record with the same reserved body under the existing submission
+normalizer and matching normalized provider digest
 (if present) settles proof. Duplicate SYSTEM matches fail closed. This proof
 does not change stored USER kinds or native USER/TELL wire matching.
 Queued records carrying the reserved setup openers also normalize to SYSTEM;

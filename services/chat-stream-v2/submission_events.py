@@ -73,14 +73,14 @@ def submission_text_matches(event: dict[str, Any], expected_text: str) -> bool:
 
 
 def system_submission_matches(event: dict[str, Any], expected_text: str) -> bool:
-    """Only reserved SYSTEM context can settle its exact submitted body."""
+    """Only reserved SYSTEM context can settle its normalized submitted body."""
     from claude_jsonl_norm import is_reserved_seat_injection
     text = event.get("text")
     return (
         event.get("kind") == "SYSTEM"
         and isinstance(text, str)
         and is_reserved_seat_injection(text)
-        and text == expected_text
+        and normalize_submission_text(text) == normalize_submission_text(expected_text)
         and ("provider_text_digest" not in event
              or event["provider_text_digest"] == provider_text_digest(expected_text))
     )

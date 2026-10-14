@@ -165,13 +165,32 @@ def test_system_injection_delivery_receipt_still_settles(provider, body):
     assert not Comms._tail_event_matches_submission(event, 'hosta:v2-child', body + '\nWrong')
 
 
+@pytest.mark.parametrize('provider', ['claude', 'codex'])
+def test_system_receipt_provider_trimmed_baseline(provider):
+    from comms import Comms
+    from submission_events import provider_text_digest, system_submission_matches
+    body = '[role baseline: lead]\nSynthetic baseline body\n'
+    event = normalize(provider, body.rstrip('\n'))
+    event.update(stream_id='hosta:v2-child', daemon_seq=10,
+                 provider_text_digest=provider_text_digest(body.rstrip('\n')))
+    assert system_submission_matches(event, body)
+    assert Comms._tail_event_matches_submission(event, 'hosta:v2-child', body)
+    class Tail:
+        async def fetch_session_event_tail(self, stream_id, *, limit):
+            return [event]
+    proof = DurableUserEventProof(Tail(), local_host='hosta')
+    observed = asyncio.run(proof.lookup('hosta:v2-child', expected_text=body,
+                           watermark=EventWatermark('hosta:v2-child', 9, 'reachable')))
+    assert observed.proven
+
+
 def test_system_receipt_negative_controls():
     from comms import Comms
     from submission_events import system_submission_matches, provider_text_digest
     body = '[role baseline: lead]\nExact body'
     event = {'kind': 'SYSTEM', 'text': body, 'stream_id': 'hosta:v2-child', 'daemon_seq': 10}
     assert system_submission_matches(event, body)
-    for bad in [dict(event, text='Ordinary context'), dict(event, text=body + ' '),
+    for bad in [dict(event, text='Ordinary context'), dict(event, text=body + ' changed'),
                 dict(event, provider_text_digest='0' * 64), dict(event, kind='USER')]:
         assert not system_submission_matches(bad, body)
     assert dict(event, kind='USER')['kind'] == 'USER'  # proof never reclassifies stored input
