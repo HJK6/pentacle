@@ -30,10 +30,10 @@ async def source_token(store):
     return token
 
 
-async def dispatch(store, source, principal):
+async def dispatch(store, source, principal, body="Move the whole desk to the other trusted host."):
     route = await store.admit_assistant_composite_input(
         stream_id=CHAT, input_identity='operator-move', input_request_id='operator-move',
-        body='Move the whole desk to the other trusted host.', attachments=[],
+        body=body, attachments=[],
         reply_to_message_id=None, reply_to_question_id=None, actor_stream_id=principal,
         direct_primary=True, direct_target_stream_id=OLD,
         direct_target_generation=source['session_generation'])

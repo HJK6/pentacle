@@ -110,6 +110,10 @@ class HostTransfer:
         composite=self.server._composite_for_message(msg)
         if composite is None or not composite.enabled or not composite.config.direct_primary:
             raise journal.TransferError('transfer_composite_unavailable')
+        if action in {'status','ready','cancel'}:
+            existing=await self.read(cid)
+            if existing and not existing.get('authorization_id') and (mode is not None or msg.get('attempt_id') is not None or msg.get('expected_attempt') is not None):
+                raise journal.TransferError('transfer_action_invalid')
         if action in {'authorization-status','authorization-revoke'}:
             if action=='authorization-status':
                 def read_authorization(c):

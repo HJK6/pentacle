@@ -1668,7 +1668,8 @@ def assistant_rebind(args: argparse.Namespace) -> int:
 
 def assistant_transfer(args: argparse.Namespace) -> int:
     action=args.action
-    standing=action in {'authorize','authorization-status','authorization-revoke','resume'} or bool(args.authorization_id)
+    standing=(action in {'authorize','authorization-status','authorization-revoke','resume'} or bool(args.authorization_id)
+              or action=='ready' and bool(args.attempt_id) or action=='cancel' and args.expected_attempt is not None)
     payload: dict[str, object] = {'type':'assistant.transfer','action':action,
         'request_id':args.request_id or str(uuid.uuid4())}
     if args.composite_stream_id: payload['composite_stream_id']=args.composite_stream_id

@@ -101,7 +101,8 @@ def authority_state(conn, sid, generation):
         (sid,generation,sid,generation)).fetchone()
     if not row:
         for attempt in conn.execute('SELECT data FROM v2_host_transfer_attempts'):
-            if any(p['target']==sid and p['target_generation'] in (None,generation) for p in json.loads(attempt[0])['seats']):
+            historical=json.loads(attempt[0])
+            if historical['state'] in {'failed','cancelled','expired'} and any(p['target']==sid and p['target_generation'] in (None,generation) for p in historical['seats']):
                 return 'prepared'
         return None
     return 'retired' if row['source']==sid else 'prepared'
@@ -179,7 +180,7 @@ def claim(conn,msg,auth,*,name,composite,env_binding,advisor,helpers,trusted_hos
         if not isinstance(refs,list) or len(refs)>16:
             raise TransferError('transfer_pointers_invalid')
         for ref in refs:
-            if (not isinstance(ref,dict) or set(ref)!={'host','path','sha256'} or ref['host'] not in trusted_hosts
+            if (not isinstance(ref,dict) or set(ref)!={'host','path','sha256'} or not isinstance(ref['host'],str) or ref['host'] not in trusted_hosts
                 or not isinstance(ref['path'],str) or not ref['path'].startswith('/')
                 or not re.fullmatch(r'[a-f0-9]{64}',str(ref['sha256']))):
                 raise TransferError('transfer_pointers_invalid')
@@ -195,7 +196,7 @@ def claim(conn,msg,auth,*,name,composite,env_binding,advisor,helpers,trusted_hos
     grant=lifecycle.current(conn)
     if (binding['stream_id'],binding['generation'])!=(actor,generation) or not lifecycle.holder_is(conn,actor,generation):
         raise TransferError('transfer_fd_required')
-    if payload['destination'] not in trusted_hosts:
+    if not isinstance(payload['destination'],str) or payload['destination'] not in trusted_hosts:
         raise TransferError('transfer_host_untrusted')
     route=conn.execute('SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND dispatch_id=?',
                        (composite,payload['dispatch_id'])).fetchone()
@@ -606,6 +607,7 @@ def initialize_authorizations(conn):
 
 
 def authorization(conn,aid):
+    require_id(aid)
     r=conn.execute('SELECT data FROM v2_host_transfer_authorizations WHERE authorization_id=?',(aid,)).fetchone()
     if not r: raise TransferError('transfer_authorization_required')
     return json.loads(r[0])
@@ -708,7 +710,7 @@ def validate_pointers(row,pointers,trusted_hosts):
         if not isinstance(refs,list) or not refs or len(refs)>16:
             raise TransferError('transfer_checkpoint_required')
         for r in refs:
-            if (not isinstance(r,dict) or set(r)!={'host','path','sha256'} or r.get('host') not in trusted_hosts
+            if (not isinstance(r,dict) or set(r)!={'host','path','sha256'} or not isinstance(r.get('host'),str) or r.get('host') not in trusted_hosts
                 or not isinstance(r.get('path'),str) or not r['path'].startswith('/')
                 or not re.fullmatch(r'[a-f0-9]{64}',str(r.get('sha256')))):
                 raise TransferError('transfer_pointers_invalid')
@@ -772,6 +774,8 @@ def authorize(conn,msg,auth,**context):
 
 
 def require_attempt(row,attempt_id):
+    if not row.get('authorization_id') and attempt_id is not None:
+        raise TransferError('transfer_action_invalid')
     if row.get('authorization_id') and row.get('attempt_id')!=attempt_id:
         raise TransferError('transfer_attempt_conflict')
 

@@ -17,7 +17,8 @@ def iso(value):
 async def grant(s,v,c,g,**extra):
     if v.hosts is None: v.hosts=Hosts(local_host='node-a',peers={'node-b':object()})
     old=await s.fetch_session('node-a','old')
-    route=await dispatch(s,old,'operator:'+g.ceremony.cid)
+    body=extra.pop('input_body',None)
+    route=await dispatch(s,old,'operator:'+g.ceremony.cid,**({'body':body} if body is not None else {}))
     auth={'token_verified':True,'stream_id':OLD,'session_generation':old['session_generation']}
     msg={'mode':t.STANDING_MODE,'action':'authorize','authorization_id':'grant-1','command_id':'standing-1',
          'request_id':'authorize-1','dispatch_id':'dispatch-move','destination':'node-b','members':[OLD,ADVISOR],
@@ -65,10 +66,12 @@ def test_default_six_hours_commit_after_600_and_single_use(tmp_path):
             assert 'operator' not in a and 'scope_row' not in a
             assert await s.submit(lambda db:t.seats(db,a['command_id']))==[]
             row,req=await request(s,v,a,auth)
-            await prepare_bundle(s,v,row)
+            parts=await prepare_bundle(s,v,row)
             result=await v.host_transfer.mutate(lambda db:t.commit(db,row['command_id'],v.operator_credential_registry,
                 now=t.expiry_value(a['original_input_at'])+601,attempt_id=row['attempt_id']),credential=True)
             assert result['state']=='committed'
+            for part in parts:
+                assert await s.transfer_authority_state(part['target'],part['target_generation']) is None
             assert (await s.submit(lambda db:t.authorization(db,a['authorization_id'])))['state']=='consumed'
             assert (await s.fetch_session('node-b','child'))['parent_stream_id']!=OLD
             assert (await v.host_transfer.mutate(lambda db:t.commit(db,row['command_id'],v.operator_credential_registry,attempt_id=row['attempt_id']),credential=True))['receipt']==result['receipt']
@@ -86,12 +89,14 @@ def test_expiry_bounds_and_operator_span(tmp_path,hours,evidence,code):
     async def run():
         async with fixture(tmp_path,authority=True) as (s,v,c,g,*_):
             old=await s.fetch_session('node-a','old')
-            route=await dispatch(s,old,'operator:'+g.ceremony.cid)
+            body='📦 Complete the fixture move within '+str(hours)+' hours.'
+            quote='within '+str(hours)+' hours'
+            route=await dispatch(s,old,'operator:'+g.ceremony.cid,body=body)
             original=datetime.fromisoformat(route['created_at'].replace('Z','+00:00')).timestamp()
             expires=iso(original+hours*3600)
-            extra={'expires_at':expires}
+            extra={'expires_at':expires,'input_body':body}
             if evidence:
-                extra['extension_evidence']={'body_start':0,'body_end':4,'quote':'Move' if evidence!='false' else 'fake',
+                extra['extension_evidence']={'body_start':body.index(quote),'body_end':body.index(quote)+len(quote),'quote':quote if evidence!='false' else 'fake',
                     'timezone':'Invalid/Zone' if evidence=='bad_timezone' else 'UTC','requested_expires_at':expires}
             if code:
                 with pytest.raises(t.TransferError,match=code): await grant(s,v,c,g,**extra)
@@ -323,4 +328,17 @@ def test_changed_runtime_scope_refuses_commit(tmp_path,change):
             with pytest.raises(t.TransferError,match='transfer_authority_changed|transfer_host_untrusted|transfer_helper_changed'):
                 await v.host_transfer.commit(row)
             assert (await s.lifecycle_authority_current())['stream_id']==OLD
+    asyncio.run(run())
+
+
+
+def test_legacy_wire_cannot_acquire_standing_attempt_semantics(tmp_path):
+    from test_host_transfer_authority import claim_bundle
+    async def run():
+        async with fixture(tmp_path,authority=True) as (s,v,c,g,*_):
+            row,_,auth,_=await claim_bundle(s,v,g,c)
+            with pytest.raises(t.TransferError,match='transfer_action_invalid'):
+                await v.host_transfer.operation({'action':'cancel','mode':t.STANDING_MODE,'command_id':row['command_id'],
+                    'composite_stream_id':CHAT,'expected_attempt':1,'request_id':'legacy-mode-mismatch','_auth_context':auth})
+            assert (await v.host_transfer.read(row['command_id']))['state']=='preparing'
     asyncio.run(run())
